@@ -161,6 +161,8 @@ from docint.core.storage.scroll import iter_scroll
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
+from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
+from docint.core.summary.units import MapUnit, partition_units, payload_text
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.embed_chunking import (
@@ -187,6 +189,10 @@ from docint.utils.retry import (
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
+# KV namespace for the tree summarizer's per-unit map cache (one entry per
+# MapUnit.unit_key), distinct from SUMMARY_CACHE_NAMESPACE which holds the
+# single final synthesized payload.
+SUMMARY_MAP_CACHE_NAMESPACE = "docint_summary_map_cache_v1"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
 
 # Marks a retrieved node as coming from the image lane. Set on the node
@@ -603,6 +609,147 @@ DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT = (
     "Style instructions:\n{style_prompt}\n\n"
     "Evidence briefs:\n{evidence_block}\n"
 )
+DEFAULT_SUMMARY_MAP_PROMPT = (
+    "You are summarizing one unit of source material from a larger document "
+    "collection.\n"
+    "Unit: {label}\n\n"
+    "Write a dense, factual summary of the numbered excerpts below (5-10 "
+    "sentences). Capture the main topics, concrete claims and findings, named "
+    "people, organizations and places, dates, and notable outliers or "
+    "disagreements. Do not invent facts and do not editorialize. If the "
+    "excerpts are unintelligible, say so.\n\n"
+    "After the summary, output one final line exactly in this form, naming "
+    "the one or two excerpt numbers that best represent this unit:\n"
+    "EVIDENCE_INDICES: 1,2\n\n"
+    "Excerpts:\n{chunk_block}"
+)
+DEFAULT_SUMMARY_FOLD_PROMPT = (
+    "You are combining partial summaries of one document collection into a "
+    "single intermediate summary. Preserve concrete facts, named entities, "
+    "dates, recurring themes, disagreements, and outliers. Do not invent "
+    "facts and do not generalize away specifics. Keep the result under 20 "
+    "sentences.\n\n"
+    "Partial summaries:\n{summaries_block}"
+)
+
+
+class _KVMapCache:
+    """Adapts a collection's ``SQLiteKVStore`` to the tree summarizer's :class:`MapCache` protocol.
+
+    Wraps ``kv_store`` so per-unit map results persist under
+    ``SUMMARY_MAP_CACHE_NAMESPACE``, keyed by ``unit_key``. The stored
+    validator concatenates the caller-supplied unit fingerprint with a
+    ``validator_suffix`` fixed at construction (the summary prompt
+    fingerprint plus the chat model id), so a prompt or model change
+    invalidates every entry without touching the unit fingerprints
+    themselves — :mod:`docint.core.summary.tree` keeps passing only the
+    unit's own fingerprint.
+
+    As a side effect, every resolved unit (cache hit via :meth:`get`, or a
+    fresh map result recorded via :meth:`put`) is recorded in
+    :attr:`covered_keys`. :meth:`RAG.build_tree_summary` reads this set from
+    *inside* the synthesis-prompt closure — the one place that needs to know
+    which units are covered before :class:`TreeSummarizer.build` returns.
+    """
+
+    def __init__(self, kv_store: BaseKVStore | None, *, validator_suffix: str) -> None:
+        """Configure the adapter.
+
+        Args:
+            kv_store: The collection's KV store, or ``None`` when persistence
+                is unavailable — the adapter then degrades to an in-memory,
+                always-miss cache so callers (and :attr:`covered_keys`
+                tracking) do not need a separate code path.
+            validator_suffix: ``"{prompt_fingerprint}|{model_name}"``,
+                appended to every unit fingerprint to form the full
+                validator string.
+        """
+        self._kv_store = kv_store
+        self._validator_suffix = validator_suffix
+        self.covered_keys: set[str] = set()
+
+    def get(self, unit_key: str, validator: str) -> dict[str, Any] | None:
+        """Return a cached map result for ``unit_key`` iff its validator matches.
+
+        Args:
+            unit_key: The unit's stable identity.
+            validator: The unit's content fingerprint (not yet combined with
+                the prompt/model suffix).
+
+        Returns:
+            dict[str, Any] | None: ``{"summary": str, "evidence_ids": list[str]}``
+            on a hit, else ``None`` (including on any storage exception).
+        """
+        if self._kv_store is None:
+            return None
+        try:
+            entry = self._kv_store.get(unit_key, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+        except Exception as exc:
+            logger.warning("Map cache get failed for unit '{}': {}", unit_key, exc)
+            return None
+        if not isinstance(entry, dict):
+            return None
+        expected = f"{validator}|{self._validator_suffix}"
+        if str(entry.get("validator") or "") != expected:
+            return None
+        self.covered_keys.add(unit_key)
+        return {
+            "summary": str(entry.get("summary") or ""),
+            "evidence_ids": list(entry.get("evidence_ids") or []),
+        }
+
+    def put(self, unit_key: str, validator: str, entry: dict[str, Any]) -> None:
+        """Store a fresh map result for ``unit_key``.
+
+        Args:
+            unit_key: The unit's stable identity.
+            validator: The unit's content fingerprint (not yet combined with
+                the prompt/model suffix).
+            entry: ``{"summary": str, "evidence_ids": list[str]}``.
+        """
+        self.covered_keys.add(unit_key)
+        if self._kv_store is None:
+            return
+        try:
+            self._kv_store.put(
+                unit_key,
+                {
+                    "validator": f"{validator}|{self._validator_suffix}",
+                    "summary": entry.get("summary"),
+                    "evidence_ids": entry.get("evidence_ids") or [],
+                },
+                collection=SUMMARY_MAP_CACHE_NAMESPACE,
+            )
+        except Exception as exc:
+            logger.warning("Map cache put failed for unit '{}': {}", unit_key, exc)
+
+    def all_keys(self) -> list[str]:
+        """Return every unit key currently persisted in the map cache.
+
+        Returns:
+            list[str]: Cached unit keys, or ``[]`` when persistence is
+            unavailable or the lookup fails.
+        """
+        if self._kv_store is None:
+            return []
+        try:
+            return list(self._kv_store.get_all(collection=SUMMARY_MAP_CACHE_NAMESPACE).keys())
+        except Exception as exc:
+            logger.warning("Map cache all_keys() failed: {}", exc)
+            return []
+
+    def delete(self, key: str) -> None:
+        """Remove one entry from the persistent map cache.
+
+        Args:
+            key: The unit key to remove.
+        """
+        if self._kv_store is None:
+            return
+        try:
+            self._kv_store.delete(key, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+        except Exception as exc:
+            logger.warning("Map cache delete failed for unit '{}': {}", key, exc)
 
 
 def _extract_node_file_hashes(nodes: list[BaseNode]) -> set[str]:
@@ -2279,6 +2426,8 @@ class RAG:
     grounded_text_qa_prompt_path: Path | None = field(default=None, init=False)
     grounded_refine_prompt_path: Path | None = field(default=None, init=False)
     grounded_collection_summary_prompt_path: Path | None = field(default=None, init=False)
+    summary_map_prompt_path: Path | None = field(default=None, init=False)
+    summary_fold_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
     summarize_social_prompt: str = field(default="", init=False)
     conversation_summary_prompt: str = field(default="", init=False)
@@ -2286,6 +2435,8 @@ class RAG:
     grounded_text_qa_prompt: str = field(default="", init=False)
     grounded_refine_prompt: str = field(default="", init=False)
     grounded_collection_summary_prompt: str = field(default="", init=False)
+    summary_map_prompt: str = field(default="", init=False)
+    summary_fold_prompt: str = field(default="", init=False)
 
     # --- Runtime (lazy caches / not in repr) ---
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
@@ -2463,6 +2614,8 @@ class RAG:
             self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
             self.grounded_refine_prompt_path = self.prompt_dir / "grounded_refine.txt"
             self.grounded_collection_summary_prompt_path = self.prompt_dir / "grounded_collection_summary.txt"
+            self.summary_map_prompt_path = self.prompt_dir / "summary_map.txt"
+            self.summary_fold_prompt_path = self.prompt_dir / "summary_fold.txt"
         if self.summarize_prompt_path is None:
             logger.error("ValueError: summarize_prompt_path is not set. Cannot load summarize prompt.")
             raise ValueError("summarize_prompt_path is not set. Cannot load summarize prompt.")
@@ -2494,6 +2647,14 @@ class RAG:
         self.grounded_collection_summary_prompt = self._load_prompt_text(
             self.grounded_collection_summary_prompt_path,
             default=DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT,
+        )
+        self.summary_map_prompt = self._load_prompt_text(
+            self.summary_map_prompt_path,
+            default=DEFAULT_SUMMARY_MAP_PROMPT,
+        )
+        self.summary_fold_prompt = self._load_prompt_text(
+            self.summary_fold_prompt_path,
+            default=DEFAULT_SUMMARY_FOLD_PROMPT,
         )
 
         # --- Retrieval config ---
@@ -7409,6 +7570,87 @@ class RAG:
                 break
         return nodes
 
+    def _iter_collection_points(self) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Scroll the active collection, yielding every point's id and payload.
+
+        The tree summarizer's :func:`~docint.core.summary.units.partition_units`
+        consumes this directly to discover map units, so every point in the
+        collection — not just the ones a similarity query would surface — is
+        represented once.
+
+        Yields:
+            tuple[str, dict[str, Any]]: ``(point_id, payload)`` pairs for
+            every point with a dict payload in the active collection.
+        """
+        if not self.qdrant_collection:
+            return
+        for page in iter_scroll(
+            self.qdrant_client,
+            collection_name=self.qdrant_collection,
+            page_size=256,
+            with_payload=True,
+            with_vectors=False,
+            error_context="tree summary points",
+        ):
+            for point in page:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+                yield str(getattr(point, "id", "")), payload
+
+    def _fetch_unit_chunks(self, unit: MapUnit) -> list[UnitChunk]:
+        """Fetch a map unit's member chunks, in the unit's reading order.
+
+        Args:
+            unit: The unit to fetch chunks for.
+
+        Returns:
+            list[UnitChunk]: One chunk per member point whose extracted text
+            is non-empty, in ``unit.member_ids`` order. For a document unit
+            keyed by content hash (``doc:{file_hash}``, as opposed to the
+            hash-less ``doc:name:{filename}`` fallback), the document's
+            stored figures/keyframes are appended as extra chunks — a
+            document's images are evidence too (see
+            :meth:`_summary_image_nodes_for_document`).
+        """
+        if not unit.member_ids or not self.qdrant_collection:
+            return []
+        try:
+            points = self.qdrant_client.retrieve(
+                collection_name=self.qdrant_collection,
+                ids=list(unit.member_ids),
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Tree summary chunk fetch failed for unit '{}': {}", unit.unit_key, exc)
+            return []
+
+        payload_by_id: dict[str, Any] = {}
+        for point in points or []:
+            point_id = str(getattr(point, "id", "") or "")
+            if point_id:
+                payload_by_id[point_id] = getattr(point, "payload", None)
+
+        chunks: list[UnitChunk] = []
+        for member_id in unit.member_ids:
+            payload = payload_by_id.get(member_id)
+            if not isinstance(payload, dict):
+                continue
+            text = payload_text(payload)
+            if not text:
+                continue
+            chunks.append(UnitChunk(chunk_id=member_id, text=text))
+
+        if unit.kind == "document" and unit.unit_key.startswith("doc:") and not unit.unit_key.startswith("doc:name:"):
+            file_hash = unit.unit_key[len("doc:") :]
+            for nws in self._summary_image_nodes_for_document(file_hash=file_hash, top_k=4):
+                image_text = nws.node.get_content()
+                if image_text:
+                    chunks.append(UnitChunk(chunk_id=str(nws.node.node_id), text=image_text))
+
+        return chunks
+
     def _retrieve_summary_nodes_for_document(self, *, filename: str, file_hash: str | None) -> list[Any]:
         """Retrieve top evidence nodes for a single document."""
         if self.index is None:
@@ -7920,6 +8162,10 @@ class RAG:
             "social_summary_enabled": self.social_summary_enabled,
             "social_summary_candidate_pool": self.social_summary_candidate_pool,
             "social_summary_diversity_limit": self.social_summary_diversity_limit,
+            "summary_map_prompt": self.summary_map_prompt,
+            "summary_fold_prompt": self.summary_fold_prompt,
+            "summary_map_window_tokens": self.summary_config.map_window_tokens,
+            "summary_reduce_fanin": self.summary_config.reduce_fanin,
         }
         encoded = json.dumps(
             payload,
@@ -8226,6 +8472,209 @@ class RAG:
         }
         self._store_cached_collection_summary(payload)
         yield payload
+
+    def build_tree_summary(self, progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+        """Build the map-reduce ("tree") summary for the currently scoped collection.
+
+        Partitions every point in the active collection into map units (one
+        per document, or one per social/table author-hour bucket — see
+        :func:`~docint.core.summary.units.partition_units`), summarizes each
+        unit independently through :class:`~docint.core.summary.tree.TreeSummarizer`
+        (reusing a unit's cached map result whenever its content and the
+        active prompts/model are unchanged), and folds the per-unit
+        summaries into one final synthesis call. On a complete
+        (non-partial), non-empty build the result is persisted via
+        :meth:`_store_cached_collection_summary` and the map cache is pruned
+        of any unit that no longer exists. Mirrors
+        :meth:`summarize_collection`'s payload shape so callers can swap
+        summarizers transparently.
+
+        Args:
+            progress: Optional callback invoked ``(processed, total)`` after
+                each unit resolves (cache hit, mapped, or failed) — useful
+                for surfacing progress on a long build.
+
+        Returns:
+            dict[str, Any]: ``{"query", "reasoning", "response", "sources",
+            "summary_diagnostics"}``, matching :meth:`summarize_collection`.
+
+        Raises:
+            ValueError: If no collection is selected.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("No collection selected.")
+
+        units = partition_units(self._iter_collection_points())
+        total_units = len(units)
+        kinds = {unit.kind for unit in units}
+        if kinds == {"document"}:
+            coverage_unit = "documents"
+        elif kinds == {"social_bucket"}:
+            coverage_unit = "posts"
+        else:
+            coverage_unit = "units"
+
+        if total_units == 0:
+            return {
+                "query": self.summarize_prompt,
+                "reasoning": None,
+                "response": "No documents available in the selected collection.",
+                "sources": [],
+                "summary_diagnostics": {
+                    "total_documents": 0,
+                    "covered_documents": 0,
+                    "coverage_ratio": 0.0,
+                    "uncovered_documents": [],
+                    "coverage_target": self.summary_coverage_target,
+                    "coverage_unit": coverage_unit,
+                    "candidate_count": 0,
+                    "deduped_count": 0,
+                    "sampled_count": 0,
+                    "partial": False,
+                    "llm_calls": 0,
+                },
+            }
+
+        kv_store = self._summary_kv_store()
+        validator_suffix = f"{self._summary_prompt_fingerprint()}|{self.text_model_id}"
+        cache_adapter = _KVMapCache(kv_store, validator_suffix=validator_suffix)
+        cache: MapCache = cache_adapter
+        covered_keys = cache_adapter.covered_keys
+
+        def _complete(prompt: str) -> str:
+            """Invoke the chat model and coerce its response to text."""
+            return str(getattr(self.post_retrieval_text_model.complete(prompt), "text", "") or "")
+
+        def _build_synthesis_prompt(briefs: list[str], diag: dict[str, Any]) -> str:
+            """Render the final synthesis prompt from the tree's live diagnostics."""
+            covered = int(diag.get("covered_units", 0) or 0)
+            total = int(diag.get("total_units", total_units) or total_units)
+            coverage_ratio = covered / total if total else 0.0
+            uncovered_labels = [unit.label for unit in units if unit.unit_key not in covered_keys][:20]
+            return self._build_summary_synthesis_prompt(
+                briefs=briefs,
+                diagnostics={
+                    "coverage_unit": coverage_unit,
+                    "coverage_ratio": coverage_ratio,
+                    "coverage_target": self.summary_coverage_target,
+                    "uncovered_documents": uncovered_labels,
+                },
+                style_prompt=self.summarize_prompt,
+            )
+
+        summarizer = TreeSummarizer(
+            complete=_complete,
+            fetch_chunks=self._fetch_unit_chunks,
+            map_prompt=self.summary_map_prompt,
+            fold_prompt=self.summary_fold_prompt,
+            build_synthesis_prompt=_build_synthesis_prompt,
+            cache=cache,
+            window_chars=self.summary_config.map_window_tokens * 4,
+            reduce_fanin=self.summary_config.reduce_fanin,
+            max_llm_calls=self.summary_config.max_llm_calls,
+            progress=progress,
+        )
+        result = summarizer.build(units)
+
+        covered_units = result.covered_units
+        coverage_ratio = covered_units / total_units if total_units else 0.0
+        uncovered_labels = [unit.label for unit in units if unit.unit_key not in covered_keys][:20]
+
+        if covered_units == 0:
+            response_text = "Unable to extract grounded evidence from the selected collection."
+        else:
+            response_text = result.response
+
+        sources: list[dict[str, Any]] = []
+        if covered_units:
+            evidence_ids: list[str] = []
+            for unit_result in result.unit_results[: self.summary_final_source_cap]:
+                for evidence_id in unit_result.evidence_ids:
+                    if evidence_id not in evidence_ids:
+                        evidence_ids.append(evidence_id)
+            for batch in chunk_nodes(evidence_ids, 200):
+                try:
+                    points = self.qdrant_client.retrieve(
+                        collection_name=self.qdrant_collection,
+                        ids=batch,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Tree summary evidence retrieve failed for '{}': {}",
+                        self.qdrant_collection,
+                        exc,
+                    )
+                    continue
+                for point in points or []:
+                    payload = getattr(point, "payload", None)
+                    if not isinstance(payload, dict):
+                        continue
+                    sources.append(
+                        self._source_from_payload(
+                            collection=self.qdrant_collection,
+                            payload=payload,
+                        )
+                    )
+                    if len(sources) >= self.summary_final_source_cap:
+                        break
+                if len(sources) >= self.summary_final_source_cap:
+                    break
+            self._number_summary_sources(sources)
+
+        diagnostics = {
+            "total_documents": total_units,
+            "covered_documents": covered_units,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "uncovered_documents": uncovered_labels,
+            "coverage_target": self.summary_coverage_target,
+            "coverage_unit": coverage_unit,
+            "candidate_count": total_units,
+            "deduped_count": covered_units,
+            "sampled_count": len(sources),
+            "partial": result.partial,
+            "llm_calls": result.llm_calls,
+        }
+
+        payload = {
+            "query": self.summarize_prompt,
+            "reasoning": None,
+            "response": response_text,
+            "sources": sources,
+            "summary_diagnostics": diagnostics,
+        }
+
+        # A partial or zero-covered build must never be served as "the"
+        # cached summary — a caller retrying later, or a different request,
+        # would otherwise be stuck with a truncated answer until the next
+        # full rebuild happens to succeed.
+        if not result.partial and covered_units > 0:
+            self._store_cached_collection_summary(payload)
+            current_keys = {unit.unit_key for unit in units}
+            for stale_key in cache_adapter.all_keys():
+                if stale_key not in current_keys:
+                    cache_adapter.delete(stale_key)
+
+        return payload
+
+    def cached_collection_summary(self) -> dict[str, Any] | None:
+        """Return the currently cached final summary for the active collection, if any.
+
+        Thin public wrapper over :meth:`_load_cached_collection_summary`
+        that never bypasses the cache — it is a pure read, distinct from
+        :meth:`build_tree_summary` (which computes and stores a fresh one).
+
+        Returns:
+            dict[str, Any] | None: The cached payload, or ``None`` when
+            nothing is cached or the cached entry is stale.
+
+        Raises:
+            ValueError: If no collection is selected.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("No collection selected.")
+        return self._load_cached_collection_summary(refresh=False)
 
     def list_documents(self) -> list[dict[str, Any]]:
         """List all documents in the current collection by scanning all points.
