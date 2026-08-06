@@ -252,6 +252,8 @@ export const en = {
   'analysis.summary_download_md': 'Download MD',
   'analysis.summary_sources': 'Sources',
   'analysis.summary_failed': 'Summary generation failed.',
+  'analysis.summary_building': 'Building collection summary…',
+  'analysis.summary_building_progress': 'Summarizing {mapped}/{total} units…',
 
   // report
   'report.title': 'Reports',

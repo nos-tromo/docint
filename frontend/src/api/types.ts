@@ -389,6 +389,24 @@ export interface SummaryResponse extends ValidationFields {
 }
 
 /**
+ * A queued-build acknowledgement from `POST /summarize` (202, or a 409's
+ * adopted in-flight job). Carries only the job id — progress arrives
+ * separately on the owner-multiplexed `GET /ingest/jobs/events` stream,
+ * tagged with this same `job_id`.
+ */
+export interface SummaryJobQueued {
+  job_id: string
+}
+
+/**
+ * `POST /summarize`'s full result shape: a cache hit answers the summary
+ * directly (200), a miss queues a background build and answers just the
+ * `job_id` (202). Callers must discriminate on `'summary' in result` rather
+ * than casting — see `SummaryPanel.tsx`.
+ */
+export type SummarizeResult = SummaryResponse | SummaryJobQueued
+
+/**
  * Server-owned ingest job snapshot, served by the `/ingest/jobs*` endpoints.
  * `collection` is the caller's logical name — the physical owner-namespaced
  * name is never echoed to the client.

@@ -262,6 +262,8 @@ export const de: Strings = {
   'analysis.summary_refresh': 'Aktualisieren',
   'analysis.summary_download_md': 'MD herunterladen',
   'analysis.summary_sources': 'Quellen',
+  'analysis.summary_building': 'Sammlungszusammenfassung wird erstellt…',
+  'analysis.summary_building_progress': 'Fasse {mapped}/{total} Einheiten zusammen…',
 
   // report
   'report.title': 'Berichte',
