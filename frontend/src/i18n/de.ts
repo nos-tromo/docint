@@ -257,7 +257,7 @@ export const de: Strings = {
   'analysis.coverage_show_uncovered': '{count} nicht abgedeckte anzeigen',
   'analysis.coverage_partial_label': 'Unvollständige Zusammenfassung',
   'analysis.coverage_partial_detail':
-    'Die Erstellung wurde durch das LLM-Aufrufbudget beendet; diese Zusammenfassung deckt daher nicht die gesamte Sammlung ab. Erhöhen Sie SUMMARY_MAX_LLM_CALLS oder klicken Sie auf „Aktualisieren“, um sie zu erweitern.',
+    'Diese Zusammenfassung wurde durch das konfigurierte Verarbeitungsbudget beendet und deckt nicht die gesamte Sammlung ab. Klicken Sie auf „Aktualisieren“, um sie soweit möglich fortzusetzen, oder bitten Sie Ihre Administration, das Verarbeitungslimit zu erhöhen.',
   'analysis.summary_failed':
     'Die Zusammenfassung konnte nicht erstellt werden.',
   'analysis.summary_generating': 'Wird erstellt…',
