@@ -6682,3 +6682,82 @@ def test_source_from_payload_surfaces_sentence_index_as_row_for_transcripts() ->
     }
     table_src = RAG._source_from_payload(collection="c", payload=table_payload)
     assert table_src.get("row") == 4711, "table.row_index must take precedence over the transcript fallback"
+
+
+class _MissingCollectionQdrant:
+    """Fake Qdrant client whose collection does not exist.
+
+    ``scroll`` raising :class:`AssertionError` pins the invariant that the
+    missing-collection case is decided by ``collection_exists`` (the API
+    contract) rather than by provoking and string-matching an exception.
+    """
+
+    def __init__(self) -> None:
+        self.exists_calls: list[str] = []
+
+    def collection_exists(self, collection_name: str) -> bool:
+        self.exists_calls.append(collection_name)
+        return False
+
+    def scroll(self, *args: Any, **kwargs: Any) -> None:
+        raise AssertionError("scroll must not be called for a missing collection")
+
+
+def test_get_existing_file_hashes_checks_existence_not_message_text() -> None:
+    """A missing collection is detected via ``collection_exists``, not scroll errors.
+
+    Regression test for issue #419: the previous implementation provoked a
+    scroll failure and substring-matched the exception text ("Not found" /
+    "doesn't exist"), which silently breaks whenever qdrant-client or the
+    Qdrant server rewords its 404 body.
+    """
+    rag = RAG(qdrant_collection="test")
+    fake = _MissingCollectionQdrant()
+    rag._qdrant_client = cast(Any, fake)
+
+    assert rag._get_existing_file_hashes() == set()
+    assert fake.exists_calls == ["test"]
+
+
+def test_get_existing_file_hashes_treats_reworded_404_as_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 404 during scroll is classified by status code, not message wording.
+
+    Covers the delete race where the collection vanishes between the
+    existence pre-check and the scroll: a 404 whose body shares no substring
+    with historical qdrant-client messages must still take the quiet
+    missing-collection path instead of the unexpected-failure warning.
+    """
+    import httpx
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    class _RacingQdrant:
+        def collection_exists(self, collection_name: str) -> bool:
+            return True
+
+        def scroll(self, *args: Any, **kwargs: Any) -> None:
+            raise UnexpectedResponse(
+                status_code=404,
+                reason_phrase="Gone Away",
+                content=b'{"status":{"error":"entirely reworded body"}}',
+                headers=httpx.Headers(),
+            )
+
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(Any, _RacingQdrant())
+
+    warnings: list[str] = []
+    sink_id = _loguru_logger.add(
+        lambda message: warnings.append(str(message)),
+        level="WARNING",
+        format="{message}",
+    )
+    try:
+        assert rag._get_existing_file_hashes() == set()
+    finally:
+        _loguru_logger.remove(sink_id)
+
+    assert not any("Failed to fetch existing hashes" in w for w in warnings), (
+        f"reworded 404 must take the missing-collection path, got warnings: {warnings}"
+    )
