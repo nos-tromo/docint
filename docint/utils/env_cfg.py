@@ -554,6 +554,52 @@ def load_metrics_env(default_enabled: bool = True) -> MetricsConfig:
     )
 
 
+_QUANTIZATION_MODES: frozenset[str] = frozenset({"turbo", "none"})
+_TURBOQUANT_BITS: frozenset[str] = frozenset({"bits4", "bits2", "bits1_5", "bits1"})
+
+
+@dataclass(frozen=True)
+class QdrantQuantizationConfig:
+    """Dataclass for Qdrant vector quantization configuration.
+
+    Attributes:
+        mode: Quantization mode; ``"turbo"`` (TurboQuant) or ``"none"``.
+        bits: TurboQuant bit width (``bits4``/``bits2``/``bits1_5``/``bits1``).
+        always_ram: Whether quantized vectors are pinned in RAM; ``None``
+            leaves the decision to Qdrant.
+    """
+
+    mode: str
+    bits: str
+    always_ram: bool | None
+
+
+def load_quantization_env() -> QdrantQuantizationConfig:
+    """Loads Qdrant quantization configuration from environment variables.
+
+    Unknown ``QDRANT_QUANTIZATION`` / ``QDRANT_TURBOQUANT_BITS`` values fall
+    back to the defaults with a logged warning (same posture as
+    ``RESPONSE_LANGUAGE``) rather than raising.
+
+    Returns:
+        QdrantQuantizationConfig: Dataclass containing quantization settings.
+        - mode (str): ``"turbo"`` (default) or ``"none"``.
+        - bits (str): TurboQuant bit width, default ``"bits4"``.
+        - always_ram (bool | None): RAM-pinning override, default ``None``.
+    """
+    mode = os.getenv("QDRANT_QUANTIZATION", "turbo").strip().lower()
+    if mode not in _QUANTIZATION_MODES:
+        logger.warning("Unknown QDRANT_QUANTIZATION '{}'; falling back to 'turbo'.", mode)
+        mode = "turbo"
+    bits = os.getenv("QDRANT_TURBOQUANT_BITS", "bits4").strip().lower()
+    if bits not in _TURBOQUANT_BITS:
+        logger.warning("Unknown QDRANT_TURBOQUANT_BITS '{}'; falling back to 'bits4'.", bits)
+        bits = "bits4"
+    always_ram_raw = os.getenv("QDRANT_QUANTIZATION_ALWAYS_RAM")
+    always_ram = None if always_ram_raw is None else always_ram_raw.strip().lower() in {"true", "1", "yes"}
+    return QdrantQuantizationConfig(mode=mode, bits=bits, always_ram=always_ram)
+
+
 @dataclass(frozen=True)
 class PrincipalConfig:
     """Dataclass for request-principal resolution configuration."""
