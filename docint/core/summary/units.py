@@ -103,6 +103,50 @@ def diversity_bucket(payload: dict[str, Any]) -> str:
     return f"{author.lower()}::{time_bucket}"
 
 
+def payload_text(payload: dict[str, Any]) -> str:
+    """Best-effort node text from a raw Qdrant payload.
+
+    Raw payloads do NOT carry a top-level ``text`` key: llama-index's
+    ``node_to_metadata_dict`` folds the node (text included) into a JSON
+    string under ``_node_content``. This mirrors
+    ``RAG._extract_payload_text`` (kept separate to preserve this module's
+    purity) — without the fallback every fingerprint hashes the empty
+    string and every fetched chunk is blank.
+
+    Args:
+        payload: Raw Qdrant payload.
+
+    Returns:
+        str: Extracted text, or ``""`` when unavailable.
+    """
+    for key in ("text", "chunk_text", "chunk", "content"):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    node_content = payload.get("_node_content")
+    node_data: dict[str, Any] | None = None
+    if isinstance(node_content, dict):
+        node_data = node_content
+    elif isinstance(node_content, str) and node_content.strip():
+        try:
+            parsed = json.loads(node_content)
+            if isinstance(parsed, dict):
+                node_data = parsed
+        except (TypeError, ValueError):
+            node_data = None
+
+    if isinstance(node_data, dict):
+        for scope in (node_data, node_data.get("metadata")):
+            if not isinstance(scope, dict):
+                continue
+            for key in ("text", "chunk_text", "chunk", "content"):
+                candidate = scope.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+    return ""
+
+
 def _member_sort_key(payload: dict[str, Any], point_id: str) -> tuple[int, int, str]:
     """Build a deterministic reading-order key for a unit member.
 
@@ -120,7 +164,11 @@ def _member_sort_key(payload: dict[str, Any], point_id: str) -> tuple[int, int, 
         except (TypeError, ValueError):
             return 0
 
-    return (_as_int(payload.get("page")), _as_int(payload.get("row")), point_id)
+    table = payload.get("table")
+    row = payload.get("row")
+    if row is None and isinstance(table, dict):
+        row = table.get("row_index")
+    return (_as_int(payload.get("page")), _as_int(row), point_id)
 
 
 def _text_hash(payload: dict[str, Any]) -> str:
@@ -132,8 +180,7 @@ def _text_hash(payload: dict[str, Any]) -> str:
     Returns:
         str: Short SHA-256 hex digest of the member's text.
     """
-    text = str(payload.get("text") or payload.get("preview_text") or "")
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(payload_text(payload).encode("utf-8")).hexdigest()[:16]
 
 
 def partition_units(points: Iterable[tuple[str, dict[str, Any]]]) -> list[MapUnit]:
@@ -159,8 +206,13 @@ def partition_units(points: Iterable[tuple[str, dict[str, Any]]]) -> list[MapUni
             bucket = diversity_bucket(payload)
             unit_key = f"social:{bucket}"
             kind = "social_bucket"
-            author, _, hour = bucket.partition("::")
-            label = f"{author} @ {hour}"
+            # Label keeps the author's ORIGINAL casing (the bucket key is
+            # lowercased for grouping only) — it is shown to the model and
+            # to the operator.
+            ref = _reference_metadata(payload)
+            display_author = str(ref.get("author_id") or ref.get("author") or "unknown").strip() or "unknown"
+            _, _, hour = bucket.partition("::")
+            label = f"{display_author} @ {hour}"
         else:
             file_hash = str(payload.get("file_hash") or "").strip()
             filename = str(payload.get("filename") or payload.get("file_name") or "").strip()
