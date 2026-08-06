@@ -123,6 +123,7 @@ __all__ = [
     "urllib",
 ]
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -4243,6 +4244,16 @@ class RAG:
             logger.warning("Unable to initialize Qdrant client for hash lookup: {}", exc)
             return existing
 
+        # Decide the missing-collection case via the API contract instead of
+        # provoking a scroll failure and matching its message text — client or
+        # server rewordings must not change control flow (issue #419).
+        if not qdrant_collection_exists(self.qdrant_client, self.qdrant_collection):
+            logger.debug(
+                "Qdrant collection '{}' not found; skipping existing-hash check",
+                self.qdrant_collection,
+            )
+            return existing
+
         offset: Any = None
         while True:
             try:
@@ -4254,16 +4265,10 @@ class RAG:
                     with_payload=True,
                 )
             except Exception as exc:
-                # Qdrant may return a 404 when the collection does not exist;
-                # treat that case as non-fatal and log at debug level to avoid
-                # cluttering logs with expected messages for new collections.
-                msg = str(exc)
-                not_found = (
-                    "Not found" in msg
-                    or "doesn't exist" in msg
-                    or "does not exist" in msg
-                    or f"Collection `{self.qdrant_collection}`" in msg
-                )
+                # The collection can still vanish between the existence
+                # pre-check above and this scroll (concurrent delete); a 404
+                # is identified by its status code, never by message wording.
+                not_found = isinstance(exc, UnexpectedResponse) and exc.status_code == 404
                 if not_found:
                     logger.debug(
                         "Qdrant collection '{}' not found; skipping existing-hash check: {}",
