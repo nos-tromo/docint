@@ -314,6 +314,38 @@ Two settings shape the lane:
 If the rerank endpoint is down, images surface ungated rather than vanishing —
 a degraded ranking is more useful than a silently emptied lane.
 
+## Collection Summary
+
+`POST /summarize` answers a collection-level summary from a map-reduce
+("tree") summarizer, not by sampling a handful of documents. Every point in
+the collection is partitioned into map units — one per document, or one per
+coarse author/hour bucket for row-level social content — each unit is
+summarized independently (windowed across multiple LLM calls when it is
+large, then folded into one unit summary), and the per-unit summaries are
+folded hierarchically down to a single synthesis call. Evidence chunks the
+map stage points to become citation sources on the answer, the same as any
+other retrieval.
+
+Per-unit summaries are cached, keyed by a fingerprint of the unit's own
+content, so an incremental re-ingest only re-summarizes units that actually
+changed — unchanged documents are served from cache at no LLM cost. Changing
+the summary prompts or the `SUMMARY_MAP_WINDOW_TOKENS` /
+`SUMMARY_REDUCE_FANIN` knobs (see
+[configuration.md](docs/configuration.md#summarisation--summaryconfig))
+changes that fingerprint too, so cached summaries are invalidated once, the
+next time a summary is built.
+
+The endpoint itself is job-backed, mirroring ingestion: a cache hit answers
+`200` immediately; a cache miss, or an explicit `refresh=true`, queues a
+background build and answers `202 {job_id}`, with progress on the same
+owner-multiplexed `GET /ingest/jobs/events` stream ingestion uses
+(`summary_started` / `summary_progress` / `summary_completed`). A second call
+while a build is already running answers `409` with that build's `job_id`. A
+collection that has never been summarized — or whose last automatic build
+failed — has no degraded fallback: the first view builds one, live, in the
+background. `SUMMARY_ON_INGEST` (default `true`) also triggers a rebuild as
+the last stage of every ingest job.
+
 ## Server-Side Exports For Large Collections
 
 The React UI streams collection-wide CSVs from the backend so the browser

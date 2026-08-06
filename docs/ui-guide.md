@@ -73,8 +73,14 @@ per-stage status.
 ### Analysis (`src/routes/Analysis.tsx`)
 
 Three tabs: **NER**, **Hate Speech** (`HateSpeechTable`), and **Summary**
-(`SummaryPanel` with coverage diagnostics). Pre-warms the NER aggregate when
-opened.
+(`SummaryPanel`). Pre-warms the NER aggregate when opened.
+
+The **Summary** tab calls `POST /summarize`: a cache hit renders
+immediately; a cache miss (or the panel's **Refresh** action) follows the
+returned `job_id` on the shared ingest-job SSE stream and shows a build
+progress bar (mapped units / total units) while the tree summarizer runs,
+then renders the result with its coverage diagnostics once
+`summary_completed` arrives.
 
 The **NER** tab opens with a **Table / Graph** view toggle (only one is shown
 at a time):

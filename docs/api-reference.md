@@ -26,8 +26,7 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `DELETE` | `/collections/{name}` | `Collections` | Delete a collection. |
 | `POST` | `/query` | `Query` | Stateless or session-aware query, non-streaming. |
 | `POST` | `/stream_query` | `Query` | Streaming variant of `/query` (SSE tokens). |
-| `POST` | `/summarize` | `Query` | Collection-level summary, non-streaming. |
-| `POST` | `/summarize/stream` | `Query` | Streaming summary (SSE tokens). |
+| `POST` | `/summarize` | `Query` | Collection-level (tree/map-reduce) summary: `200` from cache, `202` queues a job. |
 | `GET`  | `/collections/ner` | `Query` | Full NER dump for the active collection. |
 | `GET`  | `/collections/ner/stats` | `Query` | Aggregated NER statistics. |
 | `GET`  | `/collections/ner/search` | `Query` | Search for entities by name/pattern. |
@@ -143,7 +142,27 @@ complete payload.
 
 ### `POST /summarize`
 
-Generates a collection-level summary. Response (`SummarizeOut`):
+Serves the collection's cached tree summary, or queues a rebuild. Query
+parameters: `refresh` (bool, default `false`) forces a rebuild even when a
+cached summary exists; `collection` is the caller's logical collection name
+— optional on a cache read (falls back to the process-default active
+collection) but **required** (`400` otherwise) whenever a build must be
+queued, since a job snapshot must never leak the owner-namespaced physical
+Qdrant name back to a client.
+
+| Status | Meaning |
+|---|---|
+| `200` | Cache hit — `SummarizeOut` body below. |
+| `202` | Cache miss, or `refresh=true` — a `kind="summary"` job was queued; `{"job_id": "…"}`. Progress arrives on `GET /ingest/jobs/events` (`summary_started` / `summary_progress` / `summary_completed`), the same owner-multiplexed stream ingest jobs use. |
+| `400` | `collection` omitted while queuing a build. |
+| `404` | Caller does not own the collection. |
+| `409` | A summary build is already in flight for this collection — `detail` carries `{"message", "job_id"}` of the running job. |
+
+A collection that has never been summarized, or whose last automatic build
+failed, has no degraded fallback: the first read simply falls into the `202`
+path and builds one in the background — this is by design, not a bug.
+
+`200` response (`SummarizeOut`):
 
 ```json
 {
@@ -155,10 +174,12 @@ Generates a collection-level summary. Response (`SummarizeOut`):
     "coverage_ratio": 0.72,
     "uncovered_documents": ["..."],
     "coverage_target": 0.7,
-    "coverage_unit": "document",
-    "candidate_count": 400,
-    "deduped_count": 150,
-    "sampled_count": 30
+    "coverage_unit": "documents",
+    "candidate_count": 100,
+    "deduped_count": 72,
+    "sampled_count": 24,
+    "partial": false,
+    "llm_calls": 143
   },
   "validation_checked": true,
   "validation_mismatch": false,
@@ -166,12 +187,17 @@ Generates a collection-level summary. Response (`SummarizeOut`):
 }
 ```
 
-`SummaryConfig` (see [configuration.md](configuration.md#summarisation--summaryconfig))
-controls `coverage_target`, `max_docs`, and source caps.
-
-### `POST /summarize/stream`
-
-Streaming variant of `/summarize`.
+`total_documents`/`covered_documents`/`candidate_count`/`deduped_count` are
+now unit counts, not document-sample counts — `coverage_unit` is
+`"documents"`, `"posts"`, or `"units"` depending on what the collection's map
+units turned out to be. `partial` is `true` when `SUMMARY_MAX_LLM_CALLS`
+truncated the map stage before every unit was covered — a build that ends
+`partial` is never persisted as the cached summary, so a `200` response is
+always a complete one. `SummaryConfig` (see
+[configuration.md](configuration.md#summarisation--summaryconfig)) controls
+these knobs; `partial` and `llm_calls` are present on the wire but not yet
+declared on the `SummaryDiagnosticsOut` Pydantic model (the route is
+`response_model=None`, so nothing strips them).
 
 ### `GET /collections/ner`
 
@@ -333,32 +359,38 @@ run's final node batch.
 
 ### `GET /ingest/jobs/events`
 
-One SSE connection carrying every job the caller owns, each frame tagged
-with its `job_id`. On connect the stream replays a **collapsed** history per
-job — `ingestion_started`, then the retained warnings, then the latest
-`ingestion_progress`, then the terminal frame — so a browser that reloads
-mid-run re-attaches and resumes the live view.
+One SSE connection carrying every job the caller owns, of either `kind`,
+each frame tagged with its `job_id`. On connect the stream replays a
+**collapsed** history per job — the kind's `*_started` event, then the
+retained warnings, then the latest `*_progress`, then the terminal frame —
+so a browser that reloads mid-run re-attaches and resumes the live view.
+Event names are kind-specific: `ingestion_started` / `ingestion_progress` /
+`ingestion_complete` for `kind="ingest"`, `summary_started` /
+`summary_progress` (carrying `mapped`/`total_units`) / `summary_completed`
+for `kind="summary"`. A client must filter frames by `job_id` (and, if it
+cares, `kind`) since both kinds share the one connection.
 
 Progress is collapsed to the newest frame because a long run emits thousands
 of them and only the newest describes the current state. Warnings are
 retained individually, since each carries unique information.
 
-Terminal frames are `ingestion_complete` or `error`. The `error` frame
-carries a machine-readable `code` (`ingestion_failed`) alongside static
-display copy — exception text never reaches a client, as it can carry
-connection strings or file paths.
+Terminal frames are `ingestion_complete`/`summary_completed` or `error`. The
+`error` frame carries a machine-readable `code` (`ingestion_failed` or
+`summary_failed`) alongside static display copy — exception text never
+reaches a client, as it can carry connection strings or file paths.
 
 ### `GET /ingest/jobs`
 
-Lists the caller's jobs, newest first. Not used by the SPA (reload
-re-discovery goes through the persisted job id plus the SSE replay);
+Lists the caller's jobs of either `kind`, newest first. Not used by the SPA
+(reload re-discovery goes through the persisted job id plus the SSE replay);
 available for other clients that want to enumerate a caller's runs.
 
 ### `GET /ingest/jobs/{job_id}`
 
-Point-in-time snapshot of one owned job: status, latest message, error,
-and timestamps. The owner-namespaced physical collection name is
-deliberately excluded — callers only ever see their own logical name.
+Point-in-time snapshot of one owned job: `kind` (`"ingest"` or `"summary"`),
+status, latest message, error, and timestamps. The owner-namespaced physical
+collection name is deliberately excluded — callers only ever see their own
+logical name.
 
 A `404` here is how a client detects an **interrupted** run: the backend
 restarted while the job was in flight.
@@ -404,7 +436,7 @@ All Pydantic models used by the routes live at the top of
 - `SelectCollectionIn` / `SelectCollectionOut` (`api.py:208`)
 - `MetadataFilterIn` (`api.py:217`)
 - `QueryIn` / `QueryOut` (`api.py:238`, `248`)
-- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:263`, `275`)
+- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:692`, `706`)
 - `IngestIn` / `IngestOut` (`api.py:284`, `289`)
 - `SessionListOut` / `SessionHistoryOut` (`api.py:296`, `300`)
 - `NERStatsOut` / `NERSearchOut` / `HateSpeechOut` (`api.py:304`, `312`, `316`)

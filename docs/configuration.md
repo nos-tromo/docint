@@ -385,7 +385,7 @@ Loaded by `load_graphrag_env()` (`env_cfg.py:141`).
 
 ## Summarisation — `SummaryConfig`
 
-Loaded by `load_summary_env()` (`env_cfg.py:1145`).
+Loaded by `load_summary_env()` (`env_cfg.py:2145`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -394,7 +394,44 @@ Loaded by `load_summary_env()` (`env_cfg.py:1145`).
 | `SUMMARY_ON_INGEST` | `true` | Whether a collection summary rebuild runs automatically at the end of an ingest job. |
 | `SUMMARY_MAP_WINDOW_TOKENS` | `3000` | Target token budget per map-stage window (clamped to a minimum of `100`). |
 | `SUMMARY_REDUCE_FANIN` | `10` | Max map-stage summaries merged per reduce-stage call (clamped to a minimum of `2`). |
-| `SUMMARY_MAX_LLM_CALLS` | `500` | Upper bound on total LLM calls per tree-summary rebuild (clamped to a minimum of `1`). |
+| `SUMMARY_MAX_LLM_CALLS` | `500` | Upper bound on total LLM calls (map + intra-unit fold) a single tree-summary rebuild may issue, as a runaway-cost guard (clamped to a minimum of `1`). The reduce/synthesis calls that fold unit summaries down to one answer are never blocked by this cap. A rebuild that hits it mid-map is marked `partial` in `summary_diagnostics` and is never persisted as *the* cached summary. |
+
+`RAG.build_tree_summary()` (called by `POST /summarize`, an ingest job's
+post-ingest summary stage, and `uv run query --summary`) replaced the
+sampling-based summarizer with a map-reduce ("tree") pipeline:
+`docint/core/summary/units.py` partitions every point in the collection into
+map units — one per document (grouped by `file_hash`, falling back to
+filename), or one per coarse author/hour bucket for row-level social
+content — and `docint/core/summary/tree.py` summarizes each unit
+independently (windowed across multiple LLM calls at `SUMMARY_MAP_WINDOW_TOKENS`
+when a unit is large, with an intra-unit fold to merge those windows), then
+folds the per-unit summaries hierarchically, `SUMMARY_REDUCE_FANIN` at a
+time, down to one final synthesis call.
+
+Per-unit map results are cached in the collection's own SQLite KV store
+(the same `SQLiteKVStore` file that backs the LlamaIndex docstore of
+serialized hierarchical nodes, at
+`{QDRANT_SRC_DIR}/{collection}/{collection}_kv.db`, under a separate
+namespace), keyed by a fingerprint
+over the unit's member point ids and their text content. An incremental
+re-ingest therefore only re-summarizes units whose content actually
+changed; unchanged units are served from cache at no LLM cost, and a
+successful rebuild prunes cache entries for units that no longer exist. The
+cache validator additionally folds in a fingerprint of the summarize/map/fold
+prompts, the `SUMMARY_COVERAGE_TARGET` / `SUMMARY_FINAL_SOURCE_CAP` /
+`SUMMARY_MAP_WINDOW_TOKENS` / `SUMMARY_REDUCE_FANIN` knobs above, and the
+chat model id — changing any of them invalidates every cached map entry (and
+the final cached summary) once, the next time a summary is built. Ingest
+already bumps a separate revision counter that invalidates the final cached
+summary on every re-ingest, unrelated to this fingerprint.
+
+Summary-rebuild jobs (`kind="summary"`, queued by `POST /summarize` — see
+[api-reference.md](api-reference.md#post-summarize)) run under their own
+concurrency semaphore, read by `load_summary_concurrency()`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOCINT_SUMMARY_CONCURRENCY` | `1` | Summary-rebuild jobs allowed to run at once, process-wide — bounded separately from `DOCINT_INGEST_CONCURRENCY` so a rebuild's burst of map/reduce LLM calls can never starve (or be starved by) an ingest worker slot. Unparseable values fall back to `1`; values below `1` clamp to `1`. |
 
 ## Sessions — `SessionConfig`
 
