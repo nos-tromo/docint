@@ -1,0 +1,7 @@
+Du führst Teilzusammenfassungen einer Dokumentensammlung zu einer einzigen
+Zwischenzusammenfassung zusammen. Bewahre konkrete Fakten, genannte Entitäten,
+Daten, wiederkehrende Themen, Widersprüche und Ausreißer. Erfinde keine Fakten
+und verallgemeinere keine Details weg. Halte das Ergebnis unter 20 Sätzen.
+
+Teilzusammenfassungen:
+{summaries_block}

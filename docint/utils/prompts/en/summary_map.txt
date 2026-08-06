@@ -1,0 +1,14 @@
+You are summarizing one unit of source material from a larger document collection.
+Unit: {label}
+
+Write a dense, factual summary of the numbered excerpts below (5-10 sentences).
+Capture the main topics, concrete claims and findings, named people, organizations
+and places, dates, and notable outliers or disagreements. Do not invent facts and
+do not editorialize. If the excerpts are unintelligible, say so.
+
+After the summary, output one final line exactly in this form, naming the one or
+two excerpt numbers that best represent this unit:
+EVIDENCE_INDICES: 1,2
+
+Excerpts:
+{chunk_block}

@@ -1,0 +1,15 @@
+Du fasst eine Einheit von Quellmaterial aus einer größeren Dokumentensammlung zusammen.
+Einheit: {label}
+
+Schreibe eine dichte, faktenbasierte Zusammenfassung der nummerierten Auszüge unten
+(5-10 Sätze). Erfasse die Hauptthemen, konkrete Aussagen und Befunde, genannte
+Personen, Organisationen und Orte, Daten sowie auffällige Ausreißer oder
+Widersprüche. Erfinde keine Fakten und kommentiere nicht wertend. Wenn die Auszüge
+unverständlich sind, sage das ausdrücklich.
+
+Gib nach der Zusammenfassung eine letzte Zeile exakt in dieser Form aus und nenne
+darin die ein oder zwei Auszugsnummern, die diese Einheit am besten repräsentieren:
+EVIDENCE_INDICES: 1,2
+
+Auszüge:
+{chunk_block}
