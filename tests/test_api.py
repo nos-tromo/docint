@@ -127,6 +127,14 @@ class DummyRAG:
         """
         return True
 
+    def reconcile_quantization(self) -> int:
+        """Satisfy the lifespan quantization reconcile without touching Qdrant.
+
+        Returns:
+            int: Always ``0`` — nothing to reconcile in the stand-in.
+        """
+        return 0
+
     def __init__(self) -> None:
         """Initialize the DummyRAG instance."""
         self.qdrant_collection = "alpha"

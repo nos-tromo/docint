@@ -78,6 +78,10 @@ class _OwnRAG:
         """Satisfy the lifespan startup probe without touching the network."""
         return True
 
+    def reconcile_quantization(self) -> int:
+        """Satisfy the lifespan quantization reconcile without touching Qdrant."""
+        return 0
+
     def list_collections(self) -> list[str]:
         return sorted(self.existing)
 
