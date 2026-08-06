@@ -438,6 +438,94 @@ async def test_terminal_jobs_are_capped_per_owner() -> None:
     assert created[-1].job_id in retained_ids
 
 
+class TestSummaryJobs:
+    """``kind="summary"`` jobs share the registry but frame their own events."""
+
+    @pytest.mark.anyio
+    async def test_summary_job_emits_summary_events(self) -> None:
+        """A ``kind="summary"`` job frames ``summary_started``/``summary_completed``."""
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            push("summary_progress", {"message": "Summarizing 1/2 documents", "mapped": 1, "total_units": 2})
+            return {"empty": False, "resolution": None}
+
+        manager = IngestJobManager(runner=runner, concurrency=1, summary_concurrency=1)
+        state = await manager.create(owner="owner-a", logical_name="col", physical="phys", kind="summary")
+        await _drain(manager, state)
+
+        history = "".join(state.history())
+        assert "event: summary_started" in history
+        assert "event: summary_progress" in history
+        assert "event: summary_completed" in history
+        assert state.snapshot()["kind"] == "summary"
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_summary_failure_uses_summary_code(self) -> None:
+        """A failed summary job carries ``summary_failed``/its own error copy."""
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        manager = IngestJobManager(runner=runner, summary_concurrency=1)
+        state = await manager.create(owner="o", logical_name="c", physical="p", kind="summary")
+        await _drain(manager, state)
+
+        assert state.status is JobStatus.FAILED
+        assert state.error == "Summary generation failed."
+        assert '"code": "summary_failed"' in "".join(state.history())
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_ingest_and_summary_jobs_do_not_block_each_other(self) -> None:
+        """``create_if_idle`` keys idleness on ``(owner, physical, kind)``."""
+        gate = asyncio.Event()
+
+        def blocking_runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            asyncio.run_coroutine_threadsafe(gate.wait(), state_loop).result(timeout=5)
+            return {"empty": False, "resolution": None}
+
+        state_loop = asyncio.get_running_loop()
+        manager = IngestJobManager(runner=blocking_runner, concurrency=1, summary_concurrency=1)
+        ingest, created_i = await manager.create_if_idle(
+            owner="o",
+            logical_name="c",
+            physical="p",
+            batch_dir=Path("/nonexistent"),
+            hybrid=None,
+            ner=None,
+            hate_speech=None,
+            resolve=False,
+            kind="ingest",
+        )
+        summary, created_s = await manager.create_if_idle(owner="o", logical_name="c", physical="p", kind="summary")
+        assert created_i and created_s
+
+        dup, created_dup = await manager.create_if_idle(owner="o", logical_name="c", physical="p", kind="summary")
+        assert not created_dup
+        assert dup.job_id == summary.job_id
+
+        gate.set()
+        await _drain(manager, ingest)
+        await _drain(manager, summary)
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_default_kind_is_ingest_and_ingest_events_unchanged(self) -> None:
+        """Regression: default-kind jobs still emit ``ingestion_*`` frames."""
+        manager = IngestJobManager(runner=_noop_runner)
+        state = await _create(manager)
+        await _drain(manager, state)
+
+        history = "".join(state.history())
+        assert "event: ingestion_started" in history
+        assert "event: ingestion_progress" in history
+        assert "event: ingestion_complete" in history
+        assert state.kind == "ingest"
+        assert state.snapshot()["kind"] == "ingest"
+        await manager.stop()
+
+
 @pytest.mark.anyio
 async def test_eviction_never_drops_an_unfinished_job() -> None:
     """A still-running job survives eviction regardless of the cap.
