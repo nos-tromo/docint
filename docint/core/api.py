@@ -60,6 +60,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_resolution_env,
     load_response_validation_env,
+    load_summary_env,
     resolve_enable_hybrid,
 )
 from docint.utils.hashing import compute_file_hash
@@ -3313,10 +3314,66 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
                 "skipped": summary.skipped,
                 "entities_touched": summary.entities_touched,
             }
+
+    if load_summary_env().on_ingest:
+        push("ingestion_progress", {"message": "Building collection summary..."})
+        try:
+            with rag.collection_scope(state.physical):
+                rag.build_tree_summary(
+                    progress=lambda mapped, total: push(
+                        "ingestion_progress",
+                        {"message": f"Summarizing {mapped}/{total}", "mapped": mapped, "total_units": total},
+                    )
+                )
+        except Exception:
+            logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
+            push("warning", {"message": "Collection summary generation failed."})
+
     return {"empty": empty, "resolution": resolution}
 
 
-job_manager = IngestJobManager(runner=_run_ingest_job)
+def _run_summary_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Execute one summary-rebuild job: tree summary under the job's collection scope.
+
+    Injected via :func:`_run_job` so ``core/jobs.py`` stays free of docint
+    domain imports. Runs on a worker thread; ``push`` is thread-safe.
+
+    Args:
+        state (IngestJobState): The job being executed.
+        push (PushEvent): Thread-safe event publisher.
+
+    Returns:
+        dict[str, Any]: ``{"empty": bool, "resolution": None}``.
+    """
+
+    def _progress(mapped: int, total: int) -> None:
+        push(
+            "summary_progress",
+            {"message": f"Summarizing {mapped}/{total}", "mapped": mapped, "total_units": total},
+        )
+
+    with rag.collection_scope(state.physical):
+        payload = rag.build_tree_summary(progress=_progress)
+    empty = not str((payload or {}).get("response") or "").strip()
+    return {"empty": empty, "resolution": None}
+
+
+def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Dispatch a job to its kind-specific runner.
+
+    Args:
+        state (IngestJobState): The job being executed.
+        push (PushEvent): Thread-safe event publisher.
+
+    Returns:
+        dict[str, Any]: The kind-specific runner's result.
+    """
+    if state.kind == "summary":
+        return _run_summary_job(state, push)
+    return _run_ingest_job(state, push)
+
+
+job_manager = IngestJobManager(runner=_run_job)
 
 
 def get_job_manager() -> IngestJobManager:

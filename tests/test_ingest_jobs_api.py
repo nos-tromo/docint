@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from docint.core import api as api_module
-from docint.core.jobs import IngestJobManager, JobRunner
+from docint.core.jobs import IngestJobManager, IngestJobState, JobRunner
 
 
 def _default_runner(state: Any, push: Any) -> dict[str, Any]:
@@ -185,3 +186,119 @@ def test_job_manager_is_injectable(client: TestClient) -> None:
     # The application's own manager never saw the job the fixture's did.
     app_jobs = asyncio.run(api_module.job_manager.list_for_owner("alice"))
     assert [s.job_id for s in app_jobs] == []
+
+
+def _make_state(*, kind: str = "ingest", resolve: bool = False) -> IngestJobState:
+    """Build a standalone :class:`IngestJobState` for calling a runner directly.
+
+    Bypasses :class:`IngestJobManager` entirely — these tests drive
+    ``_run_summary_job``/``_run_ingest_job`` as plain functions, not through
+    the async worker dispatch. ``kind="ingest"`` gets a real, empty temp
+    directory for ``batch_dir`` (the runner's first check is
+    ``batch_dir.is_dir()``); ``kind="summary"`` omits it, matching how
+    summary jobs are created in practice.
+
+    Args:
+        kind (str): ``"ingest"`` or ``"summary"``.
+        resolve (bool): Whether the ingest job should attempt entity
+            resolution after the pipeline runs. Ingest-only.
+
+    Returns:
+        IngestJobState: A job state never registered with any manager.
+    """
+    batch_dir = Path(tempfile.mkdtemp()) if kind == "ingest" else None
+    return IngestJobState(
+        job_id="test-job-id",
+        owner="alice",
+        logical_name="mydocs",
+        physical="u0123456789ab__mydocs",
+        kind=kind,
+        batch_dir=batch_dir,
+        resolve=resolve,
+    )
+
+
+def test_run_summary_job_builds_and_reports_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_run_summary_job scopes the collection, forwards progress, returns non-empty."""
+    calls: dict[str, bool] = {}
+
+    def fake_build(progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+        assert progress is not None
+        progress(1, 2)
+        progress(2, 2)
+        calls["built"] = True
+        return {"response": "sum", "sources": [], "summary_diagnostics": {}}
+
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", fake_build)
+    pushed: list[tuple[str, dict[str, Any]]] = []
+    state = _make_state(kind="summary")
+    result = api_module._run_summary_job(state, lambda ev, p: pushed.append((ev, p)))
+
+    assert calls["built"]
+    assert result == {"empty": False, "resolution": None}
+    progress_events = [p for ev, p in pushed if ev == "summary_progress"]
+    assert progress_events[-1]["mapped"] == 2
+    assert progress_events[-1]["total_units"] == 2
+
+
+def test_ingest_job_runs_summary_stage_after_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_run_ingest_job calls build_tree_summary when SUMMARY_ON_INGEST is on."""
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    built: list[int] = []
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", lambda progress=None: built.append(1) or {})
+    state = _make_state(kind="ingest", resolve=False)
+
+    api_module._run_ingest_job(state, lambda ev, p: None)
+
+    assert built
+
+
+def test_ingest_summary_stage_failure_is_warning_not_job_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A summary-stage exception after ingest degrades to a warning, not a job failure."""
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+
+    def boom(progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", boom)
+    pushed: list[tuple[str, dict[str, Any]]] = []
+    state = _make_state(kind="ingest", resolve=False)
+
+    result = api_module._run_ingest_job(state, lambda ev, p: pushed.append((ev, p)))
+
+    assert result["empty"] is False
+    assert any(ev == "warning" and "summary" in p["message"].lower() for ev, p in pushed)
+
+
+def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With SUMMARY_ON_INGEST=false the ingest job never calls build_tree_summary."""
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    built: list[int] = []
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", lambda progress=None: built.append(1) or {})
+    state = _make_state(kind="ingest", resolve=False)
+
+    result = api_module._run_ingest_job(state, lambda ev, p: None)
+
+    assert not built
+    assert result == {"empty": False, "resolution": None}
+
+
+def test_run_job_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_run_job routes a summary-kind state to _run_summary_job and everything else to _run_ingest_job."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        api_module,
+        "_run_summary_job",
+        lambda state, push: calls.append("summary") or {"empty": False, "resolution": None},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_run_ingest_job",
+        lambda state, push: calls.append("ingest") or {"empty": False, "resolution": None},
+    )
+
+    api_module._run_job(_make_state(kind="summary"), lambda ev, p: None)
+    api_module._run_job(_make_state(kind="ingest"), lambda ev, p: None)
+
+    assert calls == ["summary", "ingest"]
