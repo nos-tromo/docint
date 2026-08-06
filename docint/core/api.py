@@ -3243,11 +3243,16 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: ``{"empty": bool, "resolution": dict | None}``.
+
+    Raises:
+        RuntimeError: If ``state.batch_dir`` is ``None``. ``batch_dir`` is
+            optional on ``IngestJobState`` only because ``kind="summary"``
+            jobs omit it; this runner is only ever registered for
+            ``kind="ingest"`` jobs, which always populate it, so this should
+            never actually trigger.
     """
-    # batch_dir is optional on IngestJobState only because kind="summary"
-    # jobs omit it; this runner is only ever registered for kind="ingest"
-    # jobs, which always populate it.
-    assert state.batch_dir is not None, "ingest jobs always carry a batch_dir"
+    if state.batch_dir is None:
+        raise RuntimeError("Ingest jobs always carry a batch_dir.")
     if not state.batch_dir.is_dir():
         # Nothing was staged (e.g. every upload batch failed, or finalize was
         # called with nothing ever uploaded). Report a soft empty completion

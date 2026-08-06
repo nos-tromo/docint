@@ -511,6 +511,49 @@ class TestSummaryJobs:
         await manager.stop()
 
     @pytest.mark.anyio
+    async def test_summary_jobs_run_on_their_own_semaphore(self) -> None:
+        """A summary job reaches RUNNING while an ingest job still holds its slot.
+
+        Regression guard for a single shared semaphore: if ``__init__``
+        aliased ``kind="ingest"`` and ``kind="summary"`` to the same
+        ``asyncio.Semaphore`` (concurrency=1 each), the summary job below
+        would stay QUEUED behind the still-running ingest job instead of
+        starting immediately — the exact "a summary rebuild cannot consume an
+        ingest worker slot" guarantee this task exists to provide.
+        """
+        gate = asyncio.Event()
+
+        def blocking_runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            asyncio.run_coroutine_threadsafe(gate.wait(), state_loop).result(timeout=5)
+            return {"empty": False, "resolution": None}
+
+        async def _wait_running(state: IngestJobState) -> None:
+            for _ in range(200):
+                if state.status is JobStatus.RUNNING:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError(f"job never reached RUNNING; status={state.status}")
+
+        state_loop = asyncio.get_running_loop()
+        manager = IngestJobManager(runner=blocking_runner, concurrency=1, summary_concurrency=1)
+
+        ingest = await manager.create(owner="o", logical_name="c1", physical="p1", kind="ingest")
+        await _wait_running(ingest)
+
+        summary = await manager.create(owner="o", logical_name="c2", physical="p2", kind="summary")
+        # If both kinds shared one semaphore, this would time out with
+        # summary still QUEUED, since the ingest job above holds the only slot.
+        await _wait_running(summary)
+
+        assert ingest.status is JobStatus.RUNNING
+        assert summary.status is JobStatus.RUNNING
+
+        gate.set()
+        await _drain(manager, ingest)
+        await _drain(manager, summary)
+        await manager.stop()
+
+    @pytest.mark.anyio
     async def test_default_kind_is_ingest_and_ingest_events_unchanged(self) -> None:
         """Regression: default-kind jobs still emit ``ingestion_*`` frames."""
         manager = IngestJobManager(runner=_noop_runner)
