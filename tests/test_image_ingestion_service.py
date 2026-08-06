@@ -112,12 +112,16 @@ class FakeQdrantClient:
             raise RuntimeError("missing")
         return self.collections[collection_name]
 
-    def create_collection(self, collection_name: str, vectors_config: dict[str, Any]) -> None:
+    def create_collection(
+        self, collection_name: str, vectors_config: dict[str, Any], **kwargs: Any
+    ) -> None:
         """Register a new collection with the given vector configuration.
 
         Args:
             collection_name: Name of the collection to create.
             vectors_config: Mapping of vector names to their parameters.
+            **kwargs: Additional creation options (e.g. ``quantization_config``),
+                accepted and ignored like the real client.
         """
         self.collections[collection_name] = SimpleNamespace(
             config=SimpleNamespace(params=SimpleNamespace(vectors=vectors_config))

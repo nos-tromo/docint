@@ -159,7 +159,7 @@ from docint.core.storage.ingest_manifest import (
 from docint.core.storage.scroll import iter_scroll
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
-from docint.core.storage.utils import qdrant_collection_exists
+from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.embed_chunking import (
@@ -6057,11 +6057,13 @@ class RAG:
                 collection_name=self.qdrant_collection,
                 vectors_config={QDRANT_DENSE_VECTOR_NAME: dense_params},
                 sparse_vectors_config={QDRANT_SPARSE_VECTOR_NAME: sparse_params},
+                quantization_config=build_quantization_config(),
             )
         else:
             self.qdrant_client.create_collection(
                 collection_name=self.qdrant_collection,
                 vectors_config=dense_params,
+                quantization_config=build_quantization_config(),
             )
         logger.info(
             "Pre-created Qdrant collection '{}' (vector_size={}, hybrid={}).",
