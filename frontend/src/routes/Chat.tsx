@@ -7,6 +7,7 @@ import { describeError, streamErrorText } from '@/api/errorMessage'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
+import { useStickToBottom } from '@/hooks/useStickToBottom'
 import { useReportDedupeKeys } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
@@ -87,6 +88,9 @@ export function Chat() {
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
   const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false })
+  // `state.turns` is a fresh array on every streamed token, so the transcript
+  // follows the growing answer — but only while the user sits at the bottom.
+  const transcript = useStickToBottom<HTMLDivElement>(state.turns)
   const abortRef = useRef<AbortController | null>(null)
   const key = draftKey(sessionIdParam)
   const draft = useChatUiStore((s) => s.drafts[key] ?? '')
@@ -244,7 +248,11 @@ export function Chat() {
             </button>
           )}
         </div>
-        <div className="flex-1 min-h-0 overflow-auto space-y-6 pr-2">
+        <div
+          ref={transcript.ref}
+          onScroll={transcript.onScroll}
+          className="flex-1 min-h-0 overflow-auto space-y-6 pr-2"
+        >
           {state.turns.map((t, i) => (
             <ChatTurn
               key={i}
