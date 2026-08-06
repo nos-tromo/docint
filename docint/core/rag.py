@@ -7880,6 +7880,17 @@ class RAG:
             covered = int(diag.get("covered_units", 0) or 0)
             total = int(diag.get("total_units", total_units) or total_units)
             coverage_ratio = covered / total if total else 0.0
+            # Approximate: `covered_keys` only tracks map-cache get/put
+            # activity, so a unit that was mapped but deliberately not
+            # cached (a cap-truncated result — see `_KVMapCache`'s
+            # docstring) reads as uncovered here even though it produced a
+            # result. This runs *during* the build, before `TreeSummarizer`
+            # returns a `TreeSummaryResult` with per-unit results, so
+            # `covered_keys` is the only signal available at this point.
+            # The post-build diagnostics below recompute this from
+            # `result.unit_results` and are the authoritative value served
+            # to the client; this closure only feeds the LLM's synthesis
+            # prompt, not `summary_diagnostics`.
             uncovered_labels = [unit.label for unit in units if unit.unit_key not in covered_keys][:20]
             return self._build_summary_synthesis_prompt(
                 briefs=briefs,
@@ -7908,7 +7919,17 @@ class RAG:
 
         covered_units = result.covered_units
         coverage_ratio = covered_units / total_units if total_units else 0.0
-        uncovered_labels = [unit.label for unit in units if unit.unit_key not in covered_keys][:20]
+        # Authoritative post-build source: a unit is covered iff it produced
+        # a `UnitMapResult` (cache hit, mapped, or cap-truncated), regardless
+        # of whether that result was written to the map cache. `covered_keys`
+        # (used above, mid-build, where `result` does not yet exist) instead
+        # tracks map-cache get/put activity, which a deliberately-uncached
+        # truncated unit never joins — that unit would otherwise be counted
+        # in both `covered_units` (it has a `UnitMapResult`) and
+        # `uncovered_labels` (`_KVMapCache` never saw it), making the
+        # coverage banner self-contradictory.
+        covered_result_keys = {unit_result.unit_key for unit_result in result.unit_results}
+        uncovered_labels = [unit.label for unit in units if unit.unit_key not in covered_result_keys][:20]
 
         if covered_units == 0:
             response_text = "Unable to extract grounded evidence from the selected collection."
@@ -7973,7 +7994,14 @@ class RAG:
             "candidate_count": total_units,
             "deduped_count": covered_units,
             "sampled_count": len(sources),
-            "partial": result.partial,
+            # A zero-covered build over a non-empty collection (the
+            # `total_units == 0` case already returned above) produces the
+            # bare "unable to extract grounded evidence" response_text above
+            # with no per-unit diagnostics to explain it. Without `partial`,
+            # `CoverageBanner` has nothing to flag and the non-answer looks
+            # like a normal, complete summary until Refresh or the next
+            # revision bump.
+            "partial": result.partial or covered_units == 0,
             "llm_calls": result.llm_calls,
         }
 

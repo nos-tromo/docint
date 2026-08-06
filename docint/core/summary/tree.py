@@ -442,7 +442,16 @@ class TreeSummarizer:
                 folded.append(self._complete(self._fold_prompt.format(summaries_block="\n\n".join(group))))
             if capped:
                 self._partial = True
-                briefs = (folded or briefs)[: self.reduce_fanin]
+                # `folded` holds every fold that completed before the cap
+                # tripped this tier — inherently bounded by `max_llm_calls`,
+                # so keeping all of it cannot make the synthesis prompt
+                # unbounded. Slicing it to `reduce_fanin` (the old behavior)
+                # discarded already-LLM-paid-for fold output whenever more
+                # than `reduce_fanin` folds had completed. Only the raw
+                # `briefs` fallback — reached when the cap tripped before any
+                # fold in this tier completed — still needs trimming, since
+                # it is the one unbounded quantity available here.
+                briefs = folded or briefs[: self.reduce_fanin]
                 break
             briefs = folded
 

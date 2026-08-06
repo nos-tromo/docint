@@ -327,6 +327,96 @@ def test_partial_build_is_cached_and_keeps_its_flag(rag_with_fake_collection: RA
     assert cached["summary_diagnostics"]["covered_documents"] == 1
 
 
+def test_build_tree_summary_zero_covered_is_flagged_partial(rag_with_fake_collection: RAG) -> None:
+    """A non-empty collection where every unit fails to map is flagged partial.
+
+    ``covered_units == 0`` produces the bare "unable to extract grounded
+    evidence" ``response_text`` with no per-unit diagnostics to explain it.
+    Without ``partial`` set, ``CoverageBanner`` has nothing to flag and the
+    non-answer looks like a normal, complete summary until Refresh or the
+    next revision bump. This scenario reaches zero coverage via per-unit map
+    failures (not the LLM-call cap), so ``TreeSummaryResult.partial`` on its
+    own is ``False`` — the orchestration layer must force the flag itself.
+    """
+    rag = rag_with_fake_collection
+
+    class _AllMapsFailModel:
+        """Raises on every map-stage call; answers the final synthesis call."""
+
+        def complete(self, prompt: str) -> _StubCompletion:
+            """Fail every map call, succeed on the exempt synthesis call.
+
+            Args:
+                prompt: The fully rendered prompt text.
+
+            Returns:
+                _StubCompletion: A canned final-response text for any
+                non-map prompt.
+
+            Raises:
+                RuntimeError: For any map-stage prompt.
+            """
+            if _MAP_PROMPT_MARKER in prompt:
+                raise RuntimeError("map model unreachable")
+            return _StubCompletion("Synthetic final response.")
+
+    rag._post_retrieval_text_model = cast(Any, _AllMapsFailModel())
+
+    payload = rag.build_tree_summary()
+
+    diag = payload["summary_diagnostics"]
+    assert diag["covered_documents"] == 0
+    assert diag["total_documents"] == 2
+    assert diag["partial"] is True
+    assert payload["response"] == "Unable to extract grounded evidence from the selected collection."
+
+
+def test_build_tree_summary_truncated_unit_not_double_counted(tmp_path: Path) -> None:
+    """A cap-truncated unit is covered exactly once, not also listed as uncovered.
+
+    ``_KVMapCache`` deliberately never writes a truncated unit's result to
+    the map cache (it would be stored under the unit's *full* content
+    fingerprint and served as complete on every later build), so
+    ``covered_keys`` — which only tracks cache get/put activity — never
+    learns about it. Deriving ``uncovered_documents`` from ``covered_keys``
+    therefore both counted the truncated unit in ``covered_documents`` (it
+    has a ``UnitMapResult``) AND listed its label in ``uncovered_documents``
+    (the cache never saw it) — a self-contradictory "N/N covered · show M
+    uncovered" banner.
+    """
+    import dataclasses
+
+    points = [
+        types.SimpleNamespace(
+            id="pt-big-1",
+            payload={"file_hash": "hash-aaa-big", "filename": "big-doc.txt", "text": "A" * 30},
+        ),
+        types.SimpleNamespace(
+            id="pt-big-2",
+            payload={"file_hash": "hash-aaa-big", "filename": "big-doc.txt", "text": "B" * 30},
+        ),
+        types.SimpleNamespace(
+            id="pt-small",
+            payload={"file_hash": "hash-zzz-small", "filename": "small-doc.txt", "text": "small doc text"},
+        ),
+    ]
+    rag = _build_rag(tmp_path, points=points)
+    # window_chars = map_window_tokens * 4 = 40: the big doc's two 30-char
+    # chunks cannot share one window (30 + 30 > 40), so mapping it costs two
+    # windows/calls; capping the budget at 1 call truncates it mid-unit
+    # before the small doc (sorted after it by unit_key) is ever attempted.
+    rag.summary_config = dataclasses.replace(rag.summary_config, map_window_tokens=10, max_llm_calls=1)
+
+    payload = rag.build_tree_summary()
+
+    diag = payload["summary_diagnostics"]
+    assert diag["partial"] is True
+    assert diag["covered_documents"] == 1
+    assert diag["total_documents"] == 2
+    assert "big-doc.txt" not in diag["uncovered_documents"]
+    assert "small-doc.txt" in diag["uncovered_documents"]
+
+
 def test_empty_build_is_cached(tmp_path: Path) -> None:
     """An empty collection's build is cached, so it stops re-queueing forever."""
     rag = _build_rag(tmp_path, points=[])

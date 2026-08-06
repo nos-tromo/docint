@@ -232,6 +232,52 @@ def test_cap_bounds_the_reduce_fold_tier() -> None:
     assert result.llm_calls == 4  # 3 folds + the exempt synthesis call
 
 
+def test_reduce_fold_tier_keeps_all_completed_folds_on_cap_trip() -> None:
+    """Cap tripping mid-fold-tier keeps every completed fold, not just ``reduce_fanin`` of them.
+
+    Regression guard: the old slice ``(folded or briefs)[:reduce_fanin]``
+    discarded already-LLM-paid-for fold output past ``reduce_fanin``
+    whenever more than ``reduce_fanin`` folds had completed before the cap
+    tripped — e.g. fan-in 2 with 4 completed folds used to drop 2 of them
+    from the synthesis prompt entirely.
+    """
+    cache = DictCache()
+    units = [_unit(f"u{i}", fingerprint=f"f{i}") for i in range(10)]
+    # Warm every unit via cache so the map stage costs zero calls; the whole
+    # LLM budget is available to (and enforced on) the fold tier.
+    _summarizer(FakeLLM(), _small_fetch, cache=cache).build(units)
+
+    captured_briefs: list[list[str]] = []
+
+    def synth(briefs: list[str], diag: dict[str, Any]) -> str:
+        captured_briefs.append(list(briefs))
+        return "SYNTH"
+
+    llm = FakeLLM()
+    # 10 units at fan-in 2 -> 5 groups this tier. A cap of 4 lets 4 folds
+    # complete (more than reduce_fanin=2) before the 5th group trips it.
+    result = _summarizer(
+        llm,
+        _small_fetch,
+        cache=cache,
+        reduce_fanin=2,
+        max_llm_calls=4,
+        build_synthesis_prompt=synth,
+    ).build(units)
+
+    fold_calls = [p for p in llm.prompts if p.startswith("FOLD")]
+    assert len(fold_calls) == 4
+    assert result.partial is True
+    # All 4 completed folds reached synthesis, not sliced down to fanin (2):
+    # the old `(folded or briefs)[:reduce_fanin]` would have captured only 2.
+    assert len(captured_briefs) == 1
+    assert len(captured_briefs[0]) == 4
+    # Each fold's distinct response text (FakeLLM numbers them by call
+    # order) survives into the synthesis input, including the 3rd and 4th
+    # fold the old slice would have dropped.
+    assert captured_briefs[0] == [f"fold-summary-{i}" for i in range(1, 5)]
+
+
 def test_final_synthesis_runs_even_when_the_cap_is_zero_budget() -> None:
     """A build with no map budget at all still produces a synthesized answer."""
     llm = FakeLLM()
