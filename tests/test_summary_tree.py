@@ -3,6 +3,8 @@
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit
 
@@ -24,15 +26,32 @@ class DictCache:
     """In-memory :class:`MapCache` stub keyed by ``(unit_key, validator)``."""
 
     def __init__(self) -> None:
+        """Initialize an empty cache store."""
         self.store: dict[str, dict[str, Any]] = {}
 
     def get(self, unit_key: str, validator: str) -> dict[str, Any] | None:
+        """Return the stored entry for ``unit_key`` iff its validator matches.
+
+        Args:
+            unit_key: The unit's stable identity.
+            validator: Content fingerprint the caller expects to match.
+
+        Returns:
+            dict[str, Any] | None: The cached entry on a hit, else ``None``.
+        """
         entry = self.store.get(unit_key)
         if entry and entry["validator"] == validator:
             return entry["entry"]
         return None
 
     def put(self, unit_key: str, validator: str, entry: dict[str, Any]) -> None:
+        """Store ``entry`` for ``unit_key`` under ``validator``.
+
+        Args:
+            unit_key: The unit's stable identity.
+            validator: Content fingerprint that validates this entry.
+            entry: The value to store.
+        """
         self.store[unit_key] = {"validator": validator, "entry": entry}
 
 
@@ -40,9 +59,19 @@ class FakeLLM:
     """Echoes a marker per call; map calls end with an evidence line."""
 
     def __init__(self) -> None:
+        """Initialize the call log."""
         self.prompts: list[str] = []
 
     def __call__(self, prompt: str) -> str:
+        """Record ``prompt`` and return a deterministic marker response.
+
+        Args:
+            prompt: The rendered prompt text.
+
+        Returns:
+            str: A marker response whose kind (map/fold/synthesis) is
+            inferred from ``prompt``'s prefix.
+        """
         self.prompts.append(prompt)
         if prompt.startswith("MAP"):
             return f"map-summary-{len(self.prompts)}\nEVIDENCE_INDICES: 1"
@@ -77,6 +106,7 @@ def _small_fetch(unit: MapUnit) -> list[UnitChunk]:
 
 
 def test_single_unit_one_window() -> None:
+    """A single small unit maps in one window and synthesizes in one call."""
     llm = FakeLLM()
     result = _summarizer(llm, _small_fetch).build([_unit("a")])
     assert result.total_units == 1
@@ -90,6 +120,7 @@ def test_single_unit_one_window() -> None:
 
 
 def test_windowing_splits_long_units_and_folds() -> None:
+    """Chunks that overflow ``window_chars`` split into multiple windows and fold."""
     llm = FakeLLM()
 
     def fetch(unit: MapUnit) -> list[UnitChunk]:
@@ -103,6 +134,7 @@ def test_windowing_splits_long_units_and_folds() -> None:
 
 
 def test_oversize_single_chunk_is_truncated_not_dropped() -> None:
+    """A single chunk longer than ``window_chars`` is truncated, not dropped."""
     llm = FakeLLM()
 
     def fetch(unit: MapUnit) -> list[UnitChunk]:
@@ -115,6 +147,7 @@ def test_oversize_single_chunk_is_truncated_not_dropped() -> None:
 
 
 def test_cache_hit_skips_llm_and_delta_only_remaps() -> None:
+    """An unchanged unit's fingerprint hits the cache; only the changed unit re-maps."""
     cache = DictCache()
     llm1 = FakeLLM()
     units = [_unit("a", fingerprint="fa"), _unit("b", fingerprint="fb")]
@@ -131,6 +164,7 @@ def test_cache_hit_skips_llm_and_delta_only_remaps() -> None:
 
 
 def test_call_cap_marks_partial_but_still_synthesizes() -> None:
+    """Tripping ``max_llm_calls`` during mapping stops mapping but still synthesizes."""
     llm = FakeLLM()
     units = [_unit(f"u{i}", fingerprint=f"f{i}") for i in range(5)]
     result = _summarizer(llm, _small_fetch, max_llm_calls=2).build(units)
@@ -140,6 +174,7 @@ def test_call_cap_marks_partial_but_still_synthesizes() -> None:
 
 
 def test_empty_units_list_returns_empty_without_llm() -> None:
+    """``build([])`` short-circuits to an empty result without any LLM call."""
     llm = FakeLLM()
     result = _summarizer(llm, _small_fetch).build([])
     assert result.response == ""
@@ -148,6 +183,7 @@ def test_empty_units_list_returns_empty_without_llm() -> None:
 
 
 def test_unit_with_no_chunks_is_uncovered() -> None:
+    """A unit whose fetcher returns no chunks is counted uncovered, not errored."""
     llm = FakeLLM()
     result = _summarizer(llm, lambda unit: []).build([_unit("a")])
     assert result.covered_units == 0
@@ -155,6 +191,7 @@ def test_unit_with_no_chunks_is_uncovered() -> None:
 
 
 def test_map_failure_skips_unit_and_continues() -> None:
+    """A ``complete()`` exception during mapping marks only that unit uncovered."""
     calls = {"n": 0}
 
     def flaky(prompt: str) -> str:
@@ -172,6 +209,7 @@ def test_map_failure_skips_unit_and_continues() -> None:
 
 
 def test_reduce_folds_when_over_fanin() -> None:
+    """More briefs than ``reduce_fanin`` fold in groups before synthesis."""
     llm = FakeLLM()
     units = [_unit(f"u{i}", fingerprint=f"f{i}") for i in range(5)]
     result = _summarizer(llm, _small_fetch, reduce_fanin=2).build(units)
@@ -181,9 +219,55 @@ def test_reduce_folds_when_over_fanin() -> None:
 
 
 def test_progress_callback_reports_per_unit() -> None:
+    """``progress`` fires once per unit as ``(processed, total)``."""
     seen: list[tuple[int, int]] = []
     llm = FakeLLM()
     _summarizer(llm, _small_fetch, progress=lambda done, total: seen.append((done, total))).build(
         [_unit("a"), _unit("b", fingerprint="fb")]
     )
     assert seen == [(1, 2), (2, 2)]
+
+
+def test_cache_hit_survives_cap_trip_during_mapping() -> None:
+    """A cache hit is retained even when the call cap trips while mapping misses.
+
+    Regression guard for semantics item 5: cache hits must resolve in a
+    pass that is never gated by ``max_llm_calls`` — collapsing the
+    two-pass loop into one cap-gated pass would drop the cached unit
+    whenever the cap trips before its turn.
+    """
+    cache = DictCache()
+    warm_llm = FakeLLM()
+    _summarizer(warm_llm, _small_fetch, cache=cache).build([_unit("a", fingerprint="fa")])
+
+    llm = FakeLLM()
+    units = [
+        _unit("a", fingerprint="fa"),
+        _unit("b", fingerprint="fb"),
+        _unit("c", fingerprint="fc"),
+    ]
+    result = _summarizer(llm, _small_fetch, cache=cache, max_llm_calls=1).build(units)
+
+    assert result.partial is True
+    by_key = {u.unit_key: u for u in result.unit_results}
+    assert by_key["a"].from_cache is True
+    assert by_key["b"].from_cache is False
+    assert "c" not in by_key  # capped before mapping ever starts on it
+    assert result.covered_units == 2  # cached "a" + mapped "b"
+    assert result.response.startswith("final-summary")
+
+
+def test_reduce_exception_propagates() -> None:
+    """An exception raised during reduce/synthesis escapes ``build()``.
+
+    Unlike a map-stage failure (which only marks its unit uncovered), a
+    reduce-stage failure must propagate so the job layer can fail the job.
+    """
+
+    def flaky(prompt: str) -> str:
+        if prompt.startswith("MAP"):
+            return "ok\nEVIDENCE_INDICES: 1"
+        raise RuntimeError("synthesis down")
+
+    with pytest.raises(RuntimeError, match="synthesis down"):
+        _summarizer(flaky, _small_fetch).build([_unit("a")])

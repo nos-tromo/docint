@@ -302,7 +302,7 @@ class TreeSummarizer:
                 evidence_ids=evidence_ids[:_MAX_EVIDENCE_PER_UNIT],
                 from_cache=False,
             )
-        except Exception as exc:  # noqa: BLE001 - map failures are per-unit, not fatal
+        except Exception as exc:
             logger.warning("Tree summary map failed for unit '{}': {}", unit.unit_key, exc)
             return None
 
