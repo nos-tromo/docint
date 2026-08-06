@@ -701,6 +701,11 @@ class SummaryDiagnosticsOut(BaseModel):
     candidate_count: int | None = None
     deduped_count: int | None = None
     sampled_count: int | None = None
+    # True when the tree summarizer's SUMMARY_MAX_LLM_CALLS budget cut the
+    # build short, so the summary reflects only part of the collection. The
+    # SPA surfaces it as an explicit notice; `None` on payloads cached before
+    # the flag existed.
+    partial: bool | None = None
 
 
 class SummarizeOut(BaseModel):

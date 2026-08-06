@@ -394,7 +394,7 @@ Loaded by `load_summary_env()` (`env_cfg.py:2145`).
 | `SUMMARY_ON_INGEST` | `true` | Whether a collection summary rebuild runs automatically at the end of an ingest job. Fail-soft: an exception from the rebuild (e.g. an LLM outage) is caught, logged, and reported to the client as a `warning` SSE event (`"Collection summary generation failed."`) — the ingest job still completes normally and its documents are ingested and retrievable regardless. |
 | `SUMMARY_MAP_WINDOW_TOKENS` | `3000` | Target token budget per map-stage window (clamped to a minimum of `100`). |
 | `SUMMARY_REDUCE_FANIN` | `10` | Max map-stage summaries merged per reduce-stage call (clamped to a minimum of `2`). |
-| `SUMMARY_MAX_LLM_CALLS` | `500` | Upper bound on total LLM calls (map + intra-unit fold) a single tree-summary rebuild may issue, as a runaway-cost guard (clamped to a minimum of `1`). The reduce/synthesis calls that fold unit summaries down to one answer are never blocked by this cap. A rebuild that hits it mid-map is marked `partial` in `summary_diagnostics` and is never persisted as *the* cached summary. |
+| `SUMMARY_MAX_LLM_CALLS` | `500` | Hard upper bound on the LLM calls a single tree-summary rebuild may issue, as a runaway-cost guard (clamped to a minimum of `1`). Enforced between units, *inside* one unit's window loop (so a single huge transcript cannot issue thousands of map calls on its own), on the intra-unit fold, and across the reduce-fold tiers. Only the one final synthesis call is exempt, so a capped rebuild still produces an answer. Cache hits cost no calls and are resolved before the cap applies. A rebuild that hits the cap is marked `partial: true` in `summary_diagnostics`, which travels through the cache to the API and the SPA's coverage banner; a cap-truncated unit summary is deliberately *not* written to the per-unit map cache, since it would otherwise be stored against the unit's full content fingerprint and served as complete forever. |
 
 `RAG.build_tree_summary()` (called by `POST /summarize`, an ingest job's
 post-ingest summary stage, and `uv run query --summary`) replaced the
@@ -416,7 +416,7 @@ namespace), keyed by a fingerprint
 over the unit's member point ids and their text content. An incremental
 re-ingest therefore only re-summarizes units whose content actually
 changed; unchanged units are served from cache at no LLM cost, and a
-successful rebuild prunes cache entries for units that no longer exist. The
+completed rebuild prunes cache entries for units that no longer exist. The
 cache validator additionally folds in a fingerprint of the summarize/map/fold
 prompts, the `SUMMARY_COVERAGE_TARGET` / `SUMMARY_FINAL_SOURCE_CAP` /
 `SUMMARY_MAP_WINDOW_TOKENS` / `SUMMARY_REDUCE_FANIN` knobs above, and the

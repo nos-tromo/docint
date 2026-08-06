@@ -7380,9 +7380,21 @@ class RAG:
         collection — not just the ones a similarity query would surface — is
         represented once.
 
+        Scroll errors are raised rather than warned (``iter_scroll``'s
+        fail-soft default, which is right for the fail-soft NER/hate-speech
+        aggregators). Here a mid-scroll Qdrant blip would shrink the universe
+        silently: ``partition_units`` would see only the pages that arrived,
+        every one of them would map, and the build would report
+        ``coverage_ratio: 1.0`` before caching a fraction of the collection as
+        the complete summary. Failing the summary job is the tested,
+        recoverable outcome.
+
         Yields:
             tuple[str, dict[str, Any]]: ``(point_id, payload)`` pairs for
             every point with a dict payload in the active collection.
+
+        Raises:
+            Exception: Whatever the Qdrant client raises mid-scroll.
         """
         if not self.qdrant_collection:
             return
@@ -7392,6 +7404,7 @@ class RAG:
             page_size=256,
             with_payload=True,
             with_vectors=False,
+            on_error="raise",
             error_context="tree summary points",
         ):
             for point in page:
@@ -7698,17 +7711,45 @@ class RAG:
             "summary_diagnostics": summary_diagnostics,
         }
 
-    def _store_cached_collection_summary(self, payload: dict[str, Any]) -> None:
+    def _store_cached_collection_summary(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         """Persist a collection summary payload in the dockv summary namespace.
+
+        Summary and ingest jobs for one collection run concurrently by design
+        (``create_if_idle`` keys idleness on ``(owner, physical, kind)``), so
+        reading the revision at *write* time would stamp a build that started
+        at revision R with whatever revision an ingest bumped it to
+        mid-build — publishing a stale summary as current, and overwriting the
+        newer summary that ingest just cached. Callers therefore capture the
+        revision when the build starts and pass it as ``expected_revision``;
+        this is a compare-and-set, skipping the write when the collection
+        moved underneath the build. The revision key is always re-put with the
+        *current* value, never the captured one, so the counter cannot roll
+        backwards.
 
         Args:
             payload (dict[str, Any]): Summary payload to cache.
+            expected_revision (int | None): Revision observed when the build
+                started. ``None`` skips the check and stamps the current
+                revision (for callers with no build window to protect).
         """
         kv_store = self._summary_kv_store()
         if kv_store is None:
             return
 
         revision = self._get_summary_revision()
+        if expected_revision is not None and expected_revision != revision:
+            logger.info(
+                "Skipping summary cache write for '{}': collection changed during the build (revision {} -> {}).",
+                self.qdrant_collection,
+                expected_revision,
+                revision,
+            )
+            return
         prompt_fingerprint = self._summary_prompt_fingerprint()
         sources = payload.get("sources")
         if not isinstance(sources, list):
@@ -7748,10 +7789,23 @@ class RAG:
         unit independently through :class:`~docint.core.summary.tree.TreeSummarizer`
         (reusing a unit's cached map result whenever its content and the
         active prompts/model are unchanged), and folds the per-unit
-        summaries into one final synthesis call. On a complete
-        (non-partial), non-empty build the result is persisted via
-        :meth:`_store_cached_collection_summary` and the map cache is pruned
-        of any unit that no longer exists.
+        summaries into one final synthesis call.
+
+        Every build that *completes* is persisted via
+        :meth:`_store_cached_collection_summary` and prunes the map cache of
+        units that no longer exist — including a build the LLM-call cap cut
+        short (``summary_diagnostics.partial`` is ``True``, and the SPA shows
+        an explicit notice) and a build over an empty collection. Only a build
+        that fails mid-way propagates its exception and caches nothing.
+        Refusing to cache a completed-but-partial build would make it
+        unreachable: ``POST /summarize`` answers 200 solely from this cache,
+        so the client's post-completion refetch would miss, silently queue
+        another full build, and report a failure — forever, for an empty
+        collection.
+
+        The summary revision is captured *before* the build and handed to the
+        cache write as a compare-and-set, so a concurrent ingest that lands
+        mid-build cannot have this (now stale) summary stamped as current.
 
         Args:
             progress: Optional callback invoked ``(processed, total)`` after
@@ -7768,6 +7822,10 @@ class RAG:
         if not self.qdrant_collection:
             raise ValueError("No collection selected.")
 
+        # Captured before any work: an ingest completing mid-build bumps this,
+        # and the cache write must notice rather than stamp a stale summary.
+        build_revision = self._get_summary_revision()
+
         units = partition_units(self._iter_collection_points())
         total_units = len(units)
         kinds = {unit.kind for unit in units}
@@ -7782,7 +7840,7 @@ class RAG:
             coverage_unit = "units"
 
         if total_units == 0:
-            return {
+            empty_payload: dict[str, Any] = {
                 "query": self.summarize_prompt,
                 "reasoning": None,
                 "response": "No documents available in the selected collection.",
@@ -7801,6 +7859,11 @@ class RAG:
                     "llm_calls": 0,
                 },
             }
+            # Cached like any other completed build: without this an empty
+            # collection can never answer 200, so every /summarize call queues
+            # a fresh job that finds nothing and reports failure, forever.
+            self._store_cached_collection_summary(empty_payload, expected_revision=build_revision)
+            return empty_payload
 
         kv_store = self._summary_kv_store()
         validator_suffix = f"{self._summary_prompt_fingerprint()}|{self.text_model_id}"
@@ -7922,16 +7985,17 @@ class RAG:
             "summary_diagnostics": diagnostics,
         }
 
-        # A partial or zero-covered build must never be served as "the"
-        # cached summary — a caller retrying later, or a different request,
-        # would otherwise be stuck with a truncated answer until the next
-        # full rebuild happens to succeed.
-        if not result.partial and covered_units > 0:
-            self._store_cached_collection_summary(payload)
-            current_keys = {unit.unit_key for unit in units}
-            for stale_key in cache_adapter.all_keys():
-                if stale_key not in current_keys:
-                    cache_adapter.delete(stale_key)
+        # This build completed, so it is cacheable — partial or not. The
+        # honesty requirement is met by `partial` travelling with the payload
+        # (through the cache, `SummaryDiagnosticsOut`, and the SPA's coverage
+        # banner), not by withholding the result: a summary that is never
+        # cached is never served, because `/summarize` answers 200 only from
+        # here. A build that fails mid-way never reaches this line.
+        self._store_cached_collection_summary(payload, expected_revision=build_revision)
+        current_keys = {unit.unit_key for unit in units}
+        for stale_key in cache_adapter.all_keys():
+            if stale_key not in current_keys:
+                cache_adapter.delete(stale_key)
 
         return payload
 

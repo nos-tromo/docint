@@ -173,6 +173,77 @@ def test_call_cap_marks_partial_but_still_synthesizes() -> None:
     assert result.response.startswith("final-summary")
 
 
+def test_cap_truncates_windows_inside_a_single_unit() -> None:
+    """The cap bites *inside* one unit's window loop, not only between units.
+
+    A between-units-only check let one huge unit (a 50 MB transcript is
+    thousands of windows) issue thousands of map calls under a cap of 500.
+    """
+    llm = FakeLLM()
+
+    def fetch(unit: MapUnit) -> list[UnitChunk]:
+        return [UnitChunk(chunk_id=f"{unit.unit_key}-m{i}", text="x" * 60) for i in range(20)]
+
+    result = _summarizer(llm, fetch, window_chars=100, max_llm_calls=3).build([_unit("a", n_members=20)])
+
+    map_calls = [p for p in llm.prompts if p.startswith("MAP")]
+    assert len(map_calls) == 3  # 20 windows requested, 3 allowed
+    assert result.partial is True
+    assert result.covered_units == 1  # what was summarized is kept
+    # The intra-unit fold is capped too, so the windows are joined locally.
+    assert not any(p.startswith("FOLD") for p in llm.prompts)
+    # The final synthesis call is exempt from the cap and still ran.
+    assert result.response.startswith("final-summary")
+
+
+def test_cap_truncated_unit_is_not_written_to_the_map_cache() -> None:
+    """A cap-truncated unit summary must not be cached under its full fingerprint.
+
+    Caching it would store a partial summary against the unit's *complete*
+    content fingerprint, so every later build would serve it as complete.
+    """
+    cache = DictCache()
+    llm = FakeLLM()
+
+    def fetch(unit: MapUnit) -> list[UnitChunk]:
+        return [UnitChunk(chunk_id=f"{unit.unit_key}-m{i}", text="x" * 60) for i in range(20)]
+
+    _summarizer(llm, fetch, cache=cache, window_chars=100, max_llm_calls=3).build([_unit("a", n_members=20)])
+
+    assert cache.store == {}
+
+
+def test_cap_bounds_the_reduce_fold_tier() -> None:
+    """Fold tiers respect the cap; 10k units cannot issue ~1,111 uncapped folds."""
+    cache = DictCache()
+    units = [_unit(f"u{i}", fingerprint=f"f{i}") for i in range(20)]
+    # Warm every unit so the map stage costs zero calls and the whole budget
+    # is available to (and must be enforced on) the fold tier.
+    _summarizer(FakeLLM(), _small_fetch, cache=cache).build(units)
+
+    llm = FakeLLM()
+    result = _summarizer(llm, _small_fetch, cache=cache, reduce_fanin=2, max_llm_calls=3).build(units)
+
+    fold_calls = [p for p in llm.prompts if p.startswith("FOLD")]
+    assert len(fold_calls) == 3  # uncapped this tier alone would issue 10
+    assert result.partial is True
+    assert result.covered_units == 20  # every unit still resolved, from cache
+    assert result.response.startswith("final-summary")
+    assert result.llm_calls == 4  # 3 folds + the exempt synthesis call
+
+
+def test_final_synthesis_runs_even_when_the_cap_is_zero_budget() -> None:
+    """A build with no map budget at all still produces a synthesized answer."""
+    llm = FakeLLM()
+    units = [_unit(f"u{i}", fingerprint=f"f{i}") for i in range(3)]
+
+    result = _summarizer(llm, _small_fetch, max_llm_calls=1).build(units)
+
+    assert result.partial is True
+    assert result.response.startswith("final-summary")
+    assert llm.prompts[-1].startswith("SYNTH")
+
+
 def test_empty_units_list_returns_empty_without_llm() -> None:
     """``build([])`` short-circuits to an empty result without any LLM call."""
     llm = FakeLLM()

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from typing_extensions import override
 
 from docint.core.rag import RAG
 
@@ -298,8 +299,15 @@ def test_build_tree_summary_incremental_uses_map_cache(rag_with_fake_collection:
     assert second_payload["response"]
 
 
-def test_partial_build_not_cached(rag_with_fake_collection: RAG) -> None:
-    """With SUMMARY_MAX_LLM_CALLS=1 the result is partial and cached_collection_summary() stays None."""
+def test_partial_build_is_cached_and_keeps_its_flag(rag_with_fake_collection: RAG) -> None:
+    """A capped build is cached, flag intact, so /summarize can serve it.
+
+    Withholding a completed-but-partial build from the cache made it
+    unreachable: ``POST /summarize`` answers 200 only from this cache, so the
+    client's post-completion refetch missed and silently queued another full
+    build. Honesty is carried by ``partial`` surviving the round-trip, not by
+    refusing to cache.
+    """
     import dataclasses
 
     rag = rag_with_fake_collection
@@ -312,7 +320,24 @@ def test_partial_build_not_cached(rag_with_fake_collection: RAG) -> None:
     assert diag["covered_documents"] == 1
     assert diag["total_documents"] == 2
 
-    assert rag.cached_collection_summary() is None
+    cached = rag.cached_collection_summary()
+    assert cached is not None
+    assert cached["response"] == payload["response"]
+    assert cached["summary_diagnostics"]["partial"] is True
+    assert cached["summary_diagnostics"]["covered_documents"] == 1
+
+
+def test_empty_build_is_cached(tmp_path: Path) -> None:
+    """An empty collection's build is cached, so it stops re-queueing forever."""
+    rag = _build_rag(tmp_path, points=[])
+
+    payload = rag.build_tree_summary()
+
+    cached = rag.cached_collection_summary()
+    assert cached is not None
+    assert cached["response"] == payload["response"]
+    assert cached["summary_diagnostics"]["total_documents"] == 0
+    assert cached["summary_diagnostics"]["partial"] is False
 
 
 def test_cached_collection_summary_roundtrip(rag_with_fake_collection: RAG) -> None:
@@ -390,6 +415,107 @@ def test_build_tree_summary_sources_follow_evidence_order_despite_retrieve_reord
     sources = payload["sources"]
     assert [source.get("filename") for source in sources] == ["doc-one.txt", "doc-two.txt"]
     assert [source.get("citation_index") for source in sources] == [1, 2]
+
+
+class _FlakyScrollQdrant(_FakeQdrant):
+    """Qdrant stub whose scroll serves one page and then fails.
+
+    Models the real failure C1 describes: a healthy first page, then a
+    transport blip partway through a long scroll.
+    """
+
+    def __init__(self, points: list[Any]) -> None:
+        """Store the points and split them across two scroll pages.
+
+        Args:
+            points: Points the scroll would serve if it stayed healthy.
+        """
+        super().__init__(points)
+        self.scroll_calls = 0
+
+    @override
+    def scroll(
+        self,
+        *,
+        collection_name: str,
+        limit: int = 256,
+        offset: Any = None,
+        scroll_filter: Any = None,
+        with_payload: bool = True,
+        with_vectors: bool = False,
+    ) -> tuple[list[Any], Any]:
+        """Return the first point, then raise on the next page.
+
+        Args:
+            collection_name: Collection being scrolled (ignored).
+            limit: Page size (ignored).
+            offset: Continuation offset from a previous call.
+            scroll_filter: Optional Qdrant filter (ignored).
+            with_payload: Whether payloads were requested (ignored).
+            with_vectors: Whether vectors were requested (ignored).
+
+        Returns:
+            tuple[list[Any], Any]: The first page and a non-null continuation
+            offset.
+
+        Raises:
+            RuntimeError: On every call after the first.
+        """
+        self.scroll_calls += 1
+        if self.scroll_calls == 1:
+            return ([self._points[0]], "page-2")
+        raise RuntimeError("qdrant scroll blip")
+
+
+def test_build_tree_summary_raises_when_scroll_fails_midway(tmp_path: Path) -> None:
+    """A mid-scroll Qdrant failure fails the build instead of shrinking the universe.
+
+    ``iter_scroll``'s default ``on_error="warn"`` logs and stops *cleanly*, so
+    the truncated point set would look like the whole collection:
+    ``partition_units`` sees only the pages that arrived, every unit maps, and
+    the build reports ``coverage_ratio: 1.0``/``partial: False`` before caching
+    a fraction of the collection as complete. The summary scroll therefore
+    raises.
+    """
+    rag = _build_rag(tmp_path, points=_two_document_points())
+    flaky = _FlakyScrollQdrant(_two_document_points())
+    rag._qdrant_client = cast(Any, flaky)
+
+    with pytest.raises(RuntimeError, match="qdrant scroll blip"):
+        rag.build_tree_summary()
+
+    assert flaky.scroll_calls >= 2
+    # Nothing partial was published as the collection's summary.
+    assert rag.cached_collection_summary() is None
+
+
+def test_build_tree_summary_skips_cache_when_revision_moves_mid_build(rag_with_fake_collection: RAG) -> None:
+    """An ingest landing mid-build must not have the stale summary stamped current.
+
+    Summary and ingest jobs for one collection run concurrently by design. If
+    the cache write read the revision at write time, a build that started at
+    revision R would be stamped with the R+1 an ingest bumped it to mid-build,
+    overwriting the newer summary and validating as current forever.
+    """
+    rag = rag_with_fake_collection
+    stub = cast(_StubTextModel, rag._post_retrieval_text_model)
+    original_complete = stub.complete
+    bumped: list[int] = []
+
+    def _complete_and_bump(prompt: str) -> _StubCompletion:
+        """Simulate a concurrent ingest completing during the final synthesis call."""
+        if _MAP_PROMPT_MARKER not in prompt and _FOLD_PROMPT_MARKER not in prompt and not bumped:
+            bumped.append(rag._bump_summary_revision())
+        return original_complete(prompt)
+
+    rag._post_retrieval_text_model = cast(Any, types.SimpleNamespace(complete=_complete_and_bump))
+
+    payload = rag.build_tree_summary()
+
+    assert bumped, "the test must actually have bumped the revision mid-build"
+    assert payload["response"], "the caller still receives its own build's payload"
+    # The stale build did not become the served summary.
+    assert rag.cached_collection_summary() is None
 
 
 def test_build_tree_summary_empty_collection(tmp_path: Path) -> None:

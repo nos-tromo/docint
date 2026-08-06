@@ -190,14 +190,22 @@ path and builds one in the background — this is by design, not a bug.
 `total_documents`/`covered_documents`/`candidate_count`/`deduped_count` are
 now unit counts, not document-sample counts — `coverage_unit` is
 `"documents"`, `"posts"`, or `"units"` depending on what the collection's map
-units turned out to be. `partial` is `true` when `SUMMARY_MAX_LLM_CALLS`
-truncated the map stage before every unit was covered — a build that ends
-`partial` is never persisted as the cached summary, so a `200` response is
-always a complete one. `SummaryConfig` (see
+units turned out to be. `partial` is `true` when `SUMMARY_MAX_LLM_CALLS` cut
+the build short — skipping units, truncating one unit's windows, or stopping
+a reduce-fold tier early — so the summary does not reflect the whole
+collection. A `200` may therefore carry `partial: true`: every build that
+*completes* is cached, including a capped one and one over an empty
+collection, and the SPA's coverage banner renders an explicit "incomplete
+summary" notice for it. Only a build that fails mid-way caches nothing (it
+fails its job instead). Caching a partial build is deliberate: `/summarize`
+answers `200` solely from the cache, so a build that is never cached is never
+served — the client's post-completion refetch would miss, silently queue
+another full build, and report a failure, forever for an empty collection.
+`SummaryConfig` (see
 [configuration.md](configuration.md#summarisation--summaryconfig)) controls
-these knobs; `partial` and `llm_calls` are present on the wire but not yet
-declared on the `SummaryDiagnosticsOut` Pydantic model (the route is
-`response_model=None`, so nothing strips them).
+these knobs. `partial` is declared on the `SummaryDiagnosticsOut` Pydantic
+model; `llm_calls` is present on the wire but not declared (the route is
+`response_model=None`, so nothing strips it).
 
 ### `GET /collections/ner`
 
