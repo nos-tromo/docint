@@ -49,9 +49,7 @@ class _FakeQdrant:
         return info
 
     def update_collection(self, *, collection_name: str, quantization_config: Any) -> None:
-        self.update_calls.append(
-            {"collection_name": collection_name, "quantization_config": quantization_config}
-        )
+        self.update_calls.append({"collection_name": collection_name, "quantization_config": quantization_config})
 
 
 def _make_rag(client: Any) -> RAG:
@@ -90,9 +88,7 @@ def test_reconcile_skips_matching_collection() -> None:
 
 def test_reconcile_treats_false_and_none_always_ram_as_equal() -> None:
     """A server reporting ``always_ram=False`` matches a ``None`` target."""
-    client = _FakeQdrant(
-        {"docs": _collection_info(vectors=_dense_params(), quantization=_turbo(always_ram=False))}
-    )
+    client = _FakeQdrant({"docs": _collection_info(vectors=_dense_params(), quantization=_turbo(always_ram=False))})
     assert _make_rag(client).reconcile_quantization() == 0
     assert client.update_calls == []
 

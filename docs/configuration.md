@@ -96,6 +96,18 @@ Loaded by `load_host_env()` (`env_cfg.py:220`).
 | `QDRANT_HOST` | `http://localhost:6333` | Qdrant REST URL. |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated CORS origins (the Vite dev server). |
 
+## Vector quantization — `QdrantQuantizationConfig`
+
+Loaded by `load_quantization_env()` (`env_cfg.py`). Controls Qdrant [TurboQuant](https://qdrant.tech/articles/turboquant-quantization/) quantization for every dense vector docint stores (the main collection, the `_images` CLIP companion, and the `_entities` companion; sparse vectors are unaffected). New collections are created quantized by default, and at backend startup a best-effort, **add-only** reconcile upgrades pre-existing collections via `update_collection` (Qdrant re-indexes in the background). Setting `QDRANT_QUANTIZATION=none` stops quantizing new collections and disables the reconcile, but never strips quantization from existing collections — Qdrant retains the original vectors either way, so this is an overlay, not a migration.
+
+Requires Qdrant server ≥ 1.18 (the data-plane stack ships v1.18.3).
+
+| Variable | Default | Description |
+|---|---|---|
+| `QDRANT_QUANTIZATION` | `turbo` | `turbo` enables TurboQuant; `none` disables quantization for new collections and the startup reconcile. Unknown values fall back to `turbo` with a warning. |
+| `QDRANT_TURBOQUANT_BITS` | `bits4` | TurboQuant bit width: `bits4` (8× compression, ~scalar-quantization recall), `bits2` (16×), `bits1_5` (~21×), or `bits1` (32×). Unknown values fall back to `bits4` with a warning. |
+| `QDRANT_QUANTIZATION_ALWAYS_RAM` | *unset* | Force quantized vectors to stay in RAM (`true`/`false`). Unset leaves the decision to Qdrant. |
+
 ## Identity and authentication — `PrincipalConfig`
 
 Loaded by `load_principal_env()` (`env_cfg.py:574`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.

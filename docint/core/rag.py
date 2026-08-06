@@ -382,9 +382,8 @@ def _quantization_matches(
     """
     if not isinstance(current, qdrant_models.TurboQuantization):
         return False
-    return current.turbo.bits == target.turbo.bits and bool(current.turbo.always_ram) == bool(
-        target.turbo.always_ram
-    )
+    return current.turbo.bits == target.turbo.bits and bool(current.turbo.always_ram) == bool(target.turbo.always_ram)
+
 
 # Metadata keys that stay visible to the chat LLM when the synthesizer
 # renders ``node.get_content(MetadataMode.LLM)``. Everything *not* in this

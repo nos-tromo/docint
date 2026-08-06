@@ -112,9 +112,7 @@ class FakeQdrantClient:
             raise RuntimeError("missing")
         return self.collections[collection_name]
 
-    def create_collection(
-        self, collection_name: str, vectors_config: dict[str, Any], **kwargs: Any
-    ) -> None:
+    def create_collection(self, collection_name: str, vectors_config: dict[str, Any], **kwargs: Any) -> None:
         """Register a new collection with the given vector configuration.
 
         Args:
