@@ -106,8 +106,12 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
       } else {
         // The rebuild just completed, so a cache-hit is expected here; a
         // second 202/409 would mean the job registry disagrees with the
-        // completion frame we just observed.
-        dispatch({ type: 'fail', error: t('analysis.summary_failed') })
+        // completion frame we just observed. Carries a code token, like the
+        // SSE `error` path, so this unexpected case is triageable too.
+        dispatch({
+          type: 'fail',
+          error: streamErrorText(t, 'summary_requeued', 'analysis.summary_failed')
+        })
       }
     } catch (e) {
       const d = describeError(e)

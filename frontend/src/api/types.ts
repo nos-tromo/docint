@@ -358,6 +358,14 @@ export interface IngestEvent {
     | 'ingestion_complete'
     | 'warning'
     | 'error'
+    // The owner-multiplexed `/ingest/jobs/events` stream is multiplexed
+    // across job kinds, not just ingest runs (`jobs.py::KIND_EVENTS`) — a
+    // summary-rebuild job's frames land in the same store as an ingest job's
+    // (see `useIngestJobStream.ts`, which applies no kind filter), so this
+    // union must cover both lifecycles.
+    | 'summary_started'
+    | 'summary_progress'
+    | 'summary_completed'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was

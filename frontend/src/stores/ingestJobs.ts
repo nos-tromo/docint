@@ -56,14 +56,27 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
 }))
 
 /**
+ * SSE event names, across every job kind this store can hold, that end a
+ * run. Mirrors the backend's `jobs.py::TERMINAL_EVENTS` — an ingest job
+ * terminates on `ingestion_complete`, a summary job on `summary_completed`,
+ * either kind on `error`. The stream is multiplexed across kinds with no
+ * kind filter (`useIngestJobStream.ts`), so both must be recognized here or
+ * a completed summary job would look permanently "running" to the selector
+ * below and leave the sidebar badge stuck on.
+ */
+const TERMINAL_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
+  'ingestion_complete',
+  'summary_completed',
+  'error'
+])
+
+/**
  * Whether any tracked job is still running — i.e. it has started and has not
  * yet produced a terminal frame. Drives the sidebar badge.
  */
 export const selectHasRunningJob = (s: IngestJobsState): boolean =>
   Object.values(s.events).some(
-    (events) =>
-      events.length > 0 &&
-      !events.some((e) => e.event === 'ingestion_complete' || e.event === 'error')
+    (events) => events.length > 0 && !events.some((e) => TERMINAL_EVENTS.has(e.event))
   )
 
 /** Stable selector for one job's log; returns a frozen empty array when absent. */

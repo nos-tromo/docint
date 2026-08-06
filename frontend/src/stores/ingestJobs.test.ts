@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { useIngestJobsStore } from './ingestJobs'
+import { useIngestJobsStore, selectHasRunningJob } from './ingestJobs'
 import type { IngestEvent } from '@/api/types'
 
 const ev = (message: string): IngestEvent => ({
@@ -66,5 +66,32 @@ describe('useIngestJobsStore', () => {
 
     expect(useIngestJobsStore.getState().events['job-1']).toBeUndefined()
     expect(useIngestJobsStore.getState().events['job-2']).toHaveLength(1)
+  })
+
+  it('treats a summary job as terminated by summary_completed, not stuck running', () => {
+    // The owner-multiplexed stream carries summary-job frames through this
+    // same store (no kind filter in useIngestJobStream.ts). Its terminal
+    // event is summary_completed, not ingestion_complete — before this fix,
+    // selectHasRunningJob only recognized the latter, so a finished summary
+    // job would report as running forever and leave the sidebar badge stuck
+    // on.
+    const { appendEvent } = useIngestJobsStore.getState()
+    const started: IngestEvent = {
+      event: 'summary_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: 0
+    }
+
+    appendEvent('job-1', started)
+    // Only the started frame so far — must still count as running so the
+    // fix isn't a blanket "always false".
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(true)
+
+    appendEvent('job-1', {
+      event: 'summary_completed',
+      data: { job_id: 'job-1' },
+      receivedAt: 1
+    })
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
   })
 })
