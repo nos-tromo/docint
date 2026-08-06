@@ -98,28 +98,44 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
     }
   }, [])
 
-  const finish = async () => {
+  // `finish`/`runBuild` are mutually recursive: after a `summary_completed`
+  // frame, `finish` refetches and — if the refetch itself carries a fresh
+  // `job_id` — re-attaches via `runBuild`, which calls back into `finish`
+  // once *that* build completes. `attempt` bounds the recursion to a single
+  // re-attach so a persistently disagreeing job registry still surfaces as
+  // a failure instead of bouncing forever.
+  const finish = async (attempt = 0) => {
     try {
       const result = await summarize(false, collection ?? undefined)
       if ('summary' in result) {
         dispatch({ type: 'done', meta: result })
-      } else {
-        // The rebuild just completed, so a cache-hit is expected here; a
-        // second 202/409 would mean the job registry disagrees with the
-        // completion frame we just observed. Carries a code token, like the
-        // SSE `error` path, so this unexpected case is triageable too.
+        return
+      }
+      if (attempt >= 1) {
+        // Second consecutive job_id: the bound is reached, so this is no
+        // longer explainable by the ordinary revision-bump race below —
+        // report it like any other unexpected state.
         dispatch({
           type: 'fail',
           error: streamErrorText(t, 'summary_requeued', 'analysis.summary_failed')
         })
+        return
       }
+      // A concurrent ingest can bump the collection's summary revision
+      // mid-build; `build_tree_summary`'s compare-and-set cache write
+      // (`_store_cached_collection_summary`) then deliberately skips
+      // caching a build made stale by that bump. The build itself
+      // succeeded — nothing failed — but with no cache entry to serve, this
+      // refetch legitimately 202s with the server's own freshly-queued
+      // rebuild. Follow it instead of reporting a false failure.
+      await runBuild(result.job_id, attempt + 1)
     } catch (e) {
       const d = describeError(e)
       dispatch({ type: 'fail', error: t(d.key, d.vars) })
     }
   }
 
-  const runBuild = async (jobId: string) => {
+  const runBuild = async (jobId: string, finishAttempt = 0) => {
     dispatch({ type: 'building', jobId })
     const controller = new AbortController()
     controllerRef.current = controller
@@ -139,7 +155,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
         if (frame.event === 'summary_completed') {
           controller.abort()
           controllerRef.current = null
-          await finish()
+          await finish(finishAttempt)
           return
         }
         if (frame.event === 'error') {

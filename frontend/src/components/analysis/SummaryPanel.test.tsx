@@ -167,6 +167,55 @@ describe('SummaryPanel job-driven build', () => {
     expect(mockSummarize).toHaveBeenCalledTimes(2)
   })
 
+  it('re-attaches to a fresh build when the post-completion refetch 202s once', async () => {
+    // A concurrent ingest bumping the summary revision mid-build makes the
+    // server-side cache write a no-op (compare-and-set guard), even though
+    // the build succeeded. The refetch after `summary_completed` then
+    // legitimately 202s with a fresh job_id for the server's own requeued
+    // rebuild — the panel must follow it, not report a failure.
+    mockSummarize
+      .mockResolvedValueOnce({ job_id: 'j1' })
+      .mockResolvedValueOnce({ job_id: 'j2' })
+      .mockResolvedValueOnce({ summary: 'Rebuilt summary.', sources: [] })
+    mockStreamSseGet
+      .mockReturnValueOnce(framesOf([{ event: 'summary_completed', data: { job_id: 'j1' } }]))
+      .mockReturnValueOnce(framesOf([{ event: 'summary_completed', data: { job_id: 'j2' } }]))
+
+    render(<SummaryPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Rebuilt summary.')).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/summary generation failed/i)).not.toBeInTheDocument()
+    // Initial 202 + two refetches (the first re-queues, the second lands).
+    expect(mockSummarize).toHaveBeenCalledTimes(3)
+    expect(mockStreamSseGet).toHaveBeenCalledTimes(2)
+  })
+
+  it('fails after a second consecutive requeue instead of looping forever', async () => {
+    // Bounds the re-attach: two job_id refetches in a row is no longer the
+    // ordinary revision-bump race, so it must surface as the existing
+    // failure rather than re-attaching indefinitely.
+    mockSummarize
+      .mockResolvedValueOnce({ job_id: 'j1' })
+      .mockResolvedValueOnce({ job_id: 'j2' })
+      .mockResolvedValueOnce({ job_id: 'j3' })
+    mockStreamSseGet
+      .mockReturnValueOnce(framesOf([{ event: 'summary_completed', data: { job_id: 'j1' } }]))
+      .mockReturnValueOnce(framesOf([{ event: 'summary_completed', data: { job_id: 'j2' } }]))
+
+    render(<SummaryPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/summary generation failed/i)).toBeInTheDocument()
+    })
+    // Initial 202 + exactly one bounded re-attach's refetch.
+    expect(mockSummarize).toHaveBeenCalledTimes(3)
+    expect(mockStreamSseGet).toHaveBeenCalledTimes(2)
+  })
+
   it('fails with localized copy on error event', async () => {
     mockSummarize.mockResolvedValueOnce({ job_id: 'j1' })
     mockStreamSseGet.mockReturnValue(
