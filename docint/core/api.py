@@ -21,7 +21,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
@@ -704,7 +704,14 @@ class SummaryDiagnosticsOut(BaseModel):
 
 
 class SummarizeOut(BaseModel):
-    """Response payload for a collection-level summary request."""
+    """Response payload for a collection-level summary request.
+
+    Documents the ``200`` (cache-hit) shape of ``POST /summarize``. ``job_id``
+    is unused there; it exists only so this model also documents the ``202``
+    (queued-build) shape's single field. The endpoint declares
+    ``response_model=None`` and returns explicit ``JSONResponse``s (its status
+    code varies by outcome), so this class is documentation/typing only.
+    """
 
     summary: str
     sources: list[dict[str, Any]] = []
@@ -712,6 +719,7 @@ class SummarizeOut(BaseModel):
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
+    job_id: str | None = None
 
 
 class IngestDefaultsOut(BaseModel):
@@ -1552,128 +1560,6 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
-def summarize(
-    refresh: bool = Query(False),
-    collection: str | None = None,
-    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
-) -> dict[str, Any]:
-    """Generate a summary for the caller's collection.
-
-    Args:
-        refresh (bool): If ``True``, bypass cached collection summaries.
-        collection (str | None): Caller's logical collection; owner-gated and
-            scoped per request, falling back to the process default when omitted.
-        principal (Principal): The resolved request principal.
-
-    Returns:
-        dict[str, list[dict] | str]: A dictionary containing the summary and sources.
-
-    Raises:
-        HTTPException: 400/404 from collection resolution; 500 on generation error.
-    """
-    with _scoped_collection(collection, principal):
-        try:
-            data = rag.summarize_collection(refresh=refresh)
-            summary = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
-            sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
-            summary_diagnostics = data.get("summary_diagnostics") if isinstance(data, dict) else None
-
-            validation = _validation_payload(
-                question=rag.summarize_prompt,
-                answer=summary,
-                sources=sources,
-                summary_diagnostics=summary_diagnostics,
-            )
-            return {
-                "summary": summary,
-                "sources": sources,
-                "summary_diagnostics": summary_diagnostics,
-                **validation,
-            }
-        except HTTPException as e:
-            logger.opt(exception=e).error("Error generating summary")
-            raise HTTPException(status_code=500, detail="Request failed.") from e
-
-
-@app.post("/summarize/stream", tags=["Query"])
-async def summarize_stream(
-    request: Request,
-    refresh: bool = Query(False),
-    collection: str | None = None,
-    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
-) -> StreamingResponse:
-    """Generate a streaming summary for the caller's collection.
-
-    Args:
-        request (Request): The incoming request, used to detect client
-            disconnects while the blocking summary stream is drained.
-        refresh (bool): If ``True``, bypass cached collection summaries.
-        collection (str | None): Caller's logical collection; owner-gated and
-            scoped per request, falling back to the process default when omitted.
-        principal (Principal): The resolved request principal.
-
-    Returns:
-        StreamingResponse: A streaming response that yields SSE events during summarization.
-
-    Raises:
-        HTTPException: 400/404 from collection resolution.
-    """
-    physical = _resolve_request_collection(collection, principal)
-
-    async def _summary_body() -> AsyncIterator[str]:
-        """Generate SSE events for the streaming summary (inside the scope).
-
-        Yields:
-            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
-        """
-        try:
-            full_summary = ""
-            final_payload: dict[str, Any] | None = None
-            async for chunk in _aiter_sync_gen(lambda: rag.stream_summarize_collection(refresh=refresh), request):
-                if isinstance(chunk, str):
-                    full_summary += chunk
-                    yield f"data: {json.dumps({'token': chunk})}\n\n"
-                elif isinstance(chunk, dict):
-                    final_payload = chunk
-
-            payload_out = dict(final_payload or {})
-            summary = str(payload_out.get("response") or payload_out.get("answer") or "")
-            if not summary:
-                summary = full_summary
-            sources = payload_out.get("sources")
-            if not isinstance(sources, list):
-                sources = cast(list[dict[str, Any]], [])
-            summary_diagnostics = payload_out.get("summary_diagnostics")
-            if not isinstance(summary_diagnostics, dict):
-                summary_diagnostics = None
-            validation = _validation_payload(
-                question=rag.summarize_prompt,
-                answer=summary,
-                sources=sources,
-                summary_diagnostics=summary_diagnostics,
-            )
-            payload_out.update(validation)
-            if payload_out:
-                yield f"data: {json.dumps(payload_out)}\n\n"
-        except Exception as e:
-            logger.error("Stream error: {}", e)
-            failure = {"error": "An internal error occurred during streaming.", "code": "summary_failed"}
-            yield f"data: {json.dumps(failure)}\n\n"
-
-    async def event_generator() -> AsyncIterator[str]:
-        """Bind the request's physical collection, then stream the summary body.
-
-        Yields:
-            str: SSE event lines from the scoped summary body.
-        """
-        with rag.collection_scope(physical):
-            async for chunk in _summary_body():
-                yield chunk
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/collections/ner", tags=["Query"], deprecated=True)
@@ -3388,6 +3274,97 @@ def get_job_manager() -> IngestJobManager:
         IngestJobManager: The manager backing the ``/ingest/jobs*`` endpoints.
     """
     return job_manager
+
+
+@app.post("/summarize", response_model=None, tags=["Query"])
+async def summarize(
+    refresh: bool = Query(False),
+    collection: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
+    """Serve the cached collection summary, or queue a rebuild job.
+
+    A cache hit answers 200 with the stored payload. A miss -- or an explicit
+    ``refresh=true`` -- queues a ``kind="summary"`` background job and answers
+    202 with its ``job_id``; progress arrives on ``GET /ingest/jobs/events``
+    (``summary_started`` / ``summary_progress`` / ``summary_completed``). A
+    second call while a build is in flight answers 409 carrying the in-flight
+    ``job_id``.
+
+    Queuing requires an explicit ``collection``: ``_resolve_request_collection``
+    falls back to the process-default active collection
+    (``rag.qdrant_collection``) when ``collection`` is omitted, and that value
+    may be a physical, owner-namespaced Qdrant name rather than the caller's
+    logical one. A physical name must never be echoed into a job's
+    ``logical_name`` snapshot or back to a client, and there is no reverse
+    (physical -> logical) lookup available here to recover a clean logical
+    name from the fallback -- so the queue path requires the caller to pass
+    ``collection`` explicitly and 400s otherwise. The cache-read path has no
+    such requirement: it only ever reads, never creates a job, so the
+    process-default fallback is safe to use there.
+
+    Args:
+        refresh (bool): Force a rebuild even when a cached summary exists.
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request. Required (400 if omitted) whenever a build is
+            queued; optional for a cache read, which falls back to the
+            process-default active collection.
+        principal (Principal): The resolved request principal.
+        jobs (IngestJobManager): The shared job registry.
+
+    Returns:
+        Response: 200 ``SummarizeOut`` JSON on a cache hit, 202 ``{"job_id"}``
+        when a build was queued.
+
+    Raises:
+        HTTPException: 400/404 from collection resolution (also 400 when
+            ``collection`` is omitted but a build must be queued); 409 when a
+            summary job is already in flight for this collection.
+    """
+    physical = _resolve_request_collection(collection, principal)
+    if not refresh:
+        with rag.collection_scope(physical):
+            data = rag.cached_collection_summary()
+        if isinstance(data, dict):
+            summary = str(data.get("response") or "")
+            sources = data.get("sources") if isinstance(data.get("sources"), list) else []
+            summary_diagnostics = (
+                data.get("summary_diagnostics") if isinstance(data.get("summary_diagnostics"), dict) else None
+            )
+            validation = _validation_payload(
+                question=rag.summarize_prompt,
+                answer=summary,
+                sources=sources,
+                summary_diagnostics=summary_diagnostics,
+            )
+            return JSONResponse(
+                {
+                    "summary": summary,
+                    "sources": sources,
+                    "summary_diagnostics": summary_diagnostics,
+                    **validation,
+                }
+            )
+
+    logical_name = (collection or "").strip()
+    if not logical_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Collection name required to queue a summary build.",
+        )
+    state, created = await jobs.create_if_idle(
+        owner=principal.effective_owner,
+        logical_name=logical_name,
+        physical=physical,
+        kind="summary",
+    )
+    if not created:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Summary generation already in progress.", "job_id": state.job_id},
+        )
+    return JSONResponse({"job_id": state.job_id}, status_code=202)
 
 
 @app.post("/ingest/upload", tags=["Ingestion"])
