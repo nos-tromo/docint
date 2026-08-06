@@ -138,20 +138,35 @@ export function parseProgressMessage(message: string): ParsedProgress {
 }
 
 /**
- * Return the "kind" of a progress event — its message with digits masked — so
- * consecutive updates of the same counter collapse into one entry.
+ * SSE event names whose frames are pure counter updates: only the newest
+ * carries information, and a long run emits thousands of them. Both job kinds
+ * multiplex through one store, so `summary_progress` must be listed alongside
+ * `ingestion_progress` — otherwise a 3,000-unit summary build appends one
+ * entry per unit and every append re-scans the whole log (`selectHasRunningJob`
+ * is O(n)) and re-renders the sidebar.
+ */
+const COLLAPSIBLE_PROGRESS_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
+  'ingestion_progress',
+  'summary_progress'
+])
+
+/**
+ * Return the "kind" of a progress event — its event name plus its message with
+ * digits masked — so consecutive updates of the same counter collapse into one
+ * entry.
  *
  * "Extracting entities: 1/9 chunks processed" and ".. 2/9 .." share a kind;
- * only the newest carries information, and a long run emits thousands.
+ * the event name is part of the kind so an ingest frame and a summary frame
+ * that happen to carry identical prose never collapse into each other.
  *
  * @param ev - The event to classify.
- * @returns The masked message, or null for non-progress events.
+ * @returns The masked kind, or null for non-progress events.
  */
 export function progressKind(ev: IngestEvent): string | null {
-  if (ev.event !== 'ingestion_progress') return null
+  if (!COLLAPSIBLE_PROGRESS_EVENTS.has(ev.event)) return null
   const message = (ev.data as { message?: unknown })?.message
   if (typeof message !== 'string') return null
-  return message.replace(/\d+/g, '#').trim()
+  return `${ev.event}:${message.replace(/\d+/g, '#').trim()}`
 }
 
 /**

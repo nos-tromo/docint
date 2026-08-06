@@ -388,6 +388,9 @@ export interface SummaryDiagnostics {
   candidate_count: number
   deduped_count: number
   sampled_count: number
+  /** True when the build hit `SUMMARY_MAX_LLM_CALLS` and covers only part of
+   *  the collection. Absent on payloads cached before the flag shipped. */
+  partial?: boolean
 }
 
 export interface SummaryResponse extends ValidationFields {

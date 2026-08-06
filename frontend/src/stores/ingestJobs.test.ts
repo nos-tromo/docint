@@ -49,6 +49,44 @@ describe('useIngestJobsStore', () => {
     expect(events.map((e) => e.event)).toEqual(['ingestion_started', 'warning'])
   })
 
+  it('collapses repeated summary_progress frames into one entry', () => {
+    // progressKind() only recognised `ingestion_progress`, so every per-unit
+    // frame of a summary build was appended: a 3,000-unit collection meant
+    // 3,000 entries, an O(n) selectHasRunningJob scan per append (~4.5M
+    // iterations) and a sidebar re-render per frame.
+    const { appendEvent } = useIngestJobsStore.getState()
+    for (let i = 1; i <= 50; i += 1) {
+      appendEvent('job-1', {
+        event: 'summary_progress',
+        data: { job_id: 'job-1', message: `Summarizing ${i}/3000`, mapped: i, total_units: 3000 },
+        receivedAt: i
+      })
+    }
+
+    const events = useIngestJobsStore.getState().events['job-1']
+    expect(events).toHaveLength(1)
+    expect((events[0].data as { mapped: number }).mapped).toBe(50)
+  })
+
+  it('resets a job log on summary_started so replays do not duplicate', () => {
+    const { appendEvent } = useIngestJobsStore.getState()
+    const started: IngestEvent = {
+      event: 'summary_started',
+      data: { job_id: 'job-1', total_units: 4 },
+      receivedAt: 0
+    }
+    const warn: IngestEvent = { event: 'warning', data: { message: 'heads up' }, receivedAt: 0 }
+
+    appendEvent('job-1', started)
+    appendEvent('job-1', warn)
+    // A mid-build SSE reconnect replays the same history from the top.
+    appendEvent('job-1', started)
+    appendEvent('job-1', warn)
+
+    const events = useIngestJobsStore.getState().events['job-1']
+    expect(events.map((e) => e.event)).toEqual(['summary_started', 'warning'])
+  })
+
   it('keeps jobs isolated from each other', () => {
     const { appendEvent } = useIngestJobsStore.getState()
     appendEvent('job-1', ev('one'))

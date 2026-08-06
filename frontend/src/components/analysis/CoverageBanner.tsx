@@ -8,8 +8,12 @@ export function CoverageBanner({ d }: { d: SummaryDiagnostics }) {
   const [open, setOpen] = useState(false)
   const ratioPct = Math.round((d.coverage_ratio ?? 0) * 100)
   const targetPct = Math.round((d.coverage_target ?? 0) * 100)
+  // A capped build can still report full coverage (the cap can bite *inside*
+  // one unit's windows, leaving every unit "covered"), so `partial` must
+  // drive the tone on its own — the ratio alone would show green.
+  const partial = d.partial === true
   const tone =
-    ratioPct >= targetPct
+    ratioPct >= targetPct && !partial
       ? 'border-[var(--status-emerald-border)] bg-[var(--status-emerald-surface)] text-[var(--status-emerald-strong)]'
       : 'border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] text-[var(--status-amber-strong)]'
 
@@ -42,6 +46,12 @@ export function CoverageBanner({ d }: { d: SummaryDiagnostics }) {
           </button>
         )}
       </div>
+      {partial && (
+        <div className="mt-2 text-[11px]" data-testid="coverage-partial-notice">
+          <span className="font-medium">{t('analysis.coverage_partial_label')}</span>{' '}
+          {t('analysis.coverage_partial_detail')}
+        </div>
+      )}
       {open && d.uncovered_documents.length > 0 && (
         <ul className="mt-2 max-h-40 overflow-auto space-y-0.5 text-[11px]">
           {d.uncovered_documents.map((f) => (

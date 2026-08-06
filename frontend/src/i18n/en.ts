@@ -246,6 +246,9 @@ export const en = {
   'analysis.coverage_sampled': 'sampled {sampled} of {candidate} (deduped {deduped})',
   'analysis.coverage_hide': 'hide',
   'analysis.coverage_show_uncovered': 'show {count} uncovered',
+  'analysis.coverage_partial_label': 'Incomplete summary',
+  'analysis.coverage_partial_detail':
+    'The build stopped at its LLM-call budget, so this summary does not cover the whole collection. Raise SUMMARY_MAX_LLM_CALLS or run Refresh to extend it.',
   'analysis.summary_generating': 'Generating…',
   'analysis.summary_generate': 'Generate',
   'analysis.summary_refresh': 'Refresh',

@@ -24,6 +24,17 @@ export interface IngestJobsState {
   clear: () => void
 }
 
+/**
+ * SSE event names that open a run, across every job kind this store can hold:
+ * an ingest job starts with `ingestion_started`, a summary job with
+ * `summary_started`. The backend replays a job's collapsed history from its
+ * started frame on every reconnect, so both must reset the local log.
+ */
+const STARTED_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
+  'ingestion_started',
+  'summary_started'
+])
+
 export const useIngestJobsStore = create<IngestJobsState>((set) => ({
   events: {},
   streamLost: false,
@@ -32,15 +43,17 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
     set((s) => ({
       events: {
         ...s.events,
-        // `ingestion_started` is the first frame of every replay, so it marks
-        // the start of a fresh fold: reset rather than append. Without this,
-        // each reconnect would re-append the job's warnings and terminal
+        // A job's *started* frame is the first frame of every replay, so it
+        // marks the start of a fresh fold: reset rather than append. Without
+        // this, each reconnect would re-append the job's warnings and terminal
         // frame (only *progress* frames collapse), so a flaky connection
-        // would visibly duplicate warnings in the event log. Within a single
-        // connection a job emits `ingestion_started` exactly once, so this
-        // costs nothing in the normal case.
-        [jobId]:
-          ev.event === 'ingestion_started' ? [ev] : appendCollapsedEvent(s.events[jobId] ?? [], ev)
+        // would visibly duplicate warnings in the event log. Both job kinds
+        // multiplex through this store, so a summary job's `summary_started`
+        // has to reset too — keying on `ingestion_started` alone left a
+        // mid-build summary reconnect re-appending its replayed history.
+        // Within a single connection a job emits its started frame exactly
+        // once, so this costs nothing in the normal case.
+        [jobId]: STARTED_EVENTS.has(ev.event) ? [ev] : appendCollapsedEvent(s.events[jobId] ?? [], ev)
       }
     })),
   setStreamLost: (streamLost) => set({ streamLost }),

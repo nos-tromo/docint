@@ -131,6 +131,42 @@ describe('SummaryPanel job-driven build', () => {
     expect(mockSummarize).toHaveBeenNthCalledWith(2, false, 'c1')
   })
 
+  it('renders a partial build as a summary with an incomplete notice, not a failure', async () => {
+    // A capped build used to be withheld from the cache, so the
+    // post-completion refetch missed, silently queued another full build and
+    // showed the failure copy. It is now cached and served as a 200 whose
+    // diagnostics carry `partial`.
+    mockSummarize.mockResolvedValueOnce({ job_id: 'j1' }).mockResolvedValueOnce({
+      summary: 'Partial summary.',
+      sources: [],
+      summary_diagnostics: {
+        total_documents: 10,
+        covered_documents: 4,
+        coverage_ratio: 0.4,
+        uncovered_documents: [],
+        coverage_target: 0.7,
+        candidate_count: 10,
+        deduped_count: 4,
+        sampled_count: 4,
+        partial: true
+      }
+    })
+    mockStreamSseGet.mockReturnValue(
+      framesOf([{ event: 'summary_completed', data: { job_id: 'j1' } }])
+    )
+
+    render(<SummaryPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Partial summary.')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('coverage-partial-notice')).toHaveTextContent(/incomplete summary/i)
+    expect(screen.queryByText(/summary generation failed/i)).not.toBeInTheDocument()
+    // Exactly one refetch — no second build silently queued.
+    expect(mockSummarize).toHaveBeenCalledTimes(2)
+  })
+
   it('fails with localized copy on error event', async () => {
     mockSummarize.mockResolvedValueOnce({ job_id: 'j1' })
     mockStreamSseGet.mockReturnValue(
