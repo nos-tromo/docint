@@ -17,6 +17,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_retrieval_env,
     load_session_env,
+    load_summary_concurrency,
     load_summary_env,
 )
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
@@ -551,3 +552,71 @@ def test_load_ingestion_env_clamps_negative_docstore_retry_knobs(
     assert cfg.docstore_max_retries == 0
     assert cfg.docstore_retry_backoff_seconds == 0.0
     assert cfg.docstore_retry_backoff_max_seconds == 0.0
+
+
+class TestTreeSummaryEnv:
+    """New tree-summary knobs on SummaryConfig and the summary job concurrency."""
+
+    def test_tree_summary_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tree-summary knobs should fall back to their documented defaults.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to clear environment variables.
+        """
+        for var in (
+            "SUMMARY_ON_INGEST",
+            "SUMMARY_MAP_WINDOW_TOKENS",
+            "SUMMARY_REDUCE_FANIN",
+            "SUMMARY_MAX_LLM_CALLS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        cfg = load_summary_env()
+        assert cfg.on_ingest is True
+        assert cfg.map_window_tokens == 3000
+        assert cfg.reduce_fanin == 10
+        assert cfg.max_llm_calls == 500
+
+    def test_tree_summary_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tree-summary knobs should read explicit environment overrides.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
+        """
+        monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
+        monkeypatch.setenv("SUMMARY_MAP_WINDOW_TOKENS", "1000")
+        monkeypatch.setenv("SUMMARY_REDUCE_FANIN", "4")
+        monkeypatch.setenv("SUMMARY_MAX_LLM_CALLS", "42")
+        cfg = load_summary_env()
+        assert cfg.on_ingest is False
+        assert cfg.map_window_tokens == 1000
+        assert cfg.reduce_fanin == 4
+        assert cfg.max_llm_calls == 42
+
+    def test_tree_summary_clamps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tree-summary numeric knobs should clamp to their documented floors.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
+        """
+        monkeypatch.setenv("SUMMARY_MAP_WINDOW_TOKENS", "0")
+        monkeypatch.setenv("SUMMARY_REDUCE_FANIN", "-3")
+        monkeypatch.setenv("SUMMARY_MAX_LLM_CALLS", "0")
+        cfg = load_summary_env()
+        assert cfg.map_window_tokens >= 100
+        assert cfg.reduce_fanin >= 2
+        assert cfg.max_llm_calls >= 1
+
+    def test_summary_concurrency_default_and_clamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Summary job concurrency should default to 1 and clamp invalid values.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
+        """
+        monkeypatch.delenv("DOCINT_SUMMARY_CONCURRENCY", raising=False)
+        assert load_summary_concurrency() == 1
+        monkeypatch.setenv("DOCINT_SUMMARY_CONCURRENCY", "0")
+        assert load_summary_concurrency() == 1
+        monkeypatch.setenv("DOCINT_SUMMARY_CONCURRENCY", "3")
+        assert load_summary_concurrency() == 3
+        monkeypatch.setenv("DOCINT_SUMMARY_CONCURRENCY", "garbage")
+        assert load_summary_concurrency() == 1
