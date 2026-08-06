@@ -45,6 +45,10 @@ class _ReportRAG:
         """Satisfy the lifespan startup probe without touching the network."""
         return True
 
+    def reconcile_quantization(self) -> int:
+        """Satisfy the lifespan quantization reconcile without touching Qdrant."""
+        return 0
+
     def ensure_report_manager(self) -> ReportManager:
         return self._rm
 

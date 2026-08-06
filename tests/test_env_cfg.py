@@ -851,3 +851,40 @@ def test_image_rerank_min_score_env_override(monkeypatch: pytest.MonkeyPatch) ->
     cfg = load_image_ingestion_config()
 
     assert cfg.rerank_min_score == 0.25
+
+
+def test_load_quantization_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defaults: turbo mode, bits4, always_ram unset."""
+    from docint.utils.env_cfg import load_quantization_env
+
+    for var in ("QDRANT_QUANTIZATION", "QDRANT_TURBOQUANT_BITS", "QDRANT_QUANTIZATION_ALWAYS_RAM"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = load_quantization_env()
+    assert cfg.mode == "turbo"
+    assert cfg.bits == "bits4"
+    assert cfg.always_ram is None
+
+
+def test_load_quantization_env_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit values are honoured, including always_ram parsing."""
+    from docint.utils.env_cfg import load_quantization_env
+
+    monkeypatch.setenv("QDRANT_QUANTIZATION", "none")
+    monkeypatch.setenv("QDRANT_TURBOQUANT_BITS", "bits1_5")
+    monkeypatch.setenv("QDRANT_QUANTIZATION_ALWAYS_RAM", "true")
+    cfg = load_quantization_env()
+    assert cfg.mode == "none"
+    assert cfg.bits == "bits1_5"
+    assert cfg.always_ram is True
+
+
+def test_load_quantization_env_falls_back_on_junk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unknown mode/bits values fall back to defaults instead of raising."""
+    from docint.utils.env_cfg import load_quantization_env
+
+    monkeypatch.setenv("QDRANT_QUANTIZATION", "hyperspeed")
+    monkeypatch.setenv("QDRANT_TURBOQUANT_BITS", "bits99")
+    monkeypatch.delenv("QDRANT_QUANTIZATION_ALWAYS_RAM", raising=False)
+    cfg = load_quantization_env()
+    assert cfg.mode == "turbo"
+    assert cfg.bits == "bits4"

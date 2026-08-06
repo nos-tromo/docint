@@ -20,7 +20,7 @@ from loguru import logger
 from PIL import Image
 from qdrant_client import QdrantClient, models
 
-from docint.core.storage.utils import qdrant_collection_exists
+from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.utils.clip_client import RemoteCLIPBackend
 from docint.utils.env_cfg import (
     ImageIngestionConfig,
@@ -705,6 +705,7 @@ class ImageIngestionService:
                         distance=models.Distance.COSINE,
                     )
                 },
+                quantization_config=build_quantization_config(),
             )
             # Payload index on image_id speeds up duplicate detection at scale.
             try:

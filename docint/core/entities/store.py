@@ -28,7 +28,7 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
 
 from docint.core.entities.resolution import Candidate, normalize_surface
-from docint.core.storage.utils import qdrant_collection_exists
+from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 
 
 def _aliases_of(payload: dict[str, Any]) -> list[str]:
@@ -82,6 +82,7 @@ class EntityStore:
                 size=self.dim,
                 distance=qdrant_models.Distance.COSINE,
             ),
+            quantization_config=build_quantization_config(),
         )
         try:
             # The KEYWORD index speeds up the type filter on a real Qdrant
