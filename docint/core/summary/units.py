@@ -7,9 +7,11 @@ dependency-free (no Qdrant, no RAG) so it is trivially unit-testable; the
 orchestration in :mod:`docint.core.rag` streams ``(point_id, payload)``
 pairs in and fetches member texts back out by point id.
 
-``is_social_payload`` and ``diversity_bucket`` are payload-level ports of
-``RAG._is_social_payload`` / ``RAG._source_diversity_bucket`` (which operate
-on normalized *sources* and remain on RAG for the retrieval path).
+``is_social_payload`` is a payload-level counterpart to
+``RAG._is_social_payload``, which remains on RAG for collection profiling
+(``_infer_collection_profile``). ``diversity_bucket`` has no RAG
+counterpart — the source-level helper it was ported from existed only for
+the (now-removed) sampling summarizer's social-source selection.
 """
 
 from __future__ import annotations

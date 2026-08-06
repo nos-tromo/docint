@@ -4629,51 +4629,6 @@ class RAG:
             for key in ("type", "network", "author", "author_id", "text_id")
         )
 
-    @staticmethod
-    def _source_post_key(source: dict[str, Any]) -> str:
-        """Build a stable social/post identity key for normalized sources."""
-        reference_metadata = source.get("reference_metadata")
-        if isinstance(reference_metadata, dict):
-            text_id = str(reference_metadata.get("text_id") or "").strip()
-            if text_id:
-                return f"text_id:{text_id}"
-
-        file_hash = str(source.get("file_hash") or "").strip()
-        row_value = source.get("row")
-        if file_hash and row_value is not None:
-            return f"row:{file_hash}:{row_value}"
-
-        text_value = str(source.get("text") or source.get("preview_text") or "").strip()
-        if text_value:
-            normalized = re.sub(r"\s+", " ", text_value).lower()
-            return f"text:{normalized[:240]}"
-        return ""
-
-    @staticmethod
-    def _source_diversity_bucket(source: dict[str, Any]) -> str:
-        """Return a coarse author/time bucket for social summary diversity."""
-        reference_metadata = source.get("reference_metadata")
-        ref: dict[str, Any] = reference_metadata if isinstance(reference_metadata, dict) else {}
-        author = str(ref.get("author_id") or ref.get("author") or "unknown").strip()
-        timestamp_raw = str(ref.get("timestamp") or "").strip()
-        time_bucket = "unknown"
-        if timestamp_raw:
-            try:
-                parsed = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
-                time_bucket = parsed.astimezone(UTC).strftime("%Y-%m-%dT%H")
-            except ValueError:
-                time_bucket = timestamp_raw[:13]
-        return f"{author.lower()}::{time_bucket}"
-
-    @staticmethod
-    def _coverage_unit_for_sources(sources: list[dict[str, Any]]) -> str:
-        """Infer coverage unit from normalized source metadata."""
-        for source in sources:
-            reference_metadata = source.get("reference_metadata")
-            if isinstance(reference_metadata, dict) and str(reference_metadata.get("text_id") or "").strip():
-                return "posts"
-        return "chunks"
-
     def _infer_collection_profile(self) -> dict[str, Any]:
         """Infer whether the active collection is social/table heavy."""
         docs = self.list_documents()
