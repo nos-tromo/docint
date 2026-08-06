@@ -21,7 +21,7 @@ jobs:
     uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@589ea4656ecba00c278ea02b4dbf754727b18062 # v3.11
     with:
       python-versions: '["3.11"]'
-      uv-sync-args: '--frozen --group dev'
+      uv-sync-args: '--locked --group dev'
       docker-build: true
       frontend-build: true
       frontend-dir: 'frontend'
