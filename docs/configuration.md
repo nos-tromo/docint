@@ -135,6 +135,7 @@ Loaded by `load_retrieval_env()` (`env_cfg.py:967`).
 | `RERANK_USE_FP16` | `false` | Use FP16 for the reranker. |
 | `PARENT_CONTEXT_RETRIEVAL_ENABLED` | `true` | Expand fine chunks to their hierarchical parent context when available. |
 | `PARENT_CONTEXT_SAFETY_MARGIN` | `0.95` | Fraction of `OPENAI_CTX_WINDOW` the parent-context packer may consume before windowing. Clamped to `(0, 1]`; values outside that range fall back to `0.95` with a warning. |
+| `SOCIAL_SOURCE_DIVERSITY_LIMIT` | `2` | Cap on retrieved chunks per author/hour bucket on social/table collections, enforced by `SocialSourceDiversityPostprocessor` on the chat/query path. Clamped to a minimum of `1`. |
 
 ### Parent-context windowing
 

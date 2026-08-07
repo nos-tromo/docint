@@ -1952,6 +1952,7 @@ class RetrievalConfig:
     hybrid_top_k: int
     parent_context_enabled: bool
     parent_context_safety_margin: float
+    social_diversity_limit: int
 
 
 def load_retrieval_env(
@@ -1963,6 +1964,7 @@ def load_retrieval_env(
     default_hybrid_top_k: int = 20,
     default_parent_context_enabled: bool = True,
     default_parent_context_safety_margin: float = 0.95,
+    default_social_diversity_limit: int = 2,
 ) -> RetrievalConfig:
     """Loads retrieval configuration from environment variables or defaults.
 
@@ -1984,6 +1986,11 @@ def load_retrieval_env(
             deciding whether to emit a full parent or a windowed slice.
             Reserves headroom for the provider's own BOS/EOS and rough
             tokenizer-estimate drift. Must fall in ``(0, 1]``. Default 0.95.
+        default_social_diversity_limit (int): Default cap on how many
+            retrieved chunks may come from the same author/hour bucket on
+            social/table collections, enforced by
+            ``SocialSourceDiversityPostprocessor`` on the chat/query path.
+            Clamped to a minimum of 1. Default 2.
 
     Returns:
         RetrievalConfig: Dataclass containing retrieval configuration.
@@ -2000,6 +2007,8 @@ def load_retrieval_env(
                 - parent_context_safety_margin (float): Fraction of
                     ``OPENAI_CTX_WINDOW`` the parent-context packer may
                     consume before windowing oversize parents.
+                - social_diversity_limit (int): Cap on retrieved chunks per
+                    author/hour bucket on social/table collections.
     """
     raw_mode = str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
     chat_response_mode: Literal["auto", "compact", "refine"] = "auto"
@@ -2050,6 +2059,10 @@ def load_retrieval_env(
         # :func:`_parse_parent_context_safety_margin`.
         parent_context_safety_margin=_parse_parent_context_safety_margin(
             default=default_parent_context_safety_margin,
+        ),
+        social_diversity_limit=max(
+            1,
+            int(os.getenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", default_social_diversity_limit)),
         ),
     )
 

@@ -2381,6 +2381,7 @@ class RAG:
     hybrid_top_k: int = field(default=20, init=False)
     parent_context_enabled: bool = field(default=True, init=False)
     parent_context_safety_margin: float = field(default=0.95, init=False)
+    social_diversity_limit: int = field(default=2, init=False)
     graphrag_enabled: bool = field(default=False, init=False)
     graphrag_neighbor_hops: int = field(default=1, init=False)
     graphrag_top_k_nodes: int = field(default=100, init=False)
@@ -2648,6 +2649,7 @@ class RAG:
         self.hybrid_top_k = self.retrieval_config.hybrid_top_k
         self.parent_context_enabled = self.retrieval_config.parent_context_enabled
         self.parent_context_safety_margin = self.retrieval_config.parent_context_safety_margin
+        self.social_diversity_limit = self.retrieval_config.social_diversity_limit
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
         self.graphrag_enabled = self.graphrag_config.enabled
         self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
@@ -5105,11 +5107,11 @@ class RAG:
                 )
             )
         if bool(profile.get("is_social_table")):
-            # Uses the postprocessor's own default diversity_limit — this
-            # knob used to be sourced from the (now-deleted) sampling
+            # Configurable via SOCIAL_SOURCE_DIVERSITY_LIMIT (RetrievalConfig)
+            # — this knob used to be sourced from the (now-deleted) sampling
             # summarizer's social config, but this call site is on the
             # chat/retrieval path, not the summarizer.
-            node_postprocessors.append(SocialSourceDiversityPostprocessor())
+            node_postprocessors.append(SocialSourceDiversityPostprocessor(diversity_limit=self.social_diversity_limit))
             node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.

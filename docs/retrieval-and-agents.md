@@ -157,8 +157,9 @@ context in the final prompt. It is enabled by
 
 `SocialSourceDiversityPostprocessor` caps the number of consecutive
 chunks returned from the same social/table row source, defaulting to
-`2` per bucket. It keeps row-heavy collections balanced across
-documents in the chat/retrieval path.
+`2` per bucket (`SOCIAL_SOURCE_DIVERSITY_LIMIT`, clamped to a minimum
+of `1`). It keeps row-heavy collections balanced across documents in
+the chat/retrieval path.
 
 `CustomImageSourcePostprocessor` filters and reranks image-vector
 matches when the active collection carries an image sibling

@@ -173,6 +173,7 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RETRIEVAL_SPARSE_TOP_K", raising=False)
     monkeypatch.delenv("RETRIEVAL_HYBRID_TOP_K", raising=False)
     monkeypatch.delenv("PARENT_CONTEXT_RETRIEVAL_ENABLED", raising=False)
+    monkeypatch.delenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", raising=False)
 
     cfg = load_retrieval_env()
 
@@ -183,6 +184,7 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.sparse_top_k == 20
     assert cfg.hybrid_top_k == 20
     assert cfg.parent_context_enabled is True
+    assert cfg.social_diversity_limit == 2
 
 
 def test_load_retrieval_env_parses_chat_response_mode(
@@ -200,6 +202,7 @@ def test_load_retrieval_env_parses_chat_response_mode(
     monkeypatch.setenv("RETRIEVAL_SPARSE_TOP_K", "17")
     monkeypatch.setenv("RETRIEVAL_HYBRID_TOP_K", "9")
     monkeypatch.setenv("PARENT_CONTEXT_RETRIEVAL_ENABLED", "false")
+    monkeypatch.setenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", "5")
 
     cfg = load_retrieval_env()
 
@@ -210,6 +213,24 @@ def test_load_retrieval_env_parses_chat_response_mode(
     assert cfg.sparse_top_k == 17
     assert cfg.hybrid_top_k == 9
     assert cfg.parent_context_enabled is False
+    assert cfg.social_diversity_limit == 5
+
+
+def test_load_retrieval_env_clamps_social_diversity_limit_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SOCIAL_SOURCE_DIVERSITY_LIMIT should be clamped to at least 1.
+
+    A limit below 1 would drop every source, so the loader floors it.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", "0")
+
+    cfg = load_retrieval_env()
+
+    assert cfg.social_diversity_limit == 1
 
 
 def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
