@@ -38,6 +38,22 @@ def _compiles_for_qdrant(rules: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _condition_keys(conditions: Any) -> list[str]:
+    """Return the payload keys of a Qdrant condition list.
+
+    ``must``/``must_not``/``should`` are typed as unions covering condition
+    shapes that have no ``key`` (nested filters, has-id, is-empty), so the
+    narrowing is done once here rather than at every assertion.
+
+    Args:
+        conditions (Any): A condition list from a ``models.Filter``, or ``None``.
+
+    Returns:
+        list[str]: Each condition's ``key``, in order.
+    """
+    return [cast(Any, condition).key for condition in (conditions or [])]
+
+
 def test_coerce_rule_wraps_a_single_field_into_the_fields_list() -> None:
     """A legacy single-field rule must expose a one-element ``fields`` list."""
     rule = _coerce_rule({"field": "mimetype", "operator": "eq", "value": "text/plain"})
@@ -201,8 +217,7 @@ def test_multi_field_date_rule_compiles_to_a_nested_should_filter() -> None:
     assert len(must) == 1
     group = must[0]
     assert isinstance(group, models.Filter)
-    should = list(group.should or [])
-    assert [condition.key for condition in should] == [
+    assert _condition_keys(group.should) == [
         "reference_metadata.timestamp",
         "reference_metadata.posting_timestamp",
     ]
@@ -217,7 +232,7 @@ def test_multi_field_negated_rule_wraps_the_group_in_must_not() -> None:
     must_not = list(compiled.must_not or [])
     assert len(must_not) == 1
     assert isinstance(must_not[0], models.Filter)
-    assert len(list(must_not[0].should or [])) == 2
+    assert len(_condition_keys(cast(Any, must_not[0]).should)) == 2
 
 
 def test_single_field_rule_stays_a_bare_condition() -> None:
@@ -238,8 +253,7 @@ def test_merge_qdrant_filters_appends_to_an_existing_must() -> None:
     merged = merge_qdrant_filters(base, extra)
 
     assert merged is not None
-    keys = [condition.key for condition in (merged.must or [])]
-    assert keys == ["mimetype", "docint_hier_type"]
+    assert _condition_keys(merged.must) == ["mimetype", "docint_hier_type"]
 
 
 def test_merge_qdrant_filters_preserves_must_not() -> None:
@@ -251,7 +265,7 @@ def test_merge_qdrant_filters_preserves_must_not() -> None:
 
     assert merged is not None
     assert len(list(merged.must_not or [])) == 1
-    assert [condition.key for condition in (merged.must or [])] == ["docint_hier_type"]
+    assert _condition_keys(merged.must) == ["docint_hier_type"]
 
 
 def test_merge_qdrant_filters_builds_a_filter_from_extras_alone() -> None:
@@ -262,7 +276,7 @@ def test_merge_qdrant_filters_builds_a_filter_from_extras_alone() -> None:
     )
 
     assert merged is not None
-    assert [condition.key for condition in (merged.must or [])] == ["docint_hier_type"]
+    assert _condition_keys(merged.must) == ["docint_hier_type"]
 
 
 def test_merge_qdrant_filters_returns_the_base_when_there_are_no_extras() -> None:

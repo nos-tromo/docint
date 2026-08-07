@@ -106,7 +106,7 @@ def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None
 
 def merge_qdrant_filters(
     base: models.Filter | None,
-    extra_conditions: list[_QdrantCondition],
+    extra_conditions: Sequence[_QdrantCondition],
 ) -> models.Filter | None:
     """Combine a request-scoped native filter with internal retrieval conditions.
 
@@ -118,8 +118,8 @@ def merge_qdrant_filters(
 
     Args:
         base (models.Filter | None): The user's compiled native filter, if any.
-        extra_conditions (list[_QdrantCondition]): Internal conditions that must
-            always apply, ANDed with the base.
+        extra_conditions (Sequence[_QdrantCondition]): Internal conditions that
+            must always apply, ANDed with the base.
 
     Returns:
         models.Filter | None: The combined filter, ``base`` unchanged when there

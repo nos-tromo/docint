@@ -5010,7 +5010,7 @@ class RAG:
             if internal_conditions and native_kwargs.get("qdrant_filters") is not None:
                 native_kwargs["qdrant_filters"] = merge_qdrant_filters(
                     native_kwargs["qdrant_filters"],
-                    cast(list[Any], internal_conditions),
+                    internal_conditions,
                 )
             retriever_kwargs["vector_store_kwargs"] = native_kwargs
         text_retriever = self.index.as_retriever(**retriever_kwargs)
