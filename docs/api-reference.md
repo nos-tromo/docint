@@ -110,9 +110,15 @@ Request (`QueryIn`):
   `entity_occurrence_multi`. The entity modes route through
   `RAG.run_entity_occurrence_query()` / `run_multi_entity_occurrence_query()`.
 - `metadata_filters` — list of `MetadataFilterIn` objects with
-  `{field, operator, value, values}`. Supported operators: `eq`, `neq`,
+  `{field, fields, operator, value, values}`. Supported operators: `eq`, `neq`,
   `gt`, `gte`, `lt`, `lte`, `in`, `contains`, `mime_match`, `date_after`,
   `date_on_or_after`, `date_before`, `date_on_or_before`.
+
+  A filter targets either a single `field` or several `fields`; when several
+  are given the rule matches if any of them matches. The SPA uses this to apply
+  one date bound to both `reference_metadata.timestamp` and
+  `reference_metadata.posting_timestamp`. A rule naming neither is rejected
+  with 422.
 
 Response (`QueryOut`):
 

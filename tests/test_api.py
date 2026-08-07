@@ -2204,13 +2204,12 @@ def test_stream_query_passes_metadata_filters(client: TestClient) -> None:
     rag = cast(DummyRAG, api_module.rag)
     last_filters = rag.stream_filters[-1]
     assert last_filters["active"] is True
-    assert [rule.model_dump() for rule in last_filters["rules"]] == [
-        {
-            "field": "hate_speech.hate_speech",
-            "operator": "eq",
-            "value": True,
-            "values": [],
-        }
+    assert [(rule.field, rule.operator, rule.value) for rule in last_filters["rules"]] == [
+        (
+            "hate_speech.hate_speech",
+            "eq",
+            True,
+        )
     ]
     assert last_filters["vector_store_kwargs"]["qdrant_filters"] is not None
 
@@ -4099,3 +4098,38 @@ def test_stream_query_error_event_carries_generation_failed_code(
 
     assert '"code": "generation_failed"' in text
     assert "boom-generic" not in text
+
+
+def test_query_accepts_a_multi_field_date_filter(client: TestClient) -> None:
+    """A rule ORing both timestamp keys must pass wire validation."""
+    response = client.post(
+        "/query",
+        json={
+            "question": "anything",
+            "metadata_filters": [
+                {
+                    "fields": [
+                        "reference_metadata.timestamp",
+                        "reference_metadata.posting_timestamp",
+                    ],
+                    "operator": "date_on_or_after",
+                    "value": "2026-01-01",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code != 422
+
+
+def test_query_rejects_a_filter_naming_no_field(client: TestClient) -> None:
+    """A rule with neither ``field`` nor ``fields`` cannot be honoured."""
+    response = client.post(
+        "/query",
+        json={
+            "question": "anything",
+            "metadata_filters": [{"operator": "eq", "value": "x"}],
+        },
+    )
+
+    assert response.status_code == 422

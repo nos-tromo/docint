@@ -133,6 +133,19 @@ Supported operators (`MetadataFilterIn.operator`): `eq`, `neq`, `gt`,
 `gte`, `lt`, `lte`, `in`, `contains`, `mime_match`, `date_after`,
 `date_on_or_after`, `date_before`, `date_on_or_before`.
 
+A filter targets either a single `field` or several `fields`; when several are
+given the rule matches if any of them matches. The SPA uses this to apply one
+date bound to both `reference_metadata.timestamp` and
+`reference_metadata.posting_timestamp`.
+
+Date, `contains`, and non-numeric range bounds are carried **only** by
+`build_qdrant_filter()`. `build_metadata_filters()` deliberately compiles them
+to nothing: `QdrantVectorStore` turns a date bound into `Range(gte=<ISO
+string>)` whose bounds are floats, and raises `NotImplementedError` for
+`FilterOperator.CONTAINS`. Since `vector_store_kwargs["qdrant_filters"]`
+overrides the LlamaIndex filters inside `QdrantVectorStore.query`, the native
+filter is the one that executes.
+
 ## Reranking
 
 Candidates retrieved from Qdrant are reranked with

@@ -24,7 +24,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
@@ -635,9 +635,17 @@ class AdminCollectionsOut(BaseModel):
 
 
 class MetadataFilterIn(BaseModel):
-    """Single metadata filter applied to retrieval queries."""
+    """Single metadata filter applied to retrieval queries.
 
-    field: str
+    A filter targets either one ``field`` or several ``fields``. When several
+    are given the rule matches if **any** of them matches, which is how a date
+    bound covers both ``reference_metadata.timestamp`` (chunks and transcript
+    segments) and ``reference_metadata.posting_timestamp`` (media artifacts
+    linked to a posting) in one rule.
+    """
+
+    field: str = ""
+    fields: list[str] = Field(default_factory=list)
     operator: Literal[
         "eq",
         "neq",
@@ -655,6 +663,20 @@ class MetadataFilterIn(BaseModel):
     ]
     value: str | int | float | bool | None = None
     values: list[str | int | float | bool] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _require_a_target_field(self) -> "MetadataFilterIn":
+        """Reject a rule that names no metadata key at all.
+
+        Returns:
+            MetadataFilterIn: The validated model.
+
+        Raises:
+            ValueError: When neither ``field`` nor ``fields`` is populated.
+        """
+        if not self.field.strip() and not [entry for entry in self.fields if entry.strip()]:
+            raise ValueError("a metadata filter must name 'field' or 'fields'")
+        return self
 
 
 class QueryIn(BaseModel):
