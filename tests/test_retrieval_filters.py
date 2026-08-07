@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from llama_index.vector_stores.qdrant.base import QdrantVectorStore
+from qdrant_client import models
 
 from docint.core.retrieval_filters import (
     _coerce_rule,
@@ -177,3 +178,52 @@ def test_neq_across_fields_requires_every_field_to_differ() -> None:
 
     assert matches_metadata_filters({"a": "y", "b": "z"}, rules)
     assert not matches_metadata_filters({"a": "x", "b": "z"}, rules)
+
+
+def test_multi_field_date_rule_compiles_to_a_nested_should_filter() -> None:
+    """One rule over two timestamp keys becomes an OR group inside ``must``."""
+    compiled = build_qdrant_filter(
+        [
+            {
+                "fields": [
+                    "reference_metadata.timestamp",
+                    "reference_metadata.posting_timestamp",
+                ],
+                "operator": "date_on_or_after",
+                "value": "2026-01-01",
+            }
+        ]
+    )
+
+    assert compiled is not None
+    must = list(compiled.must or [])
+    assert len(must) == 1
+    group = must[0]
+    assert isinstance(group, models.Filter)
+    should = list(group.should or [])
+    assert [condition.key for condition in should] == [
+        "reference_metadata.timestamp",
+        "reference_metadata.posting_timestamp",
+    ]
+
+
+def test_multi_field_negated_rule_wraps_the_group_in_must_not() -> None:
+    """NOT (a OR b) is how "neither field holds this value" is expressed."""
+    compiled = build_qdrant_filter([{"fields": ["a", "b"], "operator": "neq", "value": "x"}])
+
+    assert compiled is not None
+    assert not list(compiled.must or [])
+    must_not = list(compiled.must_not or [])
+    assert len(must_not) == 1
+    assert isinstance(must_not[0], models.Filter)
+    assert len(list(must_not[0].should or [])) == 2
+
+
+def test_single_field_rule_stays_a_bare_condition() -> None:
+    """One field must not gain a pointless nesting level."""
+    compiled = build_qdrant_filter([{"field": "mimetype", "operator": "eq", "value": "text/plain"}])
+
+    assert compiled is not None
+    must = list(compiled.must or [])
+    assert len(must) == 1
+    assert isinstance(must[0], models.FieldCondition)

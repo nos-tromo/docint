@@ -488,17 +488,49 @@ def _compile_qdrant_rule(
 ) -> tuple[_QdrantCondition | None, bool]:
     """Translate a normalized rule into a native Qdrant condition.
 
+    A rule listing several ``fields`` compiles to a nested ``models.Filter``
+    whose ``should`` holds one condition per field, so matching any field
+    satisfies the rule. Negated rules keep that grouping and are routed into
+    ``must_not`` by the caller, giving NOT (a OR b) — no listed field holds
+    the value.
+
     Args:
-        rule (dict[str, Any]): A dictionary with keys ``field``, ``operator``, ``value``, and optional ``values``,
-            where ``field`` is the metadata key to filter on, and ``operator`` is one of the
-            supported filter operations.
+        rule (dict[str, Any]): A normalized rule dictionary.
 
     Returns:
-        tuple[_QdrantCondition | None, bool]: ``(compiled_condition, negate)`` where
-            ``compiled_condition`` is a Qdrant-compatible condition/filter and ``negate`` indicates
-            whether to route into ``must_not`` rather than ``must``.
+        tuple[_QdrantCondition | None, bool]: ``(condition, negate)``; the
+            condition is ``None`` when no field produced anything compilable.
     """
-    field = rule["field"]
+    conditions: list[_QdrantCondition] = []
+    negate = False
+    for field in rule["fields"]:
+        condition, field_negate = _compile_qdrant_condition(rule, field)
+        if condition is None:
+            continue
+        negate = field_negate
+        conditions.append(condition)
+
+    if not conditions:
+        return None, False
+    if len(conditions) == 1:
+        return conditions[0], negate
+    return models.Filter(should=conditions), negate
+
+
+def _compile_qdrant_condition(
+    rule: dict[str, Any],
+    field: str,
+) -> tuple[_QdrantCondition | None, bool]:
+    """Translate a normalized rule into a native Qdrant condition on one field.
+
+    Args:
+        rule (dict[str, Any]): A normalized rule dictionary.
+        field (str): The single dotted metadata key this condition targets.
+
+    Returns:
+        tuple[_QdrantCondition | None, bool]: ``(condition, negate)`` where
+            ``negate`` routes the condition into ``must_not`` rather than ``must``.
+    """
     operator = rule["operator"]
 
     if operator in {"eq", "neq"}:

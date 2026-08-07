@@ -2160,24 +2160,22 @@ def test_query_builds_and_passes_metadata_filters(client: TestClient) -> None:
     rag = cast(DummyRAG, api_module.rag)
     last_filters = rag.chat_filters[-1]
     assert last_filters["active"] is True
-    assert [rule.model_dump() for rule in last_filters["rules"]] == [
-        {
-            "field": "mimetype",
-            "operator": "mime_match",
-            "value": "image/*",
-            "values": [],
-        },
-        {
-            "field": "reference_metadata.timestamp",
-            "operator": "date_on_or_after",
-            "value": "2026-01-01",
-            "values": [],
-        },
+    assert [(rule.field, rule.operator, rule.value) for rule in last_filters["rules"]] == [
+        ("mimetype", "mime_match", "image/*"),
+        ("reference_metadata.timestamp", "date_on_or_after", "2026-01-01"),
     ]
+    # Only the MIME rule compiles to a LlamaIndex filter. A date bound would
+    # become Range(gte=<ISO string>) inside QdrantVectorStore, whose bounds are
+    # floats, so it is carried by the native filter instead — which is the one
+    # that executes, since qdrant_filters overrides the LlamaIndex filters.
     compiled = last_filters["filters"]
     assert compiled is not None
-    assert len(compiled.filters) == 2
-    assert last_filters["vector_store_kwargs"]["qdrant_filters"] is not None
+    assert len(compiled.filters) == 1
+    assert cast(Any, compiled.filters[0]).key == "mimetype"
+
+    native = last_filters["vector_store_kwargs"]["qdrant_filters"]
+    assert native is not None
+    assert len(list(native.must)) == 2
 
 
 def test_stream_query_passes_metadata_filters(client: TestClient) -> None:
