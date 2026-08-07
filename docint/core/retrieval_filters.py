@@ -25,6 +25,17 @@ _SCALAR_OPERATORS: dict[str, FilterOperator] = {
     "contains": FilterOperator.CONTAINS,
 }
 
+_DATE_OPERATORS: frozenset[str] = frozenset(
+    {
+        "date_after",
+        "date_on_or_after",
+        "date_before",
+        "date_on_or_before",
+    }
+)
+
+_RANGE_OPERATORS: frozenset[str] = frozenset({"gt", "gte", "lt", "lte"})
+
 _QdrantCondition: TypeAlias = (
     models.FieldCondition
     | models.IsEmptyCondition
@@ -341,7 +352,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
         MetadataFilter | MetadataFilters | None: Compiled filter(s), or ``None`` if the rule
         cannot be compiled.
     """
-    field = rule["field"]
+    fields = rule["fields"]
     operator = rule["operator"]
 
     if operator in _SCALAR_OPERATORS:
@@ -351,14 +362,27 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
         if isinstance(value, bool):
             logger.debug(
                 "Skipping boolean MetadataFilter for '{}' and relying on native Qdrant filters.",
-                field,
+                fields,
             )
             return None
-        return MetadataFilter(
-            key=field,
-            value=value,
-            operator=_SCALAR_OPERATORS[operator],
-        )
+        if operator == "contains":
+            # QdrantVectorStore._build_subfilter raises NotImplementedError for
+            # FilterOperator.CONTAINS. build_qdrant_filter expresses this
+            # natively with MatchText, so drop it here rather than crash there.
+            logger.debug(
+                "Skipping CONTAINS MetadataFilter for '{}' — the native Qdrant filter covers it.",
+                fields,
+            )
+            return None
+        if operator in _RANGE_OPERATORS and not isinstance(value, (int, float)):
+            # Qdrant's Range bounds are floats; a text bound would raise a
+            # pydantic ValidationError inside the vector store.
+            logger.debug(
+                "Skipping non-numeric range MetadataFilter for '{}' — Qdrant Range needs a number.",
+                fields,
+            )
+            return None
+        return _metadata_filter_for(fields, value, _SCALAR_OPERATORS[operator])
 
     if operator == "in":
         values = _normalize_values(rule.get("values"))
@@ -367,85 +391,70 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
             values = [scalar] if scalar is not None else cast(list[str | int | float | bool], [])
         if not values:
             return None
-        return MetadataFilter(key=field, value=cast(Any, values), operator=FilterOperator.IN)
+        return _metadata_filter_for(fields, cast(Any, values), FilterOperator.IN)
 
     if operator == "mime_match":
-        return _compile_mime_rule(field=field, raw_value=rule.get("value"))
+        return _compile_mime_rule(fields=fields, raw_value=rule.get("value"))
 
-    if operator in {
-        "date_after",
-        "date_on_or_after",
-        "date_before",
-        "date_on_or_before",
-    }:
-        return _compile_date_rule(field=field, operator=operator, raw_value=rule.get("value"))
+    if operator in _DATE_OPERATORS:
+        # Date bounds compile to Range(gte=<ISO string>) in the vector store,
+        # which qdrant-client rejects. Only build_qdrant_filter can express
+        # them (models.DatetimeRange), and it is the filter that executes.
+        logger.debug(
+            "Skipping date MetadataFilter for '{}' — the native Qdrant filter covers it.",
+            fields,
+        )
+        return None
 
     logger.warning("Ignoring unsupported metadata filter operator '{}'.", operator)
     return None
 
 
+def _metadata_filter_for(
+    fields: list[str],
+    value: Any,
+    operator: FilterOperator,
+) -> MetadataFilter | MetadataFilters:
+    """Build one filter per target field, ORed together when there are several.
+
+    Args:
+        fields (list[str]): Target metadata keys; matching any one satisfies the rule.
+        value (Any): Already-normalized comparison value.
+        operator (FilterOperator): LlamaIndex operator to apply to every field.
+
+    Returns:
+        MetadataFilter | MetadataFilters: A single filter for one field, or an
+            OR-combined ``MetadataFilters`` for several.
+    """
+    filters: list[MetadataFilter | MetadataFilters] = [
+        MetadataFilter(key=field, value=value, operator=operator) for field in fields
+    ]
+    if len(filters) == 1:
+        return filters[0]
+    return MetadataFilters(filters=filters, condition=FilterCondition.OR)
+
+
 def _compile_mime_rule(
     *,
-    field: str,
+    fields: list[str],
     raw_value: Any,
-) -> MetadataFilter | None:
+) -> MetadataFilter | MetadataFilters | None:
     """Compile MIME filters, including simple ``type/*`` wildcard patterns.
 
     Args:
-        field (str): The metadata field to filter on, typically ``mimetype``.
-        raw_value (Any): The raw MIME pattern value, which may include a ``/*`` suffix for wildcard matching.
+        fields (list[str]): Target metadata keys, typically ``["mimetype"]``.
+        raw_value (Any): The raw MIME pattern, which may end in ``/*``.
 
     Returns:
-        MetadataFilter | None: A ``MetadataFilter`` with the right operator, or ``None`` if the
-            value is invalid.
+        MetadataFilter | MetadataFilters | None: The compiled filter, or ``None``
+            when the value is empty.
     """
     value = str(raw_value or "").strip().lower()
     if not value:
         return None
     if value.endswith("/*"):
-        return MetadataFilter(
-            key=field,
-            value=value[:-1],
-            operator=FilterOperator.TEXT_MATCH_INSENSITIVE,
-        )
-    return MetadataFilter(key=field, value=value, operator=FilterOperator.EQ)
-
-
-def _compile_date_rule(
-    *,
-    field: str,
-    operator: str,
-    raw_value: Any,
-) -> MetadataFilter | None:
-    """Compile date operators into ISO-8601 string comparisons.
-
-    Args:
-        field (str): The metadata field to filter on, e.g. ``reference_metadata.timestamp``.
-        operator (str): The date comparison operator, one of ``date_after``, ``date_on_or_after``,
-            ``date_before``, or ``date_on_or_before``.
-        raw_value (Any): The raw date or datetime value, which may be a string, date/datetime object,
-            or other type coercible to a date.
-
-    Returns:
-        MetadataFilter | None: A ``MetadataFilter`` with the right operator and ISO-8601 value,
-            or ``None`` if the value is invalid.
-    """
-    boundary = _normalize_date_value(raw_value, upper_bound=operator.endswith("before"))
-    if boundary is None:
-        logger.warning(
-            "Ignoring metadata date filter for '{}' due to invalid value '{}'.",
-            field,
-            raw_value,
-        )
-        return None
-
-    op_map = {
-        "date_after": FilterOperator.GT,
-        "date_on_or_after": FilterOperator.GTE,
-        "date_before": FilterOperator.LT,
-        "date_on_or_before": FilterOperator.LTE,
-    }
-    return MetadataFilter(key=field, value=boundary, operator=op_map[operator])
+        return _metadata_filter_for(fields, value[:-1], FilterOperator.TEXT_MATCH_INSENSITIVE)
+    return _metadata_filter_for(fields, value, FilterOperator.EQ)
 
 
 def _compile_qdrant_rule(
@@ -597,24 +606,6 @@ def _normalize_values(values: Any) -> list[str | int | float | bool]:
         if scalar is not None:
             normalized.append(scalar)
     return normalized
-
-
-def _normalize_date_value(value: Any, *, upper_bound: bool) -> str | None:
-    """Normalize a date or datetime input into a UTC ISO-8601 string.
-
-    Args:
-        value (Any): The raw date or datetime value, which may be a string, date/datetime object,
-            or other type coercible to a date.
-        upper_bound (bool): Whether the value represents an upper bound (i.e., "before" operator)
-            that should be normalized.
-
-    Returns:
-        str | None: A normalized UTC ISO-8601 string, or ``None`` if the value is invalid.
-    """
-    dt = _parse_date_value(value, upper_bound=upper_bound)
-    if dt is None:
-        return None
-    return dt.isoformat().replace("+00:00", "Z")
 
 
 def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:

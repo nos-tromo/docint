@@ -947,30 +947,39 @@ def test_normalize_response_data_builds_source_backed_answer_when_sources_exist(
     )
 
 
-def test_build_metadata_filters_supports_mime_and_date_rules() -> None:
-    """Metadata filter builder should compile MIME and date request rules."""
-    compiled = build_metadata_filters(
-        [
-            {
-                "field": "mimetype",
-                "operator": "mime_match",
-                "value": "image/*",
-            },
-            {
-                "field": "reference_metadata.timestamp",
-                "operator": "date_on_or_after",
-                "value": "2026-01-01",
-            },
-        ]
-    )
+def test_build_metadata_filters_compiles_mime_and_defers_dates() -> None:
+    """MIME rules compile; date rules defer to the native Qdrant filter.
+
+    A date bound compiles to ``Range(gte=<ISO string>)`` inside
+    ``QdrantVectorStore``, whose bounds are floats — so emitting a LlamaIndex
+    filter for it raises rather than filtering. ``build_qdrant_filter`` carries
+    the rule instead, via ``models.DatetimeRange``.
+    """
+    rules = [
+        {
+            "field": "mimetype",
+            "operator": "mime_match",
+            "value": "image/*",
+        },
+        {
+            "field": "reference_metadata.timestamp",
+            "operator": "date_on_or_after",
+            "value": "2026-01-01",
+        },
+    ]
+
+    compiled = build_metadata_filters(rules)
 
     assert compiled is not None
-    assert len(compiled.filters) == 2
-    first_filter = cast(Any, compiled.filters[0])
-    second_filter = cast(Any, compiled.filters[1])
-    assert first_filter.operator.value == "text_match_insensitive"
-    assert second_filter.operator.value == ">="
-    assert str(second_filter.value).startswith("2026-01-01T00:00:00")
+    assert len(compiled.filters) == 1
+    only_filter = cast(Any, compiled.filters[0])
+    assert only_filter.key == "mimetype"
+    assert only_filter.operator.value == "text_match_insensitive"
+
+    native = build_qdrant_filter(rules)
+    assert native is not None
+    assert native.must is not None
+    assert len(list(native.must)) == 2
 
 
 def test_build_qdrant_filter_supports_boolean_rules() -> None:
