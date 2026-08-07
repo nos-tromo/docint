@@ -125,18 +125,22 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
     """Normalize a raw filter payload into a plain dictionary.
 
     Args:
-    raw_rule: A filter-like mapping or object exposing ``field``, ``operator``,
-        ``value``, and optional ``values`` attributes.
+    raw_rule: A filter-like mapping or object exposing ``field`` or ``fields``,
+        ``operator``, ``value``, and optional ``values`` attributes. A rule
+        naming several ``fields`` matches when any one of them matches.
 
     Returns:
-        dict[str, Any] | None: A normalized dictionary with string keys and scalar or list values, or
-            ``None`` if the input cannot be coerced into a valid rule.
+        dict[str, Any] | None: A normalized rule with a non-empty ``fields``
+            list of target metadata keys, ``field`` retained as ``fields[0]``
+            for backwards compatibility, plus ``operator``, ``value`` and
+            ``values``. ``None`` when the input names no field or no operator.
     """
     if isinstance(raw_rule, Mapping):
         data = dict(raw_rule)
     else:
         data = {
             "field": getattr(raw_rule, "field", None),
+            "fields": getattr(raw_rule, "fields", None),
             "operator": getattr(raw_rule, "operator", None),
             "value": getattr(raw_rule, "value", None),
             "values": getattr(raw_rule, "values", None),
@@ -144,7 +148,14 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
 
     field = str(data.get("field") or "").strip()
     operator = str(data.get("operator") or "").strip().lower()
-    if not field or not operator:
+
+    raw_fields = data.get("fields")
+    fields: list[str] = []
+    if isinstance(raw_fields, (list, tuple)):
+        fields = [text for text in (str(entry or "").strip() for entry in raw_fields) if text]
+    if not fields and field:
+        fields = [field]
+    if not fields or not operator:
         return None
 
     values = data.get("values")
@@ -152,7 +163,8 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
         values = list(values) if isinstance(values, tuple) else None
 
     return {
-        "field": field,
+        "field": fields[0],
+        "fields": fields,
         "operator": operator,
         "value": data.get("value"),
         "values": values,
