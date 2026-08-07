@@ -282,9 +282,19 @@ def _posting_view(rm: dict[str, Any]) -> tuple[dict[str, str], bool]:
 
 
 def _posting_text(snap: dict[str, Any]) -> str:
-    """The (parent) posting's own text, shown next to the referenced chunk."""
+    """The (parent) posting's own text, shown next to the referenced chunk.
+
+    Empty when it would merely repeat the chunk: a finding on the posting
+    itself carries the posting's text *as* its chunk, so the row only earns
+    its place for media-derived artifacts (transcript segments, keyframes)
+    whose chunk differs from the parent posting's text.
+    """
     post, _ = _posting_view(_ref_meta(snap))
-    return _truncate(post["text"])
+    text = _truncate(post["text"])
+    chunk = _truncate(str(snap.get("chunk_text") or ""))
+    if " ".join(text.split()) == " ".join(chunk.split()):
+        return ""
+    return text
 
 
 def _provenance_rows(snap: dict[str, Any]) -> list[tuple[str, str]]:
