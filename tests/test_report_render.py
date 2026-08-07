@@ -264,6 +264,24 @@ def test_posting_text_renders_adjacent_to_chunk(monkeypatch: pytest.MonkeyPatch)
     assert i_chunk < i_posting_text < i_reason < i_source_row
 
 
+def test_posting_text_suppressed_when_chunk_is_the_posting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finding on the posting itself doesn't repeat its text as a Posting text row.
+
+    The chunk of a postings.csv finding *is* the posting's text; the dedicated
+    row only appears for media-derived artifacts whose chunk differs from it.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+    snap = report["items"][2]["snapshot"]
+    snap["reference_metadata"]["posting_text"] = snap["chunk_text"]
+    htm = R.render_html(report)
+    md = R.render_markdown(report)
+    assert ui_string("report_label_posting_text") not in htm
+    assert f"| {ui_string('report_label_posting_text')} |" not in md
+    # The chunk itself still renders.
+    assert "bad text" in htm
+
+
 def test_entity_findings_same_chunk_collapse(monkeypatch: pytest.MonkeyPatch) -> None:
     """Entity findings added per-entity for the same chunk merge into one block.
 
