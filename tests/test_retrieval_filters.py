@@ -10,6 +10,7 @@ from docint.core.retrieval_filters import (
     _coerce_rule,
     build_metadata_filters,
     build_qdrant_filter,
+    matches_metadata_filters,
 )
 
 
@@ -127,3 +128,52 @@ def test_mime_rules_still_compile() -> None:
 
     assert compiled is not None
     assert _compiles_for_qdrant(rules)
+
+
+def test_multi_field_rule_matches_when_any_field_matches() -> None:
+    """A media artifact carries posting_timestamp, not timestamp."""
+    artifact = {"reference_metadata": {"posting_timestamp": "2026-03-10T09:00:00Z"}}
+    chunk = {"reference_metadata": {"timestamp": "2026-03-10T09:00:00Z"}}
+    rules = [
+        {
+            "fields": ["reference_metadata.timestamp", "reference_metadata.posting_timestamp"],
+            "operator": "date_on_or_after",
+            "value": "2026-03-01",
+        }
+    ]
+
+    assert matches_metadata_filters(artifact, rules)
+    assert matches_metadata_filters(chunk, rules)
+
+
+def test_multi_field_rule_fails_when_no_field_matches() -> None:
+    """Neither timestamp key satisfying the bound means no match."""
+    payload = {"reference_metadata": {"timestamp": "2026-01-05T09:00:00Z"}}
+    rules = [
+        {
+            "fields": ["reference_metadata.timestamp", "reference_metadata.posting_timestamp"],
+            "operator": "date_on_or_after",
+            "value": "2026-03-01",
+        }
+    ]
+
+    assert not matches_metadata_filters(payload, rules)
+
+
+def test_neq_on_a_missing_field_includes_the_payload() -> None:
+    """``neq`` must mirror Qdrant's must_not, which passes an absent field.
+
+    Qdrant routes ``neq`` into ``must_not``; a point lacking the key does not
+    match the inner condition, so ``must_not`` passes and the point is kept.
+    The in-memory predicate has to agree, or the image lane drops sources the
+    text lane keeps.
+    """
+    assert matches_metadata_filters({"other": "x"}, [{"field": "absent", "operator": "neq", "value": "x"}])
+
+
+def test_neq_across_fields_requires_every_field_to_differ() -> None:
+    """Negation mirrors ``must_not=[Filter(should=[...])]`` — NOT (a OR b)."""
+    rules = [{"fields": ["a", "b"], "operator": "neq", "value": "x"}]
+
+    assert matches_metadata_filters({"a": "y", "b": "z"}, rules)
+    assert not matches_metadata_filters({"a": "x", "b": "z"}, rules)

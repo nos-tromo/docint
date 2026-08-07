@@ -185,6 +185,11 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
 def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
     """Return whether a normalized rule matches an in-memory metadata payload.
 
+    A rule listing several ``fields`` is satisfied when any one of them
+    matches. ``neq`` is the exception: it mirrors the native filter, which
+    routes negation into ``must_not`` around the ORed conditions, so the
+    payload matches only when *no* listed field holds the value.
+
     Args:
         metadata (Mapping[str, Any]): The metadata payload to test.
         rule (dict[str, Any]): A normalized rule dictionary.
@@ -192,17 +197,38 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
     Returns:
         bool: True if the rule matches the metadata, False otherwise.
     """
+    fields = rule["fields"]
+    if rule["operator"] == "neq":
+        positive = {**rule, "operator": "eq"}
+        return not any(_matches_rule_for_field(metadata, positive, field) for field in fields)
+    return any(_matches_rule_for_field(metadata, rule, field) for field in fields)
+
+
+def _matches_rule_for_field(
+    metadata: Mapping[str, Any],
+    rule: dict[str, Any],
+    field: str,
+) -> bool:
+    """Return whether one metadata key satisfies a normalized rule.
+
+    Args:
+        metadata (Mapping[str, Any]): The metadata payload to test.
+        rule (dict[str, Any]): A normalized rule dictionary.
+        field (str): The single dotted metadata key to test.
+
+    Returns:
+        bool: True if this field satisfies the rule, False otherwise.
+    """
     operator = rule["operator"]
-    values = _extract_field_values(metadata, rule["field"])
+    values = _extract_field_values(metadata, field)
     if not values:
         return False
 
-    if operator in {"eq", "neq"}:
+    if operator == "eq":
         expected = _normalize_scalar(rule.get("value"))
         if expected is None:
             return False
-        matched = any(_coerce_comparable(value) == expected for value in values)
-        return not matched if operator == "neq" else matched
+        return any(_coerce_comparable(value) == expected for value in values)
 
     if operator in {"gt", "gte", "lt", "lte"}:
         expected = _normalize_scalar(rule.get("value"))
