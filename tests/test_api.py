@@ -168,8 +168,8 @@ class DummyRAG:
         self.ner_graph_top_ks: list[int] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
         self.documents: list[dict[str, Any]] = []
-        self.summary_refresh_calls: list[bool] = []
-        self.summary_stream_refresh_calls: list[bool] = []
+        self.cached_summary_calls = 0
+        self.build_tree_summary_calls = 0
         self.summary_payload: dict[str, Any] = {
             "response": "summary",
             "sources": [{"id": "s1"}],
@@ -557,37 +557,28 @@ class DummyRAG:
             },
         )
 
-    def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
-        """Return canned summarize payload.
-
-        Args:
-            refresh (bool, optional): Whether to bypass summary cache.
+    def cached_collection_summary(self) -> dict[str, Any] | None:
+        """Return the canned cached summary payload, mirroring RAG.cached_collection_summary.
 
         Returns:
-            dict[str, Any]: A dictionary containing the summary response, sources, and diagnostics.
+            dict[str, Any] | None: The stub's canned payload.
         """
-        self.summary_refresh_calls.append(bool(refresh))
+        self.cached_summary_calls += 1
         return self.summary_payload
 
-    def stream_summarize_collection(
-        self,
-        refresh: bool = False,
-    ) -> Generator[str | dict[str, Any], None, None]:
-        """Stream canned summary payload.
+    def build_tree_summary(self, progress: Any = None) -> dict[str, Any]:
+        """Return the canned summary payload, mirroring RAG.build_tree_summary.
 
         Args:
-            refresh (bool, optional): Whether to bypass summary cache.
+            progress (Any, optional): Progress callback (ignored).
 
         Returns:
-            Generator[str | dict[str, Any], None, None]: Streams summary chunks plus the final
-                payload.
-
-        Yields:
-            str | dict[str, Any]: Summary chunks, then the final summary payload.
+            dict[str, Any]: The stub's canned payload.
         """
-        self.summary_stream_refresh_calls.append(bool(refresh))
-        yield "sum"
-        yield self.summary_payload
+        self.build_tree_summary_calls += 1
+        if progress is not None:
+            progress(1, 1)
+        return self.summary_payload
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Get information extraction data for the selected collection.
@@ -1851,7 +1842,7 @@ def test_stream_query_entity_occurrence_multi_mode_emits_groups(
 
 
 def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
-    """Summarize endpoint should expose summary diagnostics and validation metadata.
+    """Summarize endpoint serves the cached payload with diagnostics and validation metadata.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -1867,45 +1858,29 @@ def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
     assert "validation_checked" in payload
     assert "validation_mismatch" in payload
     assert "validation_reason" in payload
-
-
-def test_summarize_refresh_flag_passthrough(client: TestClient) -> None:
-    """Summarize endpoint should pass refresh query parameter to RAG.
-
-    Args:
-        client (TestClient): The TestClient instance.
-    """
-    response = client.post("/summarize?refresh=true")
-    assert response.status_code == 200
     rag = cast(DummyRAG, api_module.rag)
-    assert rag.summary_refresh_calls[-1] is True
+    assert rag.cached_summary_calls == 1
 
 
-def test_summarize_stream_includes_summary_diagnostics(client: TestClient) -> None:
-    """Streaming summarize endpoint should emit diagnostics in final payload.
-
-    Args:
-        client (TestClient): The TestClient instance.
-    """
-    with client.stream("POST", "/summarize/stream") as resp:
-        assert resp.status_code == 200
-        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
-    assert '"summary_diagnostics"' in text
-    assert '"coverage_ratio"' in text
-    assert '"coverage_unit"' in text
-
-
-def test_summarize_stream_refresh_flag_passthrough(client: TestClient) -> None:
-    """Streaming summarize endpoint should pass refresh query parameter to RAG.
+def test_summarize_refresh_true_queues_a_job(client: TestClient) -> None:
+    """``refresh=true`` bypasses the cache and queues a rebuild job instead of a 200.
 
     Args:
         client (TestClient): The TestClient instance.
     """
-    with client.stream("POST", "/summarize/stream?refresh=true") as resp:
-        assert resp.status_code == 200
-        _ = "".join([chunk.decode() for chunk in resp.iter_raw()])
-    rag = cast(DummyRAG, api_module.rag)
-    assert rag.summary_stream_refresh_calls[-1] is True
+    response = client.post("/summarize?collection=alpha&refresh=true")
+    assert response.status_code == 202
+    assert response.json()["job_id"]
+
+
+def test_summarize_stream_route_removed(client: TestClient) -> None:
+    """``POST /summarize/stream`` no longer exists -- clients follow job SSE instead.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post("/summarize/stream")
+    assert response.status_code in (404, 405)
 
 
 def test_collections_ner_requires_selection(client: TestClient) -> None:
@@ -4126,22 +4101,3 @@ def test_stream_query_error_event_carries_generation_failed_code(
 
     assert '"code": "generation_failed"' in text
     assert "boom-generic" not in text
-
-
-def test_summarize_stream_error_event_carries_code(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
-    """A summary-stream failure tags the error event with its code.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        client: The TestClient instance.
-    """
-
-    def _exploding_stream(self: Any, *a: Any, **kw: Any) -> Any:
-        raise RuntimeError("boom-summary")
-
-    monkeypatch.setattr(type(api_module.rag), "stream_summarize_collection", _exploding_stream)
-    with client.stream("POST", "/summarize/stream") as resp:
-        text = "".join(chunk.decode() for chunk in resp.iter_raw())
-
-    assert '"code": "summary_failed"' in text
-    assert "boom-summary" not in text

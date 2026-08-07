@@ -358,6 +358,14 @@ export interface IngestEvent {
     | 'ingestion_complete'
     | 'warning'
     | 'error'
+    // The owner-multiplexed `/ingest/jobs/events` stream is multiplexed
+    // across job kinds, not just ingest runs (`jobs.py::KIND_EVENTS`) — a
+    // summary-rebuild job's frames land in the same store as an ingest job's
+    // (see `useIngestJobStream.ts`, which applies no kind filter), so this
+    // union must cover both lifecycles.
+    | 'summary_started'
+    | 'summary_progress'
+    | 'summary_completed'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was
@@ -380,6 +388,9 @@ export interface SummaryDiagnostics {
   candidate_count: number
   deduped_count: number
   sampled_count: number
+  /** True when the build hit `SUMMARY_MAX_LLM_CALLS` and covers only part of
+   *  the collection. Absent on payloads cached before the flag shipped. */
+  partial?: boolean
 }
 
 export interface SummaryResponse extends ValidationFields {
@@ -387,6 +398,24 @@ export interface SummaryResponse extends ValidationFields {
   sources: Source[]
   summary_diagnostics?: SummaryDiagnostics
 }
+
+/**
+ * A queued-build acknowledgement from `POST /summarize` (202, or a 409's
+ * adopted in-flight job). Carries only the job id — progress arrives
+ * separately on the owner-multiplexed `GET /ingest/jobs/events` stream,
+ * tagged with this same `job_id`.
+ */
+export interface SummaryJobQueued {
+  job_id: string
+}
+
+/**
+ * `POST /summarize`'s full result shape: a cache hit answers the summary
+ * directly (200), a miss queues a background build and answers just the
+ * `job_id` (202). Callers must discriminate on `'summary' in result` rather
+ * than casting — see `SummaryPanel.tsx`.
+ */
+export type SummarizeResult = SummaryResponse | SummaryJobQueued
 
 /**
  * Server-owned ingest job snapshot, served by the `/ingest/jobs*` endpoints.

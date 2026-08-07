@@ -1,0 +1,7 @@
+You are combining partial summaries of one document collection into a single
+intermediate summary. Preserve concrete facts, named entities, dates, recurring
+themes, disagreements, and outliers. Do not invent facts and do not generalize
+away specifics. Keep the result under 20 sentences.
+
+Partial summaries:
+{summaries_block}

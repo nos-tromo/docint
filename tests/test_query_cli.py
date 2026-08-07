@@ -308,7 +308,7 @@ def test_export_summary_stores_frontend_like_payload(monkeypatch: pytest.MonkeyP
         qdrant_collection = "alpha"
         summarize_prompt = "Summarize the collection."
 
-        def summarize_collection(self) -> dict[str, Any]:
+        def build_tree_summary(self) -> dict[str, Any]:
             return {
                 "response": "Summary text.",
                 "sources": [{"filename": "doc.pdf"}],

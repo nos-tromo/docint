@@ -11,6 +11,15 @@ re-discovers them by owner — but not a backend restart. The design mirrors
 ``Nextext/nextext/api/jobs.py``; the one deliberate deviation is the collapsed
 event history (see :meth:`IngestJobState.record`).
 
+The registry also carries collection-summary rebuild jobs (``kind="summary"``)
+alongside ingest jobs (``kind="ingest"``, the default). Both kinds share the
+same registry, worker dispatch, and owner-multiplexed SSE stream; each is
+framed with its own event names (see :data:`KIND_EVENTS`) and runs under its
+own concurrency semaphore, so a summary rebuild cannot consume an ingest
+worker slot (or vice versa). An ingest job and a summary job for the same
+collection may run at once — :meth:`IngestJobManager.create_if_idle` refuses
+overlap only within the same ``(owner, physical, kind)``.
+
 The module holds no docint domain imports: the pipeline call is injected as a
 ``runner`` callable, so the manager is testable without Qdrant, models, or a
 network.
@@ -31,9 +40,35 @@ from typing import Any, ClassVar
 from anyio import to_thread
 from loguru import logger
 
-from docint.utils.env_cfg import load_ingest_concurrency
+from docint.utils.env_cfg import load_ingest_concurrency, load_summary_concurrency
 
-TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "error"})
+#: Per-kind SSE event names and failure copy. Keyed by :attr:`IngestJobState.kind`.
+#: ``"ingest"`` preserves the pre-existing event names exactly (backward
+#: compatibility for callers that pass no ``kind``); ``"summary"`` frames the
+#: same lifecycle for collection-summary rebuild jobs.
+KIND_EVENTS: dict[str, dict[str, str]] = {
+    "ingest": {
+        "started": "ingestion_started",
+        "progress": "ingestion_progress",
+        "complete": "ingestion_complete",
+        "failed_code": "ingestion_failed",
+        "failed_message": "Ingestion failed.",
+    },
+    "summary": {
+        "started": "summary_started",
+        "progress": "summary_progress",
+        "complete": "summary_completed",
+        "failed_code": "summary_failed",
+        "failed_message": "Summary generation failed.",
+    },
+}
+
+#: SSE event names, across all kinds, that open a run's history.
+STARTED_EVENTS: frozenset[str] = frozenset({"ingestion_started", "summary_started"})
+#: SSE event names, across all kinds, carrying a collapsed-to-latest progress update.
+PROGRESS_EVENTS: frozenset[str] = frozenset({"ingestion_progress", "summary_progress"})
+#: SSE event names, across all kinds, that end a run.
+TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "summary_completed", "error"})
 
 
 def _utcnow() -> datetime:
@@ -59,7 +94,7 @@ def format_sse(event: str, data: dict[str, Any]) -> str:
 
 
 class JobStatus(StrEnum):
-    """Lifecycle state of an ingest job."""
+    """Lifecycle state of a job (ingest or summary)."""
 
     QUEUED = "queued"
     RUNNING = "running"
@@ -72,24 +107,30 @@ TERMINAL_STATUSES: frozenset[JobStatus] = frozenset({JobStatus.COMPLETED, JobSta
 
 @dataclass
 class IngestJobState:
-    """Mutable state for one queued, running, or finished ingest job.
+    """Mutable state for one queued, running, or finished job (ingest or summary).
 
     ``owner`` is the principal resolved per request by
     :func:`docint.core.auth.principal.resolve_principal`; routes consult it to
     enforce per-owner access (cross-owner reads 404 so existence never leaks).
     ``physical`` is the owner-namespaced Qdrant name and stays internal —
     :meth:`snapshot` echoes only the caller's logical name.
+
+    ``kind`` distinguishes an ingest run from a collection-summary rebuild;
+    only the four identity fields are required — the ingest-only options
+    (``batch_dir``, ``hybrid``, ``ner``, ``hate_speech``, ``resolve``) default
+    to values a summary job can safely omit.
     """
 
     job_id: str
     owner: str
     logical_name: str
     physical: str
-    batch_dir: Path
-    hybrid: bool | None
-    ner: bool | None
-    hate_speech: bool | None
-    resolve: bool
+    kind: str = "ingest"
+    batch_dir: Path | None = None
+    hybrid: bool | None = None
+    ner: bool | None = None
+    hate_speech: bool | None = None
+    resolve: bool = False
     status: JobStatus = JobStatus.QUEUED
     message: str | None = None
     error: str | None = None
@@ -123,19 +164,19 @@ class IngestJobState:
             event_name (str): SSE event name.
             frame (str): The pre-rendered SSE frame.
         """
-        if event_name == "ingestion_started":
+        if event_name in STARTED_EVENTS:
             self._started_frame = frame
         elif event_name == "warning":
             if len(self._warning_frames) < self.MAX_RETAINED_WARNINGS:
                 self._warning_frames.append(frame)
             else:
                 self._dropped_warnings += 1
-        elif event_name == "ingestion_progress":
+        elif event_name in PROGRESS_EVENTS:
             self._progress_frame = frame
         elif event_name in TERMINAL_EVENTS:
             self._terminal_frame = frame
 
-        if event_name in {"ingestion_progress", "warning"}:
+        if event_name in PROGRESS_EVENTS or event_name == "warning":
             try:
                 payload = json.loads(frame.split("data: ", 1)[1])
             except (IndexError, json.JSONDecodeError):
@@ -180,6 +221,7 @@ class IngestJobState:
         return {
             "job_id": self.job_id,
             "collection": self.logical_name,
+            "kind": self.kind,
             "status": self.status.value,
             "message": self.message,
             "error": self.error,
@@ -198,14 +240,17 @@ _PING_INTERVAL_S = 15.0
 
 
 class IngestJobManager:
-    """In-memory ingest job store and worker dispatcher.
+    """In-memory job store and worker dispatcher for ingest and summary jobs.
 
     Jobs are held in a dict keyed by ``job_id`` and scoped by ``owner``. Async
-    workers bounded by an ``asyncio.Semaphore`` (``DOCINT_INGEST_CONCURRENCY``,
-    default 1) run the injected ``runner`` on a worker thread. Clients attach
-    with :meth:`subscribe_owner`, which replays each owned job's collapsed
-    history before live-tailing — so a browser that reloads mid-run re-attaches
-    and resumes the live view.
+    workers run the injected ``runner`` on a worker thread, bounded by a
+    per-``kind`` ``asyncio.Semaphore`` — ``DOCINT_INGEST_CONCURRENCY`` (default
+    1) for ``kind="ingest"`` jobs, ``DOCINT_SUMMARY_CONCURRENCY`` (default 1)
+    for ``kind="summary"`` jobs — so the two kinds never contend for the same
+    worker slot. Clients attach with :meth:`subscribe_owner`, which replays
+    each owned job's collapsed history before live-tailing — so a browser
+    that reloads mid-run re-attaches and resumes the live view, regardless of
+    job kind.
 
     There is no durable storage: jobs do not survive a process restart. A job
     is retained until its owner removes it, except that finishing a run evicts
@@ -220,21 +265,34 @@ class IngestJobManager:
     # bound; the SPA only ever needs the newest, so this is generous.
     MAX_TERMINAL_JOBS_PER_OWNER: ClassVar[int] = 50
 
-    def __init__(self, runner: JobRunner, concurrency: int | None = None) -> None:
+    def __init__(
+        self,
+        runner: JobRunner,
+        concurrency: int | None = None,
+        summary_concurrency: int | None = None,
+    ) -> None:
         """Initialize the manager.
 
         Args:
             runner (JobRunner): Blocking callable executing one job. Receives
                 the job state and a thread-safe ``push(event, payload)``.
                 Returns ``{"empty": bool, "resolution": dict | None}``.
-            concurrency (int | None): Worker semaphore size. Defaults to
-                :func:`docint.utils.env_cfg.load_ingest_concurrency`.
+            concurrency (int | None): Worker semaphore size for ``kind="ingest"``
+                jobs. Defaults to :func:`docint.utils.env_cfg.load_ingest_concurrency`.
+            summary_concurrency (int | None): Worker semaphore size for
+                ``kind="summary"`` jobs. Defaults to
+                :func:`docint.utils.env_cfg.load_summary_concurrency`.
         """
         self._runner = runner
         self._jobs: dict[str, IngestJobState] = {}
         self._subscribers: dict[str, list[asyncio.Queue[str | None]]] = {}
         self._lock = asyncio.Lock()
-        self._semaphore = asyncio.Semaphore(concurrency if concurrency is not None else load_ingest_concurrency())
+        self._semaphores: dict[str, asyncio.Semaphore] = {
+            "ingest": asyncio.Semaphore(concurrency if concurrency is not None else load_ingest_concurrency()),
+            "summary": asyncio.Semaphore(
+                summary_concurrency if summary_concurrency is not None else load_summary_concurrency()
+            ),
+        }
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def create(
@@ -243,16 +301,17 @@ class IngestJobManager:
         owner: str,
         logical_name: str,
         physical: str,
-        batch_dir: Path,
-        hybrid: bool | None,
-        ner: bool | None,
-        hate_speech: bool | None,
-        resolve: bool,
+        batch_dir: Path | None = None,
+        hybrid: bool | None = None,
+        ner: bool | None = None,
+        hate_speech: bool | None = None,
+        resolve: bool = False,
+        kind: str = "ingest",
     ) -> IngestJobState:
         """Register a job and dispatch its worker, unconditionally.
 
         Callers that must refuse a second concurrent job for the same
-        ``(owner, physical)`` pair — i.e. every route — should use
+        ``(owner, physical, kind)`` triple — i.e. every route — should use
         :meth:`create_if_idle` instead: a separate ``active_for()`` check
         before calling this method is a TOCTOU (two interleaved callers can
         both observe no in-flight job and both create one).
@@ -261,13 +320,19 @@ class IngestJobManager:
             owner (str): Resolved principal owning the job.
             logical_name (str): The caller's collection name.
             physical (str): Owner-namespaced Qdrant collection name.
-            batch_dir (Path): Directory of staged source files.
+            batch_dir (Path | None): Directory of staged source files.
+                Ingest-only; a summary job omits it.
             hybrid (bool | None): Whether hybrid search is enabled for the
                 run; ``None`` keeps the RAG engine's derived default instead
-                of forcing it.
-            ner (bool | None): Per-request NER override.
+                of forcing it. Ingest-only.
+            ner (bool | None): Per-request NER override. Ingest-only.
             hate_speech (bool | None): Per-request hate-speech override.
+                Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
+                Ingest-only.
+            kind (str): ``"ingest"`` or ``"summary"``. Selects the SSE event
+                names (:data:`KIND_EVENTS`) and the worker semaphore this job
+                waits on.
 
         Returns:
             IngestJobState: The newly registered job.
@@ -281,6 +346,7 @@ class IngestJobManager:
             ner=ner,
             hate_speech=hate_speech,
             resolve=resolve,
+            kind=kind,
         )
         async with self._lock:
             self._jobs[state.job_id] = state
@@ -293,11 +359,12 @@ class IngestJobManager:
         owner: str,
         logical_name: str,
         physical: str,
-        batch_dir: Path,
-        hybrid: bool | None,
-        ner: bool | None,
-        hate_speech: bool | None,
-        resolve: bool,
+        batch_dir: Path | None = None,
+        hybrid: bool | None = None,
+        ner: bool | None = None,
+        hate_speech: bool | None = None,
+        resolve: bool = False,
+        kind: str = "ingest",
     ) -> tuple[IngestJobState, bool]:
         """Atomically check for an in-flight job and create one only if idle.
 
@@ -312,29 +379,41 @@ class IngestJobManager:
         run's final node batch). Doing both under one lock makes the two
         outcomes ("this call created a job" / "another job is already there")
         mutually exclusive and exhaustive: at most one concurrent caller for a
-        given ``(owner, physical)`` ever sees ``created=True``.
+        given ``(owner, physical, kind)`` ever sees ``created=True``.
+
+        Idleness is scoped to ``(owner, physical, kind)``, not just
+        ``(owner, physical)``: an ingest job and a summary job for the same
+        collection are independent runs against independent worker pools, so
+        they may legitimately run at once. Only a second job of the *same*
+        kind for the same collection is refused.
 
         Args:
             owner (str): Resolved principal owning the job.
             logical_name (str): The caller's collection name.
             physical (str): Owner-namespaced Qdrant collection name.
-            batch_dir (Path): Directory of staged source files.
+            batch_dir (Path | None): Directory of staged source files.
+                Ingest-only; a summary job omits it.
             hybrid (bool | None): Whether hybrid search is enabled for the
                 run; ``None`` keeps the RAG engine's derived default instead
-                of forcing it.
-            ner (bool | None): Per-request NER override.
+                of forcing it. Ingest-only.
+            ner (bool | None): Per-request NER override. Ingest-only.
             hate_speech (bool | None): Per-request hate-speech override.
+                Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
+                Ingest-only.
+            kind (str): ``"ingest"`` or ``"summary"``. Selects the SSE event
+                names (:data:`KIND_EVENTS`), the worker semaphore this job
+                waits on, and the idleness scope checked before creating.
 
         Returns:
             tuple[IngestJobState, bool]: ``(state, created)``. When
             ``created`` is ``True``, ``state`` is the newly dispatched job
             (caller should respond 202). When ``False``, ``state`` is the
-            pre-existing queued/running job for this ``(owner, physical)``
+            pre-existing queued/running job for this ``(owner, physical, kind)``
             (caller should respond 409 carrying its ``job_id``).
         """
         async with self._lock:
-            existing = self._active_locked(owner, physical)
+            existing = self._active_locked(owner, physical, kind)
             if existing is not None:
                 return existing, False
             state = self._new_state(
@@ -346,6 +425,7 @@ class IngestJobManager:
                 ner=ner,
                 hate_speech=hate_speech,
                 resolve=resolve,
+                kind=kind,
             )
             self._jobs[state.job_id] = state
         self._dispatch_worker(state)
@@ -357,11 +437,12 @@ class IngestJobManager:
         owner: str,
         logical_name: str,
         physical: str,
-        batch_dir: Path,
-        hybrid: bool | None,
-        ner: bool | None,
-        hate_speech: bool | None,
-        resolve: bool,
+        batch_dir: Path | None = None,
+        hybrid: bool | None = None,
+        ner: bool | None = None,
+        hate_speech: bool | None = None,
+        resolve: bool = False,
+        kind: str = "ingest",
     ) -> IngestJobState:
         """Build a fresh, unregistered job state.
 
@@ -369,13 +450,17 @@ class IngestJobManager:
             owner (str): Resolved principal owning the job.
             logical_name (str): The caller's collection name.
             physical (str): Owner-namespaced Qdrant collection name.
-            batch_dir (Path): Directory of staged source files.
+            batch_dir (Path | None): Directory of staged source files.
+                Ingest-only; a summary job omits it.
             hybrid (bool | None): Whether hybrid search is enabled for the
                 run; ``None`` keeps the RAG engine's derived default instead
-                of forcing it.
-            ner (bool | None): Per-request NER override.
+                of forcing it. Ingest-only.
+            ner (bool | None): Per-request NER override. Ingest-only.
             hate_speech (bool | None): Per-request hate-speech override.
+                Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
+                Ingest-only.
+            kind (str): ``"ingest"`` or ``"summary"``.
 
         Returns:
             IngestJobState: A new, not-yet-registered job state.
@@ -385,6 +470,7 @@ class IngestJobManager:
             owner=owner,
             logical_name=logical_name,
             physical=physical,
+            kind=kind,
             batch_dir=batch_dir,
             hybrid=hybrid,
             ner=ner,
@@ -417,12 +503,12 @@ class IngestJobManager:
             state = self._jobs.get(job_id)
         return state if state is not None and state.owner == owner else None
 
-    async def active_for(self, owner: str, physical: str) -> IngestJobState | None:
+    async def active_for(self, owner: str, physical: str, kind: str = "ingest") -> IngestJobState | None:
         """Return the owner's unfinished job for a collection, if any.
 
-        Used to reject a second concurrent ingest into the same collection:
-        overlapping runs can double-write, because file hashes are only
-        recorded as ingested after a run's final node batch.
+        Used to reject a second concurrent job of the same kind into the same
+        collection: overlapping ingest runs can double-write, because file
+        hashes are only recorded as ingested after a run's final node batch.
 
         This is a point-in-time read only. A caller that means to act on the
         result by creating a job if none is found must use
@@ -433,19 +519,24 @@ class IngestJobManager:
         Args:
             owner (str): Resolved principal.
             physical (str): Owner-namespaced Qdrant collection name.
+            kind (str): ``"ingest"`` or ``"summary"``. Idleness is scoped to
+                ``(owner, physical, kind)`` — a job of the other kind for the
+                same collection does not count as active here.
 
         Returns:
             IngestJobState | None: The queued/running job, if one exists.
         """
         async with self._lock:
-            return self._active_locked(owner, physical)
+            return self._active_locked(owner, physical, kind)
 
-    def _active_locked(self, owner: str, physical: str) -> IngestJobState | None:
+    def _active_locked(self, owner: str, physical: str, kind: str = "ingest") -> IngestJobState | None:
         """Find the owner's unfinished job for a collection; caller must hold ``self._lock``.
 
         Args:
             owner (str): Resolved principal.
             physical (str): Owner-namespaced Qdrant collection name.
+            kind (str): ``"ingest"`` or ``"summary"``. Only a job of this
+                kind counts as active.
 
         Returns:
             IngestJobState | None: The queued/running job, if one exists.
@@ -454,6 +545,7 @@ class IngestJobManager:
             if (
                 state.owner == owner
                 and state.physical == physical
+                and state.kind == kind
                 and state.status in (JobStatus.QUEUED, JobStatus.RUNNING)
             ):
                 return state
@@ -583,7 +675,7 @@ class IngestJobManager:
         Args:
             state (IngestJobState): The job to process.
         """
-        async with self._semaphore:
+        async with self._semaphores[state.kind]:
             state.status = JobStatus.RUNNING
             state.started_at = _utcnow()
             loop = asyncio.get_running_loop()
@@ -608,10 +700,11 @@ class IngestJobManager:
             def _emit(event_name: str, payload: dict[str, Any]) -> None:
                 """Dispatch a frame synchronously. Loop thread only.
 
-                Used for the frames ``_worker`` produces itself
-                (``ingestion_started`` and both terminal events), which
-                already run on the loop thread — right beside the status
-                change each announces. Routing those through
+                Used for the frames ``_worker`` produces itself (the kind's
+                ``started`` frame and both terminal events, per
+                :data:`KIND_EVENTS`), which already run on the loop thread —
+                right beside the status change each announces. Routing those
+                through
                 ``call_soon_threadsafe`` too (as ``_push`` below must) would
                 defer recording the frame to a *later* loop iteration,
                 leaving a window where ``state.status`` already reads
@@ -642,17 +735,18 @@ class IngestJobManager:
                 frame = _frame(event_name, payload)
                 loop.call_soon_threadsafe(self._dispatch, state, event_name, frame)
 
-            _emit("ingestion_started", {"collection": state.logical_name})
+            names = KIND_EVENTS[state.kind]
+            _emit(names["started"], {"collection": state.logical_name})
             try:
                 result = await to_thread.run_sync(self._runner, state, _push)
             except Exception:
-                logger.exception("Ingest job {} failed.", state.job_id)
+                logger.exception("Job {} ({}) failed.", state.job_id, state.kind)
                 state.status = JobStatus.FAILED
-                state.error = "Ingestion failed."
+                state.error = names["failed_message"]
                 state.finished_at = _utcnow()
                 # Static protocol copy only: the exception text can carry
                 # connection strings or file paths and never reaches a client.
-                _emit("error", {"message": "Ingestion failed.", "code": "ingestion_failed"})
+                _emit("error", {"message": names["failed_message"], "code": names["failed_code"]})
                 return
             state.empty = bool(result.get("empty", False))
             state.resolution = result.get("resolution")
@@ -664,7 +758,7 @@ class IngestJobManager:
             }
             if state.resolution is not None:
                 terminal["resolution"] = state.resolution
-            _emit("ingestion_complete", terminal)
+            _emit(names["complete"], terminal)
 
     async def _prune_terminal(self, owner: str) -> None:
         """Drop an owner's oldest finished jobs beyond the retention cap.

@@ -177,3 +177,30 @@ def test_de_generation_prompt_binds_prior_turn_and_renders_cleanly(name: str, fi
 
     assert "PRIOR-TURN-MARKER" in rendered, f"de/{name}.txt dropped the bound prior turn"
     assert "{" not in rendered and "}" not in rendered, f"de/{name}.txt left unfilled placeholders: {rendered!r}"
+
+
+@pytest.mark.parametrize("name", ["summary_map.txt", "summary_fold.txt"])
+def test_tree_summary_prompts_exist_in_all_locales(name: str) -> None:
+    """Tree-summary map/fold prompts exist in both English and German."""
+    base = Path("docint/utils/prompts")
+    for locale in ("en", "de"):
+        path = base / locale / name
+        assert path.is_file(), f"missing {path}"
+        text = path.read_text(encoding="utf-8")
+        assert text.strip()
+
+
+def test_summary_map_prompt_placeholders() -> None:
+    """The summary_map prompt contains required placeholders and protocol strings."""
+    for locale in ("en", "de"):
+        text = Path(f"docint/utils/prompts/{locale}/summary_map.txt").read_text(encoding="utf-8")
+        assert "{label}" in text, f"missing {{label}} in {locale}/summary_map.txt"
+        assert "{chunk_block}" in text, f"missing {{chunk_block}} in {locale}/summary_map.txt"
+        assert "EVIDENCE_INDICES:" in text, f"missing EVIDENCE_INDICES: in {locale}/summary_map.txt"
+
+
+def test_summary_fold_prompt_placeholders() -> None:
+    """The summary_fold prompt contains required placeholders."""
+    for locale in ("en", "de"):
+        text = Path(f"docint/utils/prompts/{locale}/summary_fold.txt").read_text(encoding="utf-8")
+        assert "{summaries_block}" in text, f"missing {{summaries_block}} in {locale}/summary_fold.txt"

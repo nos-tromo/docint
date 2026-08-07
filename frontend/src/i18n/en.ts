@@ -246,12 +246,17 @@ export const en = {
   'analysis.coverage_sampled': 'sampled {sampled} of {candidate} (deduped {deduped})',
   'analysis.coverage_hide': 'hide',
   'analysis.coverage_show_uncovered': 'show {count} uncovered',
+  'analysis.coverage_partial_label': 'Incomplete summary',
+  'analysis.coverage_partial_detail':
+    'This summary stopped at the configured processing budget and does not cover the whole collection. Refresh to continue where possible, or ask your administrator to raise the summary processing limit.',
   'analysis.summary_generating': 'Generating…',
   'analysis.summary_generate': 'Generate',
   'analysis.summary_refresh': 'Refresh',
   'analysis.summary_download_md': 'Download MD',
   'analysis.summary_sources': 'Sources',
   'analysis.summary_failed': 'Summary generation failed.',
+  'analysis.summary_building': 'Building collection summary…',
+  'analysis.summary_building_progress': 'Summarizing {mapped}/{total} units…',
 
   // report
   'report.title': 'Reports',

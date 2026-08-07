@@ -169,8 +169,12 @@ Both modes ultimately call `RAG.run_query()`; the difference lives in
 Three endpoints stream responses back to the client:
 
 - `POST /stream_query` — streams the answer to a single query.
-- `POST /summarize/stream` — streams a collection summary.
 - `POST /agent/chat/stream` — streams the orchestrator's final answer.
+
+`POST /summarize` is not a streaming endpoint: it answers `200` from cache
+or `202` with a `job_id` and lets the caller follow the build on
+`GET /ingest/jobs/events` (see below) — the same job-plus-SSE shape as
+ingestion, not token streaming.
 
 All three use `_stream_simulated_text()` (`docint/core/api.py:189`) to
 replay the complete answer as SSE tokens with a fixed token delay

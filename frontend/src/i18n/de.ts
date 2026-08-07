@@ -255,6 +255,9 @@ export const de: Strings = {
   'analysis.coverage_sampled': 'Stichprobe {sampled} von {candidate} (dedupliziert {deduped})',
   'analysis.coverage_hide': 'ausblenden',
   'analysis.coverage_show_uncovered': '{count} nicht abgedeckte anzeigen',
+  'analysis.coverage_partial_label': 'Unvollständige Zusammenfassung',
+  'analysis.coverage_partial_detail':
+    'Diese Zusammenfassung wurde durch das konfigurierte Verarbeitungsbudget beendet und deckt nicht die gesamte Sammlung ab. Klicken Sie auf „Aktualisieren“, um sie soweit möglich fortzusetzen, oder bitten Sie Ihre Administration, das Verarbeitungslimit zu erhöhen.',
   'analysis.summary_failed':
     'Die Zusammenfassung konnte nicht erstellt werden.',
   'analysis.summary_generating': 'Wird erstellt…',
@@ -262,6 +265,8 @@ export const de: Strings = {
   'analysis.summary_refresh': 'Aktualisieren',
   'analysis.summary_download_md': 'MD herunterladen',
   'analysis.summary_sources': 'Quellen',
+  'analysis.summary_building': 'Sammlungszusammenfassung wird erstellt…',
+  'analysis.summary_building_progress': 'Fasse {mapped}/{total} Einheiten zusammen…',
 
   // report
   'report.title': 'Berichte',

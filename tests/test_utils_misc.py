@@ -17,6 +17,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_retrieval_env,
     load_session_env,
+    load_summary_concurrency,
     load_summary_env,
 )
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
@@ -112,22 +113,12 @@ def test_load_summary_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch (pytest.MonkeyPatch): Fixture to clear environment variables.
     """
     monkeypatch.delenv("SUMMARY_COVERAGE_TARGET", raising=False)
-    monkeypatch.delenv("SUMMARY_MAX_DOCS", raising=False)
-    monkeypatch.delenv("SUMMARY_PER_DOC_TOP_K", raising=False)
     monkeypatch.delenv("SUMMARY_FINAL_SOURCE_CAP", raising=False)
-    monkeypatch.delenv("SUMMARY_SOCIAL_CHUNKING_ENABLED", raising=False)
-    monkeypatch.delenv("SUMMARY_SOCIAL_CANDIDATE_POOL", raising=False)
-    monkeypatch.delenv("SUMMARY_SOCIAL_DIVERSITY_LIMIT", raising=False)
 
     cfg = load_summary_env()
 
     assert cfg.coverage_target == 0.70
-    assert cfg.max_docs == 30
-    assert cfg.per_doc_top_k == 4
     assert cfg.final_source_cap == 24
-    assert cfg.social_chunking_enabled is True
-    assert cfg.social_candidate_pool == 48
-    assert cfg.social_diversity_limit == 2
 
 
 def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,22 +128,12 @@ def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
     """
     monkeypatch.setenv("SUMMARY_COVERAGE_TARGET", "1.5")
-    monkeypatch.setenv("SUMMARY_MAX_DOCS", "12")
-    monkeypatch.setenv("SUMMARY_PER_DOC_TOP_K", "6")
     monkeypatch.setenv("SUMMARY_FINAL_SOURCE_CAP", "10")
-    monkeypatch.setenv("SUMMARY_SOCIAL_CHUNKING_ENABLED", "false")
-    monkeypatch.setenv("SUMMARY_SOCIAL_CANDIDATE_POOL", "64")
-    monkeypatch.setenv("SUMMARY_SOCIAL_DIVERSITY_LIMIT", "3")
 
     cfg = load_summary_env()
 
     assert cfg.coverage_target == 1.0
-    assert cfg.max_docs == 12
-    assert cfg.per_doc_top_k == 6
     assert cfg.final_source_cap == 10
-    assert cfg.social_chunking_enabled is False
-    assert cfg.social_candidate_pool == 64
-    assert cfg.social_diversity_limit == 3
 
 
 def test_load_frontend_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,6 +173,7 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RETRIEVAL_SPARSE_TOP_K", raising=False)
     monkeypatch.delenv("RETRIEVAL_HYBRID_TOP_K", raising=False)
     monkeypatch.delenv("PARENT_CONTEXT_RETRIEVAL_ENABLED", raising=False)
+    monkeypatch.delenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", raising=False)
 
     cfg = load_retrieval_env()
 
@@ -202,6 +184,7 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.sparse_top_k == 20
     assert cfg.hybrid_top_k == 20
     assert cfg.parent_context_enabled is True
+    assert cfg.social_diversity_limit == 2
 
 
 def test_load_retrieval_env_parses_chat_response_mode(
@@ -219,6 +202,7 @@ def test_load_retrieval_env_parses_chat_response_mode(
     monkeypatch.setenv("RETRIEVAL_SPARSE_TOP_K", "17")
     monkeypatch.setenv("RETRIEVAL_HYBRID_TOP_K", "9")
     monkeypatch.setenv("PARENT_CONTEXT_RETRIEVAL_ENABLED", "false")
+    monkeypatch.setenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", "5")
 
     cfg = load_retrieval_env()
 
@@ -229,6 +213,24 @@ def test_load_retrieval_env_parses_chat_response_mode(
     assert cfg.sparse_top_k == 17
     assert cfg.hybrid_top_k == 9
     assert cfg.parent_context_enabled is False
+    assert cfg.social_diversity_limit == 5
+
+
+def test_load_retrieval_env_clamps_social_diversity_limit_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SOCIAL_SOURCE_DIVERSITY_LIMIT should be clamped to at least 1.
+
+    A limit below 1 would drop every source, so the loader floors it.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", "0")
+
+    cfg = load_retrieval_env()
+
+    assert cfg.social_diversity_limit == 1
 
 
 def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -551,3 +553,71 @@ def test_load_ingestion_env_clamps_negative_docstore_retry_knobs(
     assert cfg.docstore_max_retries == 0
     assert cfg.docstore_retry_backoff_seconds == 0.0
     assert cfg.docstore_retry_backoff_max_seconds == 0.0
+
+
+class TestTreeSummaryEnv:
+    """New tree-summary knobs on SummaryConfig and the summary job concurrency."""
+
+    def test_tree_summary_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tree-summary knobs should fall back to their documented defaults.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to clear environment variables.
+        """
+        for var in (
+            "SUMMARY_ON_INGEST",
+            "SUMMARY_MAP_WINDOW_TOKENS",
+            "SUMMARY_REDUCE_FANIN",
+            "SUMMARY_MAX_LLM_CALLS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        cfg = load_summary_env()
+        assert cfg.on_ingest is True
+        assert cfg.map_window_tokens == 3000
+        assert cfg.reduce_fanin == 10
+        assert cfg.max_llm_calls == 500
+
+    def test_tree_summary_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tree-summary knobs should read explicit environment overrides.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
+        """
+        monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
+        monkeypatch.setenv("SUMMARY_MAP_WINDOW_TOKENS", "1000")
+        monkeypatch.setenv("SUMMARY_REDUCE_FANIN", "4")
+        monkeypatch.setenv("SUMMARY_MAX_LLM_CALLS", "42")
+        cfg = load_summary_env()
+        assert cfg.on_ingest is False
+        assert cfg.map_window_tokens == 1000
+        assert cfg.reduce_fanin == 4
+        assert cfg.max_llm_calls == 42
+
+    def test_tree_summary_clamps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tree-summary numeric knobs should clamp to their documented floors.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
+        """
+        monkeypatch.setenv("SUMMARY_MAP_WINDOW_TOKENS", "0")
+        monkeypatch.setenv("SUMMARY_REDUCE_FANIN", "-3")
+        monkeypatch.setenv("SUMMARY_MAX_LLM_CALLS", "0")
+        cfg = load_summary_env()
+        assert cfg.map_window_tokens >= 100
+        assert cfg.reduce_fanin >= 2
+        assert cfg.max_llm_calls >= 1
+
+    def test_summary_concurrency_default_and_clamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Summary job concurrency should default to 1 and clamp invalid values.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
+        """
+        monkeypatch.delenv("DOCINT_SUMMARY_CONCURRENCY", raising=False)
+        assert load_summary_concurrency() == 1
+        monkeypatch.setenv("DOCINT_SUMMARY_CONCURRENCY", "0")
+        assert load_summary_concurrency() == 1
+        monkeypatch.setenv("DOCINT_SUMMARY_CONCURRENCY", "3")
+        assert load_summary_concurrency() == 3
+        monkeypatch.setenv("DOCINT_SUMMARY_CONCURRENCY", "garbage")
+        assert load_summary_concurrency() == 1

@@ -161,6 +161,8 @@ from docint.core.storage.scroll import iter_scroll
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
+from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
+from docint.core.summary.units import MapUnit, partition_units, payload_text
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.embed_chunking import (
@@ -187,6 +189,10 @@ from docint.utils.retry import (
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
+# KV namespace for the tree summarizer's per-unit map cache (one entry per
+# MapUnit.unit_key), distinct from SUMMARY_CACHE_NAMESPACE which holds the
+# single final synthesized payload.
+SUMMARY_MAP_CACHE_NAMESPACE = "docint_summary_map_cache_v1"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
 
 # Marks a retrieved node as coming from the image lane. Set on the node
@@ -506,12 +512,6 @@ DEFAULT_SUMMARIZE_PROMPT = (
     "topics, document types, and notable findings. Focus on text bodies, not "
     "metadata. Limit the response to 15 sentences."
 )
-DEFAULT_SOCIAL_SUMMARIZE_PROMPT = (
-    "Summarize the social or row-based collection using only the cited posts or "
-    "rows. Keep posts distinct, use metadata such as network, author, and "
-    "timestamp when it helps prevent blending separate claims, and call out "
-    "conflicts or uncertainty explicitly."
-)
 DEFAULT_RETRIEVAL_REWRITE_PROMPT = (
     "Rewrite the user's latest message into a standalone retrieval query "
     "suitable for vector search.\n\n"
@@ -603,6 +603,147 @@ DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT = (
     "Style instructions:\n{style_prompt}\n\n"
     "Evidence briefs:\n{evidence_block}\n"
 )
+DEFAULT_SUMMARY_MAP_PROMPT = (
+    "You are summarizing one unit of source material from a larger document "
+    "collection.\n"
+    "Unit: {label}\n\n"
+    "Write a dense, factual summary of the numbered excerpts below (5-10 "
+    "sentences). Capture the main topics, concrete claims and findings, named "
+    "people, organizations and places, dates, and notable outliers or "
+    "disagreements. Do not invent facts and do not editorialize. If the "
+    "excerpts are unintelligible, say so.\n\n"
+    "After the summary, output one final line exactly in this form, naming "
+    "the one or two excerpt numbers that best represent this unit:\n"
+    "EVIDENCE_INDICES: 1,2\n\n"
+    "Excerpts:\n{chunk_block}"
+)
+DEFAULT_SUMMARY_FOLD_PROMPT = (
+    "You are combining partial summaries of one document collection into a "
+    "single intermediate summary. Preserve concrete facts, named entities, "
+    "dates, recurring themes, disagreements, and outliers. Do not invent "
+    "facts and do not generalize away specifics. Keep the result under 20 "
+    "sentences.\n\n"
+    "Partial summaries:\n{summaries_block}"
+)
+
+
+class _KVMapCache:
+    """Adapts a collection's ``SQLiteKVStore`` to the tree summarizer's :class:`MapCache` protocol.
+
+    Wraps ``kv_store`` so per-unit map results persist under
+    ``SUMMARY_MAP_CACHE_NAMESPACE``, keyed by ``unit_key``. The stored
+    validator concatenates the caller-supplied unit fingerprint with a
+    ``validator_suffix`` fixed at construction (the summary prompt
+    fingerprint plus the chat model id), so a prompt or model change
+    invalidates every entry without touching the unit fingerprints
+    themselves — :mod:`docint.core.summary.tree` keeps passing only the
+    unit's own fingerprint.
+
+    As a side effect, every resolved unit (cache hit via :meth:`get`, or a
+    fresh map result recorded via :meth:`put`) is recorded in
+    :attr:`covered_keys`. :meth:`RAG.build_tree_summary` reads this set from
+    *inside* the synthesis-prompt closure — the one place that needs to know
+    which units are covered before :class:`TreeSummarizer.build` returns.
+    """
+
+    def __init__(self, kv_store: BaseKVStore | None, *, validator_suffix: str) -> None:
+        """Configure the adapter.
+
+        Args:
+            kv_store: The collection's KV store, or ``None`` when persistence
+                is unavailable — the adapter then degrades to an in-memory,
+                always-miss cache so callers (and :attr:`covered_keys`
+                tracking) do not need a separate code path.
+            validator_suffix: ``"{prompt_fingerprint}|{model_name}"``,
+                appended to every unit fingerprint to form the full
+                validator string.
+        """
+        self._kv_store = kv_store
+        self._validator_suffix = validator_suffix
+        self.covered_keys: set[str] = set()
+
+    def get(self, unit_key: str, validator: str) -> dict[str, Any] | None:
+        """Return a cached map result for ``unit_key`` iff its validator matches.
+
+        Args:
+            unit_key: The unit's stable identity.
+            validator: The unit's content fingerprint (not yet combined with
+                the prompt/model suffix).
+
+        Returns:
+            dict[str, Any] | None: ``{"summary": str, "evidence_ids": list[str]}``
+            on a hit, else ``None`` (including on any storage exception).
+        """
+        if self._kv_store is None:
+            return None
+        try:
+            entry = self._kv_store.get(unit_key, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+        except Exception as exc:
+            logger.warning("Map cache get failed for unit '{}': {}", unit_key, exc)
+            return None
+        if not isinstance(entry, dict):
+            return None
+        expected = f"{validator}|{self._validator_suffix}"
+        if str(entry.get("validator") or "") != expected:
+            return None
+        self.covered_keys.add(unit_key)
+        return {
+            "summary": str(entry.get("summary") or ""),
+            "evidence_ids": list(entry.get("evidence_ids") or []),
+        }
+
+    def put(self, unit_key: str, validator: str, entry: dict[str, Any]) -> None:
+        """Store a fresh map result for ``unit_key``.
+
+        Args:
+            unit_key: The unit's stable identity.
+            validator: The unit's content fingerprint (not yet combined with
+                the prompt/model suffix).
+            entry: ``{"summary": str, "evidence_ids": list[str]}``.
+        """
+        self.covered_keys.add(unit_key)
+        if self._kv_store is None:
+            return
+        try:
+            self._kv_store.put(
+                unit_key,
+                {
+                    "validator": f"{validator}|{self._validator_suffix}",
+                    "summary": entry.get("summary"),
+                    "evidence_ids": entry.get("evidence_ids") or [],
+                },
+                collection=SUMMARY_MAP_CACHE_NAMESPACE,
+            )
+        except Exception as exc:
+            logger.warning("Map cache put failed for unit '{}': {}", unit_key, exc)
+
+    def all_keys(self) -> list[str]:
+        """Return every unit key currently persisted in the map cache.
+
+        Returns:
+            list[str]: Cached unit keys, or ``[]`` when persistence is
+            unavailable or the lookup fails.
+        """
+        if self._kv_store is None:
+            return []
+        try:
+            return list(self._kv_store.get_all(collection=SUMMARY_MAP_CACHE_NAMESPACE).keys())
+        except Exception as exc:
+            logger.warning("Map cache all_keys() failed: {}", exc)
+            return []
+
+    def delete(self, key: str) -> None:
+        """Remove one entry from the persistent map cache.
+
+        Args:
+            key: The unit key to remove.
+        """
+        if self._kv_store is None:
+            return
+        try:
+            self._kv_store.delete(key, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+        except Exception as exc:
+            logger.warning("Map cache delete failed for unit '{}': {}", key, exc)
 
 
 def _extract_node_file_hashes(nodes: list[BaseNode]) -> set[str]:
@@ -2240,18 +2381,14 @@ class RAG:
     hybrid_top_k: int = field(default=20, init=False)
     parent_context_enabled: bool = field(default=True, init=False)
     parent_context_safety_margin: float = field(default=0.95, init=False)
+    social_diversity_limit: int = field(default=2, init=False)
     graphrag_enabled: bool = field(default=False, init=False)
     graphrag_neighbor_hops: int = field(default=1, init=False)
     graphrag_top_k_nodes: int = field(default=100, init=False)
     graphrag_min_edge_weight: int = field(default=1, init=False)
     graphrag_max_neighbors: int = field(default=6, init=False)
     summary_coverage_target: float = field(default=0.70, init=False)
-    summary_max_docs: int = field(default=30, init=False)
-    summary_per_doc_top_k: int = field(default=4, init=False)
     summary_final_source_cap: int = field(default=24, init=False)
-    social_summary_enabled: bool = field(default=True, init=False)
-    social_summary_candidate_pool: int = field(default=48, init=False)
-    social_summary_diversity_limit: int = field(default=2, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -2273,19 +2410,21 @@ class RAG:
     language_code: str = field(default="en", init=False)
     prompt_dir: Path | None = field(default=None, init=False)
     summarize_prompt_path: Path | None = field(default=None, init=False)
-    summarize_social_prompt_path: Path | None = field(default=None, init=False)
     conversation_summary_prompt_path: Path | None = field(default=None, init=False)
     rewrite_retrieval_prompt_path: Path | None = field(default=None, init=False)
     grounded_text_qa_prompt_path: Path | None = field(default=None, init=False)
     grounded_refine_prompt_path: Path | None = field(default=None, init=False)
     grounded_collection_summary_prompt_path: Path | None = field(default=None, init=False)
+    summary_map_prompt_path: Path | None = field(default=None, init=False)
+    summary_fold_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
-    summarize_social_prompt: str = field(default="", init=False)
     conversation_summary_prompt: str = field(default="", init=False)
     rewrite_retrieval_prompt: str = field(default="", init=False)
     grounded_text_qa_prompt: str = field(default="", init=False)
     grounded_refine_prompt: str = field(default="", init=False)
     grounded_collection_summary_prompt: str = field(default="", init=False)
+    summary_map_prompt: str = field(default="", init=False)
+    summary_fold_prompt: str = field(default="", init=False)
 
     # --- Runtime (lazy caches / not in repr) ---
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
@@ -2457,12 +2596,13 @@ class RAG:
         ## --- Load prompts ---
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
-            self.summarize_social_prompt_path = self.prompt_dir / "summarize_social.txt"
             self.conversation_summary_prompt_path = self.prompt_dir / "conversation_summary.txt"
             self.rewrite_retrieval_prompt_path = self.prompt_dir / "rewrite_retrieval.txt"
             self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
             self.grounded_refine_prompt_path = self.prompt_dir / "grounded_refine.txt"
             self.grounded_collection_summary_prompt_path = self.prompt_dir / "grounded_collection_summary.txt"
+            self.summary_map_prompt_path = self.prompt_dir / "summary_map.txt"
+            self.summary_fold_prompt_path = self.prompt_dir / "summary_fold.txt"
         if self.summarize_prompt_path is None:
             logger.error("ValueError: summarize_prompt_path is not set. Cannot load summarize prompt.")
             raise ValueError("summarize_prompt_path is not set. Cannot load summarize prompt.")
@@ -2470,10 +2610,6 @@ class RAG:
             self.summarize_prompt_path,
             default=DEFAULT_SUMMARIZE_PROMPT,
             required=True,
-        )
-        self.summarize_social_prompt = self._load_prompt_text(
-            self.summarize_social_prompt_path,
-            default=DEFAULT_SOCIAL_SUMMARIZE_PROMPT,
         )
         self.conversation_summary_prompt = self._load_prompt_text(
             self.conversation_summary_prompt_path,
@@ -2495,6 +2631,14 @@ class RAG:
             self.grounded_collection_summary_prompt_path,
             default=DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT,
         )
+        self.summary_map_prompt = self._load_prompt_text(
+            self.summary_map_prompt_path,
+            default=DEFAULT_SUMMARY_MAP_PROMPT,
+        )
+        self.summary_fold_prompt = self._load_prompt_text(
+            self.summary_fold_prompt_path,
+            default=DEFAULT_SUMMARY_FOLD_PROMPT,
+        )
 
         # --- Retrieval config ---
         self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
@@ -2505,6 +2649,7 @@ class RAG:
         self.hybrid_top_k = self.retrieval_config.hybrid_top_k
         self.parent_context_enabled = self.retrieval_config.parent_context_enabled
         self.parent_context_safety_margin = self.retrieval_config.parent_context_safety_margin
+        self.social_diversity_limit = self.retrieval_config.social_diversity_limit
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
         self.graphrag_enabled = self.graphrag_config.enabled
         self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
@@ -2519,12 +2664,7 @@ class RAG:
 
         # --- Summary config ---
         self.summary_coverage_target = self.summary_config.coverage_target
-        self.summary_max_docs = self.summary_config.max_docs
-        self.summary_per_doc_top_k = self.summary_config.per_doc_top_k
         self.summary_final_source_cap = self.summary_config.final_source_cap
-        self.social_summary_enabled = self.summary_config.social_chunking_enabled
-        self.social_summary_candidate_pool = self.summary_config.social_candidate_pool
-        self.social_summary_diversity_limit = self.summary_config.social_diversity_limit
 
     # --- Active collection (stateless, per-request) ---
     # NOTE: ``qdrant_collection`` is exposed as a property, but it is attached
@@ -4491,51 +4631,6 @@ class RAG:
             for key in ("type", "network", "author", "author_id", "text_id")
         )
 
-    @staticmethod
-    def _source_post_key(source: dict[str, Any]) -> str:
-        """Build a stable social/post identity key for normalized sources."""
-        reference_metadata = source.get("reference_metadata")
-        if isinstance(reference_metadata, dict):
-            text_id = str(reference_metadata.get("text_id") or "").strip()
-            if text_id:
-                return f"text_id:{text_id}"
-
-        file_hash = str(source.get("file_hash") or "").strip()
-        row_value = source.get("row")
-        if file_hash and row_value is not None:
-            return f"row:{file_hash}:{row_value}"
-
-        text_value = str(source.get("text") or source.get("preview_text") or "").strip()
-        if text_value:
-            normalized = re.sub(r"\s+", " ", text_value).lower()
-            return f"text:{normalized[:240]}"
-        return ""
-
-    @staticmethod
-    def _source_diversity_bucket(source: dict[str, Any]) -> str:
-        """Return a coarse author/time bucket for social summary diversity."""
-        reference_metadata = source.get("reference_metadata")
-        ref: dict[str, Any] = reference_metadata if isinstance(reference_metadata, dict) else {}
-        author = str(ref.get("author_id") or ref.get("author") or "unknown").strip()
-        timestamp_raw = str(ref.get("timestamp") or "").strip()
-        time_bucket = "unknown"
-        if timestamp_raw:
-            try:
-                parsed = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
-                time_bucket = parsed.astimezone(UTC).strftime("%Y-%m-%dT%H")
-            except ValueError:
-                time_bucket = timestamp_raw[:13]
-        return f"{author.lower()}::{time_bucket}"
-
-    @staticmethod
-    def _coverage_unit_for_sources(sources: list[dict[str, Any]]) -> str:
-        """Infer coverage unit from normalized source metadata."""
-        for source in sources:
-            reference_metadata = source.get("reference_metadata")
-            if isinstance(reference_metadata, dict) and str(reference_metadata.get("text_id") or "").strip():
-                return "posts"
-        return "chunks"
-
     def _infer_collection_profile(self) -> dict[str, Any]:
         """Infer whether the active collection is social/table heavy."""
         docs = self.list_documents()
@@ -5012,9 +5107,11 @@ class RAG:
                 )
             )
         if bool(profile.get("is_social_table")):
-            node_postprocessors.append(
-                SocialSourceDiversityPostprocessor(diversity_limit=max(1, int(self.social_summary_diversity_limit)))
-            )
+            # Configurable via SOCIAL_SOURCE_DIVERSITY_LIMIT (RetrievalConfig)
+            # — this knob used to be sourced from the (now-deleted) sampling
+            # summarizer's social config, but this call site is on the
+            # chat/retrieval path, not the summarizer.
+            node_postprocessors.append(SocialSourceDiversityPostprocessor(diversity_limit=self.social_diversity_limit))
             node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.
@@ -7213,138 +7310,6 @@ class RAG:
         expanded_query, _ = self.expand_query_with_graph_with_debug(query)
         return expanded_query
 
-    def _summary_document_targets(self) -> list[dict[str, Any]]:
-        """Return capped document targets ordered by descending node count."""
-        documents = self.list_documents()
-        documents.sort(
-            key=lambda item: (
-                -int(item.get("node_count", 0) or 0),
-                str(item.get("filename") or "").lower(),
-            )
-        )
-        return documents[: self.summary_max_docs]
-
-    def _summary_source_matches_document(
-        self,
-        source: dict[str, Any],
-        *,
-        filename: str,
-        file_hash: str | None,
-    ) -> bool:
-        """Check whether a normalized source belongs to a document target."""
-        if file_hash and str(source.get("file_hash") or "") == file_hash:
-            return True
-
-        src_filename = str(source.get("filename") or "").strip()
-        if not src_filename:
-            return False
-
-        if src_filename == filename:
-            return True
-
-        try:
-            return Path(src_filename).name == Path(filename).name
-        except Exception:
-            return src_filename.lower() == filename.lower()
-
-    def _summary_document_filters(self, *, filename: str, file_hash: str | None) -> MetadataFilters:
-        """Build metadata filters that scope retrieval to one document."""
-        filters: list[MetadataFilter | MetadataFilters] = [
-            MetadataFilter(key="filename", value=filename, operator=FilterOperator.EQ),
-            MetadataFilter(key="file_name", value=filename, operator=FilterOperator.EQ),
-            MetadataFilter(key="file_path", value=filename, operator=FilterOperator.EQ),
-        ]
-        if file_hash:
-            filters.append(MetadataFilter(key="file_hash", value=file_hash, operator=FilterOperator.EQ))
-        return MetadataFilters(filters=filters, condition=FilterCondition.OR)
-
-    def _summary_payload_fallback_nodes(self, *, filename: str, file_hash: str | None) -> list[NodeWithScore]:
-        """Build synthetic summary nodes by scrolling stored payloads.
-
-        This fallback bypasses query embeddings entirely, so summary generation
-        can still proceed when the embedding backend returns invalid values.
-
-        Args:
-            filename (str): Target document filename.
-            file_hash (str | None): Optional file hash for precise scoping.
-
-        Returns:
-            list[NodeWithScore]: Synthetic node hits derived from stored payloads.
-        """
-        if not self.qdrant_collection:
-            return []
-
-        top_k = max(1, self.summary_per_doc_top_k)
-        matched_nodes: list[NodeWithScore] = []
-        offset = None
-        scroll_filter = None
-        if file_hash:
-            scroll_filter = qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="file_hash",
-                        match=qdrant_models.MatchValue(value=file_hash),
-                    )
-                ]
-            )
-
-        while len(matched_nodes) < top_k:
-            try:
-                points, offset = self.qdrant_client.scroll(
-                    collection_name=self.qdrant_collection,
-                    limit=128,
-                    offset=offset,
-                    scroll_filter=scroll_filter,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Payload fallback summary retrieval failed for '{}': {}",
-                    filename,
-                    exc,
-                )
-                break
-
-            if not points:
-                break
-
-            for index, point in enumerate(points, start=len(matched_nodes) + 1):
-                payload = getattr(point, "payload", None)
-                if not isinstance(payload, dict):
-                    continue
-                source = self._source_from_payload(
-                    collection=self.qdrant_collection,
-                    payload=payload,
-                )
-                if not self._summary_source_matches_document(
-                    source,
-                    filename=filename,
-                    file_hash=file_hash,
-                ):
-                    continue
-
-                node_id = str(
-                    payload.get("node_id")
-                    or payload.get("id_")
-                    or getattr(point, "id", "")
-                    or f"summary-fallback-{index}"
-                )
-                text_value = str(source.get("text") or source.get("preview_text") or "")
-                synthetic_node = TextNode(
-                    text=text_value,
-                    id_=node_id,
-                    metadata=dict(payload),
-                )
-                matched_nodes.append(NodeWithScore(node=synthetic_node, score=0.0))
-                if len(matched_nodes) >= top_k:
-                    break
-
-            if offset is None:
-                break
-
-        return matched_nodes
-
     def _summary_image_nodes_for_document(self, *, file_hash: str | None, top_k: int) -> list[NodeWithScore]:
         """Collect a document's stored images as summary evidence.
 
@@ -7409,140 +7374,99 @@ class RAG:
                 break
         return nodes
 
-    def _retrieve_summary_nodes_for_document(self, *, filename: str, file_hash: str | None) -> list[Any]:
-        """Retrieve top evidence nodes for a single document."""
-        if self.index is None:
-            self.create_index()
-        if self.index is None:
+    def _iter_collection_points(self) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Scroll the active collection, yielding every point's id and payload.
+
+        The tree summarizer's :func:`~docint.core.summary.units.partition_units`
+        consumes this directly to discover map units, so every point in the
+        collection — not just the ones a similarity query would surface — is
+        represented once.
+
+        Scroll errors are raised rather than warned (``iter_scroll``'s
+        fail-soft default, which is right for the fail-soft NER/hate-speech
+        aggregators). Here a mid-scroll Qdrant blip would shrink the universe
+        silently: ``partition_units`` would see only the pages that arrived,
+        every one of them would map, and the build would report
+        ``coverage_ratio: 1.0`` before caching a fraction of the collection as
+        the complete summary. Failing the summary job is the tested,
+        recoverable outcome.
+
+        Yields:
+            tuple[str, dict[str, Any]]: ``(point_id, payload)`` pairs for
+            every point with a dict payload in the active collection.
+
+        Raises:
+            Exception: Whatever the Qdrant client raises mid-scroll.
+        """
+        if not self.qdrant_collection:
+            return
+        for page in iter_scroll(
+            self.qdrant_client,
+            collection_name=self.qdrant_collection,
+            page_size=256,
+            with_payload=True,
+            with_vectors=False,
+            on_error="raise",
+            error_context="tree summary points",
+        ):
+            for point in page:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+                yield str(getattr(point, "id", "")), payload
+
+    def _fetch_unit_chunks(self, unit: MapUnit) -> list[UnitChunk]:
+        """Fetch a map unit's member chunks, in the unit's reading order.
+
+        Args:
+            unit: The unit to fetch chunks for.
+
+        Returns:
+            list[UnitChunk]: One chunk per member point whose extracted text
+            is non-empty, in ``unit.member_ids`` order. For a document unit
+            keyed by content hash (``doc:{file_hash}``, as opposed to the
+            hash-less ``doc:name:{filename}`` fallback), the document's
+            stored figures/keyframes are appended as extra chunks — a
+            document's images are evidence too (see
+            :meth:`_summary_image_nodes_for_document`).
+        """
+        if not unit.member_ids or not self.qdrant_collection:
+            return []
+        try:
+            points = self.qdrant_client.retrieve(
+                collection_name=self.qdrant_collection,
+                ids=list(unit.member_ids),
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Tree summary chunk fetch failed for unit '{}': {}", unit.unit_key, exc)
             return []
 
-        query = f"Extract factual highlights and notable findings from '{filename}'. Focus on substantive content."
-        top_k = max(1, self.summary_per_doc_top_k)
-        try:
-            retriever = self.index.as_retriever(
-                similarity_top_k=top_k,
-                filters=self._summary_document_filters(filename=filename, file_hash=file_hash),
-            )
-            nodes = retriever.retrieve(query)
-            if isinstance(nodes, list):
-                return nodes[:top_k]
-        except Exception as exc:
-            logger.warning(
-                "Filtered summary retrieval failed for '{}': {}",
-                filename,
-                exc,
-            )
+        payload_by_id: dict[str, Any] = {}
+        for point in points or []:
+            point_id = str(getattr(point, "id", "") or "")
+            if point_id:
+                payload_by_id[point_id] = getattr(point, "payload", None)
 
-        try:
-            fallback_retriever = self.index.as_retriever(similarity_top_k=top_k * 2)
-            fallback_nodes = fallback_retriever.retrieve(query)
-            if not isinstance(fallback_nodes, list):
-                return []
-            matched_nodes: list[Any] = []
-            for nws in fallback_nodes:
-                source = self._source_from_node_with_score(nws)
-                if source is None:
-                    continue
-                if self._summary_source_matches_document(source, filename=filename, file_hash=file_hash):
-                    matched_nodes.append(nws)
-                if len(matched_nodes) >= top_k:
-                    break
-            return matched_nodes
-        except Exception as exc:
-            logger.warning("Fallback summary retrieval failed for '{}': {}", filename, exc)
-            return self._summary_payload_fallback_nodes(
-                filename=filename,
-                file_hash=file_hash,
-            )
-
-    def _summary_source_key(self, source: dict[str, Any]) -> str:
-        """Build a deterministic deduplication key for summary sources.
-
-        Args:
-            source (dict[str, Any]): A normalized source dictionary.
-
-        Returns:
-            str: A string key that uniquely identifies the source for deduplication purposes.
-        """
-        reference_metadata = source.get("reference_metadata")
-        text_id = ""
-        if isinstance(reference_metadata, dict):
-            text_id = str(reference_metadata.get("text_id") or "").strip()
-        if text_id:
-            return f"text_id||{text_id}"
-        return "||".join(
-            [
-                str(source.get("file_hash") or ""),
-                str(source.get("filename") or ""),
-                str(source.get("page") or ""),
-                str(source.get("row") or ""),
-                str(source.get("preview_text") or source.get("text") or ""),
-            ]
-        )
-
-    def _summary_document_brief(self, *, filename: str, sources: list[dict[str, Any]]) -> str:
-        """Build one compact, evidence-first brief for a document.
-
-        Args:
-            filename (str): The name of the document.
-            sources (list[dict[str, Any]]): A list of normalized source dictionaries associated with the document.
-
-        Returns:
-            str: A formatted string brief that includes key points and evidence snippets from the sources.
-        """
-        snippets: list[str] = []
-        for source in sources:
-            raw_text = str(source.get("preview_text") or source.get("text") or "").strip()
-            if not raw_text:
+        chunks: list[UnitChunk] = []
+        for member_id in unit.member_ids:
+            payload = payload_by_id.get(member_id)
+            if not isinstance(payload, dict):
                 continue
-            compact = re.sub(r"\s+", " ", raw_text)
-            snippets.append(compact[:240])
-            if len(snippets) >= 2:
-                break
-
-        if not snippets:
-            return f"- Document: {filename}\n  - Evidence: (none)"
-
-        evidence_lines = "\n".join(f"  - Evidence {idx}: {snippet}" for idx, snippet in enumerate(snippets, start=1))
-        key_points = " ; ".join(snippets)
-        return f"- Document: {filename}\n  - Key points: {key_points}\n{evidence_lines}"
-
-    def _merge_summary_sources(self, per_doc_sources: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-        """Merge per-document evidence and guarantee broad document coverage.
-
-        Args:
-            per_doc_sources (dict[str, list[dict[str, Any]]]): Document ID -> source list.
-
-        Returns:
-            list[dict[str, Any]]: Merged sources prioritizing one per document, then filling the
-                remaining slots with additional evidence.
-        """
-        merged: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        # Ensure at least one source per covered document.
-        for sources in per_doc_sources.values():
-            if not sources:
+            text = payload_text(payload)
+            if not text:
                 continue
-            key = self._summary_source_key(sources[0])
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(sources[0])
-            if len(merged) >= self.summary_final_source_cap:
-                return merged
+            chunks.append(UnitChunk(chunk_id=member_id, text=text))
 
-        # Fill remaining slots with additional evidence snippets.
-        for sources in per_doc_sources.values():
-            for source in sources[1:]:
-                key = self._summary_source_key(source)
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(source)
-                if len(merged) >= self.summary_final_source_cap:
-                    return merged
-        return merged
+        if unit.kind == "document" and unit.unit_key.startswith("doc:") and not unit.unit_key.startswith("doc:name:"):
+            file_hash = unit.unit_key[len("doc:") :]
+            for nws in self._summary_image_nodes_for_document(file_hash=file_hash, top_k=4):
+                image_text = nws.node.get_content()
+                if image_text:
+                    chunks.append(UnitChunk(chunk_id=str(nws.node.node_id), text=image_text))
+
+        return chunks
 
     def _build_summary_synthesis_prompt(
         self,
@@ -7577,264 +7501,6 @@ class RAG:
             evidence_block=evidence_block,
         )
 
-    def _prepare_document_summary_context(self) -> dict[str, Any]:
-        """Prepare document-level summary context for standard collections."""
-        targets = self._summary_document_targets()
-        target_filenames = [str(doc.get("filename") or "") for doc in targets if doc.get("filename")]
-        per_doc_sources: dict[str, list[dict[str, Any]]] = {}
-        briefs: list[str] = []
-        candidate_count = 0
-        deduped_count = 0
-
-        for doc in targets:
-            filename = str(doc.get("filename") or "").strip()
-            if not filename:
-                continue
-            file_hash_raw = doc.get("file_hash")
-            file_hash = str(file_hash_raw).strip() if file_hash_raw else None
-            nodes = self._retrieve_summary_nodes_for_document(
-                filename=filename,
-                file_hash=file_hash,
-            )
-            # A multimodal document's figures and keyframes are evidence too;
-            # they live in the `_images` companion, which the retrieval above
-            # does not see. Capped well below the per-document budget so the
-            # images supplement the document's text rather than replace it.
-            nodes = list(nodes) + list(
-                self._summary_image_nodes_for_document(
-                    file_hash=file_hash,
-                    top_k=max(1, self.summary_per_doc_top_k // 3),
-                )
-            )
-            candidate_count += len(nodes)
-            normalized_sources: list[dict[str, Any]] = []
-            seen_doc_keys: set[str] = set()
-            for nws in nodes:
-                source = self._source_from_node_with_score(nws)
-                if source is None:
-                    continue
-                if not self._summary_source_matches_document(source, filename=filename, file_hash=file_hash):
-                    continue
-                key = self._summary_source_key(source)
-                if key in seen_doc_keys:
-                    continue
-                seen_doc_keys.add(key)
-                normalized_sources.append(source)
-                if len(normalized_sources) >= self.summary_per_doc_top_k:
-                    break
-
-            if normalized_sources:
-                deduped_count += len(normalized_sources)
-                per_doc_sources[filename] = normalized_sources
-                briefs.append(
-                    self._summary_document_brief(
-                        filename=filename,
-                        sources=normalized_sources,
-                    )
-                )
-
-        covered_filenames = list(per_doc_sources.keys())
-        uncovered = [filename for filename in target_filenames if filename not in per_doc_sources]
-        total_documents = len(target_filenames)
-        covered_documents = len(covered_filenames)
-        coverage_ratio = covered_documents / total_documents if total_documents > 0 else 0.0
-        diagnostics = {
-            "total_documents": total_documents,
-            "covered_documents": covered_documents,
-            "coverage_ratio": round(coverage_ratio, 4),
-            "uncovered_documents": uncovered,
-            "coverage_target": self.summary_coverage_target,
-            "coverage_unit": "documents",
-            "candidate_count": candidate_count,
-            "deduped_count": deduped_count,
-            "sampled_count": len(self._merge_summary_sources(per_doc_sources)),
-        }
-        merged_sources = self._merge_summary_sources(per_doc_sources)
-
-        return {
-            "synthesis_prompt": self._build_summary_synthesis_prompt(
-                briefs=briefs,
-                diagnostics=diagnostics,
-                style_prompt=self.summarize_prompt,
-            ),
-            "sources": merged_sources,
-            "summary_diagnostics": diagnostics,
-        }
-
-    def _retrieve_social_summary_nodes(self) -> list[Any]:
-        """Retrieve a larger candidate pool for social/table-heavy summaries."""
-        if self.index is None:
-            self.create_index()
-        if self.index is None:
-            return []
-
-        query = (
-            "Identify representative posts or rows, recurring themes, concrete "
-            "claims, disagreements, and notable outliers across this collection."
-        )
-        top_k = max(
-            1,
-            int(
-                max(
-                    self.social_summary_candidate_pool,
-                    self.summary_final_source_cap,
-                )
-            ),
-        )
-        try:
-            retriever = self.index.as_retriever(similarity_top_k=top_k)
-            nodes = retriever.retrieve(query)
-            if isinstance(nodes, list):
-                return nodes[:top_k]
-        except Exception as exc:
-            logger.warning("Social summary retrieval failed: {}", exc)
-        return []
-
-    def _select_social_summary_sources(
-        self,
-        candidates: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Deduplicate and diversify candidate social/table sources."""
-        deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for source in candidates:
-            identity = self._source_post_key(source)
-            if identity and identity in seen:
-                continue
-            if identity:
-                seen.add(identity)
-            deduped.append(source)
-
-        bucket_counts: dict[str, int] = defaultdict(int)
-        sampled: list[dict[str, Any]] = []
-        limit = max(1, int(self.social_summary_diversity_limit))
-        for source in deduped:
-            bucket = self._source_diversity_bucket(source)
-            if bucket_counts[bucket] >= limit:
-                continue
-            bucket_counts[bucket] += 1
-            sampled.append(source)
-            if len(sampled) >= self.summary_final_source_cap:
-                break
-        return deduped, sampled
-
-    def _count_social_coverage_units(self, coverage_unit: str) -> int:
-        """Count total social coverage units across the active collection."""
-        if not self.qdrant_collection:
-            return 0
-        seen: set[str] = set()
-        offset = None
-        while True:
-            try:
-                points, offset = self.qdrant_client.scroll(
-                    collection_name=self.qdrant_collection,
-                    limit=256,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to count social coverage units for '{}': {}",
-                    self.qdrant_collection,
-                    exc,
-                )
-                break
-            if not points:
-                break
-            for point in points:
-                payload = getattr(point, "payload", None)
-                if not isinstance(payload, dict) or not self._is_social_payload(payload):
-                    continue
-                source = self._source_from_payload(
-                    collection=self.qdrant_collection,
-                    payload=payload,
-                )
-                if coverage_unit == "posts":
-                    key = self._source_post_key(source)
-                else:
-                    key = self._summary_source_key(source)
-                if key:
-                    seen.add(key)
-            if offset is None:
-                break
-        return len(seen)
-
-    def _build_social_summary_briefs(
-        self,
-        sources: list[dict[str, Any]],
-    ) -> list[str]:
-        """Build source-preserving evidence briefs for row-level social summaries."""
-        briefs: list[str] = []
-        for index, source in enumerate(sources, start=1):
-            reference_metadata = source.get("reference_metadata")
-            ref: dict[str, Any] = reference_metadata if isinstance(reference_metadata, dict) else {}
-            metadata_bits = [
-                f"network={ref.get('network')}" if ref.get("network") else "",
-                f"type={ref.get('type')}" if ref.get("type") else "",
-                f"author={ref.get('author') or ref.get('author_id')}"
-                if (ref.get("author") or ref.get("author_id"))
-                else "",
-                f"timestamp={ref.get('timestamp')}" if ref.get("timestamp") else "",
-                f"row={source.get('row')}" if source.get("row") is not None else "",
-            ]
-            metadata_line = ", ".join(bit for bit in metadata_bits if bit) or "metadata=n/a"
-            raw_text = str(source.get("text") or source.get("preview_text") or "").strip()
-            compact = re.sub(r"\s+", " ", raw_text)[:280] if raw_text else "(no text)"
-            briefs.append(f"- Source {index}: {metadata_line}\n  - Evidence: {compact}")
-        return briefs
-
-    def _prepare_social_summary_context(self) -> dict[str, Any]:
-        """Prepare chunk/post-level summary context for social/table collections."""
-        candidate_nodes = self._retrieve_social_summary_nodes()
-        candidate_sources: list[dict[str, Any]] = []
-        for nws in candidate_nodes:
-            source = self._source_from_node_with_score(nws)
-            if source is None:
-                continue
-            if str(source.get("source") or "") != "table":
-                continue
-            candidate_sources.append(source)
-
-        if not candidate_sources:
-            for payload in self._sample_collection_payloads(limit=self.social_summary_candidate_pool):
-                if not self._is_social_payload(payload):
-                    continue
-                candidate_sources.append(
-                    self._source_from_payload(
-                        collection=self.qdrant_collection,
-                        payload=payload,
-                    )
-                )
-
-        deduped_sources, sampled_sources = self._select_social_summary_sources(candidate_sources)
-        coverage_unit = self._coverage_unit_for_sources(sampled_sources or deduped_sources or candidate_sources)
-        total_units = self._count_social_coverage_units(coverage_unit)
-        covered_units = len(sampled_sources)
-        coverage_ratio = covered_units / total_units if total_units > 0 else 0.0
-        diagnostics = {
-            "total_documents": total_units,
-            "covered_documents": covered_units,
-            "coverage_ratio": round(coverage_ratio, 4),
-            "uncovered_documents": cast(list[str], []),
-            "coverage_target": self.summary_coverage_target,
-            "coverage_unit": coverage_unit,
-            "candidate_count": len(candidate_sources),
-            "deduped_count": len(deduped_sources),
-            "sampled_count": len(sampled_sources),
-        }
-
-        briefs = self._build_social_summary_briefs(sampled_sources)
-        return {
-            "synthesis_prompt": self._build_summary_synthesis_prompt(
-                briefs=briefs,
-                diagnostics=diagnostics,
-                style_prompt=self.summarize_social_prompt,
-            ),
-            "sources": sampled_sources,
-            "summary_diagnostics": diagnostics,
-        }
-
     @staticmethod
     def _number_summary_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Stamp 1-based ``citation_index`` on summary sources in display order.
@@ -7856,16 +7522,6 @@ class RAG:
             if isinstance(source, dict):
                 source["citation_index"] = index
         return sources
-
-    def _prepare_collection_summary_context(self) -> dict[str, Any]:
-        """Prepare summary context for the active collection."""
-        profile = self._infer_collection_profile()
-        if self.social_summary_enabled and bool(profile.get("is_social_table")):
-            context = self._prepare_social_summary_context()
-        else:
-            context = self._prepare_document_summary_context()
-        self._number_summary_sources(context.get("sources") or [])
-        return context
 
     def _summary_kv_store(
         self,
@@ -7912,14 +7568,12 @@ class RAG:
         """
         payload = {
             "summarize_prompt": self.summarize_prompt,
-            "summarize_social_prompt": self.summarize_social_prompt,
+            "summary_map_prompt": self.summary_map_prompt,
+            "summary_fold_prompt": self.summary_fold_prompt,
             "summary_coverage_target": self.summary_coverage_target,
-            "summary_max_docs": self.summary_max_docs,
-            "summary_per_doc_top_k": self.summary_per_doc_top_k,
             "summary_final_source_cap": self.summary_final_source_cap,
-            "social_summary_enabled": self.social_summary_enabled,
-            "social_summary_candidate_pool": self.social_summary_candidate_pool,
-            "social_summary_diversity_limit": self.social_summary_diversity_limit,
+            "summary_map_window_tokens": self.summary_config.map_window_tokens,
+            "summary_reduce_fanin": self.summary_config.reduce_fanin,
         }
         encoded = json.dumps(
             payload,
@@ -8059,17 +7713,45 @@ class RAG:
             "summary_diagnostics": summary_diagnostics,
         }
 
-    def _store_cached_collection_summary(self, payload: dict[str, Any]) -> None:
+    def _store_cached_collection_summary(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         """Persist a collection summary payload in the dockv summary namespace.
+
+        Summary and ingest jobs for one collection run concurrently by design
+        (``create_if_idle`` keys idleness on ``(owner, physical, kind)``), so
+        reading the revision at *write* time would stamp a build that started
+        at revision R with whatever revision an ingest bumped it to
+        mid-build — publishing a stale summary as current, and overwriting the
+        newer summary that ingest just cached. Callers therefore capture the
+        revision when the build starts and pass it as ``expected_revision``;
+        this is a compare-and-set, skipping the write when the collection
+        moved underneath the build. The revision key is always re-put with the
+        *current* value, never the captured one, so the counter cannot roll
+        backwards.
 
         Args:
             payload (dict[str, Any]): Summary payload to cache.
+            expected_revision (int | None): Revision observed when the build
+                started. ``None`` skips the check and stamps the current
+                revision (for callers with no build window to protect).
         """
         kv_store = self._summary_kv_store()
         if kv_store is None:
             return
 
         revision = self._get_summary_revision()
+        if expected_revision is not None and expected_revision != revision:
+            logger.info(
+                "Skipping summary cache write for '{}': collection changed during the build (revision {} -> {}).",
+                self.qdrant_collection,
+                expected_revision,
+                revision,
+            )
+            return
         prompt_fingerprint = self._summary_prompt_fingerprint()
         sources = payload.get("sources")
         if not isinstance(sources, list):
@@ -8100,14 +7782,41 @@ class RAG:
         except Exception as exc:
             logger.warning("Failed to store cached collection summary: {}", exc)
 
-    def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
-        """Generate a coverage-aware summary for the selected collection.
+    def build_tree_summary(self, progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+        """Build the map-reduce ("tree") summary for the currently scoped collection.
+
+        Partitions every point in the active collection into map units (one
+        per document, or one per social/table author-hour bucket — see
+        :func:`~docint.core.summary.units.partition_units`), summarizes each
+        unit independently through :class:`~docint.core.summary.tree.TreeSummarizer`
+        (reusing a unit's cached map result whenever its content and the
+        active prompts/model are unchanged), and folds the per-unit
+        summaries into one final synthesis call.
+
+        Every build that *completes* is persisted via
+        :meth:`_store_cached_collection_summary` and prunes the map cache of
+        units that no longer exist — including a build the LLM-call cap cut
+        short (``summary_diagnostics.partial`` is ``True``, and the SPA shows
+        an explicit notice) and a build over an empty collection. Only a build
+        that fails mid-way propagates its exception and caches nothing.
+        Refusing to cache a completed-but-partial build would make it
+        unreachable: ``POST /summarize`` answers 200 solely from this cache,
+        so the client's post-completion refetch would miss, silently queue
+        another full build, and report a failure — forever, for an empty
+        collection.
+
+        The summary revision is captured *before* the build and handed to the
+        cache write as a compare-and-set, so a concurrent ingest that lands
+        mid-build cannot have this (now stale) summary stamped as current.
 
         Args:
-            refresh (bool): If ``True``, bypass cached summary payloads.
+            progress: Optional callback invoked ``(processed, total)`` after
+                each unit resolves (cache hit, mapped, or failed) — useful
+                for surfacing progress on a long build.
 
         Returns:
-            dict[str, Any]: Summary payload with normalized sources and diagnostics.
+            dict[str, Any]: ``{"query", "reasoning", "response", "sources",
+            "summary_diagnostics"}``.
 
         Raises:
             ValueError: If no collection is selected.
@@ -8115,117 +7824,228 @@ class RAG:
         if not self.qdrant_collection:
             raise ValueError("No collection selected.")
 
-        cached_payload = self._load_cached_collection_summary(refresh=refresh)
-        if cached_payload is not None:
-            return cached_payload
+        # Captured before any work: an ingest completing mid-build bumps this,
+        # and the cache write must notice rather than stamp a stale summary.
+        build_revision = self._get_summary_revision()
 
-        context = self._prepare_collection_summary_context()
-        diagnostics = context["summary_diagnostics"]
-        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
-        total_documents = int(diagnostics.get("total_documents", 0) or 0)
-
-        if total_documents == 0:
-            summary_text = "No documents available in the selected collection."
-        elif covered_documents == 0:
-            summary_text = "Unable to extract grounded evidence from the selected collection."
+        units = partition_units(self._iter_collection_points())
+        total_units = len(units)
+        kinds = {unit.kind for unit in units}
+        if kinds == {"social_bucket"}:
+            coverage_unit = "posts"
+        elif not kinds or kinds == {"document"}:
+            # An empty collection has no units to derive a kind from; default
+            # to "documents" — the conventional unit for an empty document
+            # collection — rather than the meaningless "units".
+            coverage_unit = "documents"
         else:
-            completion = self.post_retrieval_text_model.complete(context["synthesis_prompt"])
-            summary_text = str(getattr(completion, "text", "") or "").strip()
+            coverage_unit = "units"
+
+        if total_units == 0:
+            empty_payload: dict[str, Any] = {
+                "query": self.summarize_prompt,
+                "reasoning": None,
+                "response": "No documents available in the selected collection.",
+                "sources": [],
+                "summary_diagnostics": {
+                    "total_documents": 0,
+                    "covered_documents": 0,
+                    "coverage_ratio": 0.0,
+                    "uncovered_documents": [],
+                    "coverage_target": self.summary_coverage_target,
+                    "coverage_unit": coverage_unit,
+                    "candidate_count": 0,
+                    "deduped_count": 0,
+                    "sampled_count": 0,
+                    "partial": False,
+                    "llm_calls": 0,
+                },
+            }
+            # Cached like any other completed build: without this an empty
+            # collection can never answer 200, so every /summarize call queues
+            # a fresh job that finds nothing and reports failure, forever.
+            self._store_cached_collection_summary(empty_payload, expected_revision=build_revision)
+            return empty_payload
+
+        kv_store = self._summary_kv_store()
+        validator_suffix = f"{self._summary_prompt_fingerprint()}|{self.text_model_id}"
+        cache_adapter = _KVMapCache(kv_store, validator_suffix=validator_suffix)
+        cache: MapCache = cache_adapter
+        covered_keys = cache_adapter.covered_keys
+
+        def _complete(prompt: str) -> str:
+            """Invoke the chat model and coerce its response to text."""
+            return str(getattr(self.post_retrieval_text_model.complete(prompt), "text", "") or "")
+
+        def _build_synthesis_prompt(briefs: list[str], diag: dict[str, Any]) -> str:
+            """Render the final synthesis prompt from the tree's live diagnostics."""
+            covered = int(diag.get("covered_units", 0) or 0)
+            total = int(diag.get("total_units", total_units) or total_units)
+            coverage_ratio = covered / total if total else 0.0
+            # Approximate: `covered_keys` only tracks map-cache get/put
+            # activity, so a unit that was mapped but deliberately not
+            # cached (a cap-truncated result — see `_KVMapCache`'s
+            # docstring) reads as uncovered here even though it produced a
+            # result. This runs *during* the build, before `TreeSummarizer`
+            # returns a `TreeSummaryResult` with per-unit results, so
+            # `covered_keys` is the only signal available at this point.
+            # The post-build diagnostics below recompute this from
+            # `result.unit_results` and are the authoritative value served
+            # to the client; this closure only feeds the LLM's synthesis
+            # prompt, not `summary_diagnostics`.
+            uncovered_labels = [unit.label for unit in units if unit.unit_key not in covered_keys][:20]
+            return self._build_summary_synthesis_prompt(
+                briefs=briefs,
+                diagnostics={
+                    "coverage_unit": coverage_unit,
+                    "coverage_ratio": coverage_ratio,
+                    "coverage_target": self.summary_coverage_target,
+                    "uncovered_documents": uncovered_labels,
+                },
+                style_prompt=self.summarize_prompt,
+            )
+
+        summarizer = TreeSummarizer(
+            complete=_complete,
+            fetch_chunks=self._fetch_unit_chunks,
+            map_prompt=self.summary_map_prompt,
+            fold_prompt=self.summary_fold_prompt,
+            build_synthesis_prompt=_build_synthesis_prompt,
+            cache=cache,
+            window_chars=self.summary_config.map_window_tokens * 4,
+            reduce_fanin=self.summary_config.reduce_fanin,
+            max_llm_calls=self.summary_config.max_llm_calls,
+            progress=progress,
+        )
+        result = summarizer.build(units)
+
+        covered_units = result.covered_units
+        coverage_ratio = covered_units / total_units if total_units else 0.0
+        # Authoritative post-build source: a unit is covered iff it produced
+        # a `UnitMapResult` (cache hit, mapped, or cap-truncated), regardless
+        # of whether that result was written to the map cache. `covered_keys`
+        # (used above, mid-build, where `result` does not yet exist) instead
+        # tracks map-cache get/put activity, which a deliberately-uncached
+        # truncated unit never joins — that unit would otherwise be counted
+        # in both `covered_units` (it has a `UnitMapResult`) and
+        # `uncovered_labels` (`_KVMapCache` never saw it), making the
+        # coverage banner self-contradictory.
+        covered_result_keys = {unit_result.unit_key for unit_result in result.unit_results}
+        uncovered_labels = [unit.label for unit in units if unit.unit_key not in covered_result_keys][:20]
+
+        if covered_units == 0:
+            response_text = "Unable to extract grounded evidence from the selected collection."
+        else:
+            response_text = result.response
+
+        sources: list[dict[str, Any]] = []
+        if covered_units:
+            evidence_ids: list[str] = []
+            for unit_result in result.unit_results[: self.summary_final_source_cap]:
+                for evidence_id in unit_result.evidence_ids:
+                    if evidence_id not in evidence_ids:
+                        evidence_ids.append(evidence_id)
+
+            # Qdrant's retrieve() does not promise the response is ordered
+            # like the requested ids (the same reason _fetch_unit_chunks
+            # re-orders by member_ids above) — so results are indexed by id
+            # first and then emitted by walking evidence_ids in covered-unit
+            # order, not in whatever order retrieve() happened to return them.
+            payload_by_id: dict[str, Any] = {}
+            for batch in chunk_nodes(evidence_ids, 200):
+                try:
+                    points = self.qdrant_client.retrieve(
+                        collection_name=self.qdrant_collection,
+                        ids=batch,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Tree summary evidence retrieve failed for '{}': {}",
+                        self.qdrant_collection,
+                        exc,
+                    )
+                    continue
+                for point in points or []:
+                    point_id = str(getattr(point, "id", "") or "")
+                    if point_id:
+                        payload_by_id[point_id] = getattr(point, "payload", None)
+
+            for evidence_id in evidence_ids:
+                payload = payload_by_id.get(evidence_id)
+                if not isinstance(payload, dict):
+                    continue
+                sources.append(
+                    self._source_from_payload(
+                        collection=self.qdrant_collection,
+                        payload=payload,
+                    )
+                )
+                if len(sources) >= self.summary_final_source_cap:
+                    break
+            self._number_summary_sources(sources)
+
+        diagnostics = {
+            "total_documents": total_units,
+            "covered_documents": covered_units,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "uncovered_documents": uncovered_labels,
+            "coverage_target": self.summary_coverage_target,
+            "coverage_unit": coverage_unit,
+            "candidate_count": total_units,
+            "deduped_count": covered_units,
+            "sampled_count": len(sources),
+            # A zero-covered build over a non-empty collection (the
+            # `total_units == 0` case already returned above) produces the
+            # bare "unable to extract grounded evidence" response_text above
+            # with no per-unit diagnostics to explain it. Without `partial`,
+            # `CoverageBanner` has nothing to flag and the non-answer looks
+            # like a normal, complete summary until Refresh or the next
+            # revision bump.
+            "partial": result.partial or covered_units == 0,
+            "llm_calls": result.llm_calls,
+        }
 
         payload = {
             "query": self.summarize_prompt,
             "reasoning": None,
-            "response": summary_text,
-            "sources": context["sources"],
+            "response": response_text,
+            "sources": sources,
             "summary_diagnostics": diagnostics,
         }
-        self._store_cached_collection_summary(payload)
+
+        # This build completed, so it is cacheable — partial or not. The
+        # honesty requirement is met by `partial` travelling with the payload
+        # (through the cache, `SummaryDiagnosticsOut`, and the SPA's coverage
+        # banner), not by withholding the result: a summary that is never
+        # cached is never served, because `/summarize` answers 200 only from
+        # here. A build that fails mid-way never reaches this line.
+        self._store_cached_collection_summary(payload, expected_revision=build_revision)
+        current_keys = {unit.unit_key for unit in units}
+        for stale_key in cache_adapter.all_keys():
+            if stale_key not in current_keys:
+                cache_adapter.delete(stale_key)
+
         return payload
 
-    def stream_summarize_collection(self, refresh: bool = False) -> Any:
-        """Generate a streaming summary of the currently selected collection.
+    def cached_collection_summary(self) -> dict[str, Any] | None:
+        """Return the currently cached final summary for the active collection, if any.
 
-        Args:
-            refresh (bool): If ``True``, bypass cached summary payloads.
+        Thin public wrapper over :meth:`_load_cached_collection_summary`
+        that never bypasses the cache — it is a pure read, distinct from
+        :meth:`build_tree_summary` (which computes and stores a fresh one).
 
-        Yields:
-            str | dict: Chunks of text, followed by a dict with metadata.
+        Returns:
+            dict[str, Any] | None: The cached payload, or ``None`` when
+            nothing is cached or the cached entry is stale.
 
         Raises:
             ValueError: If no collection is selected.
         """
         if not self.qdrant_collection:
             raise ValueError("No collection selected.")
-
-        cached_payload = self._load_cached_collection_summary(refresh=refresh)
-        if cached_payload is not None:
-            full_text = str(cached_payload.get("response") or "")
-            if full_text:
-                yield full_text
-            yield cached_payload
-            return
-
-        context = self._prepare_collection_summary_context()
-        diagnostics = context["summary_diagnostics"]
-        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
-        total_documents = int(diagnostics.get("total_documents", 0) or 0)
-
-        if total_documents == 0:
-            full_text = "No documents available in the selected collection."
-            payload = {
-                "query": self.summarize_prompt,
-                "reasoning": None,
-                "response": full_text,
-                "sources": context["sources"],
-                "summary_diagnostics": diagnostics,
-            }
-            self._store_cached_collection_summary(payload)
-            yield full_text
-            yield payload
-            return
-
-        if covered_documents == 0:
-            full_text = "Unable to extract grounded evidence from the selected collection."
-            payload = {
-                "query": self.summarize_prompt,
-                "reasoning": None,
-                "response": full_text,
-                "sources": context["sources"],
-                "summary_diagnostics": diagnostics,
-            }
-            self._store_cached_collection_summary(payload)
-            yield full_text
-            yield payload
-            return
-
-        full_text = ""
-        running_text = ""
-        for chunk in self.post_retrieval_text_model.stream_complete(context["synthesis_prompt"]):
-            delta = getattr(chunk, "delta", None)
-            if isinstance(delta, str) and delta:
-                token = delta
-                running_text += token
-            else:
-                text_value = str(getattr(chunk, "text", "") or "")
-                if text_value.startswith(running_text):
-                    token = text_value[len(running_text) :]
-                else:
-                    token = text_value
-                running_text = text_value
-            if not token:
-                continue
-            full_text += token
-            yield token
-
-        payload = {
-            "query": self.summarize_prompt,
-            "reasoning": None,
-            "response": full_text,
-            "sources": context["sources"],
-            "summary_diagnostics": diagnostics,
-        }
-        self._store_cached_collection_summary(payload)
-        yield payload
+        return self._load_cached_collection_summary(refresh=False)
 
     def list_documents(self) -> list[dict[str, Any]]:
         """List all documents in the current collection by scanning all points.

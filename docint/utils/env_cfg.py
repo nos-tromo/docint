@@ -1952,6 +1952,7 @@ class RetrievalConfig:
     hybrid_top_k: int
     parent_context_enabled: bool
     parent_context_safety_margin: float
+    social_diversity_limit: int
 
 
 def load_retrieval_env(
@@ -1963,6 +1964,7 @@ def load_retrieval_env(
     default_hybrid_top_k: int = 20,
     default_parent_context_enabled: bool = True,
     default_parent_context_safety_margin: float = 0.95,
+    default_social_diversity_limit: int = 2,
 ) -> RetrievalConfig:
     """Loads retrieval configuration from environment variables or defaults.
 
@@ -1984,6 +1986,11 @@ def load_retrieval_env(
             deciding whether to emit a full parent or a windowed slice.
             Reserves headroom for the provider's own BOS/EOS and rough
             tokenizer-estimate drift. Must fall in ``(0, 1]``. Default 0.95.
+        default_social_diversity_limit (int): Default cap on how many
+            retrieved chunks may come from the same author/hour bucket on
+            social/table collections, enforced by
+            ``SocialSourceDiversityPostprocessor`` on the chat/query path.
+            Clamped to a minimum of 1. Default 2.
 
     Returns:
         RetrievalConfig: Dataclass containing retrieval configuration.
@@ -2000,6 +2007,8 @@ def load_retrieval_env(
                 - parent_context_safety_margin (float): Fraction of
                     ``OPENAI_CTX_WINDOW`` the parent-context packer may
                     consume before windowing oversize parents.
+                - social_diversity_limit (int): Cap on retrieved chunks per
+                    author/hour bucket on social/table collections.
     """
     raw_mode = str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
     chat_response_mode: Literal["auto", "compact", "refine"] = "auto"
@@ -2050,6 +2059,10 @@ def load_retrieval_env(
         # :func:`_parse_parent_context_safety_margin`.
         parent_context_safety_margin=_parse_parent_context_safety_margin(
             default=default_parent_context_safety_margin,
+        ),
+        social_diversity_limit=max(
+            1,
+            int(os.getenv("SOCIAL_SOURCE_DIVERSITY_LIMIT", default_social_diversity_limit)),
         ),
     )
 
@@ -2135,82 +2148,58 @@ class SummaryConfig:
     """Dataclass for collection summarization precision settings."""
 
     coverage_target: float
-    max_docs: int
-    per_doc_top_k: int
     final_source_cap: int
-    social_chunking_enabled: bool
-    social_candidate_pool: int
-    social_diversity_limit: int
+    on_ingest: bool
+    map_window_tokens: int
+    reduce_fanin: int
+    max_llm_calls: int
 
 
 def load_summary_env(
     default_coverage_target: float = 0.70,
-    default_max_docs: int = 30,
-    default_per_doc_top_k: int = 4,
     default_final_source_cap: int = 24,
-    default_social_chunking_enabled: bool = True,
-    default_social_candidate_pool: int = 48,
-    default_social_diversity_limit: int = 2,
+    default_on_ingest: bool = True,
+    default_map_window_tokens: int = 3000,
+    default_reduce_fanin: int = 10,
+    default_max_llm_calls: int = 500,
 ) -> SummaryConfig:
     """Load collection summary precision settings from environment variables.
 
     Args:
         default_coverage_target (float): Target minimum document coverage ratio.
-        default_max_docs (int): Maximum number of documents sampled for summary.
-        default_per_doc_top_k (int): Maximum evidence chunks retrieved per document.
         default_final_source_cap (int): Maximum number of merged summary sources.
-        default_social_chunking_enabled (bool): Whether row-heavy social/table collections use
-            chunk/post-level summarization.
-        default_social_candidate_pool (int): Candidate retrieval depth for social/table summaries.
-        default_social_diversity_limit (int): Max sources per diversity bucket during
-            social/table summaries.
+        default_on_ingest (bool): Whether a collection summary rebuild is triggered
+            automatically at the end of an ingest job.
+        default_map_window_tokens (int): Target token budget per map-stage window when
+            the tree summarizer batches source chunks for map calls.
+        default_reduce_fanin (int): Maximum number of map-stage summaries merged per
+            reduce-stage call.
+        default_max_llm_calls (int): Upper bound on total LLM calls (map + reduce) a
+            single tree-summary rebuild may issue, as a runaway-cost guard.
 
     Returns:
         SummaryConfig: Parsed summary precision settings.
         - coverage_target (float): Target minimum document coverage ratio; clamped to [0.0, 1.0].
-        - max_docs (int): Maximum number of documents to sample for summarization.
-        - per_doc_top_k (int): Maximum number of evidence chunks to retrieve per document.
         - final_source_cap (int): Maximum number of merged sources to include in the final
             summary answer, to keep it concise and focused.
-        - social_chunking_enabled (bool): Whether row-heavy social/table
-          collections should use chunk/post-level summarization.
-        - social_candidate_pool (int): Candidate retrieval depth for social/table
-          collection summaries.
-        - social_diversity_limit (int): Maximum number of sources retained per
-          diversity bucket during social/table collection summaries.
+        - on_ingest (bool): Whether a collection summary rebuild runs automatically
+          at the end of an ingest job.
+        - map_window_tokens (int): Target token budget per map-stage window; clamped
+          to a minimum of 100.
+        - reduce_fanin (int): Maximum number of map-stage summaries merged per
+          reduce-stage call; clamped to a minimum of 2.
+        - max_llm_calls (int): Upper bound on total LLM calls per tree-summary
+          rebuild; clamped to a minimum of 1.
     """
     raw_target = float(os.getenv("SUMMARY_COVERAGE_TARGET", default_coverage_target))
     target = min(1.0, max(0.0, raw_target))
     return SummaryConfig(
         coverage_target=target,
-        max_docs=max(1, int(os.getenv("SUMMARY_MAX_DOCS", default_max_docs))),
-        per_doc_top_k=max(1, int(os.getenv("SUMMARY_PER_DOC_TOP_K", default_per_doc_top_k))),
         final_source_cap=max(1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))),
-        social_chunking_enabled=str(
-            os.getenv(
-                "SUMMARY_SOCIAL_CHUNKING_ENABLED",
-                default_social_chunking_enabled,
-            )
-        ).lower()
-        in {"true", "1", "yes"},
-        social_candidate_pool=max(
-            1,
-            int(
-                os.getenv(
-                    "SUMMARY_SOCIAL_CANDIDATE_POOL",
-                    default_social_candidate_pool,
-                )
-            ),
-        ),
-        social_diversity_limit=max(
-            1,
-            int(
-                os.getenv(
-                    "SUMMARY_SOCIAL_DIVERSITY_LIMIT",
-                    default_social_diversity_limit,
-                )
-            ),
-        ),
+        on_ingest=str(os.getenv("SUMMARY_ON_INGEST", default_on_ingest)).lower() in {"true", "1", "yes"},
+        map_window_tokens=max(100, int(os.getenv("SUMMARY_MAP_WINDOW_TOKENS", default_map_window_tokens))),
+        reduce_fanin=max(2, int(os.getenv("SUMMARY_REDUCE_FANIN", default_reduce_fanin))),
+        max_llm_calls=max(1, int(os.getenv("SUMMARY_MAX_LLM_CALLS", default_max_llm_calls))),
     )
 
 
@@ -2240,5 +2229,37 @@ def load_ingest_concurrency(default: int = 1) -> int:
         return default
     if value < 1:
         logger.warning("DOCINT_INGEST_CONCURRENCY {} is < 1; clamping to 1.", value)
+        return 1
+    return value
+
+
+def load_summary_concurrency(default: int = 1) -> int:
+    """Max collection-summary rebuild jobs run concurrently.
+
+    Read from ``DOCINT_SUMMARY_CONCURRENCY``. Defaults to 1 (serial), mirroring
+    ``load_ingest_concurrency``: a tree-summary rebuild issues its own burst of
+    map/reduce LLM calls, and bounding it separately from
+    ``DOCINT_INGEST_CONCURRENCY`` keeps a rebuild from starving an ingest
+    worker slot (or vice versa) on the shared remote inference endpoints.
+    Unparseable values fall back to ``default`` and values below 1 clamp to 1
+    (both with a warning), so a misconfigured environment can never produce a
+    zero or negative semaphore.
+
+    Args:
+        default (int): Fallback when the variable is unset or unparseable.
+
+    Returns:
+        int: The configured concurrency, at least 1.
+    """
+    raw = os.getenv("DOCINT_SUMMARY_CONCURRENCY", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid DOCINT_SUMMARY_CONCURRENCY {!r}; using {}.", raw, default)
+        return default
+    if value < 1:
+        logger.warning("DOCINT_SUMMARY_CONCURRENCY {} is < 1; clamping to 1.", value)
         return 1
     return value

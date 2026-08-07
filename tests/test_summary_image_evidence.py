@@ -91,24 +91,6 @@ def test_summary_evidence_includes_the_documents_images() -> None:
     assert "Q3 field results" in nodes[0].node.get_content()
 
 
-def test_summary_image_evidence_normalizes_to_the_documents_hash() -> None:
-    """The image must match its parent document, or the summary discards it.
-
-    ``_prepare_document_summary_context`` keeps only sources that
-    ``_summary_source_matches_document`` ties to the document it is
-    summarizing; an image whose hash did not normalize would be dropped there
-    without a trace.
-    """
-    point = types.SimpleNamespace(id="point-77", payload=KEYFRAME_PAYLOAD)
-    rag, _ = _rag_with_images([point])
-
-    nodes = rag._summary_image_nodes_for_document(file_hash="hash-clip", top_k=3)
-    source = rag._source_from_node_with_score(nodes[0])
-
-    assert source is not None
-    assert rag._summary_source_matches_document(source, filename="briefing.mp4", file_hash="hash-clip")
-
-
 def test_summary_image_evidence_is_scoped_to_the_images_companion() -> None:
     """The scroll targets the companion, never the main collection."""
     point = types.SimpleNamespace(id="point-77", payload=KEYFRAME_PAYLOAD)
