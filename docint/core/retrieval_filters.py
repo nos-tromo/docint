@@ -262,9 +262,9 @@ def _matches_rule_for_field(
             return False
         return any(_coerce_comparable(value) == expected for value in values)
 
-    if operator in {"gt", "gte", "lt", "lte"}:
-        expected = _normalize_scalar(rule.get("value"))
-        if not isinstance(expected, (int, float)):
+    if operator in _RANGE_OPERATORS:
+        expected = normalize_numeric_bound(rule.get("value"))
+        if expected is None:
             return False
         numeric_values = [value for value in (_coerce_numeric(value) for value in values) if value is not None]
         if not numeric_values:
@@ -385,6 +385,33 @@ def _coerce_comparable(value: Any) -> str | int | float | bool | None:
     return str(value).strip()
 
 
+def normalize_numeric_bound(value: Any) -> int | float | None:
+    """Return a numeric range bound, parsing numeric strings.
+
+    Qdrant's ``models.Range`` bounds are floats, and LlamaIndex compiles range
+    operators straight into them, so a non-numeric bound cannot be expressed on
+    any path. JSON payloads routinely carry numbers as strings — an HTML text
+    input has no other option — so those are parsed rather than dropped. A
+    dropped range rule would leave the query unfiltered, which silently returns
+    *more* than the caller asked for.
+
+    Args:
+        value (Any): Raw comparison value.
+
+    Returns:
+        int | float | None: The numeric bound, or ``None`` when the value is
+            not numeric.
+    """
+    scalar = _normalize_scalar(value)
+    if isinstance(scalar, bool):
+        return None
+    if isinstance(scalar, (int, float)):
+        return scalar
+    if isinstance(scalar, str):
+        return _coerce_numeric(scalar)
+    return None
+
+
 def _coerce_numeric(value: Any) -> int | float | None:
     """Return a numeric representation for scalar comparisons when possible."""
     if isinstance(value, bool):
@@ -413,6 +440,29 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
     fields = rule["fields"]
     operator = rule["operator"]
 
+    if operator in _RANGE_OPERATORS:
+        bound = normalize_numeric_bound(rule.get("value"))
+        if bound is None:
+            # Qdrant has no string range, so nothing can express this. The API
+            # rejects it at the wire; reaching here means it must be dropped.
+            logger.debug(
+                "Skipping non-numeric range MetadataFilter for '{}' — Qdrant Range needs a number.",
+                fields,
+            )
+            return None
+        return _metadata_filter_for(fields, bound, _SCALAR_OPERATORS[operator])
+
+    if operator == "neq":
+        # _metadata_filter_for ORs a rule's fields, which is right for positive
+        # operators but inverts negation: NE(a) OR NE(b) is not
+        # NOT(a == x OR b == x). build_qdrant_filter expresses the latter with
+        # must_not=[Filter(should=[...])], so negation is left entirely to it.
+        logger.debug(
+            "Skipping NE MetadataFilter for '{}' — the native Qdrant filter covers it.",
+            fields,
+        )
+        return None
+
     if operator in _SCALAR_OPERATORS:
         value = _normalize_scalar(rule.get("value"))
         if value is None:
@@ -429,14 +479,6 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
             # natively with MatchText, so drop it here rather than crash there.
             logger.debug(
                 "Skipping CONTAINS MetadataFilter for '{}' — the native Qdrant filter covers it.",
-                fields,
-            )
-            return None
-        if operator in _RANGE_OPERATORS and not isinstance(value, (int, float)):
-            # Qdrant's Range bounds are floats; a text bound would raise a
-            # pydantic ValidationError inside the vector store.
-            logger.debug(
-                "Skipping non-numeric range MetadataFilter for '{}' — Qdrant Range needs a number.",
                 fields,
             )
             return None
@@ -574,9 +616,9 @@ def _compile_qdrant_condition(
             operator == "neq",
         )
 
-    if operator in {"gt", "gte", "lt", "lte"}:
-        value = _normalize_scalar(rule.get("value"))
-        if not isinstance(value, (int, float)):
+    if operator in _RANGE_OPERATORS:
+        value = normalize_numeric_bound(rule.get("value"))
+        if value is None:
             return None, False
         range_kwargs = {operator: value}
         return (

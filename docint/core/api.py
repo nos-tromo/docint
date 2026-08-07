@@ -47,7 +47,11 @@ from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError
-from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
+from docint.core.retrieval_filters import (
+    build_metadata_filters,
+    build_qdrant_filter,
+    normalize_numeric_bound,
+)
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
@@ -676,6 +680,26 @@ class MetadataFilterIn(BaseModel):
         """
         if not self.field.strip() and not [entry for entry in self.fields if entry.strip()]:
             raise ValueError("a metadata filter must name 'field' or 'fields'")
+        return self
+
+    @model_validator(mode="after")
+    def _require_a_numeric_range_bound(self) -> "MetadataFilterIn":
+        """Reject a range comparison whose bound is not a number.
+
+        Qdrant's ``models.Range`` bounds are floats and there is no string
+        equivalent, so such a rule compiles to nothing on every path and the
+        query would run unfiltered — returning strictly more than the caller
+        asked for. Refusing it is the only honest option. Numeric strings are
+        accepted: an HTML text input cannot send a JSON number.
+
+        Returns:
+            MetadataFilterIn: The validated model.
+
+        Raises:
+            ValueError: When a range operator carries a non-numeric bound.
+        """
+        if self.operator in {"gt", "gte", "lt", "lte"} and normalize_numeric_bound(self.value) is None:
+            raise ValueError(f"operator '{self.operator}' needs a numeric value")
         return self
 
 

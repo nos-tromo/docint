@@ -285,3 +285,54 @@ def test_merge_qdrant_filters_returns_the_base_when_there_are_no_extras() -> Non
 
     assert merge_qdrant_filters(base, []) is base
     assert merge_qdrant_filters(None, []) is None
+
+
+def test_numeric_string_range_bounds_compile_on_every_path() -> None:
+    """A range bound typed into a text input arrives as a string.
+
+    The SPA's custom-rule value field is a plain text input, so "3" is what
+    reaches the API. Dropping the rule would run the query unfiltered — the
+    user narrowed and silently got everything.
+    """
+    rules = [{"field": "page_number", "operator": "gte", "value": "3"}]
+
+    native = build_qdrant_filter(rules)
+    assert native is not None
+    condition = cast(Any, next(iter(native.must or [])))
+    assert condition.range.gte == 3
+
+    assert build_metadata_filters(rules) is not None
+    assert _compiles_for_qdrant(rules)
+    assert matches_metadata_filters({"page_number": 5}, rules)
+    assert not matches_metadata_filters({"page_number": 1}, rules)
+
+
+def test_non_numeric_range_bounds_compile_on_no_path() -> None:
+    """Qdrant has no string range, so such a rule cannot be honoured at all.
+
+    Nothing can express it, which is exactly why the API rejects it rather
+    than letting it reach here and silently widen the result set.
+    """
+    rules = [{"field": "section_path", "operator": "gte", "value": "chapter-two"}]
+
+    assert build_metadata_filters(rules) is None
+    assert build_qdrant_filter(rules) is None
+    assert _compiles_for_qdrant(rules)
+
+
+def test_neq_emits_no_llama_index_filter() -> None:
+    """Negation is carried natively so multi-field semantics stay consistent.
+
+    ``_metadata_filter_for`` ORs a rule's fields, which is right for positive
+    operators but inverts negation: ``NE(a) OR NE(b)`` is not
+    ``NOT(a == x OR b == x)``. The native filter expresses the latter with
+    ``must_not=[Filter(should=[...])]``, so ``neq`` is left to it.
+    """
+    rules = [{"fields": ["a", "b"], "operator": "neq", "value": "x"}]
+
+    assert build_metadata_filters(rules) is None
+    assert build_qdrant_filter(rules) is not None
+
+    single = [{"field": "a", "operator": "neq", "value": "x"}]
+    assert build_metadata_filters(single) is None
+    assert build_qdrant_filter(single) is not None

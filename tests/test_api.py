@@ -4133,3 +4133,33 @@ def test_query_rejects_a_filter_naming_no_field(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_query_rejects_a_non_numeric_range_bound(client: TestClient) -> None:
+    """Qdrant has no string range, so such a rule can only be refused.
+
+    Accepting it would compile to nothing on every path and run the query
+    unfiltered — the caller asked to narrow and would silently get everything.
+    """
+    response = client.post(
+        "/query",
+        json={
+            "question": "anything",
+            "metadata_filters": [{"field": "section_path", "operator": "gte", "value": "chapter-two"}],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_accepts_a_numeric_range_bound_sent_as_a_string(client: TestClient) -> None:
+    """A text input has no way to send a JSON number; "3" must still work."""
+    response = client.post(
+        "/query",
+        json={
+            "question": "anything",
+            "metadata_filters": [{"field": "page_number", "operator": "gte", "value": "3"}],
+        },
+    )
+
+    assert response.status_code != 422
