@@ -12,6 +12,7 @@ from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
     matches_metadata_filters,
+    merge_qdrant_filters,
 )
 
 
@@ -227,3 +228,46 @@ def test_single_field_rule_stays_a_bare_condition() -> None:
     must = list(compiled.must or [])
     assert len(must) == 1
     assert isinstance(must[0], models.FieldCondition)
+
+
+def test_merge_qdrant_filters_appends_to_an_existing_must() -> None:
+    """Internal conditions must survive alongside a user filter."""
+    base = build_qdrant_filter([{"field": "mimetype", "operator": "eq", "value": "text/plain"}])
+    extra = [models.FieldCondition(key="docint_hier_type", match=models.MatchValue(value="fine"))]
+
+    merged = merge_qdrant_filters(base, extra)
+
+    assert merged is not None
+    keys = [condition.key for condition in (merged.must or [])]
+    assert keys == ["mimetype", "docint_hier_type"]
+
+
+def test_merge_qdrant_filters_preserves_must_not() -> None:
+    """Merging must not discard negated user conditions."""
+    base = build_qdrant_filter([{"field": "a", "operator": "neq", "value": "x"}])
+    extra = [models.FieldCondition(key="docint_hier_type", match=models.MatchValue(value="fine"))]
+
+    merged = merge_qdrant_filters(base, extra)
+
+    assert merged is not None
+    assert len(list(merged.must_not or [])) == 1
+    assert [condition.key for condition in (merged.must or [])] == ["docint_hier_type"]
+
+
+def test_merge_qdrant_filters_builds_a_filter_from_extras_alone() -> None:
+    """With no user filter the internal conditions still need a filter."""
+    merged = merge_qdrant_filters(
+        None,
+        [models.FieldCondition(key="docint_hier_type", match=models.MatchValue(value="fine"))],
+    )
+
+    assert merged is not None
+    assert [condition.key for condition in (merged.must or [])] == ["docint_hier_type"]
+
+
+def test_merge_qdrant_filters_returns_the_base_when_there_are_no_extras() -> None:
+    """No internal conditions means nothing to merge."""
+    base = build_qdrant_filter([{"field": "mimetype", "operator": "eq", "value": "text/plain"}])
+
+    assert merge_qdrant_filters(base, []) is base
+    assert merge_qdrant_filters(None, []) is None

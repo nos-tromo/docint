@@ -6081,3 +6081,44 @@ def test_get_existing_file_hashes_treats_reworded_404_as_missing(
     assert not any("Failed to fetch existing hashes" in w for w in warnings), (
         f"reworded 404 must take the missing-collection path, got warnings: {warnings}"
     )
+
+
+def test_build_retriever_keeps_parent_context_filter_under_native_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The internal fine-node condition must survive a user metadata filter.
+
+    ``qdrant_filters`` overrides the LlamaIndex filters inside
+    ``QdrantVectorStore.query``, so a user filter used to silently disable
+    parent-context scoping and let coarse parent nodes back into retrieval.
+    """
+    rag = RAG(qdrant_collection="test")
+    captured: dict[str, Any] = {}
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: captured.update(kwargs) or object(),
+        ),
+    )
+    monkeypatch.setattr(RAG, "_build_image_lane", lambda self, **kwargs: None)
+    monkeypatch.setattr(
+        RAG,
+        "_resolve_runtime_retrieval_settings",
+        lambda self, **kwargs: {
+            "similarity_top_k": 5,
+            "vector_store_query_mode": _VectorStoreQueryModeStub.DEFAULT,
+            "parent_context_enabled": True,
+            "alpha": 0.5,
+            "sparse_top_k": 5,
+            "hybrid_top_k": 5,
+        },
+    )
+
+    user_filter = build_qdrant_filter([{"field": "mimetype", "operator": "eq", "value": "text/plain"}])
+    rag._build_retriever(vector_store_kwargs={"qdrant_filters": user_filter})
+
+    merged = captured["vector_store_kwargs"]["qdrant_filters"]
+    keys = [condition.key for condition in (merged.must or [])]
+    assert "docint_hier_type" in keys
+    assert "mimetype" in keys

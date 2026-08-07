@@ -104,6 +104,38 @@ def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None
     return models.Filter(must=must or None, must_not=must_not or None)
 
 
+def merge_qdrant_filters(
+    base: models.Filter | None,
+    extra_conditions: list[_QdrantCondition],
+) -> models.Filter | None:
+    """Combine a request-scoped native filter with internal retrieval conditions.
+
+    ``QdrantVectorStore.query`` uses ``qdrant_filters`` *instead of* the
+    LlamaIndex ``MetadataFilters`` when both are supplied, so any internal
+    condition that only exists on the LlamaIndex side is silently dropped as
+    soon as a user filter is active. Internal conditions must therefore be
+    merged into the native filter.
+
+    Args:
+        base (models.Filter | None): The user's compiled native filter, if any.
+        extra_conditions (list[_QdrantCondition]): Internal conditions that must
+            always apply, ANDed with the base.
+
+    Returns:
+        models.Filter | None: The combined filter, ``base`` unchanged when there
+            are no extras, or ``None`` when neither side contributes anything.
+    """
+    if not extra_conditions:
+        return base
+    if base is None:
+        return models.Filter(must=list(extra_conditions))
+    return models.Filter(
+        must=[*(base.must or []), *extra_conditions],
+        must_not=list(base.must_not) if base.must_not else None,
+        should=list(base.should) if base.should else None,
+    )
+
+
 def matches_metadata_filters(
     metadata: Mapping[str, Any],
     raw_rules: Sequence[Any] | None,
