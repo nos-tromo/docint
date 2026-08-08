@@ -77,6 +77,29 @@ canonical records, so the NER views can group by canonical entity under
 `make resolve` target runs this in a one-off `backend` container so it
 reaches the `qdrant` / `vllm-router` network aliases.
 
+## `search-index` — full-text search backfill
+
+```bash
+uv run search-index                       # prompts for the collection
+make search-index COLLECTION=demo         # non-interactive, in Docker
+```
+
+Source: `docint/cli/search_index.py`. Creates the `search_text` payload index
+on a collection and backfills the field across its existing points, which is
+what makes `POST /search` work there. Run it **once per collection ingested
+before full-text search shipped**; new ingests populate the field
+automatically.
+
+Payload-only — no re-embedding, no inference, no model downloads — so it is
+safe on an airgapped host and costs a scroll plus batched payload writes.
+Re-running is cheap: points that already carry the field are skipped. In Docker
+the `make search-index` target runs this in a one-off `backend` container so it
+reaches the `qdrant` network alias.
+
+Until it has run, `POST /search` returns `status: "not_indexed"` for that
+collection rather than an empty hit list — an empty list must never be able to
+mean "the migration never ran".
+
 ## `query` — batch chat, summaries, exports
 
 Source: `docint/cli/query.py`. The parser (`build_parser()` at

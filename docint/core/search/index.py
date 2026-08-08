@@ -76,7 +76,7 @@ def ensure_search_index(client: Any, collection: str) -> bool:
 def write_search_text(
     client: Any,
     collection: str,
-    texts: Mapping[str | int, str],
+    texts: Mapping[Any, str],
     *,
     batch_size: int = 256,
     wait: bool = False,
@@ -92,7 +92,7 @@ def write_search_text(
     Args:
         client (Any): Qdrant client exposing ``batch_update_points``.
         collection (str): Physical collection name.
-        texts (Mapping[str | int, str]): ``{point_id: chunk text}``. Point ids
+        texts (Mapping[Any, str]): ``{point_id: chunk text}``. Point ids
             keep their own type — Qdrant ids are unsigned ints or UUIDs, and
             coercing an int id to a string would target a point that does not
             exist, so the write would silently land nowhere.
@@ -149,7 +149,7 @@ def backfill_search_text(
     client: Any,
     collection: str,
     *,
-    extract_text: Callable[[Mapping[str, Any]], str],
+    extract_text: Callable[[Any], str],
     batch_size: int = 256,
     force: bool = False,
     progress: Callable[[str], None] | None = None,
@@ -163,7 +163,7 @@ def backfill_search_text(
     Args:
         client (Any): Qdrant client exposing ``scroll`` and ``batch_update_points``.
         collection (str): Physical collection name.
-        extract_text (Callable[[Mapping[str, Any]], str]): Pulls the chunk text
+        extract_text (Callable[[Any], str]): Pulls the chunk text
             out of a point payload. Injected so this module never imports
             ``core.rag``.
         batch_size (int): Points per scroll page and per write request.

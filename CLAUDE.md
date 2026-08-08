@@ -60,6 +60,10 @@ make bundle-dev # airgap tarball of the current working tree (dev/soak)
 # so it reaches the qdrant/vllm-router aliases — production is Docker-only).
 make resolve                    # prompts for the collection name
 make resolve COLLECTION=mydocs  # non-interactive
+# Build the full-text search index for a collection (payload-only, airgap-safe,
+# idempotent). Needed once per collection ingested before search shipped.
+make search-index                    # prompts for the collection name
+make search-index COLLECTION=mydocs  # non-interactive
 ```
 
 ## Architecture
@@ -107,6 +111,26 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
 - `docint/core/state/collection_ownership.py` + `collection_owner_manager.py` — **Per-user collection ownership** (multi-tenant). `CollectionOwnership` ORM (table `collection_owners` in the shared session DB) is the source of truth for the `(owner, logical_name) ↔ physical_name` mapping; `CollectionOwnerManager` (mirrors `ReportManager`) does `register`/`resolve`/`list_for`/`delete` + legacy backfill to `DOCINT_DEFAULT_IDENTITY`. Physical name = `u{sha256(owner)[:12]}__{logical}` (legacy rows keep the bare name — no Qdrant rename). Exposed via `RAG.ensure_collection_owner_manager()`; the API gate is `_require_owned_collection(logical, principal) -> physical` (404 on cross-owner, like `_get_owned_report`).
 - `docint/core/ner.py` — Entity aggregation / clustering / graph building over already-extracted NER metadata (pure post-processing; no model inference). Merge modes: `exact` (case-insensitive), `orthographic` (alphanumeric-compacted, the default — already collapses `Africa`/`africa`/`Acme Corp`), and `resolved` (groups by durable canonical entity id from the resolution store, falling back to orthographic for unresolved surfaces).
 - `docint/core/entities/` — **Entity resolution** (chorus parity), the only way to merge *semantically* similar entities (`USA`/`United States`, `EU`/`European Union`). `resolution.py` is the pure, dependency-injected pipeline (normalize → exact alias → type-blocked vector match ≥ `RES_EMBED_THRESHOLD` → conservative LLM tie-break → mint), mirroring chorus's `ingestion/resolution.py`. `store.py` (`EntityStore`) persists one point per canonical entity in the hidden `{collection}_entities` Qdrant companion (vector = name embedding; payload = `canonical_name`, `type`, `aliases`). Triggered by `RAG.resolve_entities()` (re-runnable, idempotent) via the `resolve` CLI or `POST /collections/entities/resolve`; reuses the existing remote embedding + chat clients (no new model runtime). Tuned by `RES_EMBED_THRESHOLD` (0.86), `RES_LLM_TIEBREAK` (true), `RES_CASE_NORMALIZE` (true), `RES_VECTOR_K` (5), `RES_BATCH_SIZE` (defaults to `INGESTION_BATCH_SIZE`; embed/resolve batch cadence, bounded memory on large collections) in `env_cfg.py`. Tie-break prompt: `prompts/{en,de}/entity_tiebreak.txt`.
+- `docint/core/search/` — **Full-text keyword search** over chunk text (`POST /search`).
+  `index.py` owns the `search_text` payload field and its prefix + lowercase
+  text index, plus `write_search_text()` — the batched `batch_update_points`
+  writer shared by the ingest hook and the `search-index` backfill, so the
+  migration path is exercised by every ingest. `fulltext.py` parses keywords and
+  compiles them into native Qdrant filters: one `MatchText` per keyword in
+  `must`, so **all** keywords must match, in any order. The field is written
+  **payload-only** — never through node metadata, which is rendered into the
+  embedding input and serialized into `_node_content`, so stamping it there
+  would embed each chunk's text twice and store a third copy. The lowercase
+  index is **mandatory, not an optimisation**: un-indexed `MatchText` only
+  case-folds ASCII, so German title-case tokens would not match their lowercase
+  form. Matching is prefix-based (`Partei` finds `Parteitag`; `tag` does not),
+  and coarse parent chunks are excluded — as *not-coarse* rather than *is-fine*,
+  because a collection ingested without hierarchical chunking tags nothing and
+  requiring `fine` would return zero hits there. No embeddings and no inference
+  in the path. The package imports nothing from `core/rag.py` (the text
+  extractor is injected), mirroring `core/jobs.py`. Collections ingested before
+  this shipped need `make search-index` once; until then `/search` reports
+  `status: "not_indexed"` rather than an empty hit list.
 - `docint/utils/ner_client.py` — Thin HTTP client for the remote GLiNER service hosted by `vllm-service` (full stack: `http://vllm-router:4000/gliner` with Bearer auth; gliner-only shape: `http://gliner-only:8000/gliner` with no auth). Replaces the in-process GLiNER runtime previously shipped here.
 - `docint/utils/clip_client.py` — Thin HTTP client for the remote CLIP image+text embedding service hosted by `vllm-service`. Same dual-shape posture as the NER client (full stack via router with Bearer auth; `clip-only` shape at `http://clip-only:8000` with no auth). `RemoteCLIPBackend` satisfies the `ImageEmbeddingBackend` Protocol so `core/ingest/images_service.py` swaps in place. Probes `/clip/dimension` at construction to size Qdrant `_images` collections without burning an embed call. `IMAGE_EMBED_MODEL` is no longer read by docint — set `CLIP_MODEL` on the vllm-service container instead. Override the endpoint via `CLIP_API_BASE` / `CLIP_API_KEY` / `CLIP_TIMEOUT`.
 - **Images are ordinary retrieval sources, not a side lane** (`core/rag.py::MultimodalRetriever` + `_retrieve_image_nodes`). The image lane is half of the retriever: CLIP candidates become caption nodes that join the text hits *before* ranking, so one reranker pass scores both modalities on one scale, the generator sees images in `context_str` and can cite them, and `CitationNumberingPostprocessor` numbers them like any other source. Everything downstream (parent context, diversity, link-following, synthesis, the citation panel) is modality-blind by construction. A lane outage degrades the answer to text-only; it never fails the query. **Do not reintroduce a post-generation append** — an appended source cannot be cited by the answer that was written without it. A standalone image file exists in *both* collections (`ImageReader` writes its caption as the document's text, `ImageIngestionService` writes the CLIP point), so `MultimodalRetriever` drops the lane's copy when the main-collection node for the same `image_id` was already retrieved. The collection summary draws a document's figures/keyframes from the `_images` companion by document hash (`_summary_image_nodes_for_document`), capped at a third of the per-document budget.
