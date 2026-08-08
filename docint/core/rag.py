@@ -1758,6 +1758,30 @@ class _ScopedRetriever(BaseRetriever):
         #: reported rather than silently narrowing the evidence.
         self.missing = 0
 
+    def _fetch(self, collection: str, node_ids: Sequence[str]) -> dict[str, Any]:
+        """Retrieve points by id from one collection.
+
+        Args:
+            collection (str): Collection to read from.
+            node_ids (Sequence[str]): Point ids to fetch.
+
+        Returns:
+            dict[str, Any]: ``{point_id: point}`` for whatever was found; an
+                outage yields an empty mapping so the caller reports those ids
+                missing rather than raising mid-answer.
+        """
+        try:
+            points = self._rag.qdrant_client.retrieve(
+                collection_name=collection,
+                ids=[_as_qdrant_point_id(node_id) for node_id in node_ids],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Scoped retrieve failed for {}: {}", collection, exc)
+            return {}
+        return {str(getattr(point, "id", "")): point for point in points}
+
     @override
     def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
         """Fetch the scoped points and rebuild them as nodes.
@@ -1773,19 +1797,17 @@ class _ScopedRetriever(BaseRetriever):
         if not self._node_ids:
             self.missing = 0
             return []
-        try:
-            points = self._rag.qdrant_client.retrieve(
-                collection_name=self._rag.qdrant_collection,
-                ids=[_as_qdrant_point_id(node_id) for node_id in self._node_ids],
-                with_payload=True,
-                with_vectors=False,
-            )
-        except Exception as exc:
-            logger.warning("Scoped retrieve failed for {}: {}", self._rag.qdrant_collection, exc)
-            self.missing = len(self._node_ids)
-            return []
 
-        by_id = {str(getattr(point, "id", "")): point for point in points}
+        collection = self._rag.qdrant_collection
+        by_id = self._fetch(collection, self._node_ids)
+        # A scoped image hit's chunk lives in the companion, not here. Looking
+        # only in the main collection would resolve it to nothing and report it
+        # missing — a scoped answer built on part of the selected evidence.
+        unresolved = [node_id for node_id in self._node_ids if node_id not in by_id]
+        if unresolved:
+            companion = image_companion_name(collection)
+            if self._rag._collection_exists(companion):
+                by_id.update(self._fetch(companion, unresolved))
         nodes: list[NodeWithScore] = []
         for node_id in self._node_ids:
             point = by_id.get(node_id)
@@ -8064,20 +8086,28 @@ class RAG:
         node_id = str(chunk_id or "").strip()
         if not node_id:
             return None
-        try:
-            points = self.qdrant_client.retrieve(
-                collection_name=self.qdrant_collection,
-                ids=[_as_qdrant_point_id(node_id)],
-                with_payload=True,
-                with_vectors=False,
-            )
-        except Exception as exc:
-            logger.warning("Chunk fetch failed for {} in {}: {}", node_id, self.qdrant_collection, exc)
-            return None
-        for point in points:
-            text = RAG._extract_payload_text(dict(getattr(point, "payload", {}) or {}))
-            if text:
-                return text
+        # Image hits live in the companion, so both lanes are tried before
+        # calling a chunk gone.
+        lanes = [self.qdrant_collection]
+        companion = image_companion_name(self.qdrant_collection)
+        if self._collection_exists(companion):
+            lanes.append(companion)
+
+        for lane in lanes:
+            try:
+                points = self.qdrant_client.retrieve(
+                    collection_name=lane,
+                    ids=[_as_qdrant_point_id(node_id)],
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning("Chunk fetch failed for {} in {}: {}", node_id, lane, exc)
+                continue
+            for point in points:
+                text = RAG._extract_payload_text(dict(getattr(point, "payload", {}) or {}))
+                if text:
+                    return text
         return None
 
     def search_fulltext(

@@ -6465,3 +6465,60 @@ def test_search_skips_the_image_lane_when_there_is_no_companion(
     result = rag.search_fulltext("chunk")
 
     assert [h["id"] for h in result["hits"]] == ["t1"]
+
+
+def _split_retrieve_client(main: dict[str, str], images: dict[str, str]) -> Any:
+    """Build a client whose retrieve answers per collection.
+
+    Args:
+        main (dict[str, str]): ``{point_id: text}`` in the main collection.
+        images (dict[str, str]): ``{point_id: caption}`` in the companion.
+
+    Returns:
+        Any: A Qdrant client stand-in.
+    """
+
+    def _retrieve(**kwargs: Any) -> list[Any]:
+        table = images if kwargs["collection_name"].endswith("_images") else main
+        return [types.SimpleNamespace(id=i, payload={"text": table[str(i)]}) for i in kwargs["ids"] if str(i) in table]
+
+    return cast(
+        Any,
+        types.SimpleNamespace(retrieve=_retrieve, collection_exists=lambda collection_name: True),
+    )
+
+
+def test_scope_resolves_image_chunks_from_the_companion() -> None:
+    """An image hit's chunk lives in the companion, not the main collection.
+
+    Looking only in the main collection would resolve a scoped image to
+    nothing and report it missing — a scoped answer built on part of the
+    evidence the investigator selected.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _split_retrieve_client({"t1": "a document chunk"}, {"i1": "a chart caption"})
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["t1", "i1"])
+    nodes = retriever.retrieve("anything")
+
+    assert [n.node.node_id for n in nodes] == ["t1", "i1"]
+    assert retriever.missing == 0
+
+
+def test_scope_still_reports_ids_in_neither_collection() -> None:
+    """A stale id must stay visible once both lanes have been tried."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _split_retrieve_client({"t1": "a document chunk"}, {})
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["t1", "gone"])
+    retriever.retrieve("anything")
+
+    assert retriever.missing == 1
+
+
+def test_chunk_text_falls_back_to_the_image_companion() -> None:
+    """Expanding an image hit must return its caption, not a 404."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _split_retrieve_client({}, {"i1": "a chart caption"})
+
+    assert rag.get_chunk_text("i1") == "a chart caption"
