@@ -947,30 +947,39 @@ def test_normalize_response_data_builds_source_backed_answer_when_sources_exist(
     )
 
 
-def test_build_metadata_filters_supports_mime_and_date_rules() -> None:
-    """Metadata filter builder should compile MIME and date request rules."""
-    compiled = build_metadata_filters(
-        [
-            {
-                "field": "mimetype",
-                "operator": "mime_match",
-                "value": "image/*",
-            },
-            {
-                "field": "reference_metadata.timestamp",
-                "operator": "date_on_or_after",
-                "value": "2026-01-01",
-            },
-        ]
-    )
+def test_build_metadata_filters_compiles_mime_and_defers_dates() -> None:
+    """MIME rules compile; date rules defer to the native Qdrant filter.
+
+    A date bound compiles to ``Range(gte=<ISO string>)`` inside
+    ``QdrantVectorStore``, whose bounds are floats — so emitting a LlamaIndex
+    filter for it raises rather than filtering. ``build_qdrant_filter`` carries
+    the rule instead, via ``models.DatetimeRange``.
+    """
+    rules = [
+        {
+            "field": "mimetype",
+            "operator": "mime_match",
+            "value": "image/*",
+        },
+        {
+            "field": "reference_metadata.timestamp",
+            "operator": "date_on_or_after",
+            "value": "2026-01-01",
+        },
+    ]
+
+    compiled = build_metadata_filters(rules)
 
     assert compiled is not None
-    assert len(compiled.filters) == 2
-    first_filter = cast(Any, compiled.filters[0])
-    second_filter = cast(Any, compiled.filters[1])
-    assert first_filter.operator.value == "text_match_insensitive"
-    assert second_filter.operator.value == ">="
-    assert str(second_filter.value).startswith("2026-01-01T00:00:00")
+    assert len(compiled.filters) == 1
+    only_filter = cast(Any, compiled.filters[0])
+    assert only_filter.key == "mimetype"
+    assert only_filter.operator.value == "text_match_insensitive"
+
+    native = build_qdrant_filter(rules)
+    assert native is not None
+    assert native.must is not None
+    assert len(list(native.must)) == 2
 
 
 def test_build_qdrant_filter_supports_boolean_rules() -> None:
@@ -6072,3 +6081,44 @@ def test_get_existing_file_hashes_treats_reworded_404_as_missing(
     assert not any("Failed to fetch existing hashes" in w for w in warnings), (
         f"reworded 404 must take the missing-collection path, got warnings: {warnings}"
     )
+
+
+def test_build_retriever_keeps_parent_context_filter_under_native_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The internal fine-node condition must survive a user metadata filter.
+
+    ``qdrant_filters`` overrides the LlamaIndex filters inside
+    ``QdrantVectorStore.query``, so a user filter used to silently disable
+    parent-context scoping and let coarse parent nodes back into retrieval.
+    """
+    rag = RAG(qdrant_collection="test")
+    captured: dict[str, Any] = {}
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: captured.update(kwargs) or object(),
+        ),
+    )
+    monkeypatch.setattr(RAG, "_build_image_lane", lambda self, **kwargs: None)
+    monkeypatch.setattr(
+        RAG,
+        "_resolve_runtime_retrieval_settings",
+        lambda self, **kwargs: {
+            "similarity_top_k": 5,
+            "vector_store_query_mode": _VectorStoreQueryModeStub.DEFAULT,
+            "parent_context_enabled": True,
+            "alpha": 0.5,
+            "sparse_top_k": 5,
+            "hybrid_top_k": 5,
+        },
+    )
+
+    user_filter = build_qdrant_filter([{"field": "mimetype", "operator": "eq", "value": "text/plain"}])
+    rag._build_retriever(vector_store_kwargs={"qdrant_filters": user_filter})
+
+    merged = captured["vector_store_kwargs"]["qdrant_filters"]
+    keys = [condition.key for condition in (merged.must or [])]
+    assert "docint_hier_type" in keys
+    assert "mimetype" in keys

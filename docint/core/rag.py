@@ -149,7 +149,7 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
-from docint.core.retrieval_filters import matches_metadata_filters
+from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
@@ -4968,13 +4968,24 @@ class RAG:
             similarity_top_k=similarity_top_k,
             retrieval_options=retrieval_options,
         )
+        # The internal condition is expressed twice — once per filter
+        # representation — because either may be the one that executes:
+        # QdrantVectorStore.query uses ``qdrant_filters`` *instead of* the
+        # LlamaIndex filters when both are supplied.
         internal_filters: list[MetadataFilter] = []
+        internal_conditions: list[qdrant_models.FieldCondition] = []
         if retrieval_settings["parent_context_enabled"]:
             internal_filters.append(
                 MetadataFilter(
                     key="docint_hier_type",
                     value="fine",
                     operator=FilterOperator.EQ,
+                )
+            )
+            internal_conditions.append(
+                qdrant_models.FieldCondition(
+                    key="docint_hier_type",
+                    match=qdrant_models.MatchValue(value="fine"),
                 )
             )
 
@@ -4993,7 +5004,15 @@ class RAG:
         elif retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.SPARSE:
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
         if vector_store_kwargs:
-            retriever_kwargs["vector_store_kwargs"] = vector_store_kwargs
+            # Copy before mutating: the caller owns this dict and may reuse it
+            # across the text and image lanes of the same request.
+            native_kwargs = dict(vector_store_kwargs)
+            if internal_conditions and native_kwargs.get("qdrant_filters") is not None:
+                native_kwargs["qdrant_filters"] = merge_qdrant_filters(
+                    native_kwargs["qdrant_filters"],
+                    internal_conditions,
+                )
+            retriever_kwargs["vector_store_kwargs"] = native_kwargs
         text_retriever = self.index.as_retriever(**retriever_kwargs)
         image_lane = self._build_image_lane(
             metadata_filter_rules=metadata_filter_rules,

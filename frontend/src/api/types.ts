@@ -64,8 +64,11 @@ export interface ChatFinalEvent extends ValidationFields {
   entity_match_groups?: unknown[]
 }
 
+/** A rule targets either one `field` or several `fields`; with several, it
+ *  matches when any of them matches. The API rejects a rule naming neither. */
 export interface MetadataFilter {
-  field: string
+  field?: string
+  fields?: string[]
   operator: string
   value?: unknown
   values?: unknown[]

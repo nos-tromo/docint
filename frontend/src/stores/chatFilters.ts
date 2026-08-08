@@ -2,6 +2,14 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { MetadataFilter, QueryMode, RetrievalMode } from '@/api/types'
 
+/** Both metadata keys a date bound has to cover. A chunk or transcript segment
+ *  carries `timestamp`; a media artifact linked to a posting carries
+ *  `posting_timestamp` instead. */
+const TIMESTAMP_FIELDS = [
+  'reference_metadata.timestamp',
+  'reference_metadata.posting_timestamp'
+]
+
 export interface CustomRule {
   id: string
   field: string
@@ -73,9 +81,15 @@ export const useChatFiltersStore = create<ChatFiltersState>()(
         if (!s.filterEnabled) return []
         const out: MetadataFilter[] = []
         if (s.mimePattern) out.push({ field: 'mimetype', operator: 'mime_match', value: s.mimePattern })
-        if (s.dateFrom) out.push({ field: 'date', operator: 'date_gte', value: s.dateFrom })
-        if (s.dateTo) out.push({ field: 'date', operator: 'date_lte', value: s.dateTo })
-        if (s.hateSpeechOnly) out.push({ field: 'hate_speech_flagged', operator: 'eq', value: true })
+        // One bound covers both timestamp keys: chunks and transcript segments
+        // carry `timestamp`, while media artifacts linked to a posting carry
+        // `posting_timestamp`. The API ORs a rule's `fields`.
+        if (s.dateFrom)
+          out.push({ fields: TIMESTAMP_FIELDS, operator: 'date_on_or_after', value: s.dateFrom })
+        if (s.dateTo)
+          out.push({ fields: TIMESTAMP_FIELDS, operator: 'date_on_or_before', value: s.dateTo })
+        if (s.hateSpeechOnly)
+          out.push({ field: 'hate_speech.hate_speech', operator: 'eq', value: true })
         for (const r of s.customRules) {
           if (r.field && r.operator) out.push({ field: r.field, operator: r.operator, value: r.value })
         }

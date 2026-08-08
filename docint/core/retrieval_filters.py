@@ -25,6 +25,17 @@ _SCALAR_OPERATORS: dict[str, FilterOperator] = {
     "contains": FilterOperator.CONTAINS,
 }
 
+_DATE_OPERATORS: frozenset[str] = frozenset(
+    {
+        "date_after",
+        "date_on_or_after",
+        "date_before",
+        "date_on_or_before",
+    }
+)
+
+_RANGE_OPERATORS: frozenset[str] = frozenset({"gt", "gte", "lt", "lte"})
+
 _QdrantCondition: TypeAlias = (
     models.FieldCondition
     | models.IsEmptyCondition
@@ -93,6 +104,38 @@ def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None
     return models.Filter(must=must or None, must_not=must_not or None)
 
 
+def merge_qdrant_filters(
+    base: models.Filter | None,
+    extra_conditions: Sequence[_QdrantCondition],
+) -> models.Filter | None:
+    """Combine a request-scoped native filter with internal retrieval conditions.
+
+    ``QdrantVectorStore.query`` uses ``qdrant_filters`` *instead of* the
+    LlamaIndex ``MetadataFilters`` when both are supplied, so any internal
+    condition that only exists on the LlamaIndex side is silently dropped as
+    soon as a user filter is active. Internal conditions must therefore be
+    merged into the native filter.
+
+    Args:
+        base (models.Filter | None): The user's compiled native filter, if any.
+        extra_conditions (Sequence[_QdrantCondition]): Internal conditions that
+            must always apply, ANDed with the base.
+
+    Returns:
+        models.Filter | None: The combined filter, ``base`` unchanged when there
+            are no extras, or ``None`` when neither side contributes anything.
+    """
+    if not extra_conditions:
+        return base
+    if base is None:
+        return models.Filter(must=list(extra_conditions))
+    return models.Filter(
+        must=[*(base.must or []), *extra_conditions],
+        must_not=list(base.must_not) if base.must_not else None,
+        should=list(base.should) if base.should else None,
+    )
+
+
 def matches_metadata_filters(
     metadata: Mapping[str, Any],
     raw_rules: Sequence[Any] | None,
@@ -125,18 +168,22 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
     """Normalize a raw filter payload into a plain dictionary.
 
     Args:
-    raw_rule: A filter-like mapping or object exposing ``field``, ``operator``,
-        ``value``, and optional ``values`` attributes.
+    raw_rule: A filter-like mapping or object exposing ``field`` or ``fields``,
+        ``operator``, ``value``, and optional ``values`` attributes. A rule
+        naming several ``fields`` matches when any one of them matches.
 
     Returns:
-        dict[str, Any] | None: A normalized dictionary with string keys and scalar or list values, or
-            ``None`` if the input cannot be coerced into a valid rule.
+        dict[str, Any] | None: A normalized rule with a non-empty ``fields``
+            list of target metadata keys, ``field`` retained as ``fields[0]``
+            for backwards compatibility, plus ``operator``, ``value`` and
+            ``values``. ``None`` when the input names no field or no operator.
     """
     if isinstance(raw_rule, Mapping):
         data = dict(raw_rule)
     else:
         data = {
             "field": getattr(raw_rule, "field", None),
+            "fields": getattr(raw_rule, "fields", None),
             "operator": getattr(raw_rule, "operator", None),
             "value": getattr(raw_rule, "value", None),
             "values": getattr(raw_rule, "values", None),
@@ -144,7 +191,14 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
 
     field = str(data.get("field") or "").strip()
     operator = str(data.get("operator") or "").strip().lower()
-    if not field or not operator:
+
+    raw_fields = data.get("fields")
+    fields: list[str] = []
+    if isinstance(raw_fields, (list, tuple)):
+        fields = [text for text in (str(entry or "").strip() for entry in raw_fields) if text]
+    if not fields and field:
+        fields = [field]
+    if not fields or not operator:
         return None
 
     values = data.get("values")
@@ -152,7 +206,8 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
         values = list(values) if isinstance(values, tuple) else None
 
     return {
-        "field": field,
+        "field": fields[0],
+        "fields": fields,
         "operator": operator,
         "value": data.get("value"),
         "values": values,
@@ -162,6 +217,11 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
 def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
     """Return whether a normalized rule matches an in-memory metadata payload.
 
+    A rule listing several ``fields`` is satisfied when any one of them
+    matches. ``neq`` is the exception: it mirrors the native filter, which
+    routes negation into ``must_not`` around the ORed conditions, so the
+    payload matches only when *no* listed field holds the value.
+
     Args:
         metadata (Mapping[str, Any]): The metadata payload to test.
         rule (dict[str, Any]): A normalized rule dictionary.
@@ -169,21 +229,42 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
     Returns:
         bool: True if the rule matches the metadata, False otherwise.
     """
+    fields = rule["fields"]
+    if rule["operator"] == "neq":
+        positive = {**rule, "operator": "eq"}
+        return not any(_matches_rule_for_field(metadata, positive, field) for field in fields)
+    return any(_matches_rule_for_field(metadata, rule, field) for field in fields)
+
+
+def _matches_rule_for_field(
+    metadata: Mapping[str, Any],
+    rule: dict[str, Any],
+    field: str,
+) -> bool:
+    """Return whether one metadata key satisfies a normalized rule.
+
+    Args:
+        metadata (Mapping[str, Any]): The metadata payload to test.
+        rule (dict[str, Any]): A normalized rule dictionary.
+        field (str): The single dotted metadata key to test.
+
+    Returns:
+        bool: True if this field satisfies the rule, False otherwise.
+    """
     operator = rule["operator"]
-    values = _extract_field_values(metadata, rule["field"])
+    values = _extract_field_values(metadata, field)
     if not values:
         return False
 
-    if operator in {"eq", "neq"}:
+    if operator == "eq":
         expected = _normalize_scalar(rule.get("value"))
         if expected is None:
             return False
-        matched = any(_coerce_comparable(value) == expected for value in values)
-        return not matched if operator == "neq" else matched
+        return any(_coerce_comparable(value) == expected for value in values)
 
-    if operator in {"gt", "gte", "lt", "lte"}:
-        expected = _normalize_scalar(rule.get("value"))
-        if not isinstance(expected, (int, float)):
+    if operator in _RANGE_OPERATORS:
+        expected = normalize_numeric_bound(rule.get("value"))
+        if expected is None:
             return False
         numeric_values = [value for value in (_coerce_numeric(value) for value in values) if value is not None]
         if not numeric_values:
@@ -304,6 +385,33 @@ def _coerce_comparable(value: Any) -> str | int | float | bool | None:
     return str(value).strip()
 
 
+def normalize_numeric_bound(value: Any) -> int | float | None:
+    """Return a numeric range bound, parsing numeric strings.
+
+    Qdrant's ``models.Range`` bounds are floats, and LlamaIndex compiles range
+    operators straight into them, so a non-numeric bound cannot be expressed on
+    any path. JSON payloads routinely carry numbers as strings — an HTML text
+    input has no other option — so those are parsed rather than dropped. A
+    dropped range rule would leave the query unfiltered, which silently returns
+    *more* than the caller asked for.
+
+    Args:
+        value (Any): Raw comparison value.
+
+    Returns:
+        int | float | None: The numeric bound, or ``None`` when the value is
+            not numeric.
+    """
+    scalar = _normalize_scalar(value)
+    if isinstance(scalar, bool):
+        return None
+    if isinstance(scalar, (int, float)):
+        return scalar
+    if isinstance(scalar, str):
+        return _coerce_numeric(scalar)
+    return None
+
+
 def _coerce_numeric(value: Any) -> int | float | None:
     """Return a numeric representation for scalar comparisons when possible."""
     if isinstance(value, bool):
@@ -329,8 +437,31 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
         MetadataFilter | MetadataFilters | None: Compiled filter(s), or ``None`` if the rule
         cannot be compiled.
     """
-    field = rule["field"]
+    fields = rule["fields"]
     operator = rule["operator"]
+
+    if operator in _RANGE_OPERATORS:
+        bound = normalize_numeric_bound(rule.get("value"))
+        if bound is None:
+            # Qdrant has no string range, so nothing can express this. The API
+            # rejects it at the wire; reaching here means it must be dropped.
+            logger.debug(
+                "Skipping non-numeric range MetadataFilter for '{}' — Qdrant Range needs a number.",
+                fields,
+            )
+            return None
+        return _metadata_filter_for(fields, bound, _SCALAR_OPERATORS[operator])
+
+    if operator == "neq":
+        # _metadata_filter_for ORs a rule's fields, which is right for positive
+        # operators but inverts negation: NE(a) OR NE(b) is not
+        # NOT(a == x OR b == x). build_qdrant_filter expresses the latter with
+        # must_not=[Filter(should=[...])], so negation is left entirely to it.
+        logger.debug(
+            "Skipping NE MetadataFilter for '{}' — the native Qdrant filter covers it.",
+            fields,
+        )
+        return None
 
     if operator in _SCALAR_OPERATORS:
         value = _normalize_scalar(rule.get("value"))
@@ -339,14 +470,19 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
         if isinstance(value, bool):
             logger.debug(
                 "Skipping boolean MetadataFilter for '{}' and relying on native Qdrant filters.",
-                field,
+                fields,
             )
             return None
-        return MetadataFilter(
-            key=field,
-            value=value,
-            operator=_SCALAR_OPERATORS[operator],
-        )
+        if operator == "contains":
+            # QdrantVectorStore._build_subfilter raises NotImplementedError for
+            # FilterOperator.CONTAINS. build_qdrant_filter expresses this
+            # natively with MatchText, so drop it here rather than crash there.
+            logger.debug(
+                "Skipping CONTAINS MetadataFilter for '{}' — the native Qdrant filter covers it.",
+                fields,
+            )
+            return None
+        return _metadata_filter_for(fields, value, _SCALAR_OPERATORS[operator])
 
     if operator == "in":
         values = _normalize_values(rule.get("values"))
@@ -355,85 +491,70 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
             values = [scalar] if scalar is not None else cast(list[str | int | float | bool], [])
         if not values:
             return None
-        return MetadataFilter(key=field, value=cast(Any, values), operator=FilterOperator.IN)
+        return _metadata_filter_for(fields, cast(Any, values), FilterOperator.IN)
 
     if operator == "mime_match":
-        return _compile_mime_rule(field=field, raw_value=rule.get("value"))
+        return _compile_mime_rule(fields=fields, raw_value=rule.get("value"))
 
-    if operator in {
-        "date_after",
-        "date_on_or_after",
-        "date_before",
-        "date_on_or_before",
-    }:
-        return _compile_date_rule(field=field, operator=operator, raw_value=rule.get("value"))
+    if operator in _DATE_OPERATORS:
+        # Date bounds compile to Range(gte=<ISO string>) in the vector store,
+        # which qdrant-client rejects. Only build_qdrant_filter can express
+        # them (models.DatetimeRange), and it is the filter that executes.
+        logger.debug(
+            "Skipping date MetadataFilter for '{}' — the native Qdrant filter covers it.",
+            fields,
+        )
+        return None
 
     logger.warning("Ignoring unsupported metadata filter operator '{}'.", operator)
     return None
 
 
+def _metadata_filter_for(
+    fields: list[str],
+    value: Any,
+    operator: FilterOperator,
+) -> MetadataFilter | MetadataFilters:
+    """Build one filter per target field, ORed together when there are several.
+
+    Args:
+        fields (list[str]): Target metadata keys; matching any one satisfies the rule.
+        value (Any): Already-normalized comparison value.
+        operator (FilterOperator): LlamaIndex operator to apply to every field.
+
+    Returns:
+        MetadataFilter | MetadataFilters: A single filter for one field, or an
+            OR-combined ``MetadataFilters`` for several.
+    """
+    filters: list[MetadataFilter | MetadataFilters] = [
+        MetadataFilter(key=field, value=value, operator=operator) for field in fields
+    ]
+    if len(filters) == 1:
+        return filters[0]
+    return MetadataFilters(filters=filters, condition=FilterCondition.OR)
+
+
 def _compile_mime_rule(
     *,
-    field: str,
+    fields: list[str],
     raw_value: Any,
-) -> MetadataFilter | None:
+) -> MetadataFilter | MetadataFilters | None:
     """Compile MIME filters, including simple ``type/*`` wildcard patterns.
 
     Args:
-        field (str): The metadata field to filter on, typically ``mimetype``.
-        raw_value (Any): The raw MIME pattern value, which may include a ``/*`` suffix for wildcard matching.
+        fields (list[str]): Target metadata keys, typically ``["mimetype"]``.
+        raw_value (Any): The raw MIME pattern, which may end in ``/*``.
 
     Returns:
-        MetadataFilter | None: A ``MetadataFilter`` with the right operator, or ``None`` if the
-            value is invalid.
+        MetadataFilter | MetadataFilters | None: The compiled filter, or ``None``
+            when the value is empty.
     """
     value = str(raw_value or "").strip().lower()
     if not value:
         return None
     if value.endswith("/*"):
-        return MetadataFilter(
-            key=field,
-            value=value[:-1],
-            operator=FilterOperator.TEXT_MATCH_INSENSITIVE,
-        )
-    return MetadataFilter(key=field, value=value, operator=FilterOperator.EQ)
-
-
-def _compile_date_rule(
-    *,
-    field: str,
-    operator: str,
-    raw_value: Any,
-) -> MetadataFilter | None:
-    """Compile date operators into ISO-8601 string comparisons.
-
-    Args:
-        field (str): The metadata field to filter on, e.g. ``reference_metadata.timestamp``.
-        operator (str): The date comparison operator, one of ``date_after``, ``date_on_or_after``,
-            ``date_before``, or ``date_on_or_before``.
-        raw_value (Any): The raw date or datetime value, which may be a string, date/datetime object,
-            or other type coercible to a date.
-
-    Returns:
-        MetadataFilter | None: A ``MetadataFilter`` with the right operator and ISO-8601 value,
-            or ``None`` if the value is invalid.
-    """
-    boundary = _normalize_date_value(raw_value, upper_bound=operator.endswith("before"))
-    if boundary is None:
-        logger.warning(
-            "Ignoring metadata date filter for '{}' due to invalid value '{}'.",
-            field,
-            raw_value,
-        )
-        return None
-
-    op_map = {
-        "date_after": FilterOperator.GT,
-        "date_on_or_after": FilterOperator.GTE,
-        "date_before": FilterOperator.LT,
-        "date_on_or_before": FilterOperator.LTE,
-    }
-    return MetadataFilter(key=field, value=boundary, operator=op_map[operator])
+        return _metadata_filter_for(fields, value[:-1], FilterOperator.TEXT_MATCH_INSENSITIVE)
+    return _metadata_filter_for(fields, value, FilterOperator.EQ)
 
 
 def _compile_qdrant_rule(
@@ -441,17 +562,49 @@ def _compile_qdrant_rule(
 ) -> tuple[_QdrantCondition | None, bool]:
     """Translate a normalized rule into a native Qdrant condition.
 
+    A rule listing several ``fields`` compiles to a nested ``models.Filter``
+    whose ``should`` holds one condition per field, so matching any field
+    satisfies the rule. Negated rules keep that grouping and are routed into
+    ``must_not`` by the caller, giving NOT (a OR b) — no listed field holds
+    the value.
+
     Args:
-        rule (dict[str, Any]): A dictionary with keys ``field``, ``operator``, ``value``, and optional ``values``,
-            where ``field`` is the metadata key to filter on, and ``operator`` is one of the
-            supported filter operations.
+        rule (dict[str, Any]): A normalized rule dictionary.
 
     Returns:
-        tuple[_QdrantCondition | None, bool]: ``(compiled_condition, negate)`` where
-            ``compiled_condition`` is a Qdrant-compatible condition/filter and ``negate`` indicates
-            whether to route into ``must_not`` rather than ``must``.
+        tuple[_QdrantCondition | None, bool]: ``(condition, negate)``; the
+            condition is ``None`` when no field produced anything compilable.
     """
-    field = rule["field"]
+    conditions: list[_QdrantCondition] = []
+    negate = False
+    for field in rule["fields"]:
+        condition, field_negate = _compile_qdrant_condition(rule, field)
+        if condition is None:
+            continue
+        negate = field_negate
+        conditions.append(condition)
+
+    if not conditions:
+        return None, False
+    if len(conditions) == 1:
+        return conditions[0], negate
+    return models.Filter(should=conditions), negate
+
+
+def _compile_qdrant_condition(
+    rule: dict[str, Any],
+    field: str,
+) -> tuple[_QdrantCondition | None, bool]:
+    """Translate a normalized rule into a native Qdrant condition on one field.
+
+    Args:
+        rule (dict[str, Any]): A normalized rule dictionary.
+        field (str): The single dotted metadata key this condition targets.
+
+    Returns:
+        tuple[_QdrantCondition | None, bool]: ``(condition, negate)`` where
+            ``negate`` routes the condition into ``must_not`` rather than ``must``.
+    """
     operator = rule["operator"]
 
     if operator in {"eq", "neq"}:
@@ -463,9 +616,9 @@ def _compile_qdrant_rule(
             operator == "neq",
         )
 
-    if operator in {"gt", "gte", "lt", "lte"}:
-        value = _normalize_scalar(rule.get("value"))
-        if not isinstance(value, (int, float)):
+    if operator in _RANGE_OPERATORS:
+        value = normalize_numeric_bound(rule.get("value"))
+        if value is None:
             return None, False
         range_kwargs = {operator: value}
         return (
@@ -585,24 +738,6 @@ def _normalize_values(values: Any) -> list[str | int | float | bool]:
         if scalar is not None:
             normalized.append(scalar)
     return normalized
-
-
-def _normalize_date_value(value: Any, *, upper_bound: bool) -> str | None:
-    """Normalize a date or datetime input into a UTC ISO-8601 string.
-
-    Args:
-        value (Any): The raw date or datetime value, which may be a string, date/datetime object,
-            or other type coercible to a date.
-        upper_bound (bool): Whether the value represents an upper bound (i.e., "before" operator)
-            that should be normalized.
-
-    Returns:
-        str | None: A normalized UTC ISO-8601 string, or ``None`` if the value is invalid.
-    """
-    dt = _parse_date_value(value, upper_bound=upper_bound)
-    if dt is None:
-        return None
-    return dt.isoformat().replace("+00:00", "Z")
 
 
 def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
