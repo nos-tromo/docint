@@ -113,7 +113,9 @@ export const de: Strings = {
     'Dieser Chat gehört zu einer anderen Sammlung — wechseln Sie zu dieser Sammlung, um ihn fortzusetzen, oder starten Sie einen neuen Chat.',
   'chat.error_no_collection': 'Wählen Sie eine Sammlung aus, bevor Sie einen Chat starten.',
   'chat.error_stream_ended':
-    'Der Chat-Stream wurde unerwartet beendet.',
+    'Der Chat-Stream wurde unerwartet beendet — die Verbindung brach ab oder das Backend war mitten in der Antwort nicht mehr erreichbar. Prüfen Sie die Backend-Logs und versuchen Sie es erneut.',
+  'chat.error_backend_failed':
+    'Die Antwort konnte nicht erzeugt werden. Versuchen Sie es erneut; der angezeigte Code und die Backend-Logs benennen den Fehler.',
   'chat.error_context_overflow':
     'Die Anfrage ist zu groß für das Modell – Bitte stellen Sie eine kürzere Frage oder wählen Sie weniger Dokumente aus.',
   'chat.error_embedding_unavailable':

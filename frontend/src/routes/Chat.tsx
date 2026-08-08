@@ -234,7 +234,11 @@ export function Chat() {
           // Post-D2 the backend sends a static protocol flag here, not
           // prose — never render the field itself. The validated `code`
           // token selects the copy and is shown for support triage.
-          dispatch({ type: 'fail', error: streamErrorText(t, data.code, 'chat.error_stream_ended') })
+          // The fallback is the *reported-failure* copy, not the
+          // stream-ended one: an error frame means the backend answered
+          // and named its failure. Only the transport path below, which
+          // carries no code at all, may claim the stream ended.
+          dispatch({ type: 'fail', error: streamErrorText(t, data.code, 'chat.error_backend_failed') })
           continue
         }
         const final = data as unknown as ChatFinalEvent
