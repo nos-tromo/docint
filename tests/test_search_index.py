@@ -363,3 +363,44 @@ def test_backfill_marks_textless_points_so_coverage_can_reach_zero() -> None:
 
     assert summary == BackfillSummary(scanned=2, written=1, skipped=0, empty=1)
     assert _written(client) == {"a": "", "b": "beta"}
+
+
+class _CompanionClient(_CountingClient):
+    """Counting client that also answers for an image companion."""
+
+    def __init__(self, *, main: tuple[int, int], images: tuple[int, int]) -> None:
+        """Initialize with per-collection ``(total, with_text)`` counts.
+
+        Args:
+            main (tuple[int, int]): Counts for the main collection.
+            images (tuple[int, int]): Counts for the ``_images`` companion.
+        """
+        super().__init__([], total=main[0], with_text=main[1])
+        self.images = images
+
+    @override
+    def count(self, collection_name: str, **kwargs: Any) -> Any:
+        """Return counts for whichever collection was asked about."""
+        total, with_text = self.images if collection_name.endswith("_images") else (self.total, self.with_text)
+        value = with_text if kwargs.get("count_filter") is not None else total
+        return type("_Count", (), {"count": value})()
+
+    def collection_exists(self, collection_name: str) -> bool:
+        """Report that every collection exists."""
+        return True
+
+
+def test_status_counts_the_image_companion_too() -> None:
+    """An unindexed companion means image hits silently missing.
+
+    Coverage that ignored the companion would read "complete" while every
+    figure and keyframe stayed unfindable.
+    """
+    client = _CompanionClient(main=(100, 100), images=(22, 0))
+
+    status = search_index_status(client, "col")
+
+    assert status["total"] == 122
+    assert status["with_search_text"] == 100
+    assert status["missing"] == 22
+    assert status["complete"] is False

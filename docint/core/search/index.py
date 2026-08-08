@@ -334,20 +334,25 @@ def search_index_status(
     except Exception as exc:
         logger.debug("search_text index status unavailable for {}: {}", collection, exc)
 
-    total = with_search_text = 0
+    # The image companion counts too: its points carry the captions and tags a
+    # keyword query reaches figures and keyframes by. Ignoring it would report
+    # "complete" while every image stayed unfindable.
+    lanes = [collection]
+    companion = image_companion_name(collection)
     try:
-        total = int(client.count(collection_name=collection, exact=True).count)
-        with_search_text = int(
-            client.count(
-                collection_name=collection,
-                count_filter=models.Filter(
-                    must_not=[models.IsEmptyCondition(is_empty=models.PayloadField(key=SEARCH_TEXT_FIELD))]
-                ),
-                exact=True,
-            ).count
-        )
+        if client.collection_exists(collection_name=companion):
+            lanes.append(companion)
     except Exception as exc:
-        logger.debug("search_text coverage unavailable for {}: {}", collection, exc)
+        logger.debug("companion lookup failed for {}: {}", companion, exc)
+
+    total = with_search_text = 0
+    populated = models.Filter(must_not=[models.IsEmptyCondition(is_empty=models.PayloadField(key=SEARCH_TEXT_FIELD))])
+    for lane in lanes:
+        try:
+            total += int(client.count(collection_name=lane, exact=True).count)
+            with_search_text += int(client.count(collection_name=lane, count_filter=populated, exact=True).count)
+        except Exception as exc:
+            logger.debug("search_text coverage unavailable for {}: {}", lane, exc)
 
     missing = max(0, total - with_search_text)
     return {

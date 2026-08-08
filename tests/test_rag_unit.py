@@ -6371,3 +6371,97 @@ def test_search_hits_report_whether_the_preview_was_truncated(
 
     assert hits["short"]["truncated"] is False
     assert hits["long"]["truncated"] is True
+
+
+def _two_lane_client(text_pages: Any, image_pages: Any) -> Any:
+    """Build a client whose scroll answers differently per collection.
+
+    Args:
+        text_pages (Any): ``(points, next_offset)`` for the main collection.
+        image_pages (Any): ``(points, next_offset)`` for the ``_images`` companion.
+
+    Returns:
+        Any: A Qdrant client stand-in.
+    """
+
+    def _scroll(**kwargs: Any) -> Any:
+        return image_pages if kwargs["collection_name"].endswith("_images") else text_pages
+
+    return cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=_scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: True,
+        ),
+    )
+
+
+def _indexed_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report a fully indexed collection so search proceeds."""
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 2,
+            "with_search_text": 2,
+            "missing": 0,
+            "complete": True,
+        },
+    )
+
+
+def test_search_returns_image_hits_alongside_text_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Figures and keyframes live in the companion and must be findable.
+
+    Searching only the main collection leaves every image extracted from a
+    document unreachable by keyword.
+    """
+    _indexed_status(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _two_lane_client(
+        ([types.SimpleNamespace(id="t1", payload={"text": "a document chunk"})], None),
+        ([types.SimpleNamespace(id="i1", payload={"llm_description": "a chart", "llm_tags": ["chart"]})], None),
+    )
+
+    result = rag.search_fulltext("chart")
+
+    assert [(h["id"], h["kind"]) for h in result["hits"]] == [("t1", "text"), ("i1", "image")]
+
+
+def test_search_paginates_across_the_lane_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page must fill from images once the text lane is exhausted.
+
+    Otherwise a short final text page would end the results and hide every
+    image hit behind a cursor nobody follows.
+    """
+    _indexed_status(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _two_lane_client(
+        ([types.SimpleNamespace(id="t1", payload={"text": "a document chunk"})], None),
+        ([types.SimpleNamespace(id="i1", payload={"llm_description": "a chart"})], None),
+    )
+
+    result = rag.search_fulltext("chart", limit=10)
+
+    assert len(result["hits"]) == 2
+    assert result["next_cursor"] is None
+
+
+def test_search_skips_the_image_lane_when_there_is_no_companion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection with no images has no companion; that is not an error."""
+    _indexed_status(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    client = _two_lane_client(
+        ([types.SimpleNamespace(id="t1", payload={"text": "a document chunk"})], None),
+        ([], None),
+    )
+    client.collection_exists = lambda collection_name: not collection_name.endswith("_images")
+    rag._qdrant_client = client
+
+    result = rag.search_fulltext("chunk")
+
+    assert [h["id"] for h in result["hits"]] == ["t1"]
