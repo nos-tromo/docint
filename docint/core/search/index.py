@@ -24,6 +24,24 @@ SEARCH_MIN_TOKEN_LEN = 2
 #: Longest indexable token.
 SEARCH_MAX_TOKEN_LEN = 30
 
+#: Suffix of the image companion collection. Its points carry an image's
+#: caption and tags as their node text, so they are searchable alongside
+#: document chunks once indexed.
+IMAGE_COMPANION_SUFFIX = "_images"
+
+
+def image_companion_name(collection: str) -> str:
+    """Return the image companion collection paired with ``collection``.
+
+    Args:
+        collection (str): Physical collection name.
+
+    Returns:
+        str: The companion name; it may not exist for collections with no
+            images.
+    """
+    return f"{collection}{IMAGE_COMPANION_SUFFIX}"
+
 
 def search_index_params() -> models.TextIndexParams:
     """Return the payload-index parameters full-text search depends on.
