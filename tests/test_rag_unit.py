@@ -6292,3 +6292,127 @@ def test_search_fulltext_flags_a_partially_indexed_collection(
 
     assert result["status"] == "partial"
     assert result["index_status"]["missing"] == 936
+
+
+def test_scoped_retriever_returns_exactly_the_selected_chunks() -> None:
+    """A scope answers from the chosen chunks and nothing else.
+
+    The retriever is swapped rather than the prompt hand-built, so citation
+    numbering, source normalization and the report controls keep working
+    unchanged.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [
+                types.SimpleNamespace(id="c2", payload={"text": "second chunk"}),
+                types.SimpleNamespace(id="c1", payload={"text": "first chunk"}),
+            ]
+        ),
+    )
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["c1", "c2"])
+    nodes = retriever.retrieve("anything")
+
+    # The scope's own order wins, not Qdrant's return order.
+    assert [n.node.node_id for n in nodes] == ["c1", "c2"]
+    assert [n.node.get_content() for n in nodes] == ["first chunk", "second chunk"]
+    assert retriever.missing == 0
+
+
+def test_scoped_retriever_reports_chunks_that_no_longer_exist() -> None:
+    """Re-ingestion mints new point ids, so a scope can outlive its chunks.
+
+    Answering from the remainder without saying so would quietly narrow the
+    evidence an investigator believes they selected.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [types.SimpleNamespace(id="c1", payload={"text": "first chunk"})]
+        ),
+    )
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["c1", "gone"])
+    nodes = retriever.retrieve("anything")
+
+    assert [n.node.node_id for n in nodes] == ["c1"]
+    assert retriever.missing == 1
+
+
+def test_scoped_query_engine_drops_the_ranking_postprocessors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hand-picked set must be answered from as chosen.
+
+    Every ranking postprocessor adds, drops or reorders nodes: parent-context
+    expansion and link-following would silently widen the evidence, the
+    diversity cap and relevance floor would silently narrow it, and reranking
+    would spend an inference call reordering a set the user already chose. Only
+    citation numbering — which merely numbers — survives.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.index = cast(Any, types.SimpleNamespace(docstore=object()))
+    monkeypatch.setattr(RAG, "_infer_collection_profile", lambda self: {"is_social_table": False})
+    monkeypatch.setattr(RAG, "_build_response_synthesizer", lambda self, **kwargs: object())
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+
+    rag.build_query_engine(scoped_node_ids=["c1", "c2"])
+
+    assert isinstance(captured["retriever"], rag_module._ScopedRetriever)
+    names = [type(p).__name__ for p in captured["node_postprocessors"]]
+    assert names == ["CitationNumberingPostprocessor"]
+
+
+def test_measure_scope_refuses_a_selection_that_cannot_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversize scope must be refused, never silently truncated.
+
+    Dropping part of an investigator's evidence without saying so is the worst
+    available failure: the answer looks complete and is not.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [
+                types.SimpleNamespace(id=f"c{i}", payload={"text": "word " * 5000}) for i in range(4)
+            ]
+        ),
+    )
+    monkeypatch.setattr(RAG, "_infer_collection_profile", lambda self: {"is_social_table": False})
+    monkeypatch.setattr(RAG, "_compute_parent_context_budget", lambda self, **kwargs: (100, 10))
+
+    measured = rag.measure_scope([f"c{i}" for i in range(4)])
+
+    assert measured["chunks"] == 4
+    assert measured["est_tokens"] > measured["usable_tokens"]
+    assert measured["fits"] is False
+
+
+def test_measure_scope_accepts_a_selection_that_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A modest selection must be usable."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [types.SimpleNamespace(id="c1", payload={"text": "a short chunk"})]
+        ),
+    )
+    monkeypatch.setattr(RAG, "_infer_collection_profile", lambda self: {"is_social_table": False})
+    monkeypatch.setattr(RAG, "_compute_parent_context_budget", lambda self, **kwargs: (20000, 256))
+
+    measured = rag.measure_scope(["c1"])
+
+    assert measured["fits"] is True
+    assert measured["usable_tokens"] == 20000
+    assert measured["missing"] == 0

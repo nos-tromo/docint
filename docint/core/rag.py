@@ -1705,6 +1705,74 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
         return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
 
 
+class _ScopedRetriever(BaseRetriever):
+    """Return exactly the chunks a session's scope names, in stable order.
+
+    Used when an investigator has hand-picked evidence from the search panel:
+    there is nothing to rank, so this bypasses the vector query entirely and
+    fetches the points by id. Swapping the retriever — rather than hand-building
+    a prompt — keeps citation numbering, source normalization, the report
+    controls and Inspector links working unchanged, because everything
+    downstream is driven by the node set.
+    """
+
+    def __init__(self, *, rag: RAG, node_ids: Sequence[str]) -> None:
+        """Initialize the retriever.
+
+        Args:
+            rag (RAG): Owning engine, for the Qdrant client and collection.
+            node_ids (Sequence[str]): Point ids to answer from.
+        """
+        super().__init__()
+        self._rag = rag
+        self._node_ids = [str(entry) for entry in node_ids]
+        #: Scoped ids Qdrant no longer has — surfaced so a stale scope is
+        #: reported rather than silently narrowing the evidence.
+        self.missing = 0
+
+    @override
+    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
+        """Fetch the scoped points and rebuild them as nodes.
+
+        Args:
+            query_bundle (QueryBundle): Ignored — the node set is fixed by the
+                scope, not by the question.
+
+        Returns:
+            list[NodeWithScore]: The scoped nodes, in the scope's own order
+                (not Qdrant's return order, which is unspecified).
+        """
+        if not self._node_ids:
+            self.missing = 0
+            return []
+        try:
+            points = self._rag.qdrant_client.retrieve(
+                collection_name=self._rag.qdrant_collection,
+                ids=list(self._node_ids),
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Scoped retrieve failed for {}: {}", self._rag.qdrant_collection, exc)
+            self.missing = len(self._node_ids)
+            return []
+
+        by_id = {str(getattr(point, "id", "")): point for point in points}
+        nodes: list[NodeWithScore] = []
+        for node_id in self._node_ids:
+            point = by_id.get(node_id)
+            if point is None:
+                continue
+            payload = dict(getattr(point, "payload", {}) or {})
+            text = RAG._extract_payload_text(payload)
+            if not text:
+                continue
+            nodes.append(NodeWithScore(node=TextNode(id_=node_id, text=text, metadata=payload), score=None))
+
+        self.missing = len(self._node_ids) - len(nodes)
+        return nodes
+
+
 class MultimodalRetriever(BaseRetriever):
     """Retrieve text chunks and image captions as one evidence set.
 
@@ -5116,6 +5184,7 @@ class RAG:
         retrieval_options: dict[str, Any] | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         metadata_filters_active: bool = False,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> RetrieverQueryEngine:
         """Construct a query engine for the current index.
 
@@ -5130,12 +5199,33 @@ class RAG:
                 candidates in memory.
             metadata_filters_active (bool): Whether this request carries
                 metadata filters at all.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving. Selects the
+                scoped engine, which drops every ranking postprocessor.
         """
         if self.index is None:
             self.create_index()
         if self.index is None:
             logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
+
+        if scoped_node_ids:
+            # A hand-picked set has nothing to rank, and every ranking
+            # postprocessor adds, drops or reorders nodes — parent-context
+            # expansion and link-following would silently widen the evidence,
+            # the diversity cap and relevance floor would silently narrow it,
+            # and reranking would spend an inference call reordering a set the
+            # user already chose. Only citation numbering, which merely
+            # numbers, survives.
+            return RetrieverQueryEngine.from_args(
+                retriever=_ScopedRetriever(rag=self, node_ids=scoped_node_ids),
+                llm=self.post_retrieval_text_model,
+                node_postprocessors=[CitationNumberingPostprocessor()],
+                response_synthesizer=self._build_response_synthesizer(
+                    streaming=streaming,
+                    social_table=bool(self._infer_collection_profile().get("is_social_table")),
+                ),
+            )
 
         profile = self._infer_collection_profile()
         retrieval_settings = self._resolve_runtime_retrieval_settings(
@@ -8311,6 +8401,35 @@ class RAG:
             cached = self.list_documents()
             self._documents_cache[self.qdrant_collection] = cached
         return summarize_document_types(cached)
+
+    def measure_scope(self, chunk_ids: Sequence[str]) -> dict[str, Any]:
+        """Measure a candidate scope against the chat context budget.
+
+        Scoped answering splices the chosen chunks straight into the prompt, so
+        the selection is bounded by the model's context window rather than by a
+        top-k. Reuses the same ``usable_tokens`` figure the parent-context
+        packer works from, so the two cannot drift apart.
+
+        Args:
+            chunk_ids (Sequence[str]): Candidate Qdrant point ids.
+
+        Returns:
+            dict[str, Any]: ``chunks``, ``est_tokens``, ``usable_tokens``,
+                ``missing`` (scoped ids Qdrant no longer has) and ``fits``.
+        """
+        usable_tokens, _ = self._compute_parent_context_budget(
+            social_table=bool(self._infer_collection_profile().get("is_social_table")),
+        )
+        retriever = _ScopedRetriever(rag=self, node_ids=chunk_ids)
+        nodes = retriever.retrieve("")
+        est = sum(estimate_tokens(node.node.get_content() or "", self.embed_char_token_ratio) for node in nodes)
+        return {
+            "chunks": len(list(chunk_ids)),
+            "est_tokens": est,
+            "usable_tokens": usable_tokens,
+            "missing": retriever.missing,
+            "fits": est <= usable_tokens,
+        }
 
     def search_fulltext(
         self,

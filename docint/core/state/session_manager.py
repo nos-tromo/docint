@@ -699,8 +699,8 @@ class SessionManager:
             conv = s.query(Conversation).filter_by(id=session_id).first()
             if not conv or conv.owner != owner:
                 return False
-            conv.scope_chunk_ids = json.dumps(ids) if ids else None
-            conv.scope_set_at = datetime.now(UTC) if ids else None
+            conv.scope_chunk_ids = cast(Any, json.dumps(ids) if ids else None)
+            conv.scope_set_at = cast(Any, datetime.now(UTC) if ids else None)
             # ``_session_scope`` only closes the session; callers commit.
             s.commit()
             return True
