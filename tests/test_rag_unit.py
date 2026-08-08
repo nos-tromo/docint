@@ -3393,6 +3393,11 @@ def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     # ingest stubs short-circuit it because the production probe would
     # AttributeError on the sentinel embed model.
     monkeypatch.setattr(RAG, "create_collection_if_missing", lambda self: None)
+    # Same reason for the dense-endpoint pre-flight probe: these tests are
+    # about what ingest_docs does once embedding works, not about whether
+    # the endpoint is up. The probe's own behavior and its position in the
+    # preamble are pinned in tests/test_rag_embed_endpoint.py.
+    monkeypatch.setattr(RAG, "probe_embed_endpoint", lambda self: None)
     monkeypatch.setattr(
         rag_module,
         "qdrant_collection_exists",
