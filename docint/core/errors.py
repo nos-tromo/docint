@@ -29,6 +29,9 @@ def install_error_handlers(app: FastAPI) -> None:
 #: the SPA maps them to localized copy and may show the bare token for
 #: support triage. Extend deliberately, one code per distinguishable failure:
 #:   context_overflow   — chat stream: prompt + retrieval exceed the model window
+#:   embedding_unavailable — chat stream: the dense-embedding endpoint could
+#:                        not embed the query, so retrieval never ran (a
+#:                        configuration/connectivity fault, not a model one)
 #:   generation_failed  — chat stream: any other generation failure
 #:   summary_failed     — summary stream failure
 #:   ingestion_failed   — ingestion finalize-stage failure
@@ -37,6 +40,7 @@ def install_error_handlers(app: FastAPI) -> None:
 SSE_ERROR_CODES = frozenset(
     {
         "context_overflow",
+        "embedding_unavailable",
         "generation_failed",
         "summary_failed",
         "ingestion_failed",

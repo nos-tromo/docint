@@ -110,6 +110,8 @@ export const en = {
     'Chat stream ended unexpectedly — the backend may have crashed (out of memory while loading NER/LLM models is the usual cause). Check backend logs and try again.',
   'chat.error_context_overflow':
     'The request is too large for the model – Try a shorter question or select fewer documents.',
+  'chat.error_embedding_unavailable':
+    'No documents could be retrieved: the embedding service did not answer. This is a backend configuration or connectivity issue — check the backend logs and the EMBED_API_BASE setting.',
   'chat.enable_filters': 'Enable metadata filters',
   'chat.mime_pattern': 'MIME pattern',
   'chat.hate_speech_only': 'Hate-speech only',

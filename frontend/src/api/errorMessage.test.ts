@@ -33,6 +33,13 @@ describe('streamErrorText', () => {
       'chat.error_context_overflow (context_overflow)',
     )
   })
+  it('maps a dead embedding endpoint to copy that names the real fault', () => {
+    // Without its own key this renders "the backend may have crashed",
+    // which sends the operator to the wrong service entirely.
+    expect(streamErrorText(t, 'embedding_unavailable', 'chat.error_stream_ended')).toBe(
+      'chat.error_embedding_unavailable (embedding_unavailable)',
+    )
+  })
   it('falls back to the given key for unmapped valid codes, appending the token', () => {
     expect(streamErrorText(t, 'summary_failed', 'analysis.summary_failed')).toBe(
       'analysis.summary_failed (summary_failed)',

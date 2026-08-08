@@ -69,6 +69,7 @@ from docint.utils.env_cfg import (
 )
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
+from docint.utils.openai_cfg import EmbeddingEndpointError
 from docint.utils.translate_client import translate
 
 # Names re-exported for test monkey-patching. pyrefly treats these as
@@ -1729,6 +1730,14 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     )
             if payload_out:
                 yield f"data: {json.dumps(payload_out)}\n\n"
+        except EmbeddingEndpointError:
+            # Retrieval could not embed the query, so no generation was ever
+            # attempted. Reported apart from `generation_failed`, which reads
+            # as "the chat model failed" and points at the wrong service; the
+            # exception's own message names the endpoint and the env var, and
+            # stays in the logs where an internal address belongs.
+            logger.exception("Dense embedding endpoint unusable during SSE generation")
+            yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'embedding_unavailable'})}\n\n"
         except ValueError as exc:
             msg = str(exc)
             if "context window" in msg.lower() or "context size" in msg.lower():

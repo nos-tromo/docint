@@ -3985,6 +3985,52 @@ def test_stream_query_error_event_carries_generation_failed_code(
     assert "boom-generic" not in text
 
 
+def test_stream_query_reports_a_dead_embedding_endpoint_distinctly(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """An unusable embedding endpoint gets its own code, not the generic one.
+
+    ``generation_failed`` reads as "the model failed" and sends an
+    operator to the chat model's logs. When retrieval cannot embed the
+    query, the fault is upstream and entirely different — a distinct code
+    is what lets the SPA say so.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        client: The TestClient instance.
+    """
+    from docint.utils.openai_cfg import EmbeddingEndpointError
+
+    original_run_query = type(api_module.rag).run_query
+
+    def _dead_embedding_endpoint(self: Any, *a: Any, **kw: Any) -> Any:
+        """Fail the way an unusable dense endpoint does.
+
+        Raises:
+            EmbeddingEndpointError: Always.
+        """
+        raise EmbeddingEndpointError(
+            "Dense embedding failed against http://embed-only:8000 (model=BAAI/bge-m3): "
+            "Error code: 404. EMBED_API_BASE must end in /v1."
+        )
+
+    monkeypatch.setattr(type(api_module.rag), "run_query", _dead_embedding_endpoint)
+    try:
+        with client.stream(
+            "POST",
+            "/stream_query",
+            json={"question": "hello", "retrieval_mode": "stateless"},
+        ) as resp:
+            text = "".join(chunk.decode() for chunk in resp.iter_raw())
+    finally:
+        monkeypatch.setattr(type(api_module.rag), "run_query", original_run_query)
+
+    assert '"code": "embedding_unavailable"' in text
+    # The diagnosis belongs in the logs: it carries the internal address.
+    assert "embed-only" not in text
+    assert "EMBED_API_BASE" not in text
+
+
 def test_query_accepts_a_multi_field_date_filter(client: TestClient) -> None:
     """A rule ORing both timestamp keys must pass wire validation."""
     response = client.post(

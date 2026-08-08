@@ -28,6 +28,7 @@ import type { Strings } from '@/i18n'
  *  message; every other valid code renders its fallback key's copy. */
 const STREAM_ERROR_KEYS: Partial<Record<string, keyof Strings>> = {
   context_overflow: 'chat.error_context_overflow',
+  embedding_unavailable: 'chat.error_embedding_unavailable',
 }
 
 /** SSE error codes are a closed backend enum (see docint/core/errors.py);

@@ -116,6 +116,8 @@ export const de: Strings = {
     'Der Chat-Stream wurde unerwartet beendet.',
   'chat.error_context_overflow':
     'Die Anfrage ist zu groß für das Modell – Bitte stellen Sie eine kürzere Frage oder wählen Sie weniger Dokumente aus.',
+  'chat.error_embedding_unavailable':
+    'Es konnten keine Dokumente abgerufen werden: Der Embedding-Dienst hat nicht geantwortet. Das ist ein Konfigurations- oder Verbindungsproblem im Backend — prüfen Sie die Backend-Logs und die Einstellung EMBED_API_BASE.',
   'chat.enable_filters': 'Metadatenfilter aktivieren',
   'chat.mime_pattern': 'MIME-Muster',
   'chat.hate_speech_only': 'Nur Hatespeech',
