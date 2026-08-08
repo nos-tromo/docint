@@ -18,16 +18,53 @@ const mockStreamSseGet = streamSseGet as unknown as ReturnType<typeof vi.fn>
 /**
  * Build an async generator streamSseGet can be mocked to return.
  *
- * Yields across a real macrotask boundary (not just a microtask) so
- * `waitFor` can observe the intermediate `building`/progress render between
- * frames instead of the whole sequence draining before the test's first
- * poll — mirrors real SSE delivery, where frames arrive on separate ticks.
+ * Yields across a real macrotask boundary (not just a microtask), mirroring
+ * real SSE delivery where frames arrive on separate ticks. The whole sequence
+ * still drains on its own, so only assert *terminal* state on a stream built
+ * this way — an intermediate render may be superseded before React commits
+ * it. Use `gatedFramesOf` when the assertion targets an intermediate render.
  */
 async function* framesOf(frames: SseEvent[]): AsyncGenerator<SseEvent, void, unknown> {
   for (const f of frames) {
     await new Promise((resolve) => setTimeout(resolve, 0))
     yield f
   }
+}
+
+/**
+ * Build a stream that parks until the test releases each frame.
+ *
+ * `release()` hands over the next frame and the generator parks again, so an
+ * assertion on the render a frame caused cannot race the frame after it.
+ * `waitFor` polls the *current* DOM: it can wait for a state to arrive, never
+ * for one that has already been superseded. Spacing frames a macrotask apart
+ * (`framesOf`) does not guarantee React commits in that gap — instrumented
+ * locally, the progress render was skipped roughly 1 run in 15, and on CI
+ * often enough to redden `main`; with the two frames back to back it was
+ * skipped every time.
+ *
+ * @param frames Frames to deliver, in order, one per `release()` call.
+ * @returns The generator to mock `streamSseGet` with, plus its `release`.
+ */
+function gatedFramesOf(frames: SseEvent[]): {
+  stream: AsyncGenerator<SseEvent, void, unknown>
+  release: () => void
+} {
+  const opens: Array<() => void> = []
+  const gates = frames.map(
+    (_, i) =>
+      new Promise<void>((resolve) => {
+        opens[i] = resolve
+      })
+  )
+  let released = 0
+  async function* stream(): AsyncGenerator<SseEvent, void, unknown> {
+    for (let i = 0; i < frames.length; i++) {
+      await gates[i]
+      yield frames[i]
+    }
+  }
+  return { stream: stream(), release: () => opens[released++]() }
 }
 
 beforeEach(() => {
@@ -60,20 +97,23 @@ describe('SummaryPanel job-driven build', () => {
     mockSummarize
       .mockResolvedValueOnce({ job_id: 'j1' })
       .mockResolvedValueOnce({ summary: 'Built summary.', sources: [] })
-    mockStreamSseGet.mockReturnValue(
-      framesOf([
-        { event: 'summary_progress', data: { job_id: 'j1', mapped: 1, total_units: 2 } },
-        { event: 'summary_completed', data: { job_id: 'j1' } }
-      ])
-    )
+    const frames = gatedFramesOf([
+      { event: 'summary_progress', data: { job_id: 'j1', mapped: 1, total_units: 2 } },
+      { event: 'summary_completed', data: { job_id: 'j1' } }
+    ])
+    mockStreamSseGet.mockReturnValue(frames.stream)
 
     render(<SummaryPanel />)
     await userEvent.click(screen.getByRole('button', { name: /generate/i }))
 
+    // Progress is asserted while completion is still gated behind `release`,
+    // so the render under test cannot be superseded before it is observed.
+    frames.release()
     await waitFor(() => {
       expect(screen.getByText('Summarizing 1/2 units…')).toBeInTheDocument()
     })
 
+    frames.release()
     await waitFor(() => {
       expect(screen.getByText('Built summary.')).toBeInTheDocument()
     })
@@ -88,23 +128,27 @@ describe('SummaryPanel job-driven build', () => {
     mockSummarize
       .mockResolvedValueOnce({ job_id: 'j1' })
       .mockResolvedValueOnce({ summary: 'Built summary.', sources: [] })
-    mockStreamSseGet.mockReturnValue(
-      framesOf([
-        { event: 'summary_progress', data: { job_id: 'other', mapped: 5, total_units: 5 } },
-        { event: 'summary_completed', data: { job_id: 'other' } },
-        { event: 'summary_progress', data: { job_id: 'j1', mapped: 1, total_units: 2 } },
-        { event: 'summary_completed', data: { job_id: 'j1' } }
-      ])
-    )
+    const frames = gatedFramesOf([
+      { event: 'summary_progress', data: { job_id: 'other', mapped: 5, total_units: 5 } },
+      { event: 'summary_completed', data: { job_id: 'other' } },
+      { event: 'summary_progress', data: { job_id: 'j1', mapped: 1, total_units: 2 } },
+      { event: 'summary_completed', data: { job_id: 'j1' } }
+    ])
+    mockStreamSseGet.mockReturnValue(frames.stream)
 
     render(<SummaryPanel />)
     await userEvent.click(screen.getByRole('button', { name: /generate/i }))
 
     // The foreign job's frames must not resolve the panel: progress for the
-    // real job (j1) must still show before the summary lands.
+    // real job (j1) must still show before the summary lands. j1's completion
+    // stays gated so that render cannot be superseded before it is observed.
+    frames.release() // foreign progress
+    frames.release() // foreign completion
+    frames.release() // j1 progress
     await waitFor(() => {
       expect(screen.getByText('Summarizing 1/2 units…')).toBeInTheDocument()
     })
+    frames.release() // j1 completion
     await waitFor(() => {
       expect(screen.getByText('Built summary.')).toBeInTheDocument()
     })
