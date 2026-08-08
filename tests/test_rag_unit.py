@@ -6164,3 +6164,76 @@ def test_persisted_nodes_get_search_text_written_to_their_payload(
 
     assert written["test"] == {"node-1": "the quick brown fox"}
     assert SEARCH_TEXT_FIELD not in node.metadata
+
+
+def test_search_fulltext_reports_not_indexed_rather_than_no_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty hit list must never be able to mean "the migration never ran".
+
+    Conflating the two would have an investigator conclude a term is absent
+    from the collection when it was simply never indexed.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {"indexed": False, "has_search_text": False},
+    )
+
+    result = rag.search_fulltext("berlin")
+
+    assert result["status"] == "not_indexed"
+    assert result["hits"] == []
+
+
+def test_search_fulltext_returns_normalized_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hits carry the fields the panel needs, including a token estimate."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {"indexed": True, "has_search_text": True},
+    )
+    payload = {
+        "text": "die Konferenz in Berlin",
+        "file_name": "report.pdf",
+        "page": 3,
+        "entities": [{"text": "Berlin", "type": "LOC"}],
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: ([types.SimpleNamespace(id="p1", payload=payload)], None),
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+        ),
+    )
+
+    result = rag.search_fulltext("berlin konferenz")
+
+    assert result["status"] == "ok"
+    assert result["total"] == 1
+    hit = result["hits"][0]
+    assert hit["id"] == "p1"
+    assert hit["filename"] == "report.pdf"
+    assert hit["entity_types"] == ["LOC"]
+    assert hit["est_tokens"] > 0
+    assert "Berlin" in hit["preview"]
+
+
+def test_search_fulltext_returns_nothing_for_a_keywordless_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank query must never degrade into a scan of the whole collection."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {"indexed": True, "has_search_text": True},
+    )
+
+    result = rag.search_fulltext("   ")
+
+    assert result["status"] == "ok"
+    assert result["hits"] == []
+    assert result["total"] == 0

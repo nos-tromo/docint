@@ -150,7 +150,8 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
-from docint.core.search.index import ensure_search_index, write_search_text
+from docint.core.search.fulltext import build_search_filter, parse_keywords
+from docint.core.search.index import ensure_search_index, search_index_status, write_search_text
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
@@ -8310,6 +8311,111 @@ class RAG:
             cached = self.list_documents()
             self._documents_cache[self.qdrant_collection] = cached
         return summarize_document_types(cached)
+
+    def search_fulltext(
+        self,
+        query: str,
+        *,
+        base_filter: qdrant_models.Filter | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Return chunks containing every keyword in ``query``.
+
+        Pure local lookup: one native Qdrant scroll, no embedding call and no
+        inference. Keywords are ANDed and order-independent; matching is
+        case-insensitive and prefix-based via the ``search_text`` index.
+
+        Args:
+            query (str): Raw query text; whitespace-separated keywords.
+            base_filter (qdrant_models.Filter | None): Caller's metadata filter,
+                ANDed with the keyword conditions.
+            limit (int): Hits per page, clamped to ``[1, 500]``.
+            cursor (str | None): Opaque page cursor from a previous call.
+
+        Returns:
+            dict[str, Any]: ``status`` (``"ok"`` or ``"not_indexed"``), ``hits``,
+                ``total``, ``next_cursor`` and ``index_status``.
+
+        Raises:
+            KeywordTooShortError: When a keyword cannot be indexed.
+        """
+        collection = self.qdrant_collection
+        status = search_index_status(self.qdrant_client, collection)
+        empty: dict[str, Any] = {
+            "status": "ok",
+            "hits": [],
+            "total": 0,
+            "next_cursor": None,
+            "index_status": status,
+        }
+        if not status.get("has_search_text"):
+            return {**empty, "status": "not_indexed"}
+
+        keywords = parse_keywords(query)
+        search_filter = build_search_filter(keywords, base_filter=base_filter)
+        if search_filter is None:
+            return empty
+
+        page_size = max(1, min(int(limit), 500))
+        points, next_offset = self.qdrant_client.scroll(
+            collection_name=collection,
+            scroll_filter=search_filter,
+            limit=page_size,
+            offset=cursor,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        hits: list[dict[str, Any]] = []
+        for point in points:
+            payload = getattr(point, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            node_id = str(getattr(point, "id", "") or "")
+            source = self._source_from_payload(
+                collection=collection,
+                payload=payload,
+                node_id=node_id,
+            )
+            text = str(source.get("text") or "")
+            hits.append(
+                {
+                    "id": node_id,
+                    "chunk_id": source.get("chunk_id"),
+                    "filename": source.get("filename"),
+                    "page": source.get("page"),
+                    "row": source.get("row"),
+                    "preview": text[:600].strip(),
+                    "entity_types": sorted(
+                        {
+                            str(entity.get("type") or "Unlabeled")
+                            for entity in normalize_entities(payload.get("entities"))
+                        }
+                    ),
+                    "est_tokens": estimate_tokens(text, self.embed_char_token_ratio),
+                }
+            )
+
+        try:
+            total = int(
+                self.qdrant_client.count(
+                    collection_name=collection,
+                    count_filter=search_filter,
+                    exact=True,
+                ).count
+            )
+        except Exception as exc:
+            logger.debug("search count unavailable for {}: {}", collection, exc)
+            total = len(hits)
+
+        return {
+            "status": "ok",
+            "hits": hits,
+            "total": total,
+            "next_cursor": str(next_offset) if next_offset is not None else None,
+            "index_status": status,
+        }
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all nodes from the current collection and return their NER metadata.
