@@ -74,6 +74,9 @@ def test_a_name_owned_by_several_owners_is_ambiguous() -> None:
     message = str(excinfo.value)
     assert "alice" in message
     assert "bob" in message
+    # The physical names must be in the message: an operator cannot derive
+    # them (they hash the owner), so naming only the owners is a dead end.
+    assert message.count("__docs") == 2
 
 
 def test_search_index_cli_fails_loudly_on_an_unknown_collection(

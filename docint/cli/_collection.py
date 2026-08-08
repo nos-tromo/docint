@@ -55,9 +55,19 @@ def resolve_collection_name(rag: Any, typed: str) -> str:
         )
 
     if len(matches) > 1:
-        owner_list = ", ".join(sorted(str(owner) for owner, _ in matches))
+        # Name the physical collections, not just the owners. An operator
+        # cannot derive them — they hash the owner — so listing owners alone
+        # leaves them with an error and no way to act on it. Each of these
+        # needs its own run; migrating one silently leaves the other user's
+        # collection unsearchable.
+        candidates = []
+        for owner, logical in sorted(matches, key=lambda row: str(row[0])):
+            physical = owners.resolve(owner, logical)
+            candidates.append(f"  {physical}   (owner: {owner})")
+        listing = "\n".join(candidates)
         raise CollectionNotFoundError(
-            f"{name!r} is owned by several users ({owner_list}). Pass the physical Qdrant name instead."
+            f"{name!r} is owned by several users, so it is ambiguous. "
+            f"Re-run once per collection with the physical name:\n{listing}"
         )
 
     owner, logical = matches[0]
