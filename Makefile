@@ -16,7 +16,7 @@ NETWORKS := inference-net data-net edge-net
 VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache
 include make/common.mk
 
-.PHONY: help resolve health search-index
+.PHONY: help resolve health search-index search-index-all
 
 help:
 	@echo "docint — build-host helpers."
@@ -34,6 +34,7 @@ help:
 	@echo "  make health     check backend dependency status (Qdrant reachability); chain as 'make up health'"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
 	@echo "  make search-index  build the full-text search index (COLLECTION=<name> optional)"
+	@echo "  make search-index-all  build it for every collection on this host (one-time backport)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
 	@echo "  make test       run the test suite"
@@ -78,3 +79,12 @@ search-index:
 	else \
 		$(COMPOSE) run --rm backend search-index; \
 	fi
+
+# Backport the full-text search index across every collection on this host.
+# Works on physical collection names, so two users owning the same logical name
+# are simply two entries — no ambiguity to resolve. Idempotent: collections
+# already carrying `search_text` are scanned and skipped cheaply, so re-running
+# after a partial failure is safe. One failing collection does not strand the
+# rest; the run exits non-zero and names every failure at the end.
+search-index-all:
+	$(COMPOSE) run --rm -T backend search-index-all

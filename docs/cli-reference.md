@@ -84,11 +84,27 @@ uv run search-index                       # prompts for the collection
 make search-index COLLECTION=demo         # non-interactive, in Docker
 ```
 
+Takes the **logical** collection name — the one the app shows. Collections are
+owner-namespaced in Qdrant (`u<owner-hash>__<logical>`), so the physical name is
+resolved from the ownership store; a physical name is also accepted as typed. A
+name that matches nothing stops the run with a non-zero exit rather than a
+guess.
+
+Two users may own the same logical name — the physical names are namespaced per
+owner, so those are *different collections*. That case is refused and lists each
+physical name, because **each needs its own run**: migrating one would leave the
+other user's collection unsearchable with nothing to indicate it.
+
+The command exits non-zero on any failure and prints no "ready" line — the
+backfill's scroll is fail-soft, so a missing collection would otherwise yield
+`0 scanned, 0 written`, which reads exactly like an already-migrated one.
+
 Source: `docint/cli/search_index.py`. Creates the `search_text` payload index
 on a collection and backfills the field across its existing points, which is
 what makes `POST /search` work there. Run it **once per collection ingested
-before full-text search shipped**; new ingests populate the field
-automatically.
+before full-text search shipped**. It is purely a backport: ingestion writes
+`search_text` *and* creates the payload index, so collections ingested since need
+no operator step at all.
 
 Payload-only — no re-embedding, no inference, no model downloads — so it is
 safe on an airgapped host and costs a scroll plus batched payload writes.
@@ -104,6 +120,24 @@ mean "the migration never ran". While it is *running*, `/search` returns
 from a half-migrated collection are incomplete. Transient Qdrant failures
 during the run are retried, so one connection blip does not leave the
 collection stuck in that state.
+
+## `search-index-all` — backport every collection
+
+```bash
+make search-index-all        # every collection on this host
+```
+
+Source: `docint/cli/search_index.py`. Runs `search-index` across every
+collection, for the one-time backport onto a host that predates full-text
+search. Works on **physical** collection names, so two users owning the same
+logical name are simply two entries — the ambiguity that stops the single-
+collection command does not arise. Companion collections (`_images`,
+`_entities`, `_dockv`) are excluded; nothing searches them.
+
+One failing collection does not strand the rest: the run continues, names every
+failure at the end, and exits non-zero so a partial migration cannot be mistaken
+for a clean one. Idempotent — already-populated collections are scanned and
+skipped cheaply, so re-running after a partial failure is safe.
 
 ## `query` — batch chat, summaries, exports
 

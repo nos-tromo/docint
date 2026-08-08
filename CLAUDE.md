@@ -64,6 +64,7 @@ make resolve COLLECTION=mydocs  # non-interactive
 # idempotent). Needed once per collection ingested before search shipped.
 make search-index                    # prompts for the collection name
 make search-index COLLECTION=mydocs  # non-interactive
+make search-index-all                # every collection (one-time backport)
 ```
 
 ## Architecture
@@ -129,7 +130,7 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   requiring `fine` would return zero hits there. No embeddings and no inference
   in the path. The package imports nothing from `core/rag.py` (the text
   extractor is injected), mirroring `core/jobs.py`. Collections ingested before
-  this shipped need `make search-index` once. Coverage is **counted, not
+  this shipped need `make search-index` once — **only as a backport**: ingestion both writes `search_text` and ensures the payload index, so new collections are searchable with no operator step. Both are required; the field without its index is silently case-sensitive on non-ASCII text, which `/search` reports as `not_indexed` rather than pretending to work. Coverage is **counted, not
   sampled**: `/search` reports `not_indexed` when no point carries the field
   and `partial` (with a `missing` count) while a backfill is incomplete, so a
   half-migrated collection can never masquerade as a complete result set.

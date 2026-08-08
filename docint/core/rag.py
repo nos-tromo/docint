@@ -6106,6 +6106,11 @@ class RAG:
             embed_model=embed_model,
             storage_context=storage_ctx,
         )
+        # Ingestion builds the index directly rather than through
+        # create_index(), so the payload index has to be ensured here too or a
+        # freshly ingested collection gets search_text with no index over it —
+        # searchable, but silently case-sensitive on non-ASCII text.
+        ensure_search_index(self.qdrant_client, self.qdrant_collection)
 
         pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback, ner=ner, hate_speech=hate_speech)
         manifest = self._build_ingest_manifest()
@@ -6356,6 +6361,11 @@ class RAG:
             embed_model=embed_model,
             storage_context=storage_ctx,
         )
+        # Ingestion builds the index directly rather than through
+        # create_index(), so the payload index has to be ensured here too or a
+        # freshly ingested collection gets search_text with no index over it —
+        # searchable, but silently case-sensitive on non-ASCII text.
+        ensure_search_index(self.qdrant_client, self.qdrant_collection)
 
         pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback, ner=ner, hate_speech=hate_speech)
         manifest = self._build_ingest_manifest()
@@ -8066,7 +8076,11 @@ class RAG:
             "next_cursor": None,
             "index_status": status,
         }
-        if not status.get("with_search_text"):
+        # Both conditions are required. The field alone is not a working
+        # search: un-indexed MatchText case-folds ASCII only, so a lowercase
+        # German query silently misses its title-case match. "not_indexed" is
+        # both the honest label and the one that points at the remedy.
+        if not status.get("with_search_text") or not status.get("indexed"):
             return {**empty, "status": "not_indexed"}
 
         keywords = parse_keywords(query)
