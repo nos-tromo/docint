@@ -133,6 +133,18 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   sampled**: `/search` reports `not_indexed` when no point carries the field
   and `partial` (with a `missing` count) while a backfill is incomplete, so a
   half-migrated collection can never masquerade as a complete result set.
+  The SPA surfaces this as a **collapsible panel beside the chat** (search on
+  top, metadata filters as a disclosure at its foot). Selected hits write the
+  session's **scope**: `PUT /sessions/{id}/scope` stores the chunk ids on the
+  conversation row, and while a scope is active `/query` and `/stream_query`
+  answer **only** from those chunks — `build_query_engine(scoped_node_ids=)`
+  swaps in `_ScopedRetriever` and drops every ranking postprocessor, because
+  parent-context expansion and link-following would silently widen a
+  hand-picked set while the diversity cap and relevance floor would silently
+  narrow it. An oversize selection is refused (422), never truncated. This
+  **replaced the two entity-occurrence chat query modes**, which searched the
+  NER aggregate and silently returned whichever entity was most frequent rather
+  than the one asked about.
 - `docint/utils/ner_client.py` — Thin HTTP client for the remote GLiNER service hosted by `vllm-service` (full stack: `http://vllm-router:4000/gliner` with Bearer auth; gliner-only shape: `http://gliner-only:8000/gliner` with no auth). Replaces the in-process GLiNER runtime previously shipped here.
 - `docint/utils/clip_client.py` — Thin HTTP client for the remote CLIP image+text embedding service hosted by `vllm-service`. Same dual-shape posture as the NER client (full stack via router with Bearer auth; `clip-only` shape at `http://clip-only:8000` with no auth). `RemoteCLIPBackend` satisfies the `ImageEmbeddingBackend` Protocol so `core/ingest/images_service.py` swaps in place. Probes `/clip/dimension` at construction to size Qdrant `_images` collections without burning an embed call. `IMAGE_EMBED_MODEL` is no longer read by docint — set `CLIP_MODEL` on the vllm-service container instead. Override the endpoint via `CLIP_API_BASE` / `CLIP_API_KEY` / `CLIP_TIMEOUT`.
 - **Images are ordinary retrieval sources, not a side lane** (`core/rag.py::MultimodalRetriever` + `_retrieve_image_nodes`). The image lane is half of the retriever: CLIP candidates become caption nodes that join the text hits *before* ranking, so one reranker pass scores both modalities on one scale, the generator sees images in `context_str` and can cite them, and `CitationNumberingPostprocessor` numbers them like any other source. Everything downstream (parent context, diversity, link-following, synthesis, the citation panel) is modality-blind by construction. A lane outage degrades the answer to text-only; it never fails the query. **Do not reintroduce a post-generation append** — an appended source cannot be cited by the answer that was written without it. A standalone image file exists in *both* collections (`ImageReader` writes its caption as the document's text, `ImageIngestionService` writes the CLIP point), so `MultimodalRetriever` drops the lane's copy when the main-collection node for the same `image_id` was already retrieved. The collection summary draws a document's figures/keyframes from the `_images` companion by document hash (`_summary_image_nodes_for_document`), capped at a third of the per-document budget.

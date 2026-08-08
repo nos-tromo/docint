@@ -1,7 +1,8 @@
 # Chat full-text search panel — design
 
 **Date:** 2026-08-07
-**Status:** Approved, not yet implemented
+**Status:** Implemented (2026-08-08). Corrections made while building are
+recorded inline, marked *Corrected during implementation*.
 **Supersedes:** the chat entity-occurrence query modes (`entity_occurrence`,
 `entity_occurrence_multi`), which are removed by this work.
 
@@ -505,6 +506,27 @@ keeps the hit list and the conversation visible together, which is the point.
 same working set should not reselect for each one, and a scope that vanishes on
 reload cannot be reported honestly in an export. Session-pinned scope is
 consistent with collections already being pinned to sessions.
+
+## Corrections made while building
+
+Beyond the inline notes above:
+
+- **Scoped answering swaps the retriever, not the prompt.** This document said
+  the scoped path "packs them into `context_str`". Building a `_ScopedRetriever`
+  and reusing `RetrieverQueryEngine` means citation numbering, source
+  normalization, the report controls and Inspector links keep working with no
+  parallel implementation to drift. The scoped engine also drops every ranking
+  postprocessor — they would silently widen or narrow a hand-picked set.
+
+- **A scope cannot be stored before the session exists.** The session id is
+  minted server-side on the first turn, so "search → select evidence → ask"
+  would have discarded the selection. The panel holds it locally, labels it as
+  pending, flushes it when the id arrives, and drops it if the server refuses —
+  the banner never claims a scope the server does not hold. Not anticipated by
+  this document.
+
+- **Search hits carry `file_hash`** so a hit can deep-link into the Inspector's
+  source preview, which keys on the document hash.
 
 ## Deferred work
 

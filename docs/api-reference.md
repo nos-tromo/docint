@@ -38,6 +38,8 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `GET`  | `/sessions/list` | `Sessions` | List stored sessions. |
 | `GET`  | `/sessions/{session_id}` | `Sessions` | Return conversation history for a session. |
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |
+| `PUT` | `/sessions/{session_id}/scope` | `Sessions` | Restrict the session's answers to hand-picked chunks. |
+| `DELETE` | `/sessions/{session_id}/scope` | `Sessions` | Return the session to normal retrieval. |
 | `POST` | `/agent/chat` | `Agent` | Run the agent orchestrator for one turn (non-streaming). |
 | `POST` | `/agent/chat/stream` | `Agent` | Streaming orchestrator variant (SSE tokens). |
 | `POST` | `/ingest/upload` | `Ingestion` | Stage files into a collection's batch directory (upload only, no ingestion). |
@@ -356,6 +358,33 @@ comes from `Turn` / `Citation`.
 ### `DELETE /sessions/{session_id}`
 
 Deletes the session and its turns/citations.
+
+### `PUT /sessions/{session_id}/scope`
+
+Restrict a session's answers to a hand-picked set of chunks, selected from the
+search panel. Request `{"chunk_ids": ["<point id>", ...]}`; response carries the
+stored ids plus `est_tokens`, `usable_tokens` and `missing`.
+
+Scoped answering splices the chosen chunks straight into the prompt, so the
+selection is bounded by the chat context window rather than by a top-k. A
+selection that does not fit is **refused with 422**, never truncated: silently
+dropping part of an investigator's evidence would produce an answer that looks
+complete and is not.
+
+The scope is stored on the conversation, so it survives a reload and reopening
+the session — like the pinned collection. Owner-gated: a session that is missing
+or belongs to another principal returns `404` either way.
+
+While a scope is active, `/query` and `/stream_query` report
+`retrieval_mode: "scoped"` and `scoped_chunk_count`, and answer **only** from
+those chunks — no vector query, no rerank. Re-ingestion mints new point ids, so
+a scope can outlive its chunks; the count of ids Qdrant no longer has comes back
+as `missing`.
+
+### `DELETE /sessions/{session_id}/scope`
+
+Return the session to normal retrieval. Returns an empty scope. `404` when the
+session is missing or not owned.
 
 ## Agent
 

@@ -1704,6 +1704,25 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
         return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
 
 
+def _as_qdrant_point_id(node_id: str) -> str | int:
+    """Restore a point id's native type for a Qdrant lookup.
+
+    Qdrant ids are unsigned integers or UUIDs, and nothing else. Ids travel to
+    the SPA and back through JSON as strings, so an integer id returns as
+    ``"1"`` — which Qdrant rejects outright, failing the whole retrieve. A
+    scope built from search hits would then answer from no evidence at all
+    while reporting every chunk missing. All-digit is unambiguous here
+    precisely because the id domain is only those two shapes.
+
+    Args:
+        node_id (str): Point id as it came back over the wire.
+
+    Returns:
+        str | int: The id in the type Qdrant expects.
+    """
+    return int(node_id) if node_id.isdigit() else node_id
+
+
 class _ScopedRetriever(BaseRetriever):
     """Return exactly the chunks a session's scope names, in stable order.
 
@@ -1747,7 +1766,7 @@ class _ScopedRetriever(BaseRetriever):
         try:
             points = self._rag.qdrant_client.retrieve(
                 collection_name=self._rag.qdrant_collection,
-                ids=list(self._node_ids),
+                ids=[_as_qdrant_point_id(node_id) for node_id in self._node_ids],
                 with_payload=True,
                 with_vectors=False,
             )
@@ -8060,7 +8079,9 @@ class RAG:
             collection_name=collection,
             scroll_filter=search_filter,
             limit=page_size,
-            offset=cursor,
+            # Same round trip as a scope: an integer offset returns as a
+            # string and Qdrant rejects it, restarting paging from the top.
+            offset=_as_qdrant_point_id(cursor) if cursor else None,
             with_payload=True,
             with_vectors=False,
         )

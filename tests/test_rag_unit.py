@@ -6259,3 +6259,46 @@ def test_measure_scope_accepts_a_selection_that_fits(monkeypatch: pytest.MonkeyP
     assert measured["fits"] is True
     assert measured["usable_tokens"] == 20000
     assert measured["missing"] == 0
+
+
+def test_scoped_retriever_restores_integer_point_ids() -> None:
+    """Qdrant ids are unsigned ints or UUIDs — a stringified int is neither.
+
+    Search returns ids as JSON strings, so a scope round-trips "1" rather than
+    1. Passing that straight back makes Qdrant reject the whole retrieve, and
+    the scope answers from nothing while reporting every chunk missing — a
+    scoped answer built on no evidence at all.
+    """
+    rag = RAG(qdrant_collection="test")
+    seen: dict[str, Any] = {}
+
+    def _retrieve(**kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        return [types.SimpleNamespace(id=1, payload={"text": "first chunk"})]
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(retrieve=_retrieve))
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["1"])
+    nodes = retriever.retrieve("anything")
+
+    assert seen["ids"] == [1]
+    assert [n.node.node_id for n in nodes] == ["1"]
+    assert retriever.missing == 0
+
+
+def test_scoped_retriever_leaves_uuid_ids_alone() -> None:
+    """Only all-digit ids are integers; a UUID must pass through untouched."""
+    rag = RAG(qdrant_collection="test")
+    seen: dict[str, Any] = {}
+
+    def _retrieve(**kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        return [types.SimpleNamespace(id="7f3a-not-a-number", payload={"text": "first chunk"})]
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(retrieve=_retrieve))
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["7f3a-not-a-number"])
+    nodes = retriever.retrieve("anything")
+
+    assert seen["ids"] == ["7f3a-not-a-number"]
+    assert [n.node.node_id for n in nodes] == ["7f3a-not-a-number"]
