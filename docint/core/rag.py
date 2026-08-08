@@ -150,6 +150,7 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
+from docint.core.search.index import ensure_search_index, write_search_text
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
@@ -3842,6 +3843,39 @@ class RAG:
         non_vector_candidates = [node for node in batch if id(node) not in candidate_ids]
         return non_vector_candidates + list(docstore_nodes)
 
+    def _write_search_text(self, nodes: list[BaseNode]) -> None:
+        """Write each persisted node's text to its Qdrant point for search.
+
+        Called after a successful insert, keyed by ``node_id`` — llama-index
+        uses the node id as the Qdrant point id. Deliberately a payload-only
+        write rather than node metadata: metadata is rendered into the
+        embedding input and serialized into ``_node_content``, so stamping it
+        there would embed every chunk's text twice and store a third copy of
+        it. Fail-soft — search degrades to "needs a backfill", ingestion does
+        not fail.
+
+        Args:
+            nodes (list[BaseNode]): Nodes just written to the vector store.
+        """
+        if not self.qdrant_collection or not nodes:
+            return
+        try:
+            texts = {
+                node.node_id: text
+                for node in nodes
+                if (text := node.get_content(metadata_mode=MetadataMode.NONE).strip())
+            }
+            if not texts:
+                return
+            write_search_text(self.qdrant_client, self.qdrant_collection, texts)
+        except Exception as exc:
+            logger.warning(
+                "search_text write skipped for {} node(s) in {}: {} — run `make search-index` to backfill.",
+                len(nodes),
+                self.qdrant_collection,
+                exc,
+            )
+
     def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
         """Persist nodes in micro-batches to reduce crash-loss windows.
 
@@ -3925,6 +3959,7 @@ class RAG:
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
+                self._write_search_text(prepared_vector_nodes)
 
     def _log_ingest_benchmark_summary(
         self,
@@ -4057,6 +4092,7 @@ class RAG:
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
+                self._write_search_text(prepared_vector_nodes)
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
@@ -4538,6 +4574,10 @@ class RAG:
             )
         except Exception as idx_exc:
             logger.debug("posting_uuid index on {} skipped: {}", self.qdrant_collection, idx_exc)
+
+        # Full-text search needs a lowercase prefix index on `search_text`.
+        # Idempotent and fail-soft, like the posting_uuid index above.
+        ensure_search_index(self.qdrant_client, self.qdrant_collection)
 
     def create_query_engine(self) -> None:
         """Create the query engine with a retriever and reranker.

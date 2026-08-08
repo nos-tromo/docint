@@ -6122,3 +6122,45 @@ def test_build_retriever_keeps_parent_context_filter_under_native_filters(
     keys = [condition.key for condition in (merged.must or [])]
     assert "docint_hier_type" in keys
     assert "mimetype" in keys
+
+
+def test_persisted_nodes_get_search_text_written_to_their_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Newly ingested chunks must be searchable without a backfill run.
+
+    The text is written as a payload field after insert, never stamped into
+    node metadata — metadata enters the embedding input and is serialized into
+    ``_node_content``, so stamping it there would embed every chunk's text
+    twice and store a third copy of it.
+    """
+    from docint.core.search.index import SEARCH_TEXT_FIELD
+
+    rag = RAG(qdrant_collection="test")
+    node = TextNode(text="the quick brown fox", id_="node-1")
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=types.SimpleNamespace(add_documents=lambda *a, **k: None),
+            insert_nodes=lambda nodes: None,
+        ),
+    )
+    monkeypatch.setattr(RAG, "_select_vector_nodes", staticmethod(lambda nodes: list(nodes)))
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        lambda self, nodes: (list(nodes), list(nodes)),
+    )
+    monkeypatch.setattr(RAG, "_docstore_batch_for_persist", lambda self, *a, **k: [])
+
+    written: dict[str, dict[str, str]] = {}
+    monkeypatch.setattr(
+        rag_module,
+        "write_search_text",
+        lambda client, collection, texts, **kwargs: written.setdefault(collection, {}).update(texts) or len(texts),
+    )
+
+    rag._persist_node_batches([node])
+
+    assert written["test"] == {"node-1": "the quick brown fox"}
+    assert SEARCH_TEXT_FIELD not in node.metadata
