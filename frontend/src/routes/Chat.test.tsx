@@ -7,6 +7,7 @@ import { Chat, chatReducer } from './Chat'
 import type { ChatFinalEvent } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
+import { useSearchUiStore } from '@/stores/searchUi'
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
   const enc = new TextEncoder()
@@ -33,7 +34,8 @@ function renderChat() {
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
-  useChatUiStore.setState({ drafts: {} })
+  useChatUiStore.setState({ drafts: {}, sidePanelOpen: true })
+  useSearchUiStore.setState({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false })
 })
 
 afterEach(() => {
@@ -443,6 +445,172 @@ describe('Chat drafts', () => {
     })
     expect(screen.getByText(/\(context_overflow\)/)).toBeInTheDocument()
   })
+
+describe('Chat side panel', () => {
+  const INDEX_STATUS = {
+    indexed: true,
+    total: 4,
+    with_search_text: 4,
+    missing: 0,
+    complete: true
+  }
+
+  function mockSearch(total: number) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((req: RequestInfo | URL) => {
+        const u = typeof req === 'string' ? req : String(req)
+        const body = u.includes('/search')
+          ? {
+              status: 'ok',
+              hits: [],
+              total,
+              next_cursor: null,
+              index_status: INDEX_STATUS
+            }
+          : { messages: [] }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => body,
+          text: async () => JSON.stringify(body)
+        })
+      })
+    )
+  }
+
+  it('shows the search panel by default, with the rail reporting it expanded', async () => {
+    mockSearch(0)
+
+    renderChat()
+
+    expect(await screen.findByPlaceholderText(/keywords/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /hide the search panel/i })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+  })
+
+  it('collapses on the rail chevron and persists the choice', async () => {
+    mockSearch(0)
+
+    renderChat()
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: /hide the search panel/i })
+    )
+
+    const rail = screen.getByRole('button', { name: /show the search panel/i })
+    expect(rail).toHaveAttribute('aria-expanded', 'false')
+    // Persisted in the chat UI store, so a reload does not silently reopen it.
+    expect(useChatUiStore.getState().sidePanelOpen).toBe(false)
+  })
+
+  it('keeps the hit and active-filter counts on the rail while collapsed', async () => {
+    // A panel that silently filters or scopes while hidden is a trap: the two
+    // badges are the whole reason collapsing is safe.
+    mockSearch(14)
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useChatUiStore.setState({ sidePanelOpen: false })
+    useSearchUiStore.setState({ queries: { new: 'partei' } })
+
+    renderChat()
+
+    expect(await screen.findByLabelText('14 search hits')).toHaveTextContent('14')
+    expect(screen.getByLabelText('0 active filters')).toHaveTextContent('0')
+  })
+})
+
+describe('Chat scope banner', () => {
+  it('announces an active scope above the transcript and clears it', async () => {
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = typeof req === 'string' ? req : String(req)
+      const body = u.includes('/scope') ? { chunk_ids: [] } : { messages: [] }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body)
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs', currentSessionId: 'sess-scoped' })
+    useSearchUiStore.setState({
+      scopes: { 'sess-scoped': { tokens: { p1: 10, p2: 20 }, usableTokens: 22000, missing: 1 } }
+    })
+
+    renderChatWithSession('sess-scoped')
+
+    expect(await screen.findByTestId('scope-banner')).toHaveTextContent('Scoped to 2 chunks')
+    expect(screen.getByTestId('scope-missing')).toHaveTextContent('1 of 2 chunks no longer exist')
+
+    await userEvent.click(screen.getByRole('button', { name: /^clear$/i }))
+
+    await waitFor(() => expect(screen.queryByTestId('scope-banner')).toBeNull())
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
+      expect(call).toBeDefined()
+      expect(call![1]!.method).toBe('DELETE')
+    })
+  })
+
+  it('shows no banner while the session is unscoped', async () => {
+    mockHistoryFetch([])
+
+    renderChat()
+
+    await screen.findByPlaceholderText(/ask something/i)
+    expect(screen.queryByTestId('scope-banner')).toBeNull()
+  })
+
+  it('carries a pre-session selection onto the id the backend mints', async () => {
+    // The session id only exists after the first turn, so chunks picked
+    // beforehand have nowhere to be written. Dropping them would delete the
+    // evidence the user selected in order to ask about it.
+    const scopeBody = { chunk_ids: ['p1'], est_tokens: 40, usable_tokens: 22000, missing: 0 }
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = typeof req === 'string' ? req : String(req)
+      if (u.includes('/stream_query')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: bodyFromString('data: {"response":"ok","sources":[],"session_id":"sess-new"}\n\n')
+        })
+      }
+      const body = u.includes('/scope') ? scopeBody : { messages: [] }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body)
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useSearchUiStore.setState({
+      scopes: { new: { tokens: { p1: 40 }, usableTokens: 0, missing: 0 } }
+    })
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
+      expect(call).toBeDefined()
+      expect(call![1]!.method).toBe('PUT')
+      expect(JSON.parse(String(call![1]!.body))).toEqual({ chunk_ids: ['p1'] })
+    })
+    await waitFor(() => {
+      const state = useSearchUiStore.getState()
+      expect(state.scopes['new']).toBeUndefined()
+      expect(state.scopes['sess-new']?.usableTokens).toBe(22000)
+    })
+  })
+})
 
 describe('Chat session switching', () => {
   function NavigateButton({ to }: { to: string }) {

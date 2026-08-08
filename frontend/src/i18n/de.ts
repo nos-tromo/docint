@@ -137,6 +137,39 @@ export const de: Strings = {
   'chat.validation_default_detail':
     'Die Validierung wurde für diese Antwort übersprungen oder war nicht verfügbar.',
 
+  // chat search panel + session scope
+  'search.title': 'Suche',
+  'search.placeholder': 'Suchbegriffe…',
+  'search.submit': 'Suchen',
+  'search.searching': 'Suche läuft…',
+  'search.select_collection': 'Wählen Sie eine Sammlung aus, um sie zu durchsuchen.',
+  'search.hits': '{count} Treffer',
+  'search.docs': '{count} Dokumente',
+  'search.docs_more': '{count}+ Dokumente',
+  'search.no_matches': 'Kein Abschnitt enthält alle Suchbegriffe.',
+  'search.not_indexed':
+    'Für diese Sammlung existiert noch kein Suchindex. Führen Sie dafür "make search-index" aus und suchen Sie anschließend erneut.',
+  'search.partial_warning':
+    '{count} Abschnitte sind noch nicht indexiert — diese Ergebnisse können unvollständig sein.',
+  'search.error_query': 'Geben Sie mindestens einen Suchbegriff mit zwei oder mehr Zeichen ein.',
+  'search.budget': '≈{used} / {total} Tokens',
+  'search.budget_selected': '≈{used} Tokens ausgewählt',
+  'search.budget_exceeded':
+    'Diese Auswahl ist größer, als die Antwort fassen kann. Wählen Sie einige Abschnitte ab und versuchen Sie es erneut.',
+  'search.scope_add_aria': 'Nur aus {label} antworten',
+  'search.scope_remove_aria': 'Nicht mehr aus {label} antworten',
+  'search.scope_pending': 'Ausgewählte Abschnitte greifen, sobald dieser Chat begonnen hat.',
+  'search.open_in_inspector': 'Dokumente',
+  'search.filters': 'Filter',
+  'search.clear': 'aufheben',
+  'search.expand': 'Suchbereich einblenden',
+  'search.collapse': 'Suchbereich ausblenden',
+  'search.hits_badge_aria': '{count} Suchtreffer',
+  'search.filters_badge_aria': '{count} aktive Filter',
+  'search.scope_banner': 'Eingegrenzt auf {count} Abschnitte',
+  'search.scope_missing': '{missing} von {count} Abschnitten existieren nicht mehr',
+  'search.scope_clear_error': 'Die Eingrenzung konnte nicht aufgehoben werden.',
+
   // ingest
   'ingest.title': 'Datenimport',
   'ingest.caption': 'Dokumente hochladen und indexieren',

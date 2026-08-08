@@ -129,6 +129,39 @@ export const en = {
   'chat.validation_not_validated_title': 'Response not validated',
   'chat.validation_default_detail': 'Validation was skipped or unavailable for this response.',
 
+  // chat search panel + session scope
+  'search.title': 'Search',
+  'search.placeholder': 'Keywords…',
+  'search.submit': 'Search',
+  'search.searching': 'Searching…',
+  'search.select_collection': 'Select a collection to search it.',
+  'search.hits': '{count} hits',
+  'search.docs': '{count} docs',
+  'search.docs_more': '{count}+ docs',
+  'search.no_matches': 'No chunk contains every keyword.',
+  'search.not_indexed':
+    'This collection has no search index yet. Run "make search-index" for it, then search again.',
+  'search.partial_warning':
+    '{count} chunks are not indexed yet — these results may be incomplete.',
+  'search.error_query': 'Enter at least one keyword of two or more characters.',
+  'search.budget': '≈{used} / {total} tokens',
+  'search.budget_selected': '≈{used} tokens selected',
+  'search.budget_exceeded':
+    'That selection is larger than the answer can hold. Deselect some chunks and try again.',
+  'search.scope_add_aria': 'Answer only from {label}',
+  'search.scope_remove_aria': 'Stop answering from {label}',
+  'search.scope_pending': 'Selected chunks apply once this chat has started.',
+  'search.open_in_inspector': 'Documents',
+  'search.filters': 'Filters',
+  'search.clear': 'clear',
+  'search.expand': 'Show the search panel',
+  'search.collapse': 'Hide the search panel',
+  'search.hits_badge_aria': '{count} search hits',
+  'search.filters_badge_aria': '{count} active filters',
+  'search.scope_banner': 'Scoped to {count} chunks',
+  'search.scope_missing': '{missing} of {count} chunks no longer exist',
+  'search.scope_clear_error': 'The scope could not be cleared.',
+
   // ingest
   'ingest.title': 'Ingest',
   'ingest.caption': 'Upload and index documents',

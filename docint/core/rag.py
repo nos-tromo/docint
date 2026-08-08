@@ -8081,6 +8081,9 @@ class RAG:
                 {
                     "id": node_id,
                     "chunk_id": source.get("chunk_id"),
+                    # Carried so a hit can deep-link into the Inspector's
+                    # source preview, which keys on the document hash.
+                    "file_hash": source.get("file_hash"),
                     "filename": source.get("filename"),
                     "page": source.get("page"),
                     "row": source.get("row"),

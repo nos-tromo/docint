@@ -15,14 +15,19 @@ export const draftKey = (sessionId: string | null): string => sessionId ?? 'new'
 /** Unsent chat input, keyed by session. Persisted so a reload keeps it. */
 export interface ChatUiState {
   drafts: Record<string, string>
+  /** Whether the search/filters column beside the transcript is expanded. */
+  sidePanelOpen: boolean
   setDraft: (key: string, value: string) => void
   clearDraft: (key: string) => void
+  setSidePanelOpen: (open: boolean) => void
+  toggleSidePanel: () => void
 }
 
 export const useChatUiStore = create<ChatUiState>()(
   persist(
     (set) => ({
       drafts: {},
+      sidePanelOpen: true,
       setDraft: (key, value) => set((s) => ({ drafts: { ...s.drafts, [key]: value } })),
       clearDraft: (key) =>
         set((s) => {
@@ -30,8 +35,19 @@ export const useChatUiStore = create<ChatUiState>()(
           const drafts = { ...s.drafts }
           delete drafts[key]
           return { drafts }
-        })
+        }),
+      setSidePanelOpen: (sidePanelOpen) => set({ sidePanelOpen }),
+      toggleSidePanel: () => set((s) => ({ sidePanelOpen: !s.sidePanelOpen }))
     }),
-    { name: 'docint-chat-ui', version: 1 }
+    {
+      name: 'docint-chat-ui',
+      version: 2,
+      // v1 had no panel flag; default it open so an upgrade does not silently
+      // hide a column the user never chose to hide.
+      migrate: (persisted) => {
+        const prior = (persisted ?? {}) as Partial<ChatUiState>
+        return { drafts: prior.drafts ?? {}, sidePanelOpen: prior.sidePanelOpen ?? true }
+      }
+    }
   )
 )
