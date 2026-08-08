@@ -150,6 +150,8 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
+from docint.core.search.fulltext import build_search_filter, parse_keywords
+from docint.core.search.index import ensure_search_index, search_index_status, write_search_text
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
@@ -3842,6 +3844,39 @@ class RAG:
         non_vector_candidates = [node for node in batch if id(node) not in candidate_ids]
         return non_vector_candidates + list(docstore_nodes)
 
+    def _write_search_text(self, nodes: list[BaseNode]) -> None:
+        """Write each persisted node's text to its Qdrant point for search.
+
+        Called after a successful insert, keyed by ``node_id`` — llama-index
+        uses the node id as the Qdrant point id. Deliberately a payload-only
+        write rather than node metadata: metadata is rendered into the
+        embedding input and serialized into ``_node_content``, so stamping it
+        there would embed every chunk's text twice and store a third copy of
+        it. Fail-soft — search degrades to "needs a backfill", ingestion does
+        not fail.
+
+        Args:
+            nodes (list[BaseNode]): Nodes just written to the vector store.
+        """
+        if not self.qdrant_collection or not nodes:
+            return
+        try:
+            texts = {
+                node.node_id: text
+                for node in nodes
+                if (text := node.get_content(metadata_mode=MetadataMode.NONE).strip())
+            }
+            if not texts:
+                return
+            write_search_text(self.qdrant_client, self.qdrant_collection, texts)
+        except Exception as exc:
+            logger.warning(
+                "search_text write skipped for {} node(s) in {}: {} — run `make search-index` to backfill.",
+                len(nodes),
+                self.qdrant_collection,
+                exc,
+            )
+
     def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
         """Persist nodes in micro-batches to reduce crash-loss windows.
 
@@ -3925,6 +3960,7 @@ class RAG:
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
+                self._write_search_text(prepared_vector_nodes)
 
     def _log_ingest_benchmark_summary(
         self,
@@ -4057,6 +4093,7 @@ class RAG:
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
+                self._write_search_text(prepared_vector_nodes)
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
@@ -4538,6 +4575,10 @@ class RAG:
             )
         except Exception as idx_exc:
             logger.debug("posting_uuid index on {} skipped: {}", self.qdrant_collection, idx_exc)
+
+        # Full-text search needs a lowercase prefix index on `search_text`.
+        # Idempotent and fail-soft, like the posting_uuid index above.
+        ensure_search_index(self.qdrant_client, self.qdrant_collection)
 
     def create_query_engine(self) -> None:
         """Create the query engine with a retriever and reranker.
@@ -8270,6 +8311,118 @@ class RAG:
             cached = self.list_documents()
             self._documents_cache[self.qdrant_collection] = cached
         return summarize_document_types(cached)
+
+    def search_fulltext(
+        self,
+        query: str,
+        *,
+        base_filter: qdrant_models.Filter | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Return chunks containing every keyword in ``query``.
+
+        Pure local lookup: one native Qdrant scroll, no embedding call and no
+        inference. Keywords are ANDed and order-independent; matching is
+        case-insensitive and prefix-based via the ``search_text`` index.
+
+        Args:
+            query (str): Raw query text; whitespace-separated keywords.
+            base_filter (qdrant_models.Filter | None): Caller's metadata filter,
+                ANDed with the keyword conditions.
+            limit (int): Hits per page, clamped to ``[1, 500]``.
+            cursor (str | None): Opaque page cursor from a previous call.
+
+        Returns:
+            dict[str, Any]: ``status`` — ``"ok"`` when every point in the
+                collection is indexed, ``"partial"`` when some are not (a
+                backfill is running or was interrupted, so the result set is
+                incomplete), ``"not_indexed"`` when none are — plus ``hits``,
+                ``total``, ``next_cursor`` and ``index_status`` counts.
+
+        Raises:
+            KeywordTooShortError: When a keyword cannot be indexed.
+        """
+        collection = self.qdrant_collection
+        status = search_index_status(self.qdrant_client, collection)
+        empty: dict[str, Any] = {
+            "status": "ok" if status.get("complete") else "partial",
+            "hits": [],
+            "total": 0,
+            "next_cursor": None,
+            "index_status": status,
+        }
+        if not status.get("with_search_text"):
+            return {**empty, "status": "not_indexed"}
+
+        keywords = parse_keywords(query)
+        search_filter = build_search_filter(keywords, base_filter=base_filter)
+        if search_filter is None:
+            return empty
+
+        page_size = max(1, min(int(limit), 500))
+        points, next_offset = self.qdrant_client.scroll(
+            collection_name=collection,
+            scroll_filter=search_filter,
+            limit=page_size,
+            offset=cursor,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        hits: list[dict[str, Any]] = []
+        for point in points:
+            payload = getattr(point, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            node_id = str(getattr(point, "id", "") or "")
+            source = self._source_from_payload(
+                collection=collection,
+                payload=payload,
+                node_id=node_id,
+            )
+            text = str(source.get("text") or "")
+            hits.append(
+                {
+                    "id": node_id,
+                    "chunk_id": source.get("chunk_id"),
+                    "filename": source.get("filename"),
+                    "page": source.get("page"),
+                    "row": source.get("row"),
+                    "preview": text[:600].strip(),
+                    "entity_types": sorted(
+                        {
+                            str(entity.get("type") or "Unlabeled")
+                            for entity in normalize_entities(payload.get("entities"))
+                        }
+                    ),
+                    "est_tokens": estimate_tokens(text, self.embed_char_token_ratio),
+                }
+            )
+
+        try:
+            total = int(
+                self.qdrant_client.count(
+                    collection_name=collection,
+                    count_filter=search_filter,
+                    exact=True,
+                ).count
+            )
+        except Exception as exc:
+            logger.debug("search count unavailable for {}: {}", collection, exc)
+            total = len(hits)
+
+        # "partial" is a distinct status rather than a nested field so a caller
+        # cannot miss incomplete coverage by ignoring ``index_status``. A search
+        # run while the backfill is still walking the collection returns only
+        # what has been written so far.
+        return {
+            "status": "ok" if status.get("complete") else "partial",
+            "hits": hits,
+            "total": total,
+            "next_cursor": str(next_offset) if next_offset is not None else None,
+            "index_status": status,
+        }
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all nodes from the current collection and return their NER metadata.

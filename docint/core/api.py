@@ -52,6 +52,7 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     normalize_numeric_bound,
 )
+from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
@@ -718,6 +719,30 @@ class QueryIn(BaseModel):
     query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = "answer"
 
 
+class SearchIn(BaseModel):
+    """Request payload for a full-text keyword search."""
+
+    question: str
+    collection: str | None = None
+    metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
+    limit: int = Field(default=50, ge=1, le=500)
+    cursor: str | None = None
+
+
+class SearchOut(BaseModel):
+    """Keyword-search hits plus the collection's search-index state."""
+
+    #: ``ok`` — every point in the collection is indexed. ``partial`` — some
+    #: are not, so the hit list is incomplete (a backfill is running or was
+    #: interrupted); ``index_status.missing`` says how many. ``not_indexed`` —
+    #: none are, so ``make search-index`` has never run here.
+    status: Literal["ok", "partial", "not_indexed"]
+    hits: list[dict[str, Any]] = []
+    total: int = 0
+    next_cursor: str | None = None
+    index_status: dict[str, Any] = {}
+
+
 class QueryOut(BaseModel):
     """Grounded answer plus retrieval provenance for a RAG query."""
 
@@ -1181,6 +1206,58 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
         raise
     except Exception as e:
         logger.opt(exception=e).error("Error deleting collection")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+@app.post("/search", response_model=SearchOut, tags=["Query"])
+def search_collection(
+    payload: SearchIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> SearchOut:
+    """Return chunks containing every keyword in the query.
+
+    Pure local lookup — one native Qdrant scroll, no embedding call and no
+    inference. Keywords are ANDed and order-independent; matching is
+    case-insensitive and prefix-based, so the head of a compound finds the
+    compound.
+
+    A collection that has never been backfilled returns ``status:
+    "not_indexed"`` with no hits, so an empty ``hits`` list under ``status:
+    "ok"`` means "no matches" and nothing else.
+
+    Args:
+        payload (SearchIn): Query, optional collection, filters and paging.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        SearchOut: Hits, exact total, next cursor and index state.
+
+    Raises:
+        HTTPException: 422 for an unusable query, 400/404 from collection
+            resolution, 500 on unexpected failure.
+    """
+    # Validate at the boundary rather than deep in the RAG layer: an unusable
+    # query should be refused before a collection is even resolved. An empty
+    # keyword list would otherwise reach the search as "match everything".
+    try:
+        if not parse_keywords(payload.question):
+            raise HTTPException(status_code=422, detail="Invalid request.")
+    except KeywordTooShortError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+
+    try:
+        with _scoped_collection(payload.collection, principal):
+            data = rag.search_fulltext(
+                payload.question,
+                base_filter=build_qdrant_filter(payload.metadata_filters),
+                limit=payload.limit,
+                cursor=payload.cursor,
+            )
+        return SearchOut(**data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("Error running collection search")
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 

@@ -6122,3 +6122,173 @@ def test_build_retriever_keeps_parent_context_filter_under_native_filters(
     keys = [condition.key for condition in (merged.must or [])]
     assert "docint_hier_type" in keys
     assert "mimetype" in keys
+
+
+def test_persisted_nodes_get_search_text_written_to_their_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Newly ingested chunks must be searchable without a backfill run.
+
+    The text is written as a payload field after insert, never stamped into
+    node metadata — metadata enters the embedding input and is serialized into
+    ``_node_content``, so stamping it there would embed every chunk's text
+    twice and store a third copy of it.
+    """
+    from docint.core.search.index import SEARCH_TEXT_FIELD
+
+    rag = RAG(qdrant_collection="test")
+    node = TextNode(text="the quick brown fox", id_="node-1")
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=types.SimpleNamespace(add_documents=lambda *a, **k: None),
+            insert_nodes=lambda nodes: None,
+        ),
+    )
+    monkeypatch.setattr(RAG, "_select_vector_nodes", staticmethod(lambda nodes: list(nodes)))
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        lambda self, nodes: (list(nodes), list(nodes)),
+    )
+    monkeypatch.setattr(RAG, "_docstore_batch_for_persist", lambda self, *a, **k: [])
+
+    written: dict[str, dict[str, str]] = {}
+    monkeypatch.setattr(
+        rag_module,
+        "write_search_text",
+        lambda client, collection, texts, **kwargs: written.setdefault(collection, {}).update(texts) or len(texts),
+    )
+
+    rag._persist_node_batches([node])
+
+    assert written["test"] == {"node-1": "the quick brown fox"}
+    assert SEARCH_TEXT_FIELD not in node.metadata
+
+
+def test_search_fulltext_reports_not_indexed_rather_than_no_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty hit list must never be able to mean "the migration never ran".
+
+    Conflating the two would have an investigator conclude a term is absent
+    from the collection when it was simply never indexed.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": False,
+            "total": 10,
+            "with_search_text": 0,
+            "missing": 10,
+            "complete": False,
+        },
+    )
+
+    result = rag.search_fulltext("berlin")
+
+    assert result["status"] == "not_indexed"
+    assert result["hits"] == []
+
+
+def test_search_fulltext_returns_normalized_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hits carry the fields the panel needs, including a token estimate."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 1,
+            "with_search_text": 1,
+            "missing": 0,
+            "complete": True,
+        },
+    )
+    payload = {
+        "text": "die Konferenz in Berlin",
+        "file_name": "report.pdf",
+        "page": 3,
+        "entities": [{"text": "Berlin", "type": "LOC"}],
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: ([types.SimpleNamespace(id="p1", payload=payload)], None),
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+        ),
+    )
+
+    result = rag.search_fulltext("berlin konferenz")
+
+    assert result["status"] == "ok"
+    assert result["total"] == 1
+    hit = result["hits"][0]
+    assert hit["id"] == "p1"
+    assert hit["filename"] == "report.pdf"
+    assert hit["entity_types"] == ["LOC"]
+    assert hit["est_tokens"] > 0
+    assert "Berlin" in hit["preview"]
+
+
+def test_search_fulltext_returns_nothing_for_a_keywordless_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank query must never degrade into a scan of the whole collection."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 1,
+            "with_search_text": 1,
+            "missing": 0,
+            "complete": True,
+        },
+    )
+
+    result = rag.search_fulltext("   ")
+
+    assert result["status"] == "ok"
+    assert result["hits"] == []
+    assert result["total"] == 0
+
+
+def test_search_fulltext_flags_a_partially_indexed_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A search during a running backfill must not claim to be complete.
+
+    The backfill walks the collection page by page, so a search issued
+    mid-migration returns only what has been written so far. Reporting that as
+    plain success would have an investigator treat a partial result set as the
+    whole picture. ``partial`` is a distinct status rather than a nested field
+    so a caller cannot miss it by ignoring ``index_status``.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 1000,
+            "with_search_text": 64,
+            "missing": 936,
+            "complete": False,
+        },
+    )
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: ([], None),
+            count=lambda **kwargs: types.SimpleNamespace(count=0),
+        ),
+    )
+
+    result = rag.search_fulltext("berlin")
+
+    assert result["status"] == "partial"
+    assert result["index_status"]["missing"] == 936

@@ -93,14 +93,31 @@ Kept out of `core/rag.py`, which is already ~8.7k lines.
   with `TextIndexParams(type="text", tokenizer=PREFIX, lowercase=True,
   min_token_len=2, max_token_len=30)`. Best-effort and fail-soft, mirroring the
   existing `posting_uuid` index creation in `RAG.create_index`.
-- `backfill_search_text(client, collection, *, batch_size, force=False)` —
-  scroll the collection, extract text with the existing
-  `RAG._extract_payload_text`, write it back in batches with `set_payload`.
-  Payload-only: no re-embedding, no inference, no model download, so it is
-  airgap-safe. Returns `(scanned, written, skipped)`. Points that already carry
-  `search_text` are skipped unless `force`.
-- `search_index_status(client, collection)` — whether the index exists and how
-  many points still lack `search_text`.
+- `write_search_text(client, collection, texts, *, batch_size, wait)` — writes
+  many distinct per-point payloads in **one** request via
+  `batch_update_points`. Qdrant's `set_payload` applies a single payload to
+  many points, so distinct per-point texts would otherwise cost one request
+  each; this is what makes both the ingest hook and the backfill affordable.
+  Point ids keep their own type — Qdrant ids are unsigned ints or UUIDs, and
+  coercing an int id to a string targets a point that does not exist, so the
+  write silently lands nowhere.
+- `backfill_search_text(client, collection, *, extract_text, batch_size,
+  force=False, progress=None)` — scroll the collection, extract each point's
+  text, write it back through `write_search_text`. Payload-only: no
+  re-embedding, no inference, no model download, so it is airgap-safe. Returns
+  a `BackfillSummary(scanned, written, skipped, empty)`. Points that already
+  carry `search_text` are skipped unless `force`. A point with no extractable
+  text is marked with an **empty value** rather than left alone — otherwise it
+  counts as missing forever, every search reports `partial`, and the warning
+  stops meaning anything. Transient Qdrant write failures are retried, so one
+  blip cannot leave a collection permanently half-indexed. `extract_text` is **injected**
+  (the caller passes `RAG._extract_payload_text`) so this package never imports
+  `core/rag.py` — it stays unit-testable without a RAG instance and cannot
+  create a circular import, mirroring how `core/jobs.py` takes its `runner`.
+- `search_index_status(client, collection)` — whether the payload index exists
+  plus exact coverage counts (`total`, `with_search_text`, `missing`,
+  `complete`). Counted, never sampled: see the `"partial"` note under the
+  Search API section for why.
 
 #### `fulltext.py` — pure, dependency-injected, like `core/retrieval_filters.py`
 
@@ -128,26 +145,45 @@ bytes, not a doubling of collection storage.
 
 ### Ingest wiring
 
-`search_text` is stamped **per node immediately before persistence — after all
-chunking and after the `utils/embed_chunking.py` re-chunk pass** — always from
-that node's own `get_content()`.
+**Corrected during implementation (2026-08-08).** An earlier draft of this
+section had `search_text` stamped into `node.metadata` with both exclusion lists
+set. It is written **payload-only** instead, via `batch_update_points`, straight
+after a successful insert and keyed by `node_id` — llama-index uses the node id
+as the Qdrant point id.
 
-This ordering is load-bearing. Sub-nodes inherit their parent's metadata, so
-stamping earlier would give a re-chunked child its parent's text and make search
-results point at the wrong chunk.
+Node metadata is the wrong home for it on four counts:
 
-`search_text` is added to **both** `excluded_embed_metadata_keys` and
-`excluded_llm_metadata_keys`. Without the first, every embedding input would
-contain the chunk text twice; without the second it would leak into the prompt.
-The codebase already uses this pattern in `core/storage/hierarchical.py`.
+- Metadata is rendered into the embedding input unless excluded. A missed or
+  reset exclusion would put every chunk's text into its own embedding twice,
+  silently degrading retrieval in a way nobody would notice for months.
+- Metadata is serialized *into* `_node_content`, so stamping there stores the
+  text three times per chunk (node text, metadata copy, payload key) rather
+  than twice.
+- Retrieved nodes rebuild metadata from `_node_content`, so a missed
+  `excluded_llm_metadata_keys` would push the full chunk text into the prompt a
+  second time.
+- The ingest hook and the backfill call the same `write_search_text()`, so the
+  migration path is exercised by every ingest instead of rotting until someone
+  runs it.
+
+The cost is one extra Qdrant round-trip per persistence batch, beside an
+embedding call in that same batch. The write is fail-soft end to end: a
+surprising node shape or a Qdrant outage degrades search to "needs a backfill"
+rather than failing ingestion.
 
 ### Hierarchical duplicates
 
+**Corrected during implementation (2026-08-08).** An earlier draft restricted
+search to `docint_hier_type == "fine"`. Search **excludes `"coarse"`** instead.
+
 With `HIERARCHICAL_CHUNKING_ENABLED`, a coarse parent and its fine child both
 contain the keyword, so a naive search returns both for a single logical hit.
-Search is therefore restricted to `docint_hier_type == "fine"` on collections
-that carry hierarchy — the same condition the retriever already applies
-internally.
+But verified against a live Qdrant with points tagged `fine`, tagged `coarse`,
+and untagged: requiring `"fine"` returns *only* the tagged one, so a collection
+ingested **without** hierarchical chunking — which tags nothing — would return
+zero hits for every search. Excluding `"coarse"` keeps the fine node and the
+untagged node while still dropping the duplicate parent.
+`core/rag.py:3605-3607` already uses exclude-coarse for exactly this reason.
 
 ### Data flow
 
@@ -194,7 +230,7 @@ No embeddings and no inference call appear anywhere in this path.
   ],
   "total": 14,                      // exact, via Qdrant count with the same filter
   "next_cursor": null,
-  "index_status": { "indexed": true, "missing_search_text": 0 }
+  "index_status": { "indexed": true, "total": 724, "with_search_text": 724, "missing": 0, "complete": true }
 }
 ```
 
@@ -210,11 +246,20 @@ Owner-gated through `_require_owned_collection` and bound per request with
   document count shown beside it is derived from the hits loaded so far and is
   rendered as `6+ docs` while `next_cursor` is non-null, rather than implying a
   collection-wide figure it does not have.
-- **`status: "not_indexed"`** is returned when the collection has no
-  `search_text` index or has points still missing the field, with `hits` empty
-  and `index_status.missing_search_text` populated. The panel renders the
-  migration prompt for this state. An empty `hits` list with `status: "ok"`
-  therefore means "genuinely no matches" and nothing else.
+- **`status: "not_indexed"`** is returned when the collection carries no
+  `search_text` at all, with `hits` empty. The panel renders the migration
+  prompt for this state. An empty `hits` list with `status: "ok"` therefore
+  means "genuinely no matches" and nothing else.
+- **`status: "partial"`** is a third state, added during implementation after
+  review. Coverage is **counted exactly** (two Qdrant `count` calls), not
+  sampled. A head sample cannot distinguish a finished backfill from one that
+  has written only its first page — the backfill walks the collection from the
+  same offset a sample would — so a search issued mid-migration would have
+  reported plain success while silently omitting every chunk not yet written.
+  `index_status` carries `total` / `with_search_text` / `missing` / `complete`,
+  and `partial` is a distinct *status* rather than only a nested field so a
+  client cannot miss incomplete coverage by ignoring `index_status`. The two
+  counts are also cheaper than the payload-bearing scroll pages a sample needed.
 - **Keywords shorter than `min_token_len` (2 characters) are not indexable.**
   They are rejected with a clear message naming the offending keyword rather
   than silently contributing an `must` condition that can never match.

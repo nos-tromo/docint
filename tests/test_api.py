@@ -119,6 +119,31 @@ class _DummyOwners:
 class DummyRAG:
     """Dummy Retrieval-Augmented Generation (RAG) class for testing purposes."""
 
+    def search_fulltext(self, query: str, **kwargs: Any) -> dict[str, Any]:
+        """Record the call and return an empty result set.
+
+        Args:
+            query (str): The raw query text.
+            **kwargs (Any): Paging and filter arguments from the endpoint.
+
+        Returns:
+            dict[str, Any]: An empty, well-formed search result.
+        """
+        self.search_calls.append({"query": query, **kwargs})
+        return {
+            "status": "ok",
+            "hits": [],
+            "total": 0,
+            "next_cursor": None,
+            "index_status": {
+                "indexed": True,
+                "total": 1,
+                "with_search_text": 1,
+                "missing": 0,
+                "complete": True,
+            },
+        }
+
     def probe_qdrant(self) -> bool:
         """Satisfy the lifespan startup probe without touching the network.
 
@@ -145,6 +170,7 @@ class DummyRAG:
         self.selected: list[str] = []
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
+        self.search_calls: list[dict[str, Any]] = []
         # Physical collection observed (via the active scope) at call time, so
         # tests can assert /query and /stream_query thread the resolved name in.
         self.seen_collections: list[str] = []
@@ -4163,3 +4189,31 @@ def test_query_accepts_a_numeric_range_bound_sent_as_a_string(client: TestClient
     )
 
     assert response.status_code != 422
+
+
+def test_search_returns_hits_for_the_scoped_collection(client: TestClient) -> None:
+    """The endpoint returns the RAG layer's hits under the owner's collection."""
+    response = client.post("/search", json={"question": "berlin konferenz"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] in {"ok", "partial", "not_indexed"}
+    assert isinstance(body["hits"], list)
+
+
+def test_search_rejects_a_keyword_below_the_index_minimum(client: TestClient) -> None:
+    """An unindexable keyword can never match, so it must be refused.
+
+    Accepting it would add a condition matching nothing, silently reducing the
+    whole search to zero hits.
+    """
+    response = client.post("/search", json={"question": "berlin a"})
+
+    assert response.status_code == 422
+
+
+def test_search_requires_a_query(client: TestClient) -> None:
+    """A keyword-less search must not become a scan of the whole collection."""
+    response = client.post("/search", json={"question": "   "})
+
+    assert response.status_code == 422

@@ -26,6 +26,7 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `DELETE` | `/collections/{name}` | `Collections` | Delete a collection. |
 | `POST` | `/query` | `Query` | Stateless or session-aware query, non-streaming. |
 | `POST` | `/stream_query` | `Query` | Streaming variant of `/query` (SSE tokens). |
+| `POST` | `/search` | `Query` | Full-text keyword search over chunk text (no embeddings, no inference). |
 | `POST` | `/summarize` | `Query` | Collection-level (tree/map-reduce) summary: `200` from cache, `202` queues a job. |
 | `GET`  | `/collections/ner` | `Query` | Full NER dump for the active collection. |
 | `GET`  | `/collections/ner/stats` | `Query` | Aggregated NER statistics. |
@@ -145,6 +146,90 @@ Same inputs as `/query`, streamed as SSE events with token-level output.
 The first event carries the `session_id`, subsequent events carry
 `{"type": "token", "value": "..."}`, and a final event carries the
 complete payload.
+
+### `POST /search`
+
+Full-text keyword search over the chunk text of the caller's collection. Pure
+local lookup — one native Qdrant scroll, **no embedding call and no
+inference** — which is what makes it fast enough to drive a search box.
+
+Request:
+
+```json
+{
+  "question": "berlin konferenz",
+  "collection": "<logical name>",
+  "metadata_filters": [],
+  "limit": 50,
+  "cursor": null
+}
+```
+
+- `question` — whitespace-separated keywords. **All** must match the same
+  chunk, in any order.
+- `metadata_filters` — the same `MetadataFilterIn` shape as `/query`, ANDed
+  with the keyword conditions so filters constrain the search.
+- `limit` — hits per page, `1..500` (default `50`).
+- `cursor` — opaque page cursor from a previous response.
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "hits": [
+    {
+      "id": "<qdrant point id>",
+      "chunk_id": "...",
+      "filename": "...",
+      "page": 3,
+      "row": null,
+      "preview": "...",
+      "entity_types": ["LOC"],
+      "est_tokens": 412
+    }
+  ],
+  "total": 14,
+  "next_cursor": null,
+  "index_status": {
+    "indexed": true,
+    "total": 724,
+    "with_search_text": 724,
+    "missing": 0,
+    "complete": true
+  }
+}
+```
+
+Matching semantics:
+
+- **Case-insensitive**, including non-ASCII text. This depends on the
+  `search_text` payload index (`PREFIX` tokenizer, `lowercase=true`) — an
+  un-indexed `MatchText` only case-folds ASCII, so German title-case tokens
+  would not match their lowercase form.
+- **Prefix**, not substring: `Partei` finds `Parteitag`, but `tag` does not.
+  German compounds are head-final, so the discriminating fragment is normally
+  the start of the word.
+- Coarse parent chunks are excluded, so a hierarchical collection does not
+  return both a parent and its child for one logical hit.
+
+Status and errors:
+
+- `status: "ok"` — every point in the collection is indexed, so an empty `hits`
+  list means "no matches" and nothing else.
+- `status: "partial"` — some points are not indexed, so **the hit list is
+  incomplete**: a backfill is running or was interrupted.
+  `index_status.missing` says how many chunks are still unsearchable. This is a
+  distinct status rather than a nested field precisely so a client cannot miss
+  it by ignoring `index_status` — a search that silently under-returns is the
+  worst failure mode for an investigative tool.
+- `status: "not_indexed"` — no point carries the field; the collection has
+  never been backfilled. `hits` is empty. Run
+  `make search-index COLLECTION=<name>` once.
+- `422` — the query is blank, or a keyword is shorter than 2 characters. Such a
+  keyword cannot be indexed and would contribute a condition that never
+  matches, silently reducing the whole search to zero hits.
+- `404` — the collection is not owned by the caller.
 
 ### `POST /summarize`
 

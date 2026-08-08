@@ -16,7 +16,7 @@ NETWORKS := inference-net data-net edge-net
 VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache
 include make/common.mk
 
-.PHONY: help resolve health
+.PHONY: help resolve health search-index
 
 help:
 	@echo "docint — build-host helpers."
@@ -33,6 +33,7 @@ help:
 	@echo "  make down       stop + remove containers (never touches data-plane state)"
 	@echo "  make health     check backend dependency status (Qdrant reachability); chain as 'make up health'"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
+	@echo "  make search-index  build the full-text search index (COLLECTION=<name> optional)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
 	@echo "  make test       run the test suite"
@@ -63,4 +64,17 @@ resolve:
 		printf '%s\n' "$(COLLECTION)" | $(COMPOSE) run --rm -T backend resolve; \
 	else \
 		$(COMPOSE) run --rm backend resolve; \
+	fi
+
+# Build the full-text search index for a collection: creates the `search_text`
+# payload index and backfills the field across existing points. Payload-only —
+# no re-embedding, no inference — so it is safe on an airgapped host, and
+# re-running it skips populated points. Runs in a one-off backend container so
+# it reaches the qdrant network alias; production is Docker-only, no host `uv`.
+# Interactive by default; pass COLLECTION=<name> to run non-interactively.
+search-index:
+	@if [ -n "$(COLLECTION)" ]; then \
+		printf '%s\n' "$(COLLECTION)" | $(COMPOSE) run --rm -T backend search-index; \
+	else \
+		$(COMPOSE) run --rm backend search-index; \
 	fi
