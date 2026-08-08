@@ -3,14 +3,21 @@
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from llama_index.core.base.llms.types import LLMMetadata
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI as LlamaIndexOpenAI
 from loguru import logger
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    NotFoundError,
+    OpenAI,
+    PermissionDeniedError,
+)
 from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
 from typing_extensions import override
 
@@ -26,6 +33,20 @@ from docint.utils.llm_sanitize import strip_reasoning
 
 class EmbeddingInputTooLongError(RuntimeError):
     """Raised when an embedding input still exceeds the context window."""
+
+
+class EmbeddingEndpointError(RuntimeError):
+    """Raised when the dense-embedding endpoint itself cannot serve a request.
+
+    Distinct from :class:`EmbeddingInputTooLongError`, which means the
+    endpoint worked and rejected one oversize input. This one means no
+    embedding can be produced at all — wrong address, unreachable host,
+    refused credentials — so both retrieval and ingestion are dead until
+    an operator changes configuration. The message therefore names the
+    resolved base URL and the env var that sets it; without that, the
+    failure reaches the caller as an ``openai`` exception whose traceback
+    is entirely third-party frames and mentions neither.
+    """
 
 
 class LocalOpenAI(LlamaIndexOpenAI):
@@ -214,6 +235,68 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             "(PARAMETER num_ctx N) — see docs/deployment.md."
         )
 
+    @staticmethod
+    def _endpoint_remedy(exc: Exception) -> str | None:
+        """Return the operator remedy for an endpoint-level failure.
+
+        Only the OpenAI SDK's own transport and status errors qualify:
+        anything else is a docint-side bug and must keep its own
+        exception rather than be relabelled an embedding outage.
+
+        Args:
+            exc (Exception): Exception raised by the embedding call.
+
+        Returns:
+            str | None: A remedy sentence when *exc* means the endpoint
+                itself is unusable, otherwise ``None``.
+        """
+        if isinstance(exc, APIConnectionError):
+            return (
+                "Nothing answered there — check the embedding service is running and that "
+                "EMBED_API_BASE names a host reachable from this container."
+            )
+        if isinstance(exc, AuthenticationError | PermissionDeniedError):
+            return "The endpoint refused the credentials — check EMBED_API_KEY."
+        if isinstance(exc, NotFoundError):
+            return (
+                "The OpenAI SDK appends /embeddings to EMBED_API_BASE, so that value must end "
+                "in /v1 — unlike SPARSE_API_BASE, which takes the bare host even when both "
+                "point at the same container (embed-only wants "
+                "EMBED_API_BASE=http://embed-only:8000/v1 alongside "
+                "SPARSE_API_BASE=http://embed-only:8000). A 404 can also mean the endpoint "
+                "does not serve this model."
+            )
+        if isinstance(exc, APIStatusError):
+            return "The endpoint answered with an error status — check its logs."
+        return None
+
+    def _reraise(self, exc: Exception, *, texts: list[str] | None = None) -> NoReturn:
+        """Re-raise *exc* as the most specific embedding error available.
+
+        Ordering matters: a context overflow arrives as an HTTP 400 and
+        would otherwise be swallowed by the endpoint-fault branch,
+        replacing a precise re-splitter diagnosis with a misleading
+        "endpoint is down".
+
+        Args:
+            exc (Exception): Exception raised by the embedding call.
+            texts (list[str] | None): Batch the caller was embedding, for
+                the overflow diagnostics.
+
+        Raises:
+            EmbeddingInputTooLongError: On a provider context-limit error.
+            EmbeddingEndpointError: When the endpoint itself is unusable.
+            Exception: The original exception, unchanged, otherwise.
+        """
+        if self._is_context_limit_error(exc):
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
+        remedy = self._endpoint_remedy(exc)
+        if remedy is not None:
+            raise EmbeddingEndpointError(
+                f"Dense embedding failed against {self.api_base} (model={self.model_name}): {exc}. {remedy}"
+            ) from exc
+        raise exc
+
     def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, raising on context overflow.
 
@@ -226,13 +309,12 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         Raises:
             EmbeddingInputTooLongError: When any text triggers the
                 provider's context-limit error. No retry, no truncation.
+            EmbeddingEndpointError: When the endpoint is unusable.
         """
         try:
             return super()._get_text_embeddings(texts)
         except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
-            raise self._raise_budget_overflow(exc, texts=texts) from exc
+            self._reraise(exc, texts=texts)
 
     async def aget_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
         """Async variant of :meth:`get_text_embeddings_strict`.
@@ -246,13 +328,12 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         Raises:
             EmbeddingInputTooLongError: When any text triggers the
                 provider's context-limit error.
+            EmbeddingEndpointError: When the endpoint is unusable.
         """
         try:
             return await super()._aget_text_embeddings(texts)
         except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
-            raise self._raise_budget_overflow(exc, texts=texts) from exc
+            self._reraise(exc, texts=texts)
 
     @override
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
@@ -267,13 +348,12 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         Raises:
             EmbeddingInputTooLongError: When the provider reports an
                 oversize input. No retry, no silent truncation.
+            EmbeddingEndpointError: When the endpoint is unusable.
         """
         try:
             return super()._get_text_embeddings(texts)
         except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
-            raise self._raise_budget_overflow(exc, texts=texts) from exc
+            self._reraise(exc, texts=texts)
 
     @override
     async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
@@ -288,13 +368,92 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         Raises:
             EmbeddingInputTooLongError: When the provider reports an
                 oversize input. No retry, no silent truncation.
+            EmbeddingEndpointError: When the endpoint is unusable.
         """
         try:
             return await super()._aget_text_embeddings(texts)
         except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
-            raise self._raise_budget_overflow(exc, texts=texts) from exc
+            self._reraise(exc, texts=texts)
+
+    @override
+    def _get_query_embedding(self, query: str) -> list[float]:
+        """Embed a query, naming the endpoint when it is the one at fault.
+
+        The query path is what every chat turn runs through, so leaving
+        it unguarded is what turned a one-line configuration mistake into
+        an unexplained chat-stream crash.
+
+        Args:
+            query (str): Query text.
+
+        Returns:
+            list[float]: The query embedding.
+
+        Raises:
+            EmbeddingInputTooLongError: When the query overflows the budget.
+            EmbeddingEndpointError: When the endpoint is unusable.
+        """
+        try:
+            return super()._get_query_embedding(query)
+        except Exception as exc:
+            self._reraise(exc, texts=[query])
+
+    @override
+    async def _aget_query_embedding(self, query: str) -> list[float]:
+        """Async variant of :meth:`_get_query_embedding`.
+
+        Args:
+            query (str): Query text.
+
+        Returns:
+            list[float]: The query embedding.
+
+        Raises:
+            EmbeddingInputTooLongError: When the query overflows the budget.
+            EmbeddingEndpointError: When the endpoint is unusable.
+        """
+        try:
+            return await super()._aget_query_embedding(query)
+        except Exception as exc:
+            self._reraise(exc, texts=[query])
+
+    @override
+    def _get_text_embedding(self, text: str) -> list[float]:
+        """Embed a single text, naming the endpoint when it is at fault.
+
+        Args:
+            text (str): Text to embed.
+
+        Returns:
+            list[float]: The text embedding.
+
+        Raises:
+            EmbeddingInputTooLongError: When the text overflows the budget.
+            EmbeddingEndpointError: When the endpoint is unusable.
+        """
+        try:
+            return super()._get_text_embedding(text)
+        except Exception as exc:
+            self._reraise(exc, texts=[text])
+
+    @override
+    async def _aget_text_embedding(self, text: str) -> list[float]:
+        """Async variant of :meth:`_get_text_embedding`.
+
+        Args:
+            text (str): Text to embed.
+
+        Returns:
+            list[float]: The text embedding.
+
+        Raises:
+            EmbeddingInputTooLongError: When the text overflows the budget.
+            EmbeddingEndpointError: When the endpoint is unusable.
+        """
+        try:
+            return await super()._aget_text_embedding(text)
+        except Exception as exc:
+            self._reraise(exc, texts=[text])
 
 
 def get_openai_reasoning_effort(

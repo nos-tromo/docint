@@ -731,3 +731,242 @@ def test_budgeted_embedding_forwards_timeout_max_retries_and_embed_batch_size() 
     assert embedding.timeout == 1800.0
     assert embedding.max_retries == 1
     assert embedding.embed_batch_size == 16
+
+
+# ---------------------------------------------------------------------------
+# BudgetedOpenAIEmbedding endpoint faults
+# ---------------------------------------------------------------------------
+
+
+def _embedding_client() -> Any:
+    """Build an embed client pointed at a bare (``/v1``-less) embed-only host.
+
+    Returns:
+        BudgetedOpenAIEmbedding: Client configured the way the bug report's
+        deployment was — the base URL the OpenAI SDK cannot append
+        ``/embeddings`` to successfully.
+    """
+    from docint.utils.openai_cfg import BudgetedOpenAIEmbedding
+
+    return BudgetedOpenAIEmbedding(
+        model_name="BAAI/bge-m3",
+        api_key="sk-test",
+        api_base="http://embed-only:8000",
+        reuse_client=False,
+        context_window=8192,
+    )
+
+
+def _status_error(exc_type: type[Any], status: int, body: dict[str, Any]) -> Exception:
+    """Build the exception the OpenAI SDK raises for an HTTP *status*.
+
+    Args:
+        exc_type: The ``openai`` status-error subclass for that status.
+        status: HTTP status code the endpoint answered with.
+        body: Decoded JSON body the endpoint returned.
+
+    Returns:
+        Exception: A real ``openai`` status error, not a stand-in.
+    """
+    import httpx
+
+    request = httpx.Request("POST", "http://embed-only:8000/embeddings")
+    response = httpx.Response(status, request=request, json=body)
+    # Mirrors the SDK's own `_make_status_error_from_response`, which folds
+    # the decoded body into the message — that text is what the
+    # context-limit detector reads.
+    return exc_type(f"Error code: {status} - {body}", response=response, body=body)
+
+
+def test_query_embedding_404_names_the_endpoint_and_the_v1_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 on the *query* path must name the endpoint and the fix.
+
+    This is the reported bug: ``EMBED_API_BASE`` set without ``/v1``
+    makes the SDK POST to ``{base}/embeddings``, which vLLM answers with
+    a bare ``404 {"detail": "Not Found"}``. The query path was the one
+    unguarded embedding path, so the failure reached the chat stream as
+    sixty lines of llama_index frames naming neither the embedding
+    endpoint nor the env var that controls it.
+    """
+    from docint.utils.openai_cfg import EmbeddingEndpointError
+
+    def _not_found(self: Any, query: str) -> list[float]:
+        """Raise the 404 a ``/v1``-less base URL produces.
+
+        Args:
+            self: Embedding instance.
+            query: Query text.
+
+        Raises:
+            Exception: Always, as the SDK would.
+        """
+        _ = (self, query)
+        from openai import NotFoundError
+
+        raise _status_error(NotFoundError, 404, {"detail": "Not Found"})
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_query_embedding",
+        _not_found,
+    )
+
+    with pytest.raises(EmbeddingEndpointError) as excinfo:
+        _embedding_client().get_query_embedding("wonach wird gesucht?")
+
+    message = str(excinfo.value)
+    assert "http://embed-only:8000" in message
+    assert "EMBED_API_BASE" in message
+    assert "/v1" in message
+
+
+def test_text_embedding_connection_failure_names_the_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable endpoint must name itself, not just "connection error"."""
+    import httpx
+
+    from docint.utils.openai_cfg import EmbeddingEndpointError
+
+    def _unreachable(self: Any, texts: list[str]) -> list[list[float]]:
+        """Raise the SDK's transport failure.
+
+        Args:
+            self: Embedding instance.
+            texts: Texts to embed.
+
+        Raises:
+            APIConnectionError: Always.
+        """
+        _ = (self, texts)
+        from openai import APIConnectionError
+
+        raise APIConnectionError(request=httpx.Request("POST", "http://embed-only:8000/embeddings"))
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
+        _unreachable,
+    )
+
+    with pytest.raises(EmbeddingEndpointError) as excinfo:
+        _embedding_client().get_text_embeddings_strict(["irgendein text"])
+
+    assert "http://embed-only:8000" in str(excinfo.value)
+
+
+def test_embedding_auth_failure_points_at_the_key_not_the_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 is a credentials problem — the remedy must say so.
+
+    Without a per-status remedy, every endpoint fault would repeat the
+    ``/v1`` advice and send an operator with a bad ``EMBED_API_KEY``
+    chasing the URL.
+    """
+    from docint.utils.openai_cfg import EmbeddingEndpointError
+
+    def _unauthorized(self: Any, query: str) -> list[float]:
+        """Raise a 401.
+
+        Args:
+            self: Embedding instance.
+            query: Query text.
+
+        Raises:
+            Exception: Always.
+        """
+        _ = (self, query)
+        from openai import AuthenticationError
+
+        raise _status_error(AuthenticationError, 401, {"error": {"message": "Invalid API key"}})
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_query_embedding",
+        _unauthorized,
+    )
+
+    with pytest.raises(EmbeddingEndpointError) as excinfo:
+        _embedding_client().get_query_embedding("frage")
+
+    assert "EMBED_API_KEY" in str(excinfo.value)
+
+
+def test_context_overflow_is_not_reclassified_as_an_endpoint_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversize input keeps its own error, though it arrives as a 400.
+
+    ``EmbeddingInputTooLongError`` carries the re-splitter diagnosis and
+    the ``EMBED_CTX_TOKENS`` remedy. Classifying it as an endpoint fault
+    would replace a precise message with a misleading one.
+    """
+    from docint.utils.openai_cfg import EmbeddingInputTooLongError
+
+    def _too_long(self: Any, texts: list[str]) -> list[list[float]]:
+        """Raise the provider's context-limit 400.
+
+        Args:
+            self: Embedding instance.
+            texts: Texts to embed.
+
+        Raises:
+            Exception: Always.
+        """
+        _ = (self, texts)
+        from openai import BadRequestError
+
+        raise _status_error(
+            BadRequestError,
+            400,
+            {
+                "error": {
+                    "message": (
+                        "This model's maximum context length is 8192 tokens. However, your "
+                        "prompt contains at least 8193 input tokens."
+                    )
+                }
+            },
+        )
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
+        _too_long,
+    )
+
+    with pytest.raises(EmbeddingInputTooLongError):
+        _embedding_client().get_text_embeddings_strict(["x" * 12000])
+
+
+def test_unrelated_embedding_failures_propagate_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only endpoint-level failures are reclassified — nothing else.
+
+    Guards against a catch-all that would relabel a docint-side bug as an
+    embedding-service outage.
+    """
+    from docint.utils.openai_cfg import EmbeddingEndpointError
+
+    def _bug(self: Any, query: str) -> list[float]:
+        """Raise a plain programming error.
+
+        Args:
+            self: Embedding instance.
+            query: Query text.
+
+        Raises:
+            TypeError: Always.
+        """
+        _ = (self, query)
+        raise TypeError("unhashable type: 'dict'")
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_query_embedding",
+        _bug,
+    )
+
+    with pytest.raises(TypeError, match="unhashable"):
+        _embedding_client().get_query_embedding("frage")
+
+    assert not issubclass(TypeError, EmbeddingEndpointError)
