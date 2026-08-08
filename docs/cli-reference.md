@@ -92,13 +92,18 @@ automatically.
 
 Payload-only — no re-embedding, no inference, no model downloads — so it is
 safe on an airgapped host and costs a scroll plus batched payload writes.
-Re-running is cheap: points that already carry the field are skipped. In Docker
+Re-running is cheap: points that already carry the field are skipped, and it
+heals a collection left half-indexed by an interrupted earlier run. In Docker
 the `make search-index` target runs this in a one-off `backend` container so it
 reaches the `qdrant` network alias.
 
 Until it has run, `POST /search` returns `status: "not_indexed"` for that
 collection rather than an empty hit list — an empty list must never be able to
-mean "the migration never ran".
+mean "the migration never ran". While it is *running*, `/search` returns
+`status: "partial"` with an `index_status.missing` count, because results drawn
+from a half-migrated collection are incomplete. Transient Qdrant failures
+during the run are retried, so one connection blip does not leave the
+collection stuck in that state.
 
 ## `query` — batch chat, summaries, exports
 

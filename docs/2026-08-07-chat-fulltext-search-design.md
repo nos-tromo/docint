@@ -105,13 +105,19 @@ Kept out of `core/rag.py`, which is already ~8.7k lines.
   force=False, progress=None)` — scroll the collection, extract each point's
   text, write it back through `write_search_text`. Payload-only: no
   re-embedding, no inference, no model download, so it is airgap-safe. Returns
-  a `BackfillSummary(scanned, written, skipped)`. Points that already carry
-  `search_text` are skipped unless `force`. `extract_text` is **injected**
+  a `BackfillSummary(scanned, written, skipped, empty)`. Points that already
+  carry `search_text` are skipped unless `force`. A point with no extractable
+  text is marked with an **empty value** rather than left alone — otherwise it
+  counts as missing forever, every search reports `partial`, and the warning
+  stops meaning anything. Transient Qdrant write failures are retried, so one
+  blip cannot leave a collection permanently half-indexed. `extract_text` is **injected**
   (the caller passes `RAG._extract_payload_text`) so this package never imports
   `core/rag.py` — it stays unit-testable without a RAG instance and cannot
   create a circular import, mirroring how `core/jobs.py` takes its `runner`.
 - `search_index_status(client, collection)` — whether the payload index exists
-  and whether any sampled point carries the field.
+  plus exact coverage counts (`total`, `with_search_text`, `missing`,
+  `complete`). Counted, never sampled: see the `"partial"` note under the
+  Search API section for why.
 
 #### `fulltext.py` — pure, dependency-injected, like `core/retrieval_filters.py`
 
@@ -224,7 +230,7 @@ No embeddings and no inference call appear anywhere in this path.
   ],
   "total": 14,                      // exact, via Qdrant count with the same filter
   "next_cursor": null,
-  "index_status": { "indexed": true, "has_search_text": true }
+  "index_status": { "indexed": true, "total": 724, "with_search_text": 724, "missing": 0, "complete": true }
 }
 ```
 
@@ -244,12 +250,16 @@ Owner-gated through `_require_owned_collection` and bound per request with
   `search_text` at all, with `hits` empty. The panel renders the migration
   prompt for this state. An empty `hits` list with `status: "ok"` therefore
   means "genuinely no matches" and nothing else.
-- **`index_status` is sampled, not counted** (corrected during implementation,
-  2026-08-08 — an earlier draft returned a `missing_search_text` count).
-  Counting how many points lack the field would mean a full scan on every
-  search; the question the caller actually needs answered is "has the migration
-  run on this collection", which the head of the collection answers
-  immediately.
+- **`status: "partial"`** is a third state, added during implementation after
+  review. Coverage is **counted exactly** (two Qdrant `count` calls), not
+  sampled. A head sample cannot distinguish a finished backfill from one that
+  has written only its first page — the backfill walks the collection from the
+  same offset a sample would — so a search issued mid-migration would have
+  reported plain success while silently omitting every chunk not yet written.
+  `index_status` carries `total` / `with_search_text` / `missing` / `complete`,
+  and `partial` is a distinct *status* rather than only a nested field so a
+  client cannot miss incomplete coverage by ignoring `index_status`. The two
+  counts are also cheaper than the payload-bearing scroll pages a sample needed.
 - **Keywords shorter than `min_token_len` (2 characters) are not indexable.**
   They are rejected with a clear message naming the offending keyword rather
   than silently contributing an `must` condition that can never match.

@@ -732,7 +732,11 @@ class SearchIn(BaseModel):
 class SearchOut(BaseModel):
     """Keyword-search hits plus the collection's search-index state."""
 
-    status: Literal["ok", "not_indexed"]
+    #: ``ok`` — every point in the collection is indexed. ``partial`` — some
+    #: are not, so the hit list is incomplete (a backfill is running or was
+    #: interrupted); ``index_status.missing`` says how many. ``not_indexed`` —
+    #: none are, so ``make search-index`` has never run here.
+    status: Literal["ok", "partial", "not_indexed"]
     hits: list[dict[str, Any]] = []
     total: int = 0
     next_cursor: str | None = None

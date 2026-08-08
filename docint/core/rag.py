@@ -8334,8 +8334,11 @@ class RAG:
             cursor (str | None): Opaque page cursor from a previous call.
 
         Returns:
-            dict[str, Any]: ``status`` (``"ok"`` or ``"not_indexed"``), ``hits``,
-                ``total``, ``next_cursor`` and ``index_status``.
+            dict[str, Any]: ``status`` — ``"ok"`` when every point in the
+                collection is indexed, ``"partial"`` when some are not (a
+                backfill is running or was interrupted, so the result set is
+                incomplete), ``"not_indexed"`` when none are — plus ``hits``,
+                ``total``, ``next_cursor`` and ``index_status`` counts.
 
         Raises:
             KeywordTooShortError: When a keyword cannot be indexed.
@@ -8343,13 +8346,13 @@ class RAG:
         collection = self.qdrant_collection
         status = search_index_status(self.qdrant_client, collection)
         empty: dict[str, Any] = {
-            "status": "ok",
+            "status": "ok" if status.get("complete") else "partial",
             "hits": [],
             "total": 0,
             "next_cursor": None,
             "index_status": status,
         }
-        if not status.get("has_search_text"):
+        if not status.get("with_search_text"):
             return {**empty, "status": "not_indexed"}
 
         keywords = parse_keywords(query)
@@ -8409,8 +8412,12 @@ class RAG:
             logger.debug("search count unavailable for {}: {}", collection, exc)
             total = len(hits)
 
+        # "partial" is a distinct status rather than a nested field so a caller
+        # cannot miss incomplete coverage by ignoring ``index_status``. A search
+        # run while the backfill is still walking the collection returns only
+        # what has been written so far.
         return {
-            "status": "ok",
+            "status": "ok" if status.get("complete") else "partial",
             "hits": hits,
             "total": total,
             "next_cursor": str(next_offset) if next_offset is not None else None,

@@ -191,7 +191,13 @@ Response:
   ],
   "total": 14,
   "next_cursor": null,
-  "index_status": { "indexed": true, "has_search_text": true }
+  "index_status": {
+    "indexed": true,
+    "total": 724,
+    "with_search_text": 724,
+    "missing": 0,
+    "complete": true
+  }
 }
 ```
 
@@ -209,9 +215,17 @@ Matching semantics:
 
 Status and errors:
 
-- `status: "not_indexed"` — the collection has never been backfilled. `hits` is
-  empty. Run `make search-index COLLECTION=<name>` once. An empty `hits` list
-  under `status: "ok"` therefore means "no matches" and nothing else.
+- `status: "ok"` — every point in the collection is indexed, so an empty `hits`
+  list means "no matches" and nothing else.
+- `status: "partial"` — some points are not indexed, so **the hit list is
+  incomplete**: a backfill is running or was interrupted.
+  `index_status.missing` says how many chunks are still unsearchable. This is a
+  distinct status rather than a nested field precisely so a client cannot miss
+  it by ignoring `index_status` — a search that silently under-returns is the
+  worst failure mode for an investigative tool.
+- `status: "not_indexed"` — no point carries the field; the collection has
+  never been backfilled. `hits` is empty. Run
+  `make search-index COLLECTION=<name>` once.
 - `422` — the query is blank, or a keyword is shorter than 2 characters. Such a
   keyword cannot be indexed and would contribute a condition that never
   matches, silently reducing the whole search to zero hits.

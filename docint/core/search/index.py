@@ -10,6 +10,7 @@ from loguru import logger
 from qdrant_client import models
 
 from docint.core.storage.scroll import iter_scroll
+from docint.utils.retry import is_transient_qdrant_error, retry_with_backoff
 
 #: Payload key holding a copy of the chunk's text for full-text search.
 #: Written payload-only — never through node metadata, which would land the
@@ -104,7 +105,10 @@ def write_search_text(
     Returns:
         int: Number of points written.
     """
-    items = [(point_id, text) for point_id, text in texts.items() if text]
+    # ``is not None`` rather than truthiness: an explicit empty string is the
+    # backfill's marker for "looked, nothing to index", and it has to reach
+    # Qdrant or the point counts as unprocessed forever.
+    items = [(point_id, text) for point_id, text in texts.items() if text is not None]
     if not items:
         return 0
 
@@ -136,13 +140,15 @@ class BackfillSummary:
     Attributes:
         scanned (int): Points examined.
         written (int): Points given a ``search_text`` value.
-        skipped (int): Points left alone — already populated, or carrying no
-            extractable text.
+        skipped (int): Points left alone because they were already populated.
+        empty (int): Points with no extractable text, marked with an empty
+            value so they stop counting as unprocessed.
     """
 
     scanned: int = 0
     written: int = 0
     skipped: int = 0
+    empty: int = 0
 
 
 def backfill_search_text(
@@ -153,6 +159,7 @@ def backfill_search_text(
     batch_size: int = 256,
     force: bool = False,
     progress: Callable[[str], None] | None = None,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> BackfillSummary:
     """Populate ``search_text`` across an already-ingested collection.
 
@@ -169,12 +176,29 @@ def backfill_search_text(
         batch_size (int): Points per scroll page and per write request.
         force (bool): Rewrite points that already have a value.
         progress (Callable[[str], None] | None): Optional progress sink.
+        retry_sleep (Callable[[float], None] | None): Sleep used between write
+            retries; injected by tests so they do not actually wait.
 
     Returns:
         BackfillSummary: Counts for the run.
     """
-    scanned = written = skipped = 0
+    scanned = skipped = 0
+    written = empty = 0
     pending: dict[Any, str] = {}
+
+    def _flush() -> tuple[int, int]:
+        """Write the pending batch and report ``(searchable, marker)`` counts.
+
+        Returns:
+            tuple[int, int]: Points given searchable text, and points marked
+                with an empty value because they had none.
+        """
+        if not pending:
+            return 0, 0
+        markers = sum(1 for value in pending.values() if not value)
+        flushed = _write_with_retry(client, collection, pending, batch_size, retry_sleep)
+        pending.clear()
+        return max(0, flushed - markers), markers
 
     for page in iter_scroll(
         client,
@@ -193,10 +217,6 @@ def backfill_search_text(
                 if isinstance(existing, str) and existing.strip():
                     skipped += 1
                     continue
-            text = extract_text(payload)
-            if not text:
-                skipped += 1
-                continue
             # Keep the id's own type. Qdrant point ids are unsigned ints or
             # UUIDs; coercing an int id to a string would target a point that
             # does not exist, and the backfill would silently write nothing.
@@ -204,45 +224,89 @@ def backfill_search_text(
             if point_id is None:
                 skipped += 1
                 continue
-            pending[point_id] = text
+            # A point with no extractable text is marked with an empty value
+            # rather than left alone: otherwise it counts as missing forever,
+            # every search reports `partial`, and the warning stops meaning
+            # anything. An empty string is a value, so Qdrant's is-empty check
+            # treats the point as covered.
+            pending[point_id] = extract_text(payload)
 
         if len(pending) >= batch_size:
-            written += write_search_text(client, collection, pending, batch_size=batch_size, wait=True)
-            pending.clear()
+            batch_written, batch_empty = _flush()
+            written += batch_written
+            empty += batch_empty
             if progress is not None:
                 progress(f"{written} point(s) written, {scanned} scanned")
 
-    if pending:
-        written += write_search_text(client, collection, pending, batch_size=batch_size, wait=True)
+    batch_written, batch_empty = _flush()
+    written += batch_written
+    empty += batch_empty
 
     if progress is not None:
-        progress(f"done: {scanned} scanned, {written} written, {skipped} skipped")
-    return BackfillSummary(scanned=scanned, written=written, skipped=skipped)
+        progress(f"done: {scanned} scanned, {written} written, {skipped} skipped, {empty} without text")
+    return BackfillSummary(scanned=scanned, written=written, skipped=skipped, empty=empty)
+
+
+def _write_with_retry(
+    client: Any,
+    collection: str,
+    texts: Mapping[Any, str],
+    batch_size: int,
+    retry_sleep: Callable[[float], None] | None,
+) -> int:
+    """Write one pending batch, retrying transient Qdrant failures.
+
+    Every other Qdrant write in the codebase is wrapped this way. Without it a
+    single connection blip partway through a large migration kills the run and
+    leaves the collection permanently half-indexed — and a search would then
+    serve results from that partial state.
+
+    Args:
+        client (Any): Qdrant client.
+        collection (str): Physical collection name.
+        texts (Mapping[Any, str]): ``{point_id: chunk text}`` for this batch.
+        batch_size (int): Operations per request.
+        retry_sleep (Callable[[float], None] | None): Injected sleep for tests.
+
+    Returns:
+        int: Number of points written.
+    """
+    snapshot = dict(texts)
+    return retry_with_backoff(
+        "search_text_backfill",
+        lambda: write_search_text(client, collection, snapshot, batch_size=batch_size, wait=True),
+        max_retries=3,
+        initial_backoff=0.5,
+        max_backoff=4.0,
+        is_retryable=is_transient_qdrant_error,
+        sleep=retry_sleep,
+    )
 
 
 def search_index_status(
     client: Any,
     collection: str,
-    *,
-    sample_pages: int = 4,
 ) -> dict[str, Any]:
-    """Report whether a collection is ready for full-text search.
+    """Report how much of a collection is ready for full-text search.
 
-    Samples the head of the collection rather than scanning it: the question
-    the caller needs answered is "has the migration run here", and an
-    unmigrated collection shows up immediately. A search that finds nothing
-    must be able to say *why*, so this never conflates "not indexed yet" with
-    "no matches".
+    Counts coverage exactly rather than sampling. A head sample cannot tell a
+    finished backfill from one that has only written its first page: the
+    backfill walks the collection from the same offset a sample would, so the
+    moment its first page lands, a first-hit sample would call the whole
+    collection ready. A search issued during that window would then silently
+    omit every chunk not yet written while still reporting success — the worst
+    failure mode for an investigative tool. Two counts are also cheaper than
+    the several payload-bearing scroll pages a sample needed.
 
     Args:
-        client (Any): Qdrant client exposing ``get_collection`` and ``scroll``.
+        client (Any): Qdrant client exposing ``get_collection`` and ``count``.
         collection (str): Physical collection name.
-        sample_pages (int): Scroll pages to sample when looking for the field.
 
     Returns:
-        dict[str, Any]: ``{"indexed": bool, "has_search_text": bool}`` —
-            ``indexed`` reflects the payload index, ``has_search_text`` whether
-            any sampled point carries the field.
+        dict[str, Any]: ``indexed`` (the payload index exists), ``total``,
+            ``with_search_text``, ``missing``, and ``complete`` (every point
+            carries the field). ``complete`` is ``False`` when the counts are
+            unavailable, so an unknown state never reads as a finished one.
     """
     indexed = False
     try:
@@ -252,23 +316,26 @@ def search_index_status(
     except Exception as exc:
         logger.debug("search_text index status unavailable for {}: {}", collection, exc)
 
-    has_text = False
-    for page in iter_scroll(
-        client,
-        collection_name=collection,
-        page_size=64,
-        max_pages=max(1, int(sample_pages)),
-        on_error="debug",
-        error_context="search_text status",
-    ):
-        for point in page:
-            payload = getattr(point, "payload", None)
-            if isinstance(payload, Mapping):
-                value = payload.get(SEARCH_TEXT_FIELD)
-                if isinstance(value, str) and value.strip():
-                    has_text = True
-                    break
-        if has_text:
-            break
+    total = with_search_text = 0
+    try:
+        total = int(client.count(collection_name=collection, exact=True).count)
+        with_search_text = int(
+            client.count(
+                collection_name=collection,
+                count_filter=models.Filter(
+                    must_not=[models.IsEmptyCondition(is_empty=models.PayloadField(key=SEARCH_TEXT_FIELD))]
+                ),
+                exact=True,
+            ).count
+        )
+    except Exception as exc:
+        logger.debug("search_text coverage unavailable for {}: {}", collection, exc)
 
-    return {"indexed": indexed, "has_search_text": has_text}
+    missing = max(0, total - with_search_text)
+    return {
+        "indexed": indexed,
+        "total": total,
+        "with_search_text": with_search_text,
+        "missing": missing,
+        "complete": with_search_text > 0 and missing == 0,
+    }

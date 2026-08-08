@@ -6178,7 +6178,13 @@ def test_search_fulltext_reports_not_indexed_rather_than_no_matches(
     monkeypatch.setattr(
         rag_module,
         "search_index_status",
-        lambda client, collection, **kwargs: {"indexed": False, "has_search_text": False},
+        lambda client, collection, **kwargs: {
+            "indexed": False,
+            "total": 10,
+            "with_search_text": 0,
+            "missing": 10,
+            "complete": False,
+        },
     )
 
     result = rag.search_fulltext("berlin")
@@ -6193,7 +6199,13 @@ def test_search_fulltext_returns_normalized_hits(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         rag_module,
         "search_index_status",
-        lambda client, collection, **kwargs: {"indexed": True, "has_search_text": True},
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 1,
+            "with_search_text": 1,
+            "missing": 0,
+            "complete": True,
+        },
     )
     payload = {
         "text": "die Konferenz in Berlin",
@@ -6229,7 +6241,13 @@ def test_search_fulltext_returns_nothing_for_a_keywordless_query(
     monkeypatch.setattr(
         rag_module,
         "search_index_status",
-        lambda client, collection, **kwargs: {"indexed": True, "has_search_text": True},
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 1,
+            "with_search_text": 1,
+            "missing": 0,
+            "complete": True,
+        },
     )
 
     result = rag.search_fulltext("   ")
@@ -6237,3 +6255,40 @@ def test_search_fulltext_returns_nothing_for_a_keywordless_query(
     assert result["status"] == "ok"
     assert result["hits"] == []
     assert result["total"] == 0
+
+
+def test_search_fulltext_flags_a_partially_indexed_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A search during a running backfill must not claim to be complete.
+
+    The backfill walks the collection page by page, so a search issued
+    mid-migration returns only what has been written so far. Reporting that as
+    plain success would have an investigator treat a partial result set as the
+    whole picture. ``partial`` is a distinct status rather than a nested field
+    so a caller cannot miss it by ignoring ``index_status``.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 1000,
+            "with_search_text": 64,
+            "missing": 936,
+            "complete": False,
+        },
+    )
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: ([], None),
+            count=lambda **kwargs: types.SimpleNamespace(count=0),
+        ),
+    )
+
+    result = rag.search_fulltext("berlin")
+
+    assert result["status"] == "partial"
+    assert result["index_status"]["missing"] == 936

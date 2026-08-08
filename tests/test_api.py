@@ -135,7 +135,13 @@ class DummyRAG:
             "hits": [],
             "total": 0,
             "next_cursor": None,
-            "index_status": {"indexed": True, "has_search_text": True},
+            "index_status": {
+                "indexed": True,
+                "total": 1,
+                "with_search_text": 1,
+                "missing": 0,
+                "complete": True,
+            },
         }
 
     def probe_qdrant(self) -> bool:
@@ -4191,7 +4197,7 @@ def test_search_returns_hits_for_the_scoped_collection(client: TestClient) -> No
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] in {"ok", "not_indexed"}
+    assert body["status"] in {"ok", "partial", "not_indexed"}
     assert isinstance(body["hits"], list)
 
 
