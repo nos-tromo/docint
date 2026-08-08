@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
 from qdrant_client import models
+
+from docint.core.storage.scroll import iter_scroll
 
 #: Payload key holding a copy of the chunk's text for full-text search.
 #: Written payload-only — never through node metadata, which would land the
@@ -124,3 +127,148 @@ def write_search_text(
         )
         written += len(chunk)
     return written
+
+
+@dataclass(frozen=True, slots=True)
+class BackfillSummary:
+    """Outcome of one ``search_text`` backfill run.
+
+    Attributes:
+        scanned (int): Points examined.
+        written (int): Points given a ``search_text`` value.
+        skipped (int): Points left alone — already populated, or carrying no
+            extractable text.
+    """
+
+    scanned: int = 0
+    written: int = 0
+    skipped: int = 0
+
+
+def backfill_search_text(
+    client: Any,
+    collection: str,
+    *,
+    extract_text: Callable[[Mapping[str, Any]], str],
+    batch_size: int = 256,
+    force: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> BackfillSummary:
+    """Populate ``search_text`` across an already-ingested collection.
+
+    Payload-only: no re-embedding, no inference, no model download, so this is
+    safe to run on an airgapped host. Points that already carry the field are
+    skipped unless ``force`` is set, which makes re-running cheap.
+
+    Args:
+        client (Any): Qdrant client exposing ``scroll`` and ``batch_update_points``.
+        collection (str): Physical collection name.
+        extract_text (Callable[[Mapping[str, Any]], str]): Pulls the chunk text
+            out of a point payload. Injected so this module never imports
+            ``core.rag``.
+        batch_size (int): Points per scroll page and per write request.
+        force (bool): Rewrite points that already have a value.
+        progress (Callable[[str], None] | None): Optional progress sink.
+
+    Returns:
+        BackfillSummary: Counts for the run.
+    """
+    scanned = written = skipped = 0
+    pending: dict[Any, str] = {}
+
+    for page in iter_scroll(
+        client,
+        collection_name=collection,
+        page_size=max(1, int(batch_size)),
+        error_context="search_text backfill",
+    ):
+        for point in page:
+            scanned += 1
+            payload = getattr(point, "payload", None)
+            if not isinstance(payload, Mapping):
+                skipped += 1
+                continue
+            if not force:
+                existing = payload.get(SEARCH_TEXT_FIELD)
+                if isinstance(existing, str) and existing.strip():
+                    skipped += 1
+                    continue
+            text = extract_text(payload)
+            if not text:
+                skipped += 1
+                continue
+            # Keep the id's own type. Qdrant point ids are unsigned ints or
+            # UUIDs; coercing an int id to a string would target a point that
+            # does not exist, and the backfill would silently write nothing.
+            point_id = getattr(point, "id", None)
+            if point_id is None:
+                skipped += 1
+                continue
+            pending[point_id] = text
+
+        if len(pending) >= batch_size:
+            written += write_search_text(client, collection, pending, batch_size=batch_size, wait=True)
+            pending.clear()
+            if progress is not None:
+                progress(f"{written} point(s) written, {scanned} scanned")
+
+    if pending:
+        written += write_search_text(client, collection, pending, batch_size=batch_size, wait=True)
+
+    if progress is not None:
+        progress(f"done: {scanned} scanned, {written} written, {skipped} skipped")
+    return BackfillSummary(scanned=scanned, written=written, skipped=skipped)
+
+
+def search_index_status(
+    client: Any,
+    collection: str,
+    *,
+    sample_pages: int = 4,
+) -> dict[str, Any]:
+    """Report whether a collection is ready for full-text search.
+
+    Samples the head of the collection rather than scanning it: the question
+    the caller needs answered is "has the migration run here", and an
+    unmigrated collection shows up immediately. A search that finds nothing
+    must be able to say *why*, so this never conflates "not indexed yet" with
+    "no matches".
+
+    Args:
+        client (Any): Qdrant client exposing ``get_collection`` and ``scroll``.
+        collection (str): Physical collection name.
+        sample_pages (int): Scroll pages to sample when looking for the field.
+
+    Returns:
+        dict[str, Any]: ``{"indexed": bool, "has_search_text": bool}`` —
+            ``indexed`` reflects the payload index, ``has_search_text`` whether
+            any sampled point carries the field.
+    """
+    indexed = False
+    try:
+        info = client.get_collection(collection_name=collection)
+        schema = getattr(info, "payload_schema", None) or {}
+        indexed = SEARCH_TEXT_FIELD in set(schema)
+    except Exception as exc:
+        logger.debug("search_text index status unavailable for {}: {}", collection, exc)
+
+    has_text = False
+    for page in iter_scroll(
+        client,
+        collection_name=collection,
+        page_size=64,
+        max_pages=max(1, int(sample_pages)),
+        on_error="debug",
+        error_context="search_text status",
+    ):
+        for point in page:
+            payload = getattr(point, "payload", None)
+            if isinstance(payload, Mapping):
+                value = payload.get(SEARCH_TEXT_FIELD)
+                if isinstance(value, str) and value.strip():
+                    has_text = True
+                    break
+        if has_text:
+            break
+
+    return {"indexed": indexed, "has_search_text": has_text}

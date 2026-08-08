@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from qdrant_client import models
 
 from docint.core.search.index import (
     SEARCH_TEXT_FIELD,
+    BackfillSummary,
+    backfill_search_text,
     ensure_search_index,
     search_index_params,
     write_search_text,
@@ -132,3 +135,109 @@ def test_write_search_text_ignores_empty_input() -> None:
 
     assert write_search_text(client, "col", {}) == 0
     assert client.batches == []
+
+
+class _ScrollingClient(_RecordingClient):
+    """Fake client that serves canned scroll pages."""
+
+    def __init__(self, points: list[Any]) -> None:
+        """Initialize with the points one scroll should yield.
+
+        Args:
+            points (list[Any]): Point stand-ins exposing ``id`` and ``payload``.
+        """
+        super().__init__()
+        self.points = points
+
+    def scroll(self, **kwargs: Any) -> tuple[list[Any], Any]:
+        """Return every point in one page, then stop."""
+        if kwargs.get("offset") is not None:
+            return [], None
+        return list(self.points), None
+
+
+class _Point:
+    """Minimal Qdrant point stand-in."""
+
+    def __init__(self, point_id: Any, payload: dict[str, Any]) -> None:
+        """Store the id and payload.
+
+        Args:
+            point_id (Any): Point identifier.
+            payload (dict[str, Any]): Point payload.
+        """
+        self.id = point_id
+        self.payload = payload
+
+
+def _extract(payload: Mapping[str, Any]) -> str:
+    """Test extractor standing in for ``RAG._extract_payload_text``."""
+    return str(payload.get("body") or "")
+
+
+def test_backfill_writes_text_for_points_that_lack_it() -> None:
+    """The migration must fill in every point that has text but no search_text."""
+    client = _ScrollingClient([_Point("a", {"body": "alpha"}), _Point("b", {"body": "beta"})])
+
+    summary = backfill_search_text(client, "col", extract_text=_extract)
+
+    assert summary == BackfillSummary(scanned=2, written=2, skipped=0)
+    assert _written(client) == {"a": "alpha", "b": "beta"}
+
+
+def test_backfill_preserves_integer_point_ids() -> None:
+    """Coercing an int id to a string would write to a nonexistent point."""
+    client = _ScrollingClient([_Point(7, {"body": "seventh"})])
+
+    backfill_search_text(client, "col", extract_text=_extract)
+
+    assert _written(client) == {7: "seventh"}
+
+
+def test_backfill_skips_points_that_already_have_search_text() -> None:
+    """Re-running the migration must be cheap and idempotent."""
+    client = _ScrollingClient(
+        [
+            _Point("a", {"body": "alpha", SEARCH_TEXT_FIELD: "alpha"}),
+            _Point("b", {"body": "beta"}),
+        ]
+    )
+
+    summary = backfill_search_text(client, "col", extract_text=_extract)
+
+    assert summary == BackfillSummary(scanned=2, written=1, skipped=1)
+    assert _written(client) == {"b": "beta"}
+
+
+def test_backfill_force_rewrites_existing_search_text() -> None:
+    """``force`` exists for when the extractor itself changed."""
+    client = _ScrollingClient([_Point("a", {"body": "alpha", SEARCH_TEXT_FIELD: "stale"})])
+
+    summary = backfill_search_text(client, "col", extract_text=_extract, force=True)
+
+    assert summary == BackfillSummary(scanned=1, written=1, skipped=0)
+    assert _written(client) == {"a": "alpha"}
+
+
+def test_backfill_skips_points_with_no_extractable_text() -> None:
+    """A point carrying no text is not an error — it is simply not searchable."""
+    client = _ScrollingClient([_Point("a", {"body": ""}), _Point("b", {"body": "beta"})])
+
+    summary = backfill_search_text(client, "col", extract_text=_extract)
+
+    assert summary == BackfillSummary(scanned=2, written=1, skipped=1)
+
+
+def test_backfill_reports_progress_when_a_sink_is_supplied() -> None:
+    """A long migration must report progress, not sit silently.
+
+    The ``search-index`` CLI is the only consumer, and a multi-minute scroll
+    with no output is indistinguishable from a hang.
+    """
+    client = _ScrollingClient([_Point(str(i), {"body": f"chunk {i}"}) for i in range(3)])
+    messages: list[str] = []
+
+    backfill_search_text(client, "col", extract_text=_extract, progress=messages.append)
+
+    assert messages
+    assert "3 scanned" in messages[-1]
