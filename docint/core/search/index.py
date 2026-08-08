@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
@@ -67,3 +68,59 @@ def ensure_search_index(client: Any, collection: str) -> bool:
         logger.debug("search_text index on {} skipped: {}", collection, exc)
         return False
     return True
+
+
+def write_search_text(
+    client: Any,
+    collection: str,
+    texts: Mapping[str | int, str],
+    *,
+    batch_size: int = 256,
+    wait: bool = False,
+) -> int:
+    """Write ``search_text`` onto points, several per request.
+
+    Qdrant's ``set_payload`` applies one payload to many points, so distinct
+    per-point texts would otherwise cost one request each.
+    ``batch_update_points`` carries many independent set-payload operations in
+    a single request, which is what makes both the ingest hook and the backfill
+    affordable. Setting a payload key leaves the point's other keys untouched.
+
+    Args:
+        client (Any): Qdrant client exposing ``batch_update_points``.
+        collection (str): Physical collection name.
+        texts (Mapping[str | int, str]): ``{point_id: chunk text}``. Point ids
+            keep their own type — Qdrant ids are unsigned ints or UUIDs, and
+            coercing an int id to a string would target a point that does not
+            exist, so the write would silently land nowhere.
+        batch_size (int): Operations per request.
+        wait (bool): Whether Qdrant should confirm the write before replying.
+            ``False`` on the ingest path (throughput), ``True`` for the backfill
+            so its progress reporting is truthful.
+
+    Returns:
+        int: Number of points written.
+    """
+    items = [(point_id, text) for point_id, text in texts.items() if text]
+    if not items:
+        return 0
+
+    size = max(1, int(batch_size))
+    written = 0
+    for start in range(0, len(items), size):
+        chunk = items[start : start + size]
+        client.batch_update_points(
+            collection_name=collection,
+            update_operations=[
+                models.SetPayloadOperation(
+                    set_payload=models.SetPayload(
+                        payload={SEARCH_TEXT_FIELD: text},
+                        points=[point_id],
+                    )
+                )
+                for point_id, text in chunk
+            ],
+            wait=wait,
+        )
+        written += len(chunk)
+    return written

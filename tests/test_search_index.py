@@ -6,7 +6,12 @@ from typing import Any
 
 from qdrant_client import models
 
-from docint.core.search.index import SEARCH_TEXT_FIELD, ensure_search_index, search_index_params
+from docint.core.search.index import (
+    SEARCH_TEXT_FIELD,
+    ensure_search_index,
+    search_index_params,
+    write_search_text,
+)
 
 
 class _FakeClient:
@@ -56,3 +61,74 @@ def test_ensure_search_index_is_fail_soft() -> None:
     client = _FakeClient(fail=True)
 
     assert ensure_search_index(client, "col") is False
+
+
+class _RecordingClient(_FakeClient):
+    """Fake client that records batched payload updates."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """Initialize the recorder."""
+        super().__init__(fail=fail)
+        self.batches: list[list[Any]] = []
+
+    def batch_update_points(self, **kwargs: Any) -> list[Any]:
+        """Record one batched update call."""
+        if self.fail:
+            raise RuntimeError("qdrant unreachable")
+        self.batches.append(list(kwargs["update_operations"]))
+        return []
+
+
+def _written(client: _RecordingClient) -> dict[Any, str]:
+    """Flatten recorded operations into ``{point_id: text}``.
+
+    Args:
+        client (_RecordingClient): The fake that recorded the calls.
+
+    Returns:
+        dict[Any, str]: Every point id written, mapped to its text.
+    """
+    out: dict[Any, str] = {}
+    for batch in client.batches:
+        for op in batch:
+            payload = op.set_payload
+            for point_id in payload.points or []:
+                out[point_id] = payload.payload[SEARCH_TEXT_FIELD]
+    return out
+
+
+def test_write_search_text_writes_one_operation_per_point() -> None:
+    """Distinct texts per point must survive into distinct operations."""
+    client = _RecordingClient()
+
+    assert write_search_text(client, "col", {"a": "first chunk", "b": "second chunk"}) == 2
+    assert _written(client) == {"a": "first chunk", "b": "second chunk"}
+
+
+def test_write_search_text_preserves_the_point_id_type() -> None:
+    """Qdrant ids are unsigned ints or UUIDs; coercing an int id writes nothing.
+
+    A str("1") targets a point that does not exist, so the write silently
+    lands nowhere and the collection stays unsearchable.
+    """
+    client = _RecordingClient()
+
+    assert write_search_text(client, "col", {7: "seventh chunk"}) == 1
+    assert _written(client) == {7: "seventh chunk"}
+
+
+def test_write_search_text_batches_by_batch_size() -> None:
+    """A large collection must not become one enormous request."""
+    client = _RecordingClient()
+    texts = {str(i): f"chunk {i}" for i in range(7)}
+
+    assert write_search_text(client, "col", texts, batch_size=3) == 7
+    assert [len(batch) for batch in client.batches] == [3, 3, 1]
+
+
+def test_write_search_text_ignores_empty_input() -> None:
+    """No points means no request at all."""
+    client = _RecordingClient()
+
+    assert write_search_text(client, "col", {}) == 0
+    assert client.batches == []
