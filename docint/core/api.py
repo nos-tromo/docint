@@ -719,6 +719,21 @@ class QueryIn(BaseModel):
     query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = "answer"
 
 
+class ScopeIn(BaseModel):
+    """Request payload for pinning a search scope to a session."""
+
+    chunk_ids: list[str] = Field(default_factory=list)
+
+
+class ScopeOut(BaseModel):
+    """A session's scope plus what it costs against the chat budget."""
+
+    chunk_ids: list[str] = []
+    est_tokens: int = 0
+    usable_tokens: int = 0
+    missing: int = 0
+
+
 class SearchIn(BaseModel):
     """Request payload for a full-text keyword search."""
 
@@ -1209,6 +1224,80 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
+@app.put("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
+def set_session_scope(
+    session_id: str,
+    payload: ScopeIn,
+    collection: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> ScopeOut:
+    """Restrict a session's answers to a hand-picked set of chunks.
+
+    Refuses a selection larger than the chat context window rather than
+    truncating it: scoped answering splices the chunks straight into the
+    prompt, and silently dropping part of an investigator's evidence would
+    produce an answer that looks complete and is not.
+
+    Args:
+        session_id (str): The session to scope.
+        payload (ScopeIn): The chunk ids to answer from.
+        collection (str | None): Caller's logical collection, owner-gated.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        ScopeOut: The stored scope and its measured cost.
+
+    Raises:
+        HTTPException: 404 when the session is missing or not owned, 422 when
+            the selection cannot fit the context budget, 500 on failure.
+    """
+    try:
+        with _scoped_collection(collection, principal):
+            measured = rag.measure_scope(payload.chunk_ids)
+            if payload.chunk_ids and not measured["fits"]:
+                raise HTTPException(status_code=422, detail="Invalid request.")
+            stored = rag.ensure_session_manager().set_scope(
+                session_id,
+                principal.effective_owner,
+                payload.chunk_ids,
+            )
+        if not stored:
+            raise HTTPException(status_code=404, detail="Not found.")
+        return ScopeOut(
+            chunk_ids=list(payload.chunk_ids),
+            est_tokens=int(measured["est_tokens"]),
+            usable_tokens=int(measured["usable_tokens"]),
+            missing=int(measured["missing"]),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("Error setting session scope")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+@app.delete("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
+def clear_session_scope(
+    session_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> ScopeOut:
+    """Return a session to normal retrieval.
+
+    Args:
+        session_id (str): The session to unscope.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        ScopeOut: An empty scope.
+
+    Raises:
+        HTTPException: 404 when the session is missing or not owned.
+    """
+    if not rag.ensure_session_manager().clear_scope(session_id, principal.effective_owner):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return ScopeOut()
+
+
 @app.post("/search", response_model=SearchOut, tags=["Query"])
 def search_collection(
     payload: SearchIn,
@@ -1335,6 +1424,12 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                         payload.session_id,
                         owner=principal.effective_owner,
                     )
+                    # A session pinned to hand-picked chunks answers only from
+                    # them — no vector retrieval at all.
+                    scoped_node_ids = rag.ensure_session_manager().get_scope(
+                        session_id,
+                        principal.effective_owner,
+                    )
                     data = rag.chat(
                         payload.question,
                         session_id=session_id,
@@ -1343,7 +1438,11 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                         metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
+                        scoped_node_ids=scoped_node_ids or None,
                     )
+                    if scoped_node_ids and isinstance(data, dict):
+                        data["retrieval_mode"] = "scoped"
+                        data["scoped_chunk_count"] = len(scoped_node_ids)
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
@@ -1582,6 +1681,13 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             vector_store_kwargs=vector_store_kwargs or None,
                             prior_turn=prior_turn,
                             skip_query_rewrite=False,
+                            # A session pinned to hand-picked chunks answers
+                            # only from them — no vector retrieval at all.
+                            scoped_node_ids=rag.ensure_session_manager().get_scope(
+                                session_id,
+                                session_owner,
+                            )
+                            or None,
                         ),
                     )
 

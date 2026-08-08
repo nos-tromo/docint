@@ -21,6 +21,52 @@ from docint.core.entities.resolution import ResolutionSummary
 class DummySessionManager:
     """Dummy session manager for testing purposes."""
 
+    scope: list[str] = []
+    scope_owned = True
+
+    def set_scope(self, session_id: str, owner: str | None, chunk_ids: Any) -> bool:
+        """Record a scope, honouring the owner gate the real manager applies.
+
+        Args:
+            session_id (str): The session to scope.
+            owner (str | None): The requesting principal.
+            chunk_ids (Any): Chunk ids to answer from.
+
+        Returns:
+            bool: Whether the scope was stored.
+        """
+        if not self.scope_owned:
+            return False
+        self.scope = [str(entry) for entry in chunk_ids]
+        return True
+
+    def get_scope(self, session_id: str, owner: str | None) -> list[str]:
+        """Return the recorded scope.
+
+        Args:
+            session_id (str): The session to read.
+            owner (str | None): The requesting principal.
+
+        Returns:
+            list[str]: The scoped chunk ids.
+        """
+        return list(self.scope)
+
+    def clear_scope(self, session_id: str, owner: str | None) -> bool:
+        """Clear the recorded scope.
+
+        Args:
+            session_id (str): The session to unscope.
+            owner (str | None): The requesting principal.
+
+        Returns:
+            bool: Whether the session was found.
+        """
+        if not self.scope_owned:
+            return False
+        self.scope = []
+        return True
+
     def list_sessions(self, owner: str | None = None) -> list[dict[str, Any]]:
         """List the caller's sessions.
 
@@ -119,6 +165,23 @@ class _DummyOwners:
 class DummyRAG:
     """Dummy Retrieval-Augmented Generation (RAG) class for testing purposes."""
 
+    def measure_scope(self, chunk_ids: Any) -> dict[str, Any]:
+        """Report a fixed budget measurement for the requested scope.
+
+        Args:
+            chunk_ids (Any): Candidate chunk ids.
+
+        Returns:
+            dict[str, Any]: Measurement mirroring ``RAG.measure_scope``.
+        """
+        return {
+            "chunks": len(list(chunk_ids)),
+            "est_tokens": 10,
+            "usable_tokens": 100,
+            "missing": 0,
+            "fits": self.scope_fits,
+        }
+
     def search_fulltext(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """Record the call and return an empty result set.
 
@@ -171,6 +234,7 @@ class DummyRAG:
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
         self.search_calls: list[dict[str, Any]] = []
+        self.scope_fits = True
         # Physical collection observed (via the active scope) at call time, so
         # tests can assert /query and /stream_query thread the resolved name in.
         self.seen_collections: list[str] = []
@@ -301,6 +365,7 @@ class DummyRAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
+        scoped_node_ids: Any = None,
     ) -> dict[str, Any]:
         """Chat with the RAG system.
 
@@ -355,6 +420,7 @@ class DummyRAG:
         vector_store_kwargs: Any = None,
         prior_turn: Any = None,
         skip_query_rewrite: Any = None,
+        scoped_node_ids: Any = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -4217,3 +4283,50 @@ def test_search_requires_a_query(client: TestClient) -> None:
     response = client.post("/search", json={"question": "   "})
 
     assert response.status_code == 422
+
+
+def test_scope_can_be_set_and_read_back(client: TestClient) -> None:
+    """A scope survives the round trip so a reload restores it."""
+    response = client.put("/sessions/s1/scope", json={"chunk_ids": ["c1", "c2"]})
+
+    assert response.status_code == 200
+    assert response.json()["chunk_ids"] == ["c1", "c2"]
+
+
+def test_scope_that_exceeds_the_context_budget_is_refused(client: TestClient) -> None:
+    """Refusing is the only honest option — truncating hides lost evidence.
+
+    Scoped answering splices the chunks straight into the prompt, so an
+    oversize selection cannot be honoured. Silently dropping some would produce
+    an answer that looks complete and is not.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    rag.scope_fits = False
+    try:
+        response = client.put("/sessions/s1/scope", json={"chunk_ids": ["c1"]})
+    finally:
+        rag.scope_fits = True
+
+    assert response.status_code == 422
+
+
+def test_scope_can_be_cleared(client: TestClient) -> None:
+    """Clearing returns the session to normal retrieval."""
+    client.put("/sessions/s1/scope", json={"chunk_ids": ["c1"]})
+
+    response = client.delete("/sessions/s1/scope")
+
+    assert response.status_code == 200
+    assert response.json()["chunk_ids"] == []
+
+
+def test_scope_on_an_unowned_session_is_not_found(client: TestClient) -> None:
+    """A session that is missing or another owner's must look identical."""
+    sessions = cast(DummyRAG, api_module.rag).sessions
+    sessions.scope_owned = False
+    try:
+        response = client.put("/sessions/other/scope", json={"chunk_ids": ["c1"]})
+    finally:
+        sessions.scope_owned = True
+
+    assert response.status_code == 404

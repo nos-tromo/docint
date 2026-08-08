@@ -247,6 +247,7 @@ class SessionManager:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -264,6 +265,9 @@ class SessionManager:
                 filter was supplied.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
                 filter payloads for post-filtering auxiliary image sources.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving — the session's
+                pinned search scope.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
             prior_turn (PriorTurn | None): Prior user/assistant exchange.
@@ -295,8 +299,10 @@ class SessionManager:
                 vector_store_kwargs=vector_store_kwargs,
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=metadata_filters_active,
+                scoped_node_ids=scoped_node_ids,
             )
-            if metadata_filters is not None or vector_store_kwargs
+            # A scope must never reuse the cached engine: that one retrieves.
+            if scoped_node_ids or metadata_filters is not None or vector_store_kwargs
             else self.rag.query_engine
         )
         if engine is None:
@@ -361,6 +367,7 @@ class SessionManager:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> Iterator[str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -378,6 +385,9 @@ class SessionManager:
                 filter was supplied.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
                 filter payloads for post-filtering auxiliary image sources.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving — the session's
+                pinned search scope.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
             prior_turn (PriorTurn | None): Prior user/assistant exchange.
@@ -410,6 +420,7 @@ class SessionManager:
             vector_store_kwargs=vector_store_kwargs,
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
+            scoped_node_ids=scoped_node_ids,
         )
 
         # Resolve the session per request (see :meth:`chat`): pure/idempotent,

@@ -7265,6 +7265,7 @@ class RAG:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -7301,6 +7302,7 @@ class RAG:
             vector_store_kwargs=vector_store_kwargs,
             prior_turn=prior_turn,
             skip_query_rewrite=skip_query_rewrite,
+            scoped_node_ids=scoped_node_ids,
         )
 
     def stream_chat(
@@ -7315,6 +7317,7 @@ class RAG:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -7351,6 +7354,7 @@ class RAG:
             vector_store_kwargs=vector_store_kwargs,
             prior_turn=prior_turn,
             skip_query_rewrite=skip_query_rewrite,
+            scoped_node_ids=scoped_node_ids,
         )
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
