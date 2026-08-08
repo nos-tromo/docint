@@ -87,8 +87,13 @@ make search-index COLLECTION=demo         # non-interactive, in Docker
 Takes the **logical** collection name — the one the app shows. Collections are
 owner-namespaced in Qdrant (`u<owner-hash>__<logical>`), so the physical name is
 resolved from the ownership store; a physical name is also accepted as typed. A
-name that matches nothing, or a logical name owned by several users, stops the
-run with a non-zero exit rather than a guess.
+name that matches nothing stops the run with a non-zero exit rather than a
+guess.
+
+Two users may own the same logical name — the physical names are namespaced per
+owner, so those are *different collections*. That case is refused and lists each
+physical name, because **each needs its own run**: migrating one would leave the
+other user's collection unsearchable with nothing to indicate it.
 
 The command exits non-zero on any failure and prints no "ready" line — the
 backfill's scroll is fail-soft, so a missing collection would otherwise yield
