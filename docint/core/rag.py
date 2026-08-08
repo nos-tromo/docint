@@ -141,7 +141,6 @@ from docint.core.ner import (
     aggregate_ner_sources,
     build_entity_graph,
     build_ner_stats,
-    entity_cluster_key,
     graph_neighbors,
     match_entity_text,
     normalize_entities,
@@ -1703,6 +1702,93 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
                 nodes as produced by the underlying postprocessor.
         """
         return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
+
+
+def _as_qdrant_point_id(node_id: str) -> str | int:
+    """Restore a point id's native type for a Qdrant lookup.
+
+    Qdrant ids are unsigned integers or UUIDs, and nothing else. Ids travel to
+    the SPA and back through JSON as strings, so an integer id returns as
+    ``"1"`` — which Qdrant rejects outright, failing the whole retrieve. A
+    scope built from search hits would then answer from no evidence at all
+    while reporting every chunk missing. All-digit is unambiguous here
+    precisely because the id domain is only those two shapes.
+
+    Args:
+        node_id (str): Point id as it came back over the wire.
+
+    Returns:
+        str | int: The id in the type Qdrant expects.
+    """
+    return int(node_id) if node_id.isdigit() else node_id
+
+
+class _ScopedRetriever(BaseRetriever):
+    """Return exactly the chunks a session's scope names, in stable order.
+
+    Used when an investigator has hand-picked evidence from the search panel:
+    there is nothing to rank, so this bypasses the vector query entirely and
+    fetches the points by id. Swapping the retriever — rather than hand-building
+    a prompt — keeps citation numbering, source normalization, the report
+    controls and Inspector links working unchanged, because everything
+    downstream is driven by the node set.
+    """
+
+    def __init__(self, *, rag: RAG, node_ids: Sequence[str]) -> None:
+        """Initialize the retriever.
+
+        Args:
+            rag (RAG): Owning engine, for the Qdrant client and collection.
+            node_ids (Sequence[str]): Point ids to answer from.
+        """
+        super().__init__()
+        self._rag = rag
+        self._node_ids = [str(entry) for entry in node_ids]
+        #: Scoped ids Qdrant no longer has — surfaced so a stale scope is
+        #: reported rather than silently narrowing the evidence.
+        self.missing = 0
+
+    @override
+    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
+        """Fetch the scoped points and rebuild them as nodes.
+
+        Args:
+            query_bundle (QueryBundle): Ignored — the node set is fixed by the
+                scope, not by the question.
+
+        Returns:
+            list[NodeWithScore]: The scoped nodes, in the scope's own order
+                (not Qdrant's return order, which is unspecified).
+        """
+        if not self._node_ids:
+            self.missing = 0
+            return []
+        try:
+            points = self._rag.qdrant_client.retrieve(
+                collection_name=self._rag.qdrant_collection,
+                ids=[_as_qdrant_point_id(node_id) for node_id in self._node_ids],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Scoped retrieve failed for {}: {}", self._rag.qdrant_collection, exc)
+            self.missing = len(self._node_ids)
+            return []
+
+        by_id = {str(getattr(point, "id", "")): point for point in points}
+        nodes: list[NodeWithScore] = []
+        for node_id in self._node_ids:
+            point = by_id.get(node_id)
+            if point is None:
+                continue
+            payload = dict(getattr(point, "payload", {}) or {})
+            text = RAG._extract_payload_text(payload)
+            if not text:
+                continue
+            nodes.append(NodeWithScore(node=TextNode(id_=node_id, text=text, metadata=payload), score=None))
+
+        self.missing = len(self._node_ids) - len(nodes)
+        return nodes
 
 
 class MultimodalRetriever(BaseRetriever):
@@ -5116,6 +5202,7 @@ class RAG:
         retrieval_options: dict[str, Any] | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         metadata_filters_active: bool = False,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> RetrieverQueryEngine:
         """Construct a query engine for the current index.
 
@@ -5130,12 +5217,33 @@ class RAG:
                 candidates in memory.
             metadata_filters_active (bool): Whether this request carries
                 metadata filters at all.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving. Selects the
+                scoped engine, which drops every ranking postprocessor.
         """
         if self.index is None:
             self.create_index()
         if self.index is None:
             logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
+
+        if scoped_node_ids:
+            # A hand-picked set has nothing to rank, and every ranking
+            # postprocessor adds, drops or reorders nodes — parent-context
+            # expansion and link-following would silently widen the evidence,
+            # the diversity cap and relevance floor would silently narrow it,
+            # and reranking would spend an inference call reordering a set the
+            # user already chose. Only citation numbering, which merely
+            # numbers, survives.
+            return RetrieverQueryEngine.from_args(
+                retriever=_ScopedRetriever(rag=self, node_ids=scoped_node_ids),
+                llm=self.post_retrieval_text_model,
+                node_postprocessors=[CitationNumberingPostprocessor()],
+                response_synthesizer=self._build_response_synthesizer(
+                    streaming=streaming,
+                    social_table=bool(self._infer_collection_profile().get("is_social_table")),
+                ),
+            )
 
         profile = self._infer_collection_profile()
         retrieval_settings = self._resolve_runtime_retrieval_settings(
@@ -5447,439 +5555,6 @@ class RAG:
 
         return sources
 
-    @staticmethod
-    def _dedupe_source_key(source: dict[str, Any]) -> str:
-        """Build a stable key for source-level deduplication.
-
-        Args:
-            source (dict[str, Any]): A normalized source dictionary.
-
-        Returns:
-            str: A string key that can be used to identify duplicate sources.
-        """
-        reference_metadata = source.get("reference_metadata") or {}
-        if isinstance(reference_metadata, dict):
-            text_id = str(reference_metadata.get("text_id") or "").strip()
-            if text_id:
-                return f"text_id:{text_id}"
-
-        chunk_id = str(source.get("chunk_id") or "").strip()
-        if chunk_id:
-            return f"chunk:{chunk_id}"
-
-        file_hash = str(source.get("file_hash") or "").strip()
-        page = source.get("page")
-        row = source.get("row")
-        if file_hash and (page is not None or row is not None):
-            return f"file:{file_hash}:page={page}:row={row}"
-
-        filename = str(source.get("filename") or "").strip().lower()
-        preview = str(source.get("chunk_text") or source.get("text") or "").strip()
-        return f"fallback:{filename}:{preview[:160].lower()}"
-
-    @staticmethod
-    def _collect_entity_matches(
-        aggregate: dict[str, Any],
-        *,
-        query: str,
-    ) -> list[dict[str, Any]]:
-        """Collect sorted entity matches for an occurrence lookup query.
-
-        Args:
-            aggregate (dict[str, Any]): Collection-wide NER aggregate payload.
-            query (str): Raw user query string.
-
-        Returns:
-            list[dict[str, Any]]: Candidate entity matches sorted by rank and mentions.
-        """
-        entity_matches: list[dict[str, Any]] = []
-        for entity in list(aggregate.get("entities") or []):
-            entity_text = str(entity.get("text") or "").strip()
-            if not entity_text:
-                continue
-            match = match_entity_text(entity_text, query)
-            if match is None:
-                continue
-            entity_matches.append(
-                {
-                    "key": str(entity.get("key") or ""),
-                    "text": entity_text,
-                    "type": str(entity.get("type") or "Unlabeled"),
-                    "mentions": int(entity.get("mentions", 0) or 0),
-                    "source_count": int(entity.get("source_count", 0) or 0),
-                    "best_score": entity.get("best_score"),
-                    "variant_count": int(entity.get("variant_count", 0) or 0),
-                    "variants": list(entity.get("variants") or []),
-                    "match_rank": int(match[0]),
-                    "match_alias": str(match[1]),
-                }
-            )
-
-        entity_matches.sort(
-            key=lambda row: (
-                int(row["match_rank"]),
-                -int(row["mentions"]),
-                str(row["text"]).lower(),
-                str(row["type"]).lower(),
-            )
-        )
-        return entity_matches
-
-    @staticmethod
-    def _strong_entity_matches(
-        entity_matches: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Return all strong top-rank entity matches for a query.
-
-        The strongest ambiguity cases are same-surface-form collisions such as the
-        same label appearing under different entity types. Narrowing to the top
-        alias avoids treating substring matches like ``Migration`` vs
-        ``Remigration`` as equally strong.
-        """
-        if not entity_matches:
-            return []
-        best_rank = int(entity_matches[0]["match_rank"])
-        top_alias = str(entity_matches[0].get("match_alias") or "").strip().lower()
-        strong_matches = [
-            row
-            for row in entity_matches
-            if int(row["match_rank"]) == best_rank and str(row.get("match_alias") or "").strip().lower() == top_alias
-        ]
-        return strong_matches or [row for row in entity_matches if int(row["match_rank"]) == best_rank]
-
-    @staticmethod
-    def _entity_candidate_payload(entity_match: dict[str, Any]) -> dict[str, Any]:
-        """Normalize an entity match row for API/UI disambiguation payloads."""
-        return {
-            "key": str(entity_match.get("key") or ""),
-            "text": str(entity_match.get("text") or ""),
-            "type": str(entity_match.get("type") or "Unlabeled"),
-            "mentions": int(entity_match.get("mentions", 0) or 0),
-            "source_count": int(entity_match.get("source_count", 0) or 0),
-            "best_score": entity_match.get("best_score"),
-            "variant_count": int(entity_match.get("variant_count", 0) or 0),
-            "variants": list(entity_match.get("variants") or []),
-            "match_rank": int(entity_match.get("match_rank", 99) or 99),
-            "match_alias": str(entity_match.get("match_alias") or ""),
-        }
-
-    def _build_entity_occurrence_group(
-        self,
-        *,
-        sources: list[dict[str, Any]],
-        matched_entity: dict[str, Any],
-        limit: int,
-        entity_merge_mode: EntityMergeMode,
-    ) -> dict[str, Any]:
-        """Build grouped occurrence results for one matched entity.
-
-        Args:
-            sources (list[dict[str, Any]]): Candidate NER-bearing source rows.
-            matched_entity (dict[str, Any]): Selected entity match metadata.
-            limit (int): Maximum number of source rows retained for the entity.
-            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
-
-        Returns:
-            dict[str, Any]: Group payload containing entity metadata and sources.
-        """
-        matched_key = str(matched_entity.get("key") or "")
-        matched_text = str(matched_entity["text"])
-        matched_type = str(matched_entity["type"])
-        occurrence_sources: list[dict[str, Any]] = []
-        seen_keys: set[str] = set()
-        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
-
-        for source in sources:
-            mention_rows: list[dict[str, Any]] = []
-            for entity in normalize_entities(source.get("entities")):
-                entity_text = str(entity.get("text") or "").strip()
-                entity_type = str(entity.get("type") or "Unlabeled")
-                if entity_type.lower() != matched_type.lower():
-                    continue
-                source_key = entity_cluster_key(
-                    entity_text,
-                    entity_type,
-                    entity_merge_mode=merge_mode,
-                )
-                if matched_key and source_key != matched_key:
-                    continue
-                if not matched_key and entity_text.lower() != matched_text.lower():
-                    continue
-                mention_rows.append(
-                    {
-                        "text": entity_text,
-                        "type": entity_type,
-                        "score": entity.get("score"),
-                    }
-                )
-
-            if not mention_rows:
-                continue
-
-            source_row = dict(source)
-            source_row["matched_entity"] = {
-                "key": matched_key,
-                "text": matched_text,
-                "type": matched_type,
-                "variant_count": int(matched_entity.get("variant_count", 0) or 0),
-                "variants": list(matched_entity.get("variants") or []),
-                "match_alias": str(matched_entity.get("match_alias") or ""),
-            }
-            source_row["matched_mentions"] = mention_rows
-            source_row["occurrence_count"] = len(mention_rows)
-
-            dedupe_key = self._dedupe_source_key(source_row)
-            if dedupe_key in seen_keys:
-                continue
-            seen_keys.add(dedupe_key)
-            occurrence_sources.append(source_row)
-
-        occurrence_sources.sort(
-            key=lambda source: (
-                str(source.get("filename") or "").lower(),
-                int(source.get("page") or 0),
-                int(source.get("row") or 0),
-                str(source.get("chunk_id") or "").lower(),
-            )
-        )
-
-        limited_sources = occurrence_sources[: max(1, int(limit))]
-        return {
-            "entity": self._entity_candidate_payload(matched_entity),
-            "sources": limited_sources,
-            "chunk_count": len(occurrence_sources),
-            "document_count": len(
-                {
-                    str(source.get("file_hash") or source.get("filename") or "")
-                    for source in occurrence_sources
-                    if str(source.get("file_hash") or source.get("filename") or "")
-                }
-            ),
-            "truncated": len(occurrence_sources) > len(limited_sources),
-        }
-
-    @staticmethod
-    def _flatten_occurrence_groups(
-        groups: list[dict[str, Any]],
-        *,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        """Flatten grouped occurrence results into one deduplicated source list."""
-        flattened: list[dict[str, Any]] = []
-        seen_keys: set[str] = set()
-        for group in groups:
-            for source in list(group.get("sources") or []):
-                if not isinstance(source, dict):
-                    continue
-                dedupe_key = RAG._dedupe_source_key(source)
-                if dedupe_key in seen_keys:
-                    continue
-                seen_keys.add(dedupe_key)
-                flattened.append(source)
-                if len(flattened) >= max(1, int(limit)):
-                    return flattened
-        return flattened
-
-    def run_entity_occurrence_query(
-        self,
-        prompt: str,
-        *,
-        qdrant_filter: qdrant_models.Filter | None = None,
-        limit: int = 100,
-        refresh: bool = False,
-        entity_merge_mode: EntityMergeMode = "orthographic",
-    ) -> dict[str, Any]:
-        """Return mention-level source rows for the best matching entity.
-
-        Args:
-            prompt (str): Raw user query used to identify the target entity.
-            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to
-                constrain candidate rows.
-            limit (int): Maximum number of occurrence rows to return.
-            refresh (bool): Whether to bypass cached NER rows when no native filter is used.
-            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
-
-        Returns:
-            dict[str, Any]: A response payload aligned with the normal query path.
-        """
-        query = str(prompt or "").strip()
-        if not query:
-            logger.error("ValueError: Query prompt cannot be empty.")
-            raise ValueError("Query prompt cannot be empty.")
-
-        sources = (
-            self._load_collection_ner_sources(qdrant_filter=qdrant_filter)
-            if qdrant_filter is not None
-            else self.get_collection_ner(refresh=refresh)
-        )
-        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
-        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode)
-        entity_matches = self._collect_entity_matches(aggregate, query=query)
-
-        if not entity_matches:
-            return {
-                "query": query,
-                "reasoning": None,
-                "response": (f"I couldn't find a named-entity match for '{query}' in the active collection."),
-                "sources": [],
-                "retrieval_query": query,
-                "coverage_unit": "entity_mentions",
-                "retrieval_mode": "entity_occurrence",
-                "vector_query_mode": "entity_occurrence",
-                "retrieval_profile": "entity_occurrence",
-                "parent_context_enabled": False,
-            }
-
-        strong_matches = self._strong_entity_matches(entity_matches)
-        if len(strong_matches) > 1:
-            return {
-                "query": query,
-                "reasoning": None,
-                "response": (
-                    f"Your query matches multiple entities equally well. Choose one "
-                    f"candidate below or switch to multi-entity occurrence mode to see "
-                    f"all strong matches for '{query}'."
-                ),
-                "sources": [],
-                "retrieval_query": query,
-                "coverage_unit": "entity_mentions",
-                "retrieval_mode": "entity_occurrence_ambiguous",
-                "vector_query_mode": "entity_occurrence",
-                "retrieval_profile": "entity_occurrence_ambiguous",
-                "parent_context_enabled": False,
-                "entity_match_candidates": [self._entity_candidate_payload(match) for match in strong_matches],
-                "entity_match_groups": [],
-            }
-
-        matched_entity = strong_matches[0]
-        group = self._build_entity_occurrence_group(
-            sources=sources,
-            matched_entity=matched_entity,
-            limit=limit,
-            entity_merge_mode=merge_mode,
-        )
-
-        response_text = (
-            f"Found {matched_entity['mentions']} occurrence(s) of '{matched_entity['text']}' "
-            f"across {int(group['chunk_count'])} chunk(s) in {int(group['document_count'])} "
-            "document(s)."
-        )
-        if bool(group.get("truncated")):
-            response_text += (
-                f" Showing the first {len(list(group.get('sources') or []))} chunk(s); refine with "
-                "metadata filters to narrow the result set."
-            )
-
-        return {
-            "query": query,
-            "reasoning": None,
-            "response": response_text,
-            "sources": list(group.get("sources") or []),
-            "retrieval_query": query,
-            "coverage_unit": "entity_mentions",
-            "retrieval_mode": "entity_occurrence",
-            "vector_query_mode": "entity_occurrence",
-            "retrieval_profile": "entity_occurrence",
-            "parent_context_enabled": False,
-            "entity_match_candidates": [self._entity_candidate_payload(matched_entity)],
-            "entity_match_groups": [group],
-        }
-
-    def run_multi_entity_occurrence_query(
-        self,
-        prompt: str,
-        *,
-        qdrant_filter: qdrant_models.Filter | None = None,
-        limit: int = 100,
-        refresh: bool = False,
-        entity_merge_mode: EntityMergeMode = "orthographic",
-    ) -> dict[str, Any]:
-        """Return grouped occurrence results for all strong entity matches.
-
-        Args:
-            prompt (str): Raw user query used to identify the target entities.
-            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to
-                constrain candidate rows.
-            limit (int): Maximum number of source rows retained across all groups.
-            refresh (bool): Whether to bypass cached NER rows when no native filter is used.
-            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
-
-        Returns:
-            dict[str, Any]: Grouped occurrence payload.
-        """
-        query = str(prompt or "").strip()
-        if not query:
-            logger.error("ValueError: Query prompt cannot be empty.")
-            raise ValueError("Query prompt cannot be empty.")
-
-        sources = (
-            self._load_collection_ner_sources(qdrant_filter=qdrant_filter)
-            if qdrant_filter is not None
-            else self.get_collection_ner(refresh=refresh)
-        )
-        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
-        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode)
-        entity_matches = self._collect_entity_matches(aggregate, query=query)
-
-        if not entity_matches:
-            return {
-                "query": query,
-                "reasoning": None,
-                "response": (f"I couldn't find a named-entity match for '{query}' in the active collection."),
-                "sources": [],
-                "retrieval_query": query,
-                "coverage_unit": "entity_mentions",
-                "retrieval_mode": "entity_occurrence_multi",
-                "vector_query_mode": "entity_occurrence_multi",
-                "retrieval_profile": "entity_occurrence_multi",
-                "parent_context_enabled": False,
-                "entity_match_candidates": [],
-                "entity_match_groups": [],
-            }
-
-        strong_matches = self._strong_entity_matches(entity_matches)
-        per_group_limit = max(1, int(limit))
-        groups = [
-            self._build_entity_occurrence_group(
-                sources=sources,
-                matched_entity=match,
-                limit=per_group_limit,
-                entity_merge_mode=merge_mode,
-            )
-            for match in strong_matches
-        ]
-        groups = [group for group in groups if list(group.get("sources") or [])]
-
-        flattened_sources = self._flatten_occurrence_groups(groups, limit=per_group_limit)
-        total_chunks = sum(int(group.get("chunk_count", 0) or 0) for group in groups)
-        total_documents = len(
-            {
-                str(source.get("file_hash") or source.get("filename") or "")
-                for source in flattened_sources
-                if str(source.get("file_hash") or source.get("filename") or "")
-            }
-        )
-        response_text = (
-            f"Found {len(groups)} equally strong entity match(es) for '{query}', "
-            f"covering {total_chunks} chunk(s) across {total_documents} document(s)."
-        )
-
-        return {
-            "query": query,
-            "reasoning": None,
-            "response": response_text,
-            "sources": flattened_sources,
-            "retrieval_query": query,
-            "coverage_unit": "entity_mentions",
-            "retrieval_mode": "entity_occurrence_multi",
-            "vector_query_mode": "entity_occurrence_multi",
-            "retrieval_profile": "entity_occurrence_multi",
-            "parent_context_enabled": False,
-            "entity_match_candidates": [self._entity_candidate_payload(match) for match in strong_matches],
-            "entity_match_groups": groups,
-        }
-
-    # --- Collection discovery / selection ---
     def list_collections(self) -> list[str]:
         """Return user-selectable collection names via the Qdrant API.
 
@@ -7175,6 +6850,7 @@ class RAG:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -7197,6 +6873,9 @@ class RAG:
             skip_query_rewrite (bool | None): Forwarded to
                 :meth:`docint.core.state.session_manager.SessionManager.chat`;
                 see there for semantics.
+            scoped_node_ids (Sequence[str] | None): Hand-picked chunk ids the
+                turn must answer from. When given, the session answers only
+                from them and skips vector retrieval entirely.
 
         Returns:
             dict[str, Any]: The chat response data.
@@ -7211,6 +6890,7 @@ class RAG:
             vector_store_kwargs=vector_store_kwargs,
             prior_turn=prior_turn,
             skip_query_rewrite=skip_query_rewrite,
+            scoped_node_ids=scoped_node_ids,
         )
 
     def stream_chat(
@@ -7225,6 +6905,7 @@ class RAG:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -7247,6 +6928,9 @@ class RAG:
             skip_query_rewrite (bool | None): Forwarded to
                 :meth:`docint.core.state.session_manager.SessionManager.chat`;
                 see there for semantics.
+            scoped_node_ids (Sequence[str] | None): Hand-picked chunk ids the
+                turn must answer from. When given, the session answers only
+                from them and skips vector retrieval entirely.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -7261,6 +6945,7 @@ class RAG:
             vector_store_kwargs=vector_store_kwargs,
             prior_turn=prior_turn,
             skip_query_rewrite=skip_query_rewrite,
+            scoped_node_ids=scoped_node_ids,
         )
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
@@ -8312,6 +7997,35 @@ class RAG:
             self._documents_cache[self.qdrant_collection] = cached
         return summarize_document_types(cached)
 
+    def measure_scope(self, chunk_ids: Sequence[str]) -> dict[str, Any]:
+        """Measure a candidate scope against the chat context budget.
+
+        Scoped answering splices the chosen chunks straight into the prompt, so
+        the selection is bounded by the model's context window rather than by a
+        top-k. Reuses the same ``usable_tokens`` figure the parent-context
+        packer works from, so the two cannot drift apart.
+
+        Args:
+            chunk_ids (Sequence[str]): Candidate Qdrant point ids.
+
+        Returns:
+            dict[str, Any]: ``chunks``, ``est_tokens``, ``usable_tokens``,
+                ``missing`` (scoped ids Qdrant no longer has) and ``fits``.
+        """
+        usable_tokens, _ = self._compute_parent_context_budget(
+            social_table=bool(self._infer_collection_profile().get("is_social_table")),
+        )
+        retriever = _ScopedRetriever(rag=self, node_ids=chunk_ids)
+        nodes = retriever.retrieve("")
+        est = sum(estimate_tokens(node.node.get_content() or "", self.embed_char_token_ratio) for node in nodes)
+        return {
+            "chunks": len(list(chunk_ids)),
+            "est_tokens": est,
+            "usable_tokens": usable_tokens,
+            "missing": retriever.missing,
+            "fits": est <= usable_tokens,
+        }
+
     def search_fulltext(
         self,
         query: str,
@@ -8365,7 +8079,9 @@ class RAG:
             collection_name=collection,
             scroll_filter=search_filter,
             limit=page_size,
-            offset=cursor,
+            # Same round trip as a scope: an integer offset returns as a
+            # string and Qdrant rejects it, restarting paging from the top.
+            offset=_as_qdrant_point_id(cursor) if cursor else None,
             with_payload=True,
             with_vectors=False,
         )
@@ -8386,6 +8102,9 @@ class RAG:
                 {
                     "id": node_id,
                     "chunk_id": source.get("chunk_id"),
+                    # Carried so a hit can deep-link into the Inspector's
+                    # source preview, which keys on the document hash.
+                    "file_hash": source.get("file_hash"),
                     "filename": source.get("filename"),
                     "page": source.get("page"),
                     "row": source.get("row"),

@@ -1,9 +1,10 @@
-import { useEffect, useReducer, useRef } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { Button, PageHeader } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
+import { clearScope, setScope } from '@/api/scope'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
@@ -12,10 +13,12 @@ import { useReportDedupeKeys } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { draftKey, useChatUiStore } from '@/stores/chatUi'
+import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/stores/searchUi'
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
 import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
-import { FilterBuilder } from '@/components/chat/FilterBuilder'
+import { ScopeBanner } from '@/components/chat/ScopeBanner'
+import { SearchPanel, SearchRailBadges } from '@/components/chat/SearchPanel'
 import { downloadText } from '@/lib/csv'
 import { chatTranscriptToText } from '@/lib/exports'
 import { useT } from '@/i18n/LanguageContext'
@@ -75,6 +78,20 @@ function reducer(s: State, a: Action): State {
 
 export { reducer as chatReducer }
 
+/** The rail's chevron: left while the panel is open, right while it is shut. */
+const RailChevron = ({ open }: { open: boolean }) => (
+  <svg
+    viewBox="0 0 24 24"
+    className={`h-4 w-4 transition-transform duration-300 ${open ? '' : 'rotate-180'}`}
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.75"
+    aria-hidden="true"
+  >
+    <path d="M15 6l-6 6 6 6" />
+  </svg>
+)
+
 export function Chat() {
   const t = useT()
   const params = useParams()
@@ -96,6 +113,37 @@ export function Chat() {
   const draft = useChatUiStore((s) => s.drafts[key] ?? '')
   const setDraft = useChatUiStore((s) => s.setDraft)
   const clearDraft = useChatUiStore((s) => s.clearDraft)
+  const sidePanelOpen = useChatUiStore((s) => s.sidePanelOpen)
+  const toggleSidePanel = useChatUiStore((s) => s.toggleSidePanel)
+  // The scope follows the *effective* session: a new chat holds its selection
+  // under 'new' until the backend mints an id on the first turn.
+  const scopeKey = searchKeyFor(currentSessionId)
+  const scope = useSearchUiStore((s) => scopeFor(s, scopeKey))
+  const adoptScope = useSearchUiStore((s) => s.adoptScope)
+  const dropScope = useSearchUiStore((s) => s.clearScope)
+  const setScopeMeta = useSearchUiStore((s) => s.setScopeMeta)
+  const scopedChunkIds = scopeChunkIds(scope)
+  const [scopeError, setScopeError] = useState<string | null>(null)
+
+  const describeScopeFailure = (err: unknown): string => {
+    if (err instanceof ApiError && err.status === 422) return t('search.budget_exceeded')
+    const described = describeError(err)
+    return t(described.key, described.vars)
+  }
+
+  const unscope = async () => {
+    const sessionId = currentSessionId
+    dropScope(scopeKey)
+    setScopeError(null)
+    if (!sessionId) return
+    try {
+      await clearScope(sessionId)
+    } catch (err) {
+      // The local scope is already gone; say so rather than silently leaving
+      // the server still restricting answers.
+      setScopeError(describeScopeFailure(err))
+    }
+  }
 
   useEffect(() => {
     setCurrentSessionId(sessionIdParam)
@@ -159,7 +207,6 @@ export function Chat() {
           // active collection anymore).
           collection: selectedCollection ?? undefined,
           metadata_filters: filters.buildPayload(),
-          query_mode: filters.queryMode,
           retrieval_mode: filters.retrievalMode
         },
         ac.signal
@@ -194,6 +241,30 @@ export function Chat() {
         dispatch({ type: 'finalize', meta: final })
         if (!currentSessionId && final.session_id) {
           setCurrentSessionId(final.session_id)
+          // The backend mints the session id on the first turn, so chunks
+          // picked before then had nowhere to be written. Carry them over and
+          // flush now, or the selection would silently evaporate exactly when
+          // the user starts asking about it.
+          const pending = scopedChunkIds
+          adoptScope(searchKeyFor(null), final.session_id)
+          if (pending.length > 0) {
+            try {
+              const stored = await setScope(
+                final.session_id,
+                pending,
+                selectedCollection ?? undefined
+              )
+              setScopeMeta(final.session_id, {
+                usableTokens: stored.usable_tokens,
+                missing: stored.missing
+              })
+            } catch (scopeErr) {
+              // Refused (typically over budget): drop the local copy so the
+              // banner never claims a scope the server does not hold.
+              dropScope(final.session_id)
+              setScopeError(describeScopeFailure(scopeErr))
+            }
+          }
         }
         qc.invalidateQueries({ queryKey: sessionsKey })
       }
@@ -224,7 +295,12 @@ export function Chat() {
   }
 
   return (
-    <div className="p-8 grid grid-cols-[1fr_22rem] gap-6 h-full">
+    // The column widths are animated rather than swapped, so collapsing the
+    // panel reflows the transcript smoothly instead of making it pop.
+    <div
+      className="p-8 grid gap-6 h-full transition-[grid-template-columns] duration-300 ease-out"
+      style={{ gridTemplateColumns: sidePanelOpen ? '1fr 22rem' : '1fr 2.75rem' }}
+    >
       {/* min-h-0 on the section (grid item) and the messages list (flex
           item) lets them shrink below their content, so the list scrolls
           internally instead of the section outgrowing h-full — which made
@@ -248,6 +324,16 @@ export function Chat() {
             </button>
           )}
         </div>
+        <ScopeBanner
+          count={scopedChunkIds.length}
+          missing={scope.missing}
+          onClear={() => void unscope()}
+        />
+        {scopeError && (
+          <p className="mb-3 text-xs text-red-500" role="alert">
+            {scopeError}
+          </p>
+        )}
         <div
           ref={transcript.ref}
           onScroll={transcript.onScroll}
@@ -296,37 +382,30 @@ export function Chat() {
         </form>
       </section>
 
-      <aside className="space-y-4">
-        <div className="flex flex-col gap-2 text-sm">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs uppercase text-muted-foreground">{t('chat.query_mode')}</span>
-            <select
-              value={filters.queryMode}
-              onChange={(e) => filters.setQueryMode(e.target.value as typeof filters.queryMode)}
-              className="bg-muted border border-border rounded-md px-2 py-1"
-            >
-              <option value="answer">{t('chat.mode_answer')}</option>
-              <option value="entity_occurrence">{t('chat.mode_entity_occurrence')}</option>
-              <option value="entity_occurrence_multi">
-                {t('chat.mode_entity_occurrence_multi')}
-              </option>
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs uppercase text-muted-foreground">{t('chat.retrieval')}</span>
-            <select
-              value={filters.retrievalMode}
-              onChange={(e) =>
-                filters.setRetrievalMode(e.target.value as typeof filters.retrievalMode)
-              }
-              className="bg-muted border border-border rounded-md px-2 py-1"
-            >
-              <option value="session">{t('chat.retrieval_session')}</option>
-              <option value="stateless">{t('chat.retrieval_stateless')}</option>
-            </select>
-          </label>
+      {/* The rail is deliberately quieter than the app sidebar's hamburger:
+          a slim chevron on the panel's own edge, muted until hovered or
+          focused. Collapsed it keeps the hit and active-filter counts
+          visible — a panel that silently filters or scopes while hidden is a
+          trap. */}
+      <aside className="flex h-full min-h-0 gap-2 overflow-hidden">
+        <div className="flex shrink-0 flex-col items-center gap-2">
+          <button
+            type="button"
+            onClick={toggleSidePanel}
+            aria-expanded={sidePanelOpen}
+            aria-controls="chat-side-panel"
+            aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
+            className="rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border"
+          >
+            <RailChevron open={sidePanelOpen} />
+          </button>
+          {!sidePanelOpen && <SearchRailBadges sessionId={currentSessionId} />}
         </div>
-        <FilterBuilder />
+        {/* Kept mounted while collapsed so the rail's counts stay live and
+            the typed query survives a collapse. */}
+        <div id="chat-side-panel" hidden={!sidePanelOpen} className="h-full min-h-0 min-w-0 flex-1">
+          <SearchPanel sessionId={currentSessionId} />
+        </div>
       </aside>
     </div>
   )

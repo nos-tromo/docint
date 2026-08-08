@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { MetadataFilter, QueryMode, RetrievalMode } from '@/api/types'
+import type { MetadataFilter, RetrievalMode } from '@/api/types'
 
 /** Both metadata keys a date bound has to cover. A chunk or transcript segment
  *  carries `timestamp`; a media artifact linked to a posting carries
@@ -18,7 +18,6 @@ export interface CustomRule {
 }
 
 interface ChatFiltersState {
-  queryMode: QueryMode
   retrievalMode: RetrievalMode
   filterEnabled: boolean
   mimePattern: string
@@ -26,7 +25,6 @@ interface ChatFiltersState {
   dateTo: string
   hateSpeechOnly: boolean
   customRules: CustomRule[]
-  setQueryMode: (m: QueryMode) => void
   setRetrievalMode: (m: RetrievalMode) => void
   setFilterEnabled: (b: boolean) => void
   setMimePattern: (s: string) => void
@@ -41,7 +39,6 @@ interface ChatFiltersState {
 }
 
 const initial = {
-  queryMode: 'answer' as QueryMode,
   retrievalMode: 'session' as RetrievalMode,
   filterEnabled: false,
   mimePattern: '',
@@ -55,7 +52,6 @@ export const useChatFiltersStore = create<ChatFiltersState>()(
   persist(
     (set, get) => ({
       ...initial,
-      setQueryMode: (queryMode) => set({ queryMode }),
       setRetrievalMode: (retrievalMode) => set({ retrievalMode }),
       setFilterEnabled: (filterEnabled) => set({ filterEnabled }),
       setMimePattern: (mimePattern) => set({ mimePattern }),
@@ -98,11 +94,10 @@ export const useChatFiltersStore = create<ChatFiltersState>()(
     }),
     {
       name: 'docint-chat-filters',
-      // Query/retrieval mode and a built-up filter set are part of "where I
+      // The retrieval mode and a built-up filter set are part of "where I
       // was" — losing them on reload is the same complaint as losing the
       // open chat. Actions are excluded automatically by partialize.
       partialize: (s) => ({
-        queryMode: s.queryMode,
         retrievalMode: s.retrievalMode,
         filterEnabled: s.filterEnabled,
         mimePattern: s.mimePattern,

@@ -91,9 +91,7 @@ the contextual understanding agent.
   `SessionManager.chat()` (`docint/core/state/session_manager.py`).
 - **Streaming chat** — `stream_chat(...)` yields token-level events
   for SSE streaming.
-- **NER queries** — `get_collection_ner()`,
-  `run_entity_occurrence_query()`,
-  `run_multi_entity_occurrence_query()`.
+- **NER queries** — `get_collection_ner()`.
 - **Summarisation** — `build_tree_summary()` drives
   `/summarize` with the knobs from
   [`SummaryConfig`](configuration.md#summarisation--summaryconfig).
@@ -145,6 +143,28 @@ string>)` whose bounds are floats, and raises `NotImplementedError` for
 `FilterOperator.CONTAINS`. Since `vector_store_kwargs["qdrant_filters"]`
 overrides the LlamaIndex filters inside `QdrantVectorStore.query`, the native
 filter is the one that executes.
+
+## Scoped answering
+
+When a session carries a search scope (`PUT /sessions/{id}/scope`), the read
+path changes shape: `build_query_engine(scoped_node_ids=...)` swaps in
+`_ScopedRetriever`, which fetches exactly those points by id and returns them in
+the scope's own order. There is no vector query, no rerank and no inference
+beyond generation.
+
+Swapping the *retriever* rather than hand-building a prompt is deliberate:
+citation numbering, source normalization, the report-builder controls and the
+Inspector links are all driven by the node set, so they keep working unchanged.
+
+The scoped engine **drops every ranking postprocessor**. Parent-context
+expansion and link-following would silently widen a hand-picked set; the social
+diversity cap and the image relevance floor would silently narrow it; reranking
+would spend an inference call reordering a set the user already chose. Only
+`CitationNumberingPostprocessor`, which merely numbers, survives.
+
+`RAG.measure_scope()` sizes a candidate selection against the same
+`usable_tokens` figure the parent-context packer works from, so the budget the
+API enforces and the budget retrieval assumes cannot drift apart.
 
 ## Reranking
 

@@ -74,6 +74,16 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   )
 }
 
+export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
+  return handle<T>(
+    await fetch(url(withOwner(path)), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    })
+  )
+}
+
 export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   return handle<T>(
     await fetch(url(withOwner(path)), {

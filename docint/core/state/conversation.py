@@ -21,6 +21,12 @@ class Conversation(Base):  # type: ignore[misc]
     collection_name = Column(String, nullable=True)
     owner = Column(String, nullable=True, index=True)
     rolling_summary = Column(Text, default="", nullable=False)
+    # JSON list of Qdrant point ids the session's answers are restricted to.
+    # NULL means unscoped (normal retrieval). Stored on the conversation rather
+    # than per turn so a scope survives a reload and reopening the session, the
+    # way the pinned collection does.
+    scope_chunk_ids = Column(Text, nullable=True)
+    scope_set_at = Column(DateTime, nullable=True)
     turns = relationship(
         argument="Turn",
         back_populates="conversation",

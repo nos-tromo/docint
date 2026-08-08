@@ -95,6 +95,35 @@ def _ensure_conversation_owner_column(engine: Engine) -> None:
         )
 
 
+def _ensure_conversation_scope_columns(engine: Engine) -> None:
+    """Backfill the search-scope columns onto a pre-existing ``conversations`` table.
+
+    ``Base.metadata.create_all`` only creates missing tables, never adds
+    columns to existing ones, so a sessions DB created before search scopes
+    shipped would fail on every insert touching them. Mirrors
+    :func:`_ensure_conversation_owner_column`.
+
+    Args:
+        engine (Engine): The session-store engine.
+    """
+    try:
+        inspector = inspect(engine)
+        if "conversations" not in inspector.get_table_names():
+            return
+        existing = {col["name"] for col in inspector.get_columns("conversations")}
+        pending = [("scope_chunk_ids", "TEXT"), ("scope_set_at", "DATETIME")]
+        with engine.begin() as conn:
+            for name, sql_type in pending:
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE conversations ADD COLUMN {name} {sql_type}"))
+    except Exception as exc:
+        logger.warning(
+            "Skipping conversations scope-column migration: {}: {}",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _ensure_report_columns(engine: Engine) -> None:
     """Backfill ``operator`` / ``reference_number`` onto a pre-existing reports table.
 
@@ -144,6 +173,7 @@ def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     Base.metadata.create_all(engine)
     _ensure_turn_validation_columns(engine)
     _ensure_conversation_owner_column(engine)
+    _ensure_conversation_scope_columns(engine)
     # ``create_all`` above creates any missing table (incl. reports/report_items,
     # registered via ``docint.core.state.__init__``). Only added *columns* on a
     # pre-existing table need a manual backfill:

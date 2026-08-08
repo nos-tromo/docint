@@ -60,8 +60,10 @@ export interface ChatFinalEvent extends ValidationFields {
   graph_debug?: unknown
   retrieval_query?: string
   coverage_unit?: string
-  entity_match_candidates?: unknown[]
-  entity_match_groups?: unknown[]
+  /** `'scoped'` when the turn answered from a hand-picked chunk set. */
+  retrieval_mode?: string
+  /** How many chunks that scope held. */
+  scoped_chunk_count?: number
 }
 
 /** A rule targets either one `field` or several `fields`; with several, it
@@ -74,8 +76,64 @@ export interface MetadataFilter {
   values?: unknown[]
 }
 
-export type QueryMode = 'answer' | 'entity_occurrence' | 'entity_occurrence_multi'
 export type RetrievalMode = 'stateless' | 'session'
+
+/** One chunk matching every keyword of a full-text search (`POST /search`). */
+export interface SearchHit {
+  /** Qdrant point id — the value a scope is written with. */
+  id: string
+  chunk_id?: string | null
+  /** Document hash — lets a hit deep-link into the Inspector's source preview. */
+  file_hash?: string | null
+  filename?: string | null
+  page?: number | null
+  row?: number | null
+  preview: string
+  entity_types: string[]
+  est_tokens: number
+}
+
+/** How much of the collection carries the `search_text` field. */
+export interface SearchIndexStatus {
+  indexed: boolean
+  total: number
+  with_search_text: number
+  missing: number
+  complete: boolean
+}
+
+/**
+ * A search response.
+ *
+ * `status` is load-bearing and must never be flattened into "no results":
+ * `not_indexed` means the collection was never backfilled (`make search-index`),
+ * `partial` means a backfill is incomplete so the hit list is short by an
+ * unknown amount, and only `ok` with an empty `hits` means "no matches".
+ */
+export interface SearchResult {
+  status: 'ok' | 'partial' | 'not_indexed'
+  hits: SearchHit[]
+  total: number
+  next_cursor: string | null
+  index_status: SearchIndexStatus
+}
+
+export interface SearchRequest {
+  question: string
+  collection?: string
+  metadata_filters?: MetadataFilter[]
+  limit?: number
+  cursor?: string
+}
+
+/** A session's pinned scope plus what it costs against the chat budget. */
+export interface ScopeResult {
+  chunk_ids: string[]
+  est_tokens: number
+  usable_tokens: number
+  /** Scoped chunks Qdrant no longer has (a re-ingest mints new point ids). */
+  missing: number
+}
 
 export interface ChatRequest {
   question: string
@@ -88,7 +146,6 @@ export interface ChatRequest {
   collection?: string
   metadata_filters?: MetadataFilter[]
   retrieval_mode?: RetrievalMode
-  query_mode?: QueryMode
 }
 
 export interface SessionSummary {

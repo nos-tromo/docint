@@ -21,6 +21,55 @@ from docint.core.entities.resolution import ResolutionSummary
 class DummySessionManager:
     """Dummy session manager for testing purposes."""
 
+    scope_owned = True
+
+    def __init__(self) -> None:
+        """Start with no scope pinned, per instance."""
+        self.scope: list[str] = []
+
+    def set_scope(self, session_id: str, owner: str | None, chunk_ids: Any) -> bool:
+        """Record a scope, honouring the owner gate the real manager applies.
+
+        Args:
+            session_id (str): The session to scope.
+            owner (str | None): The requesting principal.
+            chunk_ids (Any): Chunk ids to answer from.
+
+        Returns:
+            bool: Whether the scope was stored.
+        """
+        if not self.scope_owned:
+            return False
+        self.scope = [str(entry) for entry in chunk_ids]
+        return True
+
+    def get_scope(self, session_id: str, owner: str | None) -> list[str]:
+        """Return the recorded scope.
+
+        Args:
+            session_id (str): The session to read.
+            owner (str | None): The requesting principal.
+
+        Returns:
+            list[str]: The scoped chunk ids.
+        """
+        return list(self.scope)
+
+    def clear_scope(self, session_id: str, owner: str | None) -> bool:
+        """Clear the recorded scope.
+
+        Args:
+            session_id (str): The session to unscope.
+            owner (str | None): The requesting principal.
+
+        Returns:
+            bool: Whether the session was found.
+        """
+        if not self.scope_owned:
+            return False
+        self.scope = []
+        return True
+
     def list_sessions(self, owner: str | None = None) -> list[dict[str, Any]]:
         """List the caller's sessions.
 
@@ -119,6 +168,23 @@ class _DummyOwners:
 class DummyRAG:
     """Dummy Retrieval-Augmented Generation (RAG) class for testing purposes."""
 
+    def measure_scope(self, chunk_ids: Any) -> dict[str, Any]:
+        """Report a fixed budget measurement for the requested scope.
+
+        Args:
+            chunk_ids (Any): Candidate chunk ids.
+
+        Returns:
+            dict[str, Any]: Measurement mirroring ``RAG.measure_scope``.
+        """
+        return {
+            "chunks": len(list(chunk_ids)),
+            "est_tokens": 10,
+            "usable_tokens": 100,
+            "missing": 0,
+            "fits": self.scope_fits,
+        }
+
     def search_fulltext(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """Record the call and return an empty result set.
 
@@ -171,17 +237,12 @@ class DummyRAG:
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
         self.search_calls: list[dict[str, Any]] = []
+        self.scope_fits = True
         # Physical collection observed (via the active scope) at call time, so
         # tests can assert /query and /stream_query thread the resolved name in.
         self.seen_collections: list[str] = []
         self.stateless_queries: list[str] = []
         self.stateless_query_filters: list[dict[str, Any]] = []
-        self.entity_occurrence_queries: list[str] = []
-        self.entity_occurrence_filters: list[Any] = []
-        self.entity_occurrence_merge_modes: list[str] = []
-        self.multi_entity_occurrence_queries: list[str] = []
-        self.multi_entity_occurrence_filters: list[Any] = []
-        self.multi_entity_occurrence_merge_modes: list[str] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
         self.created_index = 0  # Tracks the number of times an index is created
@@ -301,6 +362,7 @@ class DummyRAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
+        scoped_node_ids: Any = None,
     ) -> dict[str, Any]:
         """Chat with the RAG system.
 
@@ -312,6 +374,7 @@ class DummyRAG:
             metadata_filters_active (bool): Whether request filters were active.
             metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
+            scoped_node_ids (Any): Hand-picked chunk ids to answer from; ignored by the stub.
 
         Returns:
             dict[str, Any]: The response from the RAG system.
@@ -355,6 +418,7 @@ class DummyRAG:
         vector_store_kwargs: Any = None,
         prior_turn: Any = None,
         skip_query_rewrite: Any = None,
+        scoped_node_ids: Any = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -368,6 +432,7 @@ class DummyRAG:
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
             prior_turn (Any): Optional prior user/assistant exchange for context.
             skip_query_rewrite (Any): Accepted for parity with RAG.stream_chat; ignored by the stub.
+            scoped_node_ids (Any): Hand-picked chunk ids to answer from; ignored by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -463,104 +528,6 @@ class DummyRAG:
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
         )
-
-    def run_entity_occurrence_query(
-        self,
-        prompt: str,
-        *,
-        qdrant_filter: Any = None,
-        limit: int = 100,
-        refresh: bool = False,
-        entity_merge_mode: str = "orthographic",
-    ) -> dict[str, Any]:
-        """Return canned entity-occurrence results for tests.
-
-        Args:
-            prompt: Query prompt.
-            qdrant_filter: Optional native Qdrant filter.
-            limit: Maximum number of occurrence rows to return.
-            refresh: Whether cache refresh was requested.
-            entity_merge_mode: Entity clustering mode (recorded for assertions).
-
-        Returns:
-            dict[str, Any]: Canned occurrence payload.
-        """
-        _ = (limit, refresh)
-        self.entity_occurrence_queries.append(prompt)
-        self.entity_occurrence_filters.append(qdrant_filter)
-        self.entity_occurrence_merge_modes.append(entity_merge_mode)
-        if prompt == "Ambiguous":
-            return {
-                "response": "Your query matches multiple entities equally well.",
-                "sources": [],
-                "retrieval_query": prompt,
-                "coverage_unit": "entity_mentions",
-                "retrieval_mode": "entity_occurrence_ambiguous",
-                "entity_match_candidates": [
-                    {"text": "Acme", "type": "ORG", "mentions": 3},
-                    {"text": "Acme", "type": "PRODUCT", "mentions": 2},
-                ],
-                "entity_match_groups": [],
-            }
-        return {
-            "response": "Found 3 occurrence(s) of 'Acme' across 2 chunk(s) in 2 document(s).",
-            "sources": [{"id": "occ-1"}, {"id": "occ-2"}],
-            "retrieval_query": prompt,
-            "coverage_unit": "entity_mentions",
-            "retrieval_mode": "entity_occurrence",
-            "entity_match_candidates": [{"text": "Acme", "type": "ORG", "mentions": 3}],
-            "entity_match_groups": [
-                {
-                    "entity": {"text": "Acme", "type": "ORG", "mentions": 3},
-                    "sources": [{"id": "occ-1"}, {"id": "occ-2"}],
-                    "chunk_count": 2,
-                    "document_count": 2,
-                    "truncated": False,
-                }
-            ],
-        }
-
-    def run_multi_entity_occurrence_query(
-        self,
-        prompt: str,
-        *,
-        qdrant_filter: Any = None,
-        limit: int = 100,
-        refresh: bool = False,
-        entity_merge_mode: str = "orthographic",
-    ) -> dict[str, Any]:
-        """Return canned multi-entity occurrence results for tests."""
-        _ = (limit, refresh)
-        self.multi_entity_occurrence_queries.append(prompt)
-        self.multi_entity_occurrence_filters.append(qdrant_filter)
-        self.multi_entity_occurrence_merge_modes.append(entity_merge_mode)
-        return {
-            "response": "Found 2 equally strong entity match(es) for 'Acme', covering 2 chunk(s) across 2 document(s).",
-            "sources": [{"id": "occ-org"}, {"id": "occ-product"}],
-            "retrieval_query": prompt,
-            "coverage_unit": "entity_mentions",
-            "retrieval_mode": "entity_occurrence_multi",
-            "entity_match_candidates": [
-                {"text": "Acme", "type": "ORG", "mentions": 3},
-                {"text": "Acme", "type": "PRODUCT", "mentions": 2},
-            ],
-            "entity_match_groups": [
-                {
-                    "entity": {"text": "Acme", "type": "ORG", "mentions": 3},
-                    "sources": [{"id": "occ-org"}],
-                    "chunk_count": 1,
-                    "document_count": 1,
-                    "truncated": False,
-                },
-                {
-                    "entity": {"text": "Acme", "type": "PRODUCT", "mentions": 2},
-                    "sources": [{"id": "occ-product"}],
-                    "chunk_count": 1,
-                    "document_count": 1,
-                    "truncated": False,
-                },
-            ],
-        }
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
         """Return deterministic GraphRAG expansion metadata for tests.
@@ -1746,125 +1713,6 @@ async def test_stream_simulated_text_applies_visible_pacing(
         api_module.SIMULATED_STREAM_TOKEN_DELAY_SECONDS,
         api_module.SIMULATED_STREAM_TOKEN_DELAY_SECONDS,
     ]
-
-
-def test_query_entity_occurrence_mode_skips_chat_and_uses_ner_lookup(
-    client: TestClient,
-) -> None:
-    """Entity occurrence mode should bypass chat and return mention rows.
-
-    Args:
-        client: The TestClient instance.
-    """
-    rag = cast(DummyRAG, api_module.rag)
-    before_chats = len(rag.chats)
-
-    response = client.post(
-        "/query",
-        json={"question": "Acme", "query_mode": "entity_occurrence"},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["answer"].startswith("Found 3 occurrence")
-    assert body["sources"] == [{"id": "occ-1"}, {"id": "occ-2"}]
-    assert body["session_id"] == "stateless"
-    assert len(rag.chats) == before_chats
-    assert rag.entity_occurrence_queries[-1] == "Acme"
-    assert body["retrieval_mode"] == "entity_occurrence"
-
-
-def test_query_entity_occurrence_mode_passes_native_filters(
-    client: TestClient,
-) -> None:
-    """Entity occurrence mode should reuse native Qdrant metadata filters.
-
-    Args:
-        client: The TestClient instance.
-    """
-    response = client.post(
-        "/query",
-        json={
-            "question": "Acme",
-            "query_mode": "entity_occurrence",
-            "metadata_filters": [
-                {
-                    "field": "hate_speech.hate_speech",
-                    "operator": "eq",
-                    "value": True,
-                }
-            ],
-        },
-    )
-
-    assert response.status_code == 200
-    rag = cast(DummyRAG, api_module.rag)
-    assert rag.entity_occurrence_filters[-1] is not None
-
-
-def test_stream_query_entity_occurrence_mode_emits_tokens(client: TestClient) -> None:
-    """Streaming occurrence mode should stream the synthesized occurrence summary.
-
-    Args:
-        client: The TestClient instance.
-    """
-    with client.stream(
-        "POST",
-        "/stream_query",
-        json={"question": "Acme", "query_mode": "entity_occurrence"},
-    ) as resp:
-        assert resp.status_code == 200
-        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
-
-    assert '"token"' in text
-    assert '"retrieval_mode": "entity_occurrence"' in text
-    assert '"coverage_unit": "entity_mentions"' in text
-
-
-def test_query_entity_occurrence_mode_returns_ambiguity_candidates(
-    client: TestClient,
-) -> None:
-    """Ambiguous single-entity occurrence lookups should expose candidates."""
-    response = client.post(
-        "/query",
-        json={"question": "Ambiguous", "query_mode": "entity_occurrence"},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["retrieval_mode"] == "entity_occurrence_ambiguous"
-    assert body["sources"] == []
-    assert len(body["entity_match_candidates"]) == 2
-
-
-def test_query_entity_occurrence_multi_mode_returns_groups(client: TestClient) -> None:
-    """Multi-entity occurrence mode should return grouped strong matches."""
-    response = client.post(
-        "/query",
-        json={"question": "Acme", "query_mode": "entity_occurrence_multi"},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["retrieval_mode"] == "entity_occurrence_multi"
-    assert len(body["entity_match_groups"]) == 2
-    assert body["entity_match_groups"][0]["entity"]["text"] == "Acme"
-
-
-def test_stream_query_entity_occurrence_multi_mode_emits_groups(
-    client: TestClient,
-) -> None:
-    """Streaming multi-entity occurrence mode should include grouped results."""
-    with client.stream(
-        "POST",
-        "/stream_query",
-        json={"question": "Acme", "query_mode": "entity_occurrence_multi"},
-    ) as resp:
-        assert resp.status_code == 200
-        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
-
-    assert '"retrieval_mode": "entity_occurrence_multi"' in text
-    assert '"entity_match_groups"' in text
 
 
 def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
@@ -4217,3 +4065,50 @@ def test_search_requires_a_query(client: TestClient) -> None:
     response = client.post("/search", json={"question": "   "})
 
     assert response.status_code == 422
+
+
+def test_scope_can_be_set_and_read_back(client: TestClient) -> None:
+    """A scope survives the round trip so a reload restores it."""
+    response = client.put("/sessions/s1/scope", json={"chunk_ids": ["c1", "c2"]})
+
+    assert response.status_code == 200
+    assert response.json()["chunk_ids"] == ["c1", "c2"]
+
+
+def test_scope_that_exceeds_the_context_budget_is_refused(client: TestClient) -> None:
+    """Refusing is the only honest option — truncating hides lost evidence.
+
+    Scoped answering splices the chunks straight into the prompt, so an
+    oversize selection cannot be honoured. Silently dropping some would produce
+    an answer that looks complete and is not.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    rag.scope_fits = False
+    try:
+        response = client.put("/sessions/s1/scope", json={"chunk_ids": ["c1"]})
+    finally:
+        rag.scope_fits = True
+
+    assert response.status_code == 422
+
+
+def test_scope_can_be_cleared(client: TestClient) -> None:
+    """Clearing returns the session to normal retrieval."""
+    client.put("/sessions/s1/scope", json={"chunk_ids": ["c1"]})
+
+    response = client.delete("/sessions/s1/scope")
+
+    assert response.status_code == 200
+    assert response.json()["chunk_ids"] == []
+
+
+def test_scope_on_an_unowned_session_is_not_found(client: TestClient) -> None:
+    """A session that is missing or another owner's must look identical."""
+    sessions = cast(DummyRAG, api_module.rag).sessions
+    sessions.scope_owned = False
+    try:
+        response = client.put("/sessions/other/scope", json={"chunk_ids": ["c1"]})
+    finally:
+        sessions.scope_owned = True
+
+    assert response.status_code == 404

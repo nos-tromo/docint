@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -247,6 +247,7 @@ class SessionManager:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -264,6 +265,9 @@ class SessionManager:
                 filter was supplied.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
                 filter payloads for post-filtering auxiliary image sources.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving — the session's
+                pinned search scope.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
             prior_turn (PriorTurn | None): Prior user/assistant exchange.
@@ -295,8 +299,10 @@ class SessionManager:
                 vector_store_kwargs=vector_store_kwargs,
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=metadata_filters_active,
+                scoped_node_ids=scoped_node_ids,
             )
-            if metadata_filters is not None or vector_store_kwargs
+            # A scope must never reuse the cached engine: that one retrieves.
+            if scoped_node_ids or metadata_filters is not None or vector_store_kwargs
             else self.rag.query_engine
         )
         if engine is None:
@@ -361,6 +367,7 @@ class SessionManager:
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> Iterator[str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -378,6 +385,9 @@ class SessionManager:
                 filter was supplied.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
                 filter payloads for post-filtering auxiliary image sources.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving — the session's
+                pinned search scope.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
             prior_turn (PriorTurn | None): Prior user/assistant exchange.
@@ -410,6 +420,7 @@ class SessionManager:
             vector_store_kwargs=vector_store_kwargs,
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
+            scoped_node_ids=scoped_node_ids,
         )
 
         # Resolve the session per request (see :meth:`chat`): pure/idempotent,
@@ -651,6 +662,71 @@ class SessionManager:
             if not conv or conv.owner != owner:
                 return None
             return cast(str | None, conv.collection_name)
+
+    def get_scope(self, session_id: str, owner: str | None) -> list[str]:
+        """Return the chunk ids a session's answers are restricted to.
+
+        Owner-scoped like :meth:`get_session_collection`: a session that does
+        not exist or belongs to another principal yields ``[]``, so the caller
+        cannot probe other users' sessions.
+
+        Args:
+            session_id (str): The session to read.
+            owner (str | None): The principal requesting the lookup.
+
+        Returns:
+            list[str]: The scoped chunk ids; empty when unscoped, missing, or
+                not owned by ``owner``.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return []
+            raw = cast(str | None, conv.scope_chunk_ids)
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Discarding unparseable scope on session {}.", session_id)
+                return []
+            return [str(entry) for entry in parsed] if isinstance(parsed, list) else []
+
+    def set_scope(self, session_id: str, owner: str | None, chunk_ids: Sequence[str]) -> bool:
+        """Restrict a session's answers to a fixed set of chunks.
+
+        Args:
+            session_id (str): The session to scope.
+            owner (str | None): The principal that must own it.
+            chunk_ids (Sequence[str]): Qdrant point ids to answer from. An
+                empty sequence clears the scope.
+
+        Returns:
+            bool: ``True`` when stored, ``False`` when the session is missing
+                or not owned by ``owner``.
+        """
+        ids = [str(entry) for entry in chunk_ids if str(entry).strip()]
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return False
+            conv.scope_chunk_ids = cast(Any, json.dumps(ids) if ids else None)
+            conv.scope_set_at = cast(Any, datetime.now(UTC) if ids else None)
+            # ``_session_scope`` only closes the session; callers commit.
+            s.commit()
+            return True
+
+    def clear_scope(self, session_id: str, owner: str | None) -> bool:
+        """Return a session to normal retrieval.
+
+        Args:
+            session_id (str): The session to unscope.
+            owner (str | None): The principal that must own it.
+
+        Returns:
+            bool: ``True`` when cleared, ``False`` when missing or not owned.
+        """
+        return self.set_scope(session_id, owner, [])
 
     def _persist_turn(
         self, session_id: str, user_msg: str, resp: Any, data: dict[str, Any], *, owner: str | None = None

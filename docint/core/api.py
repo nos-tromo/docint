@@ -1,7 +1,6 @@
 """FastAPI app exposing chat, ingestion, collection, and citation endpoints."""
 
 import asyncio
-import functools
 import io
 import json
 import zipfile
@@ -716,7 +715,21 @@ class QueryIn(BaseModel):
     collection: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
     retrieval_mode: Literal["session", "stateless"] = "session"
-    query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = "answer"
+
+
+class ScopeIn(BaseModel):
+    """Request payload for pinning a search scope to a session."""
+
+    chunk_ids: list[str] = Field(default_factory=list)
+
+
+class ScopeOut(BaseModel):
+    """A session's scope plus what it costs against the chat budget."""
+
+    chunk_ids: list[str] = []
+    est_tokens: int = 0
+    usable_tokens: int = 0
+    missing: int = 0
 
 
 class SearchIn(BaseModel):
@@ -753,8 +766,6 @@ class QueryOut(BaseModel):
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
-    entity_match_candidates: list[dict[str, Any]] = []
-    entity_match_groups: list[dict[str, Any]] = []
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -1209,6 +1220,80 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
+@app.put("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
+def set_session_scope(
+    session_id: str,
+    payload: ScopeIn,
+    collection: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> ScopeOut:
+    """Restrict a session's answers to a hand-picked set of chunks.
+
+    Refuses a selection larger than the chat context window rather than
+    truncating it: scoped answering splices the chunks straight into the
+    prompt, and silently dropping part of an investigator's evidence would
+    produce an answer that looks complete and is not.
+
+    Args:
+        session_id (str): The session to scope.
+        payload (ScopeIn): The chunk ids to answer from.
+        collection (str | None): Caller's logical collection, owner-gated.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        ScopeOut: The stored scope and its measured cost.
+
+    Raises:
+        HTTPException: 404 when the session is missing or not owned, 422 when
+            the selection cannot fit the context budget, 500 on failure.
+    """
+    try:
+        with _scoped_collection(collection, principal):
+            measured = rag.measure_scope(payload.chunk_ids)
+            if payload.chunk_ids and not measured["fits"]:
+                raise HTTPException(status_code=422, detail="Invalid request.")
+            stored = rag.ensure_session_manager().set_scope(
+                session_id,
+                principal.effective_owner,
+                payload.chunk_ids,
+            )
+        if not stored:
+            raise HTTPException(status_code=404, detail="Not found.")
+        return ScopeOut(
+            chunk_ids=list(payload.chunk_ids),
+            est_tokens=int(measured["est_tokens"]),
+            usable_tokens=int(measured["usable_tokens"]),
+            missing=int(measured["missing"]),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("Error setting session scope")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+@app.delete("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
+def clear_session_scope(
+    session_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> ScopeOut:
+    """Return a session to normal retrieval.
+
+    Args:
+        session_id (str): The session to unscope.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        ScopeOut: An empty scope.
+
+    Raises:
+        HTTPException: 404 when the session is missing or not owned.
+    """
+    if not rag.ensure_session_manager().clear_scope(session_id, principal.effective_owner):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return ScopeOut()
+
+
 @app.post("/search", response_model=SearchOut, tags=["Query"])
 def search_collection(
     payload: SearchIn,
@@ -1287,63 +1372,60 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             vector_store_kwargs["qdrant_filters"] = qdrant_filter
 
         with rag.collection_scope(physical):
-            if payload.query_mode in {"entity_occurrence", "entity_occurrence_multi"}:
-                if payload.query_mode == "entity_occurrence_multi":
-                    data = rag.run_multi_entity_occurrence_query(
-                        payload.question,
-                        qdrant_filter=qdrant_filter,
-                    )
-                else:
-                    data = rag.run_entity_occurrence_query(
-                        payload.question,
-                        qdrant_filter=qdrant_filter,
-                    )
+            if getattr(rag, "query_engine", None) is None:
+                if getattr(rag, "index", None) is None:
+                    rag.create_index()
+                rag.create_query_engine()
+
+            if payload.retrieval_mode == "stateless":
+                retrieval_query = payload.question
+                graph_debug: dict[str, Any] | None = None
+                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
+                if callable(expand_with_debug):
+                    try:
+                        expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
+                        retrieval_query = str(expanded)
+                        if isinstance(debug_payload, dict):
+                            graph_debug = debug_payload
+                    except Exception as exc:
+                        logger.warning(
+                            "Graph debug expansion failed for stateless query: {}",
+                            exc,
+                        )
+
+                data = rag.run_query(
+                    retrieval_query,
+                    metadata_filters=metadata_filters,
+                    metadata_filter_rules=payload.metadata_filters,
+                    vector_store_kwargs=vector_store_kwargs or None,
+                )
+                if graph_debug is not None:
+                    data["graph_debug"] = graph_debug
                 session_id = payload.session_id or "stateless"
             else:
-                if getattr(rag, "query_engine", None) is None:
-                    if getattr(rag, "index", None) is None:
-                        rag.create_index()
-                    rag.create_query_engine()
-
-                if payload.retrieval_mode == "stateless":
-                    retrieval_query = payload.question
-                    graph_debug: dict[str, Any] | None = None
-                    expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                    if callable(expand_with_debug):
-                        try:
-                            expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
-                            retrieval_query = str(expanded)
-                            if isinstance(debug_payload, dict):
-                                graph_debug = debug_payload
-                        except Exception as exc:
-                            logger.warning(
-                                "Graph debug expansion failed for stateless query: {}",
-                                exc,
-                            )
-
-                    data = rag.run_query(
-                        retrieval_query,
-                        metadata_filters=metadata_filters,
-                        metadata_filter_rules=payload.metadata_filters,
-                        vector_store_kwargs=vector_store_kwargs or None,
-                    )
-                    if graph_debug is not None:
-                        data["graph_debug"] = graph_debug
-                    session_id = payload.session_id or "stateless"
-                else:
-                    session_id = rag.start_session(
-                        payload.session_id,
-                        owner=principal.effective_owner,
-                    )
-                    data = rag.chat(
-                        payload.question,
-                        session_id=session_id,
-                        owner=principal.effective_owner,
-                        metadata_filters=metadata_filters,
-                        metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
-                        metadata_filter_rules=payload.metadata_filters,
-                        vector_store_kwargs=vector_store_kwargs or None,
-                    )
+                session_id = rag.start_session(
+                    payload.session_id,
+                    owner=principal.effective_owner,
+                )
+                # A session pinned to hand-picked chunks answers only from
+                # them — no vector retrieval at all.
+                scoped_node_ids = rag.ensure_session_manager().get_scope(
+                    session_id,
+                    principal.effective_owner,
+                )
+                data = rag.chat(
+                    payload.question,
+                    session_id=session_id,
+                    owner=principal.effective_owner,
+                    metadata_filters=metadata_filters,
+                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
+                    metadata_filter_rules=payload.metadata_filters,
+                    vector_store_kwargs=vector_store_kwargs or None,
+                    scoped_node_ids=scoped_node_ids or None,
+                )
+                if scoped_node_ids and isinstance(data, dict):
+                    data["retrieval_mode"] = "scoped"
+                    data["scoped_chunk_count"] = len(scoped_node_ids)
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
@@ -1365,17 +1447,6 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             if isinstance(data, dict) and data.get("retrieval_mode") is not None
             else None
         )
-        entity_match_candidates: list[Any] = (
-            data.get("entity_match_candidates", [])
-            if isinstance(data, dict) and isinstance(data.get("entity_match_candidates"), list)
-            else []
-        )
-        entity_match_groups: list[Any] = (
-            data.get("entity_match_groups", [])
-            if isinstance(data, dict) and isinstance(data.get("entity_match_groups"), list)
-            else []
-        )
-
         summary_diagnostics_query = (
             data.get("summary_diagnostics")
             if isinstance(data, dict) and isinstance(data.get("summary_diagnostics"), dict)
@@ -1400,8 +1471,6 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             "retrieval_query": retrieval_query_value,
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
-            "entity_match_candidates": entity_match_candidates,
-            "entity_match_groups": entity_match_groups,
             **validation,
         }
     except HTTPException:
@@ -1438,10 +1507,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         vector_store_kwargs["qdrant_filters"] = qdrant_filter
 
     session_owner: str | None = None
-    if (
-        payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
-        and payload.retrieval_mode != "stateless"
-    ):
+    if payload.retrieval_mode != "stateless":
         session_owner = principal.effective_owner
         # Up-front collection-pin check so a mismatch is a clean 409 rather than
         # an in-stream SSE error: resuming an owned session against a different
@@ -1470,42 +1536,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         try:
             full_answer = ""
             final_payload: dict[str, Any] | None = None
-            if payload.query_mode in {"entity_occurrence", "entity_occurrence_multi"}:
-                if payload.query_mode == "entity_occurrence_multi":
-                    occurrence_data = await to_thread.run_sync(
-                        functools.partial(
-                            rag.run_multi_entity_occurrence_query,
-                            payload.question,
-                            qdrant_filter=qdrant_filter,
-                        )
-                    )
-                else:
-                    occurrence_data = await to_thread.run_sync(
-                        functools.partial(
-                            rag.run_entity_occurrence_query,
-                            payload.question,
-                            qdrant_filter=qdrant_filter,
-                        )
-                    )
-                answer_text = str(occurrence_data.get("response") or occurrence_data.get("answer") or "")
-                async for event in _stream_simulated_text(answer_text):
-                    event_payload = json.loads(event[6:].strip())
-                    token = str(event_payload.get("token") or "")
-                    full_answer += token
-                    yield event
-
-                final_payload = {
-                    "answer": occurrence_data.get("response"),
-                    "sources": occurrence_data.get("sources") or [],
-                    "session_id": payload.session_id or "stateless",
-                    "reasoning": occurrence_data.get("reasoning"),
-                    "retrieval_query": occurrence_data.get("retrieval_query"),
-                    "coverage_unit": occurrence_data.get("coverage_unit"),
-                    "retrieval_mode": occurrence_data.get("retrieval_mode"),
-                    "entity_match_candidates": occurrence_data.get("entity_match_candidates") or [],
-                    "entity_match_groups": occurrence_data.get("entity_match_groups") or [],
-                }
-            elif payload.retrieval_mode == "stateless":
+            if payload.retrieval_mode == "stateless":
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
@@ -1582,6 +1613,13 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             vector_store_kwargs=vector_store_kwargs or None,
                             prior_turn=prior_turn,
                             skip_query_rewrite=False,
+                            # A session pinned to hand-picked chunks answers
+                            # only from them — no vector retrieval at all.
+                            scoped_node_ids=rag.ensure_session_manager().get_scope(
+                                session_id,
+                                session_owner,
+                            )
+                            or None,
                         ),
                     )
 
@@ -1620,8 +1658,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             # Persist validation onto the row stream_chat already wrote so
             # restored sessions see the same banner state as fresh turns.
             # turn_idx is set only by the session-mode branch in
-            # session_manager.stream_chat; the stateless / entity branches
-            # don't persist a turn at all and so won't carry it.
+            # session_manager.stream_chat; the stateless branch doesn't
+            # persist a turn at all and so won't carry it.
             turn_idx = payload_out.pop("turn_idx", None)
             stream_session_id = payload_out.get("session_id")
             if (
@@ -1671,10 +1709,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             str: SSE event lines from the scoped stream body.
         """
         with rag.collection_scope(physical):
-            if (
-                payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
-                and getattr(rag, "index", None) is None
-            ):
+            if getattr(rag, "index", None) is None:
                 await to_thread.run_sync(rag.create_index)
             async for chunk in _stream_body():
                 yield chunk

@@ -1650,163 +1650,6 @@ def test_collection_ner_search_matches_entity_acronyms() -> None:
     assert results[0]["mentions"] == 2
 
 
-def test_run_entity_occurrence_query_returns_matching_sources() -> None:
-    """Entity occurrence mode should return mention-level source rows."""
-    rag = RAG(qdrant_collection="test")
-    rag._ner_sources_cache[rag.qdrant_collection] = [
-        {
-            "filename": "a.pdf",
-            "file_hash": "hash-a",
-            "chunk_id": "chunk-1",
-            "chunk_text": "Remigration appears here.",
-            "text": "Remigration appears here.",
-            "page": 1,
-            "entities": [{"text": "Remigration", "type": "IDEOLOGY"}],
-        },
-        {
-            "filename": "b.pdf",
-            "file_hash": "hash-b",
-            "chunk_id": "chunk-2",
-            "chunk_text": "Another Remigration mention.",
-            "text": "Another Remigration mention.",
-            "page": 2,
-            "entities": [{"text": "Remigration", "type": "IDEOLOGY"}],
-        },
-        {
-            "filename": "c.pdf",
-            "file_hash": "hash-c",
-            "chunk_id": "chunk-3",
-            "chunk_text": "Something else.",
-            "text": "Something else.",
-            "page": 3,
-            "entities": [{"text": "Migration", "type": "IDEOLOGY"}],
-        },
-    ]
-
-    result = rag.run_entity_occurrence_query("Where is Remigration mentioned?")
-
-    assert result["retrieval_mode"] == "entity_occurrence"
-    assert result["coverage_unit"] == "entity_mentions"
-    assert len(result["sources"]) == 2
-    assert result["sources"][0]["matched_entity"]["text"] == "Remigration"
-    assert result["sources"][0]["occurrence_count"] == 1
-    assert "Found 2 occurrence(s) of 'Remigration'" in result["response"]
-
-
-def test_run_entity_occurrence_query_includes_orthographic_variants() -> None:
-    """Occurrence mode should include all mentions from condensed variants."""
-    rag = RAG(qdrant_collection="test")
-    rag._ner_sources_cache[rag.qdrant_collection] = [
-        {
-            "filename": "a.pdf",
-            "chunk_id": "chunk-1",
-            "chunk_text": "Parteitag appears here.",
-            "text": "Parteitag appears here.",
-            "entities": [{"text": "Parteitag", "type": "EVENT", "score": 0.8}],
-        },
-        {
-            "filename": "b.pdf",
-            "chunk_id": "chunk-2",
-            "chunk_text": "Partei Tag appears here.",
-            "text": "Partei Tag appears here.",
-            "entities": [{"text": "Partei Tag", "type": "EVENT", "score": 0.9}],
-        },
-    ]
-
-    result = rag.run_entity_occurrence_query("Partei Tag")
-
-    assert result["retrieval_mode"] == "entity_occurrence"
-    assert len(result["sources"]) == 2
-    assert result["sources"][0]["matched_entity"]["text"] == "Partei Tag"
-    assert result["sources"][0]["matched_entity"]["variant_count"] == 2
-    assert {mention["text"] for source in result["sources"] for mention in source["matched_mentions"]} == {
-        "Parteitag",
-        "Partei Tag",
-    }
-
-
-def test_run_entity_occurrence_query_reports_no_match() -> None:
-    """Entity occurrence mode should return a clear no-match response."""
-    rag = RAG(qdrant_collection="test")
-    rag._ner_sources_cache[rag.qdrant_collection] = [
-        {
-            "filename": "a.pdf",
-            "chunk_id": "chunk-1",
-            "chunk_text": "Acme is here.",
-            "text": "Acme is here.",
-            "entities": [{"text": "Acme", "type": "ORG"}],
-        }
-    ]
-
-    result = rag.run_entity_occurrence_query("Remigration")
-
-    assert result["sources"] == []
-    assert "couldn't find a named-entity match" in result["response"]
-
-
-def test_run_entity_occurrence_query_reports_ambiguity() -> None:
-    """Single-entity occurrence mode should stop when top-rank matches tie."""
-    rag = RAG(qdrant_collection="test")
-    rag._ner_sources_cache[rag.qdrant_collection] = [
-        {
-            "filename": "a.pdf",
-            "chunk_id": "chunk-1",
-            "chunk_text": "Acme the organization is here.",
-            "text": "Acme the organization is here.",
-            "entities": [{"text": "Acme", "type": "ORG"}],
-        },
-        {
-            "filename": "b.pdf",
-            "chunk_id": "chunk-2",
-            "chunk_text": "Acme the product is here.",
-            "text": "Acme the product is here.",
-            "entities": [{"text": "Acme", "type": "PRODUCT"}],
-        },
-    ]
-
-    result = rag.run_entity_occurrence_query("Acme")
-
-    assert result["retrieval_mode"] == "entity_occurrence_ambiguous"
-    assert result["sources"] == []
-    assert len(result["entity_match_candidates"]) == 2
-    assert "matches multiple entities equally well" in result["response"]
-
-
-def test_run_multi_entity_occurrence_query_groups_strong_matches() -> None:
-    """Multi-entity occurrence mode should group all equally strong matches."""
-    rag = RAG(qdrant_collection="test")
-    rag._ner_sources_cache[rag.qdrant_collection] = [
-        {
-            "filename": "a.pdf",
-            "file_hash": "hash-a",
-            "chunk_id": "chunk-1",
-            "chunk_text": "Acme the organization is here.",
-            "text": "Acme the organization is here.",
-            "page": 1,
-            "entities": [{"text": "Acme", "type": "ORG"}],
-        },
-        {
-            "filename": "b.pdf",
-            "file_hash": "hash-b",
-            "chunk_id": "chunk-2",
-            "chunk_text": "Acme the product is here.",
-            "text": "Acme the product is here.",
-            "page": 2,
-            "entities": [{"text": "Acme", "type": "PRODUCT"}],
-        },
-    ]
-
-    result = rag.run_multi_entity_occurrence_query("Acme")
-
-    assert result["retrieval_mode"] == "entity_occurrence_multi"
-    assert len(result["entity_match_groups"]) == 2
-    assert {group["entity"]["type"] for group in result["entity_match_groups"]} == {
-        "ORG",
-        "PRODUCT",
-    }
-    assert len(result["sources"]) == 2
-
-
 def test_collection_ner_graph_and_neighbors() -> None:
     """Graph endpoints should expose relation and co-occurrence edges."""
     rag = RAG(qdrant_collection="test")
@@ -6292,3 +6135,170 @@ def test_search_fulltext_flags_a_partially_indexed_collection(
 
     assert result["status"] == "partial"
     assert result["index_status"]["missing"] == 936
+
+
+def test_scoped_retriever_returns_exactly_the_selected_chunks() -> None:
+    """A scope answers from the chosen chunks and nothing else.
+
+    The retriever is swapped rather than the prompt hand-built, so citation
+    numbering, source normalization and the report controls keep working
+    unchanged.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [
+                types.SimpleNamespace(id="c2", payload={"text": "second chunk"}),
+                types.SimpleNamespace(id="c1", payload={"text": "first chunk"}),
+            ]
+        ),
+    )
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["c1", "c2"])
+    nodes = retriever.retrieve("anything")
+
+    # The scope's own order wins, not Qdrant's return order.
+    assert [n.node.node_id for n in nodes] == ["c1", "c2"]
+    assert [n.node.get_content() for n in nodes] == ["first chunk", "second chunk"]
+    assert retriever.missing == 0
+
+
+def test_scoped_retriever_reports_chunks_that_no_longer_exist() -> None:
+    """Re-ingestion mints new point ids, so a scope can outlive its chunks.
+
+    Answering from the remainder without saying so would quietly narrow the
+    evidence an investigator believes they selected.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [types.SimpleNamespace(id="c1", payload={"text": "first chunk"})]
+        ),
+    )
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["c1", "gone"])
+    nodes = retriever.retrieve("anything")
+
+    assert [n.node.node_id for n in nodes] == ["c1"]
+    assert retriever.missing == 1
+
+
+def test_scoped_query_engine_drops_the_ranking_postprocessors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hand-picked set must be answered from as chosen.
+
+    Every ranking postprocessor adds, drops or reorders nodes: parent-context
+    expansion and link-following would silently widen the evidence, the
+    diversity cap and relevance floor would silently narrow it, and reranking
+    would spend an inference call reordering a set the user already chose. Only
+    citation numbering — which merely numbers — survives.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.index = cast(Any, types.SimpleNamespace(docstore=object()))
+    monkeypatch.setattr(RAG, "_infer_collection_profile", lambda self: {"is_social_table": False})
+    monkeypatch.setattr(RAG, "_build_response_synthesizer", lambda self, **kwargs: object())
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+
+    rag.build_query_engine(scoped_node_ids=["c1", "c2"])
+
+    assert isinstance(captured["retriever"], rag_module._ScopedRetriever)
+    names = [type(p).__name__ for p in captured["node_postprocessors"]]
+    assert names == ["CitationNumberingPostprocessor"]
+
+
+def test_measure_scope_refuses_a_selection_that_cannot_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversize scope must be refused, never silently truncated.
+
+    Dropping part of an investigator's evidence without saying so is the worst
+    available failure: the answer looks complete and is not.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [
+                types.SimpleNamespace(id=f"c{i}", payload={"text": "word " * 5000}) for i in range(4)
+            ]
+        ),
+    )
+    monkeypatch.setattr(RAG, "_infer_collection_profile", lambda self: {"is_social_table": False})
+    monkeypatch.setattr(RAG, "_compute_parent_context_budget", lambda self, **kwargs: (100, 10))
+
+    measured = rag.measure_scope([f"c{i}" for i in range(4)])
+
+    assert measured["chunks"] == 4
+    assert measured["est_tokens"] > measured["usable_tokens"]
+    assert measured["fits"] is False
+
+
+def test_measure_scope_accepts_a_selection_that_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A modest selection must be usable."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            retrieve=lambda **kwargs: [types.SimpleNamespace(id="c1", payload={"text": "a short chunk"})]
+        ),
+    )
+    monkeypatch.setattr(RAG, "_infer_collection_profile", lambda self: {"is_social_table": False})
+    monkeypatch.setattr(RAG, "_compute_parent_context_budget", lambda self, **kwargs: (20000, 256))
+
+    measured = rag.measure_scope(["c1"])
+
+    assert measured["fits"] is True
+    assert measured["usable_tokens"] == 20000
+    assert measured["missing"] == 0
+
+
+def test_scoped_retriever_restores_integer_point_ids() -> None:
+    """Qdrant ids are unsigned ints or UUIDs — a stringified int is neither.
+
+    Search returns ids as JSON strings, so a scope round-trips "1" rather than
+    1. Passing that straight back makes Qdrant reject the whole retrieve, and
+    the scope answers from nothing while reporting every chunk missing — a
+    scoped answer built on no evidence at all.
+    """
+    rag = RAG(qdrant_collection="test")
+    seen: dict[str, Any] = {}
+
+    def _retrieve(**kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        return [types.SimpleNamespace(id=1, payload={"text": "first chunk"})]
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(retrieve=_retrieve))
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["1"])
+    nodes = retriever.retrieve("anything")
+
+    assert seen["ids"] == [1]
+    assert [n.node.node_id for n in nodes] == ["1"]
+    assert retriever.missing == 0
+
+
+def test_scoped_retriever_leaves_uuid_ids_alone() -> None:
+    """Only all-digit ids are integers; a UUID must pass through untouched."""
+    rag = RAG(qdrant_collection="test")
+    seen: dict[str, Any] = {}
+
+    def _retrieve(**kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        return [types.SimpleNamespace(id="7f3a-not-a-number", payload={"text": "first chunk"})]
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(retrieve=_retrieve))
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["7f3a-not-a-number"])
+    nodes = retriever.retrieve("anything")
+
+    assert seen["ids"] == ["7f3a-not-a-number"]
+    assert [n.node.node_id for n in nodes] == ["7f3a-not-a-number"]
