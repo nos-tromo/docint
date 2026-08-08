@@ -125,3 +125,66 @@ def test_search_index_cli_fails_when_the_index_cannot_be_created(
         cli.build_search_index("docs")
 
     assert excinfo.value.code != 0
+
+
+def test_bulk_indexes_every_collection_and_skips_none() -> None:
+    """The bulk run covers whatever the collection list reports.
+
+    It works on *physical* names, which sidesteps the logical-name ambiguity
+    entirely: two users owning the same logical name are simply two entries.
+    """
+    from docint.cli import search_index as cli
+
+    done: list[str] = []
+    rag = cast(Any, types.SimpleNamespace(list_collections=lambda: ["u1__a", "u2__a", "u1__b"]))
+
+    failures = cli.index_all_collections(rag, index_one=done.append)
+
+    assert done == ["u1__a", "u2__a", "u1__b"]
+    assert failures == []
+
+
+def test_bulk_continues_past_a_failing_collection() -> None:
+    """One bad collection must not strand the other eighteen.
+
+    Halting would leave the rest unmigrated with no signal about which; the
+    non-zero exit still reports that something failed.
+    """
+    from docint.cli import search_index as cli
+
+    done: list[str] = []
+
+    def _index_one(name: str) -> None:
+        if name == "u2__bad":
+            raise RuntimeError("qdrant exploded")
+        done.append(name)
+
+    rag = cast(Any, types.SimpleNamespace(list_collections=lambda: ["u1__a", "u2__bad", "u1__b"]))
+
+    failures = cli.index_all_collections(rag, index_one=_index_one)
+
+    assert done == ["u1__a", "u1__b"]
+    assert failures == ["u2__bad"]
+
+
+def test_bulk_cli_exits_non_zero_when_any_collection_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partial migration must not look like a clean one."""
+    from docint.cli import search_index as cli
+
+    monkeypatch.setattr(cli, "RAG", lambda **kwargs: cast(Any, types.SimpleNamespace(unload_models=lambda: None)))
+    monkeypatch.setattr(cli, "index_all_collections", lambda rag, **kwargs: ["u2__bad"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_all_search_indexes()
+
+    assert excinfo.value.code != 0
+
+
+def test_bulk_cli_exits_zero_when_every_collection_succeeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clean run must not report failure."""
+    from docint.cli import search_index as cli
+
+    monkeypatch.setattr(cli, "RAG", lambda **kwargs: cast(Any, types.SimpleNamespace(unload_models=lambda: None)))
+    monkeypatch.setattr(cli, "index_all_collections", lambda rag, **kwargs: [])
+
+    cli.build_all_search_indexes()  # must not raise

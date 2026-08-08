@@ -64,6 +64,7 @@ make resolve COLLECTION=mydocs  # non-interactive
 # idempotent). Needed once per collection ingested before search shipped.
 make search-index                    # prompts for the collection name
 make search-index COLLECTION=mydocs  # non-interactive
+make search-index-all                # every collection (one-time backport)
 ```
 
 ## Architecture

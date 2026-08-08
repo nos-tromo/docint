@@ -11,6 +11,7 @@ is owner-namespaced and resolved here.
 """
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from loguru import logger
@@ -91,6 +92,95 @@ def build_search_index(collection: str) -> None:
         summary.skipped,
         summary.empty,
     )
+
+
+def index_all_collections(
+    rag: "RAG",
+    *,
+    index_one: Callable[[str], None],
+) -> list[str]:
+    """Index every collection, continuing past failures.
+
+    Works on *physical* collection names, which sidesteps logical-name
+    ambiguity entirely: two users owning the same logical name are simply two
+    entries here. Companion collections (``_images`` / ``_entities`` /
+    ``_dockv``) are excluded by ``list_collections`` — nothing searches them.
+
+    One failure does not strand the rest: halting on the first would leave the
+    remaining collections unmigrated with no record of which. Failures are
+    collected and returned so the caller can exit non-zero.
+
+    Args:
+        rag (RAG): Engine used to enumerate collections.
+        index_one (Callable[[str], None]): Applied to each collection name.
+
+    Returns:
+        list[str]: Names that failed, in encounter order. Empty when all
+            succeeded.
+    """
+    names = rag.list_collections()
+    if not names:
+        logger.warning("No collections found — nothing to index.")
+        return []
+
+    failures: list[str] = []
+    for position, name in enumerate(names, start=1):
+        logger.info("[{}/{}] {}", position, len(names), name)
+        try:
+            index_one(name)
+        except SystemExit:
+            # build_search_index signals its own failures this way; record and
+            # keep going rather than letting one collection end the run.
+            failures.append(name)
+        except Exception as exc:
+            logger.error("Failed to index '{}': {}", name, exc)
+            failures.append(name)
+    return failures
+
+
+def build_all_search_indexes() -> None:
+    """Create the search index and backfill every collection on this host.
+
+    Idempotent: collections already carrying ``search_text`` are scanned and
+    skipped cheaply, so re-running after a partial failure is safe.
+
+    Raises:
+        SystemExit: When any collection failed, so a partial migration cannot
+            be mistaken for a clean one.
+    """
+    rag = RAG(qdrant_collection="")
+    try:
+        failures = index_all_collections(rag, index_one=_index_one_physical)
+    finally:
+        rag.unload_models()
+
+    if failures:
+        logger.error(
+            "{} collection(s) failed and are NOT searchable: {}",
+            len(failures),
+            ", ".join(failures),
+        )
+        raise SystemExit(1)
+    logger.info("All collections indexed.")
+
+
+def _index_one_physical(physical: str) -> None:
+    """Index one already-resolved physical collection.
+
+    Args:
+        physical (str): Physical Qdrant collection name.
+
+    Raises:
+        SystemExit: Propagated from :func:`build_search_index` on failure.
+    """
+    build_search_index(physical)
+
+
+def main_all() -> None:
+    """Main function for the bulk search-index CLI."""
+    init_logger()
+    set_offline_env()
+    build_all_search_indexes()
 
 
 def main() -> None:

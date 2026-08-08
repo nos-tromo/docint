@@ -121,6 +121,24 @@ from a half-migrated collection are incomplete. Transient Qdrant failures
 during the run are retried, so one connection blip does not leave the
 collection stuck in that state.
 
+## `search-index-all` — backport every collection
+
+```bash
+make search-index-all        # every collection on this host
+```
+
+Source: `docint/cli/search_index.py`. Runs `search-index` across every
+collection, for the one-time backport onto a host that predates full-text
+search. Works on **physical** collection names, so two users owning the same
+logical name are simply two entries — the ambiguity that stops the single-
+collection command does not arise. Companion collections (`_images`,
+`_entities`, `_dockv`) are excluded; nothing searches them.
+
+One failing collection does not strand the rest: the run continues, names every
+failure at the end, and exits non-zero so a partial migration cannot be mistaken
+for a clean one. Idempotent — already-populated collections are scanned and
+skipped cheaply, so re-running after a partial failure is safe.
+
 ## `query` — batch chat, summaries, exports
 
 Source: `docint/cli/query.py`. The parser (`build_parser()` at
