@@ -97,8 +97,9 @@ backfill's scroll is fail-soft, so a missing collection would otherwise yield
 Source: `docint/cli/search_index.py`. Creates the `search_text` payload index
 on a collection and backfills the field across its existing points, which is
 what makes `POST /search` work there. Run it **once per collection ingested
-before full-text search shipped**; new ingests populate the field
-automatically.
+before full-text search shipped**. It is purely a backport: ingestion writes
+`search_text` *and* creates the payload index, so collections ingested since need
+no operator step at all.
 
 Payload-only — no re-embedding, no inference, no model downloads — so it is
 safe on an airgapped host and costs a scroll plus batched payload writes.

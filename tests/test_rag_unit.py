@@ -6302,3 +6302,32 @@ def test_scoped_retriever_leaves_uuid_ids_alone() -> None:
 
     assert seen["ids"] == ["7f3a-not-a-number"]
     assert [n.node.node_id for n in nodes] == ["7f3a-not-a-number"]
+
+
+def test_search_reports_not_indexed_when_the_payload_index_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A populated field without its index is not a working search.
+
+    Un-indexed MatchText case-folds ASCII only, so a lowercase German query
+    silently misses its title-case match. Reporting "ok" there would have an
+    investigator conclude a term is absent when the index is simply missing —
+    and "not_indexed" points at the remedy that actually creates it.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": False,
+            "total": 10,
+            "with_search_text": 10,
+            "missing": 0,
+            "complete": True,
+        },
+    )
+
+    result = rag.search_fulltext("berlin")
+
+    assert result["status"] == "not_indexed"
+    assert result["hits"] == []
