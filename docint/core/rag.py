@@ -1814,7 +1814,10 @@ class _ScopedRetriever(BaseRetriever):
             if point is None:
                 continue
             payload = dict(getattr(point, "payload", {}) or {})
-            text = RAG._extract_payload_text(payload)
+            # The same text that made this chunk searchable is the text
+            # that resolves it; otherwise an image could be found but
+            # not scoped.
+            text = RAG._extract_indexable_text(payload)
             if not text:
                 continue
             nodes.append(NodeWithScore(node=TextNode(id_=node_id, text=text, metadata=payload), score=None))
@@ -4508,6 +4511,23 @@ class RAG:
         if isinstance(bbox, dict):
             src["bbox"] = bbox
         return src
+
+    @staticmethod
+    def _extract_indexable_text(payload: dict[str, Any]) -> str:
+        """Return the text a point should be searchable by.
+
+        Document chunks keep their stored text. Image points fall back to
+        their caption and tags: those live in the payload, and depending only
+        on the serialized node would mark an image "without text" — silently
+        unsearchable, and recorded as processed so it never retries.
+
+        Args:
+            payload (dict[str, Any]): A Qdrant point payload.
+
+        Returns:
+            str: The indexable text, or an empty string when there is none.
+        """
+        return RAG._extract_payload_text(payload) or RAG._image_caption_text(payload)
 
     @staticmethod
     def _image_caption_text(payload: dict[str, Any]) -> str:
@@ -8105,7 +8125,7 @@ class RAG:
                 logger.warning("Chunk fetch failed for {} in {}: {}", node_id, lane, exc)
                 continue
             for point in points:
-                text = RAG._extract_payload_text(dict(getattr(point, "payload", {}) or {}))
+                text = RAG._extract_indexable_text(dict(getattr(point, "payload", {}) or {}))
                 if text:
                     return text
         return None

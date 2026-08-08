@@ -6522,3 +6522,24 @@ def test_chunk_text_falls_back_to_the_image_companion() -> None:
     rag._qdrant_client = _split_retrieve_client({}, {"i1": "a chart caption"})
 
     assert rag.get_chunk_text("i1") == "a chart caption"
+
+
+def test_indexable_text_falls_back_to_an_image_caption() -> None:
+    """An image point's caption and tags must be indexable on their own.
+
+    Real companion points carry the caption in ``_node_content``, but the
+    fields are right there in the payload; depending solely on the serialized
+    node would mark such a point "without text" — silently unsearchable, and
+    recorded as processed so it never retries.
+    """
+    payload = {"llm_description": "a bar chart", "llm_tags": ["chart", "election"]}
+
+    text = RAG._extract_indexable_text(payload)
+
+    assert "bar chart" in text
+    assert "chart" in text and "election" in text
+
+
+def test_indexable_text_prefers_the_stored_chunk_text() -> None:
+    """A document chunk must be unaffected by the image fallback."""
+    assert RAG._extract_indexable_text({"text": "a document chunk"}) == "a document chunk"

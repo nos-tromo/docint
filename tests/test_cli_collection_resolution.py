@@ -206,6 +206,7 @@ def _fake_rag_class(client: Any) -> Any:
 
     class _FakeRag:
         _extract_payload_text = staticmethod(lambda payload: "chunk text")
+        _extract_indexable_text = staticmethod(lambda payload: "chunk text")
 
         def __init__(self, **kwargs: Any) -> None:
             self.qdrant_client = client

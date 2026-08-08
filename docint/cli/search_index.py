@@ -70,7 +70,7 @@ def build_search_index(collection: str) -> None:
         summary = backfill_search_text(
             rag.qdrant_client,
             physical,
-            extract_text=RAG._extract_payload_text,
+            extract_text=RAG._extract_indexable_text,
             progress=lambda msg: logger.info(msg),
         )
 
@@ -86,7 +86,7 @@ def build_search_index(collection: str) -> None:
             image_summary = backfill_search_text(
                 rag.qdrant_client,
                 companion,
-                extract_text=RAG._extract_payload_text,
+                extract_text=RAG._extract_indexable_text,
                 progress=lambda msg: logger.info(msg),
             )
             logger.info(

@@ -181,6 +181,7 @@ Response:
       "page": 3,
       "row": null,
       "preview": "...",
+      "kind": "text",
       "entity_types": ["LOC"],
       "est_tokens": 412,
       "truncated": true
@@ -202,6 +203,13 @@ Response:
 Fetch the whole chunk on demand with `GET /search/chunk?id=<point id>` — it
 returns `{id, text}`, or `404` when the point is gone (re-ingestion mints new
 ids, and an empty body would read as an empty chunk rather than a missing one).
+
+Search covers two lanes: the collection's document chunks and its
+`{collection}_images` companion, whose points carry an image's caption and tags.
+`kind` is `"text"` or `"image"` — an image hit's body is a caption, not document
+prose. The lanes run in sequence and a page fills across the boundary, so a
+short final page of text hits never strands the image hits behind it. `total`
+covers both.
 
 Matching semantics:
 

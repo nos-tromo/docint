@@ -135,6 +135,7 @@ export const en = {
   'search.submit': 'Search',
   'search.searching': 'Searching…',
   'search.select_collection': 'Select a collection to search it.',
+  'search.kind_image': 'Image',
   'search.hits': '{count} hits',
   'search.docs': '{count} docs',
   'search.docs_more': '{count}+ docs',

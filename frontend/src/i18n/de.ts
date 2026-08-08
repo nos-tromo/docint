@@ -143,6 +143,7 @@ export const de: Strings = {
   'search.submit': 'Suchen',
   'search.searching': 'Suche läuft…',
   'search.select_collection': 'Wählen Sie eine Sammlung aus, um sie zu durchsuchen.',
+  'search.kind_image': 'Bild',
   'search.hits': '{count} Treffer',
   'search.docs': '{count} Dokumente',
   'search.docs_more': '{count}+ Dokumente',
