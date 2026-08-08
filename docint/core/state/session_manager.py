@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -651,6 +651,71 @@ class SessionManager:
             if not conv or conv.owner != owner:
                 return None
             return cast(str | None, conv.collection_name)
+
+    def get_scope(self, session_id: str, owner: str | None) -> list[str]:
+        """Return the chunk ids a session's answers are restricted to.
+
+        Owner-scoped like :meth:`get_session_collection`: a session that does
+        not exist or belongs to another principal yields ``[]``, so the caller
+        cannot probe other users' sessions.
+
+        Args:
+            session_id (str): The session to read.
+            owner (str | None): The principal requesting the lookup.
+
+        Returns:
+            list[str]: The scoped chunk ids; empty when unscoped, missing, or
+                not owned by ``owner``.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return []
+            raw = cast(str | None, conv.scope_chunk_ids)
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Discarding unparseable scope on session {}.", session_id)
+                return []
+            return [str(entry) for entry in parsed] if isinstance(parsed, list) else []
+
+    def set_scope(self, session_id: str, owner: str | None, chunk_ids: Sequence[str]) -> bool:
+        """Restrict a session's answers to a fixed set of chunks.
+
+        Args:
+            session_id (str): The session to scope.
+            owner (str | None): The principal that must own it.
+            chunk_ids (Sequence[str]): Qdrant point ids to answer from. An
+                empty sequence clears the scope.
+
+        Returns:
+            bool: ``True`` when stored, ``False`` when the session is missing
+                or not owned by ``owner``.
+        """
+        ids = [str(entry) for entry in chunk_ids if str(entry).strip()]
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return False
+            conv.scope_chunk_ids = json.dumps(ids) if ids else None
+            conv.scope_set_at = datetime.now(UTC) if ids else None
+            # ``_session_scope`` only closes the session; callers commit.
+            s.commit()
+            return True
+
+    def clear_scope(self, session_id: str, owner: str | None) -> bool:
+        """Return a session to normal retrieval.
+
+        Args:
+            session_id (str): The session to unscope.
+            owner (str | None): The principal that must own it.
+
+        Returns:
+            bool: ``True`` when cleared, ``False`` when missing or not owned.
+        """
+        return self.set_scope(session_id, owner, [])
 
     def _persist_turn(
         self, session_id: str, user_msg: str, resp: Any, data: dict[str, Any], *, owner: str | None = None
