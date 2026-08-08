@@ -2,7 +2,8 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { useScope, useSearch } from './useSearch'
+import { useChunkText, useScope, useSearch } from './useSearch'
+import { ApiError } from '@/api/client'
 import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 
@@ -147,6 +148,44 @@ describe('useSearch', () => {
 
     await new Promise((r) => setTimeout(r, 20))
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search'))).toBe(false)
+  })
+})
+
+describe('useChunkText', () => {
+  it('fetches nothing until the hit is expanded', async () => {
+    const fetchMock = mockFetch({ id: 'p1', text: 'the whole chunk' })
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    renderHook(() => useChunkText('p1', false), { wrapper })
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search/chunk'))).toBe(false)
+  })
+
+  it('fetches the chunk text once expanded, scoped to the collection', async () => {
+    const fetchMock = mockFetch({ id: 'p1', text: 'the whole chunk' })
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    const { result } = renderHook(() => useChunkText('p1', true), { wrapper })
+
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(result.current.data?.text).toBe('the whole chunk')
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search/chunk'))
+    expect(String(call![0])).toContain('id=p1')
+    expect(String(call![0])).toContain('collection=docs')
+  })
+
+  it('surfaces a 404 as an error, never as empty text', async () => {
+    // A re-ingest mints new point ids, so a hit can outlive its chunk. An
+    // empty string here would render as an empty chunk instead of a gone one.
+    mockFetch({ detail: 'Not found.' }, 404)
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    const { result } = renderHook(() => useChunkText('gone', true), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(result.current.data).toBeUndefined()
+    expect((result.current.error as ApiError).status).toBe(404)
   })
 })
 

@@ -91,6 +91,8 @@ export interface SearchHit {
   preview: string
   entity_types: string[]
   est_tokens: number
+  /** Whether `preview` was cut short — only then is there more to expand. */
+  truncated?: boolean
 }
 
 /** How much of the collection carries the `search_text` field. */
@@ -124,6 +126,18 @@ export interface SearchRequest {
   metadata_filters?: MetadataFilter[]
   limit?: number
   cursor?: string
+}
+
+/**
+ * One chunk's full text (`GET /search/chunk`).
+ *
+ * A search hit only carries a capped preview; this is what expanding it
+ * reveals. The backend answers 404 — never an empty `text` — when the chunk is
+ * gone, so "missing" and "empty" can never be confused at the UI.
+ */
+export interface ChunkText {
+  id: string
+  text: string
 }
 
 /** A session's pinned scope plus what it costs against the chat budget. */

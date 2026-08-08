@@ -1723,6 +1723,11 @@ def _as_qdrant_point_id(node_id: str) -> str | int:
     return int(node_id) if node_id.isdigit() else node_id
 
 
+#: Characters of chunk text a search hit carries inline. Beyond this the
+#: panel fetches the whole chunk on demand (``GET /search/chunk``).
+_SEARCH_PREVIEW_CHARS = 600
+
+
 class _ScopedRetriever(BaseRetriever):
     """Return exactly the chunks a session's scope names, in stable order.
 
@@ -8156,7 +8161,11 @@ class RAG:
                     "filename": source.get("filename"),
                     "page": source.get("page"),
                     "row": source.get("row"),
-                    "preview": text[:600].strip(),
+                    "preview": text[:_SEARCH_PREVIEW_CHARS].strip(),
+                    # Lets the panel offer "expand" only where there is
+                    # more to read; without it every hit invites a
+                    # round-trip that returns the text already on screen.
+                    "truncated": len(text) > _SEARCH_PREVIEW_CHARS,
                     "entity_types": sorted(
                         {
                             str(entity.get("type") or "Unlabeled")

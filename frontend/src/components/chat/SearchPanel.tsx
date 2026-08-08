@@ -77,11 +77,27 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const hits = search.data?.hits ?? []
   const docCount = new Set(hits.map((h) => h.filename ?? '').filter(Boolean)).size
 
-  const toggle = async (hit: SearchHit) => {
+  // The scope every hit currently loaded would produce: what is already picked
+  // plus every hit on screen. Selecting all is additive — it must not silently
+  // drop chunks picked from an earlier query.
+  const allLoadedTokens = (): Record<string, number> => {
+    const next = { ...scope.tokens }
+    for (const hit of hits) next[hit.id] = hit.est_tokens
+    return next
+  }
+  const projectedTokens = Object.values(allLoadedTokens()).reduce((sum, n) => sum + n, 0)
+  const projectedOverBudget = scope.usableTokens > 0 && projectedTokens > scope.usableTokens
+
+  /**
+   * Write a selection: optimistic locally, authoritative server-side.
+   *
+   * Shared by the checkbox, select-all and clear so all three keep the same
+   * rollback — the server refuses an oversize scope with 422, and a local
+   * selection left standing after that refusal would claim evidence the next
+   * answer will not use.
+   */
+  const commitScope = async (next: Record<string, number>) => {
     const previous = scope.tokens
-    const next = { ...previous }
-    if (hit.id in next) delete next[hit.id]
-    else next[hit.id] = hit.est_tokens
     // Optimistic: the meter must move on the click, not a round trip later.
     setScopeTokens(key, next)
     setScopeError(null)
@@ -103,6 +119,13 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         setScopeError(t(described.key, described.vars))
       }
     }
+  }
+
+  const toggle = (hit: SearchHit) => {
+    const next = { ...scope.tokens }
+    if (hit.id in next) delete next[hit.id]
+    else next[hit.id] = hit.est_tokens
+    return commitScope(next)
   }
 
   const searchError = (): string => {
@@ -194,6 +217,46 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
       {search.data?.status === 'ok' && hits.length === 0 && (
         <p className="text-xs text-muted-foreground" data-testid="search-no-matches">
           {t('search.no_matches')}
+        </p>
+      )}
+
+      {/* Bulk selection. The label says "loaded" because paging means the
+          result set on screen can be a small slice of `total`, and a control
+          that read "select all" would promise the rest. The projected cost is
+          shown *before* the click so an oversize selection is a visible number
+          rather than a 422 after the fact. */}
+      <div className="flex flex-wrap items-center gap-2" data-testid="scope-bulk">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={hits.length === 0}
+          title={t('search.select_all_loaded_title', { count: hits.length })}
+          onClick={() => void commitScope(allLoadedTokens())}
+        >
+          {t('search.select_all_loaded', { count: hits.length })}
+        </Button>
+        {/* Follows the *selection*, not the hits: after selecting chunks and
+            then searching for something with no matches, the selection is
+            still live and must stay clearable from here. */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={selectedIds.length === 0}
+          onClick={() => void commitScope({})}
+        >
+          {t('search.clear_selection')}
+        </Button>
+        {hits.length > 0 && (
+          <span className="text-xs text-muted-foreground" data-testid="select-all-cost">
+            {t('search.select_all_cost', { tokens: formatTokens(projectedTokens) })}
+          </span>
+        )}
+      </div>
+      {hits.length > 0 && projectedOverBudget && (
+        <p className="text-xs text-red-500" data-testid="select-all-over-budget">
+          {t('search.select_all_over_budget', { total: formatTokens(scope.usableTokens) })}
         </p>
       )}
 

@@ -6331,3 +6331,43 @@ def test_search_reports_not_indexed_when_the_payload_index_is_missing(
 
     assert result["status"] == "not_indexed"
     assert result["hits"] == []
+
+
+def test_search_hits_report_whether_the_preview_was_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a truncated preview has more to expand.
+
+    Without the flag the panel must offer expand on every hit, so a short
+    chunk invites a round-trip that returns the text already on screen.
+    """
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 2,
+            "with_search_text": 2,
+            "missing": 0,
+            "complete": True,
+        },
+    )
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [
+                    types.SimpleNamespace(id="short", payload={"text": "a short chunk"}),
+                    types.SimpleNamespace(id="long", payload={"text": "x" * 5000}),
+                ],
+                None,
+            ),
+            count=lambda **kwargs: types.SimpleNamespace(count=2),
+        ),
+    )
+
+    hits = {h["id"]: h for h in rag.search_fulltext("chunk")["hits"]}
+
+    assert hits["short"]["truncated"] is False
+    assert hits["long"]["truncated"] is True
