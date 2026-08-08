@@ -214,7 +214,7 @@ to a dedicated container instead of the default OpenAI-style base.
 
 | Variable | Default | Description |
 |---|---|---|
-| `EMBED_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the dense-embedding endpoint. Consumed by the OpenAI SDK, which appends `/embeddings` to it, so the value **must include `/v1`** (e.g. `http://embed-only:8000/v1`) — omitting it yields a silent 404. For the `embed-only` deployment shape (CPU container, pairs with `gliner-only` / `rerank-only` / `clip-only` for non-CUDA dev; serves dense embedding, sparse weights, and tokenization from one bge-m3 instance), set `EMBED_API_BASE=http://embed-only:8000/v1`. |
+| `EMBED_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the dense-embedding endpoint. Consumed by the OpenAI SDK, which appends `/embeddings` to it, so the value **must include `/v1`** (e.g. `http://embed-only:8000/v1`) — unlike `SPARSE_API_BASE`, which takes the bare host even when both point at the same container. Omitting it 404s every embedding call: an ingest fails on its pre-flight probe before staging any file, and a chat turn ends with the `embedding_unavailable` SSE code, both logging an `EmbeddingEndpointError` that names the resolved URL and this knob. For the `embed-only` deployment shape (CPU container, pairs with `gliner-only` / `rerank-only` / `clip-only` for non-CUDA dev; serves dense embedding, sparse weights, and tokenization from one bge-m3 instance), set `EMBED_API_BASE=http://embed-only:8000/v1`. |
 | `EMBED_API_KEY` | inherits `OPENAI_API_KEY` | Bearer token for the dense-embedding endpoint. `embed-only` requires no auth (trust `inference-net`); the full router requires the master key. |
 
 `EmbedClientConfig` has no timeout field of its own — the dense-embedding
