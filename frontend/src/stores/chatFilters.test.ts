@@ -4,7 +4,6 @@ import { useChatFiltersStore } from './chatFilters'
 beforeEach(() => {
   localStorage.clear()
   useChatFiltersStore.setState({
-    queryMode: 'answer',
     retrievalMode: 'session',
     filterEnabled: false,
     mimePattern: '',
@@ -16,12 +15,10 @@ beforeEach(() => {
 })
 
 describe('useChatFiltersStore', () => {
-  it('persists the query and retrieval modes', () => {
-    useChatFiltersStore.getState().setQueryMode('entity_occurrence')
+  it('persists the retrieval mode', () => {
     useChatFiltersStore.getState().setRetrievalMode('stateless')
 
     const persisted = JSON.parse(localStorage.getItem('docint-chat-filters') ?? '{}')
-    expect(persisted.state.queryMode).toBe('entity_occurrence')
     expect(persisted.state.retrievalMode).toBe('stateless')
   })
 
@@ -84,10 +81,10 @@ describe('useChatFiltersStore', () => {
   })
 
   it('does not persist action functions', () => {
-    useChatFiltersStore.getState().setQueryMode('entity_occurrence')
+    useChatFiltersStore.getState().setRetrievalMode('stateless')
 
     const persisted = JSON.parse(localStorage.getItem('docint-chat-filters') ?? '{}')
-    expect(persisted.state.setQueryMode).toBeUndefined()
+    expect(persisted.state.setRetrievalMode).toBeUndefined()
     expect(persisted.state.buildPayload).toBeUndefined()
   })
 })

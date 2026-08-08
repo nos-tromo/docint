@@ -159,7 +159,6 @@ export function Chat() {
           // active collection anymore).
           collection: selectedCollection ?? undefined,
           metadata_filters: filters.buildPayload(),
-          query_mode: filters.queryMode,
           retrieval_mode: filters.retrievalMode
         },
         ac.signal
@@ -298,20 +297,6 @@ export function Chat() {
 
       <aside className="space-y-4">
         <div className="flex flex-col gap-2 text-sm">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs uppercase text-muted-foreground">{t('chat.query_mode')}</span>
-            <select
-              value={filters.queryMode}
-              onChange={(e) => filters.setQueryMode(e.target.value as typeof filters.queryMode)}
-              className="bg-muted border border-border rounded-md px-2 py-1"
-            >
-              <option value="answer">{t('chat.mode_answer')}</option>
-              <option value="entity_occurrence">{t('chat.mode_entity_occurrence')}</option>
-              <option value="entity_occurrence_multi">
-                {t('chat.mode_entity_occurrence_multi')}
-              </option>
-            </select>
-          </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs uppercase text-muted-foreground">{t('chat.retrieval')}</span>
             <select

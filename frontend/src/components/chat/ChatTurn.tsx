@@ -7,7 +7,6 @@ import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
 import { GraphDebugPanel } from './GraphDebugPanel'
-import { EntityCandidatesPanel } from './EntityCandidatesPanel'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { chatAnswerSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
@@ -121,7 +120,6 @@ export function ChatTurn({
           </div>
         )}
         {!!turn.meta?.graph_debug && <GraphDebugPanel data={turn.meta.graph_debug} />}
-        {turn.meta && <EntityCandidatesPanel meta={turn.meta} />}
       </div>
     </article>
   )

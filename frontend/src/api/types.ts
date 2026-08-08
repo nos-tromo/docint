@@ -60,8 +60,6 @@ export interface ChatFinalEvent extends ValidationFields {
   graph_debug?: unknown
   retrieval_query?: string
   coverage_unit?: string
-  entity_match_candidates?: unknown[]
-  entity_match_groups?: unknown[]
 }
 
 /** A rule targets either one `field` or several `fields`; with several, it
@@ -74,7 +72,6 @@ export interface MetadataFilter {
   values?: unknown[]
 }
 
-export type QueryMode = 'answer' | 'entity_occurrence' | 'entity_occurrence_multi'
 export type RetrievalMode = 'stateless' | 'session'
 
 export interface ChatRequest {
@@ -88,7 +85,6 @@ export interface ChatRequest {
   collection?: string
   metadata_filters?: MetadataFilter[]
   retrieval_mode?: RetrievalMode
-  query_mode?: QueryMode
 }
 
 export interface SessionSummary {

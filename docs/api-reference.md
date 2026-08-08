@@ -99,17 +99,13 @@ Request (`QueryIn`):
   "question": "What is in this document?",
   "session_id": null,
   "metadata_filters": [],
-  "retrieval_mode": "session",
-  "query_mode": "answer"
+  "retrieval_mode": "session"
 }
 ```
 
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
   `RAG.run_query()` directly.
-- `query_mode` — `answer` (default), `entity_occurrence`, or
-  `entity_occurrence_multi`. The entity modes route through
-  `RAG.run_entity_occurrence_query()` / `run_multi_entity_occurrence_query()`.
 - `metadata_filters` — list of `MetadataFilterIn` objects with
   `{field, fields, operator, value, values}`. Supported operators: `eq`, `neq`,
   `gt`, `gte`, `lt`, `lte`, `in`, `contains`, `mime_match`, `date_after`,
@@ -132,8 +128,6 @@ Response (`QueryOut`):
   "retrieval_query": "...",
   "coverage_unit": null,
   "retrieval_mode": "session",
-  "entity_match_candidates": [],
-  "entity_match_groups": [],
   "validation_checked": true,
   "validation_mismatch": false,
   "validation_reason": null

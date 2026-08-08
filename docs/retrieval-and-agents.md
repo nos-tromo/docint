@@ -91,9 +91,7 @@ the contextual understanding agent.
   `SessionManager.chat()` (`docint/core/state/session_manager.py`).
 - **Streaming chat** — `stream_chat(...)` yields token-level events
   for SSE streaming.
-- **NER queries** — `get_collection_ner()`,
-  `run_entity_occurrence_query()`,
-  `run_multi_entity_occurrence_query()`.
+- **NER queries** — `get_collection_ner()`.
 - **Summarisation** — `build_tree_summary()` drives
   `/summarize` with the knobs from
   [`SummaryConfig`](configuration.md#summarisation--summaryconfig).
