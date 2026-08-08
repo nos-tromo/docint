@@ -30,12 +30,42 @@ const HIT = {
   est_tokens: 1200
 }
 
+const HIT2 = {
+  id: 'p2',
+  chunk_id: 'c2',
+  filename: 'beta.pdf',
+  page: 7,
+  row: null,
+  preview: 'Zweiter Abschnitt zum Parteitag.',
+  entity_types: [],
+  est_tokens: 1200
+}
+
+/** The text only the expanded view shows — never part of a hit's preview. */
+const FULL_TEXT = 'Der Parteitag beschloss den Tagesordnungspunkt. Danach folgte die Aussprache.'
+
 const SCOPE_OK = { chunk_ids: ['p1'], est_tokens: 1200, usable_tokens: 22000, missing: 0 }
 
-/** Route by URL so one mock serves both /search and the scope endpoints. */
-function mockApi(search: SearchResult, scope: { body: unknown; status?: number } = { body: SCOPE_OK }) {
+const CHUNK_OK = { body: { id: 'p1', text: FULL_TEXT } }
+
+/** Route by URL so one mock serves /search, /search/chunk and the scope endpoints. */
+function mockApi(
+  search: SearchResult,
+  scope: { body: unknown; status?: number } = { body: SCOPE_OK },
+  chunk: { body: unknown; status?: number } = CHUNK_OK
+) {
   const fn = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
     const u = typeof req === 'string' ? req : String(req)
+    // Checked before '/scope' *and* before the generic '/search' fallthrough.
+    if (u.includes('/search/chunk')) {
+      const status = chunk.status ?? 200
+      return Promise.resolve({
+        ok: status < 400,
+        status,
+        json: async () => chunk.body,
+        text: async () => JSON.stringify(chunk.body)
+      })
+    }
     if (u.includes('/scope')) {
       const status = scope.status ?? 200
       return Promise.resolve({
@@ -289,6 +319,234 @@ describe('SearchPanel hit rendering', () => {
 
     const link = await screen.findByRole('link', { name: /documents/i })
     expect(link).toHaveAttribute('href', '/inspector')
+  })
+})
+
+describe('SearchPanel hit expansion', () => {
+  const okResult: SearchResult = {
+    status: 'ok',
+    hits: [HIT],
+    total: 1,
+    next_cursor: null,
+    index_status: INDEX_STATUS
+  }
+
+  it('fetches and renders the full chunk on expand, and hides it again on collapse', async () => {
+    const fetchMock = mockApi(okResult)
+
+    renderPanel()
+
+    // Nothing is fetched for a hit nobody opened.
+    await screen.findByText(/alpha\.pdf/)
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search/chunk'))).toBe(false)
+
+    await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
+
+    const body = await screen.findByTestId('hit-full-text')
+    expect(body).toHaveTextContent(/Danach folgte die Aussprache/)
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search/chunk'))
+    expect(String(call![0])).toContain('id=p1')
+
+    await userEvent.click(screen.getByRole('button', { name: /hide full chunk/i }))
+
+    expect(screen.queryByTestId('hit-full-text')).toBeNull()
+    expect(screen.getByTestId('hit-preview')).toHaveTextContent(/Der Parteitag beschloss/)
+    expect(screen.queryByText(/Danach folgte die Aussprache/)).toBeNull()
+  })
+
+  it('caches the fetched text, so re-expanding costs no second request', async () => {
+    const fetchMock = mockApi(okResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
+    await screen.findByTestId('hit-full-text')
+    await userEvent.click(screen.getByRole('button', { name: /hide full chunk/i }))
+    await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
+
+    await screen.findByTestId('hit-full-text')
+    const chunkCalls = fetchMock.mock.calls.filter(([u]) => String(u).includes('/search/chunk'))
+    expect(chunkCalls).toHaveLength(1)
+  })
+
+  it('shows a loading state while the chunk text is in flight', async () => {
+    let release: (() => void) | null = null
+    const gate = new Promise<void>((resolve) => {
+      release = () => resolve()
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (req: RequestInfo | URL) => {
+        const u = String(req)
+        const body: unknown = u.includes('/search/chunk') ? { id: 'p1', text: FULL_TEXT } : okResult
+        if (u.includes('/search/chunk')) await gate
+        return {
+          ok: true,
+          status: 200,
+          json: async () => body,
+          text: async () => JSON.stringify(body)
+        }
+      })
+    )
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
+
+    expect(await screen.findByTestId('hit-loading')).toBeInTheDocument()
+    release!()
+    expect(await screen.findByTestId('hit-full-text')).toHaveTextContent(/Danach folgte/)
+    expect(screen.queryByTestId('hit-loading')).toBeNull()
+  })
+
+  it('says the chunk no longer exists on a 404 — not that it is empty', async () => {
+    // Re-ingestion mints new point ids, so a hit can outlive its chunk. An
+    // empty body here would read as an empty chunk, which is a different claim.
+    mockApi(okResult, { body: SCOPE_OK }, { body: { detail: 'Not found.' }, status: 404 })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
+
+    expect(await screen.findByTestId('hit-chunk-error')).toHaveTextContent(/no longer exists/i)
+    // No empty expanded body pretending to be the chunk; the preview stands.
+    expect(screen.queryByTestId('hit-full-text')).toBeNull()
+    expect(screen.getByTestId('hit-preview')).toHaveTextContent(/Der Parteitag beschloss/)
+    // The raw backend body is never rendered.
+    expect(screen.queryByText(/Not found/)).toBeNull()
+  })
+
+  it('highlights the searched keywords in the expanded text too', async () => {
+    mockApi(okResult)
+
+    const { container } = renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
+    await screen.findByTestId('hit-full-text')
+
+    const marked = [...container.querySelectorAll('mark')].map((el) => el.textContent)
+    expect(marked).toEqual(['Parteitag'])
+  })
+
+  it('leaves the selection alone — expanding and scoping are separate controls', async () => {
+    const fetchMock = mockApi(okResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
+    await screen.findByTestId('hit-full-text')
+
+    expect(screen.getByRole('checkbox', { name: /alpha\.pdf/i })).not.toBeChecked()
+    expect(useSearchUiStore.getState().scopes[SESSION]?.tokens ?? {}).toEqual({})
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/sessions'))).toBe(false)
+  })
+})
+
+describe('SearchPanel bulk selection', () => {
+  const twoHits: SearchResult = {
+    status: 'ok',
+    hits: [HIT, HIT2],
+    total: 42,
+    next_cursor: 'next',
+    index_status: INDEX_STATUS
+  }
+
+  it('projects what selecting all would cost before anything is committed', async () => {
+    const fetchMock = mockApi(twoHits)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    // 1200 + 1200 est_tokens, shown up front so an oversize pick is visible
+    // rather than a 422 after the click.
+    expect(screen.getByTestId('select-all-cost')).toHaveTextContent('≈2.4k tokens if selected')
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(false)
+    // The button names the loaded slice, not the 42 matches behind it.
+    expect(screen.getByRole('button', { name: /select all 2 loaded/i })).toBeInTheDocument()
+  })
+
+  it('adds every loaded hit to the scope', async () => {
+    const fetchMock = mockApi(twoHits)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /select all 2 loaded/i }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1]!.body))).toEqual({ chunk_ids: ['p1', 'p2'] })
+    })
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200, p2: 1200 })
+    })
+  })
+
+  it('clears the whole selection in one go', async () => {
+    useSearchUiStore.setState({
+      scopes: { [SESSION]: { tokens: { p1: 1200, p2: 1200 }, usableTokens: 22000, missing: 0 } }
+    })
+    const fetchMock = mockApi(twoHits)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /clear selection/i }))
+
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({})
+    })
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
+    expect(JSON.parse(String(call![1]!.body))).toEqual({ chunk_ids: [] })
+  })
+
+  it('warns when selecting all would not fit the measured budget', async () => {
+    useSearchUiStore.setState({
+      scopes: { [SESSION]: { tokens: {}, usableTokens: 1000, missing: 0 } }
+    })
+    mockApi(twoHits)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    expect(screen.getByTestId('select-all-over-budget')).toHaveTextContent(/would exceed/i)
+  })
+
+  it('rolls a refused select-all back, like a single checkbox', async () => {
+    mockApi(twoHits, { body: { detail: 'Invalid request.' }, status: 422 })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: /select all 2 loaded/i }))
+
+    expect(await screen.findByText(/larger than the answer can hold/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({})
+    })
+    expect(screen.queryByText(/Invalid request/)).toBeNull()
+  })
+
+  it('disables both controls when there is nothing loaded to select', async () => {
+    mockApi({
+      status: 'ok',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await screen.findByTestId('search-no-matches')
+    expect(screen.getByRole('button', { name: /select all 0 loaded/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /clear selection/i })).toBeDisabled()
   })
 })
 

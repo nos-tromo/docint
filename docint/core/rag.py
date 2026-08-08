@@ -1723,6 +1723,11 @@ def _as_qdrant_point_id(node_id: str) -> str | int:
     return int(node_id) if node_id.isdigit() else node_id
 
 
+#: Characters of chunk text a search hit carries inline. Beyond this the
+#: panel fetches the whole chunk on demand (``GET /search/chunk``).
+_SEARCH_PREVIEW_CHARS = 600
+
+
 class _ScopedRetriever(BaseRetriever):
     """Return exactly the chunks a session's scope names, in stable order.
 
@@ -8036,6 +8041,40 @@ class RAG:
             "fits": est <= usable_tokens,
         }
 
+    def get_chunk_text(self, chunk_id: str) -> str | None:
+        """Return one chunk's full text, for expanding a search hit.
+
+        Search hits carry only a capped ``preview`` — returning full text for
+        every hit would inflate each search by an order of magnitude for
+        something most hits never need — so the whole chunk is fetched on
+        demand.
+
+        Args:
+            chunk_id (str): Qdrant point id.
+
+        Returns:
+            str | None: The chunk text, or ``None`` when the point is gone
+                (re-ingestion mints new ids) or carries no text.
+        """
+        node_id = str(chunk_id or "").strip()
+        if not node_id:
+            return None
+        try:
+            points = self.qdrant_client.retrieve(
+                collection_name=self.qdrant_collection,
+                ids=[_as_qdrant_point_id(node_id)],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Chunk fetch failed for {} in {}: {}", node_id, self.qdrant_collection, exc)
+            return None
+        for point in points:
+            text = RAG._extract_payload_text(dict(getattr(point, "payload", {}) or {}))
+            if text:
+                return text
+        return None
+
     def search_fulltext(
         self,
         query: str,
@@ -8122,7 +8161,11 @@ class RAG:
                     "filename": source.get("filename"),
                     "page": source.get("page"),
                     "row": source.get("row"),
-                    "preview": text[:600].strip(),
+                    "preview": text[:_SEARCH_PREVIEW_CHARS].strip(),
+                    # Lets the panel offer "expand" only where there is
+                    # more to read; without it every hit invites a
+                    # round-trip that returns the text already on screen.
+                    "truncated": len(text) > _SEARCH_PREVIEW_CHARS,
                     "entity_types": sorted(
                         {
                             str(entity.get("type") or "Unlabeled")

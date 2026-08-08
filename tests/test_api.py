@@ -185,6 +185,17 @@ class DummyRAG:
             "fits": self.scope_fits,
         }
 
+    def get_chunk_text(self, chunk_id: str) -> str | None:
+        """Return the stored text for a chunk, or None when it is gone.
+
+        Args:
+            chunk_id (str): Qdrant point id.
+
+        Returns:
+            str | None: The chunk text, or ``None`` when absent.
+        """
+        return "the whole chunk text" if chunk_id == "c1" else None
+
     def search_fulltext(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """Record the call and return an empty result set.
 
@@ -4110,5 +4121,27 @@ def test_scope_on_an_unowned_session_is_not_found(client: TestClient) -> None:
         response = client.put("/sessions/other/scope", json={"chunk_ids": ["c1"]})
     finally:
         sessions.scope_owned = True
+
+    assert response.status_code == 404
+
+
+def test_chunk_endpoint_returns_the_full_text(client: TestClient) -> None:
+    """Expanding a hit needs the whole chunk, which search does not carry.
+
+    ``preview`` is capped, and returning full text for every hit would inflate
+    each search by an order of magnitude for something most hits never need —
+    so it is fetched on demand.
+    """
+    response = client.get("/search/chunk", params={"id": "c1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "c1"
+    assert body["text"] == "the whole chunk text"
+
+
+def test_chunk_endpoint_404s_for_an_unknown_chunk(client: TestClient) -> None:
+    """A chunk that is gone must not read as an empty one."""
+    response = client.get("/search/chunk", params={"id": "gone"})
 
     assert response.status_code == 404

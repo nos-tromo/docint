@@ -182,7 +182,8 @@ Response:
       "row": null,
       "preview": "...",
       "entity_types": ["LOC"],
-      "est_tokens": 412
+      "est_tokens": 412,
+      "truncated": true
     }
   ],
   "total": 14,
@@ -196,6 +197,11 @@ Response:
   }
 }
 ```
+
+`preview` is capped at 600 characters; `truncated` says whether there is more.
+Fetch the whole chunk on demand with `GET /search/chunk?id=<point id>` — it
+returns `{id, text}`, or `404` when the point is gone (re-ingestion mints new
+ids, and an empty body would read as an empty chunk rather than a missing one).
 
 Matching semantics:
 

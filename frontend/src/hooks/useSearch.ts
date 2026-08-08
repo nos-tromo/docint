@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { searchCollection } from '@/api/search'
+import { fetchChunkText, searchCollection } from '@/api/search'
 import { clearScope, setScope } from '@/api/scope'
-import type { MetadataFilter, SearchResult } from '@/api/types'
+import type { ChunkText, MetadataFilter, SearchResult } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 
@@ -41,6 +41,38 @@ export function useSearch(query: string) {
     enabled: !!collection && trimmed.length > 0,
     // A blank/too-short query is a 422 the user must fix; retrying it just
     // delays the message.
+    retry: false
+  })
+}
+
+export const chunkTextQueryKey = (collection: string | null, id: string) =>
+  ['search-chunk', collection, id] as const
+
+/**
+ * Fetch one hit's full chunk text, on demand.
+ *
+ * Gated on `enabled` so nothing is fetched until a hit is actually expanded —
+ * a search page of 20 hits would otherwise cost 20 extra requests for text
+ * nobody asked to read. Once fetched the text is immutable for that point id
+ * (a re-ingest mints new ids rather than rewriting a chunk), so it never goes
+ * stale and collapsing then re-expanding is free.
+ *
+ * A 404 is terminal and meaningful — the chunk is gone — so it is neither
+ * retried nor smoothed into an empty result; the caller renders it as its own
+ * state.
+ *
+ * @param id - The hit's Qdrant point id.
+ * @param enabled - Whether the hit is expanded.
+ * @returns The TanStack Query result carrying the chunk text.
+ */
+export function useChunkText(id: string, enabled: boolean) {
+  const collection = useUiStore((s) => s.selectedCollection)
+
+  return useQuery<ChunkText>({
+    queryKey: chunkTextQueryKey(collection, id),
+    queryFn: () => fetchChunkText(id, collection ?? undefined),
+    enabled: enabled && !!collection && id.length > 0,
+    staleTime: Infinity,
     retry: false
   })
 }

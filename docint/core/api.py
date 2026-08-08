@@ -1294,6 +1294,50 @@ def clear_session_scope(
     return ScopeOut()
 
 
+class ChunkOut(BaseModel):
+    """One chunk's full text, for expanding a search hit."""
+
+    id: str
+    text: str
+
+
+@app.get("/search/chunk", response_model=ChunkOut, tags=["Query"])
+def get_search_chunk(
+    id: str,
+    collection: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> ChunkOut:
+    """Return one chunk's full text.
+
+    Search hits carry a capped preview; this backs expanding a single hit
+    without inflating every search response with text most hits never need.
+
+    Args:
+        id (str): Qdrant point id from a search hit.
+        collection (str | None): Caller's logical collection, owner-gated.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        ChunkOut: The chunk id and its full text.
+
+    Raises:
+        HTTPException: 404 when the chunk is gone or carries no text — a
+            re-ingested collection mints new ids, and an empty string would
+            read as an empty chunk rather than a missing one. 500 on failure.
+    """
+    try:
+        with _scoped_collection(collection, principal):
+            text = rag.get_chunk_text(id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("Error fetching chunk text")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if text is None:
+        raise HTTPException(status_code=404, detail="Not found.")
+    return ChunkOut(id=id, text=text)
+
+
 @app.post("/search", response_model=SearchOut, tags=["Query"])
 def search_collection(
     payload: SearchIn,

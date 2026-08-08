@@ -148,6 +148,18 @@ export const en = {
   'search.budget_selected': '≈{used} tokens selected',
   'search.budget_exceeded':
     'That selection is larger than the answer can hold. Deselect some chunks and try again.',
+  'search.expand_hit': 'Show full chunk',
+  'search.collapse_hit': 'Hide full chunk',
+  'search.chunk_loading': 'Loading the full chunk…',
+  'search.chunk_gone':
+    'This chunk no longer exists. Re-ingesting a collection replaces its chunks, so a hit found earlier can outlive the text behind it.',
+  'search.select_all_loaded': 'Select all {count} loaded',
+  'search.select_all_loaded_title':
+    'Adds the {count} results loaded so far to the scope — not every match, only what is on screen.',
+  'search.select_all_cost': '≈{tokens} tokens if selected',
+  'search.select_all_over_budget':
+    'That would exceed the {total} tokens an answer can hold, so the selection would be refused.',
+  'search.clear_selection': 'Clear selection',
   'search.scope_add_aria': 'Answer only from {label}',
   'search.scope_remove_aria': 'Stop answering from {label}',
   'search.scope_pending': 'Selected chunks apply once this chat has started.',

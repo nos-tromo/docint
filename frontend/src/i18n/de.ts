@@ -156,6 +156,18 @@ export const de: Strings = {
   'search.budget_selected': '≈{used} Tokens ausgewählt',
   'search.budget_exceeded':
     'Diese Auswahl ist größer, als die Antwort fassen kann. Wählen Sie einige Abschnitte ab und versuchen Sie es erneut.',
+  'search.expand_hit': 'Ganzen Abschnitt anzeigen',
+  'search.collapse_hit': 'Ganzen Abschnitt ausblenden',
+  'search.chunk_loading': 'Ganzer Abschnitt wird geladen…',
+  'search.chunk_gone':
+    'Dieser Abschnitt existiert nicht mehr. Beim erneuten Einlesen einer Sammlung werden ihre Abschnitte ersetzt, sodass ein früher gefundener Treffer den Text dahinter überdauern kann.',
+  'search.select_all_loaded': 'Alle {count} geladenen auswählen',
+  'search.select_all_loaded_title':
+    'Fügt die bisher geladenen {count} Treffer zur Eingrenzung hinzu — nicht alle Treffer, nur die angezeigten.',
+  'search.select_all_cost': '≈{tokens} Tokens bei Auswahl',
+  'search.select_all_over_budget':
+    'Damit würden die {total} Tokens überschritten, die eine Antwort fassen kann; die Auswahl würde abgelehnt.',
+  'search.clear_selection': 'Auswahl aufheben',
   'search.scope_add_aria': 'Nur aus {label} antworten',
   'search.scope_remove_aria': 'Nicht mehr aus {label} antworten',
   'search.scope_pending': 'Ausgewählte Abschnitte greifen, sobald dieser Chat begonnen hat.',
