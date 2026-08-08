@@ -84,6 +84,16 @@ uv run search-index                       # prompts for the collection
 make search-index COLLECTION=demo         # non-interactive, in Docker
 ```
 
+Takes the **logical** collection name — the one the app shows. Collections are
+owner-namespaced in Qdrant (`u<owner-hash>__<logical>`), so the physical name is
+resolved from the ownership store; a physical name is also accepted as typed. A
+name that matches nothing, or a logical name owned by several users, stops the
+run with a non-zero exit rather than a guess.
+
+The command exits non-zero on any failure and prints no "ready" line — the
+backfill's scroll is fail-soft, so a missing collection would otherwise yield
+`0 scanned, 0 written`, which reads exactly like an already-migrated one.
+
 Source: `docint/cli/search_index.py`. Creates the `search_text` payload index
 on a collection and backfills the field across its existing points, which is
 what makes `POST /search` work there. Run it **once per collection ingested

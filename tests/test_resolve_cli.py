@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
 import docint.cli.resolve as cli
@@ -19,6 +21,10 @@ def test_resolve_cli_invokes_rag_and_unloads(monkeypatch: pytest.MonkeyPatch) ->
     class _FakeRAG:
         def __init__(self, *, qdrant_collection: str) -> None:
             calls["collection"] = qdrant_collection
+            # The CLI resolves logical -> physical before running; a client
+            # that reports the name already exists makes that step a no-op so
+            # this test stays about the resolve call, not name resolution.
+            self.qdrant_client = types.SimpleNamespace(collection_exists=lambda collection_name: True)
 
         def resolve_entities(self, *, progress_callback: object = None) -> ResolutionSummary:
             calls["resolved"] = True
@@ -44,7 +50,10 @@ def test_resolve_cli_unloads_even_on_error(monkeypatch: pytest.MonkeyPatch) -> N
 
     class _BoomRAG:
         def __init__(self, *, qdrant_collection: str) -> None:
-            pass
+            # The CLI resolves logical -> physical before running; a client
+            # that reports the name already exists makes that step a no-op so
+            # these tests stay about unloading, not name resolution.
+            self.qdrant_client = types.SimpleNamespace(collection_exists=lambda collection_name: True)
 
         def resolve_entities(self, *, progress_callback: object = None) -> ResolutionSummary:
             raise RuntimeError("boom")
