@@ -18,7 +18,7 @@ from loguru import logger
 
 from docint.cli._collection import CollectionNotFoundError, resolve_collection_name
 from docint.core.rag import RAG
-from docint.core.search.index import backfill_search_text, ensure_search_index
+from docint.core.search.index import backfill_search_text, ensure_search_index, image_companion_name
 from docint.utils.env_cfg import set_offline_env
 from docint.utils.logger_cfg import init_logger
 
@@ -70,9 +70,33 @@ def build_search_index(collection: str) -> None:
         summary = backfill_search_text(
             rag.qdrant_client,
             physical,
-            extract_text=RAG._extract_payload_text,
+            extract_text=RAG._extract_indexable_text,
             progress=lambda msg: logger.info(msg),
         )
+
+        # Image captions and tags live in the companion, not the main
+        # collection. Indexing only the latter would leave every figure and
+        # video keyframe unfindable by keyword while this run reported
+        # success. A collection with no images simply has no companion.
+        companion = image_companion_name(physical)
+        if rag.qdrant_client.collection_exists(collection_name=companion):
+            if not ensure_search_index(rag.qdrant_client, companion):
+                logger.error("Could not create the search index on '{}'.", companion)
+                raise SystemExit(1)
+            image_summary = backfill_search_text(
+                rag.qdrant_client,
+                companion,
+                extract_text=RAG._extract_indexable_text,
+                progress=lambda msg: logger.info(msg),
+            )
+            logger.info(
+                "Image companion '{}': {} scanned, {} written, {} already populated, {} without text.",
+                companion,
+                image_summary.scanned,
+                image_summary.written,
+                image_summary.skipped,
+                image_summary.empty,
+            )
     finally:
         rag.unload_models()
 

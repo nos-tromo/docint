@@ -83,6 +83,9 @@ export interface SearchHit {
   /** Qdrant point id — the value a scope is written with. */
   id: string
   chunk_id?: string | null
+  /** `image` hits come from the `_images` companion: their body is a caption
+ *  and tags, not document prose. */
+  kind?: 'text' | 'image'
   /** Document hash — lets a hit deep-link into the Inspector's source preview. */
   file_hash?: string | null
   filename?: string | null

@@ -320,7 +320,22 @@ describe('SearchPanel hit rendering', () => {
     const link = await screen.findByRole('link', { name: /documents/i })
     expect(link).toHaveAttribute('href', '/inspector')
   })
+  it('marks an image hit so a caption is not mistaken for document prose', async () => {
+    // Image hits come from the `_images` companion: their body is a caption
+    // and tags, so they read differently from a document chunk.
+    mockApi({
+      status: 'ok',
+      hits: [{ ...HIT, id: 'img1', kind: 'image' as const }],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+    renderPanel()
+
+    expect(await screen.findByText('Image')).toBeInTheDocument()
+  })
 })
+
 
 describe('SearchPanel hit expansion', () => {
   const okResult: SearchResult = {

@@ -150,7 +150,12 @@ from docint.core.ner import (
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
 from docint.core.search.fulltext import build_search_filter, parse_keywords
-from docint.core.search.index import ensure_search_index, search_index_status, write_search_text
+from docint.core.search.index import (
+    ensure_search_index,
+    image_companion_name,
+    search_index_status,
+    write_search_text,
+)
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
@@ -1753,6 +1758,30 @@ class _ScopedRetriever(BaseRetriever):
         #: reported rather than silently narrowing the evidence.
         self.missing = 0
 
+    def _fetch(self, collection: str, node_ids: Sequence[str]) -> dict[str, Any]:
+        """Retrieve points by id from one collection.
+
+        Args:
+            collection (str): Collection to read from.
+            node_ids (Sequence[str]): Point ids to fetch.
+
+        Returns:
+            dict[str, Any]: ``{point_id: point}`` for whatever was found; an
+                outage yields an empty mapping so the caller reports those ids
+                missing rather than raising mid-answer.
+        """
+        try:
+            points = self._rag.qdrant_client.retrieve(
+                collection_name=collection,
+                ids=[_as_qdrant_point_id(node_id) for node_id in node_ids],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Scoped retrieve failed for {}: {}", collection, exc)
+            return {}
+        return {str(getattr(point, "id", "")): point for point in points}
+
     @override
     def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
         """Fetch the scoped points and rebuild them as nodes.
@@ -1768,26 +1797,27 @@ class _ScopedRetriever(BaseRetriever):
         if not self._node_ids:
             self.missing = 0
             return []
-        try:
-            points = self._rag.qdrant_client.retrieve(
-                collection_name=self._rag.qdrant_collection,
-                ids=[_as_qdrant_point_id(node_id) for node_id in self._node_ids],
-                with_payload=True,
-                with_vectors=False,
-            )
-        except Exception as exc:
-            logger.warning("Scoped retrieve failed for {}: {}", self._rag.qdrant_collection, exc)
-            self.missing = len(self._node_ids)
-            return []
 
-        by_id = {str(getattr(point, "id", "")): point for point in points}
+        collection = self._rag.qdrant_collection
+        by_id = self._fetch(collection, self._node_ids)
+        # A scoped image hit's chunk lives in the companion, not here. Looking
+        # only in the main collection would resolve it to nothing and report it
+        # missing — a scoped answer built on part of the selected evidence.
+        unresolved = [node_id for node_id in self._node_ids if node_id not in by_id]
+        if unresolved:
+            companion = image_companion_name(collection)
+            if self._rag._collection_exists(companion):
+                by_id.update(self._fetch(companion, unresolved))
         nodes: list[NodeWithScore] = []
         for node_id in self._node_ids:
             point = by_id.get(node_id)
             if point is None:
                 continue
             payload = dict(getattr(point, "payload", {}) or {})
-            text = RAG._extract_payload_text(payload)
+            # The same text that made this chunk searchable is the text
+            # that resolves it; otherwise an image could be found but
+            # not scoped.
+            text = RAG._extract_indexable_text(payload)
             if not text:
                 continue
             nodes.append(NodeWithScore(node=TextNode(id_=node_id, text=text, metadata=payload), score=None))
@@ -4509,6 +4539,23 @@ class RAG:
         if isinstance(bbox, dict):
             src["bbox"] = bbox
         return src
+
+    @staticmethod
+    def _extract_indexable_text(payload: dict[str, Any]) -> str:
+        """Return the text a point should be searchable by.
+
+        Document chunks keep their stored text. Image points fall back to
+        their caption and tags: those live in the payload, and depending only
+        on the serialized node would mark an image "without text" — silently
+        unsearchable, and recorded as processed so it never retries.
+
+        Args:
+            payload (dict[str, Any]): A Qdrant point payload.
+
+        Returns:
+            str: The indexable text, or an empty string when there is none.
+        """
+        return RAG._extract_payload_text(payload) or RAG._image_caption_text(payload)
 
     @staticmethod
     def _image_caption_text(payload: dict[str, Any]) -> str:
@@ -8090,20 +8137,28 @@ class RAG:
         node_id = str(chunk_id or "").strip()
         if not node_id:
             return None
-        try:
-            points = self.qdrant_client.retrieve(
-                collection_name=self.qdrant_collection,
-                ids=[_as_qdrant_point_id(node_id)],
-                with_payload=True,
-                with_vectors=False,
-            )
-        except Exception as exc:
-            logger.warning("Chunk fetch failed for {} in {}: {}", node_id, self.qdrant_collection, exc)
-            return None
-        for point in points:
-            text = RAG._extract_payload_text(dict(getattr(point, "payload", {}) or {}))
-            if text:
-                return text
+        # Image hits live in the companion, so both lanes are tried before
+        # calling a chunk gone.
+        lanes = [self.qdrant_collection]
+        companion = image_companion_name(self.qdrant_collection)
+        if self._collection_exists(companion):
+            lanes.append(companion)
+
+        for lane in lanes:
+            try:
+                points = self.qdrant_client.retrieve(
+                    collection_name=lane,
+                    ids=[_as_qdrant_point_id(node_id)],
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning("Chunk fetch failed for {} in {}: {}", node_id, lane, exc)
+                continue
+            for point in points:
+                text = RAG._extract_indexable_text(dict(getattr(point, "payload", {}) or {}))
+                if text:
+                    return text
         return None
 
     def search_fulltext(
@@ -8159,32 +8214,144 @@ class RAG:
             return empty
 
         page_size = max(1, min(int(limit), 500))
+        companion = image_companion_name(collection)
+        has_images = self._collection_exists(companion)
+
+        # Lanes run in sequence — documents, then images — and a page fills
+        # across the boundary. Hard match is a filter, not a ranker, so there
+        # is no meaningful interleaving to preserve; what matters is that a
+        # short final text page does not end the results and strand every
+        # image hit behind a cursor nobody follows.
+        cursor_state = decode_cursor(cursor)
+        lane = str(cursor_state.get("lane") or "text")
+        offset = cursor_state.get("o")
+
+        hits: list[dict[str, Any]] = []
+        next_cursor: str | None = None
+
+        if lane == "text":
+            points, next_offset = self._scroll_search_lane(collection, search_filter, page_size, offset)
+            hits.extend(self._search_hits(collection, points, kind="text"))
+            if next_offset is not None:
+                next_cursor = encode_cursor(next_offset, extra={"lane": "text"})
+            else:
+                lane, offset = "image", None
+
+        if lane == "image" and has_images and next_cursor is None and len(hits) < page_size:
+            points, next_offset = self._scroll_search_lane(companion, search_filter, page_size - len(hits), offset)
+            hits.extend(self._search_hits(companion, points, kind="image"))
+            if next_offset is not None:
+                next_cursor = encode_cursor(next_offset, extra={"lane": "image"})
+
+        total = self._search_total(collection, search_filter)
+        if has_images:
+            total += self._search_total(companion, search_filter)
+
+        # "partial" is a distinct status rather than a nested field so a caller
+        # cannot miss incomplete coverage by ignoring ``index_status``. A search
+        # run while the backfill is still walking the collection returns only
+        # what has been written so far.
+        return {
+            "status": "ok" if status.get("complete") else "partial",
+            "hits": hits,
+            "total": total,
+            "next_cursor": next_cursor,
+            "index_status": status,
+        }
+
+    def _collection_exists(self, name: str) -> bool:
+        """Return whether a collection exists, treating an outage as absent.
+
+        Args:
+            name (str): Physical collection name.
+
+        Returns:
+            bool: ``True`` when Qdrant reports the collection.
+        """
+        try:
+            return bool(self.qdrant_client.collection_exists(collection_name=name))
+        except Exception as exc:
+            logger.debug("collection_exists failed for {}: {}", name, exc)
+            return False
+
+    def _scroll_search_lane(
+        self,
+        name: str,
+        search_filter: qdrant_models.Filter,
+        limit: int,
+        offset: Any,
+    ) -> tuple[list[Any], Any]:
+        """Scroll one search lane.
+
+        Args:
+            name (str): Collection to scroll.
+            search_filter (qdrant_models.Filter): Compiled keyword filter.
+            limit (int): Maximum points to return.
+            offset (Any): Scroll offset from the cursor, or ``None``.
+
+        Returns:
+            tuple[list[Any], Any]: The page and the next offset.
+        """
         points, next_offset = self.qdrant_client.scroll(
-            collection_name=collection,
+            collection_name=name,
             scroll_filter=search_filter,
-            limit=page_size,
-            # Same round trip as a scope: an integer offset returns as a
-            # string and Qdrant rejects it, restarting paging from the top.
-            offset=_as_qdrant_point_id(cursor) if cursor else None,
+            limit=max(1, limit),
+            offset=offset,
             with_payload=True,
             with_vectors=False,
         )
+        return list(points), next_offset
 
+    def _search_total(self, name: str, search_filter: qdrant_models.Filter) -> int:
+        """Return the exact number of matches in one lane.
+
+        Args:
+            name (str): Collection to count.
+            search_filter (qdrant_models.Filter): Compiled keyword filter.
+
+        Returns:
+            int: Match count, or ``0`` when the count is unavailable.
+        """
+        try:
+            return int(
+                self.qdrant_client.count(
+                    collection_name=name,
+                    count_filter=search_filter,
+                    exact=True,
+                ).count
+            )
+        except Exception as exc:
+            logger.debug("search count unavailable for {}: {}", name, exc)
+            return 0
+
+    def _search_hits(self, name: str, points: list[Any], *, kind: str) -> list[dict[str, Any]]:
+        """Normalize a scrolled page into search hits.
+
+        Runs through the same ``_source_from_payload`` the retrieval path uses,
+        which already understands the ``_images`` payload shape, so an image
+        hit carries the same citation identity as a document chunk.
+
+        Args:
+            name (str): Collection the points came from.
+            points (list[Any]): Scrolled Qdrant points.
+            kind (str): ``"text"`` or ``"image"``, so the panel can tell them
+                apart — an image hit's body is a caption, not document prose.
+
+        Returns:
+            list[dict[str, Any]]: Normalized hits.
+        """
         hits: list[dict[str, Any]] = []
         for point in points:
             payload = getattr(point, "payload", None)
             if not isinstance(payload, dict):
                 continue
             node_id = str(getattr(point, "id", "") or "")
-            source = self._source_from_payload(
-                collection=collection,
-                payload=payload,
-                node_id=node_id,
-            )
+            source = self._source_from_payload(collection=name, payload=payload, node_id=node_id)
             text = str(source.get("text") or "")
             hits.append(
                 {
                     "id": node_id,
+                    "kind": kind,
                     "chunk_id": source.get("chunk_id"),
                     # Carried so a hit can deep-link into the Inspector's
                     # source preview, which keys on the document hash.
@@ -8193,9 +8360,9 @@ class RAG:
                     "page": source.get("page"),
                     "row": source.get("row"),
                     "preview": text[:_SEARCH_PREVIEW_CHARS].strip(),
-                    # Lets the panel offer "expand" only where there is
-                    # more to read; without it every hit invites a
-                    # round-trip that returns the text already on screen.
+                    # Lets the panel offer "expand" only where there is more to
+                    # read; without it every hit invites a round-trip that
+                    # returns the text already on screen.
                     "truncated": len(text) > _SEARCH_PREVIEW_CHARS,
                     "entity_types": sorted(
                         {
@@ -8206,30 +8373,7 @@ class RAG:
                     "est_tokens": estimate_tokens(text, self.embed_char_token_ratio),
                 }
             )
-
-        try:
-            total = int(
-                self.qdrant_client.count(
-                    collection_name=collection,
-                    count_filter=search_filter,
-                    exact=True,
-                ).count
-            )
-        except Exception as exc:
-            logger.debug("search count unavailable for {}: {}", collection, exc)
-            total = len(hits)
-
-        # "partial" is a distinct status rather than a nested field so a caller
-        # cannot miss incomplete coverage by ignoring ``index_status``. A search
-        # run while the backfill is still walking the collection returns only
-        # what has been written so far.
-        return {
-            "status": "ok" if status.get("complete") else "partial",
-            "hits": hits,
-            "total": total,
-            "next_cursor": str(next_offset) if next_offset is not None else None,
-            "index_status": status,
-        }
+        return hits
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all nodes from the current collection and return their NER metadata.

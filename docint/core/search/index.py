@@ -24,6 +24,24 @@ SEARCH_MIN_TOKEN_LEN = 2
 #: Longest indexable token.
 SEARCH_MAX_TOKEN_LEN = 30
 
+#: Suffix of the image companion collection. Its points carry an image's
+#: caption and tags as their node text, so they are searchable alongside
+#: document chunks once indexed.
+IMAGE_COMPANION_SUFFIX = "_images"
+
+
+def image_companion_name(collection: str) -> str:
+    """Return the image companion collection paired with ``collection``.
+
+    Args:
+        collection (str): Physical collection name.
+
+    Returns:
+        str: The companion name; it may not exist for collections with no
+            images.
+    """
+    return f"{collection}{IMAGE_COMPANION_SUFFIX}"
+
 
 def search_index_params() -> models.TextIndexParams:
     """Return the payload-index parameters full-text search depends on.
@@ -316,20 +334,25 @@ def search_index_status(
     except Exception as exc:
         logger.debug("search_text index status unavailable for {}: {}", collection, exc)
 
-    total = with_search_text = 0
+    # The image companion counts too: its points carry the captions and tags a
+    # keyword query reaches figures and keyframes by. Ignoring it would report
+    # "complete" while every image stayed unfindable.
+    lanes = [collection]
+    companion = image_companion_name(collection)
     try:
-        total = int(client.count(collection_name=collection, exact=True).count)
-        with_search_text = int(
-            client.count(
-                collection_name=collection,
-                count_filter=models.Filter(
-                    must_not=[models.IsEmptyCondition(is_empty=models.PayloadField(key=SEARCH_TEXT_FIELD))]
-                ),
-                exact=True,
-            ).count
-        )
+        if client.collection_exists(collection_name=companion):
+            lanes.append(companion)
     except Exception as exc:
-        logger.debug("search_text coverage unavailable for {}: {}", collection, exc)
+        logger.debug("companion lookup failed for {}: {}", companion, exc)
+
+    total = with_search_text = 0
+    populated = models.Filter(must_not=[models.IsEmptyCondition(is_empty=models.PayloadField(key=SEARCH_TEXT_FIELD))])
+    for lane in lanes:
+        try:
+            total += int(client.count(collection_name=lane, exact=True).count)
+            with_search_text += int(client.count(collection_name=lane, count_filter=populated, exact=True).count)
+        except Exception as exc:
+            logger.debug("search_text coverage unavailable for {}: {}", lane, exc)
 
     missing = max(0, total - with_search_text)
     return {

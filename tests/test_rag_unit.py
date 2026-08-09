@@ -6376,3 +6376,175 @@ def test_search_hits_report_whether_the_preview_was_truncated(
 
     assert hits["short"]["truncated"] is False
     assert hits["long"]["truncated"] is True
+
+
+def _two_lane_client(text_pages: Any, image_pages: Any) -> Any:
+    """Build a client whose scroll answers differently per collection.
+
+    Args:
+        text_pages (Any): ``(points, next_offset)`` for the main collection.
+        image_pages (Any): ``(points, next_offset)`` for the ``_images`` companion.
+
+    Returns:
+        Any: A Qdrant client stand-in.
+    """
+
+    def _scroll(**kwargs: Any) -> Any:
+        return image_pages if kwargs["collection_name"].endswith("_images") else text_pages
+
+    return cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=_scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: True,
+        ),
+    )
+
+
+def _indexed_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report a fully indexed collection so search proceeds."""
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kwargs: {
+            "indexed": True,
+            "total": 2,
+            "with_search_text": 2,
+            "missing": 0,
+            "complete": True,
+        },
+    )
+
+
+def test_search_returns_image_hits_alongside_text_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Figures and keyframes live in the companion and must be findable.
+
+    Searching only the main collection leaves every image extracted from a
+    document unreachable by keyword.
+    """
+    _indexed_status(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _two_lane_client(
+        ([types.SimpleNamespace(id="t1", payload={"text": "a document chunk"})], None),
+        ([types.SimpleNamespace(id="i1", payload={"llm_description": "a chart", "llm_tags": ["chart"]})], None),
+    )
+
+    result = rag.search_fulltext("chart")
+
+    assert [(h["id"], h["kind"]) for h in result["hits"]] == [("t1", "text"), ("i1", "image")]
+
+
+def test_search_paginates_across_the_lane_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page must fill from images once the text lane is exhausted.
+
+    Otherwise a short final text page would end the results and hide every
+    image hit behind a cursor nobody follows.
+    """
+    _indexed_status(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _two_lane_client(
+        ([types.SimpleNamespace(id="t1", payload={"text": "a document chunk"})], None),
+        ([types.SimpleNamespace(id="i1", payload={"llm_description": "a chart"})], None),
+    )
+
+    result = rag.search_fulltext("chart", limit=10)
+
+    assert len(result["hits"]) == 2
+    assert result["next_cursor"] is None
+
+
+def test_search_skips_the_image_lane_when_there_is_no_companion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection with no images has no companion; that is not an error."""
+    _indexed_status(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    client = _two_lane_client(
+        ([types.SimpleNamespace(id="t1", payload={"text": "a document chunk"})], None),
+        ([], None),
+    )
+    client.collection_exists = lambda collection_name: not collection_name.endswith("_images")
+    rag._qdrant_client = client
+
+    result = rag.search_fulltext("chunk")
+
+    assert [h["id"] for h in result["hits"]] == ["t1"]
+
+
+def _split_retrieve_client(main: dict[str, str], images: dict[str, str]) -> Any:
+    """Build a client whose retrieve answers per collection.
+
+    Args:
+        main (dict[str, str]): ``{point_id: text}`` in the main collection.
+        images (dict[str, str]): ``{point_id: caption}`` in the companion.
+
+    Returns:
+        Any: A Qdrant client stand-in.
+    """
+
+    def _retrieve(**kwargs: Any) -> list[Any]:
+        table = images if kwargs["collection_name"].endswith("_images") else main
+        return [types.SimpleNamespace(id=i, payload={"text": table[str(i)]}) for i in kwargs["ids"] if str(i) in table]
+
+    return cast(
+        Any,
+        types.SimpleNamespace(retrieve=_retrieve, collection_exists=lambda collection_name: True),
+    )
+
+
+def test_scope_resolves_image_chunks_from_the_companion() -> None:
+    """An image hit's chunk lives in the companion, not the main collection.
+
+    Looking only in the main collection would resolve a scoped image to
+    nothing and report it missing — a scoped answer built on part of the
+    evidence the investigator selected.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _split_retrieve_client({"t1": "a document chunk"}, {"i1": "a chart caption"})
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["t1", "i1"])
+    nodes = retriever.retrieve("anything")
+
+    assert [n.node.node_id for n in nodes] == ["t1", "i1"]
+    assert retriever.missing == 0
+
+
+def test_scope_still_reports_ids_in_neither_collection() -> None:
+    """A stale id must stay visible once both lanes have been tried."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _split_retrieve_client({"t1": "a document chunk"}, {})
+
+    retriever = rag_module._ScopedRetriever(rag=rag, node_ids=["t1", "gone"])
+    retriever.retrieve("anything")
+
+    assert retriever.missing == 1
+
+
+def test_chunk_text_falls_back_to_the_image_companion() -> None:
+    """Expanding an image hit must return its caption, not a 404."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = _split_retrieve_client({}, {"i1": "a chart caption"})
+
+    assert rag.get_chunk_text("i1") == "a chart caption"
+
+
+def test_indexable_text_falls_back_to_an_image_caption() -> None:
+    """An image point's caption and tags must be indexable on their own.
+
+    Real companion points carry the caption in ``_node_content``, but the
+    fields are right there in the payload; depending solely on the serialized
+    node would mark such a point "without text" — silently unsearchable, and
+    recorded as processed so it never retries.
+    """
+    payload = {"llm_description": "a bar chart", "llm_tags": ["chart", "election"]}
+
+    text = RAG._extract_indexable_text(payload)
+
+    assert "bar chart" in text
+    assert "chart" in text and "election" in text
+
+
+def test_indexable_text_prefers_the_stored_chunk_text() -> None:
+    """A document chunk must be unaffected by the image fallback."""
+    assert RAG._extract_indexable_text({"text": "a document chunk"}) == "a document chunk"

@@ -156,6 +156,9 @@ export function SearchHitRow({ hit, keywords, selected, onToggle }: SearchHitRow
                 {expanded ? t('search.collapse_hit') : t('search.expand_hit')}
               </Button>
             )}
+            {/* An image hit's body is a caption and tags rather than document
+                prose, so it is worth telling apart at a glance. */}
+            {hit.kind === 'image' && <Badge variant="accent">{t('search.kind_image')}</Badge>}
             {hit.entity_types.map((type) => (
               <Badge key={type} variant="neutral">
                 {type}

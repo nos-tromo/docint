@@ -20,6 +20,7 @@ from loguru import logger
 from PIL import Image
 from qdrant_client import QdrantClient, models
 
+from docint.core.search.index import ensure_search_index, write_search_text
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.utils.clip_client import RemoteCLIPBackend
 from docint.utils.env_cfg import (
@@ -747,6 +748,37 @@ class ImageIngestionService:
                 f"mismatch: expected {vector_dim}, found {named_config.size}"
             )
 
+    def _write_image_search_text(self, collection: str, point_id: str, text: str) -> None:
+        """Make a stored image findable by keyword search.
+
+        Its caption and tags are the node text, so writing them to the
+        ``search_text`` payload field is what lets a keyword query reach a
+        figure or a video keyframe. Done here because image points are written
+        straight to the companion collection, bypassing the RAG persistence
+        path that stamps document chunks. Without it, images would only ever
+        become searchable via a manual ``make search-index`` backport.
+
+        Fail-soft: a write failure degrades that image to "needs a backfill",
+        it does not fail the ingest.
+
+        Args:
+            collection (str): Companion collection the point was written to.
+            point_id (str): Qdrant point id.
+            text (str): The node's caption-and-tags text.
+        """
+        if not text.strip() or self.qdrant_client is None:
+            return
+        try:
+            ensure_search_index(self.qdrant_client, collection)
+            write_search_text(self.qdrant_client, collection, {point_id: text})
+        except Exception as exc:
+            logger.warning(
+                "search_text write skipped for image {} in {}: {} — run `make search-index` to backfill.",
+                point_id,
+                collection,
+                exc,
+            )
+
     @staticmethod
     def _run_with_retries(
         fn: Callable[[], T],
@@ -955,6 +987,7 @@ class ImageIngestionService:
             )
             vector_store = self._get_vector_store(target_collection)
             vector_store.add([image_node])
+            self._write_image_search_text(target_collection, point_id, node_text)
         except Exception as exc:
             return StoredImageRecord(
                 point_id=point_id,
@@ -1087,6 +1120,7 @@ class ImageIngestionService:
             try:
                 self._ensure_collection(collection_name=target_collection, vector_dim=len(embedding))
                 self._get_vector_store(target_collection).add([node])
+                self._write_image_search_text(target_collection, point_id, node_text)
             except Exception as exc:
                 logger.warning("Keyframe store failed: {}", exc)
                 continue

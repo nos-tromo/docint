@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from docint.cli._collection import CollectionNotFoundError, resolve_collection_name
+from docint.core.search.index import BackfillSummary
 
 
 def _rag(*, existing: set[str], mappings: list[tuple[str | None, str]]) -> Any:
@@ -188,3 +189,75 @@ def test_bulk_cli_exits_zero_when_every_collection_succeeded(monkeypatch: pytest
     monkeypatch.setattr(cli, "index_all_collections", lambda rag, **kwargs: [])
 
     cli.build_all_search_indexes()  # must not raise
+
+
+def _fake_rag_class(client: Any) -> Any:
+    """Return a stand-in for the ``RAG`` class the CLI constructs.
+
+    A plain lambda will not do: the CLI also reads
+    ``RAG._extract_payload_text`` off the class to inject into the backfill.
+
+    Args:
+        client (Any): Qdrant client stand-in exposed on the instance.
+
+    Returns:
+        Any: A class the CLI can instantiate.
+    """
+
+    class _FakeRag:
+        _extract_payload_text = staticmethod(lambda payload: "chunk text")
+        _extract_indexable_text = staticmethod(lambda payload: "chunk text")
+
+        def __init__(self, **kwargs: Any) -> None:
+            self.qdrant_client = client
+
+        def unload_models(self) -> None:
+            """No models to unload."""
+
+    return _FakeRag
+
+
+def test_search_index_also_covers_the_image_companion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Image captions and tags live in the ``_images`` companion.
+
+    Indexing only the main collection leaves every figure and video keyframe
+    unfindable by keyword while the run reports success.
+    """
+    from docint.cli import search_index as cli
+
+    indexed: list[str] = []
+    backfilled: list[str] = []
+    client = types.SimpleNamespace(collection_exists=lambda collection_name: True)
+    monkeypatch.setattr(cli, "RAG", _fake_rag_class(client))
+    monkeypatch.setattr(cli, "resolve_collection_name", lambda rag, typed: "u0__docs")
+    monkeypatch.setattr(cli, "ensure_search_index", lambda c, name: indexed.append(name) or True)
+    monkeypatch.setattr(
+        cli,
+        "backfill_search_text",
+        lambda c, name, **kwargs: backfilled.append(name) or BackfillSummary(scanned=1, written=1, skipped=0, empty=0),
+    )
+
+    cli.build_search_index("docs")
+
+    assert indexed == ["u0__docs", "u0__docs_images"]
+    assert backfilled == ["u0__docs", "u0__docs_images"]
+
+
+def test_search_index_skips_a_missing_image_companion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A collection with no images has no companion; that is not a failure."""
+    from docint.cli import search_index as cli
+
+    indexed: list[str] = []
+    client = types.SimpleNamespace(collection_exists=lambda collection_name: not collection_name.endswith("_images"))
+    monkeypatch.setattr(cli, "RAG", _fake_rag_class(client))
+    monkeypatch.setattr(cli, "resolve_collection_name", lambda rag, typed: "u0__docs")
+    monkeypatch.setattr(cli, "ensure_search_index", lambda c, name: indexed.append(name) or True)
+    monkeypatch.setattr(
+        cli,
+        "backfill_search_text",
+        lambda c, name, **kwargs: BackfillSummary(scanned=1, written=1, skipped=0, empty=0),
+    )
+
+    cli.build_search_index("docs")
+
+    assert indexed == ["u0__docs"]
