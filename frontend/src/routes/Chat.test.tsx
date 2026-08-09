@@ -623,7 +623,8 @@ describe('Chat scope banner', () => {
     // request — so the selection can only reach the server by riding along
     // with it. Installing it afterwards left the first answer unscoped while
     // the banner already claimed it was scoped.
-    const fetchMock = vi.fn((req: RequestInfo | URL) => {
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
+      void init
       const u = typeof req === 'string' ? req : String(req)
       if (u.includes('/stream_query')) {
         return Promise.resolve({
