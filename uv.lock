@@ -497,7 +497,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-magic", specifier = ">=0.4.27" },
     { name = "python-multipart", specifier = ">=0.0.32" },
-    { name = "qdrant-client", specifier = ">=1.18.0" },
+    { name = "qdrant-client", specifier = ">=1.18.0,<1.19" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "rtree", specifier = ">=1.0" },
     { name = "scipy", specifier = ">=1.6.0" },
