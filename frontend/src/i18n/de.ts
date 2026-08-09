@@ -158,7 +158,7 @@ export const de: Strings = {
     '{count} Abschnitte sind noch nicht indexiert — diese Ergebnisse können unvollständig sein.',
   'search.error_query': 'Geben Sie mindestens einen Suchbegriff mit zwei oder mehr Zeichen ein.',
   'search.budget': '≈{used} / {total} Tokens',
-  'search.budget_selected': '≈{used} Tokens ausgewählt',
+  'search.budget_selected': '≈{used} Tokens',
   'search.budget_exceeded':
     'Diese Auswahl ist größer, als die Antwort fassen kann. Wählen Sie einige Abschnitte ab und versuchen Sie es erneut.',
   'search.expand_hit': 'Ganzen Abschnitt anzeigen',
@@ -175,7 +175,6 @@ export const de: Strings = {
   'search.clear_selection': 'Auswahl aufheben',
   'search.scope_add_aria': 'Nur aus {label} antworten',
   'search.scope_remove_aria': 'Nicht mehr aus {label} antworten',
-  'search.scope_pending': 'Ausgewählte Abschnitte greifen, sobald dieser Chat begonnen hat.',
   'search.filters': 'Filter',
   'search.clear': 'aufheben',
   'search.expand': 'Suchbereich einblenden',

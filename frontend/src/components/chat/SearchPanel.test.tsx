@@ -325,7 +325,11 @@ describe('SearchPanel scope selection', () => {
     expect(screen.queryByText(/Invalid request/)).toBeNull()
   })
 
-  it('holds the selection locally and says so before the chat has an id', async () => {
+  it('holds the selection locally, silently, before the chat has an id', async () => {
+    // No session to write to yet — Chat flushes the selection when the backend
+    // mints one on the first turn. That is not worth a notice: it behaves
+    // exactly like a selection made afterwards, and the line it used to print
+    // pushed the whole hit list down the moment anything was picked.
     const fetchMock = mockApi({
       status: 'ok',
       hits: [HIT],
@@ -338,7 +342,10 @@ describe('SearchPanel scope selection', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
 
-    expect(await screen.findByText(/apply once this chat has started/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes.new?.tokens).toEqual({ p1: 1200 })
+    })
+    expect(screen.getByTestId('token-meter')).toHaveTextContent('≈1.2k tokens')
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(false)
   })
 })
@@ -537,17 +544,16 @@ describe('SearchPanel bulk selection', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    // 1200 + 1200 est_tokens, shown up front so an oversize pick is visible
-    // rather than a 422 after the click. The row is too narrow for the
-    // sentence, so the compact figure is on screen and the wording is the
-    // element's title.
-    const cost = screen.getByTestId('select-all-cost')
-    expect(cost).toHaveTextContent('≈2.4k')
-    expect(cost).toHaveAttribute('title', expect.stringMatching(/≈2\.4k tokens if selected/i))
+    // 1200 + 1200 est_tokens, offered before the click rather than as a 422
+    // after it. The control names the loaded slice, not the 42 matches behind
+    // it — it is an icon now, so both the promise and the cost live in its
+    // accessible name and tooltip.
+    const selectAll = screen.getByRole('button', { name: /select all 2 loaded/i })
+    expect(selectAll).toHaveAttribute(
+      'title',
+      expect.stringMatching(/not every match.*≈2\.4k tokens if selected/is)
+    )
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(false)
-    // The control names the loaded slice, not the 42 matches behind it — it is
-    // an icon now, so that promise lives in its accessible name.
-    expect(screen.getByRole('button', { name: /select all 2 loaded/i })).toBeInTheDocument()
   })
 
   it('adds every loaded hit to the scope', async () => {

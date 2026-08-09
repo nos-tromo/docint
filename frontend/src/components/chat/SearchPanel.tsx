@@ -171,47 +171,61 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               {searchError()}
             </p>
           )}
-          {/* What the search found, and the two things you can do to all of it
-              at once. The row follows the *selection* as well as the hits: after
-              picking chunks and then searching for something with no matches,
-              the selection is still live and must stay clearable from here.
+          {/* One line for everything the result set is — hits, documents, what
+              the selection costs — and the two things you can do to all of it
+              at once. Deliberately one line: the meter used to be a row of its
+              own that appeared on the first selection and shoved the whole hit
+              list down, so picking evidence moved the thing you were reading.
+              Content changes, row count does not.
+
+              The row follows the *selection* as well as the hits: after picking
+              chunks and then searching for something with no matches, the
+              selection is still live and must stay clearable from here.
 
               The bulk controls are icons because their labels were the longest
-              text in a 22rem column while saying the least — the precise
-              wording ("the results loaded so far, not every match") is the
-              tooltip, where it can afford to be a full sentence. The projected
-              cost stays on screen rather than in the tooltip so an oversize
-              selection is a number seen before the click, not a 422 after it. */}
+              text in a 22rem column while saying the least. Their tooltips can
+              afford full sentences, so that is where the promise ("the results
+              loaded so far, not every match") and the projected cost live —
+              the *danger* case keeps its own visible line below. */}
           {(search.data || selectedIds.length > 0) && (
             <div className="flex items-center gap-1" data-testid="scope-bulk">
-              {search.data && (
-                <p
-                  className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-                  data-testid="search-summary"
-                >
-                  {t('search.hits', { count: search.data.total })}
-                  {' · '}
-                  {search.data.next_cursor
-                    ? t('search.docs_more', { count: docCount })
-                    : t('search.docs', { count: docCount })}
-                </p>
-              )}
-              {hits.length > 0 && (
-                <span
-                  className="ml-auto shrink-0 text-xs text-muted-foreground"
-                  data-testid="select-all-cost"
-                  title={t('search.select_all_cost', { tokens: formatTokens(projectedTokens) })}
-                >
-                  ≈{formatTokens(projectedTokens)}
-                </span>
-              )}
+              <p
+                className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+                data-testid="search-summary"
+              >
+                {search.data && (
+                  <>
+                    {t('search.hits', { count: search.data.total })}
+                    {' · '}
+                    {search.data.next_cursor
+                      ? t('search.docs_more', { count: docCount })
+                      : t('search.docs', { count: docCount })}
+                  </>
+                )}
+                {selectedIds.length > 0 && (
+                  <>
+                    {search.data && ' · '}
+                    <span data-testid="token-meter">
+                      {scope.usableTokens > 0
+                        ? t('search.budget', {
+                            used: formatTokens(estTokens),
+                            total: formatTokens(scope.usableTokens)
+                          })
+                        : t('search.budget_selected', { used: formatTokens(estTokens) })}
+                    </span>
+                  </>
+                )}
+              </p>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 disabled={hits.length === 0}
                 aria-label={t('search.select_all_loaded', { count: hits.length })}
-                title={t('search.select_all_loaded_title', { count: hits.length })}
+                title={`${t('search.select_all_loaded_title', { count: hits.length })} ${t(
+                  'search.select_all_cost',
+                  { tokens: formatTokens(projectedTokens) }
+                )}`}
                 onClick={() => void commitScope(allLoadedTokens())}
                 className="h-7 w-7 shrink-0 px-0"
               >
@@ -239,19 +253,11 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         </>
       )}
 
-      {selectedIds.length > 0 && (
-        <p className="text-xs text-muted-foreground" data-testid="token-meter">
-          {scope.usableTokens > 0
-            ? t('search.budget', {
-                used: formatTokens(estTokens),
-                total: formatTokens(scope.usableTokens)
-              })
-            : t('search.budget_selected', { used: formatTokens(estTokens) })}
-        </p>
-      )}
-      {selectedIds.length > 0 && !sessionId && (
-        <p className="text-xs text-muted-foreground">{t('search.scope_pending')}</p>
-      )}
+      {/* No "applies once the chat has started" notice: picking evidence
+          before the first turn behaves exactly as it does after it, so the
+          line explained nothing while shoving the whole hit list down the
+          moment anything was selected. The selection is carried into the
+          session the backend mints on that first turn (Chat.tsx). */}
       {scopeError && (
         <p className="text-xs text-red-500" role="alert">
           {scopeError}

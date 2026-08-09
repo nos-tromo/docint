@@ -150,7 +150,7 @@ export const en = {
     '{count} chunks are not indexed yet — these results may be incomplete.',
   'search.error_query': 'Enter at least one keyword of two or more characters.',
   'search.budget': '≈{used} / {total} tokens',
-  'search.budget_selected': '≈{used} tokens selected',
+  'search.budget_selected': '≈{used} tokens',
   'search.budget_exceeded':
     'That selection is larger than the answer can hold. Deselect some chunks and try again.',
   'search.expand_hit': 'Show full chunk',
@@ -167,7 +167,6 @@ export const en = {
   'search.clear_selection': 'Clear selection',
   'search.scope_add_aria': 'Answer only from {label}',
   'search.scope_remove_aria': 'Stop answering from {label}',
-  'search.scope_pending': 'Selected chunks apply once this chat has started.',
   'search.filters': 'Filters',
   'search.clear': 'clear',
   'search.expand': 'Show the search panel',
