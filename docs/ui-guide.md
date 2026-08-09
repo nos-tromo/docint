@@ -63,6 +63,13 @@ hate-speech-only, custom field/operator/value rules) via
 mismatches, and an optional `GraphDebugPanel`. Cancellation uses an
 `AbortController`.
 
+The right-hand `SearchPanel` puts its two settings — the metadata-filter
+disclosure and the retrieval-mode toggle — on one controls band under the
+query field (`src/components/chat/SearchControls.tsx`), and each hit is a
+tile that scopes the chat when clicked. Icon-only controls draw from
+`src/components/common/icons.tsx`; never a text glyph, whose shape is
+whatever font the viewer's browser happens to pick.
+
 ### Ingest (`src/routes/Ingest.tsx`)
 
 Drag-and-drop upload (`src/components/ingest/Dropzone.tsx`) into a selected
