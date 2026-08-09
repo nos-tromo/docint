@@ -17,6 +17,21 @@ export interface ChatTurnData {
   done: boolean
   meta: ChatFinalEvent | null
   error?: string | null
+  /** How many hand-picked chunks this turn was sent with, if any. */
+  scopeRequested?: number
+}
+
+/**
+ * Whether this turn asked to be scoped and the server did not confirm it was.
+ *
+ * The scope banner describes the *chat*; only the final event says what a given
+ * answer actually ran on. Without that comparison the two are indistinguishable
+ * in the transcript — which is how an unscoped answer came to be presented as
+ * hand-picked evidence.
+ */
+function scopeWasDropped(turn: ChatTurnData): boolean {
+  if (!turn.done || !turn.scopeRequested || !turn.meta) return false
+  return turn.meta.retrieval_mode !== 'scoped'
 }
 
 function dedupeSources(sources: Source[]): Source[] {
@@ -107,6 +122,18 @@ export function ChatTurn({
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">{t('chat.error_title')}</div>
             <div className="mt-1 whitespace-pre-wrap">{turn.error}</div>
+          </div>
+        )}
+        {scopeWasDropped(turn) && (
+          <div
+            className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
+            data-testid="scope-not-applied"
+            role="alert"
+          >
+            <span aria-hidden="true" className="mr-2">
+              ⚠
+            </span>
+            {t('chat.scope_not_applied', { count: turn.scopeRequested ?? 0 })}
           </div>
         )}
         {turn.meta && <ValidationBanner v={turn.meta} />}

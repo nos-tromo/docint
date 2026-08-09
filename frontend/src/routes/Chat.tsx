@@ -30,7 +30,7 @@ interface State {
 type Action =
   | { type: 'reset' }
   | { type: 'set_turns'; turns: ChatTurnData[] }
-  | { type: 'start'; user: string }
+  | { type: 'start'; user: string; scopeRequested?: number }
   | { type: 'token'; token: string }
   | { type: 'finalize'; meta: ChatFinalEvent }
   | { type: 'fail'; error?: string }
@@ -47,7 +47,14 @@ function reducer(s: State, a: Action): State {
         inflight: true,
         turns: [
           ...s.turns,
-          { user: a.user, assistant: '', done: false, meta: null, error: null }
+          {
+            user: a.user,
+            assistant: '',
+            done: false,
+            meta: null,
+            error: null,
+            scopeRequested: a.scopeRequested
+          }
         ]
       }
     // The three cases below fold into the open turn. A session switch resets
@@ -192,7 +199,11 @@ export function Chat() {
   const send = async () => {
     const message = draft.trim()
     if (!message || state.inflight) return
-    dispatch({ type: 'start', user: message })
+    // Read once: the same list is sent with the question and recorded on the
+    // turn, so the guardrail below compares what was asked for against what
+    // the server says it did.
+    const pinned = scopedChunkIds
+    dispatch({ type: 'start', user: message, scopeRequested: pinned.length || undefined })
     clearDraft(key)
 
     const ac = new AbortController()
@@ -207,7 +218,12 @@ export function Chat() {
           // active collection anymore).
           collection: selectedCollection ?? undefined,
           metadata_filters: filters.buildPayload(),
-          retrieval_mode: filters.retrievalMode
+          retrieval_mode: filters.retrievalMode,
+          // The scope rides along with the question it scopes. An unstarted
+          // chat has no session row to pin it to yet, and even on an open one
+          // a checkbox ticked a moment ago may still be in flight — either way
+          // the request is the only place this turn's scope is certain.
+          scope_chunk_ids: pinned.length > 0 ? pinned : undefined
         },
         ac.signal
       )) {
@@ -245,17 +261,17 @@ export function Chat() {
         dispatch({ type: 'finalize', meta: final })
         if (!currentSessionId && final.session_id) {
           setCurrentSessionId(final.session_id)
-          // The backend mints the session id on the first turn, so chunks
-          // picked before then had nowhere to be written. Carry them over and
-          // flush now, or the selection would silently evaporate exactly when
-          // the user starts asking about it.
-          const pending = scopedChunkIds
+          // The backend minted the session id on this turn, so the selection
+          // that rode along with the request now has a row to live on. It has
+          // already scoped this answer; this round trip moves the local copy
+          // onto the new id and reads back what the selection costs, which is
+          // what the token meter shows.
           adoptScope(searchKeyFor(null), final.session_id)
-          if (pending.length > 0) {
+          if (pinned.length > 0) {
             try {
               const stored = await setScope(
                 final.session_id,
-                pending,
+                pinned,
                 selectedCollection ?? undefined
               )
               setScopeMeta(final.session_id, {
@@ -284,6 +300,11 @@ export function Chat() {
         error = t('chat.error_wrong_collection')
       } else if (e instanceof ApiError && e.status === 400) {
         error = t('chat.error_no_collection')
+      } else if (e instanceof ApiError && e.status === 422 && pinned.length > 0) {
+        // The scope rode along with the question, so the server is the first
+        // to measure a first-turn selection — its refusal arrives here rather
+        // than on the scope endpoint.
+        error = t('search.budget_exceeded')
       } else if (e instanceof ApiError) {
         const d = describeError(e)
         error = t(d.key, d.vars)
