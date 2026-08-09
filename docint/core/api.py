@@ -328,7 +328,9 @@ def _scoped_collection(collection: str | None, principal: Principal) -> Iterator
         yield physical
 
 
-def _validate_requested_scope(requested: Sequence[str], physical: str, session_id: str | None, owner: str | None) -> None:
+def _validate_requested_scope(
+    requested: Sequence[str], physical: str, session_id: str | None, owner: str | None
+) -> None:
     """Refuse a request-carried scope that cannot fit the chat context budget.
 
     Mirrors ``PUT /sessions/{id}/scope``: scoped answering splices the chosen
@@ -353,7 +355,7 @@ def _validate_requested_scope(requested: Sequence[str], physical: str, session_i
     """
     if not requested:
         return
-    stored = rag.ensure_session_manager().get_scope(session_id, owner) if session_id else []
+    stored: list[str] = rag.ensure_session_manager().get_scope(session_id, owner) if session_id else []
     if list(requested) == list(stored):
         return
     with rag.collection_scope(physical):
