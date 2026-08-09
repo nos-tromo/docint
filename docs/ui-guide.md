@@ -63,11 +63,12 @@ hate-speech-only, custom field/operator/value rules) via
 mismatches, and an optional `GraphDebugPanel`. Cancellation uses an
 `AbortController`.
 
-The metadata-filter disclosure and the retrieval-mode toggle sit beside the
-Chat heading (`src/components/chat/ChatControls.tsx`): they govern what any
-answer retrieves against, so they belong to the chat rather than to the
-search panel, which owns only the query field and the hits. Each hit is a
-tile that scopes the chat when clicked. Icon-only controls draw from
+The metadata-filter disclosure and the retrieval-mode toggle hold the right
+edge of the Chat header row (`src/components/chat/ChatControls.tsx`): they
+govern what any answer retrieves against, so they belong to the chat rather
+than to the search panel, which owns only the query field and the hits. Each
+hit is a tile that scopes the chat when clicked, and the panel's collapsed
+rail is a bare toggle that tints while a scope is live. Icon-only controls draw from
 `src/components/common/icons.tsx`; never a text glyph, whose shape is
 whatever font the viewer's browser happens to pick.
 

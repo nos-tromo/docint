@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import { Badge, Banner, Button, Card, Input } from '@infra/ui'
+import { Banner, Button, Card, Input } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
 import { useSearch, useScope } from '@/hooks/useSearch'
-import { useChatFiltersStore } from '@/stores/chatFilters'
 import {
   scopeChunkIds,
   scopeEstTokens,
@@ -293,37 +292,5 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         ))}
       </ul>
     </Card>
-  )
-}
-
-/**
- * The two counts the collapsed rail keeps visible: hits and active filters.
- *
- * Shares `useSearch`'s cache entry with the panel, so reading them costs no
- * extra request. A panel that silently filters or scopes while hidden is a
- * trap — these badges are the fix, not decoration.
- */
-export function SearchRailBadges({ sessionId }: SearchPanelProps) {
-  const t = useT()
-  const key = searchKeyFor(sessionId)
-  const query = useSearchUiStore((s) => s.queries[key] ?? '')
-  const search = useSearch(query)
-  const activeFilters = useChatFiltersStore().buildPayload().length
-  const hitCount = search.data?.total ?? 0
-
-  return (
-    <div className="flex flex-col items-center gap-1">
-      <Badge variant="neutral" aria-label={t('search.hits_badge_aria', { count: hitCount })}>
-        {/* Abbreviated so a large result set cannot widen the slim rail; the
-            exact count stays in the accessible name and in the panel. */}
-        {hitCount > 999 ? '999+' : hitCount}
-      </Badge>
-      <Badge
-        variant={activeFilters > 0 ? 'accent' : 'neutral'}
-        aria-label={t('search.filters_badge_aria', { count: activeFilters })}
-      >
-        {activeFilters}
-      </Badge>
-    </div>
   )
 }

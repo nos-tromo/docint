@@ -179,7 +179,6 @@ export const de: Strings = {
   'search.clear': 'aufheben',
   'search.expand': 'Suchbereich einblenden',
   'search.collapse': 'Suchbereich ausblenden',
-  'search.hits_badge_aria': '{count} Suchtreffer',
   'search.filters_badge_aria': '{count} aktive Filter',
   'search.scope_banner': 'Eingegrenzt auf {count} Abschnitte',
   'search.scope_missing': '{missing} von {count} Abschnitten existieren nicht mehr',

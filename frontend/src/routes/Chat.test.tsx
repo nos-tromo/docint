@@ -532,9 +532,7 @@ describe('Chat side panel', () => {
     expect(useChatUiStore.getState().sidePanelOpen).toBe(false)
   })
 
-  it('keeps the hit and active-filter counts on the rail while collapsed', async () => {
-    // A panel that silently filters or scopes while hidden is a trap: the two
-    // badges are the whole reason collapsing is safe.
+  it('is only a toggle while collapsed — every detail lives in the panel', async () => {
     mockSearch(14)
     useUiStore.setState({ selectedCollection: 'docs' })
     useChatUiStore.setState({ sidePanelOpen: false })
@@ -542,8 +540,27 @@ describe('Chat side panel', () => {
 
     renderChat()
 
-    expect(await screen.findByLabelText('14 search hits')).toHaveTextContent('14')
-    expect(screen.getByLabelText('0 active filters')).toHaveTextContent('0')
+    const toggle = await screen.findByRole('button', { name: /show the search panel/i })
+    // No hit count, no filter count: a slim rail is not a dashboard.
+    expect(toggle).toHaveTextContent('')
+    expect(screen.queryByText('14')).toBeNull()
+  })
+
+  it('tints the collapsed toggle while a scope is live', async () => {
+    // The one thing worth signalling from a shut panel: answers are coming
+    // from hand-picked chunks. Everything else is only a readout.
+    mockSearch(14)
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useChatUiStore.setState({ sidePanelOpen: false })
+    useSearchUiStore.setState({
+      queries: { new: 'partei' },
+      scopes: { new: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
+    })
+
+    renderChat()
+
+    const toggle = await screen.findByRole('button', { name: /show the search panel/i })
+    expect(toggle).toHaveAttribute('data-scoped', 'true')
   })
 })
 

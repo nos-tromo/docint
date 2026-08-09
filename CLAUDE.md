@@ -137,14 +137,16 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   The SPA surfaces this as a **collapsible panel beside the chat** holding the
   query field and the hits — and *only* those. A hit is a **tile**: clicking
   anywhere on it (or Enter/Space) pins it; there is no per-hit checkbox and no
-  per-hit Inspector link. The metadata filters and the retrieval-mode toggle
-  are **not** search controls and do not live here — they narrow what any
-  answer retrieves against whether or not the panel is open, so they sit beside
-  the Chat heading (`components/chat/ChatControls.tsx`). Do not move them back
-  into the panel: there they read as controls over the keyword index, and
-  stacked at its foot the filter panel opened straight over the retrieval
-  control, making the pair behave like one control with two faces. Selected
-  hits write the
+  per-hit Inspector link. Collapsed, the panel's rail is a bare open/shut
+  toggle — no counts; it only tints when a scope is live, since that is the one
+  state with consequences while hidden. The metadata filters and the
+  retrieval-mode toggle are **not** search controls and do not live here — they
+  narrow what any answer retrieves against whether or not the panel is open, so
+  they hold the right edge of the Chat header row
+  (`components/chat/ChatControls.tsx`). Do not move them back into the panel:
+  there they read as controls over the keyword index, and stacked at its foot
+  the filter panel opened straight over the retrieval control, making the pair
+  behave like one control with two faces. Selected hits write the
   session's **scope**: `PUT /sessions/{id}/scope` stores the chunk ids on the
   conversation row, and while a scope is active `/query` and `/stream_query`
   answer **only** from those chunks — `build_query_engine(scoped_node_ids=)`

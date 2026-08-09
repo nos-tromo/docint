@@ -34,7 +34,7 @@ export function RetrievalToggle() {
       aria-label={name}
       title={name}
       onClick={() => setRetrievalMode(stateful ? 'stateless' : 'session')}
-      className="h-7 w-7 shrink-0 px-0"
+      className="h-8 w-8 shrink-0 px-0"
     >
       {stateful ? (
         <ChatContextIcon className="h-4 w-4" />
@@ -57,15 +57,20 @@ export function RetrievalToggle() {
  * filters covered the retrieval control directly above them, and the pair
  * behaved like one control with two faces.
  *
- * Sitting next to the title rather than out at the right edge is deliberate:
- * the Download action appears only once a transcript exists, and controls
- * anchored to that edge would jump sideways the first time an answer lands.
+ * They hold the header's right edge, outboard of Download — which appears only
+ * once a transcript exists, so anything placed to *its* right would slide
+ * sideways the first time an answer lands. Every control in that row is 32px
+ * tall, the same as the search panel's own Search button across from it.
  */
 export function ChatControls() {
   return (
-    <div className="flex items-center gap-1">
-      <FilterBuilder />
+    <div className="flex items-center gap-2">
       <RetrievalToggle />
+      {/* Last, so its right edge *is* the header row's right edge: the panel it
+          drops is right-aligned under it and therefore lands on the same line
+          as the transcript and the composer below. Ordered the other way the
+          overlay hung short of that edge and read as misplaced. */}
+      <FilterBuilder />
     </div>
   )
 }

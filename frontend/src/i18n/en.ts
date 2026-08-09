@@ -171,7 +171,6 @@ export const en = {
   'search.clear': 'clear',
   'search.expand': 'Show the search panel',
   'search.collapse': 'Hide the search panel',
-  'search.hits_badge_aria': '{count} search hits',
   'search.filters_badge_aria': '{count} active filters',
   'search.scope_banner': 'Scoped to {count} chunks',
   'search.scope_missing': '{missing} of {count} chunks no longer exist',
