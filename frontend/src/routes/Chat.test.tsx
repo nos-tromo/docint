@@ -453,6 +453,25 @@ describe('Chat drafts', () => {
     expect(screen.getByText(/\(context_overflow\)/)).toBeInTheDocument()
   })
 
+describe('Chat retrieval controls', () => {
+  it('keeps the metadata filters and the retrieval mode on the chat, not in the search panel', async () => {
+    // They govern what any answer retrieves against — whether or not the
+    // search panel is open, and whether or not anything was ever searched.
+    // Mounted in the panel they read as controls over the keyword index.
+    useChatUiStore.setState({ drafts: {}, sidePanelOpen: false })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }))
+
+    renderChat()
+
+    const filters = await screen.findByRole('button', { name: /filters/i })
+    const mode = screen.getByRole('button', { name: /retrieval/i })
+    // The panel is collapsed, so anything still living inside it is hidden.
+    expect(filters).toBeVisible()
+    expect(mode).toBeVisible()
+    expect(screen.queryByTestId('search-panel')?.contains(filters)).toBeFalsy()
+  })
+})
+
 describe('Chat side panel', () => {
   const INDEX_STATUS = {
     indexed: true,

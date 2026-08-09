@@ -13,7 +13,6 @@ import {
   useSearchUiStore
 } from '@/stores/searchUi'
 import { useUiStore } from '@/stores/ui'
-import { SearchControls } from '@/components/chat/SearchControls'
 import { SearchHitRow } from '@/components/chat/SearchHit'
 import { CheckAllIcon, XIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
@@ -159,8 +158,6 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
           {t('search.submit')}
         </Button>
       </form>
-
-      <SearchControls />
 
       {!collection ? (
         <p className="text-xs text-muted-foreground">{t('search.select_collection')}</p>

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { SearchControls } from './SearchControls'
+import { ChatControls } from './ChatControls'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
 
@@ -10,16 +10,16 @@ beforeEach(() => {
   useSearchUiStore.setState({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false })
 })
 
-describe('SearchControls band', () => {
-  it('carries both settings on one row', () => {
-    render(<SearchControls />)
+describe('ChatControls', () => {
+  it('carries both retrieval settings', () => {
+    render(<ChatControls />)
 
     expect(screen.getByRole('button', { name: /filters/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retrieval/i })).toBeInTheDocument()
   })
 
   it('names the active retrieval mode, since the control carries no label', () => {
-    render(<SearchControls />)
+    render(<ChatControls />)
 
     // Default is stateful. An icon-only control whose state is invisible is a
     // control people leave set wrong, so the mode is in the accessible name
@@ -30,7 +30,7 @@ describe('SearchControls band', () => {
   })
 
   it('flips the retrieval mode, and says so', async () => {
-    render(<SearchControls />)
+    render(<ChatControls />)
 
     await userEvent.click(screen.getByRole('button', { name: /retrieval/i }))
 
@@ -46,7 +46,7 @@ describe('SearchControls band', () => {
   it('draws different icons for the two modes', async () => {
     // Two shapes, not one shape pressed and unpressed — the difference has to
     // survive a glance without a hover.
-    const { container } = render(<SearchControls />)
+    const { container } = render(<ChatControls />)
     const statefulIcon = container.querySelector('[aria-pressed="true"] svg')?.innerHTML
 
     await userEvent.click(screen.getByRole('button', { name: /retrieval/i }))
@@ -59,9 +59,9 @@ describe('SearchControls band', () => {
 
   it('drops the filter panel downward, so it cannot cover the mode control', async () => {
     // The regression this replaced: anchored `bottom-full` at the foot of the
-    // column, the panel opened straight over the retrieval control sitting
-    // above it, and the two settings read as one confusing toggle.
-    render(<SearchControls />)
+    // search column, the panel opened straight over the retrieval control
+    // sitting above it, and the two settings read as one confusing toggle.
+    render(<ChatControls />)
 
     await userEvent.click(screen.getByRole('button', { name: /filters/i }))
 

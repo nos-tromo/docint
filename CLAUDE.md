@@ -134,13 +134,17 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   sampled**: `/search` reports `not_indexed` when no point carries the field
   and `partial` (with a `missing` count) while a backfill is incomplete, so a
   half-migrated collection can never masquerade as a complete result set.
-  The SPA surfaces this as a **collapsible panel beside the chat**: the query
-  field, then a controls band holding the metadata-filter disclosure and the
-  retrieval-mode toggle, then the hits. A hit is a **tile** — clicking anywhere
-  on it (or Enter/Space) pins it; there is no per-hit checkbox and no per-hit
-  Inspector link. The filter panel drops *downward* over the hit list; it must
-  never open over the retrieval toggle, which is what made the two settings
-  read as one confusing control. Selected hits write the
+  The SPA surfaces this as a **collapsible panel beside the chat** holding the
+  query field and the hits — and *only* those. A hit is a **tile**: clicking
+  anywhere on it (or Enter/Space) pins it; there is no per-hit checkbox and no
+  per-hit Inspector link. The metadata filters and the retrieval-mode toggle
+  are **not** search controls and do not live here — they narrow what any
+  answer retrieves against whether or not the panel is open, so they sit beside
+  the Chat heading (`components/chat/ChatControls.tsx`). Do not move them back
+  into the panel: there they read as controls over the keyword index, and
+  stacked at its foot the filter panel opened straight over the retrieval
+  control, making the pair behave like one control with two faces. Selected
+  hits write the
   session's **scope**: `PUT /sessions/{id}/scope` stores the chunk ids on the
   conversation row, and while a scope is active `/query` and `/stream_query`
   answer **only** from those chunks — `build_query_engine(scoped_node_ids=)`

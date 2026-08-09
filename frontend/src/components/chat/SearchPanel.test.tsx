@@ -654,6 +654,27 @@ describe('SearchPanel bulk selection', () => {
   })
 })
 
+describe('SearchPanel scope', () => {
+  it('carries no chat-retrieval settings — those belong to the chat', async () => {
+    // The metadata filters and the retrieval mode narrow what any answer
+    // retrieves against, not what the keyword index returns; they live beside
+    // the Chat heading. Search owns the query and the hits, nothing else.
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    expect(screen.queryByRole('button', { name: /filters/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /retrieval/i })).toBeNull()
+  })
+})
+
 describe('SearchPanel helpers', () => {
   it('compacts token counts for the meter', () => {
     expect(formatTokens(940)).toBe('940')

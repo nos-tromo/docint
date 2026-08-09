@@ -16,6 +16,7 @@ import { draftKey, useChatUiStore } from '@/stores/chatUi'
 import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/stores/searchUi'
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
+import { ChatControls } from '@/components/chat/ChatControls'
 import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
 import { ScopeBanner } from '@/components/chat/ScopeBanner'
 import { SearchPanel, SearchRailBadges } from '@/components/chat/SearchPanel'
@@ -312,7 +313,15 @@ export function Chat() {
           viewport bottom, past the p-8 padding box. */}
       <section className="flex flex-col h-full min-h-0">
         <div className="flex items-center justify-between mb-4">
-          <PageHeader title={t('chat.title')} className="mb-0" />
+          {/* The metadata filters and the retrieval mode belong here, to the
+              chat, not to the search panel: they narrow what any answer
+              retrieves against, whether or not the panel is even open. In the
+              panel they read as controls over the keyword index, which they
+              are not. */}
+          <div className="flex items-center gap-3">
+            <PageHeader title={t('chat.title')} className="mb-0" />
+            <ChatControls />
+          </div>
           {state.turns.length > 0 && (
             <button
               type="button"

@@ -8,23 +8,22 @@ import { useT } from '@/i18n/LanguageContext'
 const OPERATORS = ['eq', 'neq', 'contains', 'gte', 'lte', 'in']
 
 /**
- * The metadata filters, as a `Filters (N)` disclosure in the chat side panel's
- * controls band.
+ * The metadata filters, as a `Filters (N)` disclosure beside the Chat heading.
  *
- * Filters are set occasionally and search is used constantly, so they must not
- * hold half the column permanently: collapsed they are one compact trigger, and
- * expanded they overlay the hit list rather than pushing it off-screen. The
- * badge keeps the active count visible while collapsed, because a filter that
- * silently narrows every search is a trap.
+ * Filters are set occasionally and read constantly, so they must not hold
+ * screen permanently: collapsed they are one compact trigger, and expanded they
+ * overlay what is beneath rather than pushing it down. The badge keeps the
+ * active count visible while collapsed, because a filter that silently narrows
+ * every retrieval is a trap.
  *
- * The panel **drops downward** from the band. It used to rise from the foot of
- * the column, where it covered the retrieval control sitting directly above it
- * — two unrelated settings taking turns in one patch of screen, which is what
- * made the pair read as a single confusing toggle.
+ * The panel **drops downward** over the transcript. It used to rise from the
+ * foot of the search column, where it covered the retrieval control sitting
+ * directly above it — two settings taking turns in one patch of screen, which
+ * is what made the pair read as a single confusing toggle.
  *
- * Positioning is anchored by the band, not by this component: `SearchControls`
- * owns the `relative` box the overlay resolves against, which is what lets the
- * panel span the full column width while the trigger stays trigger-sized.
+ * It anchors itself: `relative` here, so the panel keeps its own readable width
+ * wherever the trigger is mounted instead of stretching or shrinking to
+ * whatever box happens to contain it.
  *
  * Every control is an `@infra/ui` primitive — the hand-rolled `bg-muted`
  * inputs this replaces had no contrast at all against the muted panel.
@@ -37,13 +36,11 @@ export function FilterBuilder() {
   const activeCount = s.buildPayload().length
 
   return (
-    <>
+    <div className="relative">
       {open && (
-        // Overlays the hit list instead of compressing it: search owns the
-        // column's vertical space.
-        // The viewport cap matters now that it opens downward from near the top
-        // of a column its parent clips: a fixed 26rem can outrun a short window.
-        <div className="absolute inset-x-0 top-full z-10 mt-1 max-h-[min(26rem,55vh)] space-y-3 overflow-auto rounded-md border border-border bg-background p-3 text-sm shadow-lg">
+        // Its own width, not the trigger's, and capped against the viewport so
+        // a short window cannot cut the panel off at the bottom.
+        <div className="absolute left-0 top-full z-20 mt-1 w-[22rem] max-w-[calc(100vw-4rem)] max-h-[min(26rem,55vh)] space-y-3 overflow-auto rounded-md border border-border bg-background p-3 text-sm shadow-lg">
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -156,6 +153,6 @@ export function FilterBuilder() {
         <span>{t('search.filters')}</span>
         {activeCount > 0 && <Badge variant="accent">{activeCount}</Badge>}
       </button>
-    </>
+    </div>
   )
 }
