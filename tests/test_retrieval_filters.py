@@ -213,7 +213,7 @@ def test_multi_field_date_rule_compiles_to_a_nested_should_filter() -> None:
     )
 
     assert compiled is not None
-    must = list(compiled.must or [])
+    must: list[Any] = list(compiled.must or [])
     assert len(must) == 1
     group = must[0]
     assert isinstance(group, models.Filter)
@@ -229,7 +229,7 @@ def test_multi_field_negated_rule_wraps_the_group_in_must_not() -> None:
 
     assert compiled is not None
     assert not list(compiled.must or [])
-    must_not = list(compiled.must_not or [])
+    must_not: list[Any] = list(compiled.must_not or [])
     assert len(must_not) == 1
     assert isinstance(must_not[0], models.Filter)
     assert len(_condition_keys(cast(Any, must_not[0]).should)) == 2
@@ -240,7 +240,7 @@ def test_single_field_rule_stays_a_bare_condition() -> None:
     compiled = build_qdrant_filter([{"field": "mimetype", "operator": "eq", "value": "text/plain"}])
 
     assert compiled is not None
-    must = list(compiled.must or [])
+    must: list[Any] = list(compiled.must or [])
     assert len(must) == 1
     assert isinstance(must[0], models.FieldCondition)
 
