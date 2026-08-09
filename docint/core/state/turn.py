@@ -26,7 +26,10 @@ class Turn(Base):  # type: ignore[misc]
     validation_checked = Column(Boolean, nullable=True)
     validation_mismatch = Column(Boolean, nullable=True)
     validation_reason = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.now(UTC), nullable=False)
+    # Callable, like every other model here: a bare ``datetime.now(UTC)`` is
+    # evaluated once at import, stamping every turn the process ever writes
+    # with the moment it booted.
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
     conversation = relationship("Conversation", back_populates="turns")
     # Ordered by insertion id: citations are written in ``source_nodes``
     # order, which is the order the generator numbered them in. Replay reads

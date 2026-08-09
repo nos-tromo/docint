@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Generator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -12,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from docint.core.state.base import Base, _make_session_maker
 from docint.core.state.session_manager import SessionManager
+from docint.core.state.turn import Turn
 
 
 @pytest.fixture
@@ -100,6 +102,31 @@ def test_persist_and_retrieve_citation_with_hash(
     assert source["file_hash"] == "hash123"
     assert source["page"] == 1
     # assert source["preview_text"] == "Preview text" # This will be empty string
+
+
+def test_a_persisted_turn_is_stamped_when_it_happened(
+    session_manager: SessionManager,
+) -> None:
+    """Every turn must carry its own timestamp, not the process's start time.
+
+    ``Turn.created_at`` used a non-callable SQLAlchemy default, evaluated once
+    at import — so every turn a backend ever wrote was stamped with the moment
+    the process booted, and exported sessions read as if the whole
+    conversation happened at startup.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    before = datetime.now(UTC).replace(tzinfo=None)
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
+
+    session_manager._persist_turn("stamped-session", "hello", resp_mock, {"response": "Hi"})
+
+    with session_manager._session_scope() as session:
+        stored = session.query(Turn).filter_by(conversation_id="stamped-session").one()
+        assert cast(datetime, stored.created_at) >= before
 
 
 def test_get_session_history_enriches_sources_from_node_lookup(
