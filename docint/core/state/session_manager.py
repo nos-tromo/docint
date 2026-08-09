@@ -826,7 +826,12 @@ class SessionManager:
                 if node is not None:
                     node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
 
-                score = float(getattr(src_node, "score", 0.0)) if hasattr(src_node, "score") else None
+                # A hand-picked chunk carries no score — ``_ScopedRetriever``
+                # has nothing to rank — so "has a score attribute" is not the
+                # same as "has a score", and float(None) would kill the turn
+                # after the answer was already generated.
+                raw_score = getattr(src_node, "score", None)
+                score = float(raw_score) if raw_score is not None else None
 
                 s.add(
                     Citation(

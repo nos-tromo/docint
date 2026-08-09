@@ -104,6 +104,35 @@ def test_persist_and_retrieve_citation_with_hash(
     # assert source["preview_text"] == "Preview text" # This will be empty string
 
 
+def test_a_turn_persists_sources_that_carry_no_score(
+    session_manager: SessionManager,
+) -> None:
+    """A hand-picked chunk has no score, and persisting must survive that.
+
+    ``_ScopedRetriever`` builds its nodes with ``score=None`` — there is
+    nothing to rank — so ``float(score)`` raised on every scoped turn, killing
+    the request *after* the answer had already been generated (and, on the SSE
+    path, after it had been streamed).
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    node_mock = MagicMock()
+    node_mock.node_id = "picked-1"
+    node_mock.metadata = {"filename": "handbook.pdf", "file_hash": "h1", "source": "document"}
+    src_node_mock = MagicMock()
+    src_node_mock.node = node_mock
+    src_node_mock.score = None
+    resp_mock.source_nodes = [src_node_mock]
+
+    session_manager._persist_turn("scoped-session", "hello", resp_mock, {"response": "Hi"})
+
+    history = session_manager.get_session_history("scoped-session", owner=None)
+    assert history[1]["sources"][0]["filename"] == "handbook.pdf"
+
+
 def test_a_persisted_turn_is_stamped_when_it_happened(
     session_manager: SessionManager,
 ) -> None:
