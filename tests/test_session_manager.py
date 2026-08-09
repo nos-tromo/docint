@@ -295,6 +295,71 @@ def test_stream_chat_includes_final_response_when_no_tokens(
     ]
 
 
+def test_scoped_chat_reports_that_it_answered_from_the_scope(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scoped turn must say so, so a client can tell it apart from retrieval.
+
+    Without this the answer looks exactly like an ordinary one, which is how a
+    dropped scope stayed invisible: the UI claimed the answer came from the
+    hand-picked chunks while the server had retrieved across the collection.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    scoped_engine = MagicMock()
+    scoped_engine.query.return_value = MagicMock()
+    session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "Hi",
+        "sources": [],
+    }
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    response = session_manager.chat("hello", scoped_node_ids=["c1", "c2"])
+
+    normalize_kwargs = session_manager.rag._normalize_response_data.call_args.kwargs  # type: ignore[attr-defined]
+    assert normalize_kwargs["retrieval_mode"] == "scoped"
+    assert response["scoped_chunk_count"] == 2
+
+
+def test_scoped_stream_chat_reports_the_scope_in_its_final_frame(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SSE endpoint the chat UI uses must carry the same report.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    streaming_engine = MagicMock()
+    streaming_response = MagicMock()
+    streaming_response.response_gen = iter(())
+    streaming_response.source_nodes = cast(list[Any], [])
+    streaming_engine.query.return_value = streaming_response
+    session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "Hi",
+        "sources": [],
+        "retrieval_mode": "scoped",
+    }
+    session_manager.rag.index = object()  # type: ignore[assignment]
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    chunks = list(session_manager.stream_chat("hello", session_id="session-1", scoped_node_ids=["c1", "c2"]))
+
+    normalize_kwargs = session_manager.rag._normalize_response_data.call_args.kwargs  # type: ignore[attr-defined]
+    assert normalize_kwargs["retrieval_mode"] == "scoped"
+    final = cast(dict[str, Any], chunks[-1])
+    assert final["retrieval_mode"] == "scoped"
+    assert final["scoped_chunk_count"] == 2
+
+
 def test_make_session_maker_creates_parent_dir(tmp_path: Path) -> None:
     """File-backed SQLite session stores should create missing parent dirs.
 

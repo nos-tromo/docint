@@ -834,6 +834,9 @@ class QueryOut(BaseModel):
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
+    #: How many hand-picked chunks a ``retrieval_mode="scoped"`` turn answered
+    #: from; absent on an ordinary retrieval.
+    scoped_chunk_count: int | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -1549,9 +1552,6 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     vector_store_kwargs=vector_store_kwargs or None,
                     scoped_node_ids=scoped_node_ids or None,
                 )
-                if scoped_node_ids and isinstance(data, dict):
-                    data["retrieval_mode"] = "scoped"
-                    data["scoped_chunk_count"] = len(scoped_node_ids)
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
@@ -1597,6 +1597,9 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             "retrieval_query": retrieval_query_value,
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
+            "scoped_chunk_count": (
+                data.get("scoped_chunk_count") if isinstance(data, dict) and retrieval_mode == "scoped" else None
+            ),
             **validation,
         }
     except HTTPException:

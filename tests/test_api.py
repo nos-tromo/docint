@@ -409,6 +409,17 @@ class DummyRAG:
                 "vector_store_kwargs": vector_store_kwargs,
             }
         )
+        if scoped_node_ids:
+            # Mirror SessionManager: a scoped turn names itself, so endpoint
+            # tests can assert the report survives the response model.
+            return {
+                "response": "answer",
+                "sources": [{"id": 1}],
+                "retrieval_query": f"rewritten::{question}",
+                "coverage_unit": "documents",
+                "retrieval_mode": "scoped",
+                "scoped_chunk_count": len(list(scoped_node_ids)),
+            }
         return {
             "response": "answer",
             "sources": [{"id": 1}],
@@ -1769,6 +1780,27 @@ def test_query_answers_from_a_scope_carried_on_the_request(client: TestClient) -
     assert response.status_code == 200
     assert rag.scoped_ids[-1] == ["c1", "c2"]
     assert rag.sessions.scope == ["c1", "c2"]
+
+
+def test_query_reports_the_scope_it_answered_from(client: TestClient) -> None:
+    """The report must survive the response model, or the client cannot check it.
+
+    A field the engine sets but ``QueryOut`` does not declare is silently
+    dropped — which is how a scoped turn came to be indistinguishable from an
+    ordinary one on the wire.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post(
+        "/query",
+        json={"question": "What?", "collection": "alpha", "scope_chunk_ids": ["c1", "c2"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["retrieval_mode"] == "scoped"
+    assert body["scoped_chunk_count"] == 2
 
 
 def test_stateless_query_answers_from_a_scope_carried_on_the_request(client: TestClient) -> None:

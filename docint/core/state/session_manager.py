@@ -235,6 +235,27 @@ class SessionManager:
                 exc,
             )
 
+    def _retrieval_mode(self, scoped_node_ids: Sequence[str] | None, graph_debug: dict[str, Any]) -> str:
+        """Name how this turn found its evidence.
+
+        A scoped turn ran no retrieval at all, so it reports ``"scoped"``
+        rather than a rewrite/response-mode label — that is what lets a client
+        tell a hand-picked answer from an ordinary one that merely looked like
+        it. Shared by :meth:`chat` and :meth:`stream_chat` so the two can never
+        disagree about what happened.
+
+        Args:
+            scoped_node_ids (Sequence[str] | None): The turn's pinned scope, if any.
+            graph_debug (dict[str, Any]): Debug payload from graph expansion.
+
+        Returns:
+            str: The retrieval mode reported to the caller.
+        """
+        if scoped_node_ids:
+            return "scoped"
+        mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
+        return f"{mode}_graph" if bool(graph_debug.get("applied")) else mode
+
     def chat(
         self,
         user_msg: str,
@@ -335,9 +356,7 @@ class SessionManager:
             )
         expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
-        retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
-        if bool(graph_debug.get("applied")):
-            retrieval_mode += "_graph"
+        retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
         self._bind_prior_turn_context(engine, prior_turn)
         resp = engine.query(expanded_query)
@@ -351,6 +370,8 @@ class SessionManager:
             retrieval_mode=retrieval_mode,
         )
         response["graph_debug"] = graph_debug
+        if scoped_node_ids:
+            response["scoped_chunk_count"] = len(list(scoped_node_ids))
         self._persist_turn(session_id, user_msg, resp, response, owner=owner)
         self._maybe_update_summary(session_id)
         return response
@@ -440,9 +461,7 @@ class SessionManager:
             )
         expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
-        retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
-        if bool(graph_debug.get("applied")):
-            retrieval_mode += "_graph"
+        retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
         self._bind_prior_turn_context(streaming_engine, prior_turn)
         response = streaming_engine.query(expanded_query)
@@ -483,7 +502,7 @@ class SessionManager:
         # Yield metadata. ``turn_idx`` is an internal join key the API layer
         # uses to attach validation results after the stream completes; it
         # must be stripped before forwarding to clients.
-        yield {
+        final: dict[str, Any] = {
             "response": normalized.get("response"),
             "sources": normalized.get("sources", []),
             "session_id": session_id,
@@ -494,6 +513,9 @@ class SessionManager:
             "retrieval_mode": normalized.get("retrieval_mode"),
             "turn_idx": turn_idx,
         }
+        if scoped_node_ids:
+            final["scoped_chunk_count"] = len(list(scoped_node_ids))
+        yield final
 
     def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:
         """Export the chat session to a directory.
