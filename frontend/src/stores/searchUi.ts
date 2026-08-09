@@ -17,7 +17,7 @@ export const searchKeyFor = (sessionId: string | null): string => sessionId ?? '
  * A chat's selected chunks and what the last server round trip said they cost.
  *
  * `tokens` maps chunk id to its `est_tokens`, so the token meter can be summed
- * locally on every checkbox instead of costing a request per click.
+ * locally on every selection instead of costing a request per click.
  * `usableTokens` is only known once a scope has been written (the PUT returns
  * it); 0 means "not measured yet".
  */

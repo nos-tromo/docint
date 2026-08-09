@@ -183,7 +183,7 @@ describe('SearchPanel result states', () => {
 })
 
 describe('SearchPanel scope selection', () => {
-  it('writes the scope when a hit is checked', async () => {
+  it('writes the scope when a hit tile is clicked', async () => {
     const fetchMock = mockApi({
       status: 'ok',
       hits: [HIT],
@@ -194,8 +194,8 @@ describe('SearchPanel scope selection', () => {
 
     renderPanel()
 
-    const checkbox = await screen.findByRole('checkbox', { name: /alpha\.pdf/i })
-    await userEvent.click(checkbox)
+    const tile = await screen.findByRole('button', { name: /alpha\.pdf/i })
+    await userEvent.click(tile)
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
@@ -206,6 +206,77 @@ describe('SearchPanel scope selection', () => {
     await waitFor(() => {
       expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200 })
     })
+  })
+
+  it('scopes from anywhere on the tile, not just its heading', async () => {
+    // The whole card is the control now: an investigator skimming previews
+    // should not have to hunt for a 16px box to pin what they just read.
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await userEvent.click(await screen.findByTestId('hit-preview'))
+
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200 })
+    })
+    expect(screen.getByRole('button', { name: /stop answering from/i })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+  })
+
+  it('scopes from the keyboard, with both Enter and Space', async () => {
+    // A div carrying role="button" gets neither for free, and Space would
+    // otherwise scroll the panel instead of selecting.
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    const tile = await screen.findByRole('button', { name: /alpha\.pdf/i })
+    tile.focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200 })
+    })
+
+    await userEvent.keyboard(' ')
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({})
+    })
+  })
+
+  it('does not re-scope when the click merely ended a text selection', async () => {
+    // Dragging across a preview to copy a passage finishes with a click on the
+    // tile. Quoting evidence must not silently change what the next answer is
+    // allowed to draw on.
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    const preview = await screen.findByTestId('hit-preview')
+    vi.spyOn(window, 'getSelection').mockReturnValue({ isCollapsed: false } as Selection)
+    await userEvent.click(preview)
+
+    expect(useSearchUiStore.getState().scopes[SESSION]?.tokens ?? {}).toEqual({})
   })
 
   it('shows remaining capacity live once the budget is known', async () => {
@@ -219,7 +290,7 @@ describe('SearchPanel scope selection', () => {
 
     renderPanel()
 
-    await userEvent.click(await screen.findByRole('checkbox', { name: /alpha\.pdf/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
 
     // Before the PUT lands only the local sum is known; after it, the meter
     // shows the capacity the backend measured.
@@ -244,7 +315,7 @@ describe('SearchPanel scope selection', () => {
 
     renderPanel()
 
-    await userEvent.click(await screen.findByRole('checkbox', { name: /alpha\.pdf/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
 
     expect(await screen.findByText(/larger than the answer can hold/i)).toBeInTheDocument()
     await waitFor(() => {
@@ -265,7 +336,7 @@ describe('SearchPanel scope selection', () => {
 
     renderPanel(null)
 
-    await userEvent.click(await screen.findByRole('checkbox', { name: /alpha\.pdf/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
 
     expect(await screen.findByText(/apply once this chat has started/i)).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(false)
@@ -306,20 +377,6 @@ describe('SearchPanel hit rendering', () => {
     expect(await screen.findByText('PERSON')).toBeInTheDocument()
   })
 
-  it('links each hit into the Inspector', async () => {
-    mockApi({
-      status: 'ok',
-      hits: [HIT],
-      total: 1,
-      next_cursor: null,
-      index_status: INDEX_STATUS
-    })
-
-    renderPanel()
-
-    const link = await screen.findByRole('link', { name: /documents/i })
-    expect(link).toHaveAttribute('href', '/inspector')
-  })
   it('marks an image hit so a caption is not mistaken for document prose', async () => {
     // Image hits come from the `_images` companion: their body is a caption
     // and tags, so they read differently from a document chunk.
@@ -456,7 +513,10 @@ describe('SearchPanel hit expansion', () => {
     await userEvent.click(screen.getByRole('button', { name: /show full chunk/i }))
     await screen.findByTestId('hit-full-text')
 
-    expect(screen.getByRole('checkbox', { name: /alpha\.pdf/i })).not.toBeChecked()
+    expect(screen.getByRole('button', { name: /alpha\.pdf/i })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    )
     expect(useSearchUiStore.getState().scopes[SESSION]?.tokens ?? {}).toEqual({})
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/sessions'))).toBe(false)
   })
@@ -478,10 +538,15 @@ describe('SearchPanel bulk selection', () => {
 
     await screen.findByText(/alpha\.pdf/)
     // 1200 + 1200 est_tokens, shown up front so an oversize pick is visible
-    // rather than a 422 after the click.
-    expect(screen.getByTestId('select-all-cost')).toHaveTextContent('≈2.4k tokens if selected')
+    // rather than a 422 after the click. The row is too narrow for the
+    // sentence, so the compact figure is on screen and the wording is the
+    // element's title.
+    const cost = screen.getByTestId('select-all-cost')
+    expect(cost).toHaveTextContent('≈2.4k')
+    expect(cost).toHaveAttribute('title', expect.stringMatching(/≈2\.4k tokens if selected/i))
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(false)
-    // The button names the loaded slice, not the 42 matches behind it.
+    // The control names the loaded slice, not the 42 matches behind it — it is
+    // an icon now, so that promise lives in its accessible name.
     expect(screen.getByRole('button', { name: /select all 2 loaded/i })).toBeInTheDocument()
   })
 
@@ -533,7 +598,7 @@ describe('SearchPanel bulk selection', () => {
     expect(screen.getByTestId('select-all-over-budget')).toHaveTextContent(/would exceed/i)
   })
 
-  it('rolls a refused select-all back, like a single checkbox', async () => {
+  it('rolls a refused select-all back, like a single tile', async () => {
     mockApi(twoHits, { body: { detail: 'Invalid request.' }, status: 422 })
 
     renderPanel()
@@ -546,6 +611,30 @@ describe('SearchPanel bulk selection', () => {
       expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({})
     })
     expect(screen.queryByText(/Invalid request/)).toBeNull()
+  })
+
+  it('keeps Clear reachable when a selection outlives a zero-hit search', async () => {
+    // The row follows the selection, not the hits: chunks picked earlier are
+    // still scoping the chat even though nothing on screen matches now.
+    useSearchUiStore.setState({
+      scopes: { [SESSION]: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
+    })
+    mockApi({
+      status: 'ok',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await screen.findByTestId('search-no-matches')
+    await userEvent.click(screen.getByRole('button', { name: /clear selection/i }))
+
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({})
+    })
   })
 
   it('disables both controls when there is nothing loaded to select', async () => {

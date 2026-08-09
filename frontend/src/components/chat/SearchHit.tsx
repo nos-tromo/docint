@@ -1,12 +1,13 @@
 import { useId, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Badge, Button, Spinner } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
 import { useChunkText } from '@/hooks/useSearch'
 import type { Strings } from '@/i18n'
+import { cn } from '@/lib/cn'
 import { keywordSegments } from '@/lib/highlight'
+import { CheckCircleIcon, ChevronDownIcon, CircleIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
 
 /** Filename plus the page/row that locates the chunk inside it. */
@@ -59,17 +60,20 @@ export interface SearchHitRowProps {
  * One search result: where it came from, what matched, and whether the chat
  * is scoped to it.
  *
- * The checkbox is the scope control — ticking it pins this chunk as evidence
- * the next answer must come from. The preview highlights matched words using
- * the index's own prefix semantics (see `lib/highlight.ts::keywordSegments`),
- * so what is painted is what actually matched.
+ * The **tile itself** is the scope control — clicking anywhere on it pins this
+ * chunk as evidence the next answer must come from. This replaced a checkbox:
+ * in a 22rem column a checkbox spends a fixed indent on an affordance the whole
+ * card can carry, and the hit-sized target is easier to hit than the box was.
+ * The circle/check marker stays because *something* has to say the tile is
+ * selectable before it is hovered.
  *
  * Expanding is a *reading* control and is deliberately independent of the
- * checkbox: opening a chunk to check whether it is worth pinning must never
- * pin it. The expanded text is fetched on demand (`useChunkText`) because the
- * hit only carries a capped preview, and the expansion state is component-local
- * — it is throwaway UI state that should not survive a new search or a reload
- * the way the selection does.
+ * selection: opening a chunk to check whether it is worth pinning must never
+ * pin it. It is therefore a sibling of the pressable region rather than a
+ * button nested inside one. The expanded text is fetched on demand
+ * (`useChunkText`) because the hit only carries a capped preview, and the
+ * expansion state is component-local — it is throwaway UI state that should
+ * not survive a new search or a reload the way the selection does.
  */
 export function SearchHitRow({ hit, keywords, selected, onToggle }: SearchHitRowProps) {
   const t = useT()
@@ -78,6 +82,10 @@ export function SearchHitRow({ hit, keywords, selected, onToggle }: SearchHitRow
   const chunk = useChunkText(hit.id, expanded)
   const bodyId = useId()
   const full = expanded ? (chunk.data?.text ?? null) : null
+  // Older responses omit the flag, so an undefined value keeps the control
+  // rather than hiding it. Where the preview was not cut short, expanding
+  // would cost a round-trip to re-fetch the text already on screen.
+  const canExpand = hit.truncated !== false
 
   /** A missing chunk is its own answer, never a generic request failure. */
   const chunkErrorText = (): string => {
@@ -88,33 +96,66 @@ export function SearchHitRow({ hit, keywords, selected, onToggle }: SearchHitRow
     return t(described.key, described.vars)
   }
 
+  /**
+   * Toggle the selection — unless the click ended a drag over the text.
+   *
+   * Selecting a snippet to copy it finishes with a click on the tile, and an
+   * investigator quoting a passage must not silently re-scope the chat by
+   * doing so.
+   */
+  const press = () => {
+    const selection = window.getSelection()
+    if (selection && !selection.isCollapsed) return
+    onToggle(hit)
+  }
+
   return (
-    <li className="rounded-md border border-border bg-background p-2 text-xs" data-testid="search-hit">
-      <div className="flex items-start gap-2">
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={() => onToggle(hit)}
-          aria-label={
-            selected
-              ? t('search.scope_remove_aria', { label: label || hit.id })
-              : t('search.scope_add_aria', { label: label || hit.id })
+    <li
+      className={cn(
+        'relative rounded-md border p-2 text-xs transition-colors',
+        selected
+          ? 'border-primary bg-primary/5'
+          : 'border-border bg-background hover:border-muted-foreground/40'
+      )}
+      data-testid="search-hit"
+    >
+      <div
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected}
+        aria-label={
+          selected
+            ? t('search.scope_remove_aria', { label: label || hit.id })
+            : t('search.scope_add_aria', { label: label || hit.id })
+        }
+        onClick={press}
+        onKeyDown={(e) => {
+          // A div carrying role="button" gets neither for free; Space would
+          // otherwise scroll the panel instead of selecting.
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onToggle(hit)
           }
-          className="mt-0.5 shrink-0 accent-[var(--app-accent,currentColor)]"
-        />
+        }}
+        className="flex cursor-pointer items-start gap-2 rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-primary"
+      >
+        <span
+          className={cn('mt-0.5 shrink-0', selected ? 'text-primary' : 'text-muted-foreground')}
+          aria-hidden="true"
+        >
+          {selected ? (
+            <CheckCircleIcon className="h-3.5 w-3.5" />
+          ) : (
+            <CircleIcon className="h-3.5 w-3.5" />
+          )}
+        </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="truncate font-medium" title={label}>
-              {label || t('common.unknown_source')}
-            </span>
-            <Link
-              to="/inspector"
-              className="shrink-0 text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-              title={t('search.open_in_inspector')}
-            >
-              {t('search.open_in_inspector')}
-            </Link>
-          </div>
+          <span
+            className={cn('block truncate font-medium', canExpand && 'pr-6')}
+            title={label}
+          >
+            {label || t('common.unknown_source')}
+          </span>
           {/* One body element, so an expansion replaces the capped preview
               rather than repeating its first 600 characters below itself. */}
           <p
@@ -139,34 +180,37 @@ export function SearchHitRow({ hit, keywords, selected, onToggle }: SearchHitRow
               {chunkErrorText()}
             </p>
           )}
-          <div className="mt-1.5 flex flex-wrap items-center gap-1">
-            {/* Offered only where the preview was actually cut short —
-                otherwise expanding costs a round-trip to re-fetch the text
-                already on screen. Older responses omit the flag, so an
-                undefined value keeps the control rather than hiding it. */}
-            {hit.truncated !== false && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-expanded={expanded}
-                aria-controls={bodyId}
-                onClick={() => setExpanded((open) => !open)}
-              >
-                {expanded ? t('search.collapse_hit') : t('search.expand_hit')}
-              </Button>
-            )}
-            {/* An image hit's body is a caption and tags rather than document
-                prose, so it is worth telling apart at a glance. */}
-            {hit.kind === 'image' && <Badge variant="accent">{t('search.kind_image')}</Badge>}
-            {hit.entity_types.map((type) => (
-              <Badge key={type} variant="neutral">
-                {type}
-              </Badge>
-            ))}
-          </div>
+          {(hit.kind === 'image' || hit.entity_types.length > 0) && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              {/* An image hit's body is a caption and tags rather than document
+                  prose, so it is worth telling apart at a glance. */}
+              {hit.kind === 'image' && <Badge variant="accent">{t('search.kind_image')}</Badge>}
+              {hit.entity_types.map((type) => (
+                <Badge key={type} variant="neutral">
+                  {type}
+                </Badge>
+              ))}
+            </div>
+          )}
         </div>
       </div>
+      {canExpand && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          aria-label={expanded ? t('search.collapse_hit') : t('search.expand_hit')}
+          title={expanded ? t('search.collapse_hit') : t('search.expand_hit')}
+          onClick={() => setExpanded((open) => !open)}
+          className="absolute right-1 top-1 h-6 w-6 px-0"
+        >
+          <ChevronDownIcon
+            className={cn('h-4 w-4 transition-transform', expanded && 'rotate-180')}
+          />
+        </Button>
+      )}
     </li>
   )
 }

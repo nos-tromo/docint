@@ -1,32 +1,30 @@
 import { Badge, Button, Input, Select } from '@infra/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
+import { cn } from '@/lib/cn'
+import { SlidersIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
 
 const OPERATORS = ['eq', 'neq', 'contains', 'gte', 'lte', 'in']
 
-const ChevronGlyph = ({ open }: { open: boolean }) => (
-  <svg
-    viewBox="0 0 24 24"
-    className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-90' : ''}`}
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    aria-hidden="true"
-  >
-    <path d="M9 6l6 6-6 6" />
-  </svg>
-)
-
 /**
- * The metadata filters, as a `Filters (N)` disclosure at the foot of the chat
- * side panel.
+ * The metadata filters, as a `Filters (N)` disclosure in the chat side panel's
+ * controls band.
  *
  * Filters are set occasionally and search is used constantly, so they must not
- * hold half the column permanently: collapsed they are one summary line, and
+ * hold half the column permanently: collapsed they are one compact trigger, and
  * expanded they overlay the hit list rather than pushing it off-screen. The
  * badge keeps the active count visible while collapsed, because a filter that
  * silently narrows every search is a trap.
+ *
+ * The panel **drops downward** from the band. It used to rise from the foot of
+ * the column, where it covered the retrieval control sitting directly above it
+ * — two unrelated settings taking turns in one patch of screen, which is what
+ * made the pair read as a single confusing toggle.
+ *
+ * Positioning is anchored by the band, not by this component: `SearchControls`
+ * owns the `relative` box the overlay resolves against, which is what lets the
+ * panel span the full column width while the trigger stays trigger-sized.
  *
  * Every control is an `@infra/ui` primitive — the hand-rolled `bg-muted`
  * inputs this replaces had no contrast at all against the muted panel.
@@ -39,11 +37,13 @@ export function FilterBuilder() {
   const activeCount = s.buildPayload().length
 
   return (
-    <div className="relative">
+    <>
       {open && (
         // Overlays the hit list instead of compressing it: search owns the
         // column's vertical space.
-        <div className="absolute inset-x-0 bottom-full z-10 mb-1 max-h-[26rem] space-y-3 overflow-auto rounded-md border border-border bg-background p-3 text-sm shadow-lg">
+        // The viewport cap matters now that it opens downward from near the top
+        // of a column its parent clips: a fixed 26rem can outrun a short window.
+        <div className="absolute inset-x-0 top-full z-10 mt-1 max-h-[min(26rem,55vh)] space-y-3 overflow-auto rounded-md border border-border bg-background p-3 text-sm shadow-lg">
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -147,12 +147,15 @@ export function FilterBuilder() {
         type="button"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
-        className="flex w-full items-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className={cn(
+          'flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs transition-colors hover:text-foreground',
+          open ? 'bg-muted text-foreground' : 'text-muted-foreground'
+        )}
       >
-        <ChevronGlyph open={open} />
+        <SlidersIcon className="h-3.5 w-3.5" />
         <span>{t('search.filters')}</span>
         {activeCount > 0 && <Badge variant="accent">{activeCount}</Badge>}
       </button>
-    </div>
+    </>
   )
 }

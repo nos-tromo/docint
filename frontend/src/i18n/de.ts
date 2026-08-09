@@ -106,9 +106,9 @@ export const de: Strings = {
   'chat.source_toggle_details': 'Quellendetails anzeigen',
   'chat.ask_placeholder': 'Etwas fragen…',
   'chat.send': 'Senden',
-  'chat.retrieval': 'Abruf',
   'chat.retrieval_session': 'Kompletten Chat einbeziehen (stateful)',
   'chat.retrieval_stateless': 'Nur aktuellste Nachricht (stateless)',
+  'chat.retrieval_state': 'Abruf: {mode}',
   'chat.error_wrong_collection':
     'Dieser Chat gehört zu einer anderen Sammlung — wechseln Sie zu dieser Sammlung, um ihn fortzusetzen, oder starten Sie einen neuen Chat.',
   'chat.error_no_collection': 'Wählen Sie eine Sammlung aus, bevor Sie einen Chat starten.',
@@ -176,7 +176,6 @@ export const de: Strings = {
   'search.scope_add_aria': 'Nur aus {label} antworten',
   'search.scope_remove_aria': 'Nicht mehr aus {label} antworten',
   'search.scope_pending': 'Ausgewählte Abschnitte greifen, sobald dieser Chat begonnen hat.',
-  'search.open_in_inspector': 'Dokumente',
   'search.filters': 'Filter',
   'search.clear': 'aufheben',
   'search.expand': 'Suchbereich einblenden',
