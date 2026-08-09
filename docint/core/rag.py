@@ -7061,6 +7061,42 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
         )
 
+    def _graph_debug_base(self, query: str) -> dict[str, Any]:
+        """Build the not-yet-applied GraphRAG debug payload for a query.
+
+        Args:
+            query (str): The retrieval query the payload describes.
+
+        Returns:
+            dict[str, Any]: Debug payload describing "expansion has not (yet)
+                changed this query".
+        """
+        return {
+            "enabled": bool(self.graphrag_enabled),
+            "applied": False,
+            "original_query": query,
+            "expanded_query": query,
+            "anchor_entities": [],
+            "neighbor_entities": [],
+        }
+
+    def graph_debug_skipped(self, query: str, reason: str) -> dict[str, Any]:
+        """Report that graph expansion was deliberately not run.
+
+        Callers that bypass expansion still owe the panel the same shape as
+        :meth:`expand_query_with_graph_with_debug`; returning nothing would read
+        as "expansion ran and found nothing" instead of "expansion did not
+        apply here".
+
+        Args:
+            query (str): The unexpanded retrieval query.
+            reason (str): Why expansion was skipped (e.g. ``"scoped"``).
+
+        Returns:
+            dict[str, Any]: Debug payload carrying the reason.
+        """
+        return {**self._graph_debug_base(query), "reason": reason}
+
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
         """Optionally expand a query and return GraphRAG debug metadata.
 
@@ -7070,14 +7106,7 @@ class RAG:
         Returns:
             tuple[str, dict[str, Any]]: A tuple of ``(expanded_query, debug_payload)``.
         """
-        debug: dict[str, Any] = {
-            "enabled": bool(self.graphrag_enabled),
-            "applied": False,
-            "original_query": query,
-            "expanded_query": query,
-            "anchor_entities": [],
-            "neighbor_entities": [],
-        }
+        debug: dict[str, Any] = self._graph_debug_base(query)
 
         if not query.strip():
             debug["reason"] = "empty_query"

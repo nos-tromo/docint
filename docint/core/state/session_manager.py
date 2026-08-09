@@ -354,7 +354,14 @@ class SessionManager:
                 user_msg=user_msg,
                 conversation_context=session_context,
             )
-        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
+        if scoped_node_ids:
+            # Expansion widens *retrieval*, and there is none here — but the
+            # string it appends is also what the synthesizer is asked to
+            # answer, so running it would only add noise to the prompt.
+            expanded_query = retrieval_query
+            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
+        else:
+            expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
@@ -459,7 +466,14 @@ class SessionManager:
                 user_msg=user_msg,
                 conversation_context=session_context,
             )
-        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
+        if scoped_node_ids:
+            # Expansion widens *retrieval*, and there is none here — but the
+            # string it appends is also what the synthesizer is asked to
+            # answer, so running it would only add noise to the prompt.
+            expanded_query = retrieval_query
+            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
+        else:
+            expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 

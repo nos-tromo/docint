@@ -1757,6 +1757,27 @@ def test_expand_query_with_graph_with_debug_applies_neighbors(
     assert debug["neighbor_entities"] == ["Widget", "Rivertown"]
 
 
+def test_graph_debug_skipped_reports_the_unexpanded_query() -> None:
+    """A turn that skips expansion still reports the same debug shape.
+
+    The panel reads one shape; a skip that returned something else (or nothing)
+    would read as "expansion ran and found nothing" rather than "expansion was
+    not applicable here".
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.graphrag_enabled = True
+
+    debug = rag.graph_debug_skipped("Who is Acme?", "scoped")
+
+    assert debug["enabled"] is True
+    assert debug["applied"] is False
+    assert debug["reason"] == "scoped"
+    assert debug["original_query"] == "Who is Acme?"
+    assert debug["expanded_query"] == "Who is Acme?"
+    assert debug["anchor_entities"] == []
+    assert debug["neighbor_entities"] == []
+
+
 def test_expand_query_with_graph_with_debug_matches_acronym_anchors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

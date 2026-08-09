@@ -326,6 +326,39 @@ def test_scoped_chat_reports_that_it_answered_from_the_scope(
     assert response["scoped_chunk_count"] == 2
 
 
+def test_a_scoped_turn_does_not_expand_the_query_with_the_graph(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Graph expansion widens *retrieval*, and a scoped turn does none.
+
+    It appends "Related entities for retrieval: …" to the query string, and
+    that string is what the synthesizer is asked to answer — so on a scoped
+    turn it is noise in the generation prompt, paid for with an NER-aggregate
+    load that buys nothing.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    scoped_engine = MagicMock()
+    scoped_engine.query.return_value = MagicMock()
+    session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
+    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
+    session_manager.rag.graph_debug_skipped.return_value = {"applied": False, "reason": "scoped"}  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "Hi",
+        "sources": [],
+    }
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    response = session_manager.chat("hello", scoped_node_ids=["c1"])
+
+    session_manager.rag.expand_query_with_graph_with_debug.assert_not_called()  # type: ignore[attr-defined]
+    scoped_engine.query.assert_called_once_with("rewritten hello")
+    assert response["graph_debug"] == {"applied": False, "reason": "scoped"}
+
+
 def test_scoped_stream_chat_reports_the_scope_in_its_final_frame(
     session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
