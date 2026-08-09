@@ -29,8 +29,15 @@ describe('streamErrorText', () => {
     vars ? `${key}|${JSON.stringify(vars)}` : key) as Parameters<typeof streamErrorText>[0]
 
   it('maps a known code to its specific key and appends the token', () => {
-    expect(streamErrorText(t, 'context_overflow', 'chat.error_stream_ended')).toBe(
+    expect(streamErrorText(t, 'context_overflow', 'chat.error_backend_failed')).toBe(
       'chat.error_context_overflow (context_overflow)',
+    )
+  })
+  it('maps a dead embedding endpoint to copy that names the real fault', () => {
+    // Without its own key this falls back to the generic "could not be
+    // generated" copy, which names no service to go and look at.
+    expect(streamErrorText(t, 'embedding_unavailable', 'chat.error_backend_failed')).toBe(
+      'chat.error_embedding_unavailable (embedding_unavailable)',
     )
   })
   it('falls back to the given key for unmapped valid codes, appending the token', () => {

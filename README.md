@@ -22,7 +22,14 @@ and chat. It ships with:
     Point `NER_API_BASE` / `RERANK_API_BASE` / `CLIP_API_BASE` /
     `SPARSE_API_BASE` / `EMBED_API_BASE` at each dedicated container
     instead of the full router — see `docs/configuration.md` for the
-    per-service defaults. Setting both `EMBED_API_BASE` and
+    per-service defaults. `EMBED_API_BASE` is the one that does not take
+    the bare host: the OpenAI SDK appends `/embeddings` to it, so it must
+    end in `/v1` (`http://embed-only:8000/v1`) while `SPARSE_API_BASE`
+    stays `http://embed-only:8000` — the same container, addressed two
+    ways. Getting it wrong 404s every embedding call; docint reports that
+    as an `EmbeddingEndpointError` naming the endpoint and this knob, and
+    an ingest run fails on its pre-flight probe before staging any file.
+    Setting both `EMBED_API_BASE` and
     `SPARSE_API_BASE` to the same `embed-only` container loads bge-m3
     once instead of twice, and it replaces Ollama's bge-m3 for dense
     embeddings too — Ollama then serves chat only. The `embed-only`

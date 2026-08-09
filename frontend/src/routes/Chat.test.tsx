@@ -121,7 +121,10 @@ describe('Chat SSE handling', () => {
     await waitFor(() => {
       expect(screen.getByText(/\(no answer\)/i)).toBeInTheDocument()
     })
-    expect(screen.getByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+    // An error frame without a code is still the backend reporting a
+    // failure, so it gets the reported-failure copy — just with no token
+    // to append. Only a dropped connection may say the stream ended.
+    expect(screen.getByText(/answer could not be generated/i)).toBeInTheDocument()
     expect(screen.queryByText(/boom/)).not.toBeInTheDocument()
   })
 
@@ -428,7 +431,11 @@ describe('Chat drafts', () => {
     await waitFor(() => {
       expect(screen.getByText(/\(generation_failed\)/)).toBeInTheDocument()
     })
-    expect(screen.getByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+    // A coded error frame means the backend reported a failure and named
+    // it — the stream did not end unexpectedly, so it must not say so.
+    // That copy belongs to the transport path, which has no code at all.
+    expect(screen.getByText(/answer could not be generated/i)).toBeInTheDocument()
+    expect(screen.queryByText(/stream ended unexpectedly/i)).not.toBeInTheDocument()
   })
 
   it('shows actionable copy for a context_overflow stream error', async () => {

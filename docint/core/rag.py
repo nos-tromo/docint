@@ -3274,6 +3274,34 @@ class RAG:
                 "http://embed-only:8000), or set ENABLE_HYBRID=false to ingest dense-only."
             ) from exc
 
+    def probe_embed_endpoint(self) -> None:
+        """Verify the dense-embedding endpoint answers before an ingest run starts.
+
+        Dense embedding is required on every deployment, unlike sparse,
+        which only hybrid collections need. Document parsing runs before
+        the first embed batch and is the expensive half of an ingest —
+        vision OCR alone costs minutes per page — so a dead endpoint
+        discovered at batch time throws away the whole pass. One tiny
+        embed call up front converts that into an immediate failure.
+
+        The actionable message comes from the embed client itself
+        (:class:`~docint.utils.openai_cfg.EmbeddingEndpointError`), which
+        knows the resolved base URL; this only logs which endpoint was
+        probed and lets it through.
+
+        Raises:
+            EmbeddingEndpointError: When the configured endpoint is
+                unreachable, refuses the credentials, or serves no
+                ``/embeddings`` route — the last being what an
+                ``EMBED_API_BASE`` missing its ``/v1`` suffix produces.
+        """
+        try:
+            self.embed_model.get_query_embedding("ping")
+        except Exception as exc:
+            base = self.embed_client_config.api_base if self.embed_client_config else self.openai_api_base
+            logger.error("Dense embedding probe failed against {}: {}", base, exc)
+            raise
+
     # --- Build pieces ---
     def _vector_store(self) -> QdrantVectorStore:
         """Creates the vector store for document embeddings.
@@ -6087,8 +6115,11 @@ class RAG:
 
         # Fail before any file preparation, node parsing, or batch work: a
         # sparse transport failure discovered mid-run would already have
-        # written dense-only points into a hybrid collection.
+        # written dense-only points into a hybrid collection, and a dead
+        # dense endpoint would discard an entire parse pass (hours, on a
+        # PDF batch that needs vision OCR) to produce zero points.
         self.probe_sparse_endpoint()
+        self.probe_embed_endpoint()
 
         prepared_dir = self._prepare_sources_dir(Path(data_dir) if isinstance(data_dir, str) else data_dir)
         self.data_dir = prepared_dir

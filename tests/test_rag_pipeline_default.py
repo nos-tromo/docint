@@ -290,6 +290,10 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
         "embed_model",
         property(lambda self: object()),
     )
+    # The sentinel embed model above cannot answer the pre-ingest dense
+    # probe, and this test is about PDF routing, not endpoint health. The
+    # probe itself is pinned in tests/test_rag_embed_endpoint.py.
+    monkeypatch.setattr(RAG, "probe_embed_endpoint", lambda self: None)
     # Treat the active collection as already existing so the empty-ingestion
     # guard does not fire for this hash-handoff test.
     monkeypatch.setattr(

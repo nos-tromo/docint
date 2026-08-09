@@ -191,6 +191,10 @@ def _make_rag_with_streaming_pipeline(
         "embed_model",
         property(lambda self: embed_model_marker),
     )
+    # These tests are about batch-failure isolation, not endpoint health;
+    # the sentinel embed model above cannot answer the pre-ingest dense
+    # probe. Its own behavior is pinned in tests/test_rag_embed_endpoint.py.
+    monkeypatch.setattr(RAG, "probe_embed_endpoint", lambda self: None)
 
     class _StubVectorStoreIndex:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
