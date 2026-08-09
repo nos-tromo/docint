@@ -21,6 +21,16 @@ updates:
       # >=5.9 (i.e. docling-slim depends on docling-core>=3.0).
       - dependency-name: "transformers"
         versions: [">= 5.9.0"]
+      # qdrant-client is capped <1.19 in pyproject.toml: 1.19.0 relocated
+      # IDF_EMBEDDING_MODELS from qdrant_client.qdrant_fastembed to
+      # qdrant_client.fastembed_common, and llama-index-vector-stores-qdrant
+      # 0.10.2 (the latest, predating that release) imports it from the old
+      # path at module scope — so the bump is not a lint problem but an
+      # ImportError that takes `docint.core.rag` down with it. Lift once
+      # llama-index-vector-stores-qdrant ships a release that imports from
+      # the new path.
+      - dependency-name: "qdrant-client"
+        versions: [">= 1.19.0"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
