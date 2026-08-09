@@ -419,8 +419,11 @@ export function Chat() {
             aria-expanded={sidePanelOpen}
             aria-controls="chat-side-panel"
             aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
+            // 32px square, like every control in the chat header: both columns
+            // start on the same line, so matching the size is what puts this
+            // button on that line rather than 4px above it.
             className={cn(
-              'rounded p-1 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
+              'flex h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
               scopedChunkIds.length > 0
                 ? 'bg-primary/15 text-primary'
                 : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
