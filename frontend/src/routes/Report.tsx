@@ -1,4 +1,12 @@
-import { Button } from '@infra/ui'
+import {
+  Button,
+  ChevronDownIcon,
+  DeleteButton,
+  DownloadButton,
+  MoveDownButton,
+  MoveUpButton,
+  RemoveButton
+} from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
@@ -215,14 +223,11 @@ export function Report() {
                   {r.title}
                   <span className="ml-1 text-xs text-muted-foreground">({r.item_count})</span>
                 </button>
-                <button
-                  type="button"
+                <DeleteButton
+                  label={t('report.delete_aria')}
                   onClick={() => onDelete(r.id)}
-                  className="text-xs text-muted-foreground hover:text-red-400 px-1"
-                  aria-label={t('report.delete_aria')}
-                >
-                  ×
-                </button>
+                  className="h-7"
+                />
               </li>
             )
           })}
@@ -331,15 +336,13 @@ export function Report() {
                 </div>
               </div>
 
-              {/* Export: a single Download button; formats expand on hover/focus. */}
+              {/* Export: a single Download button; formats expand on hover/focus.
+                  The caret stays — it is the only thing saying the icon opens a
+                  list rather than downloading something on the spot. */}
               <div className="relative group shrink-0">
-                <button
-                  type="button"
-                  className="px-3 py-1 rounded-md border border-border text-sm hover:bg-muted"
-                  aria-haspopup="menu"
-                >
-                  {t('chat.download')} ▾
-                </button>
+                <DownloadButton label={t('chat.download')} aria-haspopup="menu" className="gap-1 px-2">
+                  <ChevronDownIcon className="h-3.5 w-3.5" />
+                </DownloadButton>
                 <div className="absolute right-0 top-full z-10 hidden pt-1 group-hover:block group-focus-within:block">
                   <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-muted p-1 shadow-lg">
                     {exportFormats(t).map((e) => (
@@ -382,32 +385,25 @@ export function Report() {
                               )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
-                              <button
-                                type="button"
+                              <MoveUpButton
+                                label={t('report.move_up_aria')}
                                 onClick={() => move(item, -1)}
                                 disabled={si === 0}
-                                className="px-1.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
-                                aria-label={t('report.move_up_aria')}
-                              >
-                                ↑
-                              </button>
-                              <button
-                                type="button"
+                                className="h-7"
+                              />
+                              <MoveDownButton
+                                label={t('report.move_down_aria')}
                                 onClick={() => move(item, 1)}
                                 disabled={si === sectionItems.length - 1}
-                                className="px-1.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
-                                aria-label={t('report.move_down_aria')}
-                              >
-                                ↓
-                              </button>
-                              <button
-                                type="button"
+                                className="h-7"
+                              />
+                              {/* × not trash: this takes the finding out of the
+                                  report. The evidence itself is untouched. */}
+                              <RemoveButton
+                                label={t('report.remove_item_aria')}
                                 onClick={() => removeItem.mutate({ reportId: report.id, itemId: item.id })}
-                                className="px-1.5 text-muted-foreground hover:text-red-400"
-                                aria-label={t('report.remove_item_aria')}
-                              >
-                                ×
-                              </button>
+                                className="h-7"
+                              />
                             </div>
                           </div>
                           {itemBody(item) && (

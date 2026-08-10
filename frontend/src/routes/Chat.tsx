@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Button, PageHeader } from '@infra/ui'
+import { Button, DownloadButton, PageHeader } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
@@ -348,19 +348,15 @@ export function Chat() {
               lands. */}
           <div className="flex items-center gap-3">
             {state.turns.length > 0 && (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
+              <DownloadButton
+                label={t('chat.download')}
                 onClick={() =>
                   downloadText(
                     `chat_${currentSessionId ?? 'session'}.txt`,
                     chatTranscriptToText(state.turns, t)
                   )
                 }
-              >
-                {t('chat.download')}
-              </Button>
+              />
             )}
             <ChatControls />
           </div>

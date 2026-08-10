@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { DownloadLink } from '@infra/ui'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { csvExportHref } from '@/api/collections'
 import type { HateSpeechRow } from '@/api/types'
@@ -164,13 +165,7 @@ export function HateSpeechTable({
           {hasNextPage ? '+' : ''}.
         </p>
         {collection && (
-          <a
-            href={csvExportHref(collection, 'hate-speech')}
-            download
-            className="px-3 py-1 rounded-md border border-border text-sm"
-          >
-            {t('common.csv_button')}
-          </a>
+          <DownloadLink href={csvExportHref(collection, 'hate-speech')} label={t('table.export_csv')} />
         )}
       </div>
       <div className="rounded-md border border-border overflow-hidden">

@@ -1,7 +1,7 @@
 import { useEffect, useReducer, useRef } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Button, useTheme } from '@infra/ui'
+import { Button, DownloadButton, useTheme } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { summarize } from '@/api/analysis'
 import { streamSseGet } from '@/api/sse'
@@ -216,8 +216,8 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
         </Button>
         {state.text && (
           <div className="ml-auto flex items-center gap-2">
-            <Button
-              variant="secondary"
+            <DownloadButton
+              label={t('analysis.summary_download_md')}
               onClick={() =>
                 downloadText(
                   'summary.md',
@@ -225,9 +225,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
                   'text/markdown;charset=utf-8'
                 )
               }
-            >
-              {t('analysis.summary_download_md')}
-            </Button>
+            />
             {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
           </div>
         )}
