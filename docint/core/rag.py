@@ -6628,6 +6628,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
         retrieval_options: dict[str, Any] | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
 
@@ -6641,6 +6642,8 @@ class RAG:
                 vector-store query kwargs.
             retrieval_options (dict[str, Any] | None): Optional runtime
                 retrieval overrides.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving.
 
         Returns:
             dict[str, Any]: The query results.
@@ -6660,8 +6663,10 @@ class RAG:
                 retrieval_options=retrieval_options,
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
+                scoped_node_ids=scoped_node_ids,
             )
-            if metadata_filters is not None or vector_store_kwargs or retrieval_options
+            # A scope must never reuse the cached engine: that one retrieves.
+            if scoped_node_ids or metadata_filters is not None or vector_store_kwargs or retrieval_options
             else self.query_engine
         )
         if engine is None:
@@ -6705,6 +6710,12 @@ class RAG:
         normalized["vector_query_mode"] = retrieval_settings["vector_store_query_mode"].value
         normalized["retrieval_profile"] = retrieval_settings["label"]
         normalized["parent_context_enabled"] = retrieval_settings["parent_context_enabled"]
+        if scoped_node_ids:
+            # Report what actually happened, so a client that asked for a scope
+            # can tell a scoped answer from an ordinary retrieval that merely
+            # looked like one.
+            normalized["retrieval_mode"] = "scoped"
+            normalized["scoped_chunk_count"] = len(list(scoped_node_ids))
         return normalized
 
     async def run_query_async(
@@ -6715,6 +6726,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
         retrieval_options: dict[str, Any] | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection asynchronously.
 
@@ -6728,6 +6740,8 @@ class RAG:
                 vector-store query kwargs.
             retrieval_options (dict[str, Any] | None): Optional runtime
                 retrieval overrides.
+            scoped_node_ids (Sequence[str] | None): When set, answer from
+                exactly these chunks instead of retrieving.
 
         Returns:
             dict[str, Any]: The query results.
@@ -6747,8 +6761,10 @@ class RAG:
                 retrieval_options=retrieval_options,
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
+                scoped_node_ids=scoped_node_ids,
             )
-            if metadata_filters is not None or vector_store_kwargs or retrieval_options
+            # A scope must never reuse the cached engine: that one retrieves.
+            if scoped_node_ids or metadata_filters is not None or vector_store_kwargs or retrieval_options
             else self.query_engine
         )
         if engine is None:
@@ -6790,6 +6806,10 @@ class RAG:
         normalized["vector_query_mode"] = retrieval_settings["vector_store_query_mode"].value
         normalized["retrieval_profile"] = retrieval_settings["label"]
         normalized["parent_context_enabled"] = retrieval_settings["parent_context_enabled"]
+        if scoped_node_ids:
+            # See run_query: report what actually happened.
+            normalized["retrieval_mode"] = "scoped"
+            normalized["scoped_chunk_count"] = len(list(scoped_node_ids))
         return normalized
 
     # --- Session integration ---
@@ -7041,6 +7061,42 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
         )
 
+    def _graph_debug_base(self, query: str) -> dict[str, Any]:
+        """Build the not-yet-applied GraphRAG debug payload for a query.
+
+        Args:
+            query (str): The retrieval query the payload describes.
+
+        Returns:
+            dict[str, Any]: Debug payload describing "expansion has not (yet)
+                changed this query".
+        """
+        return {
+            "enabled": bool(self.graphrag_enabled),
+            "applied": False,
+            "original_query": query,
+            "expanded_query": query,
+            "anchor_entities": [],
+            "neighbor_entities": [],
+        }
+
+    def graph_debug_skipped(self, query: str, reason: str) -> dict[str, Any]:
+        """Report that graph expansion was deliberately not run.
+
+        Callers that bypass expansion still owe the panel the same shape as
+        :meth:`expand_query_with_graph_with_debug`; returning nothing would read
+        as "expansion ran and found nothing" instead of "expansion did not
+        apply here".
+
+        Args:
+            query (str): The unexpanded retrieval query.
+            reason (str): Why expansion was skipped (e.g. ``"scoped"``).
+
+        Returns:
+            dict[str, Any]: Debug payload carrying the reason.
+        """
+        return {**self._graph_debug_base(query), "reason": reason}
+
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
         """Optionally expand a query and return GraphRAG debug metadata.
 
@@ -7050,14 +7106,7 @@ class RAG:
         Returns:
             tuple[str, dict[str, Any]]: A tuple of ``(expanded_query, debug_payload)``.
         """
-        debug: dict[str, Any] = {
-            "enabled": bool(self.graphrag_enabled),
-            "applied": False,
-            "original_query": query,
-            "expanded_query": query,
-            "anchor_entities": [],
-            "neighbor_entities": [],
-        }
+        debug: dict[str, Any] = self._graph_debug_base(query)
 
         if not query.strip():
             debug["reason"] = "empty_query"

@@ -153,7 +153,19 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   swaps in `_ScopedRetriever` and drops every ranking postprocessor, because
   parent-context expansion and link-following would silently widen a
   hand-picked set while the diversity cap and relevance floor would silently
-  narrow it. An oversize selection is refused (422), never truncated. This
+  narrow it. **The scope travels on the query request** (`scope_chunk_ids` on
+  `/query` + `/stream_query`), not only on that PUT: the conversation row is
+  minted by the first turn, so a selection made before it exists has nowhere to
+  be written — pinning it after the answer left the first turn unscoped while
+  the banner already claimed otherwise. Present ⇒ it is this turn's scope and
+  is pinned to the session; absent ⇒ the stored scope still applies. Both paths
+  report back what they did (`retrieval_mode: "scoped"` + `scoped_chunk_count`,
+  in `/query`'s body and the final SSE frame), and the SPA flags any turn that
+  asked for a scope and did not get one, so a dropped scope can never again
+  pass as hand-picked evidence. A scoped turn also skips GraphRAG expansion
+  (`RAG.graph_debug_skipped`): it widens retrieval that is not happening, and
+  the terms it appends land in the synthesis prompt. An oversize selection is
+  refused (422) before the stream opens, never truncated. This
   **replaced the two entity-occurrence chat query modes**, which searched the
   NER aggregate and silently returned whichever entity was most frequent rather
   than the one asked about.

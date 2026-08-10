@@ -80,4 +80,31 @@ describe('ChatTurn', () => {
 
     expect(screen.queryByTestId('answer-entities')).not.toBeInTheDocument()
   })
+
+  it('stays quiet when the server confirms it answered from the selection', () => {
+    const meta = {
+      session_id: 's',
+      sources: [],
+      retrieval_mode: 'scoped',
+      scoped_chunk_count: 2
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta, scopeRequested: 2 })
+
+    expect(screen.queryByTestId('scope-not-applied')).not.toBeInTheDocument()
+  })
+
+  it('flags a turn that asked for a scope and got an unscoped answer', () => {
+    // Without this the two are indistinguishable in the transcript, which is
+    // how a dropped scope came to be presented as hand-picked evidence.
+    const meta = {
+      session_id: 's',
+      sources: [],
+      retrieval_mode: 'rewrite_compact'
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Something else.', done: true, meta, scopeRequested: 2 })
+
+    expect(screen.getByTestId('scope-not-applied')).toBeInTheDocument()
+  })
 })

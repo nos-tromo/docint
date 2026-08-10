@@ -163,6 +163,11 @@ export interface ChatRequest {
   collection?: string
   metadata_filters?: MetadataFilter[]
   retrieval_mode?: RetrievalMode
+  // Hand-picked chunk ids this turn must answer from. Sent with the question
+  // rather than installed beforehand: the session id is minted by the first
+  // turn, so a selection made before it exists has nowhere to be written —
+  // pinning it afterwards left that first answer unscoped.
+  scope_chunk_ids?: string[]
 }
 
 export interface SessionSummary {

@@ -177,6 +177,7 @@ class DummyRAG:
         Returns:
             dict[str, Any]: Measurement mirroring ``RAG.measure_scope``.
         """
+        self.measured_scopes.append([str(entry) for entry in chunk_ids])
         return {
             "chunks": len(list(chunk_ids)),
             "est_tokens": 10,
@@ -249,6 +250,12 @@ class DummyRAG:
         self.chats: list[str] = []
         self.search_calls: list[dict[str, Any]] = []
         self.scope_fits = True
+        # Chunk ids each retrieval entry point was asked to answer from, so
+        # tests can assert a request-carried scope reaches the engine.
+        self.scoped_ids: list[list[str] | None] = []
+        # Scopes handed to ``measure_scope``, so tests can assert an unchanged
+        # selection is not re-measured on every turn.
+        self.measured_scopes: list[list[str]] = []
         # Physical collection observed (via the active scope) at call time, so
         # tests can assert /query and /stream_query thread the resolved name in.
         self.seen_collections: list[str] = []
@@ -385,13 +392,14 @@ class DummyRAG:
             metadata_filters_active (bool): Whether request filters were active.
             metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
-            scoped_node_ids (Any): Hand-picked chunk ids to answer from; ignored by the stub.
+            scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
 
         Returns:
             dict[str, Any]: The response from the RAG system.
         """
         _ = session_id, owner
         self.seen_collections.append(self.qdrant_collection)
+        self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
         self.chats.append(question)
         self.chat_filters.append(
             {
@@ -401,6 +409,17 @@ class DummyRAG:
                 "vector_store_kwargs": vector_store_kwargs,
             }
         )
+        if scoped_node_ids:
+            # Mirror SessionManager: a scoped turn names itself, so endpoint
+            # tests can assert the report survives the response model.
+            return {
+                "response": "answer",
+                "sources": [{"id": 1}],
+                "retrieval_query": f"rewritten::{question}",
+                "coverage_unit": "documents",
+                "retrieval_mode": "scoped",
+                "scoped_chunk_count": len(list(scoped_node_ids)),
+            }
         return {
             "response": "answer",
             "sources": [{"id": 1}],
@@ -443,12 +462,13 @@ class DummyRAG:
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
             prior_turn (Any): Optional prior user/assistant exchange for context.
             skip_query_rewrite (Any): Accepted for parity with RAG.stream_chat; ignored by the stub.
-            scoped_node_ids (Any): Hand-picked chunk ids to answer from; ignored by the stub.
+            scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
         """
         _ = session_id, owner
+        self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
         self.stream_filters.append(
             {
                 "filters": metadata_filters,
@@ -482,6 +502,7 @@ class DummyRAG:
         metadata_filters: Any = None,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
+        scoped_node_ids: Any = None,
     ) -> dict[str, Any]:
         """Run a stateless retrieval query.
 
@@ -490,6 +511,7 @@ class DummyRAG:
             metadata_filters: Optional compiled metadata filters.
             metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
+            scoped_node_ids: Hand-picked chunk ids to answer from; recorded by the stub.
 
         Returns:
             dict[str, Any]: Response payload.
@@ -498,6 +520,7 @@ class DummyRAG:
         _ = metadata_filter_rules
         _ = vector_store_kwargs
         self.seen_collections.append(self.qdrant_collection)
+        self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
         self.stateless_queries.append(prompt)
         return {
             "response": "answer",
@@ -512,6 +535,7 @@ class DummyRAG:
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
         retrieval_options: Any = None,
+        scoped_node_ids: Any = None,
     ) -> dict[str, Any]:
         """Async stateless retrieval query mirroring :meth:`run_query`.
 
@@ -521,6 +545,7 @@ class DummyRAG:
             metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
             retrieval_options: Optional runtime retrieval overrides.
+            scoped_node_ids: Hand-picked chunk ids to answer from.
 
         Returns:
             dict[str, Any]: Response payload.
@@ -538,6 +563,7 @@ class DummyRAG:
             metadata_filters=metadata_filters,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
+            scoped_node_ids=scoped_node_ids,
         )
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
@@ -1696,6 +1722,172 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
     assert len(rag.stateless_query_filters) == before + 1
     recorded = rag.stateless_query_filters[-1]
     assert set(recorded) == {"filters", "rules", "vector_store_kwargs"}
+
+
+def test_stream_query_answers_from_a_scope_carried_on_the_request(client: TestClient) -> None:
+    """The first turn of a new chat must answer from the scope it was sent with.
+
+    ``PUT /sessions/{id}/scope`` can only write to a conversation row that
+    exists, and that row is minted by this very turn — so a client holding a
+    hand-picked selection has nowhere to put it beforehand. Carrying it on the
+    request is the only way the *first* answer can be scoped; before this, the
+    selection reached the server after the answer had already been written.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    with client.stream(
+        "POST",
+        "/stream_query",
+        json={"question": "What?", "collection": "alpha", "scope_chunk_ids": ["c1", "c2"]},
+    ) as resp:
+        assert resp.status_code == 200
+        resp.read()
+
+    assert rag.scoped_ids[-1] == ["c1", "c2"]
+
+
+def test_stream_query_stores_a_request_carried_scope_on_the_session(client: TestClient) -> None:
+    """A scope that arrives with a turn is pinned, so later turns keep it.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    with client.stream(
+        "POST",
+        "/stream_query",
+        json={"question": "What?", "collection": "alpha", "scope_chunk_ids": ["c1", "c2"]},
+    ) as resp:
+        resp.read()
+
+    assert rag.sessions.scope == ["c1", "c2"]
+
+
+def test_query_answers_from_a_scope_carried_on_the_request(client: TestClient) -> None:
+    """`/query` honours a request-carried scope like `/stream_query` does.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.post(
+        "/query",
+        json={"question": "What?", "collection": "alpha", "scope_chunk_ids": ["c1", "c2"]},
+    )
+
+    assert response.status_code == 200
+    assert rag.scoped_ids[-1] == ["c1", "c2"]
+    assert rag.sessions.scope == ["c1", "c2"]
+
+
+def test_query_reports_the_scope_it_answered_from(client: TestClient) -> None:
+    """The report must survive the response model, or the client cannot check it.
+
+    A field the engine sets but ``QueryOut`` does not declare is silently
+    dropped — which is how a scoped turn came to be indistinguishable from an
+    ordinary one on the wire.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post(
+        "/query",
+        json={"question": "What?", "collection": "alpha", "scope_chunk_ids": ["c1", "c2"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["retrieval_mode"] == "scoped"
+    assert body["scoped_chunk_count"] == 2
+
+
+def test_stateless_query_answers_from_a_scope_carried_on_the_request(client: TestClient) -> None:
+    """A scope is about *which evidence*, not about carrying chat history.
+
+    Stateless mode has no session to pin a scope to, so the request is the only
+    place it can come from; dropping it there would answer a hand-picked
+    question from the whole collection.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.post(
+        "/query",
+        json={
+            "question": "What?",
+            "collection": "alpha",
+            "retrieval_mode": "stateless",
+            "scope_chunk_ids": ["c1"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert rag.scoped_ids[-1] == ["c1"]
+
+
+def test_query_without_a_scope_field_still_uses_the_stored_scope(client: TestClient) -> None:
+    """Omitting the field keeps the session's pinned scope (sticky, as before).
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    rag.sessions.scope = ["stored-1"]
+
+    response = client.post("/query", json={"question": "What?", "collection": "alpha"})
+
+    assert response.status_code == 200
+    assert rag.scoped_ids[-1] == ["stored-1"]
+
+
+def test_stream_query_refuses_an_oversize_request_scope_before_streaming(client: TestClient) -> None:
+    """An oversize selection is refused up front, never truncated mid-answer.
+
+    Mirrors ``PUT /sessions/{id}/scope``: scoped answering splices the chunks
+    straight into the prompt, so a selection that cannot fit is a 422 — and it
+    must be raised before the SSE body opens, or the refusal would arrive as an
+    in-stream error the client cannot tell from a generation failure.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    rag.scope_fits = False
+
+    response = client.post(
+        "/stream_query",
+        json={"question": "What?", "collection": "alpha", "scope_chunk_ids": ["c1", "c2"]},
+    )
+
+    assert response.status_code == 422
+    assert rag.sessions.scope == []
+
+
+def test_an_unchanged_request_scope_is_not_measured_again(client: TestClient) -> None:
+    """Re-sending the pinned scope costs no extra Qdrant round trip.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    rag.sessions.scope = ["c1", "c2"]
+
+    response = client.post(
+        "/query",
+        json={
+            "question": "What?",
+            "collection": "alpha",
+            "session_id": "generated-session",
+            "scope_chunk_ids": ["c1", "c2"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert rag.scoped_ids[-1] == ["c1", "c2"]
+    assert rag.measured_scopes == []
 
 
 @pytest.mark.anyio

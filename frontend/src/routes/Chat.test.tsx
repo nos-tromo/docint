@@ -653,6 +653,88 @@ describe('Chat scope banner', () => {
       expect(state.scopes['sess-new']?.usableTokens).toBe(22000)
     })
   })
+
+  it('sends the pinned selection with the very question it scopes', async () => {
+    // The scope endpoint needs a session row, and that row is minted by this
+    // request — so the selection can only reach the server by riding along
+    // with it. Installing it afterwards left the first answer unscoped while
+    // the banner already claimed it was scoped.
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = typeof req === 'string' ? req : String(req)
+      if (u.includes('/stream_query')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: bodyFromString(
+            'data: {"response":"ok","sources":[],"session_id":"sess-new","retrieval_mode":"scoped","scoped_chunk_count":2}\n\n'
+          )
+        })
+      }
+      const body = u.includes('/scope')
+        ? { chunk_ids: ['p1', 'p2'], est_tokens: 50, usable_tokens: 22000, missing: 0 }
+        : { messages: [] }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body)
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useSearchUiStore.setState({
+      scopes: { new: { tokens: { p1: 40, p2: 10 }, usableTokens: 0, missing: 0 } }
+    })
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/stream_query'))
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1]!.body)).scope_chunk_ids).toEqual(['p1', 'p2'])
+    })
+  })
+
+  it('says so when an answer did not come from the pinned selection', async () => {
+    // The guardrail for exactly the failure above: if the server does not
+    // confirm it answered from the selection, the turn must not pass as
+    // scoped just because the banner says the chat is.
+    const fetchMock = vi.fn((req: RequestInfo | URL) => {
+      const u = typeof req === 'string' ? req : String(req)
+      if (u.includes('/stream_query')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: bodyFromString('data: {"response":"ok","sources":[],"session_id":"sess-new"}\n\n')
+        })
+      }
+      const body = u.includes('/scope')
+        ? { chunk_ids: ['p1'], est_tokens: 40, usable_tokens: 22000, missing: 0 }
+        : { messages: [] }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body)
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useSearchUiStore.setState({
+      scopes: { new: { tokens: { p1: 40 }, usableTokens: 0, missing: 0 } }
+    })
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByTestId('scope-not-applied')).toBeInTheDocument()
+  })
 })
 
 describe('Chat session switching', () => {

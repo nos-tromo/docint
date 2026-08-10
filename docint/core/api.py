@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 import zipfile
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -326,6 +326,67 @@ def _scoped_collection(collection: str | None, principal: Principal) -> Iterator
     physical = _resolve_request_collection(collection, principal)
     with rag.collection_scope(physical):
         yield physical
+
+
+def _validate_requested_scope(
+    requested: Sequence[str], physical: str, session_id: str | None, owner: str | None
+) -> None:
+    """Refuse a request-carried scope that cannot fit the chat context budget.
+
+    Mirrors ``PUT /sessions/{id}/scope``: scoped answering splices the chosen
+    chunks straight into the prompt, so an oversize selection is refused rather
+    than truncated — a silently shortened evidence set produces an answer that
+    looks complete and is not. Callers run this *before* opening a stream, so
+    the refusal is a plain 422 instead of an in-stream error indistinguishable
+    from a generation failure.
+
+    A selection identical to the one already pinned was measured when it was
+    pinned, so it is not measured again — that keeps the ordinary turn free of
+    an extra Qdrant round trip.
+
+    Args:
+        requested (Sequence[str]): Chunk ids carried on the request.
+        physical (str): Resolved physical collection to measure against.
+        session_id (str | None): The session whose stored scope to compare to.
+        owner (str | None): The principal that must own that session.
+
+    Raises:
+        HTTPException: 422 when the selection cannot fit the context budget.
+    """
+    if not requested:
+        return
+    stored: list[str] = rag.ensure_session_manager().get_scope(session_id, owner) if session_id else []
+    if list(requested) == list(stored):
+        return
+    with rag.collection_scope(physical):
+        measured = rag.measure_scope(list(requested))
+    if not measured["fits"]:
+        raise HTTPException(status_code=422, detail="Invalid request.")
+
+
+def _apply_turn_scope(session_id: str, owner: str | None, requested: Sequence[str] | None) -> list[str]:
+    """Return the chunk ids this turn answers from, pinning a new selection.
+
+    Called once the session id exists (``start_session`` is what mints it), so
+    a scope that arrived with the very first turn is both used for that turn
+    and stored for the next one.
+
+    Args:
+        session_id (str): The resolved session for this turn.
+        owner (str | None): The principal that owns it.
+        requested (Sequence[str] | None): Chunk ids carried on the request, if
+            any. ``None`` falls back to the session's stored scope.
+
+    Returns:
+        list[str]: The effective scope; empty means ordinary retrieval.
+    """
+    sessions = rag.ensure_session_manager()
+    if requested is None:
+        return list(sessions.get_scope(session_id, owner))
+    ids = [str(entry) for entry in requested]
+    if ids != list(sessions.get_scope(session_id, owner)):
+        sessions.set_scope(session_id, owner, ids)
+    return ids
 
 
 def _resolve_qdrant_src_dir() -> Path:
@@ -716,6 +777,14 @@ class QueryIn(BaseModel):
     collection: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
     retrieval_mode: Literal["session", "stateless"] = "session"
+    # Hand-picked chunk ids this turn must answer from. Present ⇒ it *is* the
+    # scope for this turn and is pinned to the session; absent ⇒ the session's
+    # stored scope still applies (``DELETE /sessions/{id}/scope`` clears it).
+    # The scope travels with the request because the session row is minted by
+    # the first turn, so a client with a selection has nowhere to write it
+    # beforehand — installing it afterwards left that first answer unscoped
+    # while the UI already claimed it was scoped.
+    scope_chunk_ids: list[str] | None = None
 
 
 class ScopeIn(BaseModel):
@@ -767,6 +836,9 @@ class QueryOut(BaseModel):
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
+    #: How many hand-picked chunks a ``retrieval_mode="scoped"`` turn answered
+    #: from; absent on an ordinary retrieval.
+    scoped_chunk_count: int | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -1416,6 +1488,13 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
         if qdrant_filter is not None:
             vector_store_kwargs["qdrant_filters"] = qdrant_filter
 
+        _validate_requested_scope(
+            payload.scope_chunk_ids or [],
+            physical,
+            payload.session_id,
+            principal.effective_owner,
+        )
+
         with rag.collection_scope(physical):
             if getattr(rag, "query_engine", None) is None:
                 if getattr(rag, "index", None) is None:
@@ -1423,10 +1502,13 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 rag.create_query_engine()
 
             if payload.retrieval_mode == "stateless":
+                # Stateless mode has no session to pin a scope to, so the
+                # request is the only place one can come from.
+                stateless_scope = [str(entry) for entry in payload.scope_chunk_ids or []]
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                if callable(expand_with_debug):
+                if callable(expand_with_debug) and not stateless_scope:
                     try:
                         expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
                         retrieval_query = str(expanded)
@@ -1443,6 +1525,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     metadata_filters=metadata_filters,
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
+                    scoped_node_ids=stateless_scope or None,
                 )
                 if graph_debug is not None:
                     data["graph_debug"] = graph_debug
@@ -1453,10 +1536,13 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     owner=principal.effective_owner,
                 )
                 # A session pinned to hand-picked chunks answers only from
-                # them — no vector retrieval at all.
-                scoped_node_ids = rag.ensure_session_manager().get_scope(
+                # them — no vector retrieval at all. Resolved here, once the
+                # id exists, so a scope carried by the very first turn is used
+                # for that turn and pinned for the next.
+                scoped_node_ids = _apply_turn_scope(
                     session_id,
                     principal.effective_owner,
+                    payload.scope_chunk_ids,
                 )
                 data = rag.chat(
                     payload.question,
@@ -1468,9 +1554,6 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     vector_store_kwargs=vector_store_kwargs or None,
                     scoped_node_ids=scoped_node_ids or None,
                 )
-                if scoped_node_ids and isinstance(data, dict):
-                    data["retrieval_mode"] = "scoped"
-                    data["scoped_chunk_count"] = len(scoped_node_ids)
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
@@ -1516,6 +1599,9 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             "retrieval_query": retrieval_query_value,
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
+            "scoped_chunk_count": (
+                data.get("scoped_chunk_count") if isinstance(data, dict) and retrieval_mode == "scoped" else None
+            ),
             **validation,
         }
     except HTTPException:
@@ -1565,6 +1651,15 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     detail="Session is pinned to a different collection.",
                 )
 
+    # Same reasoning as the pin check above: an unaffordable scope must be a
+    # clean 422 before the SSE body opens, not an in-stream error.
+    _validate_requested_scope(
+        payload.scope_chunk_ids or [],
+        physical,
+        payload.session_id,
+        session_owner,
+    )
+
     async def _stream_body() -> AsyncIterator[str]:
         """Generate SSE events for the streaming query.
 
@@ -1582,10 +1677,13 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             full_answer = ""
             final_payload: dict[str, Any] | None = None
             if payload.retrieval_mode == "stateless":
+                # Stateless mode has no session to pin a scope to, so the
+                # request is the only place one can come from.
+                stateless_scope = [str(entry) for entry in payload.scope_chunk_ids or []]
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                if callable(expand_with_debug):
+                if callable(expand_with_debug) and not stateless_scope:
                     try:
                         expanded, debug_payload = cast(
                             "tuple[Any, Any]",
@@ -1605,6 +1703,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     metadata_filters=metadata_filters,
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
+                    scoped_node_ids=stateless_scope or None,
                 )
                 if graph_debug is not None:
                     stateless_data["graph_debug"] = graph_debug
@@ -1660,9 +1759,13 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             skip_query_rewrite=False,
                             # A session pinned to hand-picked chunks answers
                             # only from them — no vector retrieval at all.
-                            scoped_node_ids=rag.ensure_session_manager().get_scope(
+                            # Resolved here, once the id exists, so a scope
+                            # carried by the very first turn is used for that
+                            # turn and pinned for the next.
+                            scoped_node_ids=_apply_turn_scope(
                                 session_id,
                                 session_owner,
+                                payload.scope_chunk_ids,
                             )
                             or None,
                         ),

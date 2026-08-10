@@ -125,6 +125,8 @@ export const en = {
   'chat.value_placeholder': 'value',
   'chat.remove_rule_aria': 'Remove rule',
   'chat.graph_debug': 'Graph debug',
+  'chat.scope_not_applied':
+    'This answer was not restricted to the {count} selected chunks — it came from ordinary retrieval.',
   'chat.validation_mismatch_title': 'Response validation flagged a potential mismatch',
   'chat.validation_mismatch_default_detail':
     'Potential mismatch between answer and retrieved sources.',

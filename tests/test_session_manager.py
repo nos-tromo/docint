@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Generator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -12,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from docint.core.state.base import Base, _make_session_maker
 from docint.core.state.session_manager import SessionManager
+from docint.core.state.turn import Turn
 
 
 @pytest.fixture
@@ -100,6 +102,60 @@ def test_persist_and_retrieve_citation_with_hash(
     assert source["file_hash"] == "hash123"
     assert source["page"] == 1
     # assert source["preview_text"] == "Preview text" # This will be empty string
+
+
+def test_a_turn_persists_sources_that_carry_no_score(
+    session_manager: SessionManager,
+) -> None:
+    """A hand-picked chunk has no score, and persisting must survive that.
+
+    ``_ScopedRetriever`` builds its nodes with ``score=None`` — there is
+    nothing to rank — so ``float(score)`` raised on every scoped turn, killing
+    the request *after* the answer had already been generated (and, on the SSE
+    path, after it had been streamed).
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    node_mock = MagicMock()
+    node_mock.node_id = "picked-1"
+    node_mock.metadata = {"filename": "handbook.pdf", "file_hash": "h1", "source": "document"}
+    src_node_mock = MagicMock()
+    src_node_mock.node = node_mock
+    src_node_mock.score = None
+    resp_mock.source_nodes = [src_node_mock]
+
+    session_manager._persist_turn("scoped-session", "hello", resp_mock, {"response": "Hi"})
+
+    history = session_manager.get_session_history("scoped-session", owner=None)
+    assert history[1]["sources"][0]["filename"] == "handbook.pdf"
+
+
+def test_a_persisted_turn_is_stamped_when_it_happened(
+    session_manager: SessionManager,
+) -> None:
+    """Every turn must carry its own timestamp, not the process's start time.
+
+    ``Turn.created_at`` used a non-callable SQLAlchemy default, evaluated once
+    at import — so every turn a backend ever wrote was stamped with the moment
+    the process booted, and exported sessions read as if the whole
+    conversation happened at startup.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    before = datetime.now(UTC).replace(tzinfo=None)
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
+
+    session_manager._persist_turn("stamped-session", "hello", resp_mock, {"response": "Hi"})
+
+    with session_manager._session_scope() as session:
+        stored = session.query(Turn).filter_by(conversation_id="stamped-session").one()
+        assert cast(datetime, stored.created_at) >= before
 
 
 def test_get_session_history_enriches_sources_from_node_lookup(
@@ -293,6 +349,104 @@ def test_stream_chat_includes_final_response_when_no_tokens(
             "turn_idx": 0,
         }
     ]
+
+
+def test_scoped_chat_reports_that_it_answered_from_the_scope(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scoped turn must say so, so a client can tell it apart from retrieval.
+
+    Without this the answer looks exactly like an ordinary one, which is how a
+    dropped scope stayed invisible: the UI claimed the answer came from the
+    hand-picked chunks while the server had retrieved across the collection.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    scoped_engine = MagicMock()
+    scoped_engine.query.return_value = MagicMock()
+    session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "Hi",
+        "sources": [],
+    }
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    response = session_manager.chat("hello", scoped_node_ids=["c1", "c2"])
+
+    normalize_kwargs = session_manager.rag._normalize_response_data.call_args.kwargs  # type: ignore[attr-defined]
+    assert normalize_kwargs["retrieval_mode"] == "scoped"
+    assert response["scoped_chunk_count"] == 2
+
+
+def test_a_scoped_turn_does_not_expand_the_query_with_the_graph(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Graph expansion widens *retrieval*, and a scoped turn does none.
+
+    It appends "Related entities for retrieval: …" to the query string, and
+    that string is what the synthesizer is asked to answer — so on a scoped
+    turn it is noise in the generation prompt, paid for with an NER-aggregate
+    load that buys nothing.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    scoped_engine = MagicMock()
+    scoped_engine.query.return_value = MagicMock()
+    session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
+    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
+    session_manager.rag.graph_debug_skipped.return_value = {"applied": False, "reason": "scoped"}  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "Hi",
+        "sources": [],
+    }
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    response = session_manager.chat("hello", scoped_node_ids=["c1"])
+
+    session_manager.rag.expand_query_with_graph_with_debug.assert_not_called()  # type: ignore[attr-defined]
+    scoped_engine.query.assert_called_once_with("rewritten hello")
+    assert response["graph_debug"] == {"applied": False, "reason": "scoped"}
+
+
+def test_scoped_stream_chat_reports_the_scope_in_its_final_frame(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SSE endpoint the chat UI uses must carry the same report.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    streaming_engine = MagicMock()
+    streaming_response = MagicMock()
+    streaming_response.response_gen = iter(())
+    streaming_response.source_nodes = cast(list[Any], [])
+    streaming_engine.query.return_value = streaming_response
+    session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "Hi",
+        "sources": [],
+        "retrieval_mode": "scoped",
+    }
+    session_manager.rag.index = object()  # type: ignore[assignment]
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    chunks = list(session_manager.stream_chat("hello", session_id="session-1", scoped_node_ids=["c1", "c2"]))
+
+    normalize_kwargs = session_manager.rag._normalize_response_data.call_args.kwargs  # type: ignore[attr-defined]
+    assert normalize_kwargs["retrieval_mode"] == "scoped"
+    final = cast(dict[str, Any], chunks[-1])
+    assert final["retrieval_mode"] == "scoped"
+    assert final["scoped_chunk_count"] == 2
 
 
 def test_make_session_maker_creates_parent_dir(tmp_path: Path) -> None:

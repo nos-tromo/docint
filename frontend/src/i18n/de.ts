@@ -131,6 +131,8 @@ export const de: Strings = {
   'chat.value_placeholder': 'Wert',
   'chat.remove_rule_aria': 'Regel entfernen',
   'chat.graph_debug': 'Graph-Debug',
+  'chat.scope_not_applied':
+    'Diese Antwort wurde nicht auf die {count} ausgewählten Abschnitte eingegrenzt — sie stammt aus der normalen Suche.',
   'chat.validation_mismatch_title':
     'Die Antwortvalidierung hat eine mögliche Abweichung ergeben',
   'chat.validation_mismatch_default_detail':
