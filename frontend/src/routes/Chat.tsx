@@ -16,9 +16,11 @@ import { draftKey, useChatUiStore } from '@/stores/chatUi'
 import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/stores/searchUi'
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
+import { ChatControls } from '@/components/chat/ChatControls'
 import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
 import { ScopeBanner } from '@/components/chat/ScopeBanner'
-import { SearchPanel, SearchRailBadges } from '@/components/chat/SearchPanel'
+import { SearchPanel } from '@/components/chat/SearchPanel'
+import { cn } from '@/lib/cn'
 import { downloadText } from '@/lib/csv'
 import { chatTranscriptToText } from '@/lib/exports'
 import { useT } from '@/i18n/LanguageContext'
@@ -313,20 +315,34 @@ export function Chat() {
       <section className="flex flex-col h-full min-h-0">
         <div className="flex items-center justify-between mb-4">
           <PageHeader title={t('chat.title')} className="mb-0" />
-          {state.turns.length > 0 && (
-            <button
-              type="button"
-              onClick={() =>
-                downloadText(
-                  `chat_${currentSessionId ?? 'session'}.txt`,
-                  chatTranscriptToText(state.turns, t)
-                )
-              }
-              className="px-3 py-1 rounded-md border border-border text-sm"
-            >
-              {t('chat.download')}
-            </button>
-          )}
+          {/* The metadata filters and the retrieval mode belong here, to the
+              chat, not to the search panel: they narrow what any answer
+              retrieves against, whether or not the panel is even open. In the
+              panel they read as controls over the keyword index, which they
+              are not.
+
+              They are last in the row, so they hold the right edge: Download
+              appears only once a transcript exists, and controls placed
+              outboard of it would slide sideways the first time an answer
+              lands. */}
+          <div className="flex items-center gap-3">
+            {state.turns.length > 0 && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  downloadText(
+                    `chat_${currentSessionId ?? 'session'}.txt`,
+                    chatTranscriptToText(state.turns, t)
+                  )
+                }
+              >
+                {t('chat.download')}
+              </Button>
+            )}
+            <ChatControls />
+          </div>
         </div>
         <ScopeBanner
           count={scopedChunkIds.length}
@@ -388,9 +404,13 @@ export function Chat() {
 
       {/* The rail is deliberately quieter than the app sidebar's hamburger:
           a slim chevron on the panel's own edge, muted until hovered or
-          focused. Collapsed it keeps the hit and active-filter counts
-          visible — a panel that silently filters or scopes while hidden is a
-          trap. */}
+          focused, and nothing else — it opens and shuts the panel, and every
+          detail about a search belongs in the panel it opens.
+
+          It does carry one bit of state, because that bit has consequences
+          while hidden: a live scope tints the control, since a chat answering
+          from hand-picked chunks behind a shut panel is a trap. Padding stays
+          put in both states so the tint appears without nudging anything. */}
       <aside className="flex h-full min-h-0 gap-2 overflow-hidden">
         <div className="flex shrink-0 flex-col items-center gap-2">
           <button
@@ -399,13 +419,21 @@ export function Chat() {
             aria-expanded={sidePanelOpen}
             aria-controls="chat-side-panel"
             aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
-            className="rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border"
+            // 32px square, like every control in the chat header: both columns
+            // start on the same line, so matching the size is what puts this
+            // button on that line rather than 4px above it.
+            className={cn(
+              'flex h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
+              scopedChunkIds.length > 0
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
+            )}
+            data-scoped={scopedChunkIds.length > 0 || undefined}
           >
             <RailChevron open={sidePanelOpen} />
           </button>
-          {!sidePanelOpen && <SearchRailBadges sessionId={currentSessionId} />}
         </div>
-        {/* Kept mounted while collapsed so the rail's counts stay live and
+        {/* Kept mounted while collapsed so a running search stays warm and
             the typed query survives a collapse. */}
         <div id="chat-side-panel" hidden={!sidePanelOpen} className="h-full min-h-0 min-w-0 flex-1">
           <SearchPanel sessionId={currentSessionId} />

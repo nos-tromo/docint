@@ -1,32 +1,31 @@
+import { useEffect, useRef } from 'react'
 import { Badge, Button, Input, Select } from '@infra/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
+import { cn } from '@/lib/cn'
+import { SlidersIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
 
 const OPERATORS = ['eq', 'neq', 'contains', 'gte', 'lte', 'in']
 
-const ChevronGlyph = ({ open }: { open: boolean }) => (
-  <svg
-    viewBox="0 0 24 24"
-    className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-90' : ''}`}
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    aria-hidden="true"
-  >
-    <path d="M9 6l6 6-6 6" />
-  </svg>
-)
-
 /**
- * The metadata filters, as a `Filters (N)` disclosure at the foot of the chat
- * side panel.
+ * The metadata filters, as an icon disclosure beside the Chat heading.
  *
- * Filters are set occasionally and search is used constantly, so they must not
- * hold half the column permanently: collapsed they are one summary line, and
- * expanded they overlay the hit list rather than pushing it off-screen. The
- * badge keeps the active count visible while collapsed, because a filter that
- * silently narrows every search is a trap.
+ * Filters are set occasionally and read constantly, so they must not hold
+ * screen permanently: collapsed they are one icon, and expanded they overlay
+ * what is beneath rather than pushing it down. The trigger carries no label —
+ * the sliders say it — but it does carry a count badge, because a filter that
+ * silently narrows every retrieval is a trap.
+ *
+ * The panel **drops downward** over the transcript, right-aligned under the
+ * trigger so its edge lands on the chat column's edge, and 22rem wide — the
+ * width of the search panel across from it. It used to rise from the foot of
+ * that column, where it covered the retrieval control sitting directly above
+ * it: two settings taking turns in one patch of screen, which is what made the
+ * pair read as a single confusing toggle.
+ *
+ * It dismisses like a menu: a pointer anywhere else, or Escape. An overlay that
+ * can only be closed by hitting the same small icon again is a trap of its own.
  *
  * Every control is an `@infra/ui` primitive — the hand-rolled `bg-muted`
  * inputs this replaces had no contrast at all against the muted panel.
@@ -37,13 +36,34 @@ export function FilterBuilder() {
   const open = useSearchUiStore((state) => state.filtersOpen)
   const setOpen = useSearchUiStore((state) => state.setFiltersOpen)
   const activeCount = s.buildPayload().length
+  const root = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    // `pointerdown`, not `click`: a drag that starts outside and ends inside
+    // should still dismiss, and the panel must be gone before whatever was
+    // clicked underneath reacts. Anything inside the root — trigger included —
+    // is left to its own handler.
+    const onPointerDown = (e: PointerEvent) => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, setOpen])
 
   return (
-    <div className="relative">
+    <div className="relative" ref={root}>
       {open && (
-        // Overlays the hit list instead of compressing it: search owns the
-        // column's vertical space.
-        <div className="absolute inset-x-0 bottom-full z-10 mb-1 max-h-[26rem] space-y-3 overflow-auto rounded-md border border-border bg-background p-3 text-sm shadow-lg">
+        // Capped against the viewport so a short window cannot cut the panel
+        // off at the bottom.
+        <div className="absolute right-0 top-full z-20 mt-1 w-[22rem] max-w-[calc(100vw-4rem)] max-h-[min(26rem,55vh)] space-y-3 overflow-auto rounded-md border border-border bg-background p-3 text-sm shadow-lg">
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -143,16 +163,36 @@ export function FilterBuilder() {
         </div>
       )}
 
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="sm"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
-        className="flex w-full items-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+        // The badge below is decorative, so the count has to live in the name:
+        // with the label gone there is nothing else left to read out.
+        aria-label={
+          activeCount > 0 ? t('search.filters_badge_aria', { count: activeCount }) : t('search.filters')
+        }
+        title={
+          activeCount > 0 ? t('search.filters_badge_aria', { count: activeCount }) : t('search.filters')
+        }
+        className={cn('h-8 w-8 shrink-0 px-0', open && 'bg-muted text-foreground')}
       >
-        <ChevronGlyph open={open} />
-        <span>{t('search.filters')}</span>
-        {activeCount > 0 && <Badge variant="accent">{activeCount}</Badge>}
-      </button>
+        <SlidersIcon className="h-4 w-4" />
+      </Button>
+      {/* Pinned to the corner rather than set beside the icon, so an active
+          filter never changes the control's footprint — and so the count is
+          still on screen when the label is not. */}
+      {activeCount > 0 && (
+        <Badge
+          variant="accent"
+          aria-hidden="true"
+          className="pointer-events-none absolute -right-1 -top-1 min-w-4 justify-center px-1 py-0 text-[0.625rem] leading-4"
+        >
+          {activeCount}
+        </Badge>
+      )}
     </div>
   )
 }

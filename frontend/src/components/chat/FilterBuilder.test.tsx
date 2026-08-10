@@ -33,12 +33,44 @@ describe('FilterBuilder disclosure', () => {
 
   it('badges the active filter count so a hidden filter is never silent', async () => {
     useSearchUiStore.getState().setFiltersOpen(true)
-    render(<FilterBuilder />)
+    const { container } = render(<FilterBuilder />)
 
     await userEvent.click(screen.getByRole('checkbox', { name: /enable metadata filters/i }))
     await userEvent.type(screen.getByPlaceholderText('application/pdf'), 'application/pdf')
 
-    expect(screen.getByRole('button', { name: /filters/i })).toHaveTextContent('1')
+    // The trigger is an icon with no label, so the count has to reach a screen
+    // reader through its name; the corner badge is the sighted half of that.
+    expect(screen.getByRole('button', { name: /1 active filters/i })).toBeInTheDocument()
+    expect(container.querySelector('[aria-hidden="true"].absolute')).toHaveTextContent('1')
+  })
+
+  it('closes on a pointer press outside it, and on Escape', async () => {
+    // An overlay you can only shut by hitting the same small icon again is its
+    // own trap — it sits over the transcript the user is trying to read.
+    useSearchUiStore.getState().setFiltersOpen(true)
+    render(
+      <div>
+        <FilterBuilder />
+        <button type="button">elsewhere</button>
+      </div>
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /elsewhere/i }))
+    expect(useSearchUiStore.getState().filtersOpen).toBe(false)
+
+    useSearchUiStore.getState().setFiltersOpen(true)
+    await userEvent.keyboard('{Escape}')
+    expect(useSearchUiStore.getState().filtersOpen).toBe(false)
+  })
+
+  it('stays open while the panel itself is used', async () => {
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.getState().setFilterEnabled(true)
+    render(<FilterBuilder />)
+
+    await userEvent.click(screen.getByPlaceholderText('application/pdf'))
+
+    expect(useSearchUiStore.getState().filtersOpen).toBe(true)
   })
 
   it('gives the hate-speech toggle its own checkbox-beside-label row', async () => {

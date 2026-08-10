@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import { Badge, Banner, Button, Card, Input, Select } from '@infra/ui'
+import { Banner, Button, Card, Input } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
 import { useSearch, useScope } from '@/hooks/useSearch'
-import { useChatFiltersStore } from '@/stores/chatFilters'
 import {
   scopeChunkIds,
   scopeEstTokens,
@@ -13,8 +12,8 @@ import {
   useSearchUiStore
 } from '@/stores/searchUi'
 import { useUiStore } from '@/stores/ui'
-import { FilterBuilder } from '@/components/chat/FilterBuilder'
 import { SearchHitRow } from '@/components/chat/SearchHit'
+import { CheckAllIcon, XIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
@@ -57,7 +56,6 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const t = useT()
   const key = searchKeyFor(sessionId)
   const collection = useUiStore((s) => s.selectedCollection)
-  const filters = useChatFiltersStore()
 
   const draft = useSearchUiStore((s) => s.drafts[key] ?? '')
   const query = useSearchUiStore((s) => s.queries[key] ?? '')
@@ -91,7 +89,7 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   /**
    * Write a selection: optimistic locally, authoritative server-side.
    *
-   * Shared by the checkbox, select-all and clear so all three keep the same
+   * Shared by the tile, select-all and clear so all three keep the same
    * rollback — the server refuses an oversize scope with 422, and a local
    * selection left standing after that refusal would claim evidence the next
    * answer will not use.
@@ -172,31 +170,93 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               {searchError()}
             </p>
           )}
-          {search.data && (
-            <p className="text-xs text-muted-foreground" data-testid="search-summary">
-              {t('search.hits', { count: search.data.total })}
-              {' · '}
-              {search.data.next_cursor
-                ? t('search.docs_more', { count: docCount })
-                : t('search.docs', { count: docCount })}
+          {/* One line for everything the result set is — hits, documents, what
+              the selection costs — and the two things you can do to all of it
+              at once. Deliberately one line: the meter used to be a row of its
+              own that appeared on the first selection and shoved the whole hit
+              list down, so picking evidence moved the thing you were reading.
+              Content changes, row count does not.
+
+              The row follows the *selection* as well as the hits: after picking
+              chunks and then searching for something with no matches, the
+              selection is still live and must stay clearable from here.
+
+              The bulk controls are icons because their labels were the longest
+              text in a 22rem column while saying the least. Their tooltips can
+              afford full sentences, so that is where the promise ("the results
+              loaded so far, not every match") and the projected cost live —
+              the *danger* case keeps its own visible line below. */}
+          {(search.data || selectedIds.length > 0) && (
+            <div className="flex items-center gap-1" data-testid="scope-bulk">
+              <p
+                className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+                data-testid="search-summary"
+              >
+                {search.data && (
+                  <>
+                    {t('search.hits', { count: search.data.total })}
+                    {' · '}
+                    {search.data.next_cursor
+                      ? t('search.docs_more', { count: docCount })
+                      : t('search.docs', { count: docCount })}
+                  </>
+                )}
+                {selectedIds.length > 0 && (
+                  <>
+                    {search.data && ' · '}
+                    <span data-testid="token-meter">
+                      {scope.usableTokens > 0
+                        ? t('search.budget', {
+                            used: formatTokens(estTokens),
+                            total: formatTokens(scope.usableTokens)
+                          })
+                        : t('search.budget_selected', { used: formatTokens(estTokens) })}
+                    </span>
+                  </>
+                )}
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={hits.length === 0}
+                aria-label={t('search.select_all_loaded', { count: hits.length })}
+                title={`${t('search.select_all_loaded_title', { count: hits.length })} ${t(
+                  'search.select_all_cost',
+                  { tokens: formatTokens(projectedTokens) }
+                )}`}
+                onClick={() => void commitScope(allLoadedTokens())}
+                className="h-7 w-7 shrink-0 px-0"
+              >
+                <CheckAllIcon className="h-4 w-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={selectedIds.length === 0}
+                aria-label={t('search.clear_selection')}
+                title={t('search.clear_selection')}
+                onClick={() => void commitScope({})}
+                className="h-7 w-7 shrink-0 px-0"
+              >
+                <XIcon className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
+          {hits.length > 0 && projectedOverBudget && (
+            <p className="text-xs text-red-500" data-testid="select-all-over-budget">
+              {t('search.select_all_over_budget', { total: formatTokens(scope.usableTokens) })}
             </p>
           )}
         </>
       )}
 
-      {selectedIds.length > 0 && (
-        <p className="text-xs text-muted-foreground" data-testid="token-meter">
-          {scope.usableTokens > 0
-            ? t('search.budget', {
-                used: formatTokens(estTokens),
-                total: formatTokens(scope.usableTokens)
-              })
-            : t('search.budget_selected', { used: formatTokens(estTokens) })}
-        </p>
-      )}
-      {selectedIds.length > 0 && !sessionId && (
-        <p className="text-xs text-muted-foreground">{t('search.scope_pending')}</p>
-      )}
+      {/* No "applies once the chat has started" notice: picking evidence
+          before the first turn behaves exactly as it does after it, so the
+          line explained nothing while shoving the whole hit list down the
+          moment anything was selected. The selection is carried into the
+          session the backend mints on that first turn (Chat.tsx). */}
       {scopeError && (
         <p className="text-xs text-red-500" role="alert">
           {scopeError}
@@ -220,46 +280,6 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         </p>
       )}
 
-      {/* Bulk selection. The label says "loaded" because paging means the
-          result set on screen can be a small slice of `total`, and a control
-          that read "select all" would promise the rest. The projected cost is
-          shown *before* the click so an oversize selection is a visible number
-          rather than a 422 after the fact. */}
-      <div className="flex flex-wrap items-center gap-2" data-testid="scope-bulk">
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          disabled={hits.length === 0}
-          title={t('search.select_all_loaded_title', { count: hits.length })}
-          onClick={() => void commitScope(allLoadedTokens())}
-        >
-          {t('search.select_all_loaded', { count: hits.length })}
-        </Button>
-        {/* Follows the *selection*, not the hits: after selecting chunks and
-            then searching for something with no matches, the selection is
-            still live and must stay clearable from here. */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          disabled={selectedIds.length === 0}
-          onClick={() => void commitScope({})}
-        >
-          {t('search.clear_selection')}
-        </Button>
-        {hits.length > 0 && (
-          <span className="text-xs text-muted-foreground" data-testid="select-all-cost">
-            {t('search.select_all_cost', { tokens: formatTokens(projectedTokens) })}
-          </span>
-        )}
-      </div>
-      {hits.length > 0 && projectedOverBudget && (
-        <p className="text-xs text-red-500" data-testid="select-all-over-budget">
-          {t('search.select_all_over_budget', { total: formatTokens(scope.usableTokens) })}
-        </p>
-      )}
-
       <ul className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
         {hits.map((hit) => (
           <SearchHitRow
@@ -271,56 +291,6 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
           />
         ))}
       </ul>
-
-      <div className="mt-auto space-y-2">
-        <label className="flex items-center gap-2 text-xs">
-          <span className="shrink-0 uppercase text-muted-foreground">{t('chat.retrieval')}</span>
-          <Select
-            value={filters.retrievalMode}
-            onChange={(e) =>
-              filters.setRetrievalMode(e.target.value as typeof filters.retrievalMode)
-            }
-            className="min-w-0 flex-1"
-            aria-label={t('chat.retrieval')}
-          >
-            <option value="session">{t('chat.retrieval_session')}</option>
-            <option value="stateless">{t('chat.retrieval_stateless')}</option>
-          </Select>
-        </label>
-        <FilterBuilder />
-      </div>
     </Card>
-  )
-}
-
-/**
- * The two counts the collapsed rail keeps visible: hits and active filters.
- *
- * Shares `useSearch`'s cache entry with the panel, so reading them costs no
- * extra request. A panel that silently filters or scopes while hidden is a
- * trap — these badges are the fix, not decoration.
- */
-export function SearchRailBadges({ sessionId }: SearchPanelProps) {
-  const t = useT()
-  const key = searchKeyFor(sessionId)
-  const query = useSearchUiStore((s) => s.queries[key] ?? '')
-  const search = useSearch(query)
-  const activeFilters = useChatFiltersStore().buildPayload().length
-  const hitCount = search.data?.total ?? 0
-
-  return (
-    <div className="flex flex-col items-center gap-1">
-      <Badge variant="neutral" aria-label={t('search.hits_badge_aria', { count: hitCount })}>
-        {/* Abbreviated so a large result set cannot widen the slim rail; the
-            exact count stays in the accessible name and in the panel. */}
-        {hitCount > 999 ? '999+' : hitCount}
-      </Badge>
-      <Badge
-        variant={activeFilters > 0 ? 'accent' : 'neutral'}
-        aria-label={t('search.filters_badge_aria', { count: activeFilters })}
-      >
-        {activeFilters}
-      </Badge>
-    </div>
   )
 }
