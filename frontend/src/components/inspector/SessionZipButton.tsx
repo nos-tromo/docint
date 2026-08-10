@@ -1,6 +1,6 @@
+import { DownloadLink } from '@infra/ui'
 import { useUiStore } from '@/stores/ui'
 import { url } from '@/api/client'
-import { DownloadLink } from '@/components/common/DownloadAction'
 import { useT } from '@/i18n/LanguageContext'
 
 /**

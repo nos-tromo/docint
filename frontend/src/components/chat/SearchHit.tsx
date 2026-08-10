@@ -1,5 +1,5 @@
 import { useId, useState } from 'react'
-import { Badge, Button, Spinner } from '@infra/ui'
+import { Badge, Button, ChevronDownIcon, Spinner } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
@@ -7,7 +7,7 @@ import { useChunkText } from '@/hooks/useSearch'
 import type { Strings } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { keywordSegments } from '@/lib/highlight'
-import { CheckCircleIcon, ChevronDownIcon, CircleIcon } from '@/components/common/icons'
+import { CheckCircleIcon, CircleIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
 
 /** Filename plus the page/row that locates the chunk inside it. */

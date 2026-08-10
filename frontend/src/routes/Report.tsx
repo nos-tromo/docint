@@ -1,8 +1,6 @@
-import { Button } from '@infra/ui'
+import { Button, ChevronDownIcon, DeleteButton, DownloadButton, RemoveButton } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
-import { DownloadButton } from '@/components/common/DownloadAction'
-import { ChevronDownIcon } from '@/components/common/icons'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import {
   useCreateReport,
@@ -217,14 +215,11 @@ export function Report() {
                   {r.title}
                   <span className="ml-1 text-xs text-muted-foreground">({r.item_count})</span>
                 </button>
-                <button
-                  type="button"
+                <DeleteButton
+                  label={t('report.delete_aria')}
                   onClick={() => onDelete(r.id)}
-                  className="text-xs text-muted-foreground hover:text-red-400 px-1"
-                  aria-label={t('report.delete_aria')}
-                >
-                  ×
-                </button>
+                  className="h-7"
+                />
               </li>
             )
           })}
@@ -400,14 +395,13 @@ export function Report() {
                               >
                                 ↓
                               </button>
-                              <button
-                                type="button"
+                              {/* × not trash: this takes the finding out of the
+                                  report. The evidence itself is untouched. */}
+                              <RemoveButton
+                                label={t('report.remove_item_aria')}
                                 onClick={() => removeItem.mutate({ reportId: report.id, itemId: item.id })}
-                                className="px-1.5 text-muted-foreground hover:text-red-400"
-                                aria-label={t('report.remove_item_aria')}
-                              >
-                                ×
-                              </button>
+                                className="h-7"
+                              />
                             </div>
                           </div>
                           {itemBody(item) && (

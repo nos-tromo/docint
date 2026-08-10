@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { IconButton, XIcon } from '@infra/ui'
 import { sourcePreviewUrl } from '@/api/ingest'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
@@ -132,14 +133,13 @@ export function PreviewDialog() {
             >
               {t('common.preview_new_tab')}
             </a>
-            <button
-              type="button"
+            {/* The base `IconButton` rather than `RemoveButton`: closing a
+                preview takes nothing away, so it must not warn in red. */}
+            <IconButton
+              icon={<XIcon />}
+              label={t('common.preview_close')}
               onClick={closePreview}
-              aria-label={t('common.preview_close')}
-              className="rounded px-2 py-0.5 text-lg leading-none text-muted-foreground hover:text-foreground"
-            >
-              ×
-            </button>
+            />
           </div>
         </div>
         {kind === 'frame' && (

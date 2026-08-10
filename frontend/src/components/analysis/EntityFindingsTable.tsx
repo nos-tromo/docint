@@ -1,8 +1,8 @@
 import { useMemo, useRef } from 'react'
+import { DownloadLink } from '@infra/ui'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
 import { csvExportHref } from '@/api/collections'
-import { DownloadLink } from '@/components/common/DownloadAction'
 import { EntityFinding } from './EntityFinding'
 import { useT } from '@/i18n/LanguageContext'
 

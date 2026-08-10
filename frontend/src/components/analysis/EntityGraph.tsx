@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import {
+  DownloadButton,
   ForceGraph,
   downloadText,
   toGraphHtml,
@@ -9,7 +10,6 @@ import {
 } from '@infra/ui'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 import { ENTITY_EDGE_STYLES, legendForNodes, nodeStylesForTypes, toEntityForceGraph } from '@/lib/entityGraphElements'
-import { DownloadButton } from '@/components/common/DownloadAction'
 import { sanitizeExportFilename } from '@/lib/sanitizeFilename'
 import { GraphTopKControl } from './GraphTopKControl'
 import { useT } from '@/i18n/LanguageContext'

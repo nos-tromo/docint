@@ -25,13 +25,6 @@ const base = {
 
 export type IconProps = SVGProps<SVGSVGElement>
 
-/** Disclosure chevron. Rotate it with a class rather than swapping the icon. */
-export const ChevronDownIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => (
-  <svg {...base} className={className} {...props}>
-    <path d="m6 9 6 6 6-6" />
-  </svg>
-)
-
 /** An unselected tile's marker — the hollow half of the selection pair. */
 export const CircleIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => (
   <svg {...base} className={className} {...props}>
@@ -52,29 +45,6 @@ export const CheckAllIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => 
   <svg {...base} className={className} {...props}>
     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
     <path d="m9 11 3 3L22 4" />
-  </svg>
-)
-
-/** Clear / dismiss. */
-export const XIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => (
-  <svg {...base} className={className} {...props}>
-    <path d="M18 6 6 18M6 6l12 12" />
-  </svg>
-)
-
-/**
- * Save a file to the machine.
- *
- * Deliberately the conventional arrow-into-a-tray and nothing cleverer: this
- * is the one icon in the set that has to be understood without a label, on
- * first sight, by someone who has never opened this app before. Novelty here
- * costs comprehension and buys nothing.
- */
-export const DownloadIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => (
-  <svg {...base} className={className} {...props}>
-    <path d="M12 3v12" />
-    <path d="m7.5 10.5 4.5 4.5 4.5-4.5" />
-    <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
   </svg>
 )
 

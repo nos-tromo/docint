@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button } from '@infra/ui'
+import { Button, DeleteButton } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
@@ -236,28 +236,13 @@ export function Sidebar() {
               </optgroup>
             ))}
           </select>
+          {/* Trash, not ×: deleting a collection destroys every ingested
+              document in it. The icon is what says how far the action goes. */}
           {selected && (
-            <button
-              type="button"
+            <DeleteButton
+              label={t('common.delete_collection_aria', { name: selected })}
               onClick={() => onDeleteCollection(selected, selectedOwner)}
-              aria-label={t('common.delete_collection_aria', { name: selected })}
-              title={t('common.delete_collection_title')}
-              className="shrink-0 text-muted-foreground transition-colors hover:text-red-400"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="h-3.5 w-3.5"
-                aria-hidden="true"
-              >
-                <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6" />
-                <path d="M10 11v6M14 11v6" />
-              </svg>
-            </button>
+            />
           )}
         </div>
         {!selected && (
@@ -325,14 +310,11 @@ export function Sidebar() {
                 >
                   {s.title?.trim() || t('common.session_title_fallback', { id: s.id.slice(0, 8) })}
                 </button>
-                <button
-                  type="button"
+                <DeleteButton
+                  label={t('common.delete_session_aria')}
                   onClick={() => onDeleteSession(s.id)}
-                  className="text-xs text-muted-foreground hover:text-red-400 px-1"
-                  aria-label={t('common.delete_session_aria')}
-                >
-                  ×
-                </button>
+                  className="h-7"
+                />
               </li>
             )
           })}

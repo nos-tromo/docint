@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Badge, Button, Input, Select } from '@infra/ui'
+import { Badge, Button, Input, RemoveButton, Select } from '@infra/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
 import { cn } from '@/lib/cn'
@@ -145,15 +145,10 @@ export function FilterBuilder() {
                         onChange={(e) => s.updateRule(r.id, { value: e.target.value })}
                         placeholder={t('chat.value_placeholder')}
                       />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
+                      <RemoveButton
+                        label={t('chat.remove_rule_aria')}
                         onClick={() => s.removeRule(r.id)}
-                        aria-label={t('chat.remove_rule_aria')}
-                      >
-                        ×
-                      </Button>
+                      />
                     </li>
                   ))}
                 </ul>

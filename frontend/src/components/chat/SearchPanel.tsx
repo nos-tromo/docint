@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Banner, Button, Card, Input } from '@infra/ui'
+import { Banner, Button, Card, Input, RemoveButton } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
@@ -13,7 +13,7 @@ import {
 } from '@/stores/searchUi'
 import { useUiStore } from '@/stores/ui'
 import { SearchHitRow } from '@/components/chat/SearchHit'
-import { CheckAllIcon, XIcon } from '@/components/common/icons'
+import { CheckAllIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
@@ -230,18 +230,12 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               >
                 <CheckAllIcon className="h-4 w-4" />
               </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
+              <RemoveButton
+                label={t('search.clear_selection')}
                 disabled={selectedIds.length === 0}
-                aria-label={t('search.clear_selection')}
-                title={t('search.clear_selection')}
                 onClick={() => void commitScope({})}
-                className="h-7 w-7 shrink-0 px-0"
-              >
-                <XIcon className="h-4 w-4" />
-              </Button>
+                className="h-7"
+              />
             </div>
           )}
           {hits.length > 0 && projectedOverBudget && (

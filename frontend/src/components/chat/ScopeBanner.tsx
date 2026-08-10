@@ -1,3 +1,4 @@
+import { RemoveButton } from '@infra/ui'
 import { useT } from '@/i18n/LanguageContext'
 
 export interface ScopeBannerProps {
@@ -31,13 +32,7 @@ export function ScopeBanner({ count, missing = 0, onClear }: ScopeBannerProps) {
       <span aria-hidden="true" className="text-muted-foreground">
         ·
       </span>
-      <button
-        type="button"
-        onClick={onClear}
-        className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-      >
-        {t('search.clear')}
-      </button>
+      <RemoveButton label={t('search.clear')} onClick={onClear} className="h-6" />
       {missing > 0 && (
         <span className="w-full text-red-500" data-testid="scope-missing">
           {t('search.scope_missing', { missing, count })}
