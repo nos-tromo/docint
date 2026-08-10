@@ -1,4 +1,12 @@
-import { Button, ChevronDownIcon, DeleteButton, DownloadButton, RemoveButton } from '@infra/ui'
+import {
+  Button,
+  ChevronDownIcon,
+  DeleteButton,
+  DownloadButton,
+  MoveDownButton,
+  MoveUpButton,
+  RemoveButton
+} from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
@@ -377,24 +385,18 @@ export function Report() {
                               )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
-                              <button
-                                type="button"
+                              <MoveUpButton
+                                label={t('report.move_up_aria')}
                                 onClick={() => move(item, -1)}
                                 disabled={si === 0}
-                                className="px-1.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
-                                aria-label={t('report.move_up_aria')}
-                              >
-                                ↑
-                              </button>
-                              <button
-                                type="button"
+                                className="h-7"
+                              />
+                              <MoveDownButton
+                                label={t('report.move_down_aria')}
                                 onClick={() => move(item, 1)}
                                 disabled={si === sectionItems.length - 1}
-                                className="px-1.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
-                                aria-label={t('report.move_down_aria')}
-                              >
-                                ↓
-                              </button>
+                                className="h-7"
+                              />
                               {/* × not trash: this takes the finding out of the
                                   report. The evidence itself is untouched. */}
                               <RemoveButton

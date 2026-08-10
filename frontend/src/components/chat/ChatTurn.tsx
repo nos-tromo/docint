@@ -1,6 +1,6 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useTheme } from '@infra/ui'
+import { WarningIcon, useTheme } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import type { ChatFinalEvent, Source } from '@/api/types'
 import { SourcePills } from './SourcePills'
@@ -130,9 +130,7 @@ export function ChatTurn({
             data-testid="scope-not-applied"
             role="alert"
           >
-            <span aria-hidden="true" className="mr-2">
-              ⚠
-            </span>
+            <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
             {t('chat.scope_not_applied', { count: turn.scopeRequested ?? 0 })}
           </div>
         )}

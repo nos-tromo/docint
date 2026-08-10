@@ -11,7 +11,14 @@ import {
 } from '@tanstack/react-table'
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Badge, CopyButton, DownloadLink } from '@infra/ui'
+import {
+  Badge,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  ChevronsUpDownIcon,
+  CopyButton,
+  DownloadLink
+} from '@infra/ui'
 import type { DocumentRecord } from '@/api/types'
 import { csvExportHref } from '@/api/collections'
 import { mimeLabel, shortHash, unitsLabel } from '@/lib/documentFormat'
@@ -137,11 +144,17 @@ function EntityBadges({ types }: { types: string[] }) {
   )
 }
 
-/** Sort direction indicator; a faint dot when the column is sortable but unsorted. */
-function SortGlyph({ dir }: { dir: false | SortDirection }) {
-  if (dir === 'asc') return <span aria-hidden>↑</span>
-  if (dir === 'desc') return <span aria-hidden>↓</span>
-  return <span aria-hidden className="opacity-0 transition-opacity group-hover:opacity-40">↕</span>
+/**
+ * Sort direction indicator, faint until hovered when the column is sortable but
+ * unsorted. Drawn, not typed: `↑`/`↓`/`↕` render from whatever font the OS
+ * falls back to, and these sit inline with the header text at every size.
+ */
+function SortIndicator({ dir }: { dir: false | SortDirection }) {
+  if (dir === 'asc') return <ChevronUpIcon className="h-3.5 w-3.5" />
+  if (dir === 'desc') return <ChevronDownIcon className="h-3.5 w-3.5" />
+  return (
+    <ChevronsUpDownIcon className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-40" />
+  )
 }
 
 function HeaderCell({ column, children }: { column: Column<DocumentRecord>; children: ReactNode }) {
@@ -160,7 +173,7 @@ function HeaderCell({ column, children }: { column: Column<DocumentRecord>; chil
         )}
       >
         {children}
-        <SortGlyph dir={column.getIsSorted()} />
+        <SortIndicator dir={column.getIsSorted()} />
       </button>
     </div>
   )
