@@ -1,6 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import {
-  Button,
   ForceGraph,
   downloadText,
   toGraphHtml,
@@ -10,6 +9,7 @@ import {
 } from '@infra/ui'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 import { ENTITY_EDGE_STYLES, legendForNodes, nodeStylesForTypes, toEntityForceGraph } from '@/lib/entityGraphElements'
+import { DownloadButton } from '@/components/common/DownloadAction'
 import { sanitizeExportFilename } from '@/lib/sanitizeFilename'
 import { GraphTopKControl } from './GraphTopKControl'
 import { useT } from '@/i18n/LanguageContext'
@@ -218,9 +218,11 @@ export function EntityGraph({
           )}
           {fg.nodes.length > 0 && (
             <>
-              <Button
-                type="button"
-                variant="secondary"
+              {/* These three keep their format beside the icon: side by side,
+                  three identical download icons would be a guessing game, and
+                  the format is the only thing telling them apart. */}
+              <DownloadButton
+                label={t('entities.export_json')}
                 onClick={() => {
                   const sanitized = sanitizeExportFilename(exportName ?? 'docint')
                   downloadText(
@@ -230,11 +232,10 @@ export function EntityGraph({
                   )
                 }}
               >
-                {t('entities.export_json')}
-              </Button>
-              <Button
-                type="button"
-                variant="secondary"
+                {t('entities.format_json')}
+              </DownloadButton>
+              <DownloadButton
+                label={t('entities.export_graphml')}
                 onClick={() => {
                   const sanitized = sanitizeExportFilename(exportName ?? 'docint')
                   downloadText(
@@ -244,11 +245,10 @@ export function EntityGraph({
                   )
                 }}
               >
-                {t('entities.export_graphml')}
-              </Button>
-              <Button
-                type="button"
-                variant="secondary"
+                {t('entities.format_graphml')}
+              </DownloadButton>
+              <DownloadButton
+                label={t('entities.export_html')}
                 onClick={() => {
                   const sanitized = sanitizeExportFilename(exportName ?? 'docint')
                   const title = exportName
@@ -269,8 +269,8 @@ export function EntityGraph({
                   )
                 }}
               >
-                {t('entities.export_html')}
-              </Button>
+                {t('entities.format_html')}
+              </DownloadButton>
             </>
           )}
         </div>

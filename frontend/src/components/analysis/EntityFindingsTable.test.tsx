@@ -61,7 +61,8 @@ describe('EntityFindingsTable', () => {
 
   it('renders the CSV download link with the selected entity in the query string', () => {
     renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
-    const link = screen.getByRole('link', { name: 'CSV' })
+    // The control is the download icon; "Export CSV" survives as its name.
+    const link = screen.getByRole('link', { name: 'Export CSV' })
     const href = link.getAttribute('href') ?? ''
     expect(href).toContain('/collections/alpha/export/ner-sources.csv')
     expect(href).toContain('entity_text=Berlin')

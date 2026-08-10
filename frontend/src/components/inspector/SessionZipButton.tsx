@@ -1,5 +1,6 @@
 import { useUiStore } from '@/stores/ui'
 import { url } from '@/api/client'
+import { DownloadLink } from '@/components/common/DownloadAction'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
@@ -18,12 +19,10 @@ export function SessionZipButton() {
 
   const href = url(`/sessions/${encodeURIComponent(sessionId)}/sources.zip`)
   return (
-    <a
+    <DownloadLink
       href={href}
       download={`session-${sessionId}-sources.zip`}
-      className="px-3 py-1 rounded-md border border-border text-sm"
-    >
-      {t('inspector.download_session_sources')}
-    </a>
+      label={t('inspector.download_session_sources')}
+    />
   )
 }

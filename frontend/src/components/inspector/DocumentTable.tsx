@@ -14,6 +14,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { Badge, CopyButton } from '@infra/ui'
 import type { DocumentRecord } from '@/api/types'
 import { csvExportHref } from '@/api/collections'
+import { DownloadLink } from '@/components/common/DownloadAction'
 import { mimeLabel, shortHash, unitsLabel } from '@/lib/documentFormat'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -199,13 +200,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
           {isFetching ? ` ${t('table.loading_suffix')}` : ''}
         </p>
         {collection && (
-          <a
-            href={csvExportHref(collection, 'documents')}
-            download
-            className="rounded-md border border-border px-3 py-1 text-sm hover:bg-white/5"
-          >
-            {t('table.export_csv')}
-          </a>
+          <DownloadLink href={csvExportHref(collection, 'documents')} label={t('table.export_csv')} />
         )}
       </div>
 

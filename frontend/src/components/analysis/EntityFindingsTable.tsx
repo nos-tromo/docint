@@ -2,6 +2,7 @@ import { useMemo, useRef } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
 import { csvExportHref } from '@/api/collections'
+import { DownloadLink } from '@/components/common/DownloadAction'
 import { EntityFinding } from './EntityFinding'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -94,13 +95,10 @@ export function EntityFindingsTable({
           </span>
         </div>
         {collection && (
-          <a
+          <DownloadLink
             href={csvExportHref(collection, 'ner-sources', exportParams)}
-            download
-            className="px-3 py-1 rounded-md border border-border text-sm"
-          >
-            {t('common.csv_button')}
-          </a>
+            label={t('table.export_csv')}
+          />
         )}
       </div>
 

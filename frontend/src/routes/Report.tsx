@@ -1,6 +1,8 @@
 import { Button } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
+import { DownloadButton } from '@/components/common/DownloadAction'
+import { ChevronDownIcon } from '@/components/common/icons'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import {
   useCreateReport,
@@ -331,15 +333,13 @@ export function Report() {
                 </div>
               </div>
 
-              {/* Export: a single Download button; formats expand on hover/focus. */}
+              {/* Export: a single Download button; formats expand on hover/focus.
+                  The caret stays — it is the only thing saying the icon opens a
+                  list rather than downloading something on the spot. */}
               <div className="relative group shrink-0">
-                <button
-                  type="button"
-                  className="px-3 py-1 rounded-md border border-border text-sm hover:bg-muted"
-                  aria-haspopup="menu"
-                >
-                  {t('chat.download')} ▾
-                </button>
+                <DownloadButton label={t('chat.download')} aria-haspopup="menu" className="gap-1 px-2">
+                  <ChevronDownIcon className="h-3.5 w-3.5" />
+                </DownloadButton>
                 <div className="absolute right-0 top-full z-10 hidden pt-1 group-hover:block group-focus-within:block">
                   <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-muted p-1 shadow-lg">
                     {exportFormats(t).map((e) => (

@@ -7,6 +7,7 @@ import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
+import { DownloadLink } from '@/components/common/DownloadAction'
 import { MetadataPills } from '@/components/common/MetadataPills'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
@@ -164,13 +165,7 @@ export function HateSpeechTable({
           {hasNextPage ? '+' : ''}.
         </p>
         {collection && (
-          <a
-            href={csvExportHref(collection, 'hate-speech')}
-            download
-            className="px-3 py-1 rounded-md border border-border text-sm"
-          >
-            {t('common.csv_button')}
-          </a>
+          <DownloadLink href={csvExportHref(collection, 'hate-speech')} label={t('table.export_csv')} />
         )}
       </div>
       <div className="rounded-md border border-border overflow-hidden">

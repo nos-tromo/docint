@@ -8,6 +8,7 @@ import { streamSseGet } from '@/api/sse'
 import { INGEST_JOB_EVENTS_PATH } from '@/api/jobs'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
+import { DownloadButton } from '@/components/common/DownloadAction'
 import { SourcePills } from '@/components/chat/SourcePills'
 import { ValidationBanner } from '@/components/chat/ValidationBanner'
 import { downloadText } from '@/lib/csv'
@@ -216,8 +217,8 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
         </Button>
         {state.text && (
           <div className="ml-auto flex items-center gap-2">
-            <Button
-              variant="secondary"
+            <DownloadButton
+              label={t('analysis.summary_download_md')}
               onClick={() =>
                 downloadText(
                   'summary.md',
@@ -225,9 +226,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
                   'text/markdown;charset=utf-8'
                 )
               }
-            >
-              {t('analysis.summary_download_md')}
-            </Button>
+            />
             {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
           </div>
         )}

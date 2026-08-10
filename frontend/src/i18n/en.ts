@@ -224,7 +224,6 @@ export const en = {
   'common.col_metadata': 'Metadata',
   'common.col_text': 'Text',
   'common.col_report': 'Report',
-  'common.csv_button': 'CSV',
 
   // entities (Analysis: NER tab + components)
   'analysis.title': 'Analysis',
@@ -246,9 +245,14 @@ export const en = {
   'entities.reset_node_count_aria': 'Reset node count',
   'entities.reset_node_count_title': 'Reset the node count to the deploy default',
   'entities.reset_count_button': 'Reset count',
+  // Accessible names for the graph's three download buttons; the visible chip
+  // beside each icon is the bare format below.
   'entities.export_json': 'Export JSON',
   'entities.export_graphml': 'Export GraphML',
   'entities.export_html': 'Export HTML',
+  'entities.format_json': 'JSON',
+  'entities.format_graphml': 'GraphML',
+  'entities.format_html': 'HTML',
   'entities.graph_export_title_with_name': '{name} — entity graph',
   'entities.graph_export_title_fallback': 'Entity graph',
   'entities.graph_empty': 'No entity relationships to graph for this collection.',

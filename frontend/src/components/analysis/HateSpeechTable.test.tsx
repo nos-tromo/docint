@@ -68,7 +68,8 @@ describe('HateSpeechTable', () => {
 
   it('renders a streaming CSV download link to the right collection-scoped endpoint', () => {
     renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
-    const link = screen.getByRole('link', { name: 'CSV' })
+    // The control is the download icon; "Export CSV" survives as its name.
+    const link = screen.getByRole('link', { name: 'Export CSV' })
     expect(link).toHaveAttribute(
       'href',
       expect.stringContaining('/collections/alpha/export/hate-speech.csv')

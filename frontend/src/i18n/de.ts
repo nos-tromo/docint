@@ -233,7 +233,6 @@ export const de: Strings = {
   'common.col_metadata': 'Metadaten',
   'common.col_text': 'Text',
   'common.col_report': 'Bericht',
-  'common.csv_button': 'CSV',
 
   // entities (Analysis: NER tab + components)
   'analysis.title': 'Analyse',
@@ -255,9 +254,14 @@ export const de: Strings = {
   'entities.reset_node_count_aria': 'Knotenanzahl zurücksetzen',
   'entities.reset_node_count_title': 'Die Knotenanzahl auf den Standardwert zurücksetzen',
   'entities.reset_count_button': 'Anzahl zurücksetzen',
+  // Barrierefreie Namen der drei Download-Buttons im Graphen; sichtbar steht
+  // neben dem Icon nur das Format darunter.
   'entities.export_json': 'JSON exportieren',
   'entities.export_graphml': 'GraphML exportieren',
   'entities.export_html': 'HTML exportieren',
+  'entities.format_json': 'JSON',
+  'entities.format_graphml': 'GraphML',
+  'entities.format_html': 'HTML',
   'entities.graph_export_title_with_name': '{name} — Entitätsgraph',
   'entities.graph_export_title_fallback': 'Entitätsgraph',
   'entities.graph_empty': 'Keine Entitätsbeziehungen für diese Sammlung darstellbar.',

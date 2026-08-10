@@ -17,6 +17,7 @@ import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/store
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
 import { ChatControls } from '@/components/chat/ChatControls'
+import { DownloadButton } from '@/components/common/DownloadAction'
 import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
 import { ScopeBanner } from '@/components/chat/ScopeBanner'
 import { SearchPanel } from '@/components/chat/SearchPanel'
@@ -348,19 +349,15 @@ export function Chat() {
               lands. */}
           <div className="flex items-center gap-3">
             {state.turns.length > 0 && (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
+              <DownloadButton
+                label={t('chat.download')}
                 onClick={() =>
                   downloadText(
                     `chat_${currentSessionId ?? 'session'}.txt`,
                     chatTranscriptToText(state.turns, t)
                   )
                 }
-              >
-                {t('chat.download')}
-              </Button>
+              />
             )}
             <ChatControls />
           </div>
