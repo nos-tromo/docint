@@ -86,9 +86,7 @@ def test_migration_raises_loudly_on_a_readonly_db(
 
 def test_readonly_failure_names_the_volume_ownership_fix(tmp_path: Path) -> None:
     """The readonly case is the hardened-deployment trap — say how to fix it."""
-    engine = _readonly_engine(
-        tmp_path, "CREATE TABLE conversations (id TEXT PRIMARY KEY, owner TEXT)"
-    )
+    engine = _readonly_engine(tmp_path, "CREATE TABLE conversations (id TEXT PRIMARY KEY, owner TEXT)")
 
     with pytest.raises(SessionStoreMigrationError) as exc_info:
         _ensure_conversation_scope_columns(engine)
@@ -135,9 +133,7 @@ def test_lifespan_startup_initializes_the_session_store(
     def _record(self: session_manager_module.SessionManager) -> None:
         calls.append(True)
 
-    monkeypatch.setattr(
-        session_manager_module.SessionManager, "init_session_store_if_needed", _record
-    )
+    monkeypatch.setattr(session_manager_module.SessionManager, "init_session_store_if_needed", _record)
 
     with TestClient(api_module.app):
         assert calls == [True]
@@ -155,9 +151,7 @@ def test_lifespan_startup_fails_on_a_broken_session_store(
     def _boom(self: session_manager_module.SessionManager) -> None:
         raise SessionStoreMigrationError("conversations scope-columns migration failed")
 
-    monkeypatch.setattr(
-        session_manager_module.SessionManager, "init_session_store_if_needed", _boom
-    )
+    monkeypatch.setattr(session_manager_module.SessionManager, "init_session_store_if_needed", _boom)
 
     with pytest.raises(SessionStoreMigrationError):
         with TestClient(api_module.app):
