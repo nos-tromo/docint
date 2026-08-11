@@ -34,6 +34,44 @@ x-hardened: &hardened
 
 services:
   ##########################################################
+  # Volume ownership (deploy ADR 0001 runbook, automated)
+  #
+  # The backend runs as uid 10001 with a read-only rootfs, but external
+  # volumes keep whatever ownership they were created with (root, on a
+  # fresh `docker volume create`) — image-build chowns cannot help, since
+  # the volume mount shadows the image path at runtime. This one-shot
+  # root container fixes ownership before the backend starts; it reuses
+  # the backend image so the airgap bundle needs no extra image. The
+  # find form only touches wrong-owner entries, so a boot over an
+  # already-owned multi-GB huggingface-cache writes nothing.
+  ##########################################################
+  volume-permissions:
+    image: docint-backend:${DOCINT_VERSION:-latest}
+    logging: *default-logging
+    user: "0:0"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    # Roots are the five mountpoints themselves — their parent dirs live on
+    # the read-only image rootfs and must not (and cannot) be chowned.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        find /var/lib/docint/sessions /var/lib/docint/sources
+        /var/lib/docint/pipeline /home/app/.cache/docling
+        /home/app/.cache/huggingface/hub
+        -xdev ! -user 10001 -exec chown -h 10001:10001 {} +
+    volumes:
+      - docling-cache:/home/app/.cache/docling
+      - huggingface-cache:/home/app/.cache/huggingface/hub
+      - sessions-storage:/var/lib/docint/sessions
+      - source-preview-cache:/var/lib/docint/sources
+      - pipeline-storage:/var/lib/docint/pipeline
+    restart: "no"
+
+  ##########################################################
   # Backend
   #
   # Single image, CPU-only Python. All ML inference (chat,
@@ -101,6 +139,9 @@ services:
       retries: 3
       start_period: 30s
       start_interval: 3s
+    depends_on:
+      volume-permissions:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   ##########################################################

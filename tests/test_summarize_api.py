@@ -22,6 +22,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -63,6 +64,15 @@ class _StubRAG:
     def probe_qdrant(self) -> bool:
         """Satisfy the lifespan startup probe without touching the network."""
         return True
+
+    def ensure_session_manager(self) -> SimpleNamespace:
+        """Satisfy the lifespan's eager session-store init without a DB.
+
+        Returns:
+            SimpleNamespace: A stand-in whose ``init_session_store_if_needed``
+            is a no-op.
+        """
+        return SimpleNamespace(init_session_store_if_needed=lambda: None)
 
     def reconcile_quantization(self) -> int:
         """Satisfy the lifespan quantization reconcile without touching Qdrant."""

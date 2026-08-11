@@ -27,6 +27,10 @@ class DummySessionManager:
         """Start with no scope pinned, per instance."""
         self.scope: list[str] = []
 
+    def init_session_store_if_needed(self) -> None:
+        """Satisfy the lifespan's eager store init without touching a DB."""
+        return None
+
     def set_scope(self, session_id: str, owner: str | None, chunk_ids: Any) -> bool:
         """Record a scope, honouring the owner gate the real manager applies.
 

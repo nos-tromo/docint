@@ -58,6 +58,10 @@ class _SpySessions:
         self.listed.append((owner, collection))
         return [{"id": "s1", "owner": owner, "collection": collection}]
 
+    def init_session_store_if_needed(self) -> None:
+        """Satisfy the lifespan's eager store init without touching a DB."""
+        return None
+
 
 class _OwnRAG:
     """Minimal RAG stand-in for collection-ownership endpoint tests."""
