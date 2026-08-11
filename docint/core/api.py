@@ -93,6 +93,12 @@ allowed_origins = load_host_env().cors_allowed_origins.split(",")
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Probe Qdrant on startup; close ingest-job subscriber streams on shutdown.
 
+    The session store initializes (and migrates) eagerly here, and a failed
+    migration is fatal: unlike Qdrant, an unwritable or stale sessions DB
+    never self-heals, and serving anyway means every conversations query
+    500s on the columns the skipped migration didn't add (this is exactly
+    what a root-owned sessions volume did on a hardened host — ADR 0001).
+
     Qdrant is contacted lazily, so without the startup probe a mis-wired
     deployment (backend not on data-net, data-plane stack down) surfaces
     only at the first ingest or query. The probe logs a loud, actionable
@@ -114,6 +120,11 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     Yields:
         None: Control while the application serves requests.
     """
+
+    def _init_session_store() -> None:
+        rag.ensure_session_manager().init_session_store_if_needed()
+
+    await to_thread.run_sync(_init_session_store)
     await to_thread.run_sync(rag.probe_qdrant)
     await to_thread.run_sync(rag.reconcile_quantization)
     yield

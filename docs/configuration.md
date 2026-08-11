@@ -467,11 +467,11 @@ Loaded by `load_path_env()` (`env_cfg.py:785`). Every path expands `~`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATA_PATH` | `~/docint/data` | Root directory for ingestion inputs. |
+| `DATA_PATH` | `~/docint/data` | Root directory for ingestion inputs. Compose pins it to `/var/lib/docint/pipeline/data` (the `pipeline-storage` volume) — the container's `$HOME` is read-only. |
 | `LOG_PATH` | `<repo>/.logs/docint.log` | Rotating log file. |
 | `QUERIES_PATH` | `~/docint/queries.txt` | Default query input file for the CLI. |
-| `RESULTS_PATH` | `~/docint/results` | Directory for CLI export artifacts. |
-| `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). |
+| `RESULTS_PATH` | `~/docint/results` | Directory for CLI export artifacts. Compose: `/var/lib/docint/pipeline/results`. |
+| `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. |
 | `QDRANT_SRC_DIR` | `~/docint/qdrant_sources` | Where raw source files are staged for preview. |
 | `HF_HUB_CACHE` | `~/.cache/huggingface/hub` | HF Hub cache path. |
 

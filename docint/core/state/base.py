@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from loguru import logger
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
@@ -10,6 +9,42 @@ from docint.utils.env_cfg import load_principal_env
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
+
+
+class SessionStoreMigrationError(RuntimeError):
+    """A session-store schema migration could not be applied.
+
+    The ORM models already reference the migrated columns, so continuing
+    with a stale schema means every query touching them fails with
+    ``no such column`` — this must abort startup instead.
+    """
+
+
+def _migration_failure(migration: str, engine: Engine, exc: Exception) -> SessionStoreMigrationError:
+    """Build the loud, actionable error for a failed column migration.
+
+    Args:
+        migration (str): Human-readable name of the migration that failed.
+        engine (Engine): The session-store engine (its URL names the DB).
+        exc (Exception): The underlying failure.
+
+    Returns:
+        SessionStoreMigrationError: The error to raise ``from exc``.
+    """
+    hint = ""
+    if "readonly database" in str(exc).lower():
+        hint = (
+            " The database is not writable by this process — on a hardened "
+            "deployment (deploy ADR 0001) this usually means the sessions "
+            "volume is still owned by another uid; the compose "
+            "volume-permissions init service (or a one-time "
+            "`chown -R 10001:10001` of the docint volumes) fixes it."
+        )
+    return SessionStoreMigrationError(
+        f"Session-store migration ({migration}) failed on {engine.url}: "
+        f"{type(exc).__name__}: {exc}.{hint} Refusing to start with a stale "
+        "schema — the ORM would fail every query touching the missing columns."
+    )
 
 
 def _ensure_sqlite_parent_dir(db_url: str) -> None:
@@ -36,6 +71,9 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
     columns to existing ones. Sessions DBs created before validation
     persistence shipped already have a ``turns`` table and would silently
     fail on inserts that touch the new columns.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
     """
     try:
         inspector = inspect(engine)
@@ -52,11 +90,7 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE turns ADD COLUMN {name} {sql_type}"))
     except Exception as exc:
-        logger.warning(
-            "Skipping turns validation-column migration: {}: {}",
-            type(exc).__name__,
-            exc,
-        )
+        raise _migration_failure("turns validation-columns", engine, exc) from exc
 
 
 def _ensure_conversation_owner_column(engine: Engine) -> None:
@@ -69,6 +103,9 @@ def _ensure_conversation_owner_column(engine: Engine) -> None:
     its index, and idempotently backfills legacy rows to the configured
     default identity (the same value the principal resolver returns
     pre-auth) so existing sessions are owned, not orphaned.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
     """
     try:
         inspector = inspect(engine)
@@ -88,11 +125,7 @@ def _ensure_conversation_owner_column(engine: Engine) -> None:
                     {"default": default_identity},
                 )
     except Exception as exc:
-        logger.warning(
-            "Skipping conversations owner-column migration: {}: {}",
-            type(exc).__name__,
-            exc,
-        )
+        raise _migration_failure("conversations owner-column", engine, exc) from exc
 
 
 def _ensure_conversation_scope_columns(engine: Engine) -> None:
@@ -105,6 +138,9 @@ def _ensure_conversation_scope_columns(engine: Engine) -> None:
 
     Args:
         engine (Engine): The session-store engine.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
     """
     try:
         inspector = inspect(engine)
@@ -117,11 +153,7 @@ def _ensure_conversation_scope_columns(engine: Engine) -> None:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE conversations ADD COLUMN {name} {sql_type}"))
     except Exception as exc:
-        logger.warning(
-            "Skipping conversations scope-column migration: {}: {}",
-            type(exc).__name__,
-            exc,
-        )
+        raise _migration_failure("conversations scope-columns", engine, exc) from exc
 
 
 def _ensure_report_columns(engine: Engine) -> None:
@@ -131,6 +163,9 @@ def _ensure_report_columns(engine: Engine) -> None:
     ``reports`` table created before these case-metadata fields shipped needs
     them added explicitly. Uses raw SQL + ``inspect`` (no model import) to avoid
     a base ↔ report import cycle.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
     """
     try:
         inspector = inspect(engine)
@@ -151,11 +186,7 @@ def _ensure_report_columns(engine: Engine) -> None:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE reports ADD COLUMN {name} {sql_type}"))
     except Exception as exc:
-        logger.warning(
-            "Skipping reports column migration: {}: {}",
-            type(exc).__name__,
-            exc,
-        )
+        raise _migration_failure("reports columns", engine, exc) from exc
 
 
 # --- Session maker ---

@@ -183,6 +183,23 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
 
 ## Key Conventions
 
+- **Container hardening (deploy ADR 0001)**: both containers run non-root with
+  read-only root filesystems — the backend as uid `10001` (`app`,
+  `HOME=/home/app`), the frontend on `nginxinc/nginx-unprivileged` as uid `101`
+  listening on **:8080** (the edge gateway's `docint-frontend` upstream must
+  match). Every runtime write must land on a volume (`/var/lib/docint/*`,
+  `/home/app/.cache/*`) or the `/tmp` tmpfs; compose pins
+  `DATA_PATH`/`PIPELINE_ARTIFACTS_DIR`/`RESULTS_PATH` to the external
+  `pipeline-storage` volume because their `$HOME`-derived defaults are
+  unwritable in-container. Volume ownership is normalized automatically: the
+  one-shot `volume-permissions` compose service (root, backend image, runs
+  before the backend via `depends_on: service_completed_successfully`) chowns
+  wrong-owner entries on the five docint volumes to `10001:10001` — an
+  image-build chown can't do this, since runtime volume mounts shadow image
+  paths. If the sessions DB is still unwritable anyway, the backend **fails at
+  startup** with `SessionStoreMigrationError` (`docint/core/state/base.py`):
+  session-store column migrations are eager (API lifespan) and fatal, because
+  serving with a stale schema 500s every conversations query.
 - **Python ≥3.11, <3.12**. Use `uv` for dependency management (`uv add`/`uv remove` to keep `pyproject.toml` and `uv.lock` in sync).
 - **Centralized config**: All `os.getenv` calls and config dataclasses must live in `docint/utils/env_cfg.py`. Other modules import from there. If a subpackage needs a short import path, use a thin re-export module.
 - **Test synchronization**: Every functional change must include corresponding test updates. Tests are in `tests/` and use pytest. `conftest.py` provides mock stubs for external dependencies like `magic`.

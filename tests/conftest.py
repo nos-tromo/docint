@@ -46,6 +46,27 @@ def pytest_configure() -> None:
     _install_magic_stub()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _hermetic_session_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Point the default session store at a throwaway SQLite file.
+
+    The app lifespan initializes the session store eagerly at startup, so
+    every ``TestClient(app)`` would otherwise create (or migrate!) the real
+    ``~/docint/sessions.sqlite3`` on the developer's machine. ``SESSION_STORE``
+    is cleared for the same reason a developer ``.env`` clears hybrid vars
+    below: it would override this path entirely.
+
+    Yields:
+        None.
+    """
+    mp = pytest.MonkeyPatch()
+    db_path = tmp_path_factory.mktemp("session-store") / "sessions.sqlite3"
+    mp.setenv("SESSIONS_DB_PATH", str(db_path))
+    mp.delenv("SESSION_STORE", raising=False)
+    yield
+    mp.undo()
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_hybrid_env() -> Iterator[None]:
     """Clear the env vars that drive hybrid-retrieval resolution.

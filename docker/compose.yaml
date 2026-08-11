@@ -21,7 +21,56 @@ x-logging: &default-logging
     max-file: "5"
     compress: "true"
 
+##########################################################
+# Shared hardening (deploy ADR 0001) — no privilege
+# escalation, no capabilities; both images run non-root
+# with read-only root filesystems.
+##########################################################
+x-hardened: &hardened
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
+  ##########################################################
+  # Volume ownership (deploy ADR 0001 runbook, automated)
+  #
+  # The backend runs as uid 10001 with a read-only rootfs, but external
+  # volumes keep whatever ownership they were created with (root, on a
+  # fresh `docker volume create`) — image-build chowns cannot help, since
+  # the volume mount shadows the image path at runtime. This one-shot
+  # root container fixes ownership before the backend starts; it reuses
+  # the backend image so the airgap bundle needs no extra image. The
+  # find form only touches wrong-owner entries, so a boot over an
+  # already-owned multi-GB huggingface-cache writes nothing.
+  ##########################################################
+  volume-permissions:
+    image: docint-backend:${DOCINT_VERSION:-latest}
+    logging: *default-logging
+    user: "0:0"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    # Roots are the five mountpoints themselves — their parent dirs live on
+    # the read-only image rootfs and must not (and cannot) be chowned.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        find /var/lib/docint/sessions /var/lib/docint/sources
+        /var/lib/docint/pipeline /home/app/.cache/docling
+        /home/app/.cache/huggingface/hub
+        -xdev ! -user 10001 -exec chown -h 10001:10001 {} +
+    volumes:
+      - docling-cache:/home/app/.cache/docling
+      - huggingface-cache:/home/app/.cache/huggingface/hub
+      - sessions-storage:/var/lib/docint/sessions
+      - source-preview-cache:/var/lib/docint/sources
+      - pipeline-storage:/var/lib/docint/pipeline
+    restart: "no"
+
   ##########################################################
   # Backend
   #
@@ -30,11 +79,17 @@ services:
   # the external vllm-service stack — see CLAUDE.md.
   ##########################################################
   backend:
+    <<: *hardened
     image: docint-backend:${DOCINT_VERSION:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
     logging: *default-logging
+    # Uploads spool through /tmp (starlette) before landing in
+    # QDRANT_SRC_DIR, so the tmpfs must exceed DOCINT_CLIENT_MAX_BODY_SIZE.
+    read_only: true
+    tmpfs:
+      - /tmp:size=2g
     expose:
       - "8000"
     environment:
@@ -44,16 +99,25 @@ services:
       QDRANT_HOST: http://qdrant:6333
       QDRANT_SRC_DIR: /var/lib/docint/sources
       SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
+      # Volume-backed pipeline paths (deploy ADR 0001): the defaults derive
+      # from $HOME, which is read-only for the non-root user — every runtime
+      # write must land on a volume or /tmp.
+      DATA_PATH: /var/lib/docint/pipeline/data
+      PIPELINE_ARTIFACTS_DIR: /var/lib/docint/pipeline/artifacts
+      RESULTS_PATH: /var/lib/docint/pipeline/results
+      # Explicit (matches the volume mount) rather than derived from $HOME.
+      HF_HUB_CACHE: /home/app/.cache/huggingface/hub
       # Same value nginx enforces (frontend service, below). The backend only
       # advertises it via GET /config so the SPA sizes upload batches to stay
       # under nginx's client_max_body_size; it does not enforce it here.
       DOCINT_CLIENT_MAX_BODY_SIZE: ${DOCINT_CLIENT_MAX_BODY_SIZE:-1g}
     env_file: *env-file
     volumes:
-      - docling-cache:/root/.cache/docling
-      - huggingface-cache:/root/.cache/huggingface/hub
+      - docling-cache:/home/app/.cache/docling
+      - huggingface-cache:/home/app/.cache/huggingface/hub
       - sessions-storage:/var/lib/docint/sessions
       - source-preview-cache:/var/lib/docint/sources
+      - pipeline-storage:/var/lib/docint/pipeline
     networks:
       docint-net:
         aliases:
@@ -75,6 +139,9 @@ services:
       retries: 3
       start_period: 30s
       start_interval: 3s
+    depends_on:
+      volume-permissions:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   ##########################################################
@@ -82,11 +149,19 @@ services:
   # proxies API routes to the backend on the docint-net network.
   ##########################################################
   frontend:
+    <<: *hardened
     image: docint-frontend:${DOCINT_VERSION:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
     logging: *default-logging
+    # nginx (unprivileged image) writes pid/temp under /tmp; the envsubst
+    # entrypoint renders the template into /etc/nginx/conf.d at startup
+    # (mode=1777: the tmpfs shadows the image dir root-owned).
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+      - /etc/nginx/conf.d:size=1m,mode=1777
     environment:
       DOCINT_CLIENT_MAX_BODY_SIZE: ${DOCINT_CLIENT_MAX_BODY_SIZE:-1g}
     networks:
@@ -114,6 +189,8 @@ volumes:
   sessions-storage:
     external: true
   source-preview-cache:
+    external: true
+  pipeline-storage:
     external: true
 
 ##########################################################
