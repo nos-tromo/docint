@@ -188,6 +188,10 @@ class DocumentIngestionPipeline:
     hate_speech_prompt: str | None = field(default=None, init=False)
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
+    # True when the batch holds no reader-supported files at all (e.g. an
+    # audio/video-only upload): the generic sweep is skipped but the Nextext
+    # pre-passes still run, so a media-only batch is not an error.
+    reader_has_no_supported_files: bool = field(default=False, init=False)
     social_link_consumed: set[Path] = field(default_factory=set, init=False)
     social_link_documents: list[Document] = field(default_factory=list, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -267,7 +271,7 @@ class DocumentIngestionPipeline:
         self._load_doc_readers()
         self._load_node_parsers()
 
-        if self.dir_reader is None:
+        if self.dir_reader is None and not self.reader_has_no_supported_files:
             raise RuntimeError("Directory reader failed to initialize.")
 
         # Pre-filter files based on existing hashes to avoid unnecessary processing
@@ -309,7 +313,7 @@ class DocumentIngestionPipeline:
         self._load_doc_readers()
         self._load_node_parsers()
 
-        if self.dir_reader is None:
+        if self.dir_reader is None and not self.reader_has_no_supported_files:
             raise RuntimeError("Directory reader failed to initialize.")
 
         if existing_hashes:
@@ -393,10 +397,17 @@ class DocumentIngestionPipeline:
             list[Document]: The loaded documents for each processed file.
 
         Raises:
-            RuntimeError: If the directory reader is not initialized.
+            RuntimeError: If the directory reader is not initialized (and the
+                batch was not flagged as holding no reader-supported files).
         """
         if self.dir_reader is None:
-            raise RuntimeError("Directory reader failed to initialize.")
+            if not self.reader_has_no_supported_files:
+                raise RuntimeError("Directory reader failed to initialize.")
+            # Media-only batch: nothing for the generic sweep, but the Nextext
+            # pre-passes may still have produced transcript Documents below.
+            if self.social_link_documents:
+                yield self.social_link_documents
+            return
         dir_reader = self.dir_reader
 
         for input_file in dir_reader.input_files:
@@ -785,7 +796,39 @@ class DocumentIngestionPipeline:
         return cleaned
 
     def _load_doc_readers(self) -> None:
-        """Load document readers for various file types."""
+        """Load document readers, then run the Nextext media pre-passes.
+
+        The generic :class:`SimpleDirectoryReader` refuses to construct over a
+        batch with no reader-supported files. A media-only batch (only
+        audio/video, which ``required_exts`` deliberately excludes) is not an
+        error though — the Nextext pre-passes ingest it — so that one failure
+        mode is absorbed and flagged via ``reader_has_no_supported_files``.
+        """
+        try:
+            self.dir_reader = self._build_dir_reader()
+        except ValueError as exc:
+            if "No files found" not in str(exc):
+                raise
+            # The batch holds no reader-supported files (e.g. only audio/video,
+            # which required_exts deliberately excludes). Don't fail here: the
+            # Nextext pre-passes below can still ingest media-only batches.
+            self.dir_reader = None
+            self.reader_has_no_supported_files = True
+        self._run_social_linker()
+        self._run_standalone_media()
+
+    def _build_dir_reader(self) -> SimpleDirectoryReader:
+        """Construct the generic directory reader over the batch tree.
+
+        Returns:
+            SimpleDirectoryReader: The reader restricted to
+                ``reader_required_exts``, with docint's custom per-extension
+                extractors registered.
+
+        Raises:
+            ValueError: Propagated from :class:`SimpleDirectoryReader` when no
+                file in the batch matches ``required_exts``.
+        """
         image_reader = ImageReader(
             image_ingestion_service=(self.image_ingestion_service or ImageIngestionService()),
             source_collection=self.target_collection,
@@ -823,7 +866,7 @@ class DocumentIngestionPipeline:
                 "file_hash": file_hash,
             }
 
-        self.dir_reader = SimpleDirectoryReader(
+        return SimpleDirectoryReader(
             input_dir=self.data_dir,
             errors=self.reader_errors,
             recursive=self.reader_recursive,
@@ -856,8 +899,6 @@ class DocumentIngestionPipeline:
                 ".rtf": RTFReader(),
             },
         )
-        self._run_social_linker()
-        self._run_standalone_media()
 
     def _open_ingest_manifest(self) -> Any:
         """Open the ingest manifest for this collection, or a no-op stub.

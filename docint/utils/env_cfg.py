@@ -1219,6 +1219,8 @@ class NextextConfig:
     keyframes_max: int
     keyframe_dedup_cosine: float
     nextext_max_concurrency: int
+    auth_header: str = "X-Auth-User"
+    identity: str = "docint"
 
 
 def load_nextext_env(
@@ -1238,6 +1240,14 @@ def load_nextext_env(
     along as Nextext job options; the cosine threshold is applied docint-side.
     The client is disabled unless ``NEXTEXT_API_BASE`` is set, so non-social
     dev hosts skip video/audio rows rather than erroring.
+
+    Nextext resolves a per-request identity from a trusted header (its
+    ``NEXTEXT_AUTH_HEADER``, default ``X-Auth-User``) and rejects header-less
+    callers with 401 unless its own ``NEXTEXT_DEFAULT_IDENTITY`` fallback is
+    set. docint therefore sends ``{auth_header}: {identity}`` on every request
+    (``NEXTEXT_AUTH_HEADER`` / ``NEXTEXT_IDENTITY``, defaults ``X-Auth-User`` /
+    ``docint``). Set ``NEXTEXT_IDENTITY`` to empty to suppress the header and
+    rely on Nextext's server-side default identity instead.
 
     Args:
         default_api_base (str): Fallback base URL (empty ⇒ disabled).
@@ -1275,6 +1285,8 @@ def load_nextext_env(
         keyframes_max=int(os.getenv("KEYFRAMES_MAX", default_keyframes_max)),
         keyframe_dedup_cosine=cosine,
         nextext_max_concurrency=max(1, int(os.getenv("NEXTEXT_MAX_CONCURRENCY", default_nextext_max_concurrency))),
+        auth_header=os.getenv("NEXTEXT_AUTH_HEADER", "X-Auth-User").strip() or "X-Auth-User",
+        identity=os.getenv("NEXTEXT_IDENTITY", "docint").strip(),
     )
 
 
