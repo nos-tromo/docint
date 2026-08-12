@@ -86,10 +86,13 @@ services:
       dockerfile: docker/Dockerfile.backend
     logging: *default-logging
     # Uploads spool through /tmp (starlette) before landing in
-    # QDRANT_SRC_DIR, so the tmpfs must exceed DOCINT_CLIENT_MAX_BODY_SIZE.
+    # QDRANT_SRC_DIR, so /tmp must hold whole request bodies (up to
+    # DOCINT_CLIENT_MAX_BODY_SIZE, concurrently). A RAM tmpfs sized for that
+    # would eat host memory, so it is a disk-backed scratch volume
+    # (media-tmp, in `volumes:` below) instead — mirroring vllm-service's
+    # asr/diarize/vad/router; it never holds durable state and `down -v`
+    # may delete it.
     read_only: true
-    tmpfs:
-      - /tmp:size=2g
     expose:
       - "8000"
     environment:
@@ -118,6 +121,10 @@ services:
       - sessions-storage:/var/lib/docint/sessions
       - source-preview-cache:/var/lib/docint/sources
       - pipeline-storage:/var/lib/docint/pipeline
+      # Upload spool (see the read_only comment above). A fresh volume copies
+      # the image's /tmp mode (1777), so the non-root user can write without
+      # a chown step in volume-permissions.
+      - media-tmp:/tmp
     networks:
       docint-net:
         aliases:
@@ -192,6 +199,9 @@ volumes:
     external: true
   pipeline-storage:
     external: true
+  # Upload spool (backend /tmp) — disk-backed scratch, never durable state.
+  # Compose-managed (not external): safe to recreate at any time.
+  media-tmp:
 
 ##########################################################
 # Networks

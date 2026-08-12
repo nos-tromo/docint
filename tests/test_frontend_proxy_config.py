@@ -179,3 +179,39 @@ def test_frontend_image_ships_the_framable_headers() -> None:
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile.frontend").read_text(encoding="utf-8")
 
     assert "security-headers-framable.conf" in dockerfile
+
+
+def _ingest_location_block() -> str:
+    """Return the body of the ingest ``location`` block in the nginx config.
+
+    Returns:
+        str: The directives between the ingest location's braces.
+    """
+    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+    match = re.search(r"location ~ \^/ingest\(/\|\$\) \{(.*?)\n    \}", nginx_conf, re.DOTALL)
+    assert match is not None, "ingest location block not found in nginx config"
+    return match.group(1)
+
+
+def test_ingest_proxy_streams_request_body() -> None:
+    """Uploads must stream through nginx unbuffered.
+
+    Without ``proxy_request_buffering off`` nginx spools the whole request
+    body to /tmp before forwarding — and the frontend container's /tmp is a
+    16m tmpfs, far below client_max_body_size, so any upload batch larger
+    than the tmpfs 500s on "no space left on device".
+    """
+    assert "proxy_request_buffering off;" in _ingest_location_block()
+
+
+def test_backend_tmp_is_disk_backed_volume() -> None:
+    """The backend's upload spool (/tmp) must be a disk volume, not a RAM tmpfs.
+
+    Starlette spools every multipart body to /tmp before it lands in
+    QDRANT_SRC_DIR; a tmpfs sized for DOCINT_CLIENT_MAX_BODY_SIZE (worse:
+    concurrent uploads) is host RAM. Mirrors vllm-service's media-tmp volumes.
+    """
+    compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
+
+    assert "- media-tmp:/tmp" in compose
+    assert "/tmp:size=2g" not in compose
