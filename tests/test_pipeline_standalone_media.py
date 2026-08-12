@@ -117,3 +117,49 @@ def test_pipeline_coexistence_merges_social_and_standalone(tmp_path: Path, monke
     assert social_clip in seen["already_consumed"]  # social's claim excluded from the standalone walk
     assert pipeline.social_link_consumed == {social_clip, loose_clip}  # both merged
     assert pipeline.social_link_documents == [social_doc, standalone_doc]  # social first, standalone appended
+
+
+def test_media_only_batch_still_runs_standalone_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch of only audio/video files no longer dies as 'No files found'.
+
+    SimpleDirectoryReader refuses to construct when nothing matches
+    required_exts (audio/video is deliberately excluded), which used to
+    propagate as ValueError before the Nextext pre-passes ever ran — an
+    audio-only upload always completed as an empty ingest. The pipeline must
+    absorb that constructor failure, still run the standalone media pass, and
+    yield its transcript Documents through the normal batch flow.
+    """
+    (tmp_path / "clip.mp3").write_bytes(b"a")
+    pipeline = _pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_run_social_linker", lambda self: None)
+
+    doc = Document(text="transcribed speech", metadata={"docint_doc_kind": "transcript_segment"})
+
+    class _FakeIngestor:
+        def run(self, data_dir: Path, already_consumed: set[Path]) -> MediaTranscribeResult:
+            return MediaTranscribeResult(consumed_paths={tmp_path / "clip.mp3"}, transcript_documents=[doc])
+
+    monkeypatch.setattr(pipe_mod, "StandaloneMediaIngestor", lambda *a, **k: _FakeIngestor())
+
+    batches = list(pipeline.build())
+
+    assert pipeline.reader_has_no_supported_files is True
+    assert pipeline.dir_reader is None
+    yielded_docs = [d for docs, _nodes in batches for d in docs]
+    assert any(d.text == "transcribed speech" for d in yielded_docs)
+
+
+def test_media_only_batch_with_no_transcripts_yields_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A media-only batch whose transcription produced nothing yields no batches (soft-empty)."""
+    (tmp_path / "clip.mp3").write_bytes(b"a")
+    pipeline = _pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_run_social_linker", lambda self: None)
+
+    class _EmptyIngestor:
+        def run(self, data_dir: Path, already_consumed: set[Path]) -> MediaTranscribeResult:
+            return MediaTranscribeResult()
+
+    monkeypatch.setattr(pipe_mod, "StandaloneMediaIngestor", lambda *a, **k: _EmptyIngestor())
+
+    assert list(pipeline.build()) == []
+    assert pipeline.reader_has_no_supported_files is True
