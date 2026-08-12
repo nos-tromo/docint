@@ -120,3 +120,53 @@ def test_process_media_poll_error_status(tmp_path: Path) -> None:
     assert result.status == "poll_error"
     assert result.transcript_jsonl is None
     assert result.keyframes == []
+
+
+def test_default_client_sends_identity_header() -> None:
+    """The self-built HTTP client carries the trusted identity header.
+
+    Nextext resolves a per-request principal from this header and rejects
+    header-less callers 401 unless its server-side default identity is set.
+    """
+    client = NextextClient(_cfg())
+    assert client._client.headers["X-Auth-User"] == "docint"
+
+
+def test_default_client_identity_header_configurable() -> None:
+    """Custom auth_header/identity land on the self-built HTTP client."""
+    cfg = NextextConfig(
+        api_base="http://nextext.test",
+        api_key="sekret",
+        timeout=5.0,
+        poll_interval=0.0,
+        poll_max_seconds=5.0,
+        enabled=True,
+        keyframes_per_minute=4,
+        keyframes_max=20,
+        keyframe_dedup_cosine=0.95,
+        nextext_max_concurrency=4,
+        auth_header="X-Custom-User",
+        identity="svc-docint",
+    )
+    client = NextextClient(cfg)
+    assert client._client.headers["X-Custom-User"] == "svc-docint"
+    assert client._client.headers["Authorization"] == "Bearer sekret"
+
+
+def test_default_client_empty_identity_sends_no_header() -> None:
+    """An empty identity suppresses the trusted header entirely."""
+    cfg = NextextConfig(
+        api_base="http://nextext.test",
+        api_key=None,
+        timeout=5.0,
+        poll_interval=0.0,
+        poll_max_seconds=5.0,
+        enabled=True,
+        keyframes_per_minute=4,
+        keyframes_max=20,
+        keyframe_dedup_cosine=0.95,
+        nextext_max_concurrency=4,
+        identity="",
+    )
+    client = NextextClient(cfg)
+    assert "X-Auth-User" not in client._client.headers

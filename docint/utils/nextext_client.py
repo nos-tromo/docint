@@ -57,7 +57,14 @@ class NextextClient:
         if client is not None:
             self._client = client
         else:
-            headers = {"Authorization": f"Bearer {self._cfg.api_key}"} if self._cfg.api_key else {}
+            headers: dict[str, str] = {}
+            if self._cfg.api_key:
+                headers["Authorization"] = f"Bearer {self._cfg.api_key}"
+            # Nextext resolves a per-request identity from a trusted header and
+            # fails closed with 401 without one (unless its server-side
+            # NEXTEXT_DEFAULT_IDENTITY fallback is configured).
+            if self._cfg.identity:
+                headers[self._cfg.auth_header] = self._cfg.identity
             self._client = httpx.Client(base_url=self._cfg.api_base, timeout=self._cfg.timeout, headers=headers)
 
     def _options_payload(self) -> str:

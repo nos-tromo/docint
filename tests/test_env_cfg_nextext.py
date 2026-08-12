@@ -66,3 +66,28 @@ def test_nextext_max_concurrency_floors_at_one(
     monkeypatch.setenv("NEXTEXT_MAX_CONCURRENCY", "0")
     cfg = load_nextext_env()
     assert cfg.nextext_max_concurrency == 1
+
+
+def test_nextext_identity_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trusted-header identity defaults to X-Auth-User / docint."""
+    for var in ("NEXTEXT_AUTH_HEADER", "NEXTEXT_IDENTITY"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = load_nextext_env()
+    assert cfg.auth_header == "X-Auth-User"
+    assert cfg.identity == "docint"
+
+
+def test_nextext_identity_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NEXTEXT_AUTH_HEADER / NEXTEXT_IDENTITY override the identity docint sends."""
+    monkeypatch.setenv("NEXTEXT_AUTH_HEADER", "X-Custom-User")
+    monkeypatch.setenv("NEXTEXT_IDENTITY", "svc-docint")
+    cfg = load_nextext_env()
+    assert cfg.auth_header == "X-Custom-User"
+    assert cfg.identity == "svc-docint"
+
+
+def test_nextext_identity_empty_suppresses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty NEXTEXT_IDENTITY resolves to '' (client sends no identity header)."""
+    monkeypatch.setenv("NEXTEXT_IDENTITY", "  ")
+    cfg = load_nextext_env()
+    assert cfg.identity == ""
