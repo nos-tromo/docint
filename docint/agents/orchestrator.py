@@ -1,10 +1,14 @@
 """Agent orchestrator that routes understanding, clarification, and retrieval."""
 
+import dataclasses
+
 from docint.agents.context import TurnContext
 from docint.agents.policies import ClarificationPolicy
+from docint.agents.reformulation import QueryReformulationAgent
 from docint.agents.types import (
     ClarificationAgent,
     ClarificationRequest,
+    IntentAnalysis,
     OrchestratorResult,
     ResponseAgent,
     RetrievalAgent,
@@ -22,6 +26,15 @@ WEAK_ANSWER_PHRASES: tuple[str, ...] = (
     "cannot answer based on the provided",
     "the retrieved context does not",
     "no information",
+    # German refusals, for RESPONSE_LANGUAGE=de deployments. The phrase list
+    # can only ever cover the wordings we have seen; the length check below is
+    # the locale-agnostic half of the signal and does the heavier lifting.
+    "keine informationen",
+    "keine belege",
+    "unzureichende belege",
+    "belege sind unzureichend",
+    "kann auf grundlage der bereitgestellten",
+    "konnte keine antwort",
 )
 WEAK_ANSWER_FALLBACK_MESSAGE = (
     "I couldn't find enough specific evidence to elaborate. Could you tell me "
@@ -30,7 +43,7 @@ WEAK_ANSWER_FALLBACK_MESSAGE = (
 )
 
 
-def _is_weak_answer(answer: str | None) -> bool:
+def is_weak_answer(answer: str | None) -> bool:
     """Return True when an answer is short or matches a known refusal phrase.
 
     Multi-signal so that we avoid both over-triggering (validation mismatch
@@ -50,6 +63,10 @@ def _is_weak_answer(answer: str | None) -> bool:
     return any(phrase in lowered for phrase in WEAK_ANSWER_PHRASES)
 
 
+# Retained for callers that predate the public name.
+_is_weak_answer = is_weak_answer
+
+
 class AgentOrchestrator:
     """Coordinate agents for a single conversational turn.
 
@@ -63,6 +80,7 @@ class AgentOrchestrator:
         retriever: RetrievalAgent,
         responder: ResponseAgent | None = None,
         policy: ClarificationPolicy | None = None,
+        reformulator: QueryReformulationAgent | None = None,
     ) -> None:
         """Initialize the AgentOrchestrator.
 
@@ -73,12 +91,17 @@ class AgentOrchestrator:
             responder (ResponseAgent | None, optional): The agent responsible for response validation/post-processing.
             policy (ClarificationPolicy | None, optional): Policy deciding when clarification
                 is needed. Defaults to None.
+            reformulator (QueryReformulationAgent | None, optional): Enables the
+                corrective retry when supplied. Left as ``None`` the orchestrator
+                behaves exactly as before, so the config knob lives entirely in
+                the wiring rather than in here.
         """
         self.understanding = understanding
         self.clarifier = clarifier
         self.retriever = retriever
         self.responder = responder
         self.policy = policy or ClarificationPolicy()
+        self.reformulator = reformulator
 
     def handle_turn(self, turn: Turn, context: TurnContext | None = None) -> OrchestratorResult:
         """Process a turn: understand, possibly clarify, otherwise retrieve/respond.
@@ -120,6 +143,8 @@ class AgentOrchestrator:
         if self.responder is not None:
             retrieval = self.responder.finalize(retrieval, turn)
 
+        retrieval = self._maybe_retry(turn, ctx, analysis, retrieval)
+
         # Validation-driven clarification fallback: if the responder flagged
         # the answer as mismatched AND it is also weak (empty, very short, or
         # contains a refusal phrase), convert the turn into a clarification
@@ -127,7 +152,7 @@ class AgentOrchestrator:
         # "Evidence insufficient." Respects the per-session clarification cap.
         if (
             retrieval.validation_mismatch is True
-            and _is_weak_answer(retrieval.answer)
+            and is_weak_answer(retrieval.answer)
             and ctx.clarifications < self.policy.config.max_clarifications
         ):
             return OrchestratorResult(
@@ -140,3 +165,59 @@ class AgentOrchestrator:
                 analysis=analysis,
             )
         return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+
+    def _maybe_retry(
+        self,
+        turn: Turn,
+        ctx: TurnContext,
+        analysis: IntentAnalysis,
+        retrieval: RetrievalResult,
+    ) -> RetrievalResult:
+        """Re-answer once with a reformulated query when the first attempt failed.
+
+        Runs only when the responder flagged a mismatch *and* the answer is weak
+        — a mismatched but substantive answer is still worth showing, and
+        discarding it to chase a better one would trade a real answer for a
+        coin flip. The retry is capped at one attempt structurally (there is no
+        loop), and it re-validates so the caller's fallback decision is made
+        against the answer the user will actually see.
+
+        Args:
+            turn (Turn): The user turn being answered.
+            ctx (TurnContext): Per-turn context, read for conversation history.
+            analysis (IntentAnalysis): The understanding agent's analysis.
+            retrieval (RetrievalResult): The rejected first attempt.
+
+        Returns:
+            RetrievalResult: The retry's validated result, or the original one
+            when no retry ran or no reformulation was available.
+        """
+        if self.reformulator is None:
+            return retrieval
+        if retrieval.validation_mismatch is not True or not is_weak_answer(retrieval.answer):
+            return retrieval
+
+        new_query = self.reformulator.reformulate(
+            user_query=turn.user_input,
+            failed_query=retrieval.retrieval_query or analysis.rewritten_query,
+            validation_reason=retrieval.validation_reason,
+        )
+        if not new_query:
+            return retrieval
+
+        retry_analysis = dataclasses.replace(analysis, rewritten_query=new_query)
+        second = self.retriever.retrieve(
+            RetrievalRequest(
+                turn=turn,
+                analysis=retry_analysis,
+                history=list(ctx.history),
+                # One user message, one persisted turn: the retry overwrites the
+                # row its first attempt wrote.
+                replace_turn_idx=retrieval.turn_idx,
+            )
+        )
+        if self.responder is not None:
+            second = self.responder.finalize(second, turn)
+        second.retried = True
+        second.retry_query = new_query
+        return second

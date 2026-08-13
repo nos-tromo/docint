@@ -19,6 +19,12 @@ export interface ChatTurnData {
   error?: string | null
   /** How many hand-picked chunks this turn was sent with, if any. */
   scopeRequested?: number
+  /**
+   * The reformulated query a corrective retry used, when the first answer was
+   * rejected and re-answered. Set live from the stream's retry frame; on a
+   * reloaded session it arrives on `meta` instead.
+   */
+  retryQuery?: string
 }
 
 /**
@@ -29,6 +35,17 @@ export interface ChatTurnData {
  * in the transcript — which is how an unscoped answer came to be presented as
  * hand-picked evidence.
  */
+/**
+ * The reformulated query behind this answer, if it came from a corrective retry.
+ *
+ * Reads the live stream frame first and the persisted turn second, so the
+ * notice survives a reload rather than only existing while the tab that
+ * watched the retry stays open.
+ */
+function retryQuery(turn: ChatTurnData): string | undefined {
+  return turn.retryQuery ?? turn.meta?.retry_query
+}
+
 function scopeWasDropped(turn: ChatTurnData): boolean {
   if (!turn.done || !turn.scopeRequested || !turn.meta) return false
   return turn.meta.retrieval_mode !== 'scoped'
@@ -122,6 +139,15 @@ export function ChatTurn({
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">{t('chat.error_title')}</div>
             <div className="mt-1 whitespace-pre-wrap">{turn.error}</div>
+          </div>
+        )}
+        {retryQuery(turn) && (
+          <div
+            className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
+            data-testid="retry-notice"
+            role="status"
+          >
+            {t('chat.retry_notice', { query: retryQuery(turn) ?? '' })}
           </div>
         )}
         {scopeWasDropped(turn) && (

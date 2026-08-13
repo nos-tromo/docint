@@ -50,6 +50,8 @@ export interface ValidationFields {
 export interface ChatFinalEvent extends ValidationFields {
   status?: 'answer' | 'clarification'
   answer?: string
+  /** `/stream_query`'s name for the complete answer text. */
+  response?: string
   message?: string
   sources: Source[]
   session_id: string
@@ -64,6 +66,10 @@ export interface ChatFinalEvent extends ValidationFields {
   retrieval_mode?: string
   /** How many chunks that scope held. */
   scoped_chunk_count?: number
+  /** `true` when this answer came from a corrective retry, not the first attempt. */
+  retried?: boolean
+  /** The reformulated retrieval query that retry used. */
+  retry_query?: string
 }
 
 /** A rule targets either one `field` or several `fields`; with several, it
@@ -182,6 +188,10 @@ export interface SessionMessage extends Partial<ValidationFields> {
   content: string
   sources?: Source[]
   reasoning?: string
+  /** `true` when a corrective retry produced this answer. */
+  retried?: boolean
+  /** The reformulated retrieval query that retry used. */
+  retry_query?: string
 }
 
 export interface DocumentRecord {

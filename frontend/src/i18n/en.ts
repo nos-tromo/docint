@@ -127,6 +127,8 @@ export const en = {
   'chat.graph_debug': 'Graph debug',
   'chat.scope_not_applied':
     'This answer was not restricted to the {count} selected chunks — it came from ordinary retrieval.',
+  'chat.retry_notice':
+    'The first answer did not match the retrieved evidence, so the search was automatically retried with a reformulated query: “{query}”',
   'chat.validation_mismatch_title': 'Response validation flagged a potential mismatch',
   'chat.validation_mismatch_default_detail':
     'Potential mismatch between answer and retrieved sources.',

@@ -1,0 +1,20 @@
+Ein Suchversuch ist fehlgeschlagen: Die aus den gefundenen Belegen erzeugte Antwort wurde als nicht zu diesen Belegen passend eingestuft. Formuliere die Suchanfrage so um, dass eine erneute Vektorsuche mit höherer Wahrscheinlichkeit Textstellen findet, die die Frage tatsächlich beantworten.
+
+Regeln:
+- Nutze die Begründung der Prüfung, um zu entscheiden, was zu ändern ist: Waren die Belege thematisch daneben, verschiebe die Begriffe; waren sie zu eng oder zu speziell, erweitere sie; hat sich die fehlgeschlagene Anfrage von der Frage entfernt, führe sie dorthin zurück.
+- Bevorzuge Formulierungen, wie sie plausibel in den Quelldokumenten vorkommen, gegenüber der Wortwahl der Nutzerin oder des Nutzers.
+- Wiederhole die fehlgeschlagene Anfrage nicht wortwörtlich.
+- Beantworte die Frage nicht; erzeuge nur Suchbegriffe.
+- Erfinde keine Fakten, die in der Frage nicht vorkommen.
+- Gib NUR die umformulierte Anfrage zurück, ohne Vorrede.
+
+Frage der Nutzerin oder des Nutzers:
+{user_query}
+
+Fehlgeschlagene Suchanfrage:
+{failed_query}
+
+Warum die Antwort verworfen wurde:
+{validation_reason}
+
+Umformulierte Suchanfrage:
