@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
-import { Button, DownloadButton, PageHeader } from '@infra/ui'
+import { useNavigate, useParams } from 'react-router-dom'
+import { Button, DownloadButton, NewButton, PageHeader } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
@@ -104,6 +104,7 @@ const RailChevron = ({ open }: { open: boolean }) => (
 export function Chat() {
   const t = useT()
   const params = useParams()
+  const navigate = useNavigate()
   const sessionIdParam = params.sessionId ?? null
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
   const currentSessionId = useUiStore((s) => s.currentSessionId)
@@ -170,6 +171,27 @@ export function Chat() {
     abortRef.current = null
     dispatch({ type: 'reset' })
   }, [sessionIdParam])
+
+  useEffect(() => {
+    // Starting a new chat only clears the session id. From `/chat/:sessionId`
+    // that drops the URL segment too and the effect above does the reset — but
+    // a chat that minted its session on the first turn never had that segment
+    // (the id lives only in the store), so nothing the effect above watches
+    // changed and the finished transcript stayed on screen, making the click
+    // look like it had done nothing. Reset on the *effective* session going
+    // away, which covers both, and switching collections besides.
+    if (sessionIdParam !== null || currentSessionId !== null) return
+    abortRef.current?.abort()
+    abortRef.current = null
+    dispatch({ type: 'reset' })
+  }, [sessionIdParam, currentSessionId])
+
+  const onNewChat = () => {
+    setCurrentSessionId(null)
+    // Required even when the id lived only in the store: from a pinned
+    // `/chat/:sessionId` the param effect would otherwise put it straight back.
+    navigate('/chat')
+  }
 
   useEffect(() => {
     if (!history.data) return
@@ -358,6 +380,10 @@ export function Chat() {
                 }
               />
             )}
+            {/* The sidebar's copy of this is the one reachable from every
+                route; this one is where the wish arrives — at the foot of an
+                answer, without crossing the page to the session list. */}
+            <NewButton label={t('common.new_chat')} onClick={onNewChat} />
             <ChatControls />
           </div>
         </div>

@@ -792,6 +792,37 @@ describe('Chat session switching', () => {
     })
   })
 
+  it('clears a transcript whose session was minted on this page, not by the URL', async () => {
+    // The one case the effect above cannot see: a chat started at /chat gets
+    // its id from the first answer and never gains a :sessionId segment, so
+    // "New chat" changes nothing the route watches. Before the reset keyed on
+    // the effective session, the finished answer stayed on screen and the
+    // click looked like a no-op — from the very button that sits under it.
+    const frames =
+      'data: {"token":"Answer"}\n\n' +
+      'data: {"response":"Answer","sources":[],"session_id":"sess-1"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChatAt('/chat')
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Answer')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(useUiStore.getState().currentSessionId).toBe('sess-1')
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: /new chat/i }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('Answer')).not.toBeInTheDocument()
+    })
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+
   it('ignores stream frames that arrive with no open turn', () => {
     // The session reset empties the transcript, so a frame from the stream
     // being torn down has no turn to fold into. Folding into `undefined`
