@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button, DeleteButton } from '@infra/ui'
+import { HoverIconAction, NewButton, TrashIcon } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
@@ -148,6 +148,102 @@ export function Sidebar() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
+      {/* The collection leads the sidebar because every section below it —
+          ingest, chat, analysis, report — is scoped to whichever one is
+          active. Sitting between the nav and the sessions it read as one
+          section's setting rather than the context they all share.
+
+          It carries no heading and no box: it is the first thing in the
+          panel, it shows a collection name, and it drops a chevron, so a
+          "SAMMLUNG" label above it only repeated what the row already said.
+          It carries no fill either — the primary tint means "where you are"
+          everywhere else in this panel, and a second tinted row sitting
+          directly above the active nav item competed with it for that. The
+          live dot and the name's weight say it instead. */}
+      <section>
+        <div
+          data-testid={selected ? 'active-collection' : undefined}
+          className="group flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors hover:bg-accent"
+        >
+          <span
+            aria-hidden="true"
+            className={cn(
+              'h-2 w-2 shrink-0 rounded-full',
+              selected
+                ? 'bg-primary shadow-[0_0_6px_var(--color-primary)]'
+                : 'bg-muted-foreground/40'
+            )}
+          />
+          {selected && (
+            <span className="text-[10px] uppercase tracking-wide text-primary shrink-0">
+              {t('common.active')}
+            </span>
+          )}
+          {selected && selectedOwner && (
+            <span className="text-[10px] text-muted-foreground shrink-0 truncate">
+              {selectedOwner}
+            </span>
+          )}
+          <select
+            aria-label={t('common.select_collection_aria')}
+            className="min-w-0 flex-1 cursor-pointer bg-transparent text-sm font-medium text-foreground outline-hidden"
+            value={selectedIndex >= 0 ? String(selectedIndex) : ''}
+            onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
+          >
+            <option value="" disabled>
+              {entries.length ? t('common.choose_collection') : t('common.no_collections')}
+            </option>
+            {collections?.mine.map((c) => (
+              <option key={`own:${c}`} value={String(entries.findIndex((e) => entryMatches(e, c, null)))}>
+                {c}
+              </option>
+            ))}
+            {collections?.others.map((g) => (
+              <optgroup key={g.owner} label={g.owner}>
+                {g.collections.map((c) => (
+                  <option
+                    key={`${g.owner}:${c}`}
+                    value={String(entries.findIndex((e) => entryMatches(e, c, g.owner)))}
+                  >
+                    {c}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          {/* Trash, not ×: deleting a collection destroys every ingested
+              document in it. The icon is what says how far the action goes.
+              Hover-revealed, because destroying a collection is the rarest
+              thing done here and an always-lit trash beside the one row that
+              leads the panel reads as an invitation. */}
+          {selected && (
+            <HoverIconAction
+              icon={<TrashIcon />}
+              label={t('common.delete_collection_aria', { name: selected })}
+              onClick={() => onDeleteCollection(selected, selectedOwner)}
+              className="-my-1 h-7"
+            />
+          )}
+        </div>
+        {!selected && (
+          <p className="mt-1.5 px-3 text-xs text-muted-foreground">
+            {t('common.no_active_collection')}
+          </p>
+        )}
+        {/* A failed delete is otherwise indistinguishable from the button
+            doing nothing (the collection list renders from the ownership DB
+            and stays intact) — surface the mutation error in the same opaque
+            chip style as the sessions error below. Clears automatically when
+            the next delete attempt starts or succeeds. */}
+        {deleteCollectionMutation.isError && (
+          <p role="alert" className="mt-1.5 rounded-md border border-amber-700 bg-amber-950 px-2 py-2 text-xs text-amber-200">
+            {t('common.delete_collection_error', {
+              name: `"${String(deleteCollectionMutation.variables ?? '')}"`
+            })}
+          </p>
+        )}
+      </section>
+
       <nav className="flex flex-col gap-1">
         {NAV.map(({ to, key }) => {
           // The open chat lives on the server and its id is persisted; the
@@ -181,103 +277,21 @@ export function Sidebar() {
         })}
       </nav>
 
-      <section>
-        <label className="text-xs uppercase text-muted-foreground">{t('common.collection')}</label>
-        <div
-          data-testid={selected ? 'active-collection' : undefined}
-          className={cn(
-            'mt-1 flex items-center gap-2 rounded-md border px-2.5 py-2 transition-colors',
-            selected ? 'border-primary/60 bg-primary/5' : 'border-border'
-          )}
-        >
-          <span
-            aria-hidden="true"
-            className={cn(
-              'h-2 w-2 shrink-0 rounded-full',
-              selected
-                ? 'bg-primary shadow-[0_0_6px_var(--color-primary)]'
-                : 'bg-muted-foreground/40'
-            )}
-          />
-          {selected && (
-            <span className="text-[10px] uppercase tracking-wide text-primary shrink-0">
-              {t('common.active')}
-            </span>
-          )}
-          {selected && selectedOwner && (
-            <span className="text-[10px] text-muted-foreground shrink-0 truncate">
-              {selectedOwner}
-            </span>
-          )}
-          <select
-            aria-label={t('common.select_collection_aria')}
-            className="min-w-0 flex-1 cursor-pointer bg-transparent text-sm text-foreground outline-hidden"
-            value={selectedIndex >= 0 ? String(selectedIndex) : ''}
-            onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
-          >
-            <option value="" disabled>
-              {entries.length ? t('common.choose_collection') : t('common.no_collections')}
-            </option>
-            {collections?.mine.map((c) => (
-              <option key={`own:${c}`} value={String(entries.findIndex((e) => entryMatches(e, c, null)))}>
-                {c}
-              </option>
-            ))}
-            {collections?.others.map((g) => (
-              <optgroup key={g.owner} label={g.owner}>
-                {g.collections.map((c) => (
-                  <option
-                    key={`${g.owner}:${c}`}
-                    value={String(entries.findIndex((e) => entryMatches(e, c, g.owner)))}
-                  >
-                    {c}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-          {/* Trash, not ×: deleting a collection destroys every ingested
-              document in it. The icon is what says how far the action goes. */}
-          {selected && (
-            <DeleteButton
-              label={t('common.delete_collection_aria', { name: selected })}
-              onClick={() => onDeleteCollection(selected, selectedOwner)}
-            />
-          )}
-        </div>
-        {!selected && (
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            {t('common.no_active_collection')}
-          </p>
-        )}
-        {/* A failed delete is otherwise indistinguishable from the button
-            doing nothing (the collection list renders from the ownership DB
-            and stays intact) — surface the mutation error in the same opaque
-            chip style as the sessions error below. Clears automatically when
-            the next delete attempt starts or succeeds. */}
-        {deleteCollectionMutation.isError && (
-          <p role="alert" className="mt-1.5 rounded-md border border-amber-700 bg-amber-950 px-2 py-2 text-xs text-amber-200">
-            {t('common.delete_collection_error', {
-              name: `"${String(deleteCollectionMutation.variables ?? '')}"`
-            })}
-          </p>
-        )}
-      </section>
-
       <section className="flex-1 min-h-0 flex flex-col">
-        <div className="flex items-center justify-between">
-          <label className="text-xs uppercase text-muted-foreground">{t('common.sessions')}</label>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={onNewChat}
-          >
-            {t('common.new_session')}
-          </Button>
+        {/* The one heading in the panel, and it earns its keep: the rows below
+            are drawn exactly like the nav rows above, so without a label the
+            two runs read as one long list of sections. It also gives the
+            new-chat action a home directly over the list it adds to, which is
+            reachable from every route — unlike the copy in the chat header. */}
+        <div className="flex items-center justify-between gap-2">
+          <span className="px-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            {t('common.sessions')}
+          </span>
+          <NewButton label={t('common.new_chat')} onClick={onNewChat} className="h-7" />
         </div>
         <ul className="mt-2 flex-1 overflow-auto space-y-1">
           {sessionsLoading && (
-            <li className="px-2 py-1 text-sm text-muted-foreground">{t('common.loading_chats')}</li>
+            <li className="px-3 py-2 text-sm text-muted-foreground">{t('common.loading_chats')}</li>
           )}
           {/* Opaque self-contained chip (fixed dark bg + light fg), matching
               ValidationBanner's convention — not a translucent tint over the
@@ -289,7 +303,7 @@ export function Sidebar() {
             </li>
           )}
           {!sessionsLoading && !sessionsError && sessions.length === 0 && (
-            <li className="px-2 py-1 text-sm text-muted-foreground">
+            <li className="px-3 py-2 text-sm text-muted-foreground">
               {selected
                 ? t('common.no_chats_in_collection')
                 : t('common.select_collection_to_see_chats')}
@@ -298,22 +312,27 @@ export function Sidebar() {
           {!sessionsLoading && !sessionsError && sessions.map((s) => {
             const active = currentSessionId === s.id
             return (
-              <li key={s.id} className="flex items-center gap-1">
+              // The trash is positioned out of the flow rather than sitting
+              // beside the button: `opacity-0` still occupies its column, so
+              // as a flex sibling it would hold every session row short of
+              // the nav rows they are meant to match.
+              <li key={s.id} className="group relative flex items-center">
                 <button
                   type="button"
                   onClick={() => onPickSession(s.id)}
                   className={cn(
-                    'flex-1 text-left text-sm px-2 py-1 rounded-md truncate',
-                    active ? 'bg-primary/10 text-primary' : 'hover:bg-accent'
+                    'min-w-0 flex-1 truncate rounded-md px-3 py-2 pr-9 text-left text-sm hover:bg-accent',
+                    active && 'bg-primary/15 text-primary'
                   )}
                   title={s.title ?? s.id}
                 >
                   {s.title?.trim() || t('common.session_title_fallback', { id: s.id.slice(0, 8) })}
                 </button>
-                <DeleteButton
+                <HoverIconAction
+                  icon={<TrashIcon />}
                   label={t('common.delete_session_aria')}
                   onClick={() => onDeleteSession(s.id)}
-                  className="h-7"
+                  className="absolute right-1 h-7"
                 />
               </li>
             )

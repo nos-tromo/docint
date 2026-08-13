@@ -31,7 +31,7 @@ export const de: Strings = {
     'Sammlung {name} konnte nicht gelöscht werden. Prüfen Sie, ob Backend und Vektordatenbank erreichbar sind, und versuchen Sie es erneut.',
   'common.no_active_collection': 'Keine aktive Sammlung — wählen Sie eine aus, um Anfragen zu stellen.',
   'common.sessions': 'Sitzungen',
-  'common.new_session': '+ Neu',
+  'common.new_chat': 'Neuer Chat',
   'common.new_report': 'Neuer Bericht',
   'common.loading_chats': 'Lädt Chats...',
   'common.sessions_error_default': 'Chats konnten nicht geladen werden.',

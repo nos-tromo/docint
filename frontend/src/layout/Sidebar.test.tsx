@@ -402,6 +402,76 @@ describe('Sidebar keeps the current section when switching collections', () => {
   })
 })
 
+describe('Sidebar new chat', () => {
+  it('drops the open session and lands in chat from any section', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': { sessions: [{ id: 's-1', title: 'Prior chat' }] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 's-1' })
+
+    renderSidebarAt('/analysis')
+
+    await userEvent.click(await screen.findByRole('button', { name: /new chat/i }))
+
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+    await waitFor(() => {
+      expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
+    })
+  })
+
+  it('draws the control rather than spelling it, so it renders the same everywhere', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': [],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSidebar()
+
+    // A "+" typed as text renders from whatever font the OS falls back to, and
+    // in a control carrying no text of its own that drawing is the affordance.
+    const button = await screen.findByRole('button', { name: /new chat/i })
+    expect(button.querySelector('svg')).toBeInTheDocument()
+    expect(button).toHaveTextContent('')
+  })
+})
+
+describe('Sidebar layout', () => {
+  it('leads with the collection every section below it is scoped to', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebar()
+
+    const collection = await screen.findByTestId('active-collection')
+    const nav = document.querySelector('nav')!
+    // Node.DOCUMENT_POSITION_FOLLOWING — the nav comes after the collection.
+    expect(collection.compareDocumentPosition(nav) & 4).toBeTruthy()
+  })
+
+  it('gives the session list the one heading, since its rows are drawn like the nav rows', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebar()
+
+    expect(await screen.findByText(/sessions/i)).toBeInTheDocument()
+    // The collection leads the panel and names itself; a heading over it only
+    // repeated the row beneath, which the nav above manages without.
+    expect(screen.queryByText(/^collection$/i)).not.toBeInTheDocument()
+  })
+})
+
 describe('Sidebar navigation', () => {
   it('orders sections dashboard, ingest, inspector, chat, analysis, report', () => {
     const fetchMock = mockFetch({

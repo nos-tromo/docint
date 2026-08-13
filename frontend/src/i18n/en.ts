@@ -28,7 +28,7 @@ export const en = {
     'Collection {name} could not be deleted. Check that the backend and vector store are reachable, then try again.',
   'common.no_active_collection': 'No active collection — pick one to query.',
   'common.sessions': 'Sessions',
-  'common.new_session': '+ New',
+  'common.new_chat': 'New chat',
   'common.new_report': 'New report',
   'common.loading_chats': 'Loading chats...',
   'common.sessions_error_default': 'Failed to load chats.',
