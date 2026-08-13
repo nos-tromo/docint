@@ -49,6 +49,21 @@ describe('useIngestJobsStore', () => {
     )
   })
 
+  it('does not merge per-file frames whose names differ only in digits', () => {
+    // Digit masking gives "indexed 12 chunks: report_v1.pdf" and
+    // "indexed 30 chunks: report_v2.pdf" the same kind, but they are distinct
+    // files: only the enrichment counters may collapse across the trailing
+    // run — everything else keeps adjacent-only collapsing.
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', ev('Core pipeline indexed 12 chunks: report_v1.pdf'))
+    appendEvent('job-1', ev('Core pipeline processing PDF (2/2): report_v2.pdf'))
+    appendEvent('job-1', ev('Core pipeline indexed 30 chunks: report_v2.pdf'))
+
+    const events = useIngestJobsStore.getState().events['job-1']
+    expect(events).toHaveLength(3)
+    expect((events[0].data as { message: string }).message).toContain('report_v1.pdf')
+  })
+
   it('does not collapse progress frames across a non-progress entry', () => {
     const { appendEvent } = useIngestJobsStore.getState()
     appendEvent('job-1', ev('Extracting entities: 1/9 chunks processed'))

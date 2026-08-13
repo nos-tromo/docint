@@ -1059,6 +1059,29 @@ def test_enrichment_exactly_once_and_skips_empty_text(monkeypatch: pytest.Monkey
     assert "entities" not in nodes[1].metadata
 
 
+def test_enrichment_propagates_progress_callback_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A raising progress callback fails the batch instead of being swallowed.
+
+    The production callback (jobs.py ``_push``) raises when the event loop is
+    closed mid-ingest; before the single-pool refactor that error propagated
+    from the coordinating thread and failed the job. Worker-thread errors must
+    surface the same way rather than vanish in ``wait(futures)``.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+
+    def broken_callback(message: str) -> None:
+        raise RuntimeError("Event loop is closed")
+
+    pipeline = _make_enrichment_pipeline(monkeypatch, tmp_path, ner_workers=2, progress_callback=broken_callback)
+    pipeline.entity_extractor = lambda text: ([], [])
+
+    with pytest.raises(RuntimeError, match="Event loop is closed"):
+        pipeline._enrich_nodes_in_place(_enrichment_nodes("One.", "Two."))
+
+
 def test_enrichment_single_stage_and_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A disabled stage emits no progress frames; fully disabled is a no-op.
 

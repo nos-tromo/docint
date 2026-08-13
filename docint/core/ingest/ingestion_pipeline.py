@@ -562,6 +562,11 @@ class DocumentIngestionPipeline:
         with ThreadPoolExecutor(max_workers=max(1, pool_size)) as executor:
             futures = [executor.submit(_process_node, progress_offset + i, node) for i, node in enumerate(nodes)]
             wait(futures)
+        # Stage errors are swallowed per node above; anything stored on a
+        # future is a coordination failure (e.g. the progress callback raised)
+        # and must fail the batch like it did pre-pooling, not vanish.
+        for future in futures:
+            future.result()
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
         """Create nodes from documents without applying enrichment stages.
