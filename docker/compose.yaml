@@ -55,6 +55,12 @@ services:
     network_mode: none
     # Roots are the five mountpoints themselves — their parent dirs live on
     # the read-only image rootfs and must not (and cannot) be chowned.
+    # The second find sweeps the media-tmp upload spool: starlette unlinks
+    # its /tmp spool files only on clean request teardown, so a crash or
+    # restart mid-upload strands them, and a disk-backed named volume (unlike
+    # the tmpfs it replaced) has no size cap and survives restarts. Nothing
+    # is in flight before the backend starts, so a boot-time wipe restores
+    # the tmpfs's clean-on-start property.
     entrypoint:
       - /bin/sh
       - -c
@@ -63,12 +69,15 @@ services:
         /var/lib/docint/pipeline /home/app/.cache/docling
         /home/app/.cache/huggingface/hub
         -xdev ! -user 10001 -exec chown -h 10001:10001 {} +
+        &&
+        find /cleanup/media-tmp -xdev -mindepth 1 -delete
     volumes:
       - docling-cache:/home/app/.cache/docling
       - huggingface-cache:/home/app/.cache/huggingface/hub
       - sessions-storage:/var/lib/docint/sessions
       - source-preview-cache:/var/lib/docint/sources
       - pipeline-storage:/var/lib/docint/pipeline
+      - media-tmp:/cleanup/media-tmp
     restart: "no"
 
   ##########################################################
@@ -91,7 +100,8 @@ services:
     # would eat host memory, so it is a disk-backed scratch volume
     # (media-tmp, in `volumes:` below) instead — mirroring vllm-service's
     # asr/diarize/vad/router; it never holds durable state and `down -v`
-    # may delete it.
+    # may delete it. volume-permissions wipes it before each backend start,
+    # so spool files orphaned by a crash mid-upload cannot accumulate.
     read_only: true
     expose:
       - "8000"

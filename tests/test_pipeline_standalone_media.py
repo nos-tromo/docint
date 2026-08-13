@@ -143,14 +143,22 @@ def test_media_only_batch_still_runs_standalone_pass(tmp_path: Path, monkeypatch
 
     batches = list(pipeline.build())
 
-    assert pipeline.reader_has_no_supported_files is True
     assert pipeline.dir_reader is None
     yielded_docs = [d for docs, _nodes in batches for d in docs]
     assert any(d.text == "transcribed speech" for d in yielded_docs)
 
 
-def test_media_only_batch_with_no_transcripts_yields_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A media-only batch whose transcription produced nothing yields no batches (soft-empty)."""
+def test_media_only_batch_unclaimed_by_prepasses_raises_no_supported_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch with nothing ingestable raises instead of silently yielding nothing.
+
+    With Nextext unconfigured the standalone pass claims nothing, so a
+    media-only upload would previously complete as a silent success into an
+    existing collection (no batches, no error, no warning). The pipeline must
+    raise the typed ``NoSupportedFilesError`` so callers surface a visible
+    "no ingestable files" warning.
+    """
     (tmp_path / "clip.mp3").write_bytes(b"a")
     pipeline = _pipeline(tmp_path, monkeypatch)
     monkeypatch.setattr(DocumentIngestionPipeline, "_run_social_linker", lambda self: None)
@@ -161,5 +169,38 @@ def test_media_only_batch_with_no_transcripts_yields_nothing(tmp_path: Path, mon
 
     monkeypatch.setattr(pipe_mod, "StandaloneMediaIngestor", lambda *a, **k: _EmptyIngestor())
 
+    with pytest.raises(pipe_mod.NoSupportedFilesError):
+        list(pipeline.build())
+
+
+def test_empty_batch_raises_no_supported_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuinely empty staged directory raises the typed error.
+
+    Detection must not depend on llama-index's literal 'No files found'
+    error prose — the pipeline pre-scans the batch tree itself.
+    """
+    pipeline = _pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_run_social_linker", lambda self: None)
+
+    with pytest.raises(pipe_mod.NoSupportedFilesError):
+        list(pipeline.build())
+
+
+def test_media_claimed_without_transcripts_is_soft_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Media the pre-pass claimed but produced no transcripts for stays a soft empty.
+
+    Consumed paths mean work happened (e.g. keyframes ingested to the images
+    companion), so this is not the nothing-ingestable case and must not raise.
+    """
+    clip = tmp_path / "clip.mp3"
+    clip.write_bytes(b"a")
+    pipeline = _pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_run_social_linker", lambda self: None)
+
+    class _ConsumingIngestor:
+        def run(self, data_dir: Path, already_consumed: set[Path]) -> MediaTranscribeResult:
+            return MediaTranscribeResult(consumed_paths={clip}, transcript_documents=[])
+
+    monkeypatch.setattr(pipe_mod, "StandaloneMediaIngestor", lambda *a, **k: _ConsumingIngestor())
+
     assert list(pipeline.build()) == []
-    assert pipeline.reader_has_no_supported_files is True

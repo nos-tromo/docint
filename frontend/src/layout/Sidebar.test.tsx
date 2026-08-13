@@ -394,7 +394,11 @@ describe('Sidebar keeps the current section when switching collections', () => {
     })
     // A session is pinned to the collection it was created under, so the stale
     // session sub-route is dropped — but the user stays within the chat section.
-    expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
+    // The router applies the navigation on its own render tick, after the
+    // store update above — poll for it instead of asserting synchronously.
+    await waitFor(() => {
+      expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
+    })
   })
 })
 

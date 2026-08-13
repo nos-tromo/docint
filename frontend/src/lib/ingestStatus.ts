@@ -170,18 +170,46 @@ export function progressKind(ev: IngestEvent): string | null {
 }
 
 /**
+ * Return whether a progress event is one of the enrichment counters
+ * (`Extracting entities` / `Detecting hate speech`), the only frames the
+ * backend emits interleaved (both stages run from one pool).
+ *
+ * @param ev - The event to classify.
+ * @returns True for an enrichment counter frame.
+ */
+function isEnrichmentCounter(ev: IngestEvent): boolean {
+  const message = (ev.data as { message?: unknown })?.message
+  if (typeof message !== 'string') return false
+  return RE_ENTITIES.test(message) || RE_HATE.test(message)
+}
+
+/**
  * Append an event to a log, collapsing a repeat of the previous progress kind
- * in place. Keeps the log bounded on long ingests.
+ * in place. The interleaving enrichment counters (entities / hate speech, the
+ * only frames the backend alternates) additionally collapse into their most
+ * recent same-kind entry within the trailing run of counter frames, so an
+ * alternating stream stays at one entry per counter. Any other frame — and
+ * any non-progress entry — bounds that scan, which keeps appends O(1) and
+ * prevents digit-masking from merging distinct per-file frames (e.g.
+ * `indexed 12 chunks: report_v1.pdf` / `indexed 30 chunks: report_v2.pdf`).
+ * Keeps the log bounded on long ingests.
  *
  * @param events - The existing log.
  * @param next - The event to append.
  * @returns A new log array.
  */
 export function appendCollapsedEvent(events: IngestEvent[], next: IngestEvent): IngestEvent[] {
-  const last = events[events.length - 1]
   const nextKind = progressKind(next)
-  if (nextKind && last && nextKind === progressKind(last)) {
-    return [...events.slice(0, -1), next]
+  if (nextKind) {
+    const scanAcrossCounters = isEnrichmentCounter(next)
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      if (progressKind(events[i]) === nextKind) {
+        const out = events.slice()
+        out[i] = next
+        return out
+      }
+      if (!scanAcrossCounters || !isEnrichmentCounter(events[i])) break
+    }
   }
   return [...events, next]
 }

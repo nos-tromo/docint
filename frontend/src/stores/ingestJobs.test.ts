@@ -30,6 +30,49 @@ describe('useIngestJobsStore', () => {
     expect(useIngestJobsStore.getState().events['job-1']).toHaveLength(2)
   })
 
+  it('collapses interleaved entities and hate frames to one entry each', () => {
+    // The backend enriches both stages from one pool, so their counter frames
+    // arrive interleaved rather than as two adjacent runs.
+    const { appendEvent } = useIngestJobsStore.getState()
+    for (let i = 1; i <= 9; i += 1) {
+      appendEvent('job-1', ev(`Extracting entities: ${i}/9 chunks processed`))
+      appendEvent('job-1', ev(`Detecting hate speech: ${i}/9 chunks processed`))
+    }
+
+    const events = useIngestJobsStore.getState().events['job-1']
+    expect(events).toHaveLength(2)
+    expect((events[0].data as { message: string }).message).toBe(
+      'Extracting entities: 9/9 chunks processed'
+    )
+    expect((events[1].data as { message: string }).message).toBe(
+      'Detecting hate speech: 9/9 chunks processed'
+    )
+  })
+
+  it('does not merge per-file frames whose names differ only in digits', () => {
+    // Digit masking gives "indexed 12 chunks: report_v1.pdf" and
+    // "indexed 30 chunks: report_v2.pdf" the same kind, but they are distinct
+    // files: only the enrichment counters may collapse across the trailing
+    // run — everything else keeps adjacent-only collapsing.
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', ev('Core pipeline indexed 12 chunks: report_v1.pdf'))
+    appendEvent('job-1', ev('Core pipeline processing PDF (2/2): report_v2.pdf'))
+    appendEvent('job-1', ev('Core pipeline indexed 30 chunks: report_v2.pdf'))
+
+    const events = useIngestJobsStore.getState().events['job-1']
+    expect(events).toHaveLength(3)
+    expect((events[0].data as { message: string }).message).toContain('report_v1.pdf')
+  })
+
+  it('does not collapse progress frames across a non-progress entry', () => {
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', ev('Extracting entities: 1/9 chunks processed'))
+    appendEvent('job-1', { event: 'warning', data: { message: 'heads up' }, receivedAt: 0 })
+    appendEvent('job-1', ev('Extracting entities: 2/9 chunks processed'))
+
+    expect(useIngestJobsStore.getState().events['job-1']).toHaveLength(3)
+  })
+
   it('resets a job log on ingestion_started so replays do not duplicate', () => {
     const { appendEvent } = useIngestJobsStore.getState()
     const started: IngestEvent = {

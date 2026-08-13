@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, NotRequired, TypedDict, cast
 
 from llama_index.core import Document, SimpleDirectoryReader
 
-__all__ = ["DocumentIngestionPipeline", "SimpleDirectoryReader"]
+__all__ = ["DocumentIngestionPipeline", "NoSupportedFilesError", "SimpleDirectoryReader"]
 from llama_index.core.node_parser import (
     MarkdownNodeParser,
     NodeParser,
@@ -43,6 +44,17 @@ from docint.utils.ner_client import build_remote_ner_extractor
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
+
+
+class NoSupportedFilesError(RuntimeError):
+    """Raised when a staged batch holds nothing the pipeline can ingest.
+
+    No file matches the reader's ``required_exts`` whitelist and the Nextext
+    media pre-passes claimed nothing either (e.g. an audio-only upload with
+    Nextext unconfigured, or a genuinely empty directory). Callers surface
+    this as a visible "no ingestable files" warning rather than letting the
+    run complete as a silent success.
+    """
 
 
 class HateSpeechDetection(TypedDict):
@@ -187,11 +199,10 @@ class DocumentIngestionPipeline:
     hate_speech_max_workers: int = field(default=1, init=False)
     hate_speech_prompt: str | None = field(default=None, init=False)
 
-    dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
-    # True when the batch holds no reader-supported files at all (e.g. an
+    # None when the batch holds no reader-supported files at all (e.g. an
     # audio/video-only upload): the generic sweep is skipped but the Nextext
     # pre-passes still run, so a media-only batch is not an error.
-    reader_has_no_supported_files: bool = field(default=False, init=False)
+    dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     social_link_consumed: set[Path] = field(default_factory=set, init=False)
     social_link_documents: list[Document] = field(default_factory=list, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -266,13 +277,10 @@ class DocumentIngestionPipeline:
             tuple[list[Document], list[BaseNode]]: Batches of cleaned documents and their nodes.
 
         Raises:
-            RuntimeError: If the directory reader fails to initialize.
+            NoSupportedFilesError: If the batch holds nothing ingestable.
         """
         self._load_doc_readers()
         self._load_node_parsers()
-
-        if self.dir_reader is None and not self.reader_has_no_supported_files:
-            raise RuntimeError("Directory reader failed to initialize.")
 
         # Pre-filter files based on existing hashes to avoid unnecessary processing
         if existing_hashes:
@@ -312,9 +320,6 @@ class DocumentIngestionPipeline:
         """
         self._load_doc_readers()
         self._load_node_parsers()
-
-        if self.dir_reader is None and not self.reader_has_no_supported_files:
-            raise RuntimeError("Directory reader failed to initialize.")
 
         if existing_hashes:
             self._filter_input_files(existing_hashes)
@@ -395,42 +400,33 @@ class DocumentIngestionPipeline:
 
         Yields:
             list[Document]: The loaded documents for each processed file.
-
-        Raises:
-            RuntimeError: If the directory reader is not initialized (and the
-                batch was not flagged as holding no reader-supported files).
         """
-        if self.dir_reader is None:
-            if not self.reader_has_no_supported_files:
-                raise RuntimeError("Directory reader failed to initialize.")
-            # Media-only batch: nothing for the generic sweep, but the Nextext
-            # pre-passes may still have produced transcript Documents below.
-            if self.social_link_documents:
-                yield self.social_link_documents
-            return
-        dir_reader = self.dir_reader
-
-        for input_file in dir_reader.input_files:
-            if Path(input_file) in self.social_link_consumed:
-                continue
-            ext = input_file.suffix.lower()
-            reader = dir_reader.file_extractor.get(ext) if dir_reader.file_extractor else None
-            if self.streaming_readers_enabled and reader is not None and hasattr(reader, "iter_documents"):
-                extra_info = dir_reader.file_metadata(str(input_file))
-                docs = list(reader.iter_documents(input_file, extra_info=extra_info))
-            else:
-                docs = SimpleDirectoryReader.load_file(
-                    input_file=input_file,
-                    file_metadata=dir_reader.file_metadata,
-                    file_extractor=dir_reader.file_extractor,
-                    filename_as_id=dir_reader.filename_as_id,
-                    encoding=dir_reader.encoding,
-                    errors=dir_reader.errors,
-                    raise_on_error=dir_reader.raise_on_error,
-                    fs=dir_reader.fs,
-                )
-            if docs:
-                yield dir_reader._exclude_metadata(docs)
+        # dir_reader is None on a media-only batch: nothing for the generic
+        # sweep, but the Nextext pre-passes may still have produced transcript
+        # Documents, yielded through the shared tail below.
+        if self.dir_reader is not None:
+            dir_reader = self.dir_reader
+            for input_file in dir_reader.input_files:
+                if Path(input_file) in self.social_link_consumed:
+                    continue
+                ext = input_file.suffix.lower()
+                reader = dir_reader.file_extractor.get(ext) if dir_reader.file_extractor else None
+                if self.streaming_readers_enabled and reader is not None and hasattr(reader, "iter_documents"):
+                    extra_info = dir_reader.file_metadata(str(input_file))
+                    docs = list(reader.iter_documents(input_file, extra_info=extra_info))
+                else:
+                    docs = SimpleDirectoryReader.load_file(
+                        input_file=input_file,
+                        file_metadata=dir_reader.file_metadata,
+                        file_extractor=dir_reader.file_extractor,
+                        filename_as_id=dir_reader.filename_as_id,
+                        encoding=dir_reader.encoding,
+                        errors=dir_reader.errors,
+                        raise_on_error=dir_reader.raise_on_error,
+                        fs=dir_reader.fs,
+                    )
+                if docs:
+                    yield dir_reader._exclude_metadata(docs)
         if self.social_link_documents:
             yield self.social_link_documents
 
@@ -468,6 +464,13 @@ class DocumentIngestionPipeline:
     ) -> None:
         """Apply NER and hate-speech enrichment to *nodes* in-place.
 
+        Both stages run in one thread pool: each per-node task performs NER
+        then hate-speech detection sequentially for its node, so the two
+        remote backends (GLiNER, chat LLM) are kept busy concurrently across
+        nodes while a node's metadata is only ever written from one thread.
+        Per-stage semaphores keep in-flight calls within ``ner_max_workers``
+        and ``hate_speech_max_workers``.
+
         Args:
             nodes (list[BaseNode]): Nodes to enrich.
             progress_offset (int): Processed node count offset for cumulative progress.
@@ -476,94 +479,89 @@ class DocumentIngestionPipeline:
         if not nodes:
             return
 
+        ner_enabled = self.entity_extractor is not None
+        hate_enabled = bool(self.hate_speech_enabled and self.hate_speech_prompt and self.hate_speech_model is not None)
+        if not ner_enabled and not hate_enabled:
+            return
+
         total_nodes = progress_total or (progress_offset + len(nodes))
+        ner_sem = threading.Semaphore(max(1, self.ner_max_workers))
+        hate_sem = threading.Semaphore(max(1, self.hate_speech_max_workers))
+        progress_lock = threading.Lock()
+        counters = {"ner": progress_offset, "hate": progress_offset}
 
-        if self.entity_extractor:
+        def _tick(stage: str, label: str) -> None:
+            """Advance one stage's counter and report cumulative progress."""
+            with progress_lock:
+                counters[stage] += 1
+                if self.progress_callback:
+                    self.progress_callback(f"{label}: {counters[stage]}/{total_nodes} chunks processed")
 
-            def _process_node(idx: int, node: BaseNode) -> None:
-                """Run NER extraction on ``node`` and merge entities/relations into metadata."""
-                text_value = getattr(node, "text", "") or ""
-                if not text_value.strip():
-                    return
-                try:
-                    if self.entity_extractor:
-                        ents, rels = self.entity_extractor(text_value)
-                        if ents or rels:
-                            meta = dict(getattr(node, "metadata", {}) or {})
-                            if ents:
-                                meta["entities"] = ents
-                            if rels:
-                                meta["relations"] = rels
-                            node.metadata = meta
-                except Exception as exc:
-                    logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
-
-            if self.ner_max_workers > 1:
-                with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
-                    futures = [
-                        executor.submit(_process_node, i + progress_offset, node) for i, node in enumerate(nodes)
-                    ]
-                    for i, _ in enumerate(as_completed(futures)):
-                        if self.progress_callback:
-                            self.progress_callback(
-                                f"Extracting entities: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                            )
-            else:
-                for i, node in enumerate(nodes):
-                    _process_node(i + progress_offset, node)
-                    if self.progress_callback:
-                        self.progress_callback(
-                            f"Extracting entities: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                        )
-
-        if self.hate_speech_enabled and self.hate_speech_prompt and self.hate_speech_model is not None:
-
-            def _process_hate_speech(idx: int, node: BaseNode) -> None:
-                """Run hate-speech detection on ``node`` and annotate metadata when positive."""
-                text_value = getattr(node, "text", "") or ""
-                if not text_value.strip():
-                    return
-                try:
-                    prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
-                        "{text}", text_value[: self.hate_speech_max_chars]
-                    )
-                    response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
-                    raw = response.text if hasattr(response, "text") else str(response)
-                    parsed = _parse_hate_speech_payload(str(raw))
-                    if bool(parsed.get("hate_speech")):
+        def _extract_entities(idx: int, node: BaseNode, text_value: str) -> None:
+            """Run NER extraction on ``node`` and merge entities/relations into metadata."""
+            try:
+                if self.entity_extractor:
+                    ents, rels = self.entity_extractor(text_value)
+                    if ents or rels:
                         meta = dict(getattr(node, "metadata", {}) or {})
-                        chunk_id = str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
-                        source_ref = str(
-                            meta.get("file_path")
-                            or meta.get("filename")
-                            or meta.get("file_name")
-                            or meta.get("source")
-                            or ""
-                        )
-                        parsed["chunk_id"] = chunk_id
-                        parsed["chunk_text"] = text_value
-                        parsed["source_ref"] = source_ref
-                        node.metadata = {**meta, "hate_speech": parsed}
-                except Exception as exc:
-                    logger.warning("Hate-speech detection failed on chunk {}: {}", idx, exc)
+                        if ents:
+                            meta["entities"] = ents
+                        if rels:
+                            meta["relations"] = rels
+                        node.metadata = meta
+            except Exception as exc:
+                logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
 
-            if self.hate_speech_max_workers > 1:
-                with ThreadPoolExecutor(max_workers=self.hate_speech_max_workers) as executor:
-                    futures = [
-                        executor.submit(_process_hate_speech, i + progress_offset, node) for i, node in enumerate(nodes)
-                    ]
-                    for i, _ in enumerate(as_completed(futures)):
-                        if self.progress_callback:
-                            self.progress_callback(
-                                f"Detecting hate speech: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                            )
-            else:
-                for i, node in enumerate(nodes):
-                    _process_hate_speech(i + progress_offset, node)
-                    if self.progress_callback:
-                        self.progress_callback(
-                            f"Detecting hate speech: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                        )
+        def _detect_hate_speech(idx: int, node: BaseNode, text_value: str) -> None:
+            """Run hate-speech detection on ``node`` and annotate metadata when positive."""
+            try:
+                prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
+                    "{text}", text_value[: self.hate_speech_max_chars]
+                )
+                response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
+                raw = response.text if hasattr(response, "text") else str(response)
+                parsed = _parse_hate_speech_payload(str(raw))
+                if bool(parsed.get("hate_speech")):
+                    meta = dict(getattr(node, "metadata", {}) or {})
+                    chunk_id = str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
+                    source_ref = str(
+                        meta.get("file_path")
+                        or meta.get("filename")
+                        or meta.get("file_name")
+                        or meta.get("source")
+                        or ""
+                    )
+                    parsed["chunk_id"] = chunk_id
+                    parsed["chunk_text"] = text_value
+                    parsed["source_ref"] = source_ref
+                    node.metadata = {**meta, "hate_speech": parsed}
+            except Exception as exc:
+                logger.warning("Hate-speech detection failed on chunk {}: {}", idx, exc)
+
+        def _process_node(idx: int, node: BaseNode) -> None:
+            """Enrich one node: NER then hate-speech, ticking each stage's progress."""
+            text_value = getattr(node, "text", "") or ""
+            has_text = bool(text_value.strip())
+            if ner_enabled:
+                if has_text:
+                    with ner_sem:
+                        _extract_entities(idx, node, text_value)
+                _tick("ner", "Extracting entities")
+            if hate_enabled:
+                if has_text:
+                    with hate_sem:
+                        _detect_hate_speech(idx, node, text_value)
+                _tick("hate", "Detecting hate speech")
+
+        pool_size = (self.ner_max_workers if ner_enabled else 0) + (self.hate_speech_max_workers if hate_enabled else 0)
+        with ThreadPoolExecutor(max_workers=max(1, pool_size)) as executor:
+            futures = [executor.submit(_process_node, progress_offset + i, node) for i, node in enumerate(nodes)]
+            wait(futures)
+        # Stage errors are swallowed per node above; anything stored on a
+        # future is a coordination failure (e.g. the progress callback raised)
+        # and must fail the batch like it did pre-pooling, not vanish.
+        for future in futures:
+            future.result()
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
         """Create nodes from documents without applying enrichment stages.
@@ -795,39 +793,58 @@ class DocumentIngestionPipeline:
                 cleaned.append(doc)
         return cleaned
 
+    def _has_reader_supported_files(self) -> bool:
+        """Return whether the batch tree holds any reader-supported file.
+
+        Mirrors :class:`SimpleDirectoryReader`'s defaults: matches against
+        ``reader_required_exts``, honors ``reader_recursive``, and excludes
+        hidden files and files under hidden directories.
+
+        Returns:
+            bool: True when at least one supported file exists.
+        """
+        exts = {ext.lower() for ext in self.reader_required_exts}
+        candidates = self.data_dir.rglob("*") if self.reader_recursive else self.data_dir.glob("*")
+        for path in candidates:
+            if not path.is_file() or path.suffix.lower() not in exts:
+                continue
+            relative = path.relative_to(self.data_dir)
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            return True
+        return False
+
     def _load_doc_readers(self) -> None:
         """Load document readers, then run the Nextext media pre-passes.
 
-        The generic :class:`SimpleDirectoryReader` refuses to construct over a
-        batch with no reader-supported files. A media-only batch (only
-        audio/video, which ``required_exts`` deliberately excludes) is not an
-        error though — the Nextext pre-passes ingest it — so that one failure
-        mode is absorbed and flagged via ``reader_has_no_supported_files``.
+        The generic reader is only constructed when the batch tree actually
+        holds reader-supported files (pre-scanned here — a media-only batch,
+        whose audio/video ``required_exts`` deliberately excludes, is served
+        by the Nextext pre-passes instead). ``dir_reader is None`` therefore
+        means "no reader-supported files", not a construction failure.
+
+        Raises:
+            NoSupportedFilesError: When no file matches ``required_exts`` and
+                the pre-passes claimed nothing either — the batch holds
+                nothing ingestable and the run must not complete silently.
         """
-        try:
-            self.dir_reader = self._build_dir_reader()
-        except ValueError as exc:
-            if "No files found" not in str(exc):
-                raise
-            # The batch holds no reader-supported files (e.g. only audio/video,
-            # which required_exts deliberately excludes). Don't fail here: the
-            # Nextext pre-passes below can still ingest media-only batches.
-            self.dir_reader = None
-            self.reader_has_no_supported_files = True
+        self.dir_reader = self._build_dir_reader() if self._has_reader_supported_files() else None
         self._run_social_linker()
         self._run_standalone_media()
+        if self.dir_reader is None and not self.social_link_documents and not self.social_link_consumed:
+            raise NoSupportedFilesError(f"No ingestable files in batch directory {self.data_dir}.")
 
     def _build_dir_reader(self) -> SimpleDirectoryReader:
         """Construct the generic directory reader over the batch tree.
+
+        Only called when :meth:`_has_reader_supported_files` found at least
+        one matching file, so the reader's own "No files found" refusal cannot
+        trigger here.
 
         Returns:
             SimpleDirectoryReader: The reader restricted to
                 ``reader_required_exts``, with docint's custom per-extension
                 extractors registered.
-
-        Raises:
-            ValueError: Propagated from :class:`SimpleDirectoryReader` when no
-                file in the batch matches ``required_exts``.
         """
         image_reader = ImageReader(
             image_ingestion_service=(self.image_ingestion_service or ImageIngestionService()),
