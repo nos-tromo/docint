@@ -156,8 +156,10 @@ export function Sidebar() {
           It carries no heading and no box: it is the first thing in the
           panel, it shows a collection name, and it drops a chevron, so a
           "SAMMLUNG" label above it only repeated what the row already said.
-          The nav's own active treatment (a primary tint, no border) says
-          "this is live" here too, in the same language as everything else. */}
+          It carries no fill either — the primary tint means "where you are"
+          everywhere else in this panel, and a second tinted row sitting
+          directly above the active nav item competed with it for that. The
+          live dot and the name's weight say it instead. */}
       <section>
         <div
           data-testid={selected ? 'active-collection' : undefined}
