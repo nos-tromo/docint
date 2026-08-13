@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, NotRequired, TypedDict, cast
@@ -468,6 +469,13 @@ class DocumentIngestionPipeline:
     ) -> None:
         """Apply NER and hate-speech enrichment to *nodes* in-place.
 
+        Both stages run in one thread pool: each per-node task performs NER
+        then hate-speech detection sequentially for its node, so the two
+        remote backends (GLiNER, chat LLM) are kept busy concurrently across
+        nodes while a node's metadata is only ever written from one thread.
+        Per-stage semaphores keep in-flight calls within ``ner_max_workers``
+        and ``hate_speech_max_workers``.
+
         Args:
             nodes (list[BaseNode]): Nodes to enrich.
             progress_offset (int): Processed node count offset for cumulative progress.
@@ -476,94 +484,84 @@ class DocumentIngestionPipeline:
         if not nodes:
             return
 
+        ner_enabled = self.entity_extractor is not None
+        hate_enabled = bool(self.hate_speech_enabled and self.hate_speech_prompt and self.hate_speech_model is not None)
+        if not ner_enabled and not hate_enabled:
+            return
+
         total_nodes = progress_total or (progress_offset + len(nodes))
+        ner_sem = threading.Semaphore(max(1, self.ner_max_workers))
+        hate_sem = threading.Semaphore(max(1, self.hate_speech_max_workers))
+        progress_lock = threading.Lock()
+        counters = {"ner": progress_offset, "hate": progress_offset}
 
-        if self.entity_extractor:
+        def _tick(stage: str, label: str) -> None:
+            """Advance one stage's counter and report cumulative progress."""
+            with progress_lock:
+                counters[stage] += 1
+                if self.progress_callback:
+                    self.progress_callback(f"{label}: {counters[stage]}/{total_nodes} chunks processed")
 
-            def _process_node(idx: int, node: BaseNode) -> None:
-                """Run NER extraction on ``node`` and merge entities/relations into metadata."""
-                text_value = getattr(node, "text", "") or ""
-                if not text_value.strip():
-                    return
-                try:
-                    if self.entity_extractor:
-                        ents, rels = self.entity_extractor(text_value)
-                        if ents or rels:
-                            meta = dict(getattr(node, "metadata", {}) or {})
-                            if ents:
-                                meta["entities"] = ents
-                            if rels:
-                                meta["relations"] = rels
-                            node.metadata = meta
-                except Exception as exc:
-                    logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
-
-            if self.ner_max_workers > 1:
-                with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
-                    futures = [
-                        executor.submit(_process_node, i + progress_offset, node) for i, node in enumerate(nodes)
-                    ]
-                    for i, _ in enumerate(as_completed(futures)):
-                        if self.progress_callback:
-                            self.progress_callback(
-                                f"Extracting entities: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                            )
-            else:
-                for i, node in enumerate(nodes):
-                    _process_node(i + progress_offset, node)
-                    if self.progress_callback:
-                        self.progress_callback(
-                            f"Extracting entities: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                        )
-
-        if self.hate_speech_enabled and self.hate_speech_prompt and self.hate_speech_model is not None:
-
-            def _process_hate_speech(idx: int, node: BaseNode) -> None:
-                """Run hate-speech detection on ``node`` and annotate metadata when positive."""
-                text_value = getattr(node, "text", "") or ""
-                if not text_value.strip():
-                    return
-                try:
-                    prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
-                        "{text}", text_value[: self.hate_speech_max_chars]
-                    )
-                    response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
-                    raw = response.text if hasattr(response, "text") else str(response)
-                    parsed = _parse_hate_speech_payload(str(raw))
-                    if bool(parsed.get("hate_speech")):
+        def _extract_entities(idx: int, node: BaseNode, text_value: str) -> None:
+            """Run NER extraction on ``node`` and merge entities/relations into metadata."""
+            try:
+                if self.entity_extractor:
+                    ents, rels = self.entity_extractor(text_value)
+                    if ents or rels:
                         meta = dict(getattr(node, "metadata", {}) or {})
-                        chunk_id = str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
-                        source_ref = str(
-                            meta.get("file_path")
-                            or meta.get("filename")
-                            or meta.get("file_name")
-                            or meta.get("source")
-                            or ""
-                        )
-                        parsed["chunk_id"] = chunk_id
-                        parsed["chunk_text"] = text_value
-                        parsed["source_ref"] = source_ref
-                        node.metadata = {**meta, "hate_speech": parsed}
-                except Exception as exc:
-                    logger.warning("Hate-speech detection failed on chunk {}: {}", idx, exc)
+                        if ents:
+                            meta["entities"] = ents
+                        if rels:
+                            meta["relations"] = rels
+                        node.metadata = meta
+            except Exception as exc:
+                logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
 
-            if self.hate_speech_max_workers > 1:
-                with ThreadPoolExecutor(max_workers=self.hate_speech_max_workers) as executor:
-                    futures = [
-                        executor.submit(_process_hate_speech, i + progress_offset, node) for i, node in enumerate(nodes)
-                    ]
-                    for i, _ in enumerate(as_completed(futures)):
-                        if self.progress_callback:
-                            self.progress_callback(
-                                f"Detecting hate speech: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                            )
-            else:
-                for i, node in enumerate(nodes):
-                    _process_hate_speech(i + progress_offset, node)
-                    if self.progress_callback:
-                        self.progress_callback(
-                            f"Detecting hate speech: {progress_offset + i + 1}/{total_nodes} chunks processed"
-                        )
+        def _detect_hate_speech(idx: int, node: BaseNode, text_value: str) -> None:
+            """Run hate-speech detection on ``node`` and annotate metadata when positive."""
+            try:
+                prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
+                    "{text}", text_value[: self.hate_speech_max_chars]
+                )
+                response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
+                raw = response.text if hasattr(response, "text") else str(response)
+                parsed = _parse_hate_speech_payload(str(raw))
+                if bool(parsed.get("hate_speech")):
+                    meta = dict(getattr(node, "metadata", {}) or {})
+                    chunk_id = str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
+                    source_ref = str(
+                        meta.get("file_path")
+                        or meta.get("filename")
+                        or meta.get("file_name")
+                        or meta.get("source")
+                        or ""
+                    )
+                    parsed["chunk_id"] = chunk_id
+                    parsed["chunk_text"] = text_value
+                    parsed["source_ref"] = source_ref
+                    node.metadata = {**meta, "hate_speech": parsed}
+            except Exception as exc:
+                logger.warning("Hate-speech detection failed on chunk {}: {}", idx, exc)
+
+        def _process_node(idx: int, node: BaseNode) -> None:
+            """Enrich one node: NER then hate-speech, ticking each stage's progress."""
+            text_value = getattr(node, "text", "") or ""
+            has_text = bool(text_value.strip())
+            if ner_enabled:
+                if has_text:
+                    with ner_sem:
+                        _extract_entities(idx, node, text_value)
+                _tick("ner", "Extracting entities")
+            if hate_enabled:
+                if has_text:
+                    with hate_sem:
+                        _detect_hate_speech(idx, node, text_value)
+                _tick("hate", "Detecting hate speech")
+
+        pool_size = (self.ner_max_workers if ner_enabled else 0) + (self.hate_speech_max_workers if hate_enabled else 0)
+        with ThreadPoolExecutor(max_workers=max(1, pool_size)) as executor:
+            futures = [executor.submit(_process_node, progress_offset + i, node) for i, node in enumerate(nodes)]
+            wait(futures)
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
         """Create nodes from documents without applying enrichment stages.

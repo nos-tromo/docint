@@ -170,18 +170,28 @@ export function progressKind(ev: IngestEvent): string | null {
 }
 
 /**
- * Append an event to a log, collapsing a repeat of the previous progress kind
- * in place. Keeps the log bounded on long ingests.
+ * Append an event to a log, collapsing a repeat of the same progress kind
+ * within the trailing run of progress entries in place. Keeps the log bounded
+ * on long ingests even when several counters interleave (the backend enriches
+ * entities and hate speech from one pool, so their frames alternate). A
+ * non-progress entry (e.g. a warning) still separates progress runs.
  *
  * @param events - The existing log.
  * @param next - The event to append.
  * @returns A new log array.
  */
 export function appendCollapsedEvent(events: IngestEvent[], next: IngestEvent): IngestEvent[] {
-  const last = events[events.length - 1]
   const nextKind = progressKind(next)
-  if (nextKind && last && nextKind === progressKind(last)) {
-    return [...events.slice(0, -1), next]
+  if (nextKind) {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const kind = progressKind(events[i])
+      if (kind === null) break
+      if (kind === nextKind) {
+        const out = events.slice()
+        out[i] = next
+        return out
+      }
+    }
   }
   return [...events, next]
 }

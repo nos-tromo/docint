@@ -1,5 +1,7 @@
 """Tests for the CLI ingest entry point and ingestion pipeline."""
 
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -733,6 +735,383 @@ def test_hate_speech_detection_parallel_workers(monkeypatch: pytest.MonkeyPatch,
         detection = node.metadata.get("hate_speech")
         assert isinstance(detection, dict)
         assert detection["hate_speech"] is True
+
+
+_FLAGGED_RESPONSE_TEXT = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "offensive"}'
+
+
+def _make_enrichment_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    ner_workers: int = 1,
+    hate_enabled: bool = False,
+    hate_workers: int = 1,
+    hate_model: Any = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> DocumentIngestionPipeline:
+    """Build a pipeline wired for direct ``_enrich_nodes_in_place`` tests.
+
+    Env loaders and the prompt loader are stubbed; NER stays disabled in the
+    env config (callers assign ``pipeline.entity_extractor`` afterwards, which
+    is what gates the stage) while ``ner_workers`` still drives
+    ``ner_max_workers``.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the pipeline.
+        ner_workers: Value for ``ner_max_workers``.
+        hate_enabled: Whether hate-speech detection is enabled.
+        hate_workers: Value for ``hate_speech_max_workers``.
+        hate_model: Model passed as ``hate_speech_model``.
+        progress_callback: Optional progress callback.
+
+    Returns:
+        The constructed pipeline.
+    """
+
+    class FakeNERConfig:
+        enabled = False
+        max_chars = 256
+        max_workers = ner_workers
+
+    class FakeHateSpeechConfig:
+        enabled = hate_enabled
+        max_chars = 512
+        max_workers = hate_workers
+
+    class FakeIngestionConfig:
+        ingestion_batch_size = 2
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes: ClassVar[list[str]] = []
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+        streaming_readers_enabled = False
+
+    class FakeOpenAIPipeline:
+        def load_prompt(self, kw: str) -> str:
+            """Return a canned hate-speech prompt template.
+
+            Args:
+                kw: The prompt keyword.
+
+            Returns:
+                A placeholder prompt template.
+            """
+            return "Detect hate speech:\n{text}"
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig())
+    monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
+    monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        ner_model=None,
+        progress_callback=progress_callback,
+        hate_speech_model=hate_model,
+    )
+    pipeline.entity_extractor = None
+    return pipeline
+
+
+def _enrichment_nodes(*texts: str) -> list[Any]:
+    """Build SimpleNamespace nodes for direct enrichment calls.
+
+    Args:
+        *texts: One text per node.
+
+    Returns:
+        The node stubs.
+    """
+    return [
+        SimpleNamespace(text=text, node_id=f"n-{i}", metadata={"file_path": f"doc-{i}.pdf"})
+        for i, text in enumerate(texts, start=1)
+    ]
+
+
+def test_enrichment_overlaps_hate_speech_with_ner_across_nodes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hate-speech detection for a finished node runs while NER is still busy.
+
+    Node two's extractor blocks until the hate-speech model has been invoked
+    at least once (which can only happen for node one). Under stage-sequential
+    enrichment no hate-speech call happens before every NER call returns, so
+    the wait times out.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+    hate_started = threading.Event()
+    overlap_seen: list[bool] = []
+
+    def extractor(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if "two" in text:
+            overlap_seen.append(hate_started.wait(timeout=5))
+        return ([], [])
+
+    class FakeResponse:
+        text = _FLAGGED_RESPONSE_TEXT
+
+    class FakeModel:
+        def complete(self, prompt: str) -> FakeResponse:
+            """Signal that the hate-speech stage has started.
+
+            Args:
+                prompt: The prompt text.
+
+            Returns:
+                A flagged response.
+            """
+            hate_started.set()
+            return FakeResponse()
+
+    pipeline = _make_enrichment_pipeline(
+        monkeypatch,
+        tmp_path,
+        ner_workers=2,
+        hate_enabled=True,
+        hate_workers=1,
+        hate_model=cast(Any, FakeModel()),
+    )
+    pipeline.entity_extractor = extractor
+
+    nodes = _enrichment_nodes("Text one.", "Text two.")
+    pipeline._enrich_nodes_in_place(nodes)
+
+    assert overlap_seen == [True]
+    for node in nodes:
+        assert node.metadata["hate_speech"]["hate_speech"] is True
+
+
+def test_enrichment_honors_per_stage_concurrency_caps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """In-flight NER and hate-speech calls never exceed their own worker caps.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+    lock = threading.Lock()
+    in_flight = {"ner": 0, "hate": 0}
+    max_seen = {"ner": 0, "hate": 0}
+    calls = {"ner": 0, "hate": 0}
+
+    def _enter(stage: str) -> None:
+        with lock:
+            in_flight[stage] += 1
+            calls[stage] += 1
+            max_seen[stage] = max(max_seen[stage], in_flight[stage])
+
+    def _leave(stage: str) -> None:
+        with lock:
+            in_flight[stage] -= 1
+
+    def extractor(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        _enter("ner")
+        time.sleep(0.01)
+        _leave("ner")
+        return ([], [])
+
+    class FakeResponse:
+        text = _FLAGGED_RESPONSE_TEXT
+
+    class FakeModel:
+        def complete(self, prompt: str) -> FakeResponse:
+            """Track in-flight hate-speech calls.
+
+            Args:
+                prompt: The prompt text.
+
+            Returns:
+                A flagged response.
+            """
+            _enter("hate")
+            time.sleep(0.01)
+            _leave("hate")
+            return FakeResponse()
+
+    pipeline = _make_enrichment_pipeline(
+        monkeypatch,
+        tmp_path,
+        ner_workers=3,
+        hate_enabled=True,
+        hate_workers=1,
+        hate_model=cast(Any, FakeModel()),
+    )
+    pipeline.entity_extractor = extractor
+
+    pipeline._enrich_nodes_in_place(_enrichment_nodes(*[f"Chunk {i}." for i in range(6)]))
+
+    assert calls == {"ner": 6, "hate": 6}
+    assert max_seen["ner"] <= 3
+    assert max_seen["hate"] == 1
+
+
+def test_enrichment_progress_messages_per_stage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Each stage emits its verbatim counter messages in monotonic order.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+    messages: list[str] = []
+
+    class FakeResponse:
+        text = _FLAGGED_RESPONSE_TEXT
+
+    class FakeModel:
+        def complete(self, prompt: str) -> FakeResponse:
+            """Return a flagged response.
+
+            Args:
+                prompt: The prompt text.
+
+            Returns:
+                A flagged response.
+            """
+            return FakeResponse()
+
+    pipeline = _make_enrichment_pipeline(
+        monkeypatch,
+        tmp_path,
+        ner_workers=2,
+        hate_enabled=True,
+        hate_workers=2,
+        hate_model=cast(Any, FakeModel()),
+        progress_callback=messages.append,
+    )
+    pipeline.entity_extractor = lambda text: ([], [])
+
+    pipeline._enrich_nodes_in_place(_enrichment_nodes("One.", "Two.", "Three."))
+
+    assert [m for m in messages if m.startswith("Extracting entities")] == [
+        f"Extracting entities: {i}/3 chunks processed" for i in (1, 2, 3)
+    ]
+    assert [m for m in messages if m.startswith("Detecting hate speech")] == [
+        f"Detecting hate speech: {i}/3 chunks processed" for i in (1, 2, 3)
+    ]
+
+    messages.clear()
+    pipeline._enrich_nodes_in_place(_enrichment_nodes("Four.", "Five.", "Six."), progress_offset=2, progress_total=5)
+
+    assert [m for m in messages if m.startswith("Extracting entities")] == [
+        f"Extracting entities: {i}/5 chunks processed" for i in (3, 4, 5)
+    ]
+    assert [m for m in messages if m.startswith("Detecting hate speech")] == [
+        f"Detecting hate speech: {i}/5 chunks processed" for i in (3, 4, 5)
+    ]
+
+
+def test_enrichment_exactly_once_and_skips_empty_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Blank nodes tick progress without remote calls; others are hit exactly once.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+    messages: list[str] = []
+    extracted: list[str] = []
+    completed: list[str] = []
+
+    class FakeResponse:
+        text = _FLAGGED_RESPONSE_TEXT
+
+    class FakeModel:
+        def complete(self, prompt: str) -> FakeResponse:
+            """Record the prompt and return a flagged response.
+
+            Args:
+                prompt: The prompt text.
+
+            Returns:
+                A flagged response.
+            """
+            completed.append(prompt)
+            return FakeResponse()
+
+    pipeline = _make_enrichment_pipeline(
+        monkeypatch,
+        tmp_path,
+        ner_workers=1,
+        hate_enabled=True,
+        hate_workers=1,
+        hate_model=cast(Any, FakeModel()),
+        progress_callback=messages.append,
+    )
+
+    def extractor(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        extracted.append(text)
+        return ([], [])
+
+    pipeline.entity_extractor = extractor
+
+    nodes = _enrichment_nodes("a", "   ", "b")
+    pipeline._enrich_nodes_in_place(nodes)
+
+    assert sorted(extracted) == ["a", "b"]
+    assert len(completed) == 2
+    assert len([m for m in messages if m.startswith("Extracting entities")]) == 3
+    assert len([m for m in messages if m.startswith("Detecting hate speech")]) == 3
+    assert "hate_speech" not in nodes[1].metadata
+    assert "entities" not in nodes[1].metadata
+
+
+def test_enrichment_single_stage_and_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A disabled stage emits no progress frames; fully disabled is a no-op.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+    messages: list[str] = []
+
+    class FakeResponse:
+        text = _FLAGGED_RESPONSE_TEXT
+
+    class FakeModel:
+        def complete(self, prompt: str) -> FakeResponse:
+            """Return a flagged response.
+
+            Args:
+                prompt: The prompt text.
+
+            Returns:
+                A flagged response.
+            """
+            return FakeResponse()
+
+    # Hate-speech only: no entity frames.
+    pipeline = _make_enrichment_pipeline(
+        monkeypatch,
+        tmp_path,
+        hate_enabled=True,
+        hate_model=cast(Any, FakeModel()),
+        progress_callback=messages.append,
+    )
+    pipeline._enrich_nodes_in_place(_enrichment_nodes("One.", "Two."))
+    assert messages
+    assert not [m for m in messages if m.startswith("Extracting entities")]
+
+    # NER only: no hate frames.
+    messages.clear()
+    pipeline = _make_enrichment_pipeline(monkeypatch, tmp_path, ner_workers=2, progress_callback=messages.append)
+    pipeline.entity_extractor = lambda text: ([{"text": "x"}], [])
+    nodes = _enrichment_nodes("One.")
+    pipeline._enrich_nodes_in_place(nodes)
+    assert nodes[0].metadata["entities"] == [{"text": "x"}]
+    assert messages
+    assert not [m for m in messages if m.startswith("Detecting hate speech")]
+
+    # Neither stage: nothing happens.
+    messages.clear()
+    pipeline = _make_enrichment_pipeline(monkeypatch, tmp_path, progress_callback=messages.append)
+    nodes = _enrichment_nodes("One.")
+    pipeline._enrich_nodes_in_place(nodes)
+    assert messages == []
+    assert nodes[0].metadata == {"file_path": "doc-1.pdf"}
 
 
 def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
