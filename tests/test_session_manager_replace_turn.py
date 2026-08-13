@@ -218,15 +218,11 @@ def test_append_still_advances_the_index(session_manager: SessionManager) -> Non
         session_manager: The session manager fixture.
     """
     session_id = "sess-append"
-    first = session_manager._persist_turn(
-        session_id, "q1", _response([]), {"response": "a1", "reasoning": None}
-    )
+    first = session_manager._persist_turn(session_id, "q1", _response([]), {"response": "a1", "reasoning": None})
     session_manager._persist_turn(
         session_id, "retry", _response([]), {"response": "a1-better", "reasoning": None}, replace_idx=first
     )
-    second = session_manager._persist_turn(
-        session_id, "q2", _response([]), {"response": "a2", "reasoning": None}
-    )
+    second = session_manager._persist_turn(session_id, "q2", _response([]), {"response": "a2", "reasoning": None})
 
     assert (first, second) == (0, 1)
     turns = _turns(session_manager, session_id)
