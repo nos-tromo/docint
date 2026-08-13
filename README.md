@@ -481,6 +481,8 @@ external Nextext service. Set:
 ```bash
 NEXTEXT_API_BASE=https://<nextext-host>/api/v1   # required to enable social-media ingestion
 NEXTEXT_API_KEY=<token>                          # if the endpoint requires auth
+NEXTEXT_AUTH_HEADER=X-Auth-User                  # trusted identity header name (must match Nextext's)
+NEXTEXT_IDENTITY=docint                          # identity docint sends; empty = send no header
 NEXTEXT_TIMEOUT=120                              # per-request HTTP timeout (seconds)
 NEXTEXT_POLL_INTERVAL=5                          # polling interval while waiting for job (seconds)
 NEXTEXT_POLL_MAX_SECONDS=600                     # hard deadline per transcription job (seconds)
@@ -489,6 +491,13 @@ NEXTEXT_POLL_MAX_SECONDS=600                     # hard deadline per transcripti
 The `/api/v1` suffix is required: docint's client calls `{NEXTEXT_API_BASE}/jobs`,
 and Nextext mounts its jobs router under `/api/v1` — a base URL without that
 suffix will 404 on every request.
+
+Nextext resolves each request's identity from a trusted header (its
+`NEXTEXT_AUTH_HEADER`, default `X-Auth-User`) and rejects header-less callers
+with 401 unless its own default-identity fallback is configured. docint sends
+`NEXTEXT_IDENTITY` (default `docint`) under `NEXTEXT_AUTH_HEADER` (default
+`X-Auth-User`) on every request; set `NEXTEXT_IDENTITY` to empty to suppress
+the header, e.g. when a gateway in between injects it instead.
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
 video/audio files are skipped gracefully — collections with no audio/video are unaffected (loose audio/video in any batch is transcribed when `NEXTEXT_API_BASE` is set — see **Standalone media (audio/video)** below).

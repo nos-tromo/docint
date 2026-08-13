@@ -12,7 +12,7 @@ from typing import Any, NotRequired, TypedDict, cast
 
 from llama_index.core import Document, SimpleDirectoryReader
 
-__all__ = ["DocumentIngestionPipeline", "SimpleDirectoryReader"]
+__all__ = ["DocumentIngestionPipeline", "NoSupportedFilesError", "SimpleDirectoryReader"]
 from llama_index.core.node_parser import (
     MarkdownNodeParser,
     NodeParser,
@@ -44,6 +44,17 @@ from docint.utils.ner_client import build_remote_ner_extractor
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
+
+
+class NoSupportedFilesError(RuntimeError):
+    """Raised when a staged batch holds nothing the pipeline can ingest.
+
+    No file matches the reader's ``required_exts`` whitelist and the Nextext
+    media pre-passes claimed nothing either (e.g. an audio-only upload with
+    Nextext unconfigured, or a genuinely empty directory). Callers surface
+    this as a visible "no ingestable files" warning rather than letting the
+    run complete as a silent success.
+    """
 
 
 class HateSpeechDetection(TypedDict):
@@ -188,11 +199,10 @@ class DocumentIngestionPipeline:
     hate_speech_max_workers: int = field(default=1, init=False)
     hate_speech_prompt: str | None = field(default=None, init=False)
 
-    dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
-    # True when the batch holds no reader-supported files at all (e.g. an
+    # None when the batch holds no reader-supported files at all (e.g. an
     # audio/video-only upload): the generic sweep is skipped but the Nextext
     # pre-passes still run, so a media-only batch is not an error.
-    reader_has_no_supported_files: bool = field(default=False, init=False)
+    dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     social_link_consumed: set[Path] = field(default_factory=set, init=False)
     social_link_documents: list[Document] = field(default_factory=list, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -267,13 +277,10 @@ class DocumentIngestionPipeline:
             tuple[list[Document], list[BaseNode]]: Batches of cleaned documents and their nodes.
 
         Raises:
-            RuntimeError: If the directory reader fails to initialize.
+            NoSupportedFilesError: If the batch holds nothing ingestable.
         """
         self._load_doc_readers()
         self._load_node_parsers()
-
-        if self.dir_reader is None and not self.reader_has_no_supported_files:
-            raise RuntimeError("Directory reader failed to initialize.")
 
         # Pre-filter files based on existing hashes to avoid unnecessary processing
         if existing_hashes:
@@ -313,9 +320,6 @@ class DocumentIngestionPipeline:
         """
         self._load_doc_readers()
         self._load_node_parsers()
-
-        if self.dir_reader is None and not self.reader_has_no_supported_files:
-            raise RuntimeError("Directory reader failed to initialize.")
 
         if existing_hashes:
             self._filter_input_files(existing_hashes)
@@ -396,42 +400,33 @@ class DocumentIngestionPipeline:
 
         Yields:
             list[Document]: The loaded documents for each processed file.
-
-        Raises:
-            RuntimeError: If the directory reader is not initialized (and the
-                batch was not flagged as holding no reader-supported files).
         """
-        if self.dir_reader is None:
-            if not self.reader_has_no_supported_files:
-                raise RuntimeError("Directory reader failed to initialize.")
-            # Media-only batch: nothing for the generic sweep, but the Nextext
-            # pre-passes may still have produced transcript Documents below.
-            if self.social_link_documents:
-                yield self.social_link_documents
-            return
-        dir_reader = self.dir_reader
-
-        for input_file in dir_reader.input_files:
-            if Path(input_file) in self.social_link_consumed:
-                continue
-            ext = input_file.suffix.lower()
-            reader = dir_reader.file_extractor.get(ext) if dir_reader.file_extractor else None
-            if self.streaming_readers_enabled and reader is not None and hasattr(reader, "iter_documents"):
-                extra_info = dir_reader.file_metadata(str(input_file))
-                docs = list(reader.iter_documents(input_file, extra_info=extra_info))
-            else:
-                docs = SimpleDirectoryReader.load_file(
-                    input_file=input_file,
-                    file_metadata=dir_reader.file_metadata,
-                    file_extractor=dir_reader.file_extractor,
-                    filename_as_id=dir_reader.filename_as_id,
-                    encoding=dir_reader.encoding,
-                    errors=dir_reader.errors,
-                    raise_on_error=dir_reader.raise_on_error,
-                    fs=dir_reader.fs,
-                )
-            if docs:
-                yield dir_reader._exclude_metadata(docs)
+        # dir_reader is None on a media-only batch: nothing for the generic
+        # sweep, but the Nextext pre-passes may still have produced transcript
+        # Documents, yielded through the shared tail below.
+        if self.dir_reader is not None:
+            dir_reader = self.dir_reader
+            for input_file in dir_reader.input_files:
+                if Path(input_file) in self.social_link_consumed:
+                    continue
+                ext = input_file.suffix.lower()
+                reader = dir_reader.file_extractor.get(ext) if dir_reader.file_extractor else None
+                if self.streaming_readers_enabled and reader is not None and hasattr(reader, "iter_documents"):
+                    extra_info = dir_reader.file_metadata(str(input_file))
+                    docs = list(reader.iter_documents(input_file, extra_info=extra_info))
+                else:
+                    docs = SimpleDirectoryReader.load_file(
+                        input_file=input_file,
+                        file_metadata=dir_reader.file_metadata,
+                        file_extractor=dir_reader.file_extractor,
+                        filename_as_id=dir_reader.filename_as_id,
+                        encoding=dir_reader.encoding,
+                        errors=dir_reader.errors,
+                        raise_on_error=dir_reader.raise_on_error,
+                        fs=dir_reader.fs,
+                    )
+                if docs:
+                    yield dir_reader._exclude_metadata(docs)
         if self.social_link_documents:
             yield self.social_link_documents
 
@@ -798,39 +793,58 @@ class DocumentIngestionPipeline:
                 cleaned.append(doc)
         return cleaned
 
+    def _has_reader_supported_files(self) -> bool:
+        """Return whether the batch tree holds any reader-supported file.
+
+        Mirrors :class:`SimpleDirectoryReader`'s defaults: matches against
+        ``reader_required_exts``, honors ``reader_recursive``, and excludes
+        hidden files and files under hidden directories.
+
+        Returns:
+            bool: True when at least one supported file exists.
+        """
+        exts = {ext.lower() for ext in self.reader_required_exts}
+        candidates = self.data_dir.rglob("*") if self.reader_recursive else self.data_dir.glob("*")
+        for path in candidates:
+            if not path.is_file() or path.suffix.lower() not in exts:
+                continue
+            relative = path.relative_to(self.data_dir)
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            return True
+        return False
+
     def _load_doc_readers(self) -> None:
         """Load document readers, then run the Nextext media pre-passes.
 
-        The generic :class:`SimpleDirectoryReader` refuses to construct over a
-        batch with no reader-supported files. A media-only batch (only
-        audio/video, which ``required_exts`` deliberately excludes) is not an
-        error though — the Nextext pre-passes ingest it — so that one failure
-        mode is absorbed and flagged via ``reader_has_no_supported_files``.
+        The generic reader is only constructed when the batch tree actually
+        holds reader-supported files (pre-scanned here — a media-only batch,
+        whose audio/video ``required_exts`` deliberately excludes, is served
+        by the Nextext pre-passes instead). ``dir_reader is None`` therefore
+        means "no reader-supported files", not a construction failure.
+
+        Raises:
+            NoSupportedFilesError: When no file matches ``required_exts`` and
+                the pre-passes claimed nothing either — the batch holds
+                nothing ingestable and the run must not complete silently.
         """
-        try:
-            self.dir_reader = self._build_dir_reader()
-        except ValueError as exc:
-            if "No files found" not in str(exc):
-                raise
-            # The batch holds no reader-supported files (e.g. only audio/video,
-            # which required_exts deliberately excludes). Don't fail here: the
-            # Nextext pre-passes below can still ingest media-only batches.
-            self.dir_reader = None
-            self.reader_has_no_supported_files = True
+        self.dir_reader = self._build_dir_reader() if self._has_reader_supported_files() else None
         self._run_social_linker()
         self._run_standalone_media()
+        if self.dir_reader is None and not self.social_link_documents and not self.social_link_consumed:
+            raise NoSupportedFilesError(f"No ingestable files in batch directory {self.data_dir}.")
 
     def _build_dir_reader(self) -> SimpleDirectoryReader:
         """Construct the generic directory reader over the batch tree.
+
+        Only called when :meth:`_has_reader_supported_files` found at least
+        one matching file, so the reader's own "No files found" refusal cannot
+        trigger here.
 
         Returns:
             SimpleDirectoryReader: The reader restricted to
                 ``reader_required_exts``, with docint's custom per-extension
                 extractors registered.
-
-        Raises:
-            ValueError: Propagated from :class:`SimpleDirectoryReader` when no
-                file in the batch matches ``required_exts``.
         """
         image_reader = ImageReader(
             image_ingestion_service=(self.image_ingestion_service or ImageIngestionService()),

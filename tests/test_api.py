@@ -16,6 +16,7 @@ import docint.core.api as api_module
 from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
 from docint.core.entities.resolution import ResolutionSummary
+from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 
 
 class DummySessionManager:
@@ -2779,12 +2780,12 @@ def test_ingest_finalize_missing_dir_completes_empty(
 def test_ingest_soft_completes_when_reader_finds_no_supported_files(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """A "No files found" reader error becomes a soft-empty completion.
+    """A ``NoSupportedFilesError`` becomes a soft-empty completion.
 
-    A finalize job whose staged directory holds only reader-unsupported files
-    (e.g. audio/video, which the ``required_exts`` whitelist filters out) makes
-    ``SimpleDirectoryReader`` raise ``ValueError("No files found ...")``. That
-    must surface as a warning + empty completion, not a ``failed`` job.
+    A finalize job whose staged directory holds nothing ingestable (e.g. only
+    audio/video with Nextext unconfigured, which the pre-passes cannot claim)
+    makes the pipeline raise the typed ``NoSupportedFilesError``. That must
+    surface as a warning + empty completion, not a ``failed`` job.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2796,9 +2797,9 @@ def test_ingest_soft_completes_when_reader_finds_no_supported_files(
     def raise_no_files(
         collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None, **kwargs: Any
     ) -> None:
-        """Simulate the reader finding no ingestable files in ``path``."""
+        """Simulate the pipeline finding no ingestable files in ``path``."""
         _ = (collection, hybrid, progress_callback)
-        raise ValueError(f"No files found in {path}.")
+        raise NoSupportedFilesError(f"No ingestable files in batch directory {path}.")
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", raise_no_files)
 

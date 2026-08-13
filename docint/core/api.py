@@ -44,6 +44,7 @@ from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
+from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import (
@@ -3304,6 +3305,15 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
             "hybrid": resolved_hybrid,
             "empty": True,
         }
+    except NoSupportedFilesError:
+        logger.warning("No ingestable files for collection '{}'; returning empty response.", name)
+        return {
+            "ok": True,
+            "collection": name,
+            "data_dir": str(data_dir),
+            "hybrid": resolved_hybrid,
+            "empty": True,
+        }
     except Exception as exc:
         logger.opt(exception=exc).error(f"Unexpected error during ingestion of '{name}'")
         raise HTTPException(status_code=500, detail="Request failed.") from exc
@@ -3503,12 +3513,10 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
             },
         )
         return {"empty": True, "resolution": None}
-    except ValueError as exc:
-        if "No files found" not in str(exc):
-            raise
-        # The staged directory held no reader-supported files (e.g. only
-        # audio/video, which required_exts filters out). A soft empty ingest,
-        # not a hard failure.
+    except NoSupportedFilesError:
+        # The staged directory held nothing ingestable (e.g. only audio/video
+        # with Nextext unconfigured, which the pre-passes cannot claim). A
+        # soft empty ingest, not a hard failure.
         logger.warning("No ingestable files for collection '{}'; completing as empty.", state.logical_name)
         push("warning", {"message": f"No ingestable files found for '{state.logical_name}'."})
         return {"empty": True, "resolution": None}
@@ -3713,7 +3721,7 @@ async def ingest_upload(
     batches so ingestion happens once over the whole staged directory instead
     of once per batch (re-initializing the pipeline's models per batch and
     hard-failing on any batch that happened to hold only reader-unsupported
-    files, e.g. audio/video → "No files found").
+    files, e.g. audio/video → ``NoSupportedFilesError``).
 
     Args:
         request (Request): The incoming request, used to resolve the principal.
