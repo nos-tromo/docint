@@ -1,6 +1,7 @@
 """CLI entry point for ingesting documents into a collection."""
 
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -9,6 +10,40 @@ from loguru import logger
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logger_cfg import init_logger
+
+_SECONDS_PER_DAY = 86_400
+_SECONDS_PER_HOUR = 3_600
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format an elapsed duration for the completion log line.
+
+    Mirrors the SPA's ``formatDuration``
+    (``frontend/src/lib/ingestStatus.ts``) so a log line and the ingest
+    card's frozen timer can be compared without converting units. The
+    duration *scales* rather than overflowing one column: rolling hours
+    into the minutes place renders a ~42 h run as ``2500:37``.
+
+    Args:
+        seconds (float): Elapsed wall-clock seconds. Non-positive and
+            non-finite inputs yield ``"00:00"`` rather than a negative or
+            nonsense duration.
+
+    Returns:
+        str: ``MM:SS`` under an hour, ``H:MM:SS`` under a day, and
+        ``Nd HH:MM:SS`` beyond (DIN 1301 day symbol, shared across locales).
+    """
+    total = int(seconds)
+    if total <= 0:
+        return "00:00"
+    days, remainder = divmod(total, _SECONDS_PER_DAY)
+    hours, remainder = divmod(remainder, _SECONDS_PER_HOUR)
+    minutes, secs = divmod(remainder, 60)
+    if days > 0:
+        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def get_collection() -> str:
@@ -59,6 +94,7 @@ def ingest_docs(
     rag = (
         RAG(qdrant_collection=qdrant_col) if hybrid is None else RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
     )
+    started_at = time.monotonic()
     try:
         rag.ingest_docs(
             data_dir,
@@ -69,7 +105,13 @@ def ingest_docs(
         )
     finally:
         rag.unload_models()
-    logger.info("Ingestion complete.")
+    # Both API call sites route through here, so this is the only place a
+    # completed ingest's duration reaches an operator reading the backend
+    # log — the SPA's frozen timer is not visible there. Measured across
+    # the whole call including model unload: that is the wall clock the
+    # caller actually waited. It therefore covers less than the SPA's
+    # client-anchored timer, which starts at the upload rather than here.
+    logger.info("Ingestion complete in {}.", _format_elapsed(time.monotonic() - started_at))
 
 
 def main() -> None:
