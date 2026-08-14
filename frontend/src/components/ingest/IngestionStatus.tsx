@@ -153,9 +153,7 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
 
       {status.phase === 'uploading' && <UploadingBody status={status} />}
       {status.phase === 'processing' && <ProcessingBody status={status} />}
-      {status.phase === 'complete' && (
-        <CompleteBody status={status} elapsedMs={elapsedMs} />
-      )}
+      {status.phase === 'complete' && <CompleteBody status={status} />}
       {status.phase === 'error' && <ErrorBody status={status} />}
     </div>
   )
@@ -330,20 +328,18 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
   )
 }
 
-function CompleteBody({
-  status,
-  elapsedMs
-}: {
-  status: IngestStatus
-  elapsedMs: number
-}) {
+// No duration here on purpose: the header timer has been ticking in this exact
+// spot for the whole run, so on completion it simply stops. Restating the same
+// number one line down puts it in the card twice, and moves the answer away
+// from where the eye was already watching for it. The header timer is also the
+// wider of the two — it renders on the error phase as well, and whenever it
+// has a duration to show, this summary would have had the identical one.
+function CompleteBody({ status }: { status: IngestStatus }) {
   const t = useT()
   const fileCount = Math.max(status.indexed, status.filesSaved, status.totalFiles)
   const parts: string[] = []
   if (fileCount > 0) parts.push(t('ingest.files_indexed', { count: fileCount }))
   if (status.totalChunks > 0) parts.push(t('ingest.chunks', { count: status.totalChunks }))
-  if (elapsedMs > 0)
-    parts.push(t('ingest.duration', { duration: formatDuration(elapsedMs) }))
   const summary = parts.length > 0 ? parts.join(' · ') : t('ingest.finished')
   return (
     <div className="mt-3 text-sm text-[var(--status-emerald-fg)] tabular-nums">

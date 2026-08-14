@@ -73,20 +73,22 @@ describe('IngestionStatus completion timing', () => {
     expect(screen.getByText('1:02:05')).toBeInTheDocument()
   })
 
-  it('includes the duration in the completion summary', () => {
+  it('renders the duration once, leaving it out of the completion summary', () => {
+    // The header timer freezes in place where it was already ticking; a second
+    // copy in the summary showed the same number twice in one card.
     render(
       <IngestionStatus
         status={completeStatus({ startedAt: 10_000, finishedAt: 75_000 })}
       />
     )
-    expect(
-      screen.getByText(/2 files indexed · 10 chunks · Duration: 01:05/)
-    ).toBeInTheDocument()
-  })
-
-  it('omits the summary duration when no start time is known', () => {
-    render(<IngestionStatus status={completeStatus()} />)
+    expect(screen.getByText('01:05')).toBeInTheDocument()
     expect(screen.getByText('2 files indexed · 10 chunks')).toBeInTheDocument()
     expect(screen.queryByText(/Duration:/)).not.toBeInTheDocument()
+  })
+
+  it('omits the timer when no start time is known', () => {
+    render(<IngestionStatus status={completeStatus()} />)
+    expect(screen.getByText('2 files indexed · 10 chunks')).toBeInTheDocument()
+    expect(screen.queryByText('00:00')).not.toBeInTheDocument()
   })
 })
