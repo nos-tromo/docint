@@ -4,7 +4,8 @@ import {
   deriveIngestStatus,
   formatBytes,
   formatDuration,
-  parseProgressMessage
+  parseProgressMessage,
+  withServerTimes
 } from './ingestStatus'
 
 function progress(message: string): IngestEvent {
@@ -105,8 +106,87 @@ describe('formatDuration', () => {
     expect(formatDuration(65_000)).toBe('01:05')
   })
 
-  it('rolls hours into the minutes column', () => {
-    expect(formatDuration(3_725_000)).toBe('62:05')
+  it('stays MM:SS up to the last second under an hour', () => {
+    expect(formatDuration(3_599_000)).toBe('59:59')
+  })
+
+  it('promotes to H:MM:SS at one hour', () => {
+    expect(formatDuration(3_600_000)).toBe('1:00:00')
+    expect(formatDuration(3_725_000)).toBe('1:02:05')
+    expect(formatDuration(86_399_000)).toBe('23:59:59')
+  })
+
+  it('promotes to days at 24 hours', () => {
+    expect(formatDuration(86_400_000)).toBe('1d 00:00:00')
+    // The reported regression shape: a ~42 h job rendered as "2500:37".
+    expect(formatDuration(150_037_000)).toBe('1d 17:40:37')
+  })
+})
+
+describe('withServerTimes', () => {
+  const base = deriveIngestStatus([])
+
+  it('leaves a client-anchored timeline untouched', () => {
+    const status = { ...base, startedAt: 1_000, finishedAt: 9_000 }
+    expect(
+      withServerTimes(status, {
+        started_at: '2026-08-14T10:00:00Z',
+        finished_at: '2026-08-14T11:00:00Z'
+      })
+    ).toBe(status)
+  })
+
+  it('returns the status unchanged without a snapshot or server start', () => {
+    expect(withServerTimes(base, undefined)).toBe(base)
+    expect(withServerTimes(base, null)).toBe(base)
+    expect(
+      withServerTimes(base, { started_at: null, finished_at: null })
+    ).toBe(base)
+  })
+
+  it('fills startedAt and finishedAt as a same-source pair', () => {
+    const out = withServerTimes(base, {
+      started_at: '2026-08-14T10:00:00Z',
+      finished_at: '2026-08-14T11:30:00Z'
+    })
+    expect(out.startedAt).toBe(Date.parse('2026-08-14T10:00:00Z'))
+    expect(out.finishedAt).toBe(Date.parse('2026-08-14T11:30:00Z'))
+  })
+
+  it('overrides a replay-stamped client finishedAt with the server pair', () => {
+    // A replayed terminal frame stamps finishedAt with its *arrival* time;
+    // paired with a server start it would measure start→reload.
+    const status = { ...base, finishedAt: 999_999_999_999 }
+    const out = withServerTimes(status, {
+      started_at: '2026-08-14T10:00:00Z',
+      finished_at: '2026-08-14T11:30:00Z'
+    })
+    expect(out.finishedAt).toBe(Date.parse('2026-08-14T11:30:00Z'))
+  })
+
+  it('keeps a live client finishedAt when the snapshot has none yet', () => {
+    const status = { ...base, finishedAt: 5_000 }
+    const out = withServerTimes(status, {
+      started_at: '2026-08-14T10:00:00Z',
+      finished_at: null
+    })
+    expect(out.startedAt).toBe(Date.parse('2026-08-14T10:00:00Z'))
+    expect(out.finishedAt).toBe(5_000)
+  })
+
+  it('fills only startedAt for a still-running job', () => {
+    const out = withServerTimes(base, {
+      started_at: '2026-08-14T10:00:00Z',
+      finished_at: null
+    })
+    expect(out.startedAt).toBe(Date.parse('2026-08-14T10:00:00Z'))
+    expect(out.finishedAt).toBeUndefined()
+  })
+
+  it('ignores an unparsable server timestamp', () => {
+    expect(
+      withServerTimes(base, { started_at: 'not-a-date', finished_at: null })
+    ).toBe(base)
   })
 })
 

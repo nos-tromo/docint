@@ -153,7 +153,9 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
 
       {status.phase === 'uploading' && <UploadingBody status={status} />}
       {status.phase === 'processing' && <ProcessingBody status={status} />}
-      {status.phase === 'complete' && <CompleteBody status={status} />}
+      {status.phase === 'complete' && (
+        <CompleteBody status={status} elapsedMs={elapsedMs} />
+      )}
       {status.phase === 'error' && <ErrorBody status={status} />}
     </div>
   )
@@ -169,7 +171,7 @@ function Header({
   elapsedMs: number
 }) {
   const t = useT()
-  const showTimer = status.startedAt !== undefined && status.phase !== 'error'
+  const showTimer = status.startedAt !== undefined
   const icon =
     status.phase === 'complete' ? '✓' : status.phase === 'error' ? '✗' : null
   return (
@@ -328,12 +330,20 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
   )
 }
 
-function CompleteBody({ status }: { status: IngestStatus }) {
+function CompleteBody({
+  status,
+  elapsedMs
+}: {
+  status: IngestStatus
+  elapsedMs: number
+}) {
   const t = useT()
   const fileCount = Math.max(status.indexed, status.filesSaved, status.totalFiles)
   const parts: string[] = []
   if (fileCount > 0) parts.push(t('ingest.files_indexed', { count: fileCount }))
   if (status.totalChunks > 0) parts.push(t('ingest.chunks', { count: status.totalChunks }))
+  if (elapsedMs > 0)
+    parts.push(t('ingest.duration', { duration: formatDuration(elapsedMs) }))
   const summary = parts.length > 0 ? parts.join(' · ') : t('ingest.finished')
   return (
     <div className="mt-3 text-sm text-[var(--status-emerald-fg)] tabular-nums">

@@ -30,6 +30,9 @@ let knownJobIds: Set<string>
 /** Job ids the mocked `/ingest/jobs/{id}` endpoint reports as still
  *  `queued` (waiting on the concurrency semaphore) rather than `running`. */
 let queuedJobIds: Set<string>
+/** Server-side timestamps per job id; the default (absent) mirrors a job
+ *  that has not started. */
+let jobTimes: Record<string, { started_at: string | null; finished_at: string | null }>
 
 function jobSnapshot(id: string) {
   return {
@@ -41,8 +44,8 @@ function jobSnapshot(id: string) {
     empty: false,
     resolution: null,
     created_at: '',
-    started_at: null,
-    finished_at: null
+    started_at: jobTimes[id]?.started_at ?? null,
+    finished_at: jobTimes[id]?.finished_at ?? null
   }
 }
 
@@ -60,6 +63,7 @@ beforeEach(() => {
   useIngestJobsStore.getState().clear()
   knownJobIds = new Set()
   queuedJobIds = new Set()
+  jobTimes = {}
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const u = typeof input === 'string' ? input : input.toString()
     if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
@@ -197,6 +201,35 @@ describe('Ingest', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /run again|erneut/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('Ingest — elapsed time across a reload', () => {
+  it('shows the server-derived duration when the log has no client start frame', async () => {
+    // After a reload only the backend's replayed job frames exist — the
+    // synthetic upload `start` frame that anchors the client timer is gone,
+    // so the elapsed display must fall back to the snapshot's
+    // `started_at`/`finished_at` pair.
+    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    knownJobIds.add('job-1')
+    jobTimes['job-1'] = {
+      started_at: '2026-08-14T10:00:00Z',
+      finished_at: '2026-08-14T11:02:05Z'
+    }
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    await waitFor(() => expect(screen.getByText('1:02:05')).toBeInTheDocument())
   })
 })
 
