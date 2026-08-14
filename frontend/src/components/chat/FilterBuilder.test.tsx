@@ -91,7 +91,7 @@ describe('FilterBuilder disclosure', () => {
     useChatFiltersStore.getState().setFilterEnabled(true)
     render(<FilterBuilder />)
 
-    await userEvent.click(screen.getByRole('button', { name: /\+ rule/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^rule$/i }))
     await userEvent.type(screen.getByPlaceholderText('field'), 'mimetype')
 
     expect(useChatFiltersStore.getState().customRules[0].field).toBe('mimetype')

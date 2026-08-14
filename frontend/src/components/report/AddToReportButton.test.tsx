@@ -49,7 +49,7 @@ describe('AddToReportButton', () => {
 
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     renderButton(false, qc)
-    await userEvent.click(screen.getByRole('button', { name: /\+ report/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^report$/i }))
 
     await waitFor(() => {
       expect(calls.some((c) => c.url.endsWith('/reports') && c.method === 'POST')).toBe(true)

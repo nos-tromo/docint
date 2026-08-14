@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Badge, Button, Input, RemoveButton, Select } from '@infra/ui'
+import { Badge, Button, Input, PlusIcon, RemoveButton, Select } from '@infra/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
 import { cn } from '@/lib/cn'
@@ -119,6 +119,7 @@ export function FilterBuilder() {
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-xs text-muted-foreground">{t('chat.custom_rules')}</span>
                   <Button type="button" variant="secondary" size="sm" onClick={() => s.addRule()}>
+                    <PlusIcon className="mr-1 inline h-3.5 w-3.5 align-[-0.15em]" />
                     {t('chat.add_rule')}
                   </Button>
                 </div>
