@@ -196,6 +196,7 @@ export const en = {
   'ingest.working': 'Working…',
   'ingest.files_indexed': '{count} files indexed',
   'ingest.chunks': '{count} chunks',
+  'ingest.duration': 'Duration: {duration}',
   'ingest.finished': 'Ingestion finished',
   'ingest.failed_default': 'Ingestion failed.',
   'ingest.save_failed_file': 'Upload failed: “{filename}” could not be saved.',

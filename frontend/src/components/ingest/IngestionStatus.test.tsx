@@ -40,4 +40,53 @@ describe('IngestionStatus error body', () => {
     render(<IngestionStatus status={errorStatus({ errorCode: 'Not A Valid Token!' })} />)
     expect(screen.getByText('Ingestion failed.')).toBeInTheDocument()
   })
+
+  it('keeps the elapsed timer visible on a failed job', () => {
+    render(
+      <IngestionStatus
+        status={errorStatus({ startedAt: 10_000, finishedAt: 75_000 })}
+      />
+    )
+    expect(screen.getByText('01:05')).toBeInTheDocument()
+  })
+})
+
+function completeStatus(overrides: Partial<IngestStatus> = {}): IngestStatus {
+  return {
+    phase: 'complete',
+    totalFiles: 2,
+    filesSaved: 2,
+    tasks: [],
+    indexed: 2,
+    totalChunks: 10,
+    ...overrides,
+  } as IngestStatus
+}
+
+describe('IngestionStatus completion timing', () => {
+  it('shows the frozen elapsed timer in the header', () => {
+    render(
+      <IngestionStatus
+        status={completeStatus({ startedAt: 0, finishedAt: 3_725_000 })}
+      />
+    )
+    expect(screen.getByText('1:02:05')).toBeInTheDocument()
+  })
+
+  it('includes the duration in the completion summary', () => {
+    render(
+      <IngestionStatus
+        status={completeStatus({ startedAt: 10_000, finishedAt: 75_000 })}
+      />
+    )
+    expect(
+      screen.getByText(/2 files indexed · 10 chunks · Duration: 01:05/)
+    ).toBeInTheDocument()
+  })
+
+  it('omits the summary duration when no start time is known', () => {
+    render(<IngestionStatus status={completeStatus()} />)
+    expect(screen.getByText('2 files indexed · 10 chunks')).toBeInTheDocument()
+    expect(screen.queryByText(/Duration:/)).not.toBeInTheDocument()
+  })
 })

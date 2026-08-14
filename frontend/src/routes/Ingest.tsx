@@ -12,7 +12,11 @@ import { useConfig } from '@/hooks/useConfig'
 import { useUiStore } from '@/stores/ui'
 import { Dropzone } from '@/components/ingest/Dropzone'
 import { IngestionStatus } from '@/components/ingest/IngestionStatus'
-import { deriveIngestStatus, type IngestStatus } from '@/lib/ingestStatus'
+import {
+  deriveIngestStatus,
+  withServerTimes,
+  type IngestStatus
+} from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
@@ -90,15 +94,22 @@ export function Ingest() {
     // live `uploadingFile`/`uploadingBytes` fields it clears on that event.
     const merged = run.uploading ? run.uploadEvents : [...run.uploadEvents, ...jobEvents]
     const derived = deriveIngestStatus(merged, fileSizes)
+    // While uploading, the snapshot (keyed on the stale `activeJobId`) also
+    // belongs to the previous run, so its timestamps must not be merged.
+    if (run.uploading) return derived
+    // A reattached log has no synthetic upload `start` frame, so the elapsed
+    // timer has no client anchor — fall back to the server snapshot's
+    // `started_at`/`finished_at` (already fetched by `jobQuery`).
+    const timed = withServerTimes(derived, jobQuery.data)
     // A merged log can start mid-stream — reattaching to a job whose
     // `ingestion_started` frame arrived before this tab did — and still
     // carry real progress. Treat "an active job has events" as never idle so
     // progress stays visible even without an explicit phase-setting frame.
-    if (derived.phase === 'idle' && !run.uploading && run.activeJobId && jobEvents.length > 0) {
-      return { ...derived, phase: 'processing' }
+    if (timed.phase === 'idle' && run.activeJobId && jobEvents.length > 0) {
+      return { ...timed, phase: 'processing' }
     }
-    return derived
-  }, [run.uploadEvents, jobEvents, fileSizes, run.activeJobId, run.uploading])
+    return timed
+  }, [run.uploadEvents, jobEvents, fileSizes, run.activeJobId, run.uploading, jobQuery.data])
 
   // A job the server 404s on is an interrupted run: the backend restarted
   // while it was in flight (jobs are in-memory by design). Answered by

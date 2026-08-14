@@ -1,4 +1,4 @@
-import type { IngestEvent } from '@/api/types'
+import type { IngestEvent, IngestJobSnapshot } from '@/api/types'
 
 export type IngestPhase =
   | 'idle'
@@ -413,22 +413,69 @@ export function formatBytes(n: number): string {
 }
 
 /**
- * Format an elapsed duration in milliseconds as `MM:SS` (or `MMM:SS` for
- * runs longer than an hour). Hours are intentionally rolled into the
- * minutes column to keep the column width predictable in the status card.
+ * Format an elapsed duration in milliseconds, scaling with magnitude:
+ * `MM:SS` under an hour, `H:MM:SS` under a day, `Nd HH:MM:SS` beyond.
+ * The `d` day marker is the DIN 1301 unit symbol, shared across locales,
+ * so this module stays free of catalog lookups.
  *
  * Args:
  *   ms: Duration in milliseconds.
  *
  * Returns:
- *   String of the form `"03:42"` or `"62:05"`.
+ *   String of the form `"03:42"`, `"1:02:05"`, or `"1d 17:40:37"`.
  */
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '00:00'
   const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
+  const days = Math.floor(totalSeconds / 86_400)
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
   const seconds = totalSeconds % 60
   const mm = String(minutes).padStart(2, '0')
   const ss = String(seconds).padStart(2, '0')
+  if (days > 0) return `${days}d ${String(hours).padStart(2, '0')}:${mm}:${ss}`
+  if (hours > 0) return `${hours}:${mm}:${ss}`
   return `${mm}:${ss}`
+}
+
+/**
+ * Fill a derived status's timeline from the server-owned job snapshot when
+ * the client-side anchor is missing.
+ *
+ * After a reload/reattach the merged event log holds only replayed job
+ * frames — no synthetic upload `start` — so `startedAt` is undefined and the
+ * elapsed timer never renders. When filling from the snapshot, `finished_at`
+ * is taken from the *same source*: a replayed terminal frame stamps
+ * `finishedAt` with its arrival time, so pairing a server start with that
+ * client finish would measure start→reload instead of start→finish (and a
+ * same-source pair cancels server/client clock skew). The client
+ * `finishedAt` is kept only when the snapshot has no `finished_at` yet —
+ * i.e. the terminal event arrived live, where its arrival time is accurate.
+ * A client-anchored timeline is returned unchanged.
+ *
+ * Args:
+ *   status: Status derived from the merged event log.
+ *   snapshot: Server job snapshot, if one is loaded.
+ *
+ * Returns:
+ *   `status`, with `startedAt`/`finishedAt` filled from the snapshot when
+ *   the client log carried no `start` frame.
+ */
+export function withServerTimes(
+  status: IngestStatus,
+  snapshot?: Pick<IngestJobSnapshot, 'started_at' | 'finished_at'> | null
+): IngestStatus {
+  if (status.startedAt !== undefined || !snapshot?.started_at) return status
+  const startedAt = Date.parse(snapshot.started_at)
+  if (Number.isNaN(startedAt)) return status
+  const serverFinishedAt = snapshot.finished_at
+    ? Date.parse(snapshot.finished_at)
+    : NaN
+  return {
+    ...status,
+    startedAt,
+    finishedAt: Number.isNaN(serverFinishedAt)
+      ? status.finishedAt
+      : serverFinishedAt
+  }
 }
