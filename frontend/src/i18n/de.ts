@@ -45,7 +45,7 @@ export const de: Strings = {
   'common.show_more': 'Mehr anzeigen',
   'common.show_less': 'Weniger anzeigen',
   'common.translate': 'Übersetzen',
-  'common.preview_new_tab': 'In neuem Tab öffnen ↗',
+  'common.preview_new_tab': 'In neuem Tab öffnen',
   'common.preview_close': 'Vorschau schließen',
   'common.preview_loading': 'Vorschau wird geladen…',
   'common.preview_error': 'Die Datei konnte hier nicht geladen werden. Öffnen Sie sie stattdessen in einem neuen Tab.',
@@ -55,7 +55,7 @@ export const de: Strings = {
   'common.show_original': 'Original anzeigen',
   'common.translation_unavailable': 'Übersetzung nicht verfügbar — Original wird angezeigt.',
   'common.loading_ellipsis': 'Lädt…',
-  'common.pill_open_link': 'Beitrag öffnen ↗',
+  'common.pill_open_link': 'Beitrag öffnen',
 
   // table (shared DataTable chrome)
   'table.col_filename': 'Dateiname',
@@ -356,7 +356,7 @@ export const de: Strings = {
   'report.remove_item_aria': 'Eintrag entfernen',
   'report.note_placeholder': 'Notiz hinzufügen…',
   'report.retry': 'Wiederholen',
-  'report.in_report': '✓ Im Bericht',
+  'report.in_report': 'Im Bericht',
   'report.add_button': '+ Bericht',
   'report.retry_title': 'Server nicht erreichbar — zum Wiederholen klicken',
   'report.remove_title': 'Aus Bericht entfernen',

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { CheckIcon, StopwatchIcon, XIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import {
   formatBytes,
@@ -185,23 +186,20 @@ function Header({
   // Either measurement is enough to show a timer: a reattached run can carry
   // the server's duration without ever having had a client anchor.
   const showTimer = status.startedAt !== undefined || status.durationMs !== undefined
-  const icon =
-    status.phase === 'complete' ? '✓' : status.phase === 'error' ? '✗' : null
+  // The terminal phases mark themselves; the live ones pulse a dot instead.
+  const Marker = status.phase === 'complete' ? CheckIcon : status.phase === 'error' ? XIcon : null
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="flex items-center gap-2 min-w-0">
-        {icon ? (
-          <span
+        {Marker ? (
+          <Marker
             className={cn(
-              'text-xs font-medium',
+              'h-3.5 w-3.5 shrink-0',
               status.phase === 'complete'
                 ? 'text-[var(--status-emerald-fg)]'
                 : 'text-[var(--status-red-fg)]'
             )}
-            aria-hidden="true"
-          >
-            {icon}
-          </span>
+          />
         ) : (
           <span
             className={cn(
@@ -230,8 +228,8 @@ function Header({
         )}
       </div>
       {showTimer && (
-        <span className="tabular-nums text-xs text-muted-foreground shrink-0">
-          <span aria-hidden="true">⏱ </span>
+        <span className="inline-flex items-center gap-1 tabular-nums text-xs text-muted-foreground shrink-0">
+          <StopwatchIcon className="h-3.5 w-3.5" />
           {formatDuration(elapsedMs)}
         </span>
       )}

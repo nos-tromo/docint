@@ -114,3 +114,24 @@ describe('IngestionStatus completion timing', () => {
     expect(screen.getByText('01:05')).toBeInTheDocument()
   })
 })
+
+describe('IngestionStatus markers are drawn, never typed', () => {
+  // A text character renders from whatever font the OS falls back to, and `⏱`
+  // in particular carries emoji presentation on some platforms — it can arrive
+  // full-colour beside otherwise monochrome chrome.
+  it('marks a completed run with a drawn check and a drawn stopwatch', () => {
+    const { container } = render(
+      <IngestionStatus status={completeStatus({ startedAt: 0, finishedAt: 65_000 })} />
+    )
+    expect(container.querySelectorAll('svg').length).toBeGreaterThanOrEqual(2)
+    expect(container.textContent).not.toMatch(/[✓✗⏱]/)
+  })
+
+  it('marks a failed run with a drawn cross', () => {
+    const { container } = render(
+      <IngestionStatus status={errorStatus({ startedAt: 0, finishedAt: 65_000 })} />
+    )
+    expect(container.querySelector('svg')).not.toBeNull()
+    expect(container.textContent).not.toMatch(/[✓✗⏱]/)
+  })
+})

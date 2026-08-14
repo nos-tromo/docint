@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { IconButton, XIcon } from '@infra/ui'
+import { ExternalLinkIcon, IconButton, XIcon } from '@infra/ui'
 import { sourcePreviewUrl } from '@/api/ingest'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
@@ -129,9 +129,10 @@ export function PreviewDialog() {
               href={url}
               target="_blank"
               rel="noreferrer"
-              className="text-xs text-blue-400 hover:text-blue-300"
+              className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
             >
               {t('common.preview_new_tab')}
+              <ExternalLinkIcon className="h-3.5 w-3.5" />
             </a>
             {/* The base `IconButton` rather than `RemoveButton`: closing a
                 preview takes nothing away, so it must not warn in red. */}

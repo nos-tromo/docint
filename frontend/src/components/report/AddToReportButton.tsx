@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button } from '@infra/ui'
+import { Button, CheckIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import type { Report, ReportItemInput } from '@/api/types'
 import { reportKey, useAddReportItem, useCreateReport, useRemoveReportItem } from '@/hooks/useReports'
@@ -71,6 +71,9 @@ export function AddToReportButton({ item, inReport, className }: Props) {
       : inReport
         ? t('report.in_report')
         : t('report.add_button')
+  // Drawn, not a `✓` prefixed to the catalog string: a symbol inside
+  // translated copy is one a translator can silently drop or reorder.
+  const showCheck = inReport && !pending && !failed
   return (
     <Button
       type="button"
@@ -82,6 +85,7 @@ export function AddToReportButton({ item, inReport, className }: Props) {
       onClick={handleClick}
       className={cn('shrink-0 whitespace-nowrap', className)}
     >
+      {showCheck && <CheckIcon className="mr-1 inline h-3.5 w-3.5 align-[-0.15em]" />}
       {label}
     </Button>
   )

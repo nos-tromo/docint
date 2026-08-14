@@ -42,7 +42,7 @@ export const en = {
   'common.show_more': 'Show more',
   'common.show_less': 'Show less',
   'common.translate': 'Translate',
-  'common.preview_new_tab': 'Open in new tab ↗',
+  'common.preview_new_tab': 'Open in new tab',
   'common.preview_close': 'Close preview',
   'common.preview_loading': 'Loading preview…',
   'common.preview_error': 'The file could not be loaded here. Open it in a new tab instead.',
@@ -52,7 +52,7 @@ export const en = {
   'common.show_original': 'Show original',
   'common.translation_unavailable': 'Translation unavailable — showing original.',
   'common.loading_ellipsis': 'Loading…',
-  'common.pill_open_link': 'Open link ↗',
+  'common.pill_open_link': 'Open link',
 
   // table (shared DataTable chrome)
   'table.col_filename': 'Filename',
@@ -346,7 +346,7 @@ export const en = {
   'report.remove_item_aria': 'Remove item',
   'report.note_placeholder': 'Add a note…',
   'report.retry': 'Retry',
-  'report.in_report': '✓ In report',
+  'report.in_report': 'In report',
   'report.add_button': '+ Report',
   'report.retry_title': 'Could not reach the server — click to retry',
   'report.remove_title': 'Remove from report',

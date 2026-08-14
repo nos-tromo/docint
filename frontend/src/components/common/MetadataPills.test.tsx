@@ -25,12 +25,17 @@ describe('MetadataPills', () => {
   it('renders href pills as external links', () => {
     render(
       <MetadataPills
-        items={[{ key: 'posting_url', value: 'Beitrag öffnen ↗', href: 'https://ig.example/p' }]}
+        items={[{ key: 'posting_url', value: 'Beitrag öffnen', href: 'https://ig.example/p' }]}
       />
     )
-    const link = screen.getByRole('link', { name: 'Beitrag öffnen ↗' })
+    const link = screen.getByRole('link', { name: 'Beitrag öffnen' })
     expect(link).toHaveAttribute('href', 'https://ig.example/p')
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', 'noreferrer')
+    // The leaving-arrow is drawn and driven by `href`, not appended to the
+    // pill's copy — so it survives a translator editing the label, and it
+    // cannot arrive as a full-colour emoji the way `↗` can.
+    expect(link.querySelector('svg')).not.toBeNull()
+    expect(link.textContent).toBe('Beitrag öffnen')
   })
 })
