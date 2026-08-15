@@ -1,10 +1,10 @@
 import {
-  Button,
   ChevronDownIcon,
   DeleteButton,
   DownloadButton,
   MoveDownButton,
   MoveUpButton,
+  NewButton,
   RemoveButton
 } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
@@ -187,16 +187,14 @@ export function Report() {
       <aside className="flex flex-col gap-3 min-h-0">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">{t('report.title')}</h1>
-          <Button
-            variant="primary"
-            size="sm"
+          <NewButton
+            label={t('common.new_report')}
             onClick={onCreate}
+            busy={createReport.isPending}
             // Also gated while /whoami is in flight: creating before the
             // identity resolves would store a report with no operator.
-            disabled={createReport.isPending || whoami.isLoading}
-          >
-            {t('common.new_report')}
-          </Button>
+            disabled={whoami.isLoading}
+          />
         </div>
         {createReport.isError && (
           <p className="text-xs text-[var(--status-red-fg)]">{t('report.create_error')}</p>
