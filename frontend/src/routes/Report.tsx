@@ -363,7 +363,7 @@ export function Report() {
 
             {items.length === 0 && overviewToShow === null ? (
               <p className="text-sm text-muted-foreground">
-                {t('report.empty_report_hint', { control: t('report.add_button') })}
+                {t('report.empty_report_hint')}
               </p>
             ) : (
               <div className="flex-1 overflow-auto space-y-6 pr-2">

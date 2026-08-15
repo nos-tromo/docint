@@ -187,7 +187,7 @@ describe('EntityFinding', () => {
         />
       </QueryClientProvider>
     )
-    expect(screen.getByRole('button', { name: /^report$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /add to report/i })).toBeInTheDocument()
   })
 
   it('reveals a Translate toggle in the actions cell that swaps the chunk text in place', async () => {

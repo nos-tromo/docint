@@ -332,7 +332,7 @@ export const en = {
   'report.format_csv': 'CSV',
   'report.format_json': 'JSON',
   'report.empty_report_hint':
-    'This report is empty. Use the “{control}” control on a chat answer, entity finding, or hate-speech finding to add it here.',
+    'This report is empty. Use the report icon on a chat answer, entity finding, or hate-speech finding to add it here.',
   'report.section_summaries': 'Summaries',
   'report.section_chat_answers': 'Chat answers',
   'report.section_entity_findings': 'Entity findings',
@@ -347,7 +347,6 @@ export const en = {
   'report.note_placeholder': 'Add a note…',
   'report.retry': 'Retry',
   'report.in_report': 'In report',
-  'report.add_button': 'Report',
   'report.retry_title': 'Could not reach the server — click to retry',
   'report.remove_title': 'Remove from report',
   'report.add_title': 'Add to report',

@@ -342,7 +342,7 @@ export const de: Strings = {
   'report.format_csv': 'CSV',
   'report.format_json': 'JSON',
   'report.empty_report_hint':
-    'Dieser Bericht ist leer. Verwenden Sie die Schaltfläche „{control}“ bei einer Chat-Antwort, einem Entitätsfund oder einem Hatespeech-Fund, um sie hier hinzuzufügen.',
+    'Dieser Bericht ist leer. Verwenden Sie das Berichtssymbol bei einer Chat-Antwort, einem Entitätsfund oder einem Hatespeech-Fund, um sie hier hinzuzufügen.',
   'report.section_summaries': 'Zusammenfassungen',
   'report.section_chat_answers': 'Chat-Antworten',
   'report.section_entity_findings': 'Entitätsfunde',
@@ -357,7 +357,6 @@ export const de: Strings = {
   'report.note_placeholder': 'Notiz hinzufügen…',
   'report.retry': 'Wiederholen',
   'report.in_report': 'Im Bericht',
-  'report.add_button': 'Bericht',
   'report.retry_title': 'Server nicht erreichbar — zum Wiederholen klicken',
   'report.remove_title': 'Aus Bericht entfernen',
   'report.add_title': 'Zu Bericht hinzufügen',
