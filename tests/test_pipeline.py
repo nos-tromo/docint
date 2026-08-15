@@ -44,9 +44,11 @@ from docint.core.readers.documents.ocr import (
 from docint.core.readers.documents.orchestrator import (
     DocumentPipelineOrchestrator,
 )
+from docint.core.readers.documents.parse import ParsedPage, ParsedPdf
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
+from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, two_column_page
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -262,113 +264,84 @@ class TestPipelineConfig:
 class TestTriage:
     """Tests for the PDF triage stage (digital, scanned, mixed detection)."""
 
-    def test_digital_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """Pages with sufficient text should not need OCR.
+    def test_digital_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Pages with sufficient text should not need OCR."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = "A" * 500
-        mock_mediabox = MagicMock()
-        mock_mediabox.width = 612.0
-        mock_mediabox.height = 792.0
-        mock_page.mediabox = mock_mediabox
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/doc.pdf", pipeline_config)
+        pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 1
         assert pages[0].has_text_layer is True
         assert pages[0].needs_ocr is False
         assert pages[0].status == "completed"
+        assert (pages[0].width, pages[0].height) == (612.0, 792.0)
+        assert pages[0].text_coverage > pipeline_config.text_coverage_threshold
 
-    def test_scanned_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """Pages with no text should need OCR.
+    def test_scanned_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Pages with no text should need OCR."""
+        pdf = tmp_path / "scan.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = ""
-        mock_mediabox = MagicMock()
-        mock_mediabox.width = 612.0
-        mock_mediabox.height = 792.0
-        mock_page.mediabox = mock_mediabox
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/scan.pdf", pipeline_config)
+        pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 1
         assert pages[0].has_text_layer is False
         assert pages[0].needs_ocr is True
+        assert pages[0].text_coverage == 0.0
 
-    def test_mixed_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """A PDF with mixed pages should classify each correctly.
+    def test_mixed_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A PDF with mixed pages should classify each correctly."""
+        pdf = tmp_path / "mixed.pdf"
+        pdf.write_bytes(build_pdf([two_column_page(), PageSpec()]))
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        digital_page = MagicMock()
-        digital_page.extract_text.return_value = "X" * 1000
-        digital_mb = MagicMock()
-        digital_mb.width = 612.0
-        digital_mb.height = 792.0
-        digital_page.mediabox = digital_mb
-
-        scanned_page = MagicMock()
-        scanned_page.extract_text.return_value = ""
-        scanned_mb = MagicMock()
-        scanned_mb.width = 612.0
-        scanned_mb.height = 792.0
-        scanned_page.mediabox = scanned_mb
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [digital_page, scanned_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/mixed.pdf", pipeline_config)
+        pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 2
         assert pages[0].needs_ocr is False
         assert pages[1].needs_ocr is True
 
-    def test_bad_page_does_not_crash(self, pipeline_config: PipelineConfig) -> None:
-        """A page that raises during extraction should be marked failed.
+    def test_bad_page_does_not_crash(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A page that raises during parsing should be marked failed, not abort triage."""
+        pdf = tmp_path / "bad.pdf"
+        pdf.write_bytes(build_pdf([two_column_page(), two_column_page()]))
+        real_page = ParsedPdf.page
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        good_page = MagicMock()
-        good_page.extract_text.return_value = "A" * 500
-        good_mb = MagicMock()
-        good_mb.width = 612.0
-        good_mb.height = 792.0
-        good_page.mediabox = good_mb
+        def _flaky(self: ParsedPdf, page_index: int) -> ParsedPage:
+            if page_index == 1:
+                raise RuntimeError("corrupt page")
+            return real_page(self, page_index)
 
-        bad_page = MagicMock()
-        bad_page.extract_text.side_effect = RuntimeError("corrupt page")
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [good_page, bad_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/bad.pdf", pipeline_config)
+        with patch.object(ParsedPdf, "page", _flaky):
+            pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 2
         assert pages[0].status == "completed"
         assert pages[1].status == "failed"
+        assert pages[1].needs_ocr is True
         assert pages[1].error is not None
+
+    def test_unreadable_file_yields_single_failed_page(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A file docling-parse cannot open degrades to one failed page."""
+        bogus = tmp_path / "bogus.pdf"
+        bogus.write_bytes(b"not a pdf")
+
+        pages = triage_pdf(bogus, pipeline_config)
+
+        assert len(pages) == 1
+        assert pages[0].status == "failed"
+        assert pages[0].needs_ocr is True
+
+    def test_reuses_injected_parsed_document(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """When the orchestrator hands over an open ``ParsedPdf`` it is used as-is."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
+        with ParsedPdf(pdf) as parsed:
+            with patch("docint.core.readers.documents.triage.ParsedPdf") as ctor:
+                pages = triage_pdf(pdf, pipeline_config, parsed=parsed)
+            ctor.assert_not_called()
+        assert len(pages) == 1
+        assert pages[0].needs_ocr is False
 
 
 # ---------------------------------------------------------------------------
