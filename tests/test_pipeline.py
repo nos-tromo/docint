@@ -15,6 +15,7 @@ from pdf_fixtures import (
     build_pdf,
     irregular_table_page,
     report_pages,
+    spanning_header_table_page,
     table_page,
     two_column_page,
     wrapped_header_table_page,
@@ -59,6 +60,7 @@ from docint.core.readers.documents.orchestrator import (
     DocumentPipelineOrchestrator,
 )
 from docint.core.readers.documents.parse import ParsedPage, ParsedPdf
+from docint.core.readers.documents.table_vlm import TableVlmStats
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
@@ -209,7 +211,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "3.1.0"
+        assert cfg.pipeline_version == "3.2.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -2172,6 +2174,109 @@ class TestOrchestrator:
 
         assert manifest.status == "failed"
         assert manifest.error
+
+    def test_table_structure_lane_replaces_a_flattened_grid(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """A table geometry flattened is re-read by the vision lane, rows and all."""
+        pdf_file = tmp_path / "spanning.pdf"
+        pdf_file.write_bytes(build_pdf([spanning_header_table_page()]))
+
+        engine = MagicMock()
+        engine.disabled = False
+        engine.stats = TableVlmStats(tables_recovered=1)
+        engine.structure_for.return_value = [
+            ["Model", "Score EN-DE", "Score EN-FR"],
+            ["Alpha", "23.8", "39.2"],
+        ]
+
+        with patch(
+            "docint.core.readers.documents.orchestrator.TableStructureEngine",
+            return_value=engine,
+        ) as engine_cls:
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        engine_cls.assert_called_once()
+        engine.structure_for.assert_called_once()
+        engine.close.assert_called_once()
+        assert manifest.status == "completed"
+        assert manifest.tables_structured == 1
+
+        table = json.loads(
+            next((Path(pipeline_config.artifacts_dir) / manifest.doc_id / "tables").glob("*.json")).read_text()
+        )
+        assert table["cell_grid"][0] == ["Model", "Score EN-DE", "Score EN-FR"]
+        assert table["structure_source"] == "vlm"
+
+        chunks = (Path(pipeline_config.artifacts_dir) / manifest.doc_id / "chunks.jsonl").read_text()
+        assert "Model | Score EN-DE | Score EN-FR" in chunks
+        assert "Table 2: Scores and cost on both corpora" in chunks
+
+    def test_table_structure_lane_is_skipped_for_a_clean_grid(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """A table geometry recovered cleanly costs no vision call."""
+        pdf_file = tmp_path / "clean.pdf"
+        pdf_file.write_bytes(build_pdf([table_page()]))
+
+        with patch("docint.core.readers.documents.orchestrator.TableStructureEngine") as engine_cls:
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        engine_cls.assert_not_called()
+        assert manifest.status == "completed"
+        assert manifest.tables_structured == 0
+
+    def test_table_structure_lane_can_be_switched_off(self, tmp_path: Path) -> None:
+        """With the knob off the lane never runs, however weak the grid."""
+        config = PipelineConfig(
+            text_coverage_threshold=0.01,
+            pipeline_version="test-1.0.0",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            max_retries=1,
+            force_reprocess=True,
+            max_workers=1,
+            enable_vision_ocr=False,
+            vision_ocr_timeout=60.0,
+            vision_ocr_max_retries=1,
+            vision_ocr_max_image_dimension=1024,
+            vision_ocr_max_tokens=4096,
+            enable_table_vlm=False,
+        )
+        pdf_file = tmp_path / "spanning.pdf"
+        pdf_file.write_bytes(build_pdf([spanning_header_table_page()]))
+
+        with patch("docint.core.readers.documents.orchestrator.TableStructureEngine") as engine_cls:
+            manifest = DocumentPipelineOrchestrator(config=config).process(pdf_file)
+
+        engine_cls.assert_not_called()
+        assert manifest.status == "completed"
+
+    def test_table_structure_failure_keeps_the_geometric_grid(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """When the model cannot answer, the table keeps what geometry found."""
+        pdf_file = tmp_path / "spanning.pdf"
+        pdf_file.write_bytes(build_pdf([spanning_header_table_page()]))
+
+        engine = MagicMock()
+        engine.disabled = False
+        engine.stats = TableVlmStats(tables_failed=1)
+        engine.structure_for.return_value = None
+
+        with patch(
+            "docint.core.readers.documents.orchestrator.TableStructureEngine",
+            return_value=engine,
+        ):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        assert manifest.tables_structured == 0
+        assert manifest.tables_structure_failed == 1
+        table = json.loads(
+            next((Path(pipeline_config.artifacts_dir) / manifest.doc_id / "tables").glob("*.json")).read_text()
+        )
+        assert table["structure_source"] == "geometry"
+        assert "Alpha" in table["raw_text"]
 
     def test_retry_logic(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Stages should retry on transient failures."""

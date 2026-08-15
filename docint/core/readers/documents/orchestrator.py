@@ -20,7 +20,7 @@ from docint.core.readers.documents.artifacts import (
 )
 from docint.core.readers.documents.chunking import build_coarse_units
 from docint.core.readers.documents.extraction import extract_images, extract_tables
-from docint.core.readers.documents.layout import analyze_document
+from docint.core.readers.documents.layout import _CAPTION_RE, analyze_document
 from docint.core.readers.documents.models import (
     BBox,
     BlockType,
@@ -38,6 +38,8 @@ from docint.core.readers.documents.ocr import (
     extract_text_for_pages,
 )
 from docint.core.readers.documents.parse import ParsedPdf
+from docint.core.readers.documents.table_vlm import TableStructureEngine
+from docint.core.readers.documents.tables import grid_to_text, needs_structure
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_ingestion_env, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
@@ -277,6 +279,11 @@ class DocumentPipelineOrchestrator:
                 len(pt.full_text),
             )
 
+        # --- Stage 3b: table structure from the vision endpoint ---
+        # Only for tables the geometric pass could not recover: a header
+        # spanning columns leaves blanks that cell positions cannot fill.
+        self._recover_table_structure(file_path, doc_id, layout, manifest, artifacts_dir)
+
         # --- Stage 4: Table extraction ---
         tables: list[TableResult] = self._run_with_retry("tables", lambda: extract_tables(layout)) or []
         for table in tables:
@@ -315,6 +322,79 @@ class DocumentPipelineOrchestrator:
 
         self._log_summary(manifest, duration_ms, len(chunks))
         return manifest
+
+    def _recover_table_structure(
+        self,
+        file_path: Path,
+        doc_id: str,
+        layout: dict[int, list[LayoutBlock]],
+        manifest: DocumentManifest,
+        artifacts_dir: Path,
+    ) -> None:
+        """Re-read weakly-structured tables with the vision model, in place.
+
+        Runs before table extraction so the recovered grid flows through
+        ``TableResult`` and the CSV artifact untouched, and re-renders the
+        block's text row by row — retrieval reads the block, never the
+        ``TableResult``, so the re-render is what carries the improvement into
+        answers. Every failure is soft: the geometric grid stays.
+
+        Args:
+            file_path (Path): Path to the PDF.
+            doc_id (str): Deterministic document hash.
+            layout (dict[int, list[LayoutBlock]]): Layout blocks per page (mutated).
+            manifest (DocumentManifest): Manifest to record counters on.
+            artifacts_dir (Path): Artifacts root (layout artifacts are re-saved).
+        """
+        if not self.config.enable_table_vlm:
+            return
+        candidates = [
+            (page_index, block)
+            for page_index, blocks in sorted(layout.items())
+            for block in blocks
+            if block.type == BlockType.TABLE and needs_structure(block.cells)
+        ]
+        if not candidates:
+            return
+
+        try:
+            engine = TableStructureEngine(
+                file_path,
+                timeout=self.config.table_vlm_timeout,
+                max_retries=self.config.table_vlm_max_retries,
+                max_image_dimension=self.config.table_vlm_max_image_dimension,
+                max_tokens=self.config.table_vlm_max_tokens,
+            )
+        except Exception as exc:
+            logger.debug("Table structure engine not available: {}", exc)
+            return
+
+        changed_pages: set[int] = set()
+        try:
+            for page_index, block in candidates:
+                grid = engine.structure_for(page_index, block.bbox)
+                if not grid:
+                    continue
+                caption = block.text.splitlines()[0] if block.text.splitlines() else ""
+                body = grid_to_text(grid)
+                block.text = f"{caption}\n{body}".strip() if _CAPTION_RE.match(caption) else body
+                block.cells = grid
+                block.cells_source = "vlm"
+                changed_pages.add(page_index)
+        finally:
+            stats = engine.stats
+            engine.close()
+
+        manifest.tables_structured = stats.tables_recovered
+        manifest.tables_structure_failed = stats.tables_failed
+        for page_index in changed_pages:
+            save_layout(doc_id, page_index, layout[page_index], artifacts_dir)
+        logger.info(
+            "Table structure lane: {} recovered, {} failed, {} skipped",
+            stats.tables_recovered,
+            stats.tables_failed,
+            stats.tables_skipped,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

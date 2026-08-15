@@ -51,6 +51,7 @@ def extract_tables(
                     raw_text=block.text,
                     cell_grid=block.cells,
                     confidence=block.confidence,
+                    structure_source=block.cells_source,
                 )
             )
     logger.info("Extracted {} tables from layout blocks", len(tables))

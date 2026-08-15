@@ -336,3 +336,44 @@ def math_caption_table_page() -> PageSpec:
         TextRun("O(1)", x=400, y=618),
     ]
     return PageSpec(runs=runs)
+
+
+def spanning_header_table_page() -> PageSpec:
+    """A captioned table whose two-level header geometry cannot express.
+
+    Mirrors the shape that defeats cell geometry in real papers: group headings
+    (``Score``, ``Cost``) sit over two sub-columns each, and most rows fill only
+    some of those sub-columns. The reconstructed grid is therefore full of holes
+    — which is exactly what marks it as needing a second opinion from a model
+    that can see the spans.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs = [
+        TextRun("Table 2: Scores and cost on both corpora", x=60, y=700),
+        # Group headings, each over two sub-columns.
+        TextRun("Score", x=250, y=660),
+        TextRun("Cost", x=420, y=660),
+        TextRun("Model", x=60, y=646),
+        TextRun("EN-DE", x=230, y=646),
+        TextRun("EN-FR", x=310, y=646),
+        TextRun("EN-DE", x=400, y=646),
+        TextRun("EN-FR", x=470, y=646),
+    ]
+    # Sparse data rows: most report only one or two of the four metrics.
+    rows: list[tuple[str, str, str, str, str]] = [
+        ("Alpha", "23.8", "", "", ""),
+        ("Beta", "", "39.2", "", "1.0"),
+        ("Gamma", "24.6", "39.9", "2.3", "1.4"),
+        ("Delta", "25.1", "", "", ""),
+        ("Epsilon", "26.0", "40.5", "", ""),
+    ]
+    for index, (label, de_score, fr_score, de_cost, fr_cost) in enumerate(rows):
+        y = 628 - index * 14
+        runs.append(TextRun(label, x=60, y=y))
+        for text, x in ((de_score, 230), (fr_score, 310), (de_cost, 400), (fr_cost, 470)):
+            if text:
+                runs.append(TextRun(text, x=x, y=y))
+    runs.append(TextRun("The following paragraph is ordinary body text, far below the table.", x=60, y=520))
+    return PageSpec(runs=runs)

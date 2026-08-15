@@ -1437,6 +1437,53 @@ def load_clip_client_env(
 
 
 @dataclass(frozen=True)
+class TableVlmClientConfig:
+    """Dataclass for the remote vision service used to recover table structure."""
+
+    api_base: str
+    api_key: str | None
+    model: str
+    timeout: float
+
+
+def load_table_vlm_env(
+    default_api_base: str,
+    default_api_key: str | None,
+    default_model: str,
+    default_timeout: float,
+) -> "TableVlmClientConfig":
+    """Load the table-structure vision endpoint settings.
+
+    Defaults to whatever vision endpoint and model the rest of the app already
+    uses, so the lane works on an unchanged stack; ``TABLE_VLM_API_BASE`` /
+    ``TABLE_VLM_API_KEY`` / ``TABLE_VLM_MODEL`` point it at a dedicated
+    document-parsing model instead, without a code change.
+
+    Args:
+        default_api_base (str): Fallback endpoint (the shared OpenAI-compatible base).
+        default_api_key (str | None): Fallback API key.
+        default_model (str): Fallback model id (the configured vision model).
+        default_timeout (float): Fallback per-request timeout in seconds.
+
+    Returns:
+        TableVlmClientConfig: The resolved client configuration.
+    """
+    raw_key = os.getenv("TABLE_VLM_API_KEY")
+    if raw_key is not None and raw_key.strip():
+        api_key: str | None = raw_key.strip()
+    elif default_api_key and default_api_key.strip():
+        api_key = default_api_key.strip()
+    else:
+        api_key = None
+    return TableVlmClientConfig(
+        api_base=os.getenv("TABLE_VLM_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        model=os.getenv("TABLE_VLM_MODEL", default_model),
+        timeout=float(os.getenv("TABLE_VLM_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
 class RerankClientConfig:
     """Dataclass for the remote rerank service HTTP client."""
 
@@ -1816,6 +1863,13 @@ class PipelineConfig:
     vision_ocr_max_retries: int
     vision_ocr_max_image_dimension: int
     vision_ocr_max_tokens: int
+    # Table-structure vision lane. Defaulted so every existing construction of
+    # this config keeps working.
+    enable_table_vlm: bool = True
+    table_vlm_timeout: float = 0.0
+    table_vlm_max_retries: int = 1
+    table_vlm_max_image_dimension: int = 1536
+    table_vlm_max_tokens: int = 4096
 
 
 # 2.0.0: PDF chunking unified onto the hierarchical SentenceSplitter
@@ -1829,7 +1883,10 @@ class PipelineConfig:
 # 3.1.0: table blocks carry a reconstructed cell grid and read row-major,
 # page furniture (running head / footer / page number / margin stamp) is kept
 # out of body text, and words split by a line-break hyphen are rejoined.
-PIPELINE_VERSION = "3.1.0"
+# 3.2.0: table blocks whose structure geometry could not recover are sent to
+# the vision endpoint, which sees spanning headers that the cell positions
+# cannot express.
+PIPELINE_VERSION = "3.2.0"
 
 
 def load_pipeline_config(
@@ -1844,6 +1901,11 @@ def load_pipeline_config(
     default_vision_ocr_max_retries: int = 1,
     default_vision_ocr_max_image_dimension: int = 1024,
     default_vision_ocr_max_tokens: int = 4096,
+    default_enable_table_vlm: bool = True,
+    default_table_vlm_timeout: float | None = None,
+    default_table_vlm_max_retries: int = 1,
+    default_table_vlm_max_image_dimension: int = 1536,
+    default_table_vlm_max_tokens: int = 4096,
 ) -> PipelineConfig:
     """Build a ``PipelineConfig`` from environment variables with sensible defaults.
 
@@ -1865,6 +1927,14 @@ def load_pipeline_config(
             API call.
         default_vision_ocr_max_image_dimension (int): Default max pixel dimension for images sent
             to the vision OCR endpoint.
+        default_enable_table_vlm (bool): Default flag for the table-structure vision lane, which
+            runs only for tables whose structure the geometric reconstruction could not recover.
+        default_table_vlm_timeout (float | None): Default per-request timeout in seconds for the
+            table-structure lane. ``None`` inherits ``OPENAI_TIMEOUT``.
+        default_table_vlm_max_retries (int): Default maximum retries for a single table.
+        default_table_vlm_max_image_dimension (int): Default max pixel dimension for the rendered
+            table region (larger than the OCR lane's: a table's digits must stay legible).
+        default_table_vlm_max_tokens (int): Default maximum tokens the model may generate per table.
         default_vision_ocr_max_tokens (int): Default maximum number of tokens the vision LLM may
             generate per OCR request.
 
@@ -1920,6 +1990,19 @@ def load_pipeline_config(
             )
         ),
         vision_ocr_max_tokens=int(os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)),
+        enable_table_vlm=os.getenv("PIPELINE_TABLE_VLM", str(default_enable_table_vlm).lower()).lower()
+        in {"true", "1", "yes"},
+        table_vlm_timeout=float(
+            os.getenv(
+                "PIPELINE_TABLE_VLM_TIMEOUT",
+                default_table_vlm_timeout if default_table_vlm_timeout is not None else load_openai_env().timeout,
+            )
+        ),
+        table_vlm_max_retries=int(os.getenv("PIPELINE_TABLE_VLM_MAX_RETRIES", default_table_vlm_max_retries)),
+        table_vlm_max_image_dimension=int(
+            os.getenv("PIPELINE_TABLE_VLM_MAX_IMAGE_DIM", default_table_vlm_max_image_dimension)
+        ),
+        table_vlm_max_tokens=int(os.getenv("PIPELINE_TABLE_VLM_MAX_TOKENS", default_table_vlm_max_tokens)),
     )
 
 

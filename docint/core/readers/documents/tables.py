@@ -53,6 +53,9 @@ _MAX_ROW_GAP_HEIGHTS = 2.5
 # rows are indented differently and hold short cells.
 _CAPTION_INDENT_TOLERANCE = 3.0
 _CAPTION_LINE_MIN_CHARS = 60
+# Share of empty cells above which a reconstructed grid is treated as having
+# lost its structure (spanning headers flatten into blanks).
+_MAX_EMPTY_CELL_SHARE = 0.25
 
 
 def _median_height(cells: list[TextLine]) -> float:
@@ -163,6 +166,31 @@ def grid_to_text(grid: list[list[str]]) -> str:
         str: One line per row.
     """
     return "\n".join(" | ".join(row).strip() for row in grid)
+
+
+def needs_structure(grid: list[list[str]] | None) -> bool:
+    """Whether a table's geometric grid is too weak to stand on its own.
+
+    A missing grid, a single column, or a grid where a quarter of the cells are
+    empty all point the same way: the structure was flattened, typically by a
+    header spanning columns that cell positions cannot express. Those are the
+    tables worth a remote vision call; a dense grid is left alone.
+
+    Args:
+        grid (list[list[str]] | None): The reconstructed grid, if any.
+
+    Returns:
+        bool: True when the table should be sent for structure recovery.
+    """
+    if not grid:
+        return True
+    if max((len(row) for row in grid), default=0) < _MIN_ROW_CELLS:
+        return True
+    cells = [cell for row in grid for cell in row]
+    if not cells:
+        return True
+    empty = sum(1 for cell in cells if not cell.strip())
+    return empty >= _MAX_EMPTY_CELL_SHARE * len(cells)
 
 
 def caption_extent(page: ParsedPage, caption: BBox) -> BBox | None:
