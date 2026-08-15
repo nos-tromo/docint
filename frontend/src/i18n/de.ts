@@ -305,6 +305,9 @@ export const de: Strings = {
     'Diese Zusammenfassung wurde durch das konfigurierte Verarbeitungsbudget beendet und deckt nicht die gesamte Sammlung ab. Klicken Sie auf „Aktualisieren“, um sie soweit möglich fortzusetzen, oder bitten Sie Ihre Administration, das Verarbeitungslimit zu erhöhen.',
   'analysis.summary_failed':
     'Die Zusammenfassung konnte nicht erstellt werden.',
+  'analysis.summary_caption_one': '{count} Quelle',
+  'analysis.summary_caption_other': '{count} Quellen',
+  'analysis.summary_empty': 'Für diese Sammlung gibt es noch keine Zusammenfassung.',
   'analysis.summary_generating': 'Wird erstellt…',
   'analysis.summary_generate': 'Erstellen',
   'analysis.summary_refresh': 'Aktualisieren',
@@ -334,7 +337,6 @@ export const de: Strings = {
   'report.reference_label': 'Aktenzeichen',
   'report.toc_label': 'Inhaltsverzeichnis',
   'report.document_overview': 'Dokumentenübersicht',
-  'report.refresh_overview_pending': 'Wird aktualisiert…',
   'report.refresh_overview_captured': 'Übersicht aktualisieren (erfasst {date})',
   'report.capture_overview': 'Übersicht erfassen',
   'report.open_new_tab_title': 'In neuem Tab öffnen',

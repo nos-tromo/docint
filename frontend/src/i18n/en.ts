@@ -294,6 +294,9 @@ export const en = {
   'analysis.coverage_partial_label': 'Incomplete summary',
   'analysis.coverage_partial_detail':
     'This summary stopped at the configured processing budget and does not cover the whole collection. Refresh to continue where possible, or ask your administrator to raise the summary processing limit.',
+  'analysis.summary_caption_one': '{count} source',
+  'analysis.summary_caption_other': '{count} sources',
+  'analysis.summary_empty': 'No summary for this collection yet.',
   'analysis.summary_generating': 'Generating…',
   'analysis.summary_generate': 'Generate',
   'analysis.summary_refresh': 'Refresh',
@@ -324,7 +327,6 @@ export const en = {
   'report.reference_label': 'File reference',
   'report.toc_label': 'Table of contents',
   'report.document_overview': 'Document overview',
-  'report.refresh_overview_pending': 'Refreshing…',
   'report.refresh_overview_captured': 'Refresh overview (captured {date})',
   'report.capture_overview': 'Capture overview',
   'report.open_new_tab_title': 'Open in a new tab',
