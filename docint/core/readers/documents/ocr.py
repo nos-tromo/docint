@@ -20,6 +20,7 @@ from typing_extensions import override
 
 from docint.core.readers.documents.models import (
     BBox,
+    BlockType,
     LayoutBlock,
     OCRSpan,
     PageInfo,
@@ -29,6 +30,9 @@ from docint.core.readers.documents.parse import ParsedPdf, order_lines
 from docint.utils.env_cfg import load_model_env, load_openai_env
 from docint.utils.llm_sanitize import looks_like_no_image_refusal, squeeze_char_runs, strip_reasoning
 from docint.utils.openai_cfg import OpenAIPipeline
+
+# Page furniture is not part of the page's text (mirrors chunking.py).
+_FURNITURE_BLOCK_TYPES = frozenset({BlockType.PAGE_HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER})
 
 
 class OCREngine(ABC):
@@ -611,6 +615,8 @@ def build_page_text(
     """
     pdf_spans: list[OCRSpan] = []
     for block in layout_blocks:
+        if block.type in _FURNITURE_BLOCK_TYPES:
+            continue
         if block.text.strip():
             pdf_spans.append(
                 OCRSpan(

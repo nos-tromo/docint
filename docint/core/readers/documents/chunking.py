@@ -36,6 +36,9 @@ _HEADING_BLOCK_TYPES = frozenset({BlockType.TITLE, BlockType.HEADER})
 # Blocks that contribute prose to a coarse unit's body and may fall back to
 # the page's full text when their own ``text`` is empty.
 _PROSE_BLOCK_TYPES = frozenset({BlockType.TEXT, BlockType.LIST, BlockType.CAPTION})
+# Page furniture belongs to the page, not the argument: a running head repeated
+# on every page would otherwise be embedded into every chunk of the document.
+_FURNITURE_BLOCK_TYPES = frozenset({BlockType.PAGE_HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER})
 
 
 def _stable_chunk_id(doc_id: str, page_index: int, block_id: str, idx: int) -> str:
@@ -84,7 +87,8 @@ def build_coarse_units(
 ) -> list[ChunkResult]:
     """Group layout blocks into section-bounded coarse units.
 
-    The walker visits pages in order and blocks in reading order. Heading
+    The walker visits pages in order and blocks in reading order. Page
+    furniture (running head, footer, page number) is skipped entirely. Heading
     blocks (``TITLE``/``HEADER``) update a running ``section_path`` and
     flush the in-progress unit so each unit belongs to a single section.
     Consecutive prose blocks under the current heading are accumulated
@@ -185,6 +189,10 @@ def build_coarse_units(
         page_images = image_by_page.get(page_idx, [])
 
         for block in blocks:
+            # Page furniture never contributes body text or bbox refs.
+            if block.type in _FURNITURE_BLOCK_TYPES:
+                continue
+
             # Heading blocks delimit sections: flush the current unit, then
             # update the running section path (do not emit the heading as body).
             if block.type in _HEADING_BLOCK_TYPES:

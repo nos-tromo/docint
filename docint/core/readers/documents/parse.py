@@ -28,7 +28,7 @@ from docling_core.types.doc.page import TextCellUnit
 from docling_parse.pdf_parser import ContentConfig, ContentLevel, DoclingPdfParser
 from loguru import logger
 
-from docint.core.readers.documents.models import BBox
+from docint.core.readers.documents.models import BBox, BlockType
 
 # Radians; anything beyond this is treated as rotated text (a 90-degree stamp is 1.57).
 _ROTATION_TOLERANCE = 0.05
@@ -142,6 +142,7 @@ class ParsedPdf:
             ),
         )
         self._pages: dict[int, ParsedPage] = {}
+        self._furniture: dict[int, dict[int, BlockType]] | None = None
 
     @property
     def file_path(self) -> Path:
@@ -200,6 +201,27 @@ class ParsedPdf:
         self._pages[page_index] = parsed
         return parsed
 
+    @property
+    def furniture(self) -> dict[int, dict[int, BlockType]]:
+        """Page furniture map, computed once per document.
+
+        Detection is document-level (it needs to see which band lines repeat
+        across pages), while the layout stage runs page by page — so the map is
+        computed on first access and cached here.
+
+        Returns:
+            dict[int, dict[int, BlockType]]: Page index → line index → block type.
+        """
+        cached = self._furniture
+        if cached is None:
+            # Imported here, not at module scope: furniture.py builds on this
+            # module, so a top-level import would be circular.
+            from docint.core.readers.documents.furniture import detect_furniture
+
+            cached = detect_furniture(self)
+            self._furniture = cached
+        return cached
+
     def close(self) -> None:
         """Release the native document handle."""
         try:
@@ -207,6 +229,7 @@ class ParsedPdf:
         except Exception as exc:  # pragma: no cover - best effort
             logger.debug("docling-parse unload failed for {}: {}", self._file_path, exc)
         self._pages.clear()
+        self._furniture = None
 
     def __enter__(self) -> ParsedPdf:
         """Enter the context manager."""

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, two_column_page
+from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, report_pages, two_column_page
 
 from docint.core.readers.documents.artifacts import (
     load_manifest,
@@ -402,6 +402,34 @@ class TestChunking:
         assert text_units[0].text.startswith("Chapter 1: Introduction")
         # The heading is folded into its section's unit, never emitted alone.
         assert all(u.text.strip() != "Chapter 1: Introduction" for u in units)
+
+    def test_furniture_blocks_never_enter_chunk_text(self) -> None:
+        """PAGE_HEADER / FOOTER / PAGE_NUMBER blocks are skipped by the chunker."""
+
+        def _block(block_id: str, kind: BlockType, text: str, order: int) -> LayoutBlock:
+            return LayoutBlock(
+                block_id=block_id,
+                page_index=0,
+                type=kind,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=order,
+                confidence=1.0,
+                text=text,
+            )
+
+        layout = {
+            0: [
+                _block("ph", BlockType.PAGE_HEADER, "Quarterly Review 2031", 0),
+                _block("b", BlockType.TEXT, "The body sentence that should survive.", 1),
+                _block("ft", BlockType.FOOTER, "Confidential draft", 2),
+                _block("pn", BlockType.PAGE_NUMBER, "7", 3),
+            ]
+        }
+        units = build_coarse_units("doc", layout, {}, [], [])
+
+        assert len(units) == 1
+        assert units[0].text == "The body sentence that should survive."
+        assert units[0].block_ids == ["b"]
 
     def test_header_replaces_previous_header_under_title(self) -> None:
         """Section paths stay title + current header; consecutive HEADERs do not stack."""
@@ -925,8 +953,8 @@ class TestLayoutAnalysis:
         blocks = self._analyze(tmp_path, spec)
         assert all(b.type == BlockType.TEXT for b in blocks)
 
-    def test_rotated_stamp_is_never_a_heading(self, tmp_path: Path) -> None:
-        """A rotated side stamp stays TEXT even though its axis-aligned box is tall."""
+    def test_rotated_stamp_is_furniture_not_a_heading(self, tmp_path: Path) -> None:
+        """A rotated margin stamp is page furniture, never a heading, however tall its box."""
         spec = PageSpec(
             runs=[
                 TextRun("Preprint stamp running up the margin", x=30, y=300, size=12, rotate90=True),
@@ -936,7 +964,10 @@ class TestLayoutAnalysis:
             ]
         )
         blocks = self._analyze(tmp_path, spec)
-        assert all(b.type == BlockType.TEXT for b in blocks)
+        by_type = {b.type: b.text for b in blocks}
+        assert by_type.get(BlockType.PAGE_HEADER) == "Preprint stamp running up the margin"
+        assert BlockType.TITLE not in by_type and BlockType.HEADER not in by_type
+        assert "stamp" not in by_type.get(BlockType.TEXT, "")
 
     def test_two_letter_fragment_is_not_a_heading(self, tmp_path: Path) -> None:
         """Short symbol-like fragments (math) never become headings."""
@@ -950,6 +981,21 @@ class TestLayoutAnalysis:
         )
         blocks = self._analyze(tmp_path, spec)
         assert all(b.type == BlockType.TEXT for b in blocks)
+
+    def test_running_head_footer_and_number_become_furniture_blocks(self, tmp_path: Path) -> None:
+        """Layout emits PAGE_HEADER / FOOTER / PAGE_NUMBER blocks, not TEXT."""
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(build_pdf(report_pages(3)))
+        pages = [PageInfo(page_index=i, has_text_layer=True, text_coverage=1.0, needs_ocr=False) for i in range(3)]
+        layout = analyze_document(pdf, pages)
+
+        by_type = {b.type: b.text for b in layout[1]}
+        assert by_type.get(BlockType.PAGE_HEADER) == "Quarterly Review 2031"
+        assert by_type.get(BlockType.FOOTER) == "Confidential draft"
+        assert by_type.get(BlockType.PAGE_NUMBER) == "2"
+        body = " ".join(b.text for b in layout[1] if b.type == BlockType.TEXT)
+        assert "Body line one of page 2" in body
+        assert "Quarterly Review" not in body and "Confidential" not in body
 
     def test_analyze_document_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
         """analyze_document() uses the caller's ParsedPdf when given one."""
@@ -1053,6 +1099,35 @@ class TestOCR:
         assert result.source_mix == "mixed"
         assert "Hello world" in result.full_text
         assert "Additional OCR text" in result.full_text
+
+    def test_furniture_blocks_are_left_out_of_page_text(self) -> None:
+        """build_page_text() ignores furniture blocks when assembling the page text."""
+        page_info = PageInfo(page_index=0, has_text_layer=True, text_coverage=1.0, needs_ocr=False)
+        blocks = [
+            LayoutBlock(
+                block_id="ph",
+                page_index=0,
+                type=BlockType.PAGE_HEADER,
+                bbox=BBox(x0=0, y0=760, x1=612, y1=780),
+                reading_order=0,
+                confidence=0.8,
+                text="Quarterly Review 2031",
+            ),
+            LayoutBlock(
+                block_id="b",
+                page_index=0,
+                type=BlockType.TEXT,
+                bbox=BBox(x0=0, y0=100, x1=612, y1=700),
+                reading_order=1,
+                confidence=1.0,
+                text="The body sentence that should survive.",
+            ),
+        ]
+
+        result = build_page_text(page_info, blocks, [])
+
+        assert result.full_text == "The body sentence that should survive."
+        assert len(result.pdf_text_spans) == 1
 
     def test_pdf_text_engine_emits_one_span_per_line(self, tmp_path: Path) -> None:
         """The digital text engine yields per-line spans with real boxes, in reading order."""

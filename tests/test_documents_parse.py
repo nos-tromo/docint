@@ -215,8 +215,8 @@ class TestDehyphenation:
 
     def test_en_dash_is_not_a_soft_hyphen(self) -> None:
         """An en dash ends a clause; it never joins two lines."""
-        lines = [_line("der Vertrag –", 60, 700, 300, 710), _line("so hiess es", 60, 686, 300, 696)]
-        assert lines_to_text(lines) == "der Vertrag –\nso hiess es"
+        lines = [_line("der Vertrag \u2013", 60, 700, 300, 710), _line("so hiess es", 60, 686, 300, 696)]
+        assert lines_to_text(lines) == "der Vertrag \u2013\nso hiess es"
 
     def test_paragraph_break_never_joins(self) -> None:
         """A hyphen before a paragraph gap keeps the blank line (and the hyphen)."""

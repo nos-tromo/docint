@@ -16,7 +16,12 @@ class BlockType(StrEnum):
     TABLE = "table"
     FIGURE = "figure"
     CAPTION = "caption"
+    # HEADER is a section sub-heading (it nests the chunker's section_path).
+    # Page furniture — the running head repeated on every page, the footer, the
+    # page number, a rotated margin stamp — is PAGE_HEADER / FOOTER /
+    # PAGE_NUMBER and is skipped when building body text.
     HEADER = "header"
+    PAGE_HEADER = "page_header"
     FOOTER = "footer"
     PAGE_NUMBER = "page_number"
 

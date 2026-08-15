@@ -65,6 +65,9 @@ class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
       page's body text, or in a bold face at body size. The largest heading
       size on the page is ``TITLE`` (resets the section path downstream), the
       rest ``HEADER`` (nests).
+    * **PAGE_HEADER** / **FOOTER** / **PAGE_NUMBER** — page furniture (a
+      running head, a footer, a page number, a rotated margin stamp), detected
+      across the whole document and kept out of body text downstream.
     * **TABLE** — a *"Table N:"* caption plus the short/tabular lines that
       follow it (caption heuristic), with the union of those lines' boxes.
     * **TEXT** — everything else, one block per run of lines between headings
@@ -121,8 +124,8 @@ class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
                     )
                 )
 
-            # --- Text: headings, tables, prose ---
-            blocks.extend(_build_text_blocks(page, page_index))
+            # --- Text: furniture, headings, tables, prose ---
+            blocks.extend(_build_text_blocks(page, page_index, self._doc.furniture.get(page_index, {})))
 
             # Fallback: if nothing was detected at all, emit an empty TEXT block
             if not blocks:
@@ -263,19 +266,35 @@ def _classify_headings(lines: list[TextLine], excluded: set[int]) -> dict[int, B
     }
 
 
-def _build_text_blocks(page: ParsedPage, page_index: int) -> list[LayoutBlock]:
-    """Turn a page's lines into TITLE / HEADER / TABLE / TEXT blocks in reading order.
+def _build_text_blocks(
+    page: ParsedPage,
+    page_index: int,
+    furniture: dict[int, BlockType] | None = None,
+) -> list[LayoutBlock]:
+    """Turn a page's lines into furniture / heading / table / TEXT blocks in reading order.
 
     Args:
         page (ParsedPage): The parsed page.
         page_index (int): Zero-based page number (for block ids).
+        furniture (dict[int, BlockType] | None): Page-furniture classification
+            keyed by index into ``page.lines`` (see
+            :func:`~docint.core.readers.documents.furniture.detect_furniture`).
+            Those lines become their own blocks and take no part in heading,
+            table or prose detection.
 
     Returns:
         list[LayoutBlock]: Blocks in reading order (``reading_order`` unset).
     """
+    # Keyed by object identity: ``order_lines`` reorders the very same
+    # ``TextLine`` objects, and a ``TextLine`` is not hashable (its ``BBox``
+    # is a plain dataclass).
+    furniture_by_id = {id(page.lines[i]): kind for i, kind in (furniture or {}).items() if i < len(page.lines)}
     ordered = order_lines(page.lines)
     if not ordered:
         return []
+    furniture_at: dict[int, BlockType] = {
+        idx: furniture_by_id[id(ln)] for idx, ln in enumerate(ordered) if id(ln) in furniture_by_id
+    }
 
     marked = _with_paragraph_breaks(ordered)
     # Table regions are found on the text view (blank-line markers included),
@@ -290,7 +309,7 @@ def _build_text_blocks(page: ParsedPage, page_index: int) -> list[LayoutBlock]:
             if o is not None:
                 table_lines[o] = table_no
 
-    headings = _classify_headings(ordered, set(table_lines))
+    headings = _classify_headings(ordered, set(table_lines) | set(furniture_at))
 
     blocks: list[LayoutBlock] = []
     run: list[TextLine] = []
@@ -314,6 +333,21 @@ def _build_text_blocks(page: ParsedPage, page_index: int) -> list[LayoutBlock]:
     idx = 0
     while idx < len(ordered):
         ln = ordered[idx]
+        if idx in furniture_at:
+            _flush_text()
+            blocks.append(
+                LayoutBlock(
+                    block_id=f"furniture-{page_index}-{uuid.uuid4().hex[:8]}",
+                    page_index=page_index,
+                    type=furniture_at[idx],
+                    bbox=ln.bbox,
+                    reading_order=0,
+                    confidence=0.8,
+                    text=ln.text.strip(),
+                )
+            )
+            idx += 1
+            continue
         if idx in table_lines:
             _flush_text()
             table_no = table_lines[idx]

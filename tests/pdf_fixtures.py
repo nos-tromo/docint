@@ -163,3 +163,30 @@ def two_column_page() -> PageSpec:
     for i in range(3):
         runs.append(TextRun(f"Right column line {i + 1}", x=330, y=700 - 14 * i))
     return PageSpec(runs=runs)
+
+
+def report_pages(count: int = 3, *, running_head: str = "Quarterly Review 2031") -> list[PageSpec]:
+    """A multi-page document with a running head, a footer and page numbers.
+
+    Each page carries the same head and footer text plus its own page number,
+    with a few lines of body prose in between.
+
+    Args:
+        count: Number of pages.
+        running_head: Text repeated at the top of every page.
+
+    Returns:
+        list[PageSpec]: One spec per page.
+    """
+    pages: list[PageSpec] = []
+    for page_no in range(1, count + 1):
+        runs = [
+            TextRun(running_head, x=60, y=760, size=9),
+            TextRun(f"Body line one of page {page_no} with enough words to read as prose.", x=60, y=700),
+            TextRun(f"Body line two of page {page_no} continuing the same paragraph here.", x=60, y=686),
+            TextRun(f"Body line three of page {page_no} rounding the paragraph off nicely.", x=60, y=672),
+            TextRun("Confidential draft", x=60, y=40, size=8),
+            TextRun(str(page_no), x=300, y=26, size=9),
+        ]
+        pages.append(PageSpec(runs=runs))
+    return pages
