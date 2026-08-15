@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Report } from './Report'
 import { useReportStore } from '@/stores/report'
@@ -130,6 +131,9 @@ describe('Report view — document overview', () => {
   it('shows both the items and the overview preview when a report has both', async () => {
     renderReport()
     await screen.findByText('Acme [ORG]')
+    // The manifest is collapsed by default, so its rows are behind the
+    // heading — what matters here is that the overview section is present.
+    await userEvent.click(await screen.findByRole('button', { name: /document overview/i }))
     expect(screen.getByText('c.pdf')).toBeInTheDocument()
     expect(screen.getByText('0123456789ab')).toBeInTheDocument()
     expect(screen.queryByText(/this report is empty/i)).not.toBeInTheDocument()
@@ -147,7 +151,8 @@ describe('Report view — document overview', () => {
   it('shows the overview preview instead of the empty message when there are no items', async () => {
     mockFetch({ ...reportDetail, items: [], item_count: 0 })
     renderReport()
-    await screen.findByText('c.pdf')
+    await userEvent.click(await screen.findByRole('button', { name: /document overview/i }))
+    expect(await screen.findByText('c.pdf')).toBeInTheDocument()
     expect(screen.queryByText(/this report is empty/i)).not.toBeInTheDocument()
   })
 
@@ -328,9 +333,13 @@ describe('Report view — the header selector', () => {
     mockTwoReports()
     renderReport()
 
-    const select = await screen.findByRole('combobox', { name: /select report/i })
-    await screen.findByRole('option', { name: 'Case Beta (0)' })
-    fireEvent.change(select, { target: { value: '2' } })
+    // The trigger keeps role="combobox", so this query survived the move off a
+    // native <select>. What changed is that a closed menu has no options in
+    // the DOM at all, so the list has to be opened before one can be picked.
+    const trigger = await screen.findByRole('combobox', { name: /select report/i })
+    await waitFor(() => expect(trigger).toHaveTextContent('Case Alpha (2)'))
+    await userEvent.click(trigger)
+    await userEvent.click(await screen.findByRole('option', { name: 'Case Beta (0)' }))
 
     await waitFor(() => {
       expect(useReportStore.getState().activeReportId).toBe(2)
@@ -381,7 +390,13 @@ describe('Report view — the header selector', () => {
 
     // With nothing to pick, the placeholder says so rather than inviting a
     // choice; delete and export need a report and must not sit there dead.
-    expect(await screen.findByText(/no reports yet/i)).toBeInTheDocument()
+    // The empty message lives on the closed trigger, exactly where the native
+    // select's disabled placeholder option used to render it — not hidden
+    // behind a click.
+    const emptyTrigger = await screen.findByRole('combobox', { name: /select report/i })
+    expect(emptyTrigger).toHaveTextContent(/no reports yet/i)
+    expect(emptyTrigger).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /delete report/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /New/i })).toBeInTheDocument()
   })

@@ -1,3 +1,6 @@
+import { useId, useState } from 'react'
+import { ChevronDownIcon } from '@infra/ui'
+import { cn } from '@/lib/cn'
 import type { CollectionOverviewSnapshot } from '@/api/types'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
@@ -33,17 +36,47 @@ function count(
  */
 export function CollectionOverviewPreview({ overview }: { overview: CollectionOverviewSnapshot }) {
   const t = useT()
+  // Throwaway view state, like every other content disclosure in the SPA —
+  // only the route-level layout panels persist theirs.
+  const [open, setOpen] = useState(false)
+  const tableId = useId()
   return (
     <div className="space-y-2">
-      <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-        {t('report.document_overview')}
-      </h2>
-      <div className="text-xs text-muted-foreground">
-        {count(overview.document_count, 'document', t)} · {count(overview.node_count, 'node', t)} ·{' '}
-        {count(overview.file_types.length, 'filetype', t)} ·{' '}
-        {count(overview.entity_types.length, 'entitytype', t)}
-      </div>
-      <div className="overflow-auto rounded-md border border-border">
+      {/* The manifest is the longest thing in a report and the least often
+          read — sixteen documents pushed the report's own findings off the
+          screen. The heading and its counts are the summary and stay put; the
+          table is the detail and now waits to be asked for. Both live inside
+          the trigger, so its accessible name carries the counts too, which
+          also keeps it distinct from the "Document overview" checkbox above. */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={tableId}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <div className="min-w-0">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+            {t('report.document_overview')}
+          </h2>
+          <div className="text-xs text-muted-foreground">
+            {count(overview.document_count, 'document', t)} ·{' '}
+            {count(overview.node_count, 'node', t)} ·{' '}
+            {count(overview.file_types.length, 'filetype', t)} ·{' '}
+            {count(overview.entity_types.length, 'entitytype', t)}
+          </div>
+        </div>
+        {/* One caret rotated, never a pair: `aria-expanded` carries the state
+            for anyone not looking at it. */}
+        <ChevronDownIcon
+          className={cn(
+            'h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform',
+            !open && '-rotate-90'
+          )}
+        />
+      </button>
+      {open && (
+      <div id={tableId} className="max-h-[60vh] overflow-auto rounded-md border border-border">
         <table className="w-full text-xs">
           <thead className="text-muted-foreground">
             <tr>
@@ -65,6 +98,7 @@ export function CollectionOverviewPreview({ overview }: { overview: CollectionOv
           </tbody>
         </table>
       </div>
+      )}
     </div>
   )
 }

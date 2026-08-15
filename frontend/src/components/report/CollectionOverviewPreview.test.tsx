@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { CollectionOverviewPreview } from './CollectionOverviewPreview'
 import type { CollectionOverviewSnapshot } from '@/api/types'
@@ -16,8 +17,22 @@ const overview: CollectionOverviewSnapshot = {
 }
 
 describe('CollectionOverviewPreview', () => {
-  it('renders the strip and the manifest row with a truncated hash', () => {
+  it('keeps the manifest behind its heading until asked', () => {
     render(<CollectionOverviewPreview overview={overview} />)
+    // The counts are the summary and stay put; the table is the detail. A
+    // sixteen-row manifest opening by default pushed the report's own findings
+    // off the screen.
+    expect(screen.getByText(/1 document ·/)).toBeInTheDocument()
+    expect(screen.queryByText('a.pdf')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /document overview/i })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+  })
+
+  it('renders the strip and the manifest row with a truncated hash once opened', async () => {
+    render(<CollectionOverviewPreview overview={overview} />)
+    await userEvent.click(screen.getByRole('button', { name: /document overview/i }))
     expect(screen.getByText('a.pdf')).toBeInTheDocument()
     expect(screen.getByText('0123456789ab')).toBeInTheDocument()
     expect(screen.queryByText('0123456789abcdef')).not.toBeInTheDocument()

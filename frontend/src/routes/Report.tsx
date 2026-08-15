@@ -5,7 +5,9 @@ import {
   MoveDownButton,
   MoveUpButton,
   NewButton,
-  RemoveButton
+  RefreshButton,
+  RemoveButton,
+  SelectMenu
 } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
@@ -227,26 +229,28 @@ export function Report() {
       <h1 className="sr-only">{t('report.title')}</h1>
 
       <div className="flex items-center gap-3">
-        {/* The sidebar's collection switcher, one size up: a native select with
-            no border and no fill, so it reads as the page title it is and
-            still drops a chevron to say it is a list. Native because switching
-            reports is exactly what a select does — keyboard, type-ahead and
-            the platform's own picker on touch, none of it hand-built. */}
-        <select
-          aria-label={t('report.select_aria')}
-          value={activeReportId != null ? String(activeReportId) : ''}
-          onChange={(e) => setActiveReportId(e.target.value ? Number(e.target.value) : null)}
-          className="min-w-0 max-w-[40rem] cursor-pointer truncate bg-transparent text-2xl font-semibold text-foreground outline-hidden"
-        >
-          <option value="" disabled>
-            {reportList.length ? t('report.choose') : t('report.empty_list')}
-          </option>
-          {reportList.map((r) => (
-            <option key={r.id} value={String(r.id)}>
-              {`${r.title} (${r.item_count})`}
-            </option>
-          ))}
-        </select>
+        {/* The page title *is* the picker. It was a native <select> sized up
+            to text-2xl — but a native popup inherits its control's font size,
+            so macOS Chrome opened a 24px list that covered this header.
+            SelectMenu draws its panel as a sibling of the trigger, so the
+            trigger stays title-sized and the list stays text-sm.
+
+            The item count rides inside the label rather than beside it:
+            "Vorgang Alpha (1)" is what an operator reads as the report's name,
+            on the closed title and in the list alike. */}
+        <SelectMenu
+          label={t('report.select_aria')}
+          options={reportList.map((r) => ({
+            value: String(r.id),
+            label: `${r.title} (${r.item_count})`
+          }))}
+          value={activeReportId != null ? String(activeReportId) : null}
+          onChange={(id) => setActiveReportId(Number(id))}
+          placeholder={t('report.choose')}
+          emptyLabel={t('report.empty_list')}
+          className="min-w-0 max-w-[40rem]"
+          triggerClassName="text-2xl font-semibold"
+        />
 
         <div className="ml-auto flex items-center gap-2">
           <NewButton
@@ -365,20 +369,23 @@ export function Report() {
                     <span className="uppercase tracking-wide">{t('report.document_overview')}</span>
                   </label>
                   {(report.show_collection_overview ?? true) && (
-                    <button
-                      type="button"
-                      onClick={() => refreshOverview.mutate(report.id)}
-                      disabled={refreshOverview.isPending}
-                      className="text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground disabled:opacity-50"
-                    >
-                      {refreshOverview.isPending
-                        ? t('report.refresh_overview_pending')
-                        : report.collection_overview?.captured_at
+                    // The refresh icon, not a dotted-underline text link: an
+                    // underline in a row of form fields reads as a link to
+                    // somewhere else, and this rebuilds what is on screen. The
+                    // label keeps carrying the captured date, so the tooltip
+                    // and the accessible name still say when the snapshot is
+                    // from — an icon alone would drop that.
+                    <RefreshButton
+                      label={
+                        report.collection_overview?.captured_at
                           ? t('report.refresh_overview_captured', {
                               date: report.collection_overview.captured_at.slice(0, 10)
                             })
-                          : t('report.capture_overview')}
-                    </button>
+                          : t('report.capture_overview')
+                      }
+                      busy={refreshOverview.isPending}
+                      onClick={() => refreshOverview.mutate(report.id)}
+                    />
                   )}
                 </div>
               </div>
