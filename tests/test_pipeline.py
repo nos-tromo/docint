@@ -38,6 +38,7 @@ from docint.core.readers.documents.models import (
     TableResult,
 )
 from docint.core.readers.documents.ocr import (
+    PdfTextEngine,
     build_page_text,
     extract_text_for_pages,
 )
@@ -922,8 +923,40 @@ class TestOCR:
         assert "Hello world" in result.full_text
         assert "Additional OCR text" in result.full_text
 
-    def test_extract_text_for_pages_vision_fallback(self) -> None:
-        """Vision engine should be tried when pypdf yields nothing on OCR pages."""
+    def test_pdf_text_engine_emits_one_span_per_line(self, tmp_path: Path) -> None:
+        """The digital text engine yields per-line spans with real boxes, in reading order."""
+        pdf = tmp_path / "cols.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
+
+        engine = PdfTextEngine(pdf)
+        try:
+            spans = engine.ocr_page(0)
+        finally:
+            engine.close()
+
+        assert len(spans) == 6
+        assert [s.text for s in spans[:3]] == ["Left column line 1", "Left column line 2", "Left column line 3"]
+        assert spans[3].text == "Right column line 1"
+        assert all(s.source == "pdf_text" for s in spans)
+        assert spans[0].bbox.x0 == pytest.approx(60.0, abs=1.0)
+        assert spans[3].bbox.x0 == pytest.approx(330.0, abs=1.0)
+        assert spans[0].bbox.y0 > spans[1].bbox.y0
+
+    def test_extract_text_for_pages_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
+        """extract_text_for_pages() uses the caller's ParsedPdf when given one."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("Some actual text.", x=60, y=700)])]))
+        page_info = PageInfo(page_index=0, has_text_layer=True, text_coverage=0.5, needs_ocr=True)
+        with ParsedPdf(pdf) as parsed:
+            with patch("docint.core.readers.documents.ocr.ParsedPdf") as ctor:
+                result = extract_text_for_pages(pdf, [page_info], {0: []}, parsed=parsed)
+            ctor.assert_not_called()
+        assert "Some actual text" in result[0].full_text
+
+    def test_extract_text_for_pages_vision_fallback(self, tmp_path: Path) -> None:
+        """Vision engine should be tried when the PDF text layer yields nothing on OCR pages."""
+        pdf = tmp_path / "scan.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
         page_info = PageInfo(
             page_index=0,
             has_text_layer=False,
@@ -945,33 +978,17 @@ class TestOCR:
             )
         ]
 
-        with patch("docint.core.readers.documents.ocr.pypdf") as mock_pypdf:
-            mock_page = MagicMock()
-            mock_page.extract_text.return_value = ""
-            mock_mb = MagicMock()
-            mock_mb.left = 0.0
-            mock_mb.bottom = 0.0
-            mock_mb.right = 612.0
-            mock_mb.top = 792.0
-            mock_page.mediabox = mock_mb
-            mock_reader = MagicMock()
-            mock_reader.pages = [mock_page]
-            mock_pypdf.PdfReader.return_value = mock_reader
-
-            result = extract_text_for_pages(
-                "/fake/scan.pdf",
-                [page_info],
-                layout,
-                vision_engine=mock_vision,
-            )
+        result = extract_text_for_pages(pdf, [page_info], layout, vision_engine=mock_vision)
 
         assert 0 in result
         assert "Vision-extracted text" in result[0].full_text
         assert result[0].source_mix == "ocr"
         mock_vision.ocr_page.assert_called_once()
 
-    def test_extract_text_for_pages_no_vision_when_text_found(self) -> None:
-        """Vision engine should NOT be called when pypdf yields text."""
+    def test_extract_text_for_pages_no_vision_when_text_found(self, tmp_path: Path) -> None:
+        """Vision engine should NOT be called when the PDF text layer yields text."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("Some actual text.", x=60, y=700)])]))
         page_info = PageInfo(
             page_index=0,
             has_text_layer=True,
@@ -985,25 +1002,7 @@ class TestOCR:
 
         mock_vision = MagicMock()
 
-        with patch("docint.core.readers.documents.ocr.pypdf") as mock_pypdf:
-            mock_page = MagicMock()
-            mock_page.extract_text.return_value = "Some actual text."
-            mock_mb = MagicMock()
-            mock_mb.left = 0.0
-            mock_mb.bottom = 0.0
-            mock_mb.right = 612.0
-            mock_mb.top = 792.0
-            mock_page.mediabox = mock_mb
-            mock_reader = MagicMock()
-            mock_reader.pages = [mock_page]
-            mock_pypdf.PdfReader.return_value = mock_reader
-
-            result = extract_text_for_pages(
-                "/fake/doc.pdf",
-                [page_info],
-                layout,
-                vision_engine=mock_vision,
-            )
+        result = extract_text_for_pages(pdf, [page_info], layout, vision_engine=mock_vision)
 
         assert 0 in result
         assert "Some actual text" in result[0].full_text
