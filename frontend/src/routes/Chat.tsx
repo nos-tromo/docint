@@ -344,155 +344,155 @@ export function Chat() {
   }
 
   return (
-    // The column widths are animated rather than swapped, so collapsing the
-    // panel reflows the transcript smoothly instead of making it pop.
-    <div
-      className="p-8 grid gap-6 h-full transition-[grid-template-columns] duration-300 ease-out"
-      style={{ gridTemplateColumns: sidePanelOpen ? '1fr 22rem' : '1fr 2rem' }}
-    >
-      {/* min-h-0 on the section (grid item) and the messages list (flex
-          item) lets them shrink below their content, so the list scrolls
-          internally instead of the section outgrowing h-full — which made
-          the whole page scroll and pushed the composer flush against the
-          viewport bottom, past the p-8 padding box. */}
-      <section className="flex flex-col h-full min-h-0">
-        <div className="flex items-center justify-between mb-4">
-          <PageHeader title={t('chat.title')} className="mb-0" />
-          {/* The metadata filters and the retrieval mode belong here, to the
-              chat, not to the search panel: they narrow what any answer
-              retrieves against, whether or not the panel is even open. In the
-              panel they read as controls over the keyword index, which they
-              are not.
+    <div className="p-8 flex flex-col h-full min-h-0">
+      {/* The header spans both columns rather than riding on the chat one.
+          Inside the grid its right edge was the transcript's, so opening the
+          panel slid every button 20rem to the left — the controls moving
+          because something else did. Out here they hold the page's right edge
+          and only the panel moves. */}
+      <div className="flex items-center justify-between mb-4">
+        <PageHeader title={t('chat.title')} className="mb-0" />
+        {/* The metadata filters and the retrieval mode belong here, to the
+            chat, not to the search panel: they narrow what any answer
+            retrieves against, whether or not the panel is even open. In the
+            panel they read as controls over the keyword index, which they
+            are not.
 
-              They are last in the row, so they hold the right edge: Download
-              appears only once a transcript exists, and controls placed
-              outboard of it would slide sideways the first time an answer
-              lands. */}
-          <div className="flex items-center gap-3">
-            {state.turns.length > 0 && (
-              <DownloadButton
-                label={t('chat.download')}
-                onClick={() =>
-                  downloadText(
-                    `chat_${currentSessionId ?? 'session'}.txt`,
-                    chatTranscriptToText(state.turns, t)
-                  )
-                }
-              />
-            )}
-            {/* The sidebar's copy of this is the one reachable from every
-                route; this one is where the wish arrives — at the foot of an
-                answer, without crossing the page to the session list. */}
-            <NewButton label={t('common.new_chat')} onClick={onNewChat} />
-            <ChatControls />
-          </div>
-        </div>
-        <ScopeBanner
-          count={scopedChunkIds.length}
-          missing={scope.missing}
-          onClear={() => void unscope()}
-        />
-        {scopeError && (
-          <p className="mb-3 text-xs text-red-500" role="alert">
-            {scopeError}
-          </p>
-        )}
-        <div
-          ref={transcript.ref}
-          onScroll={transcript.onScroll}
-          className="flex-1 min-h-0 overflow-auto space-y-6 pr-2"
-        >
-          {state.turns.map((t, i) => (
-            <ChatTurn
-              key={i}
-              turn={t}
-              sessionId={t.meta?.session_id ?? currentSessionId ?? undefined}
-              turnIdx={i}
-              reportDedupeKeys={reportDedupeKeys}
-            />
-          ))}
-        </div>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            void send()
-          }}
-          className="mt-4 flex items-end gap-2 pr-2"
-        >
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(key, e.target.value)}
-            onKeyDown={(e) => {
-              // Enter submits; Shift+Enter inserts a newline (standard
-              // chat-composer behavior). IME composition is excluded so
-              // Enter while composing doesn't accidentally submit.
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault()
-                void send()
+            Order within the group is stable-first: Download appears only once
+            a transcript exists, so it sits innermost, where its arrival pushes
+            nothing sideways. */}
+        <div className="flex items-center gap-3">
+          {state.turns.length > 0 && (
+            <DownloadButton
+              label={t('chat.download')}
+              onClick={() =>
+                downloadText(
+                  `chat_${currentSessionId ?? 'session'}.txt`,
+                  chatTranscriptToText(state.turns, t)
+                )
               }
-            }}
-            placeholder={t('chat.ask_placeholder')}
-            rows={1}
-            className="flex-1 bg-muted border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
-          />
-          {/* size="md" so the shell's aspect-square lands at 40x40, the
-              composer's own height. `busy` replaces what used to be a typed
-              '…' standing in for a spinner, and IconButton folds busy into
-              disabled, so the in-flight guard is unchanged. */}
-          <SendButton
-            label={t('chat.send')}
-            type="submit"
-            variant="primary"
-            size="md"
-            busy={state.inflight}
-            disabled={!draft.trim()}
-          />
-        </form>
-      </section>
-
-      {/* The rail is deliberately quieter than the app sidebar's hamburger:
-          a slim chevron on the panel's own edge, muted until hovered or
-          focused, and nothing else — it opens and shuts the panel, and every
-          detail about a search belongs in the panel it opens.
-
-          It does carry one bit of state, because that bit has consequences
-          while hidden: a live scope tints the control, since a chat answering
-          from hand-picked chunks behind a shut panel is a trap.
-
-          The rail sits *inside* this column rather than in the gap beside it.
-          It used to be a third column, so the space between the chat and the
-          search panel measured 24px + a 32px button + 8px = 64, against 32px
-          from the sidebar's seam to the chat text — the same page with two
-          different gutters, because a nearly invisible control was standing in
-          whitespace. Here the gap is only the grid's own `gap-6`, which with
-          the columns' `pr-2` comes to the 32px the left side already had. */}
-      <aside className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
-        <button
-          type="button"
-          onClick={toggleSidePanel}
-          aria-expanded={sidePanelOpen}
-          aria-controls="chat-side-panel"
-          aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
-          // 32px square, like every control in the chat header: both columns
-          // start on the same line, so matching the size is what puts this
-          // button on that line rather than 4px above it. `self-start` keeps
-          // it that size now that it is a flex *column* item.
-          className={cn(
-            'flex h-8 w-8 shrink-0 items-center justify-center self-start rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
-            scopedChunkIds.length > 0
-              ? 'bg-primary/15 text-primary'
-              : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
+            />
           )}
-          data-scoped={scopedChunkIds.length > 0 || undefined}
-        >
-          <RailChevron open={sidePanelOpen} />
-        </button>
-        {/* Kept mounted while collapsed so a running search stays warm and
-            the typed query survives a collapse. */}
-        <div id="chat-side-panel" hidden={!sidePanelOpen} className="min-h-0 min-w-0 flex-1">
-          <SearchPanel sessionId={currentSessionId} />
+          {/* The sidebar's copy of this is the one reachable from every
+              route; this one is where the wish arrives — at the foot of an
+              answer, without crossing the page to the session list. */}
+          <NewButton label={t('common.new_chat')} onClick={onNewChat} />
+          <ChatControls />
+          {/* The panel toggle is last: it is the control nearest the thing it
+              opens, and it is the one button here that changes the page's
+              shape rather than acting on the chat. It carries one bit of
+              state, because that bit has consequences while the panel is
+              shut — a live scope tints it, since a chat answering from
+              hand-picked chunks behind a closed panel is a trap. */}
+          <button
+            type="button"
+            onClick={toggleSidePanel}
+            aria-expanded={sidePanelOpen}
+            aria-controls="chat-side-panel"
+            aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
+            className={cn(
+              'flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
+              scopedChunkIds.length > 0
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
+            )}
+            data-scoped={scopedChunkIds.length > 0 || undefined}
+          >
+            <RailChevron open={sidePanelOpen} />
+          </button>
         </div>
-      </aside>
+      </div>
+
+      {/* The columns are animated rather than swapped, so collapsing the panel
+          reflows the transcript smoothly instead of making it pop. The gap has
+          to animate too: at `1fr 0` a static `gap-6` leaves 24px of nothing on
+          the right, and the chat would stay narrower than every other route's
+          content box — the thing this collapse is supposed to fix. */}
+      <div
+        className="grid min-h-0 flex-1 transition-[grid-template-columns,column-gap] duration-300 ease-out"
+        style={{
+          gridTemplateColumns: sidePanelOpen ? '1fr 22rem' : '1fr 0px',
+          columnGap: sidePanelOpen ? '1.5rem' : '0px'
+        }}
+      >
+        {/* min-h-0 on the section (grid item) and the messages list (flex
+            item) lets them shrink below their content, so the list scrolls
+            internally instead of the section outgrowing its row — which made
+            the whole page scroll and pushed the composer flush against the
+            viewport bottom, past the p-8 padding box. */}
+        <section className="flex flex-col h-full min-h-0">
+          <ScopeBanner
+            count={scopedChunkIds.length}
+            missing={scope.missing}
+            onClear={() => void unscope()}
+          />
+          {scopeError && (
+            <p className="mb-3 text-xs text-red-500" role="alert">
+              {scopeError}
+            </p>
+          )}
+          <div
+            ref={transcript.ref}
+            onScroll={transcript.onScroll}
+            className="flex-1 min-h-0 overflow-auto space-y-6 pr-2"
+          >
+            {state.turns.map((t, i) => (
+              <ChatTurn
+                key={i}
+                turn={t}
+                sessionId={t.meta?.session_id ?? currentSessionId ?? undefined}
+                turnIdx={i}
+                reportDedupeKeys={reportDedupeKeys}
+              />
+            ))}
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              void send()
+            }}
+            className="mt-4 flex items-end gap-2 pr-2"
+          >
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(key, e.target.value)}
+              onKeyDown={(e) => {
+                // Enter submits; Shift+Enter inserts a newline (standard
+                // chat-composer behavior). IME composition is excluded so
+                // Enter while composing doesn't accidentally submit.
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault()
+                  void send()
+                }
+              }}
+              placeholder={t('chat.ask_placeholder')}
+              rows={1}
+              className="flex-1 bg-muted border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
+            />
+            {/* size="md" so the shell's aspect-square lands at 40x40, the
+                composer's own height. `busy` replaces what used to be a typed
+                '…' standing in for a spinner, and IconButton folds busy into
+                disabled, so the in-flight guard is unchanged. */}
+            <SendButton
+              label={t('chat.send')}
+              type="submit"
+              variant="primary"
+              size="md"
+              busy={state.inflight}
+              disabled={!draft.trim()}
+            />
+          </form>
+        </section>
+
+        {/* Kept mounted while collapsed so a running search stays warm and the
+            typed query survives — the column narrows to nothing and clips it,
+            rather than the panel unmounting. */}
+        <aside className="h-full min-h-0 overflow-hidden">
+          <div id="chat-side-panel" hidden={!sidePanelOpen} className="h-full min-h-0 min-w-0">
+            <SearchPanel sessionId={currentSessionId} />
+          </div>
+        </aside>
+      </div>
     </div>
   )
 }
