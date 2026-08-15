@@ -246,15 +246,16 @@ export function Ingest() {
           <FileList
             files={run.files}
             onRemove={(i) => run.removeFile(i)}
-            onClear={() => run.clearFiles()}
             labels={{
               files: (n) => t(n === 1 ? 'upload.files_one' : 'upload.files_other', { count: n }),
-              clearAll: t('upload.clear_all'),
               remove: t('common.remove')
             }}
           />
 
-          <fieldset className="space-y-1 text-sm" disabled={busy}>
+          {/* One row, not a stack: two short options read as a single "how"
+              line under the files, and stacking them made the card's only
+              narrow elements taller than the choice deserved. */}
+          <fieldset className="flex flex-wrap gap-x-6 gap-y-1 text-sm" disabled={busy}>
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={run.ner} onChange={(e) => run.setNer(e.target.checked)} />
               {t('ingest.opt_ner')}
@@ -269,8 +270,13 @@ export function Ingest() {
             </label>
           </fieldset>
 
+          {/* Full width: it is the card's one action, and everything above it —
+              the collection field, the dropzone, the file list — already runs
+              edge to edge. A small left-aligned button under all of that read
+              as an afterthought. */}
           <Button
             variant="primary"
+            className="w-full"
             onClick={() => void run.start(limitBytes, t)}
             disabled={busy || !run.collection || run.files.length === 0}
           >
@@ -313,7 +319,7 @@ export function Ingest() {
                 {/* An interrupted, never-going-to-report-progress-again job would
                     otherwise strand this banner forever — `activeJobId` is
                     persisted and nothing else clears it. */}
-                <Button variant="secondary" size="sm" onClick={() => run.dismissActive()}>
+                <Button variant="secondary" onClick={() => run.dismissActive()}>
                   {t('ingest.dismiss')}
                 </Button>
               </div>
@@ -321,11 +327,10 @@ export function Ingest() {
           )}
 
           {streamLost && (
-            <div className="flex items-center gap-3 text-sm text-[var(--status-amber-fg)]" role="alert">
-              <span>{t('ingest.stream_lost')}</span>
+            <div className="space-y-2 text-sm text-[var(--status-amber-fg)]" role="alert">
+              <p>{t('ingest.stream_lost')}</p>
               <Button
                 variant="secondary"
-                size="sm"
                 onClick={() => useIngestJobsStore.getState().retryStream()}
               >
                 {t('ingest.reconnect')}
@@ -339,7 +344,6 @@ export function Ingest() {
               {(status.phase === 'complete' || status.phase === 'error') && run.activeJobId && (
                 <Button
                   variant="secondary"
-                  size="sm"
                   onClick={() => dismissMutation.mutate(run.activeJobId!)}
                 >
                   {t('ingest.dismiss')}
