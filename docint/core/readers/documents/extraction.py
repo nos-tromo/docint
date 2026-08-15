@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any
 
-import pypdf
+import pypdfium2
+import pypdfium2.raw as pdfium_raw
 from loguru import logger
 
 from docint.core.readers.documents.models import (
@@ -16,6 +16,10 @@ from docint.core.readers.documents.models import (
     LayoutBlock,
     TableResult,
 )
+
+# Placement boxes come from docling-parse and pdfium reads the same content
+# stream, so a match is exact up to float rounding.
+_BBOX_MATCH_TOLERANCE = 1.0
 
 
 def extract_tables(
@@ -60,8 +64,8 @@ def extract_images(
     """Extract figure/image regions from layout blocks.
 
     For each ``FIGURE`` block the bounding box is recorded.  When
-    *output_dir* is set, embedded images are extracted via ``pypdf``
-    and saved as PNGs.
+    *output_dir* is set, the embedded image drawn at that box is
+    extracted via ``pypdfium2`` and saved as a PNG.
 
     Args:
         layout (dict[int, list[LayoutBlock]]): Mapping of page index → list of ``LayoutBlock``.
@@ -80,7 +84,9 @@ def extract_images(
             image_path: str | None = None
 
             if file_path and output_dir:
-                image_path = _try_extract_embedded_image(Path(file_path), page_idx, image_id, Path(output_dir))
+                image_path = _try_extract_embedded_image(
+                    Path(file_path), page_idx, image_id, Path(output_dir), block.bbox
+                )
 
             images.append(
                 ImageResult(
@@ -98,105 +104,62 @@ def extract_images(
     return images
 
 
-def _try_extract_embedded_image(file_path: Path, page_index: int, image_id: str, output_dir: Path) -> str | None:
-    """Best-effort extraction of embedded images via ``pypdf``.
+def _try_extract_embedded_image(
+    file_path: Path,
+    page_index: int,
+    image_id: str,
+    output_dir: Path,
+    bbox: BBox | None = None,
+) -> str | None:
+    """Best-effort extraction of the embedded image drawn at ``bbox``.
 
-    Uses ``pypdf``'s ``page.images`` API which returns decoded image
-    data ready for writing.  Falls back to manual ``/XObject``
-    inspection when the higher-level API is unavailable.
+    Uses ``pypdfium2`` (pdfium decodes every image filter) to enumerate the
+    page's image objects, picks the one whose placement bounds match the
+    FIGURE block's ``bbox`` (the layout stage took that box from
+    docling-parse, which reports the same placement rectangle), renders it
+    to a PIL image and writes a PNG. When no object matches — or ``bbox``
+    is ``None`` — nothing is written.
 
     Args:
         file_path (Path): Source PDF.
         page_index (int): Page to inspect.
         image_id (str): Identifier for naming the output file.
         output_dir (Path): Where to write the image.
+        bbox (BBox | None): Placement box of the FIGURE block.
 
     Returns:
-        str | None: Path string to the written image, or ``None`` on failure.
+        str | None: Path string to the written PNG, or ``None`` on failure.
     """
+    if bbox is None:
+        return None
     try:
-        reader = pypdf.PdfReader(file_path)
-        page = reader.pages[page_index]
-
-        # pypdf >= 3.x exposes page.images with decoded data
-        if hasattr(page, "images") and page.images:
+        pdf = pypdfium2.PdfDocument(str(file_path))
+        try:
+            page = pdf[page_index]
+            match = None
+            for obj in page.get_objects(filter=(pdfium_raw.FPDF_PAGEOBJ_IMAGE,)):
+                x0, y0, x1, y1 = obj.get_bounds()
+                if (
+                    abs(x0 - bbox.x0) <= _BBOX_MATCH_TOLERANCE
+                    and abs(y0 - bbox.y0) <= _BBOX_MATCH_TOLERANCE
+                    and abs(x1 - bbox.x1) <= _BBOX_MATCH_TOLERANCE
+                    and abs(y1 - bbox.y1) <= _BBOX_MATCH_TOLERANCE
+                ):
+                    match = obj
+                    break
+            if match is None:
+                logger.debug("No image object matches bbox {} on page {}", bbox, page_index)
+                return None
+            pil_image = match.get_bitmap().to_pil()
             output_dir.mkdir(parents=True, exist_ok=True)
-            for idx, img in enumerate(page.images):
-                ext = Path(img.name).suffix or ".png"
-                img_path = output_dir / f"{image_id}-{idx}{ext}"
-                img_path.write_bytes(img.data)
-                logger.debug("Extracted image: {}", img_path)
-                # Return the first extracted image path
-                return str(img_path)
-
-        # Fallback: manual XObject extraction with Pillow decoding
-        return _try_extract_xobject_image(page, image_id, output_dir)
-
+            img_path = output_dir / f"{image_id}.png"
+            pil_image.save(str(img_path), "PNG")
+            logger.debug("Extracted image: {}", img_path)
+            return str(img_path)
+        finally:
+            pdf.close()
     except Exception as exc:
         logger.debug("Embedded image extraction failed: {}", exc)
-    return None
-
-
-def _try_extract_xobject_image(page: object, image_id: str, output_dir: Path) -> str | None:
-    """Attempt to extract an image from page XObjects using Pillow.
-
-    Args:
-        page (object): A ``pypdf`` page object.
-        image_id (str): Identifier for naming the output file.
-        output_dir (Path): Where to write the PNG.
-
-    Returns:
-        str | None: Path string to the written image, or ``None`` on failure.
-    """
-    try:
-        import io
-
-        from PIL import Image
-
-        x_objects: Any = getattr(page, "get", lambda *a: None)("/Resources", {})
-        if hasattr(x_objects, "get"):
-            x_objects = x_objects.get("/XObject", {})
-        else:
-            return None
-
-        if hasattr(x_objects, "get_object"):
-            x_objects = x_objects.get_object()
-
-        for obj_name in x_objects:
-            obj = x_objects[obj_name]
-            resolved = obj.get_object() if hasattr(obj, "get_object") else obj
-            subtype = str(resolved.get("/Subtype", ""))
-            if subtype != "/Image":
-                continue
-
-            output_dir.mkdir(parents=True, exist_ok=True)
-            # Bind `data` before the try so the except fallback (write raw
-            # bytes) can't hit an unbound name if get_data() itself fails.
-            data = resolved.get_data()
-            try:
-                width = int(resolved.get("/Width", 0))
-                height = int(resolved.get("/Height", 0))
-                color_space = str(resolved.get("/ColorSpace", "/DeviceRGB"))
-
-                if width > 0 and height > 0:
-                    mode = "RGB" if "RGB" in color_space else "L"
-                    try:
-                        img = Image.frombytes(mode, (width, height), data)
-                    except Exception:
-                        img = Image.open(io.BytesIO(data))
-                else:
-                    img = Image.open(io.BytesIO(data))
-
-                img_path = output_dir / f"{image_id}.png"
-                img.save(str(img_path), "PNG")
-                return str(img_path)
-            except Exception:
-                # Last resort: write raw bytes
-                img_path = output_dir / f"{image_id}.bin"
-                img_path.write_bytes(data)
-                return str(img_path)
-    except Exception as exc:
-        logger.debug("XObject image extraction failed: {}", exc)
     return None
 
 

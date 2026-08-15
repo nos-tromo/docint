@@ -696,6 +696,60 @@ class TestExtraction:
         assert images[0].page_index == 0
         assert images[0].metadata["confidence"] == 0.85
 
+    def test_extract_images_writes_one_png_per_figure_block(self, tmp_path: Path) -> None:
+        """Each FIGURE block gets the embedded image drawn at its bbox, not the page's first image."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(
+            build_pdf(
+                [
+                    PageSpec(
+                        images=[
+                            ImageBox(x=50, y=600, w=100, h=50, pixels=(4, 2), rgb=(255, 0, 0)),
+                            ImageBox(x=300, y=100, w=120, h=80, pixels=(2, 4), rgb=(0, 0, 255)),
+                        ]
+                    )
+                ]
+            )
+        )
+        layout = analyze_document(pdf, [PageInfo(page_index=0, has_text_layer=False, text_coverage=0.0, needs_ocr=True)])
+        out_dir = tmp_path / "images"
+
+        images = extract_images(layout, pdf, out_dir)
+
+        assert len(images) == 2
+        paths = {img.image_path for img in images}
+        assert len(paths) == 2 and all(p and Path(p).exists() for p in paths)
+        from PIL import Image
+
+        by_x = sorted(images, key=lambda i: i.bbox.x0)
+        left = Image.open(str(by_x[0].image_path))
+        right = Image.open(str(by_x[1].image_path))
+        assert left.size == (4, 2)
+        assert right.size == (2, 4)
+        assert left.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+        assert right.convert("RGB").getpixel((0, 0)) == (0, 0, 255)
+
+    def test_extract_images_survives_missing_pixels(self, tmp_path: Path) -> None:
+        """A FIGURE block whose bbox matches no image object still yields a result without a path."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("no images here", x=60, y=700)])]))
+        layout = {
+            0: [
+                LayoutBlock(
+                    block_id="fig1",
+                    page_index=0,
+                    type=BlockType.FIGURE,
+                    bbox=BBox(x0=0, y0=0, x1=200, y1=200),
+                    reading_order=0,
+                    confidence=0.85,
+                    text="",
+                )
+            ]
+        }
+        images = extract_images(layout, pdf, tmp_path / "images")
+        assert len(images) == 1
+        assert images[0].image_path is None
+
 
 # ---------------------------------------------------------------------------
 # Layout analysis tests
