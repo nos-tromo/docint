@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, two_column_page
 
 from docint.core.readers.documents.artifacts import (
     load_manifest,
@@ -49,7 +50,6 @@ from docint.core.readers.documents.parse import ParsedPage, ParsedPdf
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
-from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, two_column_page
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -197,7 +197,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "2.0.0"
+        assert cfg.pipeline_version == "3.0.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -711,7 +711,9 @@ class TestExtraction:
                 ]
             )
         )
-        layout = analyze_document(pdf, [PageInfo(page_index=0, has_text_layer=False, text_coverage=0.0, needs_ocr=True)])
+        layout = analyze_document(
+            pdf, [PageInfo(page_index=0, has_text_layer=False, text_coverage=0.0, needs_ocr=True)]
+        )
         out_dir = tmp_path / "images"
 
         images = extract_images(layout, pdf, out_dir)
@@ -883,7 +885,7 @@ class TestLayoutAnalysis:
             with patch("docint.core.readers.documents.layout.ParsedPdf") as ctor:
                 layout = analyze_document(pdf, [page_info], parsed=parsed)
             ctor.assert_not_called()
-        assert 0 in layout and layout[0]
+        assert layout.get(0)
 
 
 class TestTableDetection:

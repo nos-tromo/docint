@@ -181,7 +181,7 @@ def _classify_headings(lines: list[TextLine], excluded: set[int]) -> dict[int, B
     """Decide which of ``lines`` are headings.
 
     A line is a heading candidate when it is short (≤ 120 chars, not ending in
-    sentence punctuation) and either set ≥ 1.15 × the body font size or set in a
+    sentence punctuation) and either set ≥ 1.15 x the body font size or set in a
     bold face at body size or larger. Candidates with the page's largest heading
     size (when that size is itself larger than body) are ``TITLE``; the rest
     ``HEADER``. When more than half of the page's lines qualify, nothing is

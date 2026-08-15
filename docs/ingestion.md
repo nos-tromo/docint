@@ -92,16 +92,17 @@ The PDF pipeline is page-level and has its own sub-modules:
 
 | File | Responsibility |
 |---|---|
-| `documents/triage.py` | Classifies pages as text / scanned / mixed based on `PIPELINE_TEXT_COVERAGE_THRESHOLD`. |
-| `documents/layout.py` | Runs Docling's layout analyser on text pages. |
-| `documents/ocr.py` | Falls back to OCR for scanned pages. When `PIPELINE_ENABLE_VISION_OCR=true`, the vision LLM is used as a second-stage OCR; otherwise it relies on RapidOCR. |
-| `documents/extraction.py` | Extracts text blocks, tables, and images into the intermediate pipeline model. |
+| `documents/parse.py` | The docling-parse backbone: opens the PDF once per document and exposes each page's line cells (text, bbox, font name/size) and embedded-image placements; computes reading order with a recursive XY-cut so multi-column pages read column by column. No models, no network. |
+| `documents/triage.py` | Classifies pages as text / scanned / mixed from the text-layer coverage against `PIPELINE_TEXT_COVERAGE_THRESHOLD`. |
+| `documents/layout.py` | Builds layout blocks from the parsed geometry: `FIGURE` per embedded image, `TITLE`/`HEADER` for short lines set larger or bolder than the body text (they become the chunker's `section_path`), `TABLE` for a *"Table N:"* caption plus its rows, and per-column/section `TEXT` blocks. |
+| `documents/ocr.py` | Text extraction for pages that need OCR: the page's own text layer first (per-line spans), then — when `PIPELINE_ENABLE_VISION_OCR=true` — the remote vision LLM as the OCR fallback. |
+| `documents/extraction.py` | Collects tables (raw text) and images (the embedded image drawn at each `FIGURE` block, via pypdfium2) into the intermediate pipeline model. |
 | `documents/chunking.py` | Splits the extracted text into coarse parent chunks and fine child chunks. |
 | `documents/artifacts.py` | Persists intermediate artifacts under `PIPELINE_ARTIFACTS_DIR` so reruns are incremental. |
 | `documents/orchestrator.py` | Glues the stages above into a single per-document run. |
 | `documents/reader.py` | The LlamaIndex-compatible reader class (`CorePDFPipelineReader`) used by the ingestion pipeline. |
 | `documents/config.py` | Thin re-export of `load_pipeline_config()` from `env_cfg`. |
-| `documents/models.py` | Pydantic models shared by the pipeline stages. |
+| `documents/models.py` | Dataclasses shared by the pipeline stages. |
 
 Tuning lives in [`PipelineConfig`](configuration.md#pipeline--pipelineconfig).
 Key knobs: `PIPELINE_TEXT_COVERAGE_THRESHOLD`,

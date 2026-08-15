@@ -288,7 +288,7 @@ def lines_to_text(lines: list[TextLine]) -> str:
     """Join already-ordered lines into page text.
 
     Consecutive lines are separated by a newline; a vertical gap larger than
-    1.5 × the median line height inserts a blank line (paragraph break).
+    1.5 x the median line height inserts a blank line (paragraph break).
 
     Args:
         lines (list[TextLine]): Lines in reading order.

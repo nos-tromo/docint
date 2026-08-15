@@ -136,8 +136,10 @@ def _try_extract_embedded_image(
         pdf = pypdfium2.PdfDocument(str(file_path))
         try:
             page = pdf[page_index]
-            match = None
+            match: pypdfium2.PdfImage | None = None
             for obj in page.get_objects(filter=(pdfium_raw.FPDF_PAGEOBJ_IMAGE,)):
+                if not isinstance(obj, pypdfium2.PdfImage):
+                    continue
                 x0, y0, x1, y1 = obj.get_bounds()
                 if (
                     abs(x0 - bbox.x0) <= _BBOX_MATCH_TOLERANCE

@@ -105,8 +105,7 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
         for run in spec.runs:
             font = "/F2" if run.bold else "/F1"
             content.write(
-                b"BT %s %g Tf %g %g Td (%s) Tj ET\n"
-                % (font.encode(), run.size, run.x, run.y, _escape(run.text))
+                b"BT %s %g Tf %g %g Td (%s) Tj ET\n" % (font.encode(), run.size, run.x, run.y, _escape(run.text))
             )
         xobjects: list[tuple[str, int]] = []
         for idx, img in enumerate(spec.images):
