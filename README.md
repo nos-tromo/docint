@@ -307,6 +307,27 @@ Conversations replayed from the session DB take their numbers from citation
 row order, which is the order the generator saw. Answers written before this
 feature still contain hand-counted ordinals that may not line up.
 
+## Corrective Retry
+
+When response validation judges an answer both ungrounded and weak — empty,
+very short, or a refusal like "Evidence insufficient." — the backend rewrites
+the retrieval query from the validator's own reason and answers once more,
+then validates that second answer against the original question. One attempt
+only.
+
+It happens in the open. The chat stream sends a retry frame *before* the
+replacement arrives, so the rejected answer is dropped on screen rather than
+swapped out at the end, and the turn keeps an amber notice naming the query
+that was used — in the live stream and after a reload. Nothing is appended:
+the second attempt overwrites the first, so one question stays one turn.
+
+Turns answering from a hand-picked scope are left alone (they run no retrieval
+for a new query to change), and a substantive answer is never discarded just
+because the validator flagged it. A triggered retry costs up to three extra
+model round-trips, so the turns that fire it are noticeably slower. Turn it off
+with `CORRECTIVE_RETRY_ENABLED=false`; see
+[Retrieval and agents](docs/retrieval-and-agents.md#corrective-retry).
+
 ## Images As Sources
 
 Images are ordinary sources. A stored image — a standalone file, a figure
@@ -651,7 +672,7 @@ manual. It complements this README with topic-by-topic deep dives:
 - [Ingestion pipeline](docs/ingestion.md) — readers, chunking, NER,
   storage
 - [Retrieval and agents](docs/retrieval-and-agents.md) — orchestrator,
-  hybrid retrieval, graph-RAG, validation
+  hybrid retrieval, graph-RAG, validation, corrective retry
 - [UI guide](docs/ui-guide.md) — React SPA pages and components
 - [Deployment](docs/deployment.md) — Docker deployment, volumes,
   co-deployment with vLLM / Ollama, offline image bundles

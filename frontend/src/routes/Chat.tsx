@@ -34,6 +34,7 @@ type Action =
   | { type: 'set_turns'; turns: ChatTurnData[] }
   | { type: 'start'; user: string; scopeRequested?: number }
   | { type: 'token'; token: string }
+  | { type: 'retry'; query: string }
   | { type: 'finalize'; meta: ChatFinalEvent }
   | { type: 'fail'; error?: string }
 
@@ -69,10 +70,23 @@ function reducer(s: State, a: Action): State {
       const updated = { ...last, assistant: last.assistant + a.token }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
+    // The backend rejected the answer it just streamed and is re-answering.
+    // Drop the rejected tokens: the replacement streams in behind this frame,
+    // and keeping both would splice two answers into one.
+    case 'retry': {
+      const last = s.turns[s.turns.length - 1]
+      if (!last) return s
+      const updated = { ...last, assistant: '', retryQuery: a.query }
+      return { ...s, turns: [...s.turns.slice(0, -1), updated] }
+    }
     case 'finalize': {
       const last = s.turns[s.turns.length - 1]
       if (!last) return { ...s, inflight: false }
-      const finalText = a.meta.answer ?? a.meta.message ?? last.assistant
+      // The envelope's own text wins over the accumulated tokens: when a retry
+      // is abandoned mid-stream the backend falls back to reporting the first
+      // answer, and the tokens on screen are then a fragment of the attempt
+      // that was dropped.
+      const finalText = a.meta.answer ?? a.meta.message ?? (a.meta.response || last.assistant)
       const updated = { ...last, assistant: finalText, done: true, meta: a.meta }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
@@ -210,7 +224,9 @@ export function Chat() {
                 session_id: sessionIdParam ?? '',
                 validation_checked: m.validation_checked,
                 validation_mismatch: m.validation_mismatch,
-                validation_reason: m.validation_reason
+                validation_reason: m.validation_reason,
+                retried: m.retried,
+                retry_query: m.retry_query
               } as ChatFinalEvent)
             : null
         })
@@ -268,6 +284,14 @@ export function Chat() {
           !('answer' in data)
         if (isTokenFrame) {
           dispatch({ type: 'token', token: data.token as string })
+          continue
+        }
+        // Announced before the replacement answer streams, so the rejected
+        // one is discarded on arrival rather than swapped out silently at the
+        // end. Must be handled before the finalize fallthrough below.
+        if (typeof data.retry === 'object' && data.retry !== null) {
+          const retryQuery = (data.retry as Record<string, unknown>).query
+          if (typeof retryQuery === 'string') dispatch({ type: 'retry', query: retryQuery })
           continue
         }
         if (typeof data.error === 'string') {

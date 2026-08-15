@@ -269,6 +269,7 @@ class SessionManager:
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
+        replace_turn_idx: int | None = None,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -303,9 +304,16 @@ class SessionManager:
                 query). Pass ``False`` to bind ``prior_turn`` for generation
                 while still running the internal retrieval rewrite (the
                 ``/stream_query`` path); pass ``True`` to skip it regardless.
+            replace_turn_idx (int | None): When set, overwrite this existing
+                turn instead of appending one — the corrective retry's second
+                attempt. The rolling summary is left alone in that case: the
+                turn count has not changed, and folding in the answer that was
+                just discarded would poison later context.
 
         Returns:
-            dict[str, Any]: The response data.
+            dict[str, Any]: The response data, including ``turn_idx`` — the
+                index of the persisted turn, an internal join key callers use
+                to attach validation or to replace the turn on a retry.
 
         Raises:
             ValueError: If the user message is empty.
@@ -379,8 +387,11 @@ class SessionManager:
         response["graph_debug"] = graph_debug
         if scoped_node_ids:
             response["scoped_chunk_count"] = len(list(scoped_node_ids))
-        self._persist_turn(session_id, user_msg, resp, response, owner=owner)
-        self._maybe_update_summary(session_id)
+        response["turn_idx"] = self._persist_turn(
+            session_id, user_msg, resp, response, owner=owner, replace_idx=replace_turn_idx
+        )
+        if replace_turn_idx is None:
+            self._maybe_update_summary(session_id)
         return response
 
     def stream_chat(
@@ -396,6 +407,7 @@ class SessionManager:
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
+        replace_turn_idx: int | None = None,
     ) -> Iterator[str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -423,6 +435,9 @@ class SessionManager:
             skip_query_rewrite (bool | None): See :meth:`chat`. The
                 ``/stream_query`` path passes ``False`` to keep its internal
                 retrieval rewrite while binding the prior turn for generation.
+            replace_turn_idx (int | None): See :meth:`chat`. Set by the
+                corrective retry so its second answer overwrites the rejected
+                one rather than appending a turn the user never asked for.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -510,8 +525,11 @@ class SessionManager:
             retrieval_mode=retrieval_mode,
         )
         normalized["graph_debug"] = graph_debug
-        turn_idx = self._persist_turn(session_id, user_msg, final_response, normalized, owner=owner)
-        self._maybe_update_summary(session_id)
+        turn_idx = self._persist_turn(
+            session_id, user_msg, final_response, normalized, owner=owner, replace_idx=replace_turn_idx
+        )
+        if replace_turn_idx is None:
+            self._maybe_update_summary(session_id)
 
         # Yield metadata. ``turn_idx`` is an internal join key the API layer
         # uses to attach validation results after the stream completes; it
@@ -765,7 +783,14 @@ class SessionManager:
         return self.set_scope(session_id, owner, [])
 
     def _persist_turn(
-        self, session_id: str, user_msg: str, resp: Any, data: dict[str, Any], *, owner: str | None = None
+        self,
+        session_id: str,
+        user_msg: str,
+        resp: Any,
+        data: dict[str, Any],
+        *,
+        owner: str | None = None,
+        replace_idx: int | None = None,
     ) -> int:
         """Persist a user message and the assistant's response in the database.
 
@@ -777,9 +802,15 @@ class SessionManager:
             owner (str | None): The principal that owns the session. Threaded
                 from the chat turn and used only if the conversation row has to
                 be created here as a fallback (it normally already exists).
+            replace_idx (int | None): When set, overwrite this existing turn
+                instead of appending a new one — the corrective retry's second
+                attempt, which must not read back as a second user message.
+                ``user_text`` is deliberately preserved: the retry's
+                ``user_msg`` is a machine-reformulated query the user never
+                typed. Falls back to appending when the row is missing.
 
         Returns:
-            int: The 0-based index of the newly persisted turn within the
+            int: The 0-based index of the persisted turn within the
                 conversation. Used by the API layer to attach validation
                 results that complete after this row is written.
         """
@@ -793,16 +824,40 @@ class SessionManager:
             rewritten = str(rewritten_candidate).strip() if isinstance(rewritten_candidate, str) else None
 
             reasoning = data.get("reasoning")
-            next_idx = len(conv.turns)  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
-            t = Turn(
-                conversation_id=conv.id,
-                idx=next_idx,
-                user_text=user_msg,
-                rewritten_query=rewritten,
-                model_response=data.get("response") or "",
-                reasoning=reasoning,
+            existing = (
+                s.query(Turn).filter_by(conversation_id=conv.id, idx=replace_idx).one_or_none()
+                if replace_idx is not None
+                else None
             )
-            s.add(t)
+            if replace_idx is not None and existing is None:
+                logger.warning(
+                    "_persist_turn: no turn to replace for session={} idx={}; appending instead",
+                    session_id,
+                    replace_idx,
+                )
+
+            if existing is not None and replace_idx is not None:
+                next_idx = replace_idx
+                t = existing
+                t.rewritten_query = rewritten  # type: ignore[assignment]
+                t.model_response = data.get("response") or ""  # type: ignore[assignment]
+                t.reasoning = reasoning  # type: ignore[assignment]
+                # Flush the delete-orphan cascade before the replacements are
+                # inserted, so the turn never momentarily holds both sets and
+                # replay cannot renumber citations against a stale row.
+                t.citations.clear()
+                s.flush()
+            else:
+                next_idx = len(conv.turns)  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
+                t = Turn(
+                    conversation_id=conv.id,
+                    idx=next_idx,
+                    user_text=user_msg,
+                    rewritten_query=rewritten,
+                    model_response=data.get("response") or "",
+                    reasoning=reasoning,
+                )
+                s.add(t)
             s.flush()
 
             for src_node in getattr(resp, "source_nodes", []) or []:
@@ -858,6 +913,8 @@ class SessionManager:
         validation_checked: bool | None,
         validation_mismatch: bool | None,
         validation_reason: str | None,
+        retried: bool | None = None,
+        retry_query: str | None = None,
     ) -> None:
         """Backfill validation results onto an existing turn row.
 
@@ -871,6 +928,10 @@ class SessionManager:
             validation_checked (bool | None): Validation outcome flag.
             validation_mismatch (bool | None): Mismatch flag.
             validation_reason (str | None): Validator-supplied explanation.
+            retried (bool | None): Whether the answer came from a corrective
+                retry rather than the turn's first attempt.
+            retry_query (str | None): The reformulated retrieval query the
+                retry used, shown as provenance beside the answer.
         """
         with self._session_scope() as s:
             t = s.query(Turn).filter_by(conversation_id=session_id, idx=turn_idx).one_or_none()
@@ -884,6 +945,8 @@ class SessionManager:
             t.validation_checked = validation_checked  # type: ignore[assignment]
             t.validation_mismatch = validation_mismatch  # type: ignore[assignment]
             t.validation_reason = validation_reason  # type: ignore[assignment]
+            t.retried = retried  # type: ignore[assignment]
+            t.retry_query = retry_query  # type: ignore[assignment]
             s.commit()
 
     def _maybe_update_summary(self, session_id: str, every_n_turns: int = 5) -> None:
@@ -1047,6 +1110,9 @@ class SessionManager:
                         msg_entry["validation_checked"] = t.validation_checked
                         msg_entry["validation_mismatch"] = t.validation_mismatch
                         msg_entry["validation_reason"] = t.validation_reason
+                    if t.retried:
+                        msg_entry["retried"] = True
+                        msg_entry["retry_query"] = t.retry_query
                     messages.append(msg_entry)
 
             return messages

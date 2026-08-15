@@ -133,6 +133,8 @@ export const de: Strings = {
   'chat.graph_debug': 'Graph-Debug',
   'chat.scope_not_applied':
     'Diese Antwort wurde nicht auf die {count} ausgewählten Abschnitte eingegrenzt — sie stammt aus der normalen Suche.',
+  'chat.retry_notice':
+    'Die erste Antwort passte nicht zu den gefundenen Belegen, daher wurde die Suche automatisch mit einer umformulierten Anfrage wiederholt: „{query}“',
   'chat.validation_mismatch_title':
     'Die Antwortvalidierung hat eine mögliche Abweichung ergeben',
   'chat.validation_mismatch_default_detail':

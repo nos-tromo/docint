@@ -10,8 +10,9 @@ from docint.agents.generation import (
     PassthroughResponseAgent,
     ResultValidationResponseAgent,
 )
-from docint.agents.orchestrator import AgentOrchestrator
+from docint.agents.orchestrator import AgentOrchestrator, is_weak_answer
 from docint.agents.policies import ClarificationConfig, ClarificationPolicy
+from docint.agents.reformulation import QueryReformulationAgent
 from docint.agents.retrieval import RAGRetrievalAgent
 from docint.agents.tools import ToolRegistry, default_tool_registry
 from docint.agents.types import (
@@ -38,6 +39,7 @@ __all__ = [
     "OrchestratorResult",
     "PassthroughResponseAgent",
     "PriorTurn",
+    "QueryReformulationAgent",
     "RAGRetrievalAgent",
     "ResultValidationResponseAgent",
     "RetrievalRequest",
@@ -48,4 +50,5 @@ __all__ = [
     "Turn",
     "TurnContext",
     "default_tool_registry",
+    "is_weak_answer",
 ]

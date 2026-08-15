@@ -245,6 +245,45 @@ If the LLM answers "no" to either question, `validation_mismatch=true`
 is set on the `QueryOut` / `AgentChatOut` payload and `validation_reason`
 carries the LLM's explanation. The frontend surfaces this as a warning banner.
 
+## Corrective retry
+
+A rejected answer that is *also* weak — empty, under 40 characters, or
+carrying a known refusal phrase (`is_weak_answer` in
+`agents/orchestrator.py`) — gets one automatic second attempt when
+`CORRECTIVE_RETRY_ENABLED=true`. `QueryReformulationAgent`
+(`agents/reformulation.py`, prompt `prompts/{en,de}/reformulate_retrieval.txt`)
+turns the original question, the failed retrieval query, and the validator's
+reason into a fresh retrieval query; the turn is re-retrieved, re-generated,
+and re-validated against the **original** question. The cap is one attempt and
+it is structural — there is no loop.
+
+Both chat paths run it:
+
+- **`/agent/chat`** — inside `AgentOrchestrator.handle_turn`, between
+  validation and the existing weak-answer clarification fallback. A retry that
+  is still weak and mismatched falls through to that same fallback. The
+  response carries `retried` / `retry_query`.
+- **`/stream_query`** — after the first answer has streamed and been
+  validated. The retry is announced with its own SSE frame
+  (`{"retry": {"query": ...}}`) *before* the replacement streams, so the SPA
+  discards the rejected answer on arrival rather than swapping it silently at
+  the end; the final envelope carries `retried` / `retry_query`, and both are
+  persisted on the turn so a reloaded session still names the retry.
+
+The gate is deliberately narrow. A mismatched but substantive answer is kept —
+discarding it to chase a better one trades a real answer for a coin flip. A
+scoped turn is skipped entirely, since it runs no retrieval for a new query to
+change. And the second attempt overwrites the first attempt's turn
+(`replace_turn_idx`) instead of appending, so one user message stays one turn.
+
+Failures degrade rather than escalate: no reformulation available, or a second
+pass that dies mid-stream, leaves the first answer as the delivered result —
+a retry never turns a delivered answer into an error.
+
+The cost is up to three extra LLM round-trips (reformulate, regenerate,
+re-validate) inside the one request, so a turn that triggers a retry is
+noticeably slower than one that does not.
+
 ## Sessions and citations
 
 For session-aware retrieval, `SessionManager.chat()`

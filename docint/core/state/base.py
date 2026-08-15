@@ -65,7 +65,7 @@ def _ensure_sqlite_parent_dir(db_url: str) -> None:
 
 
 def _ensure_turn_validation_columns(engine: Engine) -> None:
-    """Backfill ``validation_*`` columns onto a pre-existing ``turns`` table.
+    """Backfill ``validation_*`` / ``retr*`` columns onto a pre-existing ``turns`` table.
 
     ``Base.metadata.create_all`` only creates missing tables, never adds
     columns to existing ones. Sessions DBs created before validation
@@ -84,6 +84,10 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
             ("validation_checked", "BOOLEAN"),
             ("validation_mismatch", "BOOLEAN"),
             ("validation_reason", "TEXT"),
+            # Corrective-retry provenance: a reloaded session must still show
+            # that the answer on screen came from a second attempt.
+            ("retried", "BOOLEAN"),
+            ("retry_query", "TEXT"),
         ]
         with engine.begin() as conn:
             for name, sql_type in pending:

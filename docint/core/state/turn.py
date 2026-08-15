@@ -26,6 +26,11 @@ class Turn(Base):  # type: ignore[misc]
     validation_checked = Column(Boolean, nullable=True)
     validation_mismatch = Column(Boolean, nullable=True)
     validation_reason = Column(Text, nullable=True)
+    # Corrective-retry provenance. The answer above may be a second attempt
+    # after the first was rejected as ungrounded; a reloaded session has to be
+    # able to say so, or the retry would read as the original answer.
+    retried = Column(Boolean, nullable=True)
+    retry_query = Column(Text, nullable=True)
     # Callable, like every other model here: a bare ``datetime.now(UTC)`` is
     # evaluated once at import, stamping every turn the process ever writes
     # with the moment it booted.

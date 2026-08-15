@@ -6964,6 +6964,7 @@ class RAG:
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
+        replace_turn_idx: int | None = None,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -6989,9 +6990,12 @@ class RAG:
             scoped_node_ids (Sequence[str] | None): Hand-picked chunk ids the
                 turn must answer from. When given, the session answers only
                 from them and skips vector retrieval entirely.
+            replace_turn_idx (int | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.chat`;
+                overwrites that turn instead of appending one.
 
         Returns:
-            dict[str, Any]: The chat response data.
+            dict[str, Any]: The chat response data, including ``turn_idx``.
         """
         return self.ensure_session_manager().chat(
             user_msg,
@@ -7004,6 +7008,7 @@ class RAG:
             prior_turn=prior_turn,
             skip_query_rewrite=skip_query_rewrite,
             scoped_node_ids=scoped_node_ids,
+            replace_turn_idx=replace_turn_idx,
         )
 
     def stream_chat(
@@ -7019,6 +7024,7 @@ class RAG:
         prior_turn: PriorTurn | None = None,
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
+        replace_turn_idx: int | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -7044,6 +7050,9 @@ class RAG:
             scoped_node_ids (Sequence[str] | None): Hand-picked chunk ids the
                 turn must answer from. When given, the session answers only
                 from them and skips vector retrieval entirely.
+            replace_turn_idx (int | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.stream_chat`;
+                overwrites that turn instead of appending one.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -7059,6 +7068,7 @@ class RAG:
             prior_turn=prior_turn,
             skip_query_rewrite=skip_query_rewrite,
             scoped_node_ids=scoped_node_ids,
+            replace_turn_idx=replace_turn_idx,
         )
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:

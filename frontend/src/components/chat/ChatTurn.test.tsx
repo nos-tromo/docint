@@ -107,4 +107,28 @@ describe('ChatTurn', () => {
 
     expect(screen.getByTestId('scope-not-applied')).toBeInTheDocument()
   })
+
+  it('names the corrective retry a reloaded session replays', () => {
+    // The live retry frame is long gone by then; the provenance has to come
+    // off the persisted turn or a reloaded transcript would present a second
+    // attempt as though it were the original answer.
+    const meta = {
+      session_id: 's',
+      sources: [],
+      retried: true,
+      retry_query: 'Security Council resolutions'
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'what did the UN say?', assistant: 'Three resolutions.', done: true, meta })
+
+    expect(screen.getByTestId('retry-notice')).toHaveTextContent(/Security Council resolutions/)
+  })
+
+  it('shows no retry notice on an ordinary answer', () => {
+    const meta = { session_id: 's', sources: [] } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta })
+
+    expect(screen.queryByTestId('retry-notice')).not.toBeInTheDocument()
+  })
 })

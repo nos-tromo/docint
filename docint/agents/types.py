@@ -56,6 +56,13 @@ class RetrievalRequest:
     turn: Turn
     analysis: IntentAnalysis
     history: list[dict[str, str]] = field(default_factory=list)
+    replace_turn_idx: int | None = None
+    """Overwrite this conversation turn instead of appending a new one.
+
+    Set by the corrective retry so the second attempt replaces the rejected
+    answer in place: one user message must persist as exactly one turn, or the
+    session would read back as though the user had asked twice.
+    """
 
 
 @dataclass
@@ -75,6 +82,14 @@ class RetrievalResult:
     summary_diagnostics: dict[str, Any] | None = None
     retrieval_query: str | None = None
     rewritten_query: str | None = None
+    retried: bool | None = None
+    retry_query: str | None = None
+    turn_idx: int | None = None
+    """Index of the persisted conversation turn; an internal join key.
+
+    Carried so a corrective retry can overwrite the turn its first attempt
+    wrote. Never serialized to clients.
+    """
 
 
 @dataclass

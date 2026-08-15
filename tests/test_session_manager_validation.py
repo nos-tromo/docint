@@ -115,6 +115,59 @@ def test_update_turn_validation_unknown_idx_logs_and_returns(
     )
 
 
+def test_get_session_history_replays_corrective_retry_provenance(
+    session_manager: SessionManager,
+) -> None:
+    """A reloaded session must still name the retry that produced the answer.
+
+    The live SSE retry frame is long gone by then, so without this the second
+    attempt replays as though it were the original answer.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    session_id = "sess-retried"
+    idx = _persist_dummy_turn(session_manager, session_id)
+
+    session_manager.update_turn_validation(
+        session_id,
+        idx,
+        validation_checked=True,
+        validation_mismatch=False,
+        validation_reason=None,
+        retried=True,
+        retry_query="Security Council resolutions",
+    )
+
+    assistant = session_manager.get_session_history(session_id, owner=None)[1]
+    assert assistant["retried"] is True
+    assert assistant["retry_query"] == "Security Council resolutions"
+
+
+def test_get_session_history_omits_retry_keys_for_ordinary_turns(
+    session_manager: SessionManager,
+) -> None:
+    """An answer that was never retried carries no retry keys at all.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    session_id = "sess-not-retried"
+    idx = _persist_dummy_turn(session_manager, session_id)
+
+    session_manager.update_turn_validation(
+        session_id,
+        idx,
+        validation_checked=True,
+        validation_mismatch=False,
+        validation_reason=None,
+    )
+
+    assistant = session_manager.get_session_history(session_id, owner=None)[1]
+    assert "retried" not in assistant
+    assert "retry_query" not in assistant
+
+
 def test_get_session_history_omits_validation_when_all_null(
     session_manager: SessionManager,
 ) -> None:
@@ -166,7 +219,14 @@ def test_idempotent_column_migration_adds_missing_columns_on_legacy_db() -> None
     _ensure_turn_validation_columns(engine)  # second call must be a no-op
 
     post_columns = {c["name"] for c in inspect(engine).get_columns("turns")}
-    assert {"validation_checked", "validation_mismatch", "validation_reason"} <= (post_columns)
+    assert {
+        "validation_checked",
+        "validation_mismatch",
+        "validation_reason",
+        # Corrective-retry provenance rides the same idempotent migration.
+        "retried",
+        "retry_query",
+    } <= (post_columns)
 
     with engine.begin() as conn:
         legacy = conn.execute(text("SELECT validation_checked FROM turns")).scalar()

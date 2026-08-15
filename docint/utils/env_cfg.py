@@ -1957,6 +1957,31 @@ def load_response_validation_env(
 
 
 @dataclass(frozen=True)
+class CorrectiveRetryConfig:
+    """Dataclass for corrective-retry configuration."""
+
+    enabled: bool
+
+
+def load_corrective_retry_env(default_enabled: bool = True) -> CorrectiveRetryConfig:
+    """Load corrective-retry configuration from environment variables.
+
+    Args:
+        default_enabled (bool): Whether the corrective retry is enabled by default.
+
+    Returns:
+        CorrectiveRetryConfig: Parsed corrective-retry settings.
+        - enabled (bool): Whether an answer flagged by response validation as
+          mismatched *and* judged weak triggers one automatic re-retrieval with
+          a reformulated query. Depends on response validation being enabled —
+          without a mismatch verdict there is nothing to retry on.
+    """
+    return CorrectiveRetryConfig(
+        enabled=str(os.getenv("CORRECTIVE_RETRY_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
+    )
+
+
+@dataclass(frozen=True)
 class RetrievalConfig:
     """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
 

@@ -80,11 +80,17 @@ class RAGRetrievalAgent(RetrievalAgent):
         prior_turn = build_prior_turn(request.history)
         # Thread the resolved session id explicitly so the turn persists under
         # this conversation (never a process-global / shared field).
-        data = self.rag.chat(query_text, session_id=session_id, prior_turn=prior_turn)
+        data = self.rag.chat(
+            query_text,
+            session_id=session_id,
+            prior_turn=prior_turn,
+            replace_turn_idx=request.replace_turn_idx,
+        )
         latency = (time.monotonic() - start) * 1000
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources = data.get("sources", []) if isinstance(data, dict) else []
+        turn_idx = data.get("turn_idx") if isinstance(data, dict) else None
 
         return RetrievalResult(
             answer=answer,
@@ -96,6 +102,7 @@ class RAGRetrievalAgent(RetrievalAgent):
             latency_ms=latency,
             retrieval_query=query_text,
             rewritten_query=analysis.rewritten_query,
+            turn_idx=turn_idx if isinstance(turn_idx, int) else None,
         )
 
     def _filter_ner_sources(self, sources: list[dict[str, Any]], entities: dict[str, Any]) -> list[dict[str, Any]]:

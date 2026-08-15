@@ -34,12 +34,14 @@ from docint.agents import (
     ClarificationConfig,
     ClarificationPolicy,
     ContextualUnderstandingAgent,
+    QueryReformulationAgent,
     RAGRetrievalAgent,
     ResultValidationResponseAgent,
     RetrievalResult,
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
     Turn,
+    is_weak_answer,
 )
 from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
@@ -58,6 +60,7 @@ from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
+    load_corrective_retry_env,
     load_frontend_env,
     load_hate_speech_env,
     load_host_env,
@@ -195,6 +198,14 @@ def _build_orchestrator() -> AgentOrchestrator:
     understanding = _select_understanding_agent()
     validation_cfg = load_response_validation_env()
     validation_llm = rag.text_model if isinstance(understanding, ContextualUnderstandingAgent) else None
+    # The retry rides on the same LLM as validation: without a mismatch verdict
+    # there is nothing to retry on, so gating them together keeps the two from
+    # drifting into a state where one is armed and the other cannot fire.
+    reformulator = (
+        QueryReformulationAgent(llm=validation_llm)
+        if load_corrective_retry_env().enabled and validation_llm is not None
+        else None
+    )
 
     return AgentOrchestrator(
         understanding=understanding,
@@ -205,6 +216,7 @@ def _build_orchestrator() -> AgentOrchestrator:
             llm=validation_llm,
         ),
         policy=_clarification_policy,
+        reformulator=reformulator,
     )
 
 
@@ -585,6 +597,39 @@ def _validation_payload(
         "validation_mismatch": validated.validation_mismatch,
         "validation_reason": validated.validation_reason,
     }
+
+
+def _reformulated_query(question: str, failed_query: str | None, reason: str | None) -> str | None:
+    """Rewrite a retrieval query whose answer response validation rejected.
+
+    Built fresh per call like the validator in :func:`_validation_payload`: the
+    agent holds no state, so there is nothing to cache and nothing to leak
+    between requests. Blocking — call it off the event loop.
+
+    Args:
+        question (str): The user's original question.
+        failed_query (str | None): The retrieval query that produced the
+            rejected answer.
+        reason (str | None): The validator's reason for rejecting the answer.
+
+    Returns:
+        str | None: A fresh retrieval query, or ``None`` when none could be
+            produced — no chat model configured, or the model declined. The
+            caller treats ``None`` as "skip the retry".
+    """
+    if not getattr(rag, "text_model_id", None):
+        return None
+    try:
+        llm = rag.text_model
+    except Exception as exc:
+        logger.warning("Failed to initialize reformulation LLM: {}", exc)
+        return None
+
+    return QueryReformulationAgent(llm=llm).reformulate(
+        user_query=question,
+        failed_query=failed_query,
+        validation_reason=reason,
+    )
 
 
 def _iter_text_tokens(text: str) -> list[str]:
@@ -1050,6 +1095,8 @@ class AgentChatOut(BaseModel):
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
+    retried: bool | None = None
+    retry_query: str | None = None
 
 
 class ReportCreateIn(BaseModel):
@@ -1753,13 +1800,31 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     "graph_debug": stateless_data.get("graph_debug"),
                 }
             else:
+                # Resolved once, on the first pass, and reused by the corrective
+                # retry. The prior turn especially: recomputing it after the
+                # first pass has persisted would bind the answer this turn is
+                # replacing as that same turn's own context.
+                stream_state: dict[str, Any] = {}
 
-                def _make_chat_stream() -> Iterator[Any]:
+                def _make_chat_stream(
+                    question: str | None = None,
+                    *,
+                    replace_turn_idx: int | None = None,
+                ) -> Iterator[Any]:
                     """Build the blocking chat stream off the event loop.
 
                     Session start, history load, and the retrieval/LLM stream
                     are all synchronous and so run on the worker thread driven
                     by ``_aiter_sync_gen``.
+
+                    Args:
+                        question (str | None): Query to answer. ``None`` (the
+                            first pass) uses the user's question and keeps this
+                            endpoint's internal retrieval rewrite; a value (the
+                            corrective retry) is already a retrieval query, so
+                            rewriting it again would undo the correction.
+                        replace_turn_idx (int | None): Overwrite this persisted
+                            turn instead of appending one.
 
                     Returns:
                         Iterator[Any]: The sync chat-chunk generator.
@@ -1769,35 +1834,41 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     # user/assistant exchange (owner-scoped) onto the synthesis
                     # templates while keeping this endpoint's own internal
                     # retrieval rewrite (``skip_query_rewrite=False``).
-                    session_id = rag.start_session(payload.session_id, owner=session_owner)
-                    prior_turn = (
-                        build_prior_turn(rag.sessions.get_session_history(session_id, owner=session_owner))
-                        if rag.sessions is not None
-                        else None
-                    )
+                    if "session_id" not in stream_state:
+                        resolved_id = rag.start_session(payload.session_id, owner=session_owner)
+                        stream_state["session_id"] = resolved_id
+                        stream_state["prior_turn"] = (
+                            build_prior_turn(rag.sessions.get_session_history(resolved_id, owner=session_owner))
+                            if rag.sessions is not None
+                            else None
+                        )
+                        # A session pinned to hand-picked chunks answers only
+                        # from them — no vector retrieval at all. Resolved here,
+                        # once the id exists, so a scope carried by the very
+                        # first turn is used for that turn and pinned for the
+                        # next.
+                        stream_state["scoped_node_ids"] = (
+                            _apply_turn_scope(
+                                resolved_id,
+                                session_owner,
+                                payload.scope_chunk_ids,
+                            )
+                            or None
+                        )
                     return cast(
                         "Iterator[Any]",
                         rag.stream_chat(
-                            payload.question,
-                            session_id=session_id,
+                            payload.question if question is None else question,
+                            session_id=stream_state["session_id"],
                             owner=session_owner,
                             metadata_filters=metadata_filters,
                             metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                             metadata_filter_rules=payload.metadata_filters,
                             vector_store_kwargs=vector_store_kwargs or None,
-                            prior_turn=prior_turn,
-                            skip_query_rewrite=False,
-                            # A session pinned to hand-picked chunks answers
-                            # only from them — no vector retrieval at all.
-                            # Resolved here, once the id exists, so a scope
-                            # carried by the very first turn is used for that
-                            # turn and pinned for the next.
-                            scoped_node_ids=_apply_turn_scope(
-                                session_id,
-                                session_owner,
-                                payload.scope_chunk_ids,
-                            )
-                            or None,
+                            prior_turn=stream_state["prior_turn"],
+                            skip_query_rewrite=question is not None,
+                            scoped_node_ids=stream_state["scoped_node_ids"],
+                            replace_turn_idx=replace_turn_idx,
                         ),
                     )
 
@@ -1839,6 +1910,92 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             # session_manager.stream_chat; the stateless branch doesn't
             # persist a turn at all and so won't carry it.
             turn_idx = payload_out.pop("turn_idx", None)
+
+            # Corrective retry: an answer the validator rejected *and* that is
+            # itself weak gets one more attempt with a reformulated query. The
+            # gate is deliberately narrow — a mismatched but substantive answer
+            # is still worth showing, a scoped turn runs no retrieval for a new
+            # query to change, and without a persisted turn there is nothing to
+            # overwrite, which would leave the user asking twice.
+            # Session mode only, and named as such rather than inferred from the
+            # absent turn_idx: the retry re-enters ``_make_chat_stream``, which
+            # only exists on that branch.
+            retry_query: str | None = None
+            if (
+                payload.retrieval_mode != "stateless"
+                and isinstance(turn_idx, int)
+                and validation.get("validation_mismatch") is True
+                and is_weak_answer(answer)
+                and payload_out.get("retrieval_mode") != "scoped"
+                and load_corrective_retry_env().enabled
+            ):
+                try:
+                    retry_query = await to_thread.run_sync(
+                        _reformulated_query,
+                        payload.question,
+                        stream_retrieval_query,
+                        cast("str | None", validation.get("validation_reason")),
+                    )
+                except Exception as exc:
+                    logger.opt(exception=exc).warning("Corrective retry reformulation failed")
+
+            if retry_query:
+                # Announced before the second stream opens: the SPA discards
+                # the rejected answer on this frame, so a silent swap is
+                # impossible even if everything after it fails.
+                yield f"data: {json.dumps({'retry': {'query': retry_query}})}\n\n"
+
+                def _make_retry_stream() -> Iterator[Any]:
+                    """Build the retry's chat stream, overwriting the first turn.
+
+                    Returns:
+                        Iterator[Any]: The sync chat-chunk generator.
+                    """
+                    return _make_chat_stream(retry_query, replace_turn_idx=cast(int, turn_idx))
+
+                retry_payload: dict[str, Any] | None = None
+                retry_answer = ""
+                retry_ok = True
+                try:
+                    async for chunk in _aiter_sync_gen(_make_retry_stream, request):
+                        if isinstance(chunk, str):
+                            retry_answer += chunk
+                            yield f"data: {json.dumps({'token': chunk})}\n\n"
+                        elif isinstance(chunk, dict):
+                            retry_payload = chunk
+                except Exception as exc:
+                    # Never turn a delivered answer into an error frame: the
+                    # first attempt's envelope still describes what was
+                    # persisted, so fall back to reporting that.
+                    logger.opt(exception=exc).warning("Corrective retry failed; keeping the first answer")
+                    retry_ok = False
+
+                if retry_ok:
+                    payload_out = dict(retry_payload or {})
+                    payload_out.pop("turn_idx", None)
+                    retry_final = str(payload_out.get("response") or payload_out.get("answer") or "") or retry_answer
+                    retry_sources = payload_out.get("sources")
+                    if not isinstance(retry_sources, list):
+                        retry_sources = cast(list[dict[str, Any]], [])
+                    # Validated against the user's original question, never the
+                    # reformulation: the reformulation is a retrieval tactic,
+                    # and grading the answer against it would let a drifting
+                    # rewrite mark its own homework.
+                    validation = _validation_payload(
+                        question=payload.question,
+                        answer=retry_final,
+                        sources=retry_sources,
+                        summary_diagnostics=(
+                            payload_out.get("summary_diagnostics")
+                            if isinstance(payload_out.get("summary_diagnostics"), dict)
+                            else None
+                        ),
+                        retrieval_query=str(payload_out.get("retrieval_query") or retry_query),
+                    )
+                    payload_out.update(validation)
+                    payload_out["retried"] = True
+                    payload_out["retry_query"] = retry_query
+
             stream_session_id = payload_out.get("session_id")
             if (
                 isinstance(turn_idx, int)
@@ -1853,6 +2010,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         validation_checked=cast("bool | None", validation.get("validation_checked")),
                         validation_mismatch=cast("bool | None", validation.get("validation_mismatch")),
                         validation_reason=cast("str | None", validation.get("validation_reason")),
+                        retried=cast("bool | None", payload_out.get("retried")),
+                        retry_query=cast("str | None", payload_out.get("retry_query")),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -3257,6 +3416,8 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
         validation_checked=retrieval.validation_checked,
         validation_mismatch=retrieval.validation_mismatch,
         validation_reason=retrieval.validation_reason,
+        retried=retrieval.retried,
+        retry_query=retrieval.retry_query,
     )
 
 

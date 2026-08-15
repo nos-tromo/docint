@@ -830,12 +830,88 @@ describe('Chat session switching', () => {
     const empty = { turns: [], inflight: true }
 
     expect(chatReducer(empty, { type: 'token', token: 'x' })).toEqual(empty)
+    expect(chatReducer(empty, { type: 'retry', query: 'q' })).toEqual(empty)
     expect(
       chatReducer(empty, { type: 'finalize', meta: { session_id: 's' } as ChatFinalEvent })
     ).toEqual({ turns: [], inflight: false })
     expect(chatReducer(empty, { type: 'fail', error: 'boom' })).toEqual({
       turns: [],
       inflight: false
+    })
+  })
+
+  it('replaces the rejected answer and names the retry when the backend re-answers', async () => {
+    // The retry frame lands between two token streams: the first answer was
+    // rejected, so it must be discarded rather than spliced onto the second.
+    const frames =
+      'data: {"token":"Evidence insufficient."}\n\n' +
+      'data: {"retry":{"query":"Security Council resolutions"}}\n\n' +
+      'data: {"token":"The Council adopted three resolutions."}\n\n' +
+      'data: {"response":"The Council adopted three resolutions.","sources":[],' +
+      '"session_id":"sess-1","retried":true,"retry_query":"Security Council resolutions"}\n\n'
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/The Council adopted three resolutions/)).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/Evidence insufficient/)).not.toBeInTheDocument()
+    const notice = screen.getByTestId('retry-notice')
+    expect(notice).toHaveTextContent(/Security Council resolutions/)
+  })
+
+  it('keeps the retry notice after the final envelope arrives', async () => {
+    const frames =
+      'data: {"retry":{"query":"reformulated"}}\n\n' +
+      'data: {"token":"A better answer."}\n\n' +
+      'data: {"response":"A better answer.","sources":[],"session_id":"sess-1",' +
+      '"retried":true,"retry_query":"reformulated"}\n\n'
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/A better answer/)).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('retry-notice')).toHaveTextContent(/reformulated/)
+  })
+
+  it('restores the delivered answer when a retry is abandoned mid-stream', async () => {
+    // The backend gave up on the retry and reported the first answer instead.
+    // Without preferring the envelope's own text the turn would render blank —
+    // the retry frame cleared the tokens and no replacement ever arrived.
+    const frames =
+      'data: {"token":"Evidence insufficient."}\n\n' +
+      'data: {"retry":{"query":"reformulated"}}\n\n' +
+      'data: {"response":"Evidence insufficient.","sources":[],"session_id":"sess-1"}\n\n'
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/Evidence insufficient/)).toBeInTheDocument()
     })
   })
 })

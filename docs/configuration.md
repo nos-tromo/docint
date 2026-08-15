@@ -501,6 +501,14 @@ Loaded by `load_response_validation_env()` (`env_cfg.py:935`).
 | `RESPONSE_VALIDATION_ENABLED` | `true` | Run the `ResultValidationResponseAgent` to cross-check answers against sources. |
 | `RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS` | `48000` | Total characters of source text shown to the validator, shared across that answer's sources (shortest-first fair share, unused share redistributed). Sources still trimmed are marked inline and the prompt tells the validator not to read hidden text as an unsupported claim. Too small a budget makes the validator flag grounded answers as hallucinated. |
 
+## Corrective retry — `CorrectiveRetryConfig`
+
+Loaded by `load_corrective_retry_env()`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CORRECTIVE_RETRY_ENABLED` | `true` | Re-answer once with a reformulated query when validation flags a mismatch *and* the answer is weak. Depends on response validation being on — without a mismatch verdict there is nothing to retry. A triggered retry costs up to three extra LLM round-trips (reformulate, regenerate, re-validate) inside the same request, so a turn that fires it is noticeably slower; untriggered turns are unaffected. |
+
 ## Offline mode
 
 - `DOCINT_OFFLINE` — default `1`. When truthy, Docint sets

@@ -1,7 +1,7 @@
 """Tests for :class:`AgentOrchestrator` turn-handling logic."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typing_extensions import override
@@ -317,6 +317,239 @@ def test_orchestrator_respects_max_clarifications_for_fallback(turn: Turn) -> No
     assert result.clarification is None
     assert result.retrieval is not None
     assert result.retrieval.answer == "Evidence insufficient."
+
+
+class _StubReformulator:
+    """Reformulator returning a canned query and recording its inputs."""
+
+    def __init__(self, query: str | None = "reformulated query") -> None:
+        """Initialise with the query to hand back.
+
+        Args:
+            query: The reformulation to return, or ``None`` to decline.
+        """
+        self.query = query
+        self.calls: list[dict[str, Any]] = []
+
+    def reformulate(
+        self,
+        *,
+        user_query: str,
+        failed_query: str | None = None,
+        validation_reason: str | None = None,
+    ) -> str | None:
+        """Record the call and return the canned query.
+
+        Args:
+            user_query: The user's original question.
+            failed_query: The query that produced the rejected answer.
+            validation_reason: The validator's rejection reason.
+
+        Returns:
+            The canned reformulation, or ``None``.
+        """
+        self.calls.append(
+            {
+                "user_query": user_query,
+                "failed_query": failed_query,
+                "validation_reason": validation_reason,
+            }
+        )
+        return self.query
+
+
+class _CountingWeakRetriever(RetrievalAgent):
+    """Retrieval agent that records every request and answers weakly."""
+
+    def __init__(self, answers: list[str] | None = None) -> None:
+        """Initialise with the sequence of answers to return.
+
+        Args:
+            answers: Answers to return per call; the last one repeats.
+        """
+        self.requests: list[RetrievalRequest] = []
+        self.answers = answers or ["Evidence insufficient."]
+
+    @override
+    def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+        """Record the request and return the next canned answer.
+
+        Args:
+            request: The retrieval request from the orchestrator.
+
+        Returns:
+            A ``RetrievalResult`` carrying the next canned answer.
+        """
+        self.requests.append(request)
+        answer = self.answers[min(len(self.requests) - 1, len(self.answers) - 1)]
+        return RetrievalResult(
+            answer=answer,
+            sources=[],
+            session_id="s1",
+            retrieval_query="failed query",
+            turn_idx=3,
+        )
+
+
+def _retry_orchestrator(
+    retriever: RetrievalAgent,
+    reformulator: _StubReformulator | None,
+    responder: ResponseAgent | None = None,
+) -> AgentOrchestrator:
+    """Build an orchestrator wired for the corrective-retry path.
+
+    Args:
+        retriever: The retrieval agent under test.
+        reformulator: The reformulator to inject, or ``None`` to disable retry.
+        responder: Optional responder; defaults to a mismatch-flagging one.
+
+    Returns:
+        AgentOrchestrator: Orchestrator under test.
+    """
+    return AgentOrchestrator(
+        understanding=SimpleUnderstandingAgent(default_confidence=0.9),
+        clarifier=_NoopClarifier(),
+        retriever=retriever,
+        responder=responder if responder is not None else _MismatchResponseAgent(),
+        policy=_NeverClarifyPolicy(),
+        reformulator=cast(Any, reformulator),
+    )
+
+
+def test_orchestrator_retries_weak_mismatched_answer_with_reformulated_query(
+    turn: Turn,
+) -> None:
+    """A weak, mismatched answer triggers one re-retrieval with a new query."""
+    retriever = _CountingWeakRetriever(
+        answers=[
+            "Evidence insufficient.",
+            "The Security Council adopted three resolutions on the matter in 2019.",
+        ]
+    )
+    reformulator = _StubReformulator()
+
+    result = _retry_orchestrator(retriever, reformulator).handle_turn(turn)
+
+    assert len(retriever.requests) == 2
+    assert retriever.requests[1].analysis.rewritten_query == "reformulated query"
+    assert result.retrieval is not None
+    assert result.retrieval.retried is True
+    assert result.retrieval.retry_query == "reformulated query"
+    assert result.retrieval.answer is not None
+    assert "Security Council" in result.retrieval.answer
+
+
+def test_orchestrator_retry_replaces_the_first_attempts_turn(turn: Turn) -> None:
+    """The retry overwrites the persisted turn instead of appending one."""
+    retriever = _CountingWeakRetriever(answers=["Evidence insufficient.", "A much better grounded answer here."])
+
+    _retry_orchestrator(retriever, _StubReformulator()).handle_turn(turn)
+
+    assert retriever.requests[0].replace_turn_idx is None
+    assert retriever.requests[1].replace_turn_idx == 3
+
+
+def test_orchestrator_retry_feeds_the_validation_reason_to_the_reformulator(
+    turn: Turn,
+) -> None:
+    """The reformulator sees the question, the failed query, and the reason."""
+    reformulator = _StubReformulator()
+
+    _retry_orchestrator(_CountingWeakRetriever(), reformulator).handle_turn(turn)
+
+    assert reformulator.calls == [
+        {
+            "user_query": "hello",
+            "failed_query": "failed query",
+            "validation_reason": "no UN content in sources",
+        }
+    ]
+
+
+def test_orchestrator_revalidates_the_retry_answer(turn: Turn) -> None:
+    """The responder runs again so the fallback judges what the user will see."""
+
+    class _CountingResponder(ResponseAgent):
+        """Responder that counts calls and flags a mismatch each time."""
+
+        def __init__(self) -> None:
+            """Initialise the call counter."""
+            self.calls = 0
+
+        @override
+        def finalize(self, result: RetrievalResult, turn: TurnType) -> RetrievalResult:
+            """Flag a mismatch and count the call.
+
+            Args:
+                result: The retrieval result to annotate.
+                turn: The current conversation turn (unused).
+
+            Returns:
+                The annotated retrieval result.
+            """
+            _ = turn
+            self.calls += 1
+            result.validation_checked = True
+            result.validation_mismatch = True
+            result.validation_reason = "still off-topic"
+            return result
+
+    responder = _CountingResponder()
+    retriever = _CountingWeakRetriever(answers=["Evidence insufficient.", "A much better grounded answer here."])
+
+    _retry_orchestrator(retriever, _StubReformulator(), responder=responder).handle_turn(turn)
+
+    assert responder.calls == 2
+
+
+def test_orchestrator_falls_back_to_clarification_when_the_retry_also_fails(
+    turn: Turn,
+) -> None:
+    """Two weak attempts still end in the clarification nudge."""
+    retriever = _CountingWeakRetriever(answers=["Evidence insufficient."])
+
+    result = _retry_orchestrator(retriever, _StubReformulator()).handle_turn(turn)
+
+    assert len(retriever.requests) == 2
+    assert result.retrieval is None
+    assert result.clarification is not None
+    assert result.clarification.reason == "weak_answer_after_validation_mismatch"
+
+
+def test_orchestrator_skips_retry_when_the_reformulator_declines(turn: Turn) -> None:
+    """No usable reformulation means the original fallback, not a second call."""
+    retriever = _CountingWeakRetriever()
+
+    result = _retry_orchestrator(retriever, _StubReformulator(query=None)).handle_turn(turn)
+
+    assert len(retriever.requests) == 1
+    assert result.clarification is not None
+    assert result.clarification.reason == "weak_answer_after_validation_mismatch"
+
+
+def test_orchestrator_does_not_retry_a_strong_mismatched_answer(turn: Turn) -> None:
+    """A substantive answer is kept even when the validator flags it."""
+    retriever = _CountingWeakRetriever(
+        answers=["Hamas's stance is described across multiple cited passages spanning pages 13 and 67."]
+    )
+    reformulator = _StubReformulator()
+
+    result = _retry_orchestrator(retriever, reformulator).handle_turn(turn)
+
+    assert len(retriever.requests) == 1
+    assert reformulator.calls == []
+    assert result.retrieval is not None
+    assert result.retrieval.retried is None
+
+
+def test_orchestrator_without_a_reformulator_never_retries(turn: Turn) -> None:
+    """The retry is opt-in: no reformulator wired, no second retrieval."""
+    retriever = _CountingWeakRetriever()
+
+    result = _retry_orchestrator(retriever, None).handle_turn(turn)
+
+    assert len(retriever.requests) == 1
+    assert result.clarification is not None
 
 
 def test_orchestrator_forwards_history_into_retrieval_request(turn: Turn) -> None:

@@ -1,0 +1,20 @@
+A retrieval attempt failed: the answer generated from the retrieved evidence was flagged as not matching that evidence. Rewrite the retrieval query so that a fresh vector search is more likely to surface passages that actually answer the user's question.
+
+Rules:
+- Use the validator's reason to decide what to change: if the evidence was off-topic, shift the terms; if it was too narrow or too specific, broaden them; if the failed query drifted from the user's question, steer it back.
+- Prefer the wording the source documents would plausibly use over the user's phrasing.
+- Do not repeat the failed query verbatim.
+- Do not answer the question; only produce search terms.
+- Do not invent facts that are absent from the user's question.
+- Return ONLY the reformulated query, no preamble.
+
+User's question:
+{user_query}
+
+Failed retrieval query:
+{failed_query}
+
+Why the answer was rejected:
+{validation_reason}
+
+Reformulated retrieval query:

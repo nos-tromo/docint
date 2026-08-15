@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import io
+import json
 import types
 from collections.abc import Generator, Iterator
 from pathlib import Path
@@ -27,10 +28,45 @@ class DummySessionManager:
     def __init__(self) -> None:
         """Start with no scope pinned, per instance."""
         self.scope: list[str] = []
+        self.validation_updates: list[dict[str, Any]] = []
 
     def init_session_store_if_needed(self) -> None:
         """Satisfy the lifespan's eager store init without touching a DB."""
         return None
+
+    def update_turn_validation(
+        self,
+        *,
+        session_id: str,
+        turn_idx: int,
+        validation_checked: bool | None,
+        validation_mismatch: bool | None,
+        validation_reason: str | None,
+        retried: bool | None = None,
+        retry_query: str | None = None,
+    ) -> None:
+        """Record the validation back-write the streaming path performs.
+
+        Args:
+            session_id (str): Conversation the turn belongs to.
+            turn_idx (int): Index of the turn being stamped.
+            validation_checked (bool | None): Validation outcome flag.
+            validation_mismatch (bool | None): Mismatch flag.
+            validation_reason (str | None): Validator explanation.
+            retried (bool | None): Whether a corrective retry produced the answer.
+            retry_query (str | None): The reformulated query the retry used.
+        """
+        self.validation_updates.append(
+            {
+                "session_id": session_id,
+                "turn_idx": turn_idx,
+                "validation_checked": validation_checked,
+                "validation_mismatch": validation_mismatch,
+                "validation_reason": validation_reason,
+                "retried": retried,
+                "retry_query": retry_query,
+            }
+        )
 
     def set_scope(self, session_id: str, owner: str | None, chunk_ids: Any) -> bool:
         """Record a scope, honouring the owner gate the real manager applies.
@@ -268,6 +304,9 @@ class DummyRAG:
         self.stateless_query_filters: list[dict[str, Any]] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
+        # One entry per stream_chat call, so the corrective-retry tests can
+        # assert what the second pass was asked for.
+        self.stream_calls: list[dict[str, Any]] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
@@ -454,6 +493,7 @@ class DummyRAG:
         prior_turn: Any = None,
         skip_query_rewrite: Any = None,
         scoped_node_ids: Any = None,
+        replace_turn_idx: int | None = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -468,12 +508,21 @@ class DummyRAG:
             prior_turn (Any): Optional prior user/assistant exchange for context.
             skip_query_rewrite (Any): Accepted for parity with RAG.stream_chat; ignored by the stub.
             scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
+            replace_turn_idx (int | None): Turn to overwrite; recorded by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
         """
         _ = session_id, owner
         self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
+        self.stream_calls.append(
+            {
+                "question": question,
+                "skip_query_rewrite": skip_query_rewrite,
+                "replace_turn_idx": replace_turn_idx,
+                "prior_turn": prior_turn,
+            }
+        )
         self.stream_filters.append(
             {
                 "filters": metadata_filters,
@@ -487,6 +536,7 @@ class DummyRAG:
             "response": "answer",
             "sources": [{"id": 1}],
             "session_id": "generated-session",
+            "turn_idx": 0,
             "retrieval_query": f"rewritten::{question}",
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact_graph",
@@ -1290,6 +1340,51 @@ def test_agent_chat_returns_validation_alert(monkeypatch: pytest.MonkeyPatch, cl
     assert data["validation_reason"] == "mismatch"
 
 
+def test_agent_chat_surfaces_corrective_retry_provenance(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """An answer produced by a corrective retry must say so in the response.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+
+    class _RetriedOrchestrator:
+        """Stub orchestrator returning a result the corrective retry produced."""
+
+        def handle_turn(self, turn: Any, context: Any = None) -> OrchestratorResult:
+            """Return a canned retried retrieval result.
+
+            Args:
+                turn (Any): The user turn to process.
+                context (Any): The turn context. Defaults to None.
+
+            Returns:
+                OrchestratorResult: The result of processing the turn.
+            """
+            _ = turn, context
+            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"})
+            retrieval = RetrievalResult(
+                answer="A properly grounded answer.",
+                sources=[{"id": 1}],
+                session_id="generated-session",
+                validation_checked=True,
+                validation_mismatch=False,
+                retried=True,
+                retry_query="Security Council resolutions",
+                turn_idx=0,
+            )
+            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+
+    monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _RetriedOrchestrator())
+
+    data = client.post("/agent/chat", json={"message": "hello"}).json()
+
+    assert data["retried"] is True
+    assert data["retry_query"] == "Security Council resolutions"
+    # The persisted-turn join key is internal and must never reach a client.
+    assert "turn_idx" not in data
+
+
 def test_agent_chat_stream_clarifies(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Streaming endpoint should emit clarification event when policy demands it.
 
@@ -1325,6 +1420,314 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
     assert '"retrieval_query"' in text
     assert '"retrieval_mode"' in text
     assert '"response": "answer"' in text
+
+
+def _sse_frames(text: str) -> list[dict[str, Any]]:
+    """Parse an SSE body into its decoded JSON frames.
+
+    Args:
+        text (str): The raw SSE response body.
+
+    Returns:
+        list[dict[str, Any]]: One dict per ``data:`` frame, in order.
+    """
+    frames: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            frames.append(json.loads(line[6:]))
+    return frames
+
+
+def _arm_corrective_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    answers: list[str],
+    reformulation: str | None = "reformulated query",
+    mismatch: bool = True,
+    retrieval_mode: str = "rewrite_compact_graph",
+) -> list[dict[str, Any]]:
+    """Wire the streaming path so the corrective retry can be exercised.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        answers (list[str]): Answer text per ``stream_chat`` call; the last repeats.
+        reformulation (str | None): What the stubbed reformulator returns.
+        mismatch (bool): The validation verdict to force.
+        retrieval_mode (str): The retrieval mode the stream reports.
+
+    Returns:
+        list[dict[str, Any]]: Recorded ``stream_chat`` calls, appended in order.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def _fake_stream_chat(question: str, **kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Stream a canned answer and record how it was called.
+
+        Args:
+            question (str): The query being answered.
+            **kwargs (Any): Remaining ``stream_chat`` keyword arguments.
+
+        Yields:
+            str | dict[str, Any]: Answer tokens, then the final metadata dict.
+        """
+        calls.append({"question": question, **kwargs})
+        answer = answers[min(len(calls) - 1, len(answers) - 1)]
+        yield answer
+        yield {
+            "response": answer,
+            "sources": [{"id": 1}],
+            "session_id": "generated-session",
+            "turn_idx": 0,
+            "retrieval_query": question,
+            "retrieval_mode": retrieval_mode,
+        }
+
+    def _fake_validation(**kwargs: Any) -> dict[str, Any]:
+        """Return a forced validation verdict.
+
+        Args:
+            **kwargs (Any): Validation inputs (ignored).
+
+        Returns:
+            dict[str, Any]: The forced verdict.
+        """
+        _ = kwargs
+        return {
+            "validation_checked": True,
+            "validation_mismatch": mismatch,
+            "validation_reason": "no UN content in sources",
+        }
+
+    def _fake_reformulate(question: str, failed_query: str | None, reason: str | None) -> str | None:
+        """Return the canned reformulation.
+
+        Args:
+            question (str): The user's original question.
+            failed_query (str | None): The query that failed.
+            reason (str | None): The validator's reason.
+
+        Returns:
+            str | None: The canned reformulation.
+        """
+        _ = question, failed_query, reason
+        return reformulation
+
+    monkeypatch.setattr(api_module.rag, "stream_chat", _fake_stream_chat)
+    monkeypatch.setattr(api_module, "_validation_payload", _fake_validation)
+    monkeypatch.setattr(api_module, "_reformulated_query", _fake_reformulate)
+    return calls
+
+
+def _stream_text(client: TestClient, question: str = "What did the UN say?") -> str:
+    """Run a streaming query and return the raw SSE body.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        question (str): The question to ask.
+
+    Returns:
+        str: The raw SSE response body.
+    """
+    with client.stream("POST", "/stream_query", json={"question": question}) as resp:
+        assert resp.status_code == 200
+        return "".join([chunk.decode() for chunk in resp.iter_raw()])
+
+
+def test_stream_query_retries_a_weak_mismatched_answer(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A rejected weak answer is re-answered once, visibly, on the same stream.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(
+        monkeypatch,
+        answers=[
+            "Evidence insufficient.",
+            "The Security Council adopted three resolutions on the matter in 2019.",
+        ],
+    )
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert {"retry": {"query": "reformulated query"}} in frames
+    assert {"token": "The Security Council adopted three resolutions on the matter in 2019."} in frames
+    final = frames[-1]
+    assert final["retried"] is True
+    assert final["retry_query"] == "reformulated query"
+    assert final["response"] == "The Security Council adopted three resolutions on the matter in 2019."
+    assert len(calls) == 2
+
+
+def test_stream_query_retry_replaces_the_first_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """The retry overwrites the persisted turn and stamps it once.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(
+        monkeypatch,
+        answers=["Evidence insufficient.", "A properly grounded answer about the Security Council."],
+    )
+    sessions = cast("Any", api_module.rag.sessions)
+    sessions.validation_updates.clear()
+
+    _stream_text(client)
+
+    assert calls[0]["replace_turn_idx"] is None
+    assert calls[1]["replace_turn_idx"] == 0
+    # The reformulation IS the retrieval query; rewriting it again would undo
+    # the correction.
+    assert calls[1]["skip_query_rewrite"] is True
+    assert calls[1]["question"] == "reformulated query"
+    updates = sessions.validation_updates
+    assert len(updates) == 1
+    assert updates[0]["retried"] is True
+    assert updates[0]["retry_query"] == "reformulated query"
+    assert updates[0]["turn_idx"] == 0
+
+
+def test_stream_query_retry_reuses_the_first_passes_prior_turn(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The retry must not bind the answer it is replacing as its own context.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(
+        monkeypatch,
+        answers=["Evidence insufficient.", "A properly grounded answer about the Security Council."],
+    )
+
+    _stream_text(client)
+
+    assert calls[0]["prior_turn"] == calls[1]["prior_turn"]
+
+
+def test_stream_query_does_not_retry_a_strong_mismatched_answer(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A substantive answer is delivered even when the validator flags it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(
+        monkeypatch,
+        answers=["A long, substantive answer that clears the weak-answer threshold entirely."],
+    )
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert len(calls) == 1
+    assert not any("retry" in frame for frame in frames)
+    assert "retried" not in frames[-1]
+
+
+def test_stream_query_does_not_retry_a_scoped_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A hand-picked scope runs no retrieval for a new query to change.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(
+        monkeypatch,
+        answers=["Evidence insufficient."],
+        retrieval_mode="scoped",
+    )
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert len(calls) == 1
+    assert not any("retry" in frame for frame in frames)
+
+
+def test_stream_query_skips_retry_when_disabled(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """``CORRECTIVE_RETRY_ENABLED=false`` restores the single-pass behaviour.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("CORRECTIVE_RETRY_ENABLED", "false")
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient."])
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert len(calls) == 1
+    assert not any("retry" in frame for frame in frames)
+
+
+def test_stream_query_skips_retry_when_reformulation_declines(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """No usable reformulation means no second pass and no retry frame.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient."], reformulation=None)
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert len(calls) == 1
+    assert not any("retry" in frame for frame in frames)
+
+
+def test_stream_query_keeps_the_first_answer_when_the_retry_fails(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A failed retry degrades to the delivered answer, never to an error.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls: list[str] = []
+
+    def _flaky_stream_chat(question: str, **kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Answer weakly the first time, then fail.
+
+        Args:
+            question (str): The query being answered.
+            **kwargs (Any): Remaining ``stream_chat`` keyword arguments.
+
+        Yields:
+            str | dict[str, Any]: Tokens then metadata, on the first call only.
+
+        Raises:
+            RuntimeError: On every call after the first.
+        """
+        _ = kwargs
+        calls.append(question)
+        if len(calls) > 1:
+            raise RuntimeError("retrieval died mid-retry")
+        yield "Evidence insufficient."
+        yield {
+            "response": "Evidence insufficient.",
+            "sources": [{"id": 1}],
+            "session_id": "generated-session",
+            "turn_idx": 0,
+            "retrieval_query": question,
+            "retrieval_mode": "rewrite_compact_graph",
+        }
+
+    _arm_corrective_retry(monkeypatch, answers=["unused"])
+    monkeypatch.setattr(api_module.rag, "stream_chat", _flaky_stream_chat)
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert len(calls) == 2
+    final = frames[-1]
+    assert "error" not in final
+    assert final["response"] == "Evidence insufficient."
+    assert "retried" not in final
 
 
 def test_query_stamps_default_identity_on_session_start(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:

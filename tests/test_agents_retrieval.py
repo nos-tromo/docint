@@ -154,3 +154,39 @@ def test_retrieve_history_field_defaults_empty_list() -> None:
     agent.retrieve(request)
     _, kwargs = rag.chat.call_args
     assert kwargs.get("prior_turn") is None
+
+
+def test_retrieve_reports_the_persisted_turn_index() -> None:
+    """The turn index rides back so a corrective retry can overwrite that turn."""
+    rag = _make_rag_mock()
+    rag.chat.return_value = {
+        "response": "ok",
+        "sources": [{"id": 1}],
+        "session_id": "session-1",
+        "turn_idx": 4,
+    }
+    agent = RAGRetrievalAgent(rag)
+    request = RetrievalRequest(
+        turn=Turn(user_input="hello", session_id="session-1"),
+        analysis=IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"}),
+    )
+
+    result = agent.retrieve(request)
+
+    assert result.turn_idx == 4
+    assert rag.chat.call_args.kwargs.get("replace_turn_idx") is None
+
+
+def test_retrieve_forwards_replace_turn_idx() -> None:
+    """A retry's request must reach ``rag.chat`` as a replacement, not an append."""
+    rag = _make_rag_mock()
+    agent = RAGRetrievalAgent(rag)
+    request = RetrievalRequest(
+        turn=Turn(user_input="hello", session_id="session-1"),
+        analysis=IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"}),
+        replace_turn_idx=4,
+    )
+
+    agent.retrieve(request)
+
+    assert rag.chat.call_args.kwargs.get("replace_turn_idx") == 4
