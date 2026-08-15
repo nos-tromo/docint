@@ -20,10 +20,10 @@ from docint.core.readers.documents.artifacts import (
 from docint.core.readers.documents.chunking import build_coarse_units
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import (
-    PypdfLayoutAnalyzer,
-    _extract_image_bboxes_from_stream,
+    DoclingParseLayoutAnalyzer,
+    _detect_table_regions,
     _find_table_end,
-    _multiply_matrices,
+    analyze_document,
 )
 from docint.core.readers.documents.models import (
     BBox,
@@ -702,226 +702,133 @@ class TestExtraction:
 
 
 class TestLayoutAnalysis:
-    """Tests for PypdfLayoutAnalyzer image and table detection logic."""
+    """Tests for DoclingParseLayoutAnalyzer block detection on real PDFs."""
 
-    def test_detect_images_creates_figure_blocks(self) -> None:
-        """Pages with embedded images should produce FIGURE blocks."""
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = "Some text on the page."
+    @staticmethod
+    def _analyze(tmp_path: Path, spec: PageSpec) -> list[LayoutBlock]:
+        """Write a one-page PDF and return its layout blocks."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([spec]))
+        analyzer = DoclingParseLayoutAnalyzer(pdf)
+        try:
+            return analyzer.analyze_page(0)
+        finally:
+            analyzer.close()
 
-        # Simulate XObject with an /Image
-        mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
-        mock_image_obj.get_object.return_value = mock_image_obj
-
-        mock_xobj_dict = {"/Im1": mock_image_obj}
-        mock_xobj = MagicMock()
-        mock_xobj.get_object.return_value = mock_xobj_dict
-
-        mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
+    def test_detect_images_creates_figure_blocks_with_placement(self, tmp_path: Path) -> None:
+        """Embedded images become FIGURE blocks carrying their placement bbox."""
+        spec = PageSpec(
+            runs=[TextRun("Some text on the page.", x=60, y=700)],
+            images=[ImageBox(x=100, y=400, w=200, h=100)],
         )
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
+        blocks = self._analyze(tmp_path, spec)
 
         figure_blocks = [b for b in blocks if b.type == BlockType.FIGURE]
         text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
-        assert len(figure_blocks) >= 1
-        assert len(text_blocks) >= 1  # remaining text
+        assert len(figure_blocks) == 1
+        fig = figure_blocks[0].bbox
+        assert (fig.x0, fig.y0, fig.x1, fig.y1) == pytest.approx((100.0, 400.0, 300.0, 500.0))
+        assert figure_blocks[0].confidence == pytest.approx(0.9)
+        assert len(text_blocks) == 1
+        assert text_blocks[0].text == "Some text on the page."
 
-    def test_detect_tables_via_caption(self) -> None:
-        """Text containing 'Table N:' captions should produce TABLE blocks."""
-        table_text = (
-            "Some introductory text about the experiment.\n"
-            "Table 1: Results summary\n"
-            "Model    Accuracy   F1\n"
-            "BERT     89.3       88.1\n"
-            "GPT-2    91.0       90.5\n"
-            "\n"
-            "The results show clear improvement in accuracy."
-        )
+    def test_two_images_two_figure_blocks(self, tmp_path: Path) -> None:
+        """Every embedded image gets its own FIGURE block."""
+        spec = PageSpec(images=[ImageBox(x=50, y=600, w=100, h=50), ImageBox(x=300, y=100, w=120, h=80)])
+        blocks = self._analyze(tmp_path, spec)
+        figs = sorted((b for b in blocks if b.type == BlockType.FIGURE), key=lambda b: b.bbox.x0)
+        assert [round(b.bbox.x0) for b in figs] == [50, 300]
 
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = table_text
-        # No images
-        mock_resources = MagicMock()
-        mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
+    def test_detect_tables_via_caption(self, tmp_path: Path) -> None:
+        """A 'Table N:' caption followed by short rows becomes a TABLE block with a tight bbox."""
+        rows = [
+            "Some introductory text about the experiment.",
+            "Table 1: Results summary",
+            "Model    Accuracy   F1",
+            "BERT     89.3       88.1",
+            "GPT-2    91.0       90.5",
+        ]
+        runs = [TextRun(t, x=60, y=700 - 14 * i) for i, t in enumerate(rows)]
+        runs.append(TextRun("The results show clear improvement in accuracy.", x=60, y=580))
+        blocks = self._analyze(tmp_path, PageSpec(runs=runs))
 
         table_blocks = [b for b in blocks if b.type == BlockType.TABLE]
-        text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
         assert len(table_blocks) == 1
-        assert "Table 1:" in table_blocks[0].text
-        assert "Model" in table_blocks[0].text
-        # Remaining text should still exist (intro + conclusion)
-        assert len(text_blocks) >= 1
-        remaining = text_blocks[0].text
-        assert "introductory" in remaining
-        assert "Table 1:" not in remaining
+        table = table_blocks[0]
+        assert "Table 1:" in table.text
+        assert "BERT" in table.text
+        # Tight bbox: the table does not span the whole page.
+        assert table.bbox.y1 < 720 and table.bbox.y0 > 600
+        text = "\n".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "introductory" in text and "results show" in text
+        assert "Table 1:" not in text
 
-    def test_no_images_no_tables_produces_text_only(self) -> None:
-        """A plain text page should produce only TEXT blocks."""
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = "Just plain text. Nothing special."
-        mock_resources = MagicMock()
-        mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
+    def test_no_images_no_tables_produces_text_only(self, tmp_path: Path) -> None:
+        """Plain prose yields a single TEXT block with the page text."""
+        blocks = self._analyze(
+            tmp_path,
+            PageSpec(runs=[TextRun("Just plain prose.", x=60, y=700), TextRun("Second line.", x=60, y=686)]),
+        )
+        assert [b.type for b in blocks] == [BlockType.TEXT]
+        assert blocks[0].text == "Just plain prose.\nSecond line."
+        assert blocks[0].bbox.y0 > 600  # tight, not page-sized
 
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
-
+    def test_empty_page_produces_fallback_block(self, tmp_path: Path) -> None:
+        """A page with nothing on it still yields an empty TEXT block."""
+        blocks = self._analyze(tmp_path, PageSpec())
         assert len(blocks) == 1
         assert blocks[0].type == BlockType.TEXT
-        assert "plain text" in blocks[0].text
-
-    def test_empty_page_produces_fallback_block(self) -> None:
-        """A page with no text or images should still produce a block."""
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = ""
-        mock_resources = MagicMock()
-        mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
-
-        assert len(blocks) == 1
-        assert blocks[0].type == BlockType.TEXT
+        assert blocks[0].text == ""
         assert blocks[0].confidence == 0.0
 
-    def test_mixed_content_page(self) -> None:
-        """A page with images, tables, and text should produce all block types."""
-        mixed_text = (
-            "Introduction paragraph.\nTable 1: Key metrics\nMetric   Value\nLoss     0.5\n\nSome concluding remarks."
+    def test_two_columns_read_left_column_first(self, tmp_path: Path) -> None:
+        """Multi-column text is emitted column by column, one TEXT block per column."""
+        blocks = self._analyze(tmp_path, two_column_page())
+        text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
+        assert len(text_blocks) == 2
+        assert text_blocks[0].text.startswith("Left column line 1")
+        assert text_blocks[0].text.endswith("Left column line 3")
+        assert text_blocks[1].text.startswith("Right column line 1")
+        assert text_blocks[0].reading_order < text_blocks[1].reading_order
+
+    def test_large_bold_line_becomes_title_and_bold_line_header(self, tmp_path: Path) -> None:
+        """Font-based heading detection: biggest heading → TITLE, others → HEADER."""
+        spec = PageSpec(
+            runs=[
+                TextRun("Annual Report", x=60, y=740, size=20, bold=True),
+                TextRun("This is the body of the report, set in the regular face.", x=60, y=700, size=11),
+                TextRun("It continues for another line of ordinary prose.", x=60, y=686, size=11),
+                TextRun("Financial Summary", x=60, y=650, size=11, bold=True),
+                TextRun("Revenue rose in every quarter of the reporting period.", x=60, y=636, size=11),
+                TextRun("Costs stayed flat across the same period.", x=60, y=622, size=11),
+            ]
         )
+        blocks = self._analyze(tmp_path, spec)
+        kinds = [(b.type, b.text) for b in blocks]
+        assert (BlockType.TITLE, "Annual Report") in kinds
+        assert (BlockType.HEADER, "Financial Summary") in kinds
+        text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
+        assert len(text_blocks) == 2  # split at the heading
+        assert "Annual Report" not in text_blocks[0].text
+        order = [b.type for b in sorted(blocks, key=lambda b: b.reading_order)]
+        assert order == [BlockType.TITLE, BlockType.TEXT, BlockType.HEADER, BlockType.TEXT]
 
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = mixed_text
+    def test_uniform_page_has_no_headings(self, tmp_path: Path) -> None:
+        """When every line looks alike nothing is promoted to a heading."""
+        runs = [TextRun(f"Line {i} of ordinary prose that ends here.", x=60, y=700 - 14 * i) for i in range(6)]
+        blocks = self._analyze(tmp_path, PageSpec(runs=runs))
+        assert all(b.type == BlockType.TEXT for b in blocks)
 
-        # Simulate image XObject
-        mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
-        mock_image_obj.get_object.return_value = mock_image_obj
-        mock_xobj_dict = {"/Im1": mock_image_obj}
-        mock_xobj = MagicMock()
-        mock_xobj.get_object.return_value = mock_xobj_dict
-        mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
-        )
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
-
-        block_types = {b.type for b in blocks}
-        assert BlockType.FIGURE in block_types
-        assert BlockType.TABLE in block_types
-        assert BlockType.TEXT in block_types
-
-
-class TestContentStreamParsing:
-    """Tests for the image bounding box extraction from content streams."""
-
-    def test_extract_image_bbox_from_simple_stream(self) -> None:
-        """Should extract correct bbox from cm + Do operators."""
-        stream = "q\n1 0 0 1 100 200 cm\n300 0 0 400 0 0 cm\n/Im1 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
-        assert "/Im1" in result
-        bbox = result["/Im1"]
-        assert bbox.x0 == pytest.approx(100.0)
-        assert bbox.y0 == pytest.approx(200.0)
-        assert bbox.x1 == pytest.approx(400.0)  # 100 + 300
-        assert bbox.y1 == pytest.approx(600.0)  # 200 + 400
-
-    def test_extract_with_scaling(self) -> None:
-        """Should handle scale + translate combos correctly."""
-        stream = "q\n1 0 0 1 196.559 397.582 cm\n.6 0 0 .6 0 0 cm\n364.8 0 0 537.36 0 0 cm\n/Im1 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
-        assert "/Im1" in result
-        bbox = result["/Im1"]
-        assert bbox.x0 == pytest.approx(196.559, abs=0.1)
-        assert bbox.y0 == pytest.approx(397.582, abs=0.1)
-        assert bbox.x1 == pytest.approx(415.439, abs=0.1)
-        assert bbox.y1 == pytest.approx(720.0, abs=0.1)
-
-    def test_unknown_image_name_ignored(self) -> None:
-        """Images not in the lookup set should be skipped."""
-        stream = "q\n300 0 0 400 100 200 cm\n/Im99 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
-        assert "/Im99" not in result
-        assert len(result) == 0
-
-    def test_multiple_images(self) -> None:
-        """Multiple images on one page should all get bboxes."""
-        stream = "q\n200 0 0 300 50 100 cm\n/Im1 Do\nQ\nq\n150 0 0 200 400 500 cm\n/Im2 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1", "/Im2"})
-        assert len(result) == 2
-        assert "/Im1" in result
-        assert "/Im2" in result
-        assert result["/Im1"].x0 == pytest.approx(50.0)
-        assert result["/Im2"].x0 == pytest.approx(400.0)
+    def test_analyze_document_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
+        """analyze_document() uses the caller's ParsedPdf when given one."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
+        page_info = PageInfo(page_index=0, has_text_layer=True, text_coverage=1.0, needs_ocr=False)
+        with ParsedPdf(pdf) as parsed:
+            with patch("docint.core.readers.documents.layout.ParsedPdf") as ctor:
+                layout = analyze_document(pdf, [page_info], parsed=parsed)
+            ctor.assert_not_called()
+        assert 0 in layout and layout[0]
 
 
 class TestTableDetection:
@@ -953,58 +860,21 @@ class TestTableDetection:
         end = _find_table_end(lines, 0)
         assert end == 2
 
-    def test_detect_tables_removes_table_from_text(self) -> None:
-        """Table regions should be excluded from the remaining text."""
-        text = (
-            "Introduction.\n"
-            "Table 1: Data\n"
-            "Col1  Col2  Col3\n"
-            "A     B     C\n"
-            "\n"
-            "Conclusion paragraph with enough text to not look like a table row."
-        )
-        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(text, 0, BBox(0, 0, 612, 792), 612.0, 792.0)
-        assert len(table_blocks) == 1
-        assert "Table 1:" in table_blocks[0].text
-        assert "Introduction" in remaining
-        assert "Conclusion" in remaining
-        assert "Table 1:" not in remaining
+    def test_detect_table_regions(self) -> None:
+        """Caption + rows form one region; surrounding prose is left out."""
+        lines = [
+            "Introduction.",
+            "Table 1: Data",
+            "Col1  Col2  Col3",
+            "A     B     C",
+            "",
+            "Conclusion paragraph with enough text to not look like a table row.",
+        ]
+        assert _detect_table_regions(lines) == [(1, 3)]
 
-    def test_no_table_returns_full_text(self) -> None:
-        """Without table captions, all text should remain."""
-        text = "Just regular text without any tables."
-        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(text, 0, BBox(0, 0, 612, 792), 612.0, 792.0)
-        assert len(table_blocks) == 0
-        assert remaining == text
-
-
-class TestMatrixMultiplication:
-    """Tests for the PDF affine matrix multiplication helper."""
-
-    def test_identity(self) -> None:
-        """Multiplying two identity matrices returns identity."""
-        identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-        result = _multiply_matrices(identity, identity)
-        assert result == pytest.approx(identity)
-
-    def test_translate(self) -> None:
-        """Translation matrix preserves tx/ty offsets."""
-        identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-        translate = [1.0, 0.0, 0.0, 1.0, 100.0, 200.0]
-        result = _multiply_matrices(identity, translate)
-        assert result[4] == pytest.approx(100.0)
-        assert result[5] == pytest.approx(200.0)
-
-    def test_scale_then_translate(self) -> None:
-        """Scaling after translation preserves the translation offset."""
-        translate = [1.0, 0.0, 0.0, 1.0, 50.0, 50.0]
-        scale = [2.0, 0.0, 0.0, 3.0, 0.0, 0.0]
-        result = _multiply_matrices(translate, scale)
-        # Scale should apply in current coord system, translation preserved
-        assert result[0] == pytest.approx(2.0)
-        assert result[3] == pytest.approx(3.0)
-        assert result[4] == pytest.approx(50.0)
-        assert result[5] == pytest.approx(50.0)
+    def test_no_table_no_regions(self) -> None:
+        """Without table captions, no regions are found."""
+        assert _detect_table_regions(["Just regular text without any tables."]) == []
 
 
 # ---------------------------------------------------------------------------
