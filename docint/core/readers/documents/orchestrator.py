@@ -37,6 +37,7 @@ from docint.core.readers.documents.ocr import (
     VisionOCREngine,
     extract_text_for_pages,
 )
+from docint.core.readers.documents.parse import ParsedPdf
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_ingestion_env, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
@@ -103,8 +104,48 @@ class DocumentPipelineOrchestrator:
             pipeline_version=self.config.pipeline_version,
         )
 
+        # One docling-parse handle serves every stage; pages are parsed once
+        # and cached on it. A file that cannot be opened at all fails the
+        # document here rather than surfacing as a "completed" manifest with
+        # a single failed page (which would register the hash as ingested).
+        try:
+            parsed = ParsedPdf(file_path)
+        except Exception as exc:
+            logger.error("Cannot open PDF {}: {}", file_path.name, exc)
+            manifest.status = "failed"
+            manifest.error = f"Cannot open PDF: {exc}"
+            save_manifest(manifest, artifacts_dir)
+            return manifest
+
+        try:
+            return self._process_parsed(file_path, doc_id, manifest, parsed, artifacts_dir, start)
+        finally:
+            parsed.close()
+
+    def _process_parsed(
+        self,
+        file_path: Path,
+        doc_id: str,
+        manifest: DocumentManifest,
+        parsed: ParsedPdf,
+        artifacts_dir: Path,
+        start: float,
+    ) -> DocumentManifest:
+        """Run stages 1-6 over an open document handle and return the manifest.
+
+        Args:
+            file_path (Path): Path to the PDF.
+            doc_id (str): Deterministic document hash.
+            manifest (DocumentManifest): Manifest to fill in.
+            parsed (ParsedPdf): Open docling-parse handle shared by the stages.
+            artifacts_dir (Path): Artifacts root.
+            start (float): ``time.monotonic()`` at the start of processing.
+
+        Returns:
+            DocumentManifest: The completed manifest.
+        """
         # --- Stage 1: Triage ---
-        pages = self._run_with_retry("triage", lambda: triage_pdf(file_path, self.config))
+        pages = self._run_with_retry("triage", lambda: triage_pdf(file_path, self.config, parsed=parsed))
         if pages is None:
             manifest.status = "failed"
             manifest.error = "Triage failed after retries"
@@ -125,7 +166,7 @@ class DocumentPipelineOrchestrator:
 
             def _analyze_layout(pi: PageInfo = page_info) -> dict[int, list[LayoutBlock]]:
                 """Run layout analysis for a single page and return its block map."""
-                result = analyze_document(file_path, [pi])
+                result = analyze_document(file_path, [pi], parsed=parsed)
                 return result if result is not None else {}
 
             result = self._run_with_retry(
@@ -173,6 +214,7 @@ class DocumentPipelineOrchestrator:
                         [pi],
                         layout,
                         vision_engine=vision_engine,
+                        parsed=parsed,
                     )
                     or {}
                 )

@@ -1790,49 +1790,71 @@ class TestOCR:
 class TestOrchestrator:
     """Tests for the document pipeline orchestrator."""
 
-    def test_process_with_mocked_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
-        """Processing a mocked PDF should produce a completed manifest with artifacts."""
-        # Create a dummy file for hashing
+    def test_process_real_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Processing a digital PDF should produce a completed manifest with artifacts and chunks."""
         pdf_file = tmp_path / "test.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 dummy content for hashing")
-
-        # Mock pypdf
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = "Test document content. Second sentence."
-        mock_mb = MagicMock()
-        mock_mb.width = 612.0
-        mock_mb.height = 792.0
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
+        pdf_file.write_bytes(
+            build_pdf(
+                [
+                    PageSpec(
+                        runs=[
+                            TextRun("Report Title", x=60, y=740, size=20, bold=True),
+                            TextRun("Test document content. Second sentence.", x=60, y=700),
+                            TextRun("Third sentence with more content here.", x=60, y=686),
+                        ]
+                    )
+                ]
+            )
+        )
 
         orch = DocumentPipelineOrchestrator(config=pipeline_config)
-
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as mock_triage_pypdf,
-            patch("docint.core.readers.documents.layout.pypdf") as mock_layout_pypdf,
-            patch("docint.core.readers.documents.ocr.pypdf") as mock_ocr_pypdf,
-        ):
-            mock_triage_pypdf.PdfReader.return_value = mock_reader
-            mock_layout_pypdf.PdfReader.return_value = mock_reader
-            mock_ocr_pypdf.PdfReader.return_value = mock_reader
-
-            manifest = orch.process(pdf_file)
+        manifest = orch.process(pdf_file)
 
         assert manifest.status == "completed"
         assert manifest.pages_total == 1
         assert manifest.pages_failed == 0
-
-        # Check artifacts were created
+        assert manifest.pages_ocr == 0
 
         doc_id = compute_file_hash(pdf_file)
         artifacts_dir = Path(pipeline_config.artifacts_dir)
         assert (artifacts_dir / doc_id / "manifest.json").exists()
+        chunks_path = artifacts_dir / doc_id / "chunks.jsonl"
+        chunk = json.loads(chunks_path.read_text().strip().split("\n")[0])
+        assert chunk["section_path"] == ["Report Title"]
+        assert "Test document content" in chunk["text"]
+
+    def test_two_column_pdf_chunks_read_column_wise(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """End to end, a two-column page's chunk text keeps each column contiguous."""
+        pdf_file = tmp_path / "cols.pdf"
+        pdf_file.write_bytes(build_pdf([two_column_page()]))
+
+        manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        chunks_path = Path(pipeline_config.artifacts_dir) / manifest.doc_id / "chunks.jsonl"
+        text = "\n".join(json.loads(line)["text"] for line in chunks_path.read_text().strip().split("\n"))
+        assert text.index("Left column line 3") < text.index("Right column line 1")
+
+    def test_opens_document_once_and_closes_it(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """One ParsedPdf handle serves every stage and is released at the end."""
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(build_pdf([two_column_page(), two_column_page()]))
+        closes: list[int] = []
+        real_close = ParsedPdf.close
+
+        def _counting_close(self: ParsedPdf) -> None:
+            closes.append(1)
+            real_close(self)
+
+        with (
+            patch.object(ParsedPdf, "close", _counting_close),
+            patch("docint.core.readers.documents.orchestrator.ParsedPdf", wraps=ParsedPdf) as ctor,
+        ):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        assert ctor.call_count == 1
+        assert len(closes) == 1
 
     def test_idempotent_rerun(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Second run should reuse artifacts when pipeline version matches."""
@@ -1852,80 +1874,47 @@ class TestOrchestrator:
         )
 
         pdf_file = tmp_path / "test.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 idempotent test content")
-
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = "Idempotent test."
-        mock_mb = MagicMock()
-        mock_mb.width = 612.0
-        mock_mb.height = 792.0
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
+        pdf_file.write_bytes(build_pdf([PageSpec(runs=[TextRun("Idempotent test.", x=60, y=700)])]))
 
         orch = DocumentPipelineOrchestrator(config=config)
 
-        # First run
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as m1,
-            patch("docint.core.readers.documents.layout.pypdf") as m2,
-            patch("docint.core.readers.documents.ocr.pypdf") as m3,
-        ):
-            m1.PdfReader.return_value = mock_reader
-            m2.PdfReader.return_value = mock_reader
-            m3.PdfReader.return_value = mock_reader
-            manifest1 = orch.process(pdf_file)
-
+        manifest1 = orch.process(pdf_file)
         assert manifest1.status == "completed"
 
         # Second run — should skip processing
-        manifest2 = orch.process(pdf_file)
+        with patch("docint.core.readers.documents.orchestrator.triage_pdf") as triage:
+            manifest2 = orch.process(pdf_file)
+        triage.assert_not_called()
         assert manifest2.status == "completed"
         assert manifest2.doc_id == manifest1.doc_id
 
     def test_page_failure_isolation(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """A failing page should not crash the whole document."""
         pdf_file = tmp_path / "test.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 failure isolation test")
+        pdf_file.write_bytes(build_pdf([two_column_page(), two_column_page()]))
+        real_page = ParsedPdf.page
 
-        good_page = MagicMock()
-        good_page.extract_text.return_value = "Good page content."
-        good_mb = MagicMock()
-        good_mb.width = 612.0
-        good_mb.height = 792.0
-        good_mb.left = 0.0
-        good_mb.bottom = 0.0
-        good_mb.right = 612.0
-        good_mb.top = 792.0
-        good_page.mediabox = good_mb
+        def _flaky(self: ParsedPdf, page_index: int) -> ParsedPage:
+            if page_index == 1:
+                raise RuntimeError("corrupt")
+            return real_page(self, page_index)
 
-        bad_page = MagicMock()
-        bad_page.extract_text.side_effect = RuntimeError("corrupt")
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [good_page, bad_page]
-
-        orch = DocumentPipelineOrchestrator(config=pipeline_config)
-
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as m1,
-            patch("docint.core.readers.documents.layout.pypdf") as m2,
-            patch("docint.core.readers.documents.ocr.pypdf") as m3,
-        ):
-            m1.PdfReader.return_value = mock_reader
-            m2.PdfReader.return_value = mock_reader
-            m3.PdfReader.return_value = mock_reader
-            manifest = orch.process(pdf_file)
+        with patch.object(ParsedPdf, "page", _flaky):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
 
         assert manifest.status == "completed"
         assert manifest.pages_total == 2
-        # At least one page should be processed (the good one)
-        assert any(p.status == "completed" for p in manifest.pages)
+        assert [p.status for p in manifest.pages] == ["completed", "failed"]
+
+    def test_unreadable_pdf_fails_cleanly(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A file that cannot be opened yields a failed manifest, not an exception."""
+        pdf_file = tmp_path / "bogus.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 not really a pdf")
+
+        manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "failed"
+        assert manifest.error
 
     def test_retry_logic(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Stages should retry on transient failures."""
@@ -1945,11 +1934,7 @@ class TestOrchestrator:
         assert call_count == 2
 
     def test_scanned_pdf_injects_text_block(self, tmp_path: Path) -> None:
-        """A scanned PDF should get a synthetic TEXT block after vision OCR.
-
-        Args:
-            tmp_path: pytest fixture providing a temporary directory for test files.
-        """
+        """A scanned PDF should get a synthetic TEXT block after vision OCR."""
         config = PipelineConfig(
             text_coverage_threshold=0.01,
             pipeline_version="test-1.0.0",
@@ -1964,36 +1949,9 @@ class TestOrchestrator:
             vision_ocr_max_tokens=4096,
         )
 
+        # Scanned page: no text, but a full-page embedded image
         pdf_file = tmp_path / "scan.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 scanned page test")
-
-        # Scanned page: no text, but an embedded image
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = ""
-        mock_mb = MagicMock()
-        mock_mb.width = 612.0
-        mock_mb.height = 792.0
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-
-        # Image XObject so layout produces a FIGURE block
-        mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
-        mock_image_obj.get_object.return_value = mock_image_obj
-        mock_xobj_dict = {"/Im1": mock_image_obj}
-        mock_xobj = MagicMock()
-        mock_xobj.get_object.return_value = mock_xobj_dict
-        mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
-        )
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
 
         # Mock the vision OCR engine to return extracted text
         mock_vision_engine = MagicMock()
@@ -2008,23 +1966,16 @@ class TestOrchestrator:
 
         orch = DocumentPipelineOrchestrator(config=config)
 
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as m1,
-            patch("docint.core.readers.documents.layout.pypdf") as m2,
-            patch("docint.core.readers.documents.ocr.pypdf") as m3,
-            patch(
-                "docint.core.readers.documents.orchestrator.VisionOCREngine",
-                return_value=mock_vision_engine,
-            ),
+        with patch(
+            "docint.core.readers.documents.orchestrator.VisionOCREngine",
+            return_value=mock_vision_engine,
         ):
-            m1.PdfReader.return_value = mock_reader
-            m2.PdfReader.return_value = mock_reader
-            m3.PdfReader.return_value = mock_reader
             manifest = orch.process(pdf_file)
 
         assert manifest.status == "completed"
         assert manifest.pages_total == 1
         assert manifest.pages_ocr == 1
+        assert manifest.images_found == 1
 
         # Verify chunks were produced from the vision OCR text
         doc_id = compute_file_hash(pdf_file)
@@ -2033,7 +1984,6 @@ class TestOrchestrator:
         assert chunks_path.exists(), "Expected chunks.jsonl to be created"
         lines = [line for line in chunks_path.read_text().strip().split("\n") if line.strip()]
         assert len(lines) >= 1
-        import json
 
         chunk_data = json.loads(lines[0])
-        assert "vision OCR" in chunk_data["text"].lower() or "scanned" in chunk_data["text"].lower()
+        assert "vision ocr" in chunk_data["text"].lower() or "scanned" in chunk_data["text"].lower()
