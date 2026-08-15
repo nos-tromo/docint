@@ -1,12 +1,14 @@
 """CLI entry point for ingesting documents into a collection."""
 
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from loguru import logger
 
 from docint.core.rag import RAG, EmptyIngestionError
+from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logger_cfg import init_logger
 
@@ -56,6 +58,13 @@ def ingest_docs(
         The CLI skips query engine creation so that large generation and reranker models
         are not loaded unnecessarily during ingestion jobs.
     """
+    # Deliberately untimed: this is one stage of a run, not a run. Under the
+    # job API the same run also resolves entities and builds the collection
+    # summary afterwards, and a duration logged here would exclude both — plus
+    # the RAG construction just above, whose embedding-tokenizer load alone
+    # cost 1.8 s of a 9.4 s run in the trace that motivated this. Each caller
+    # that owns a whole run times it instead (see :func:`main`,
+    # ``core/api.py``'s ``ingest``, and ``IngestJobManager._run``).
     rag = (
         RAG(qdrant_collection=qdrant_col) if hybrid is None else RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
     )
@@ -69,7 +78,6 @@ def ingest_docs(
         )
     finally:
         rag.unload_models()
-    logger.info("Ingestion complete.")
 
 
 def main() -> None:
@@ -79,11 +87,17 @@ def main() -> None:
     surfaces as a warning and a clean exit rather than a traceback or
     non-zero exit code — the underlying ``RAG`` already removed the
     empty SQLite KV store and retained the uploaded source files.
+
+    Times the run from here rather than inside :func:`ingest_docs` so the
+    duration covers everything the operator waited for, model loading
+    included. There is no job and no ingest card on this path, so this line
+    is the only record of how long the run took.
     """
     init_logger()
     set_offline_env()
     data_path = load_path_env().data
     qdrant_col = get_collection()
+    started_ticks = time.monotonic()
     try:
         ingest_docs(qdrant_col, data_path)
     except EmptyIngestionError as exc:
@@ -92,6 +106,8 @@ def main() -> None:
             "removed; uploaded source files are retained.",
             exc.collection_name,
         )
+    else:
+        logger.info("Ingestion complete in {}.", format_elapsed(time.monotonic() - started_ticks))
 
 
 if __name__ == "__main__":

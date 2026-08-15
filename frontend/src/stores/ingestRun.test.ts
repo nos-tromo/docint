@@ -48,6 +48,29 @@ describe('useIngestRunStore', () => {
     expect(useIngestRunStore.getState().uploading).toBe(false)
   })
 
+  it('reports the upload leg so the run starts where the timer did', async () => {
+    // The job only exists from finalize on, so the leg before it is the one
+    // stretch the server cannot measure. Anchored to the synthetic `start`
+    // event — the same stamp the card's timer ticks from — not to "now".
+    streamIngestUploadBatched.mockImplementationOnce(async function* () {
+      yield {
+        event: 'start',
+        data: { collection: 'mydocs', files: ['a.txt'] },
+        receivedAt: Date.now() - 2_000
+      }
+      yield { event: 'file_saved', data: { filename: 'a.txt' }, receivedAt: Date.now() }
+      return { anySaved: true, failures: [] }
+    })
+    const s = useIngestRunStore.getState()
+    s.setCollection('mydocs')
+    s.addFiles([file('a.txt')])
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    const payload = createIngestJob.mock.calls[0][0] as { upload_elapsed_ms?: number }
+    expect(payload.upload_elapsed_ms).toBeGreaterThanOrEqual(2_000)
+    expect(payload.upload_elapsed_ms).toBeLessThan(3_000)
+  })
+
   it('clears the picked files once the job is queued', async () => {
     const s = useIngestRunStore.getState()
     s.setCollection('mydocs')

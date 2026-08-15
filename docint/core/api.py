@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import time
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
@@ -55,6 +56,7 @@ from docint.core.retrieval_filters import (
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
+from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
     load_frontend_env,
     load_hate_speech_env,
@@ -908,6 +910,21 @@ class IngestIn(BaseModel):
     hybrid: bool | None = None
     ner: bool | None = None
     hate_speech: bool | None = None
+
+
+class IngestFinalizeIn(IngestIn):
+    """Finalize payload: an ingest request plus how long its upload took.
+
+    A run starts when the client begins uploading, not when the job is
+    created, so the client reports the leg the server never saw. It sends an
+    *elapsed duration*, never a timestamp: no client clock is trusted, and the
+    value is clamped server-side (:func:`docint.core.jobs._clamp_lead`) because
+    it bounds a log line. The field is on this subclass rather than
+    :class:`IngestIn` so the legacy synchronous ``POST /ingest``, which has no
+    upload leg, does not advertise it.
+    """
+
+    upload_elapsed_ms: float | None = Field(default=None, ge=0)
 
 
 class IngestOut(BaseModel):
@@ -3287,6 +3304,10 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
     # hybrid on. Calling the same resolver here reports what that resolution
     # actually produced, for callers that read the response's ``hybrid`` field.
     resolved_hybrid = payload.hybrid if payload.hybrid is not None else resolve_enable_hybrid()
+    # Timed here rather than inside ``ingest_docs`` so the duration covers the
+    # whole request, model loading included — this endpoint is synchronous, so
+    # the request *is* the run (unlike the job API, which times its own).
+    started_ticks = time.monotonic()
     try:
         ingest_module.ingest_docs(
             physical,
@@ -3318,6 +3339,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
         logger.opt(exception=exc).error(f"Unexpected error during ingestion of '{name}'")
         raise HTTPException(status_code=500, detail="Request failed.") from exc
 
+    logger.info("Ingestion complete in {}.", format_elapsed(time.monotonic() - started_ticks))
     return {
         "ok": True,
         "collection": name,
@@ -3825,7 +3847,7 @@ async def ingest_upload(
 
 @app.post("/ingest/finalize", status_code=202, tags=["Ingestion"])
 async def ingest_finalize(
-    payload: IngestIn,
+    payload: IngestFinalizeIn,
     request: Request,
     jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, str]:
@@ -3837,7 +3859,9 @@ async def ingest_finalize(
     a browser reload no longer severs the run's only view.
 
     Args:
-        payload (IngestIn): Collection (logical name) and run options.
+        payload (IngestFinalizeIn): Collection (logical name), run options,
+            and the client's upload elapsed time, which anchors the run's
+            duration at the moment the user started rather than here.
         request (Request): The incoming request, for principal resolution.
         jobs (IngestJobManager): The ingest job registry.
 
@@ -3869,6 +3893,7 @@ async def ingest_finalize(
         ner=payload.ner,
         hate_speech=payload.hate_speech,
         resolve=_auto_resolve_requested(payload.ner),
+        upload_lead_s=(payload.upload_elapsed_ms or 0.0) / 1000.0,
     )
     if not created:
         raise HTTPException(

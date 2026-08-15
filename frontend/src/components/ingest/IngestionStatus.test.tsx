@@ -73,20 +73,44 @@ describe('IngestionStatus completion timing', () => {
     expect(screen.getByText('1:02:05')).toBeInTheDocument()
   })
 
-  it('includes the duration in the completion summary', () => {
+  it('renders the duration once, leaving it out of the completion summary', () => {
+    // The header timer freezes in place where it was already ticking; a second
+    // copy in the summary showed the same number twice in one card.
     render(
       <IngestionStatus
         status={completeStatus({ startedAt: 10_000, finishedAt: 75_000 })}
       />
     )
-    expect(
-      screen.getByText(/2 files indexed · 10 chunks · Duration: 01:05/)
-    ).toBeInTheDocument()
-  })
-
-  it('omits the summary duration when no start time is known', () => {
-    render(<IngestionStatus status={completeStatus()} />)
+    expect(screen.getByText('01:05')).toBeInTheDocument()
     expect(screen.getByText('2 files indexed · 10 chunks')).toBeInTheDocument()
     expect(screen.queryByText(/Duration:/)).not.toBeInTheDocument()
+  })
+
+  it('omits the timer when nothing was measured at all', () => {
+    render(<IngestionStatus status={completeStatus()} />)
+    expect(screen.getByText('2 files indexed · 10 chunks')).toBeInTheDocument()
+    expect(screen.queryByText('00:00')).not.toBeInTheDocument()
+  })
+
+  it('renders the server duration in preference to its own delta', () => {
+    // The reported bug: the card floored its own start→finish (19.0 s) while
+    // the backend log floored the run it measured (18.9 s), so one run showed
+    // two durations a second apart. The server's number is the only one now.
+    render(
+      <IngestionStatus
+        status={completeStatus({
+          startedAt: 0,
+          finishedAt: 19_004,
+          durationMs: 18_942
+        })}
+      />
+    )
+    expect(screen.getByText('00:18')).toBeInTheDocument()
+    expect(screen.queryByText('00:19')).not.toBeInTheDocument()
+  })
+
+  it('shows the timer for a reattached run that has only the server duration', () => {
+    render(<IngestionStatus status={completeStatus({ durationMs: 65_000 })} />)
+    expect(screen.getByText('01:05')).toBeInTheDocument()
   })
 })

@@ -1,19 +1,47 @@
 """Tests for the CLI ingest entry point and ingestion pipeline."""
 
+import logging
+import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Never, cast
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from llama_index.core import Document
 from llama_index.core.schema import TextNode
+from loguru import logger
 
 import docint.cli.ingest as ingest
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+
+
+@pytest.fixture
+def loguru_caplog_info(caplog: LogCaptureFixture) -> Iterable[LogCaptureFixture]:
+    """Bridge loguru INFO records into ``caplog`` for the duration of a test.
+
+    Loguru bypasses ``logging``, so the stdlib ``caplog`` fixture sees none
+    of its records by default. Mirrors the ``loguru_caplog`` fixture in
+    ``tests/test_embedding_tokenizer.py``, lowered to INFO because the
+    completion line this file asserts on is informational, not a warning.
+
+    Args:
+        caplog: The standard pytest log-capture fixture.
+
+    Yields:
+        The same ``caplog`` fixture, now populated with loguru-sourced
+        records at INFO level and above.
+    """
+    handler_id = logger.add(caplog.handler, level="INFO", format="{message}")
+    caplog.set_level(logging.INFO)
+    try:
+        yield caplog
+    finally:
+        logger.remove(handler_id)
 
 
 def test_parse_hate_speech_payload_extracts_first_json_object_from_noisy_output() -> None:
@@ -175,6 +203,88 @@ def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert calls.args == ("demo", False)
     assert calls.path == data_dir
     assert calls.build_query_engine is False
+
+
+class _SilentRAG:
+    """RAG test double that ingests without touching Qdrant or a model."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Accept and ignore every RAG construction kwarg.
+
+        Args:
+            **kwargs: Ignored collection / hybrid configuration.
+        """
+
+    def ingest_docs(self, *args: Any, **kwargs: Any) -> None:
+        """Stand in for a real ingest.
+
+        Args:
+            *args: Ignored positional ingest arguments.
+            **kwargs: Ignored ingest flags.
+        """
+
+    def unload_models(self) -> None:
+        """No-op model unload for the test double."""
+        return None
+
+
+def test_main_logs_the_elapsed_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """The CLI's completion line must carry how long the run took.
+
+    This path has no job and no ingest card, so the log line is the only
+    record of the duration. It is timed around the whole ``ingest_docs``
+    call — model loading included — because that is what the operator
+    waited for.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory path for the test.
+        loguru_caplog_info (LogCaptureFixture): Loguru-to-caplog bridge at INFO.
+    """
+    monkeypatch.setattr(ingest, "init_logger", lambda: None)
+    monkeypatch.setattr(ingest, "set_offline_env", lambda: None)
+    monkeypatch.setattr(ingest, "load_path_env", lambda: SimpleNamespace(data=tmp_path))
+    monkeypatch.setattr(ingest, "get_collection", lambda: "demo")
+    monkeypatch.setattr(ingest, "RAG", _SilentRAG)
+
+    ingest.main()
+
+    completion = [r for r in loguru_caplog_info.messages if r.startswith("Ingestion complete")]
+    assert completion, f"no completion line logged; got {loguru_caplog_info.messages}"
+    # A bare "Ingestion complete." is the regression: the duration went
+    # unrecorded anywhere an operator could read it after the fact.
+    assert re.fullmatch(r"Ingestion complete in \d{2}:\d{2}\.", completion[-1]), completion[-1]
+
+
+def test_ingest_docs_does_not_log_a_run_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """The pipeline helper must not report a duration of its own.
+
+    ``ingest_docs`` is one stage of a run: under the job API the same run
+    goes on to resolve entities and build the collection summary, and the
+    ``RAG`` construction inside this call precedes any clock started around
+    the pipeline itself. A duration logged here therefore reads as the run
+    total while measuring roughly half of it — the mismatch against the
+    ingest card's timer that this pins. Whoever owns the whole run times it
+    (``main``, ``core/api.py``'s ``ingest``, ``IngestJobManager._run``).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory path for the test.
+        loguru_caplog_info (LogCaptureFixture): Loguru-to-caplog bridge at INFO.
+    """
+    monkeypatch.setattr(ingest, "RAG", _SilentRAG)
+
+    ingest.ingest_docs("demo", tmp_path)
+
+    assert not [r for r in loguru_caplog_info.messages if "complete in" in r], loguru_caplog_info.messages
 
 
 def test_ingest_docs_leaves_enable_hybrid_unset_when_hybrid_is_none(

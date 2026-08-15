@@ -188,6 +188,36 @@ describe('withServerTimes', () => {
       withServerTimes(base, { started_at: 'not-a-date', finished_at: null })
     ).toBe(base)
   })
+
+  it('anchors on run_started_at, which covers the upload leg', () => {
+    // started_at is when the worker slot was acquired; the run — and the
+    // timer the user watched — began at the upload, one queue wait earlier.
+    const out = withServerTimes(base, {
+      run_started_at: '2026-08-14T09:59:00Z',
+      started_at: '2026-08-14T10:00:00Z',
+      finished_at: '2026-08-14T10:30:00Z'
+    })
+    expect(out.startedAt).toBe(Date.parse('2026-08-14T09:59:00Z'))
+  })
+
+  it('adopts the snapshot duration when no terminal frame carried one', () => {
+    const out = withServerTimes(base, {
+      run_started_at: '2026-08-14T10:00:00Z',
+      finished_at: '2026-08-14T10:00:19Z',
+      duration_ms: 19_000
+    })
+    expect(out.durationMs).toBe(19_000)
+  })
+
+  it('never overwrites a duration the terminal frame already reported', () => {
+    const status = { ...base, durationMs: 19_000 }
+    const out = withServerTimes(status, {
+      run_started_at: '2026-08-14T10:00:00Z',
+      finished_at: '2026-08-14T10:00:19Z',
+      duration_ms: 4_000
+    })
+    expect(out.durationMs).toBe(19_000)
+  })
 })
 
 describe('deriveIngestStatus', () => {
@@ -352,6 +382,44 @@ describe('deriveIngestStatus', () => {
     expect(status.phase).toBe('complete')
     expect(status.startedAt).toBe(1000)
     expect(status.finishedAt).toBe(9000)
+  })
+
+  it('takes the run duration from the terminal frame, not its own delta', () => {
+    // The card must render the number the backend logged. Its own
+    // finish-minus-start covers the SSE hop too, and flooring both
+    // independently makes them disagree by a whole second often enough to
+    // read as a contradiction.
+    const events: IngestEvent[] = [
+      { event: 'start', data: { collection: 'c', files: [] }, receivedAt: 1000 },
+      {
+        event: 'ingestion_complete',
+        data: { collection: 'c', duration_ms: 18_942 },
+        receivedAt: 20_100
+      }
+    ]
+    expect(deriveIngestStatus(events).durationMs).toBe(18_942)
+  })
+
+  it('takes the run duration from a backend-composed error frame too', () => {
+    const events: IngestEvent[] = [
+      { event: 'start', data: { collection: 'c', files: [] }, receivedAt: 1000 },
+      {
+        event: 'error',
+        data: { message: 'Ingestion failed.', code: 'ingestion_failed', duration_ms: 4_200 },
+        receivedAt: 6000
+      }
+    ]
+    expect(deriveIngestStatus(events).durationMs).toBe(4_200)
+  })
+
+  it('leaves durationMs unset for an upload that never reached a job', () => {
+    // A client-composed error carries no server measurement; the client's own
+    // delta is the only thing there is to show.
+    const events: IngestEvent[] = [
+      { event: 'start', data: { collection: 'c', files: [] }, receivedAt: 1000 },
+      { event: 'error', data: { message: 'upload rejected' }, receivedAt: 3000 }
+    ]
+    expect(deriveIngestStatus(events).durationMs).toBeUndefined()
   })
 
   it('derives startedAt/finishedAt from event arrival time, not the wall clock', () => {

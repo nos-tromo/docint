@@ -205,7 +205,6 @@ export const de: Strings = {
   'ingest.working': 'Wird bearbeitet…',
   'ingest.files_indexed': '{count} Dateien indexiert',
   'ingest.chunks': '{count} Chunks',
-  'ingest.duration': 'Dauer: {duration}',
   'ingest.finished': 'Datenimport abgeschlossen',
   'ingest.failed_default': 'Datenimport fehlgeschlagen.',
   'ingest.save_failed_file': 'Upload fehlgeschlagen: „{filename}“ konnte nicht gespeichert werden.',

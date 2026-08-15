@@ -55,6 +55,17 @@ export interface IngestStatus {
    *  failed post-ingest entity resolution. */
   warnings: string[]
   finishedAt?: number
+  /**
+   * The run's total duration as measured by the server (`duration_ms` on the
+   * terminal frame, or on the job snapshot after a reattach). Preferred over
+   * `finishedAt - startedAt` once present: the two windows differ by the
+   * upload leg and the SSE hop, and flooring both independently makes them
+   * disagree by a whole second whenever that difference straddles a boundary
+   * — which is what made the card and the backend log contradict each other.
+   * Absent for an upload that failed before any job existed, where the
+   * client's own delta is the only measurement there is.
+   */
+  durationMs?: number
 }
 
 export type ProgressKind = 'stage' | 'indexed' | 'task' | 'unknown'
@@ -363,6 +374,7 @@ export function deriveIngestStatus(
         status.uploadingBytes = undefined
         status.uploadingTotalBytes = undefined
         status.finishedAt = ev.receivedAt
+        status.durationMs = numOf(d.duration_ms) ?? status.durationMs
         break
       }
       case 'error': {
@@ -379,6 +391,9 @@ export function deriveIngestStatus(
         status.errorMessage = typeof d.code === 'string' ? undefined : strOf(d.message)
         status.errorCode = typeof d.code === 'string' ? d.code : undefined
         status.finishedAt = ev.receivedAt
+        // Only a backend-composed failure carries one; an upload that never
+        // reached a job has no server-measured duration to report.
+        status.durationMs = numOf(d.duration_ms) ?? status.durationMs
         break
       }
     }
@@ -439,43 +454,65 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * Fill a derived status's timeline from the server-owned job snapshot when
- * the client-side anchor is missing.
+ * Fill a derived status's timeline from the server-owned job snapshot.
  *
- * After a reload/reattach the merged event log holds only replayed job
- * frames — no synthetic upload `start` — so `startedAt` is undefined and the
- * elapsed timer never renders. When filling from the snapshot, `finished_at`
- * is taken from the *same source*: a replayed terminal frame stamps
- * `finishedAt` with its arrival time, so pairing a server start with that
- * client finish would measure start→reload instead of start→finish (and a
- * same-source pair cancels server/client clock skew). The client
- * `finishedAt` is kept only when the snapshot has no `finished_at` yet —
- * i.e. the terminal event arrived live, where its arrival time is accurate.
- * A client-anchored timeline is returned unchanged.
+ * Two distinct fills, both needed after a reload/reattach:
+ *
+ * - `durationMs` — the run's authoritative total. Normally it arrives on the
+ *   terminal frame, but a client that reattaches after that frame has aged
+ *   out of the replay history only ever sees it here. Never overwrites a
+ *   value the frame already provided.
+ * - `startedAt`/`finishedAt` — the ticking anchor. A reattached log holds no
+ *   synthetic upload `start`, so there is no client anchor and the elapsed
+ *   timer would not render at all. The anchor is `run_started_at`, not
+ *   `started_at`: the former covers the upload leg the timer was ticking
+ *   through before this tab existed, the latter only the worker slot. When
+ *   filling, `finished_at` is taken from the *same source* — a replayed
+ *   terminal frame stamps `finishedAt` with its arrival time, so pairing a
+ *   server start with that client finish would measure start→reload instead
+ *   of start→finish (and a same-source pair cancels server/client clock
+ *   skew). The client `finishedAt` is kept only when the snapshot has no
+ *   `finished_at` yet — i.e. the terminal event arrived live, where its
+ *   arrival time is accurate. A client-anchored timeline keeps its own
+ *   anchor.
  *
  * Args:
  *   status: Status derived from the merged event log.
  *   snapshot: Server job snapshot, if one is loaded.
  *
  * Returns:
- *   `status`, with `startedAt`/`finishedAt` filled from the snapshot when
- *   the client log carried no `start` frame.
+ *   `status`, with the server's duration and (when the client log carried no
+ *   `start` frame) the server's run window.
  */
 export function withServerTimes(
   status: IngestStatus,
-  snapshot?: Pick<IngestJobSnapshot, 'started_at' | 'finished_at'> | null
+  // Partial: every field here is read defensively, and a snapshot from a
+  // backend that predates `run_started_at`/`duration_ms` still anchors the
+  // timer off `started_at` exactly as before.
+  snapshot?: Partial<
+    Pick<
+      IngestJobSnapshot,
+      'run_started_at' | 'started_at' | 'finished_at' | 'duration_ms'
+    >
+  > | null
 ): IngestStatus {
-  if (status.startedAt !== undefined || !snapshot?.started_at) return status
-  const startedAt = Date.parse(snapshot.started_at)
-  if (Number.isNaN(startedAt)) return status
-  const serverFinishedAt = snapshot.finished_at
+  const merged =
+    status.durationMs === undefined && typeof snapshot?.duration_ms === 'number'
+      ? { ...status, durationMs: snapshot.duration_ms }
+      : status
+  if (merged.startedAt !== undefined) return merged
+  const anchor = snapshot?.run_started_at ?? snapshot?.started_at
+  if (!anchor) return merged
+  const startedAt = Date.parse(anchor)
+  if (Number.isNaN(startedAt)) return merged
+  const serverFinishedAt = snapshot?.finished_at
     ? Date.parse(snapshot.finished_at)
     : NaN
   return {
-    ...status,
+    ...merged,
     startedAt,
     finishedAt: Number.isNaN(serverFinishedAt)
-      ? status.finishedAt
+      ? merged.finishedAt
       : serverFinishedAt
   }
 }

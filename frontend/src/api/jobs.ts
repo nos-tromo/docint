@@ -8,6 +8,15 @@ export interface CreateIngestJobPayload {
   hybrid?: boolean
   ner?: boolean
   hate_speech?: boolean
+  /**
+   * How long this run spent uploading, in ms. The run starts when the user
+   * hits ingest, but the job only exists from here on, so the client reports
+   * the leg the server never saw and the backend folds it into the one
+   * duration it logs and reports back. A duration, never a timestamp — the
+   * server trusts no client clock, and clamps this. Omitted by the re-run
+   * path, which re-finalizes already-staged batches without uploading.
+   */
+  upload_elapsed_ms?: number
 }
 
 /**

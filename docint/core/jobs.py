@@ -29,10 +29,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import time
 import uuid
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
@@ -40,6 +42,7 @@ from typing import Any, ClassVar
 from anyio import to_thread
 from loguru import logger
 
+from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import load_ingest_concurrency, load_summary_concurrency
 
 #: Per-kind SSE event names and failure copy. Keyed by :attr:`IngestJobState.kind`.
@@ -71,6 +74,11 @@ PROGRESS_EVENTS: frozenset[str] = frozenset({"ingestion_progress", "summary_prog
 TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "summary_completed", "error"})
 
 
+#: Upper bound on a caller-reported upload lead. A day is far longer than any
+#: real upload and short enough that a bogus value cannot claim a nonsense run.
+MAX_UPLOAD_LEAD_S: float = 86_400.0
+
+
 def _utcnow() -> datetime:
     """Return a timezone-aware UTC timestamp.
 
@@ -78,6 +86,22 @@ def _utcnow() -> datetime:
         datetime: Current time with an explicit UTC offset.
     """
     return datetime.now(tz=UTC)
+
+
+def _clamp_lead(seconds: float) -> float:
+    """Bound a caller-reported upload lead to a plausible range.
+
+    Args:
+        seconds (float): Reported seconds spent before the job was created.
+
+    Returns:
+        float: The value clamped to ``[0, MAX_UPLOAD_LEAD_S]``; non-finite
+        input yields ``0.0``, since a run with no measurable lead is the
+        honest fallback.
+    """
+    if not math.isfinite(seconds):
+        return 0.0
+    return min(max(seconds, 0.0), MAX_UPLOAD_LEAD_S)
 
 
 def format_sse(event: str, data: dict[str, Any]) -> str:
@@ -139,6 +163,19 @@ class IngestJobState:
     created_at: datetime = field(default_factory=_utcnow)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    #: Seconds this run had already spent before the job existed — for an
+    #: ingest, the client's upload leg, reported on ``POST /ingest/finalize``.
+    #: The run the user waited for starts there, not here.
+    upload_lead_s: float = 0.0
+    #: Total run duration, computed once at the terminal path. It is what the
+    #: completion line logs and what the terminal frame carries, so the log and
+    #: the SPA's ingest card render one number rather than two nearly-equal
+    #: ones that floor apart at a second boundary.
+    duration_s: float | None = None
+    #: Monotonic twin of ``created_at``. Monotonic because an NTP step mid-run
+    #: would skew a wall-clock subtraction, and a long ingest is exactly when
+    #: one can land.
+    _created_ticks: float = field(default_factory=time.monotonic, repr=False)
     _started_frame: str | None = field(default=None, repr=False)
     _warning_frames: list[str] = field(default_factory=list, repr=False)
     _dropped_warnings: int = field(default=0, repr=False)
@@ -150,6 +187,38 @@ class IngestJobState:
     # of it to every reattaching tab. The earliest are kept: they explain what
     # started going wrong, and later ones are usually the same cause repeating.
     MAX_RETAINED_WARNINGS: ClassVar[int] = 100
+
+    @property
+    def run_started_at(self) -> datetime:
+        """When the run began, upload leg included.
+
+        Earlier than ``created_at`` by the upload lead, and earlier than
+        ``started_at`` by the queue wait as well. This is the anchor a
+        reattaching client ticks from; ``started_at`` keeps its own meaning
+        (the worker slot was acquired), which is what queue-depth analysis
+        needs.
+
+        Returns:
+            datetime: The run's start instant, in UTC.
+        """
+        return self.created_at - timedelta(seconds=self.upload_lead_s)
+
+    @property
+    def duration_ms(self) -> int | None:
+        """The run's total duration in whole milliseconds, once it has one.
+
+        Returns:
+            int | None: Milliseconds, or ``None`` while the job is unfinished.
+        """
+        return None if self.duration_s is None else round(self.duration_s * 1000)
+
+    def elapsed_s(self) -> float:
+        """Seconds since the run began, upload leg and queue wait included.
+
+        Returns:
+            float: Elapsed seconds, measured monotonically from creation.
+        """
+        return self.upload_lead_s + (time.monotonic() - self._created_ticks)
 
     def record(self, event_name: str, frame: str) -> None:
         """Fold a frame into the collapsed replay history.
@@ -228,8 +297,10 @@ class IngestJobState:
             "empty": self.empty,
             "resolution": self.resolution,
             "created_at": self.created_at.isoformat(),
+            "run_started_at": self.run_started_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "duration_ms": self.duration_ms,
         }
 
 
@@ -307,6 +378,7 @@ class IngestJobManager:
         hate_speech: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
+        upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Register a job and dispatch its worker, unconditionally.
 
@@ -333,6 +405,9 @@ class IngestJobManager:
             kind (str): ``"ingest"`` or ``"summary"``. Selects the SSE event
                 names (:data:`KIND_EVENTS`) and the worker semaphore this job
                 waits on.
+            upload_lead_s (float): Seconds the run had already spent before
+                this job existed (an ingest's upload leg). Folded into the
+                duration the job logs and reports.
 
         Returns:
             IngestJobState: The newly registered job.
@@ -347,6 +422,7 @@ class IngestJobManager:
             hate_speech=hate_speech,
             resolve=resolve,
             kind=kind,
+            upload_lead_s=upload_lead_s,
         )
         async with self._lock:
             self._jobs[state.job_id] = state
@@ -365,6 +441,7 @@ class IngestJobManager:
         hate_speech: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
+        upload_lead_s: float = 0.0,
     ) -> tuple[IngestJobState, bool]:
         """Atomically check for an in-flight job and create one only if idle.
 
@@ -404,6 +481,11 @@ class IngestJobManager:
             kind (str): ``"ingest"`` or ``"summary"``. Selects the SSE event
                 names (:data:`KIND_EVENTS`), the worker semaphore this job
                 waits on, and the idleness scope checked before creating.
+            upload_lead_s (float): Seconds the run had already spent before
+                this job existed (an ingest's upload leg). Folded into the
+                duration the job logs and reports. Ignored when an in-flight
+                job is adopted instead of created — that run's own lead
+                already stands.
 
         Returns:
             tuple[IngestJobState, bool]: ``(state, created)``. When
@@ -426,6 +508,7 @@ class IngestJobManager:
                 hate_speech=hate_speech,
                 resolve=resolve,
                 kind=kind,
+                upload_lead_s=upload_lead_s,
             )
             self._jobs[state.job_id] = state
         self._dispatch_worker(state)
@@ -443,6 +526,7 @@ class IngestJobManager:
         hate_speech: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
+        upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Build a fresh, unregistered job state.
 
@@ -461,6 +545,10 @@ class IngestJobManager:
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
             kind (str): ``"ingest"`` or ``"summary"``.
+            upload_lead_s (float): Seconds the run had already spent before
+                this job existed. Clamped here — it reaches the server as a
+                client-reported number, and it bounds a log line, so it must
+                not be able to express a negative or absurd run.
 
         Returns:
             IngestJobState: A new, not-yet-registered job state.
@@ -476,6 +564,7 @@ class IngestJobManager:
             ner=ner,
             hate_speech=hate_speech,
             resolve=resolve,
+            upload_lead_s=_clamp_lead(upload_lead_s),
         )
 
     def _dispatch_worker(self, state: IngestJobState) -> None:
@@ -672,6 +761,19 @@ class IngestJobManager:
     async def _run(self, state: IngestJobState) -> None:
         """Execute the job body, holding a worker slot for its duration.
 
+        Both terminal paths compute the run's duration exactly once
+        (:meth:`IngestJobState.elapsed_s`), log it, and carry it on the
+        terminal frame as ``duration_ms``. Two things follow from computing it
+        here and only here. First, it is the only boundary that spans a whole
+        run — the injected runner's own stages (for an ingest: the pipeline
+        call, then entity resolution, then the collection summary) each cover
+        a fraction of it, and the clock starts at *creation*, so a job that
+        waited on a busy semaphore counts its queue wait too. Second, the SPA
+        renders this same number rather than deriving its own: two nearly
+        equal durations floored independently disagree by a whole second
+        whenever their difference straddles a boundary, which no amount of
+        narrowing the two windows can fix.
+
         Args:
             state (IngestJobState): The job to process.
         """
@@ -740,21 +842,42 @@ class IngestJobManager:
             try:
                 result = await to_thread.run_sync(self._runner, state, _push)
             except Exception:
-                logger.exception("Job {} ({}) failed.", state.job_id, state.kind)
+                state.duration_s = state.elapsed_s()
+                logger.exception(
+                    "Job {} ({}) failed after {}.",
+                    state.job_id,
+                    state.kind,
+                    format_elapsed(state.duration_s),
+                )
                 state.status = JobStatus.FAILED
                 state.error = names["failed_message"]
                 state.finished_at = _utcnow()
                 # Static protocol copy only: the exception text can carry
                 # connection strings or file paths and never reaches a client.
-                _emit("error", {"message": names["failed_message"], "code": names["failed_code"]})
+                _emit(
+                    "error",
+                    {
+                        "message": names["failed_message"],
+                        "code": names["failed_code"],
+                        "duration_ms": state.duration_ms,
+                    },
+                )
                 return
             state.empty = bool(result.get("empty", False))
             state.resolution = result.get("resolution")
             state.status = JobStatus.COMPLETED
             state.finished_at = _utcnow()
+            state.duration_s = state.elapsed_s()
+            logger.info(
+                "Job {} ({}) completed in {}.",
+                state.job_id,
+                state.kind,
+                format_elapsed(state.duration_s),
+            )
             terminal: dict[str, Any] = {
                 "collection": state.logical_name,
                 "empty": state.empty,
+                "duration_ms": state.duration_ms,
             }
             if state.resolution is not None:
                 terminal["resolution"] = state.resolution

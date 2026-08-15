@@ -145,6 +145,18 @@ and chat. It ships with:
    from more than one ingest at a time. Jobs survive a browser reload but not a
    backend restart; the staged files remain on disk either way, so a re-run is
    cheap (hash-deduped).
+- **A run has exactly one duration.** The server measures it once — from the
+   moment the user started, upload leg included, through the queue wait and
+   every stage of the job — and both the backend log (`Job <id> (ingest)
+   completed in 00:19.`) and the ingest card's timer show that same value. The
+   card gets it from `duration_ms` on the terminal SSE frame, and a reattached
+   client from the job snapshot's `duration_ms` / `run_started_at`
+   (`started_at` still means "a worker slot was acquired"). Because the upload
+   happens before the job exists, the SPA reports how long it took as
+   `upload_elapsed_ms` on `POST /ingest/finalize` — an elapsed duration, never
+   a timestamp, so no client clock is trusted, and it is clamped server-side.
+   Deriving a second duration on the client is what previously let one run
+   report two numbers a second apart.
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
   database URL.

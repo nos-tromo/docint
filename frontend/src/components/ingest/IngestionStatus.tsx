@@ -122,7 +122,8 @@ function Bar({
 function useElapsedMs(
   phase: IngestPhase,
   startedAt?: number,
-  finishedAt?: number
+  finishedAt?: number,
+  durationMs?: number
 ): number {
   // Tick once per second while the ingest is in flight so the elapsed
   // counter updates without re-deriving status on every animation frame.
@@ -133,6 +134,13 @@ function useElapsedMs(
     const id = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(id)
   }, [ticking])
+  // A finished run reports its own duration, and that number is the one the
+  // backend log prints. Deriving a second one from the client's own
+  // start/finish would differ by the SSE hop and floor a whole second apart
+  // often enough to read as a contradiction. The client delta still drives
+  // the live tick — no job exists yet during the upload — and remains the
+  // only measurement for an upload that failed before reaching one.
+  if (durationMs !== undefined) return durationMs
   if (startedAt === undefined) return 0
   const end = finishedAt ?? (ticking ? now : startedAt)
   return Math.max(0, end - startedAt)
@@ -140,7 +148,12 @@ function useElapsedMs(
 
 export function IngestionStatus({ status }: { status: IngestStatus }) {
   const theme = PHASE_THEME[status.phase]
-  const elapsedMs = useElapsedMs(status.phase, status.startedAt, status.finishedAt)
+  const elapsedMs = useElapsedMs(
+    status.phase,
+    status.startedAt,
+    status.finishedAt,
+    status.durationMs
+  )
   if (status.phase === 'idle') return null
 
   return (
@@ -153,9 +166,7 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
 
       {status.phase === 'uploading' && <UploadingBody status={status} />}
       {status.phase === 'processing' && <ProcessingBody status={status} />}
-      {status.phase === 'complete' && (
-        <CompleteBody status={status} elapsedMs={elapsedMs} />
-      )}
+      {status.phase === 'complete' && <CompleteBody status={status} />}
       {status.phase === 'error' && <ErrorBody status={status} />}
     </div>
   )
@@ -171,7 +182,9 @@ function Header({
   elapsedMs: number
 }) {
   const t = useT()
-  const showTimer = status.startedAt !== undefined
+  // Either measurement is enough to show a timer: a reattached run can carry
+  // the server's duration without ever having had a client anchor.
+  const showTimer = status.startedAt !== undefined || status.durationMs !== undefined
   const icon =
     status.phase === 'complete' ? '✓' : status.phase === 'error' ? '✗' : null
   return (
@@ -330,20 +343,18 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
   )
 }
 
-function CompleteBody({
-  status,
-  elapsedMs
-}: {
-  status: IngestStatus
-  elapsedMs: number
-}) {
+// No duration here on purpose: the header timer has been ticking in this exact
+// spot for the whole run, so on completion it simply stops. Restating the same
+// number one line down puts it in the card twice, and moves the answer away
+// from where the eye was already watching for it. The header timer is also the
+// wider of the two — it renders on the error phase as well, and whenever it
+// has a duration to show, this summary would have had the identical one.
+function CompleteBody({ status }: { status: IngestStatus }) {
   const t = useT()
   const fileCount = Math.max(status.indexed, status.filesSaved, status.totalFiles)
   const parts: string[] = []
   if (fileCount > 0) parts.push(t('ingest.files_indexed', { count: fileCount }))
   if (status.totalChunks > 0) parts.push(t('ingest.chunks', { count: status.totalChunks }))
-  if (elapsedMs > 0)
-    parts.push(t('ingest.duration', { duration: formatDuration(elapsedMs) }))
   const summary = parts.length > 0 ? parts.join(' · ') : t('ingest.finished')
   return (
     <div className="mt-3 text-sm text-[var(--status-emerald-fg)] tabular-nums">

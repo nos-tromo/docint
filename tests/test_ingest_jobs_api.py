@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,21 @@ def _headers(user: str = "alice") -> dict[str, str]:
     return {"X-Auth-User": user}
 
 
+def _await_terminal(client: TestClient, job_id: str, user: str = "alice") -> dict[str, Any]:
+    """Poll a job's snapshot until it finishes, and return it.
+
+    The worker runs on the test client's portal thread, so sleeping here lets
+    it advance.
+    """
+    snapshot: dict[str, Any] = {}
+    for _ in range(200):
+        snapshot = client.get(f"/ingest/jobs/{job_id}", headers=_headers(user)).json()
+        if snapshot["status"] in {"completed", "failed"}:
+            return snapshot
+        time.sleep(0.01)
+    raise AssertionError(f"job did not finish; last snapshot={snapshot}")
+
+
 def _stage(client: TestClient, collection: str, user: str = "alice") -> None:
     client.post(
         "/ingest/upload",
@@ -80,6 +96,38 @@ def test_finalize_returns_a_job_id(client: TestClient) -> None:
 
     assert res.status_code == 202
     assert res.json()["job_id"]
+
+
+def test_finalize_folds_the_client_upload_leg_into_the_run(client: TestClient) -> None:
+    """The run's duration starts when the user did, not when the job was queued.
+
+    The upload happens before any job exists, so the client reports how long
+    it took and the snapshot's window has to cover it — otherwise the logged
+    total undercounts exactly the stretch the ingest card already ticked
+    through.
+    """
+    _stage(client, "mydocs")
+    job_id = client.post(
+        "/ingest/finalize",
+        json={"collection": "mydocs", "upload_elapsed_ms": 30_000},
+        headers=_headers(),
+    ).json()["job_id"]
+
+    snapshot = _await_terminal(client, job_id)
+    assert snapshot["duration_ms"] >= 30_000
+    assert snapshot["run_started_at"] < snapshot["created_at"]
+
+
+def test_finalize_rejects_a_negative_upload_leg(client: TestClient) -> None:
+    """A duration cannot be negative; the model refuses it before it reaches a log line."""
+    _stage(client, "mydocs")
+    res = client.post(
+        "/ingest/finalize",
+        json={"collection": "mydocs", "upload_elapsed_ms": -1},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 422
 
 
 def test_finalize_409s_with_the_existing_job_when_already_running(
