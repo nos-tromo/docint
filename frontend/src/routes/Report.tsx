@@ -24,7 +24,6 @@ import {
 import { useWhoami } from '@/hooks/useWhoami'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
-import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
@@ -49,6 +48,45 @@ function exportFormats(t: Translate): Array<{ format: ReportExportFormat; label:
     { format: 'zip', label: t('report.format_csv') },
     { format: 'json', label: t('report.format_json') }
   ]
+}
+
+/**
+ * Export disclosure for one report: a single download icon whose formats
+ * expand on hover or focus.
+ *
+ * Lifted out of the detail pane unchanged when the report list became a
+ * selector, so it could join the create and delete actions on the header line.
+ * The caret stays — it is the only thing saying the icon opens a list rather
+ * than downloading something on the spot. The links stay in the DOM and are
+ * merely CSS-hidden, which is also what keeps them reachable by keyboard.
+ *
+ * @param reportId - The report to export.
+ * @param t - The active locale's translate function.
+ * @returns The export control.
+ */
+function ExportMenu({ reportId, t }: { reportId: number; t: Translate }) {
+  return (
+    <div className="relative group shrink-0">
+      <DownloadButton label={t('chat.download')} aria-haspopup="menu" className="gap-1 px-2">
+        <ChevronDownIcon className="h-3.5 w-3.5" />
+      </DownloadButton>
+      <div className="absolute right-0 top-full z-10 hidden pt-1 group-hover:block group-focus-within:block">
+        <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-muted p-1 shadow-lg">
+          {exportFormats(t).map((e) => (
+            <a
+              key={e.format}
+              href={reportExportHref(reportId, e.format)}
+              {...(e.view ? { target: '_blank', rel: 'noreferrer' } : { download: true })}
+              className="block rounded px-3 py-1.5 text-sm hover:bg-accent whitespace-nowrap"
+              title={e.view ? t('report.open_new_tab_title') : t('report.download_format_title', { label: e.label })}
+            >
+              {e.label}
+            </a>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function str(snapshot: Record<string, unknown>, key: string): string {
@@ -156,13 +194,11 @@ export function Report() {
     }
   }
 
+  // Deletes the report on screen — the only one reachable now that the list is
+  // a selector rather than a column of rows.
   const onDelete = (id: number) => {
     if (!confirm(t('report.delete_confirm'))) return
-    deleteReport.mutate(id, {
-      onSuccess: () => {
-        if (activeReportId === id) setActiveReportId(null)
-      }
-    })
+    deleteReport.mutate(id, { onSuccess: () => setActiveReportId(null) })
   }
 
   // Swap an item with its same-type neighbor in display order, then persist the
@@ -183,10 +219,36 @@ export function Report() {
   const reportList = reports.data?.reports ?? []
 
   return (
-    <div className="p-8 grid grid-cols-[18rem_1fr] gap-6 h-full">
-      <aside className="flex flex-col gap-3 min-h-0">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold">{t('report.title')}</h1>
+    <div className="p-8 flex flex-col gap-4 h-full min-h-0">
+      {/* The visible heading is the selector below — it names the report on
+          screen, which is worth more than the word "Reports" over a route the
+          nav already labels. The landmark stays for screen-reader navigation,
+          which every other route gets from PageHeader. */}
+      <h1 className="sr-only">{t('report.title')}</h1>
+
+      <div className="flex items-center gap-3">
+        {/* The sidebar's collection switcher, one size up: a native select with
+            no border and no fill, so it reads as the page title it is and
+            still drops a chevron to say it is a list. Native because switching
+            reports is exactly what a select does — keyboard, type-ahead and
+            the platform's own picker on touch, none of it hand-built. */}
+        <select
+          aria-label={t('report.select_aria')}
+          value={activeReportId != null ? String(activeReportId) : ''}
+          onChange={(e) => setActiveReportId(e.target.value ? Number(e.target.value) : null)}
+          className="min-w-0 max-w-[40rem] cursor-pointer truncate bg-transparent text-2xl font-semibold text-foreground outline-hidden"
+        >
+          <option value="" disabled>
+            {reportList.length ? t('report.choose') : t('report.empty_list')}
+          </option>
+          {reportList.map((r) => (
+            <option key={r.id} value={String(r.id)}>
+              {`${r.title} (${r.item_count})`}
+            </option>
+          ))}
+        </select>
+
+        <div className="ml-auto flex items-center gap-2">
           <NewButton
             label={t('common.new_report')}
             onClick={onCreate}
@@ -195,44 +257,23 @@ export function Report() {
             // identity resolves would store a report with no operator.
             disabled={whoami.isLoading}
           />
+          {report && (
+            <DeleteButton label={t('report.delete_aria')} onClick={() => onDelete(report.id)} />
+          )}
+          {report && <ExportMenu reportId={report.id} t={t} />}
         </div>
-        {createReport.isError && (
-          <p className="text-xs text-[var(--status-red-fg)]">{t('report.create_error')}</p>
-        )}
-        <ul className="flex-1 overflow-auto space-y-1">
-          {reports.isError ? (
-            <li className="px-2 py-1 text-sm text-red-400">{t('report.load_error')}</li>
-          ) : reportList.length === 0 ? (
-            <li className="px-2 py-1 text-sm text-muted-foreground">{t('report.empty_list')}</li>
-          ) : null}
-          {reportList.map((r) => {
-            const isActive = r.id === activeReportId
-            return (
-              <li key={r.id} className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setActiveReportId(r.id)}
-                  className={cn(
-                    'flex-1 text-left text-sm px-2 py-1.5 rounded-md truncate',
-                    isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted'
-                  )}
-                  title={r.title}
-                >
-                  {r.title}
-                  <span className="ml-1 text-xs text-muted-foreground">({r.item_count})</span>
-                </button>
-                <DeleteButton
-                  label={t('report.delete_aria')}
-                  onClick={() => onDelete(r.id)}
-                  className="h-7"
-                />
-              </li>
-            )
-          })}
-        </ul>
-      </aside>
+      </div>
 
-      <section className="flex flex-col min-h-0">
+      {reports.isError && (
+        <p className="text-xs text-[var(--status-red-fg)]" role="alert">
+          {t('report.load_error')}
+        </p>
+      )}
+      {createReport.isError && (
+        <p className="text-xs text-[var(--status-red-fg)]">{t('report.create_error')}</p>
+      )}
+
+      <section className="flex flex-col min-h-0 flex-1">
         {!activeReportId ? (
           <p className="text-sm text-muted-foreground">{t('report.select_hint')}</p>
         ) : active.isError ? (
@@ -248,19 +289,27 @@ export function Report() {
           <>
             <div className="flex items-start justify-between gap-3 mb-4">
               <div className="min-w-0 flex-1 space-y-1.5">
-                <input
-                  key={report.id}
-                  defaultValue={report.title}
-                  onBlur={(e) => {
-                    const title = e.target.value.trim()
-                    if (title && title !== report.title) {
-                      updateReport.mutate({ id: report.id, title })
-                    }
-                  }}
-                  className="w-full bg-transparent text-2xl font-semibold outline-hidden border-b border-transparent focus:border-border"
-                  aria-label={t('report.title_aria')}
-                />
                 <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+                  {/* Renaming lives here rather than on the title line, which
+                      is now the selector. It joins the two fields that already
+                      carry report identity, directly under a control showing
+                      the same value. */}
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className="uppercase tracking-wide">{t('report.title_label')}</span>
+                    <input
+                      key={`title-${report.id}`}
+                      defaultValue={report.title}
+                      placeholder={t('report.title_label')}
+                      onBlur={(e) => {
+                        const title = e.target.value.trim()
+                        if (title && title !== report.title) {
+                          updateReport.mutate({ id: report.id, title })
+                        }
+                      }}
+                      className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
+                      aria-label={t('report.title_aria')}
+                    />
+                  </label>
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span className="uppercase tracking-wide">{t('report.operator_label')}</span>
                     <input
@@ -334,29 +383,6 @@ export function Report() {
                 </div>
               </div>
 
-              {/* Export: a single Download button; formats expand on hover/focus.
-                  The caret stays — it is the only thing saying the icon opens a
-                  list rather than downloading something on the spot. */}
-              <div className="relative group shrink-0">
-                <DownloadButton label={t('chat.download')} aria-haspopup="menu" className="gap-1 px-2">
-                  <ChevronDownIcon className="h-3.5 w-3.5" />
-                </DownloadButton>
-                <div className="absolute right-0 top-full z-10 hidden pt-1 group-hover:block group-focus-within:block">
-                  <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-muted p-1 shadow-lg">
-                    {exportFormats(t).map((e) => (
-                      <a
-                        key={e.format}
-                        href={reportExportHref(report.id, e.format)}
-                        {...(e.view ? { target: '_blank', rel: 'noreferrer' } : { download: true })}
-                        className="block rounded px-3 py-1.5 text-sm hover:bg-accent whitespace-nowrap"
-                        title={e.view ? t('report.open_new_tab_title') : t('report.download_format_title', { label: e.label })}
-                      >
-                        {e.label}
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              </div>
             </div>
 
             {items.length === 0 && overviewToShow === null ? (

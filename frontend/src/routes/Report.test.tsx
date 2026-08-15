@@ -290,3 +290,99 @@ describe('Report view — document overview', () => {
     expect('operator' in (calls[0].body as Record<string, unknown>)).toBe(false)
   })
 })
+
+describe('Report view — the header selector', () => {
+  /** Two reports in the list, so the selector has something to switch between. */
+  function mockTwoReports() {
+    const calls: Array<{ url: string; method: string; body?: string }> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined })
+        if (url.includes('/reports/1')) {
+          return { ok: true, status: 200, json: async () => reportDetail }
+        }
+        if (url.includes('/reports/2')) {
+          return { ok: true, status: 200, json: async () => ({ ...reportDetail, id: 2, title: 'Case Beta', item_count: 0, items: [] }) }
+        }
+        if (url.endsWith('/reports')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              reports: [
+                { ...reportDetail, items: undefined },
+                { ...reportDetail, items: undefined, id: 2, title: 'Case Beta', item_count: 0 }
+              ]
+            })
+          }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    return calls
+  }
+
+  it('switches the active report from the header selector', async () => {
+    mockTwoReports()
+    renderReport()
+
+    const select = await screen.findByRole('combobox', { name: /select report/i })
+    await screen.findByRole('option', { name: 'Case Beta (0)' })
+    fireEvent.change(select, { target: { value: '2' } })
+
+    await waitFor(() => {
+      expect(useReportStore.getState().activeReportId).toBe(2)
+    })
+  })
+
+  it('renames the active report from the title field', async () => {
+    const calls = mockTwoReports()
+    renderReport()
+
+    const title = await screen.findByDisplayValue('Case Alpha')
+    fireEvent.change(title, { target: { value: 'Case Gamma' } })
+    fireEvent.blur(title)
+
+    await waitFor(() => {
+      const patch = calls.find((c) => c.method === 'PATCH')
+      expect(patch?.body).toContain('Case Gamma')
+    })
+  })
+
+  it('deletes the active report from the header and clears the selection', async () => {
+    const calls = mockTwoReports()
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderReport()
+
+    fireEvent.click(await screen.findByRole('button', { name: /delete report/i }))
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.method === 'DELETE' && c.url.includes('/reports/1'))).toBe(true)
+    })
+    await waitFor(() => {
+      expect(useReportStore.getState().activeReportId).toBeNull()
+    })
+  })
+
+  it('offers only the create action when there are no reports', async () => {
+    useReportStore.setState({ activeReportId: null })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string) => {
+        if (String(u).endsWith('/reports')) {
+          return { ok: true, status: 200, json: async () => ({ reports: [] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    renderReport()
+
+    // With nothing to pick, the placeholder says so rather than inviting a
+    // choice; delete and export need a report and must not sit there dead.
+    expect(await screen.findByText(/no reports yet/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /delete report/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /New/i })).toBeInTheDocument()
+  })
+})
