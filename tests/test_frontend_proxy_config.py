@@ -87,19 +87,24 @@ def test_frontend_nginx_proxies_translate_endpoint() -> None:
     assert "translate" in _nginx_api_route_tokens()
 
 
+DEV_PROXY_TS = REPO_ROOT / "frontend" / "src" / "lib" / "devProxy.ts"
+
+
 def _vite_api_prefixes() -> list[str]:
     """Return the Vite dev server's ``API_PREFIXES`` allowlist entries.
 
-    Order-independent: parses the ``API_PREFIXES = [...]`` array literal in
-    ``vite.config.ts`` (each entry is proxied under the ``/docint/`` base) so
-    membership checks don't depend on where an entry sits in the list.
+    Order-independent: parses the ``API_PREFIXES = [...]`` array literal so
+    membership checks don't depend on where an entry sits in the list. The list
+    lives in ``frontend/src/lib/devProxy.ts`` rather than in ``vite.config.ts``
+    (which imports it) so the dev proxy's rules can be unit-tested from vitest
+    as well as asserted here.
 
     Returns:
         list[str]: The API path segments proxied to the backend.
     """
-    vite_conf = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
-    match = re.search(r"API_PREFIXES\s*=\s*\[([^\]]*)\]", vite_conf)
-    assert match is not None, "API_PREFIXES array not found in vite.config.ts"
+    dev_proxy = DEV_PROXY_TS.read_text(encoding="utf-8")
+    match = re.search(r"API_PREFIXES\s*=\s*\[([^\]]*)\]", dev_proxy)
+    assert match is not None, f"API_PREFIXES array not found in {DEV_PROXY_TS.name}"
     return [tok.strip().strip("'\"") for tok in match.group(1).split(",") if tok.strip()]
 
 
@@ -215,3 +220,45 @@ def test_backend_tmp_is_disk_backed_volume() -> None:
 
     assert "- media-tmp:/tmp" in compose
     assert "/tmp:size=2g" not in compose
+
+
+def test_ingest_page_and_api_are_split_by_method() -> None:
+    """``/ingest`` is both an SPA route and an endpoint, so both proxies split it.
+
+    The SPA's ingest screen and the CLI/batch ``POST /ingest`` share one path.
+    Both proxy layers matched the whole prefix to the backend, so opening or
+    reloading ``/docint/ingest`` was answered by FastAPI (405) instead of the
+    app -- the screen was reachable only by clicking through from another
+    route. Only the bare path is ambiguous; everything under ``/ingest/``
+    (upload, finalize, jobs, the SSE stream) stays API-only.
+
+    Guards the production half here and the wiring of the dev half; the dev
+    rule's own behavior is unit-tested in ``devProxy.test.ts``.
+    """
+    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+
+    assert 'map "$request_method:$uri" $ingest_spa_page' in nginx_conf
+    assert '"GET:/ingest"' in nginx_conf
+    assert "error_page 418 = @spa_shell;" in nginx_conf
+    assert "location @spa_shell {" in nginx_conf
+
+    vite_conf = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
+    assert "spaShellBypass" in vite_conf, "the dev proxy lost its ingest-page carve-out"
+
+
+def test_ingest_subpaths_still_reach_the_backend() -> None:
+    """The carve-out must not swallow the ingest API it sits in front of.
+
+    ``/ingest/upload``, ``/ingest/finalize`` and the ``/ingest/jobs*`` stream
+    are API-only. The nginx map keys the page on the *exact* bare path, so a
+    key with a trailing segment would hand an upload to the SPA shell.
+    """
+    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+
+    match = re.search(r"map \"\$request_method:\$uri\" \$ingest_spa_page \{(.*?)\}", nginx_conf, re.S)
+    assert match is not None, "ingest page map not found"
+    keys = re.findall(r'"([^"]+)"', match.group(1))
+    assert keys, "ingest page map has no keys"
+    for key in keys:
+        _, _, path = key.partition(":")
+        assert path.rstrip("/") == "/ingest", f"{key} would divert an API path to the SPA"
