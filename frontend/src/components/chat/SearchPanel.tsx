@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Banner, Button, Card, Input, RemoveButton } from '@infra/ui'
+import { Banner, Button, Card, Input, RemoveButton, SearchButton } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
@@ -153,9 +153,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
           aria-label={t('search.title')}
           className="min-w-0 flex-1"
         />
-        <Button type="submit" variant="secondary" size="sm">
-          {t('search.submit')}
-        </Button>
+        {/* size="md" matches the Input's h-10: the pair never lined up while
+            this was a sm button beside a taller field. */}
+        <SearchButton label={t('search.submit')} type="submit" variant="secondary" size="md" />
       </form>
 
       {!collection ? (

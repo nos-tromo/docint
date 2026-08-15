@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Button, DownloadButton, NewButton, PageHeader } from '@infra/ui'
+import { DownloadButton, NewButton, PageHeader, SendButton } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
@@ -435,13 +435,18 @@ export function Chat() {
             rows={1}
             className="flex-1 bg-muted border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
           />
-          <Button
-            variant="primary"
+          {/* size="md" so the shell's aspect-square lands at 40x40, the
+              composer's own height. `busy` replaces what used to be a typed
+              '…' standing in for a spinner, and IconButton folds busy into
+              disabled, so the in-flight guard is unchanged. */}
+          <SendButton
+            label={t('chat.send')}
             type="submit"
-            disabled={state.inflight || !draft.trim()}
-          >
-            {state.inflight ? '…' : t('chat.send')}
-          </Button>
+            variant="primary"
+            size="md"
+            busy={state.inflight}
+            disabled={!draft.trim()}
+          />
         </form>
       </section>
 
