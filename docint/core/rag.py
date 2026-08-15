@@ -105,6 +105,7 @@ from llama_index.core.vector_stores.types import (
 from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
+from prometheus_client import Counter
 from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
 
@@ -200,6 +201,16 @@ SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 # single final synthesized payload.
 SUMMARY_MAP_CACHE_NAMESPACE = "docint_summary_map_cache_v1"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+
+# The reranker records what it did on the nodes it returns. That is the one
+# place the outcome can ride safely: the postprocessor instance is shared by
+# every concurrent request (query engines are cached per collection), and the
+# streaming path crosses threads between retrieval and the final frame, so
+# neither instance state nor a context variable would reach the response.
+# ``_normalize_response_data`` lifts the stamp into ``response["rerank"]``
+# and strips it before a node becomes a source.
+RERANK_APPLIED_KEY = "docint_rerank_applied"
+RERANK_ERROR_KEY = "docint_rerank_error"
 
 # Marks a retrieved node as coming from the image lane. Set on the node
 # metadata by ``RAG._retrieve_image_nodes`` and read by
@@ -1518,6 +1529,37 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         return expanded
 
 
+_RERANK_FAILURES = Counter(
+    "docint_rerank_failures_total",
+    "Rerank calls that failed and fell back to the retrieval order.",
+)
+
+
+def _stamp_rerank_outcome(
+    nodes: list[NodeWithScore], *, applied: bool, error: str | None = None
+) -> list[NodeWithScore]:
+    """Record on each node whether it went through the reranker.
+
+    Args:
+        nodes (list[NodeWithScore]): Nodes about to be returned.
+        applied (bool): Whether the reranker actually re-scored them.
+        error (str | None): The failure, when it did not.
+
+    Returns:
+        list[NodeWithScore]: The same nodes, stamped.
+    """
+    for nws in nodes:
+        metadata = getattr(nws.node, "metadata", None)
+        if not isinstance(metadata, dict):
+            continue
+        metadata[RERANK_APPLIED_KEY] = applied
+        if applied:
+            metadata.pop(RERANK_ERROR_KEY, None)
+        else:
+            metadata[RERANK_ERROR_KEY] = error or "unknown"
+    return nodes
+
+
 class VLLMRerankPostprocessor(BaseNodePostprocessor):
     """Call a vLLM-compatible rerank endpoint and map results back to nodes."""
 
@@ -1642,14 +1684,15 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
 
             if not reranked:
                 raise ValueError("vLLM rerank response did not contain usable results")
-            return reranked
+            return _stamp_rerank_outcome(reranked, applied=True)
         except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
             logger.warning(
                 "vLLM rerank request failed at '{}': {}. Returning original retrieval order.",
                 request_url,
                 exc,
             )
-            return self._fallback_nodes(nodes)
+            _RERANK_FAILURES.inc()
+            return _stamp_rerank_outcome(self._fallback_nodes(nodes), applied=False, error=str(exc))
 
 
 class LazyRerankerPostprocessor(BaseNodePostprocessor):
@@ -3331,6 +3374,33 @@ class RAG:
             base = self.embed_client_config.api_base if self.embed_client_config else self.openai_api_base
             logger.error("Dense embedding probe failed against {}: {}", base, exc)
             raise
+
+    def probe_rerank_endpoint(self) -> None:
+        """Report at boot whether the reranker answers. Never raises.
+
+        The reranker is fail-soft by design — a transport failure degrades a
+        query to raw retrieval order — so an outage used to leave one WARNING
+        per query and nothing else. Measured on a live stack, that let a
+        day-long outage ship every answer's top-5 by fusion order with no
+        visible sign. This probe turns the first sign into one ERROR line at
+        startup; the per-turn ``rerank`` field on the response does the rest.
+        """
+        probe = NodeWithScore(node=TextNode(text="ping"), score=1.0)
+        try:
+            result = self.reranker.postprocess_nodes([probe], query_bundle=QueryBundle(query_str="ping"))
+        except Exception as exc:  # pragma: no cover - the postprocessor is fail-soft
+            logger.error("Rerank probe raised unexpectedly: {}", exc)
+            return
+        # The postprocessor swallows transport failures and stamps the outcome
+        # on the nodes it returns (see RERANK_APPLIED_KEY).
+        stamped: dict[str, Any] = result[0].node.metadata if result else {}
+        if stamped.get(RERANK_APPLIED_KEY) is False:
+            logger.error(
+                "Rerank endpoint unreachable ({}) — answers will ship in raw retrieval order, "
+                "reported per turn as rerank.applied=false, until it is back. Check RERANK_API_BASE "
+                "and that the rerank service is running.",
+                stamped.get(RERANK_ERROR_KEY),
+            )
 
     # --- Build pieces ---
     def _vector_store(self) -> QdrantVectorStore:
@@ -5554,8 +5624,18 @@ class RAG:
         if not isinstance(source_nodes, list):
             source_nodes = cast(list[Any], [])
 
+        # Lift the reranker's outcome off the nodes (see RERANK_APPLIED_KEY)
+        # before they become sources, so a degraded turn is reported and the
+        # stamp never reaches a client or a persisted turn.
+        rerank: dict[str, Any] | None = None
         sources: list[dict[str, Any]] = []
         for nws in source_nodes:
+            metadata = getattr(getattr(nws, "node", None), "metadata", None)
+            if isinstance(metadata, dict) and RERANK_APPLIED_KEY in metadata:
+                applied = bool(metadata.pop(RERANK_APPLIED_KEY))
+                error = metadata.pop(RERANK_ERROR_KEY, None)
+                if rerank is None or (rerank["applied"] and not applied):
+                    rerank = {"applied": applied, "error": None if applied else str(error or "unknown")}
             normalized = self._source_from_node_with_score(nws)
             if normalized is not None:
                 sources.append(normalized)
@@ -5590,6 +5670,7 @@ class RAG:
             "retrieval_query": retrieval_query,
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
+            "rerank": rerank,
         }
 
     def _load_collection_ner_sources(

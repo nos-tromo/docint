@@ -2264,6 +2264,135 @@ def test_vllm_reranker_falls_back_to_original_order(
     assert [node.node.get_content() for node in reranked] == ["alpha", "beta"]
 
 
+def test_vllm_reranker_fallback_marks_nodes_as_not_reranked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded turn must be recognisable downstream: the returned nodes carry the outcome.
+
+    The reranker instance is shared across concurrent requests and the streaming
+    path hops threads before the final frame is built, so the outcome travels on
+    the nodes themselves rather than on the instance or a context variable.
+    """
+
+    def fake_urlopen(request: object, timeout: float) -> object:
+        _ = (request, timeout)
+        raise urllib.error.URLError("upstream down")
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
+    reranker = rag_module.VLLMRerankPostprocessor(api_base="http://router:8000/v1", model="m", top_n=2)
+    nodes = [
+        NodeWithScore(node=TextNode(text="alpha"), score=0.3),
+        NodeWithScore(node=TextNode(text="beta"), score=0.2),
+    ]
+
+    reranked = reranker.postprocess_nodes(nodes, query_bundle=rag_module.QueryBundle(query_str="q"))
+
+    for nws in reranked:
+        assert nws.node.metadata[rag_module.RERANK_APPLIED_KEY] is False
+        assert "upstream down" in nws.node.metadata[rag_module.RERANK_ERROR_KEY]
+
+
+def test_vllm_reranker_success_marks_nodes_as_reranked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A healthy rerank stamps the nodes too, so a missing stamp means 'no reranker ran'."""
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            _ = exc
+
+        def read(self) -> bytes:
+            return json.dumps({"results": [{"index": 1, "relevance_score": 0.9}]}).encode("utf-8")
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    reranker = rag_module.VLLMRerankPostprocessor(api_base="http://router:8000/v1", model="m", top_n=1)
+    nodes = [
+        NodeWithScore(node=TextNode(text="alpha"), score=0.3),
+        NodeWithScore(node=TextNode(text="beta"), score=0.2),
+    ]
+
+    reranked = reranker.postprocess_nodes(nodes, query_bundle=rag_module.QueryBundle(query_str="q"))
+
+    assert reranked[0].node.metadata[rag_module.RERANK_APPLIED_KEY] is True
+    assert rag_module.RERANK_ERROR_KEY not in reranked[0].node.metadata
+
+
+def test_normalize_response_reports_rerank_outcome_and_strips_the_stamp() -> None:
+    """The response says whether sources were re-ranked; the stamp never leaks into a source."""
+    from llama_index.core.base.response.schema import Response
+
+    rag = RAG(qdrant_collection="test")
+    degraded = TextNode(
+        text="alpha", metadata={rag_module.RERANK_APPLIED_KEY: False, rag_module.RERANK_ERROR_KEY: "upstream down"}
+    )
+    result = Response(response="answer", source_nodes=[NodeWithScore(node=degraded, score=0.3)])
+
+    data = rag._normalize_response_data("q", result)
+
+    assert data["rerank"] == {"applied": False, "error": "upstream down"}
+    for source in data["sources"]:
+        assert rag_module.RERANK_APPLIED_KEY not in json.dumps(source)
+        assert rag_module.RERANK_ERROR_KEY not in json.dumps(source)
+
+    healthy = TextNode(text="beta", metadata={rag_module.RERANK_APPLIED_KEY: True})
+    data = rag._normalize_response_data(
+        "q", Response(response="answer", source_nodes=[NodeWithScore(node=healthy, score=0.9)])
+    )
+    assert data["rerank"] == {"applied": True, "error": None}
+
+    # No reranker in the loop at all (scoped turn, empty result): nothing to report.
+    data = rag._normalize_response_data("q", Response(response="answer", source_nodes=[]))
+    assert data["rerank"] is None
+
+
+def test_probe_rerank_endpoint_logs_an_error_but_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreachable reranker is reported loudly at boot, without blocking startup.
+
+    The reranker is fail-soft by design, so a per-query WARNING was the only
+    trace of a day-long outage. One ERROR at boot is what an operator sees.
+    """
+
+    def fake_urlopen(request: object, timeout: float) -> object:
+        _ = (request, timeout)
+        raise urllib.error.URLError("upstream down")
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
+    rag = RAG(qdrant_collection="test")
+    errors: list[str] = []
+    handle = rag_module.logger.add(lambda message: errors.append(str(message)), level="ERROR")
+    try:
+        rag.probe_rerank_endpoint()  # must not raise
+    finally:
+        rag_module.logger.remove(handle)
+
+    assert any("rerank" in line.lower() and "upstream down" in line for line in errors)
+
+
+def test_probe_rerank_endpoint_is_quiet_when_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A healthy reranker produces no error at boot."""
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            _ = exc
+
+        def read(self) -> bytes:
+            return json.dumps({"results": [{"index": 0, "relevance_score": 0.5}]}).encode("utf-8")
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    rag = RAG(qdrant_collection="test")
+    errors: list[str] = []
+    handle = rag_module.logger.add(lambda message: errors.append(str(message)), level="ERROR")
+    try:
+        rag.probe_rerank_endpoint()
+    finally:
+        rag_module.logger.remove(handle)
+    assert errors == []
+
+
 def test_embed_model_uses_ollama_embedding_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

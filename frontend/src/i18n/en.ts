@@ -127,6 +127,8 @@ export const en = {
   'chat.graph_debug': 'Graph debug',
   'chat.scope_not_applied':
     'This answer was not restricted to the {count} selected chunks — it came from ordinary retrieval.',
+  'chat.rerank_not_applied':
+    'The sources of this answer were not re-ranked — the reranker was unreachable, so they are in raw retrieval order and may be less precise.',
   'chat.retry_notice':
     'The first answer did not match the retrieved evidence, so the search was automatically retried with a reformulated query: “{query}”',
   'chat.validation_mismatch_title': 'Response validation flagged a potential mismatch',

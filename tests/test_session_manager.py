@@ -346,6 +346,7 @@ def test_stream_chat_includes_final_response_when_no_tokens(
             "retrieval_query": "rewritten hello",
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact",
+            "rerank": None,
             "turn_idx": 0,
         }
     ]

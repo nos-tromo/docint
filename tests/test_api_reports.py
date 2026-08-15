@@ -42,6 +42,10 @@ class _ReportRAG:
         self._com = CollectionOwnerManager(rag=cast(Any, self))
         self._com._SessionMaker = sessionmaker(bind=engine)
 
+    def probe_rerank_endpoint(self) -> None:
+        """Satisfy the lifespan rerank probe without touching the network."""
+        return None
+
     def probe_qdrant(self) -> bool:
         """Satisfy the lifespan startup probe without touching the network."""
         return True

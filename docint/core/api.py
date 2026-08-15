@@ -132,6 +132,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await to_thread.run_sync(_init_session_store)
     await to_thread.run_sync(rag.probe_qdrant)
+    await to_thread.run_sync(rag.probe_rerank_endpoint)
     await to_thread.run_sync(rag.reconcile_quantization)
     yield
     await job_manager.stop()
@@ -898,6 +899,12 @@ class QueryOut(BaseModel):
     #: How many hand-picked chunks a ``retrieval_mode="scoped"`` turn answered
     #: from; absent on an ordinary retrieval.
     scoped_chunk_count: int | None = None
+    #: Whether the sources went through the reranker: ``{"applied": bool,
+    #: "error": str | None}``. ``applied=False`` means the reranker was
+    #: unreachable and the sources are in raw retrieval order — a degraded
+    #: turn that must not pass as a normal one. ``None`` when no reranker
+    #: was in the loop (scoped turn, no sources).
+    rerank: dict[str, Any] | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -1679,6 +1686,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             "scoped_chunk_count": (
                 data.get("scoped_chunk_count") if isinstance(data, dict) and retrieval_mode == "scoped" else None
             ),
+            "rerank": data.get("rerank") if isinstance(data, dict) else None,
             **validation,
         }
     except HTTPException:

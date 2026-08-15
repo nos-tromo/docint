@@ -263,6 +263,10 @@ class DummyRAG:
             },
         }
 
+    def probe_rerank_endpoint(self) -> None:
+        """Satisfy the lifespan rerank probe without touching the network."""
+        return None
+
     def probe_qdrant(self) -> bool:
         """Satisfy the lifespan startup probe without touching the network.
 
@@ -470,6 +474,9 @@ class DummyRAG:
             "retrieval_query": f"rewritten::{question}",
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact_graph",
+            # Mirror SessionManager: the engine reports whether the sources
+            # were re-ranked, so endpoint tests can assert it reaches the wire.
+            "rerank": {"applied": False, "error": "upstream down"},
             "graph_debug": {
                 "enabled": True,
                 "applied": True,
@@ -540,6 +547,7 @@ class DummyRAG:
             "retrieval_query": f"rewritten::{question}",
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact_graph",
+            "rerank": {"applied": False, "error": "upstream down"},
             "graph_debug": {
                 "enabled": True,
                 "applied": True,
@@ -2209,6 +2217,34 @@ def test_query_reports_the_scope_it_answered_from(client: TestClient) -> None:
     body = response.json()
     assert body["retrieval_mode"] == "scoped"
     assert body["scoped_chunk_count"] == 2
+
+
+def test_query_reports_whether_sources_were_reranked(client: TestClient) -> None:
+    """A turn whose reranker was unreachable must say so on the wire.
+
+    Measured on a live stack: the reranker container had been down for a day
+    and every answer shipped its top-5 by raw fusion order, indistinguishable
+    from a healthy turn. The field is what lets the client flag it.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post("/query", json={"question": "What?", "collection": "alpha"})
+
+    assert response.status_code == 200
+    assert response.json()["rerank"] == {"applied": False, "error": "upstream down"}
+
+
+def test_stream_query_final_frame_reports_rerank_outcome(client: TestClient) -> None:
+    """The streaming path carries the same report in its final frame.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    with client.stream("POST", "/stream_query", json={"question": "What?", "collection": "alpha"}) as response:
+        frames = [line for line in response.iter_lines() if line.startswith("data:")]
+    final = json.loads(frames[-1][len("data:") :])
+    assert final["rerank"] == {"applied": False, "error": "upstream down"}
 
 
 def test_stateless_query_answers_from_a_scope_carried_on_the_request(client: TestClient) -> None:

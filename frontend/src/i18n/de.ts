@@ -133,6 +133,8 @@ export const de: Strings = {
   'chat.graph_debug': 'Graph-Debug',
   'chat.scope_not_applied':
     'Diese Antwort wurde nicht auf die {count} ausgewählten Abschnitte eingegrenzt — sie stammt aus der normalen Suche.',
+  'chat.rerank_not_applied':
+    'Die Quellen dieser Antwort wurden nicht neu gewichtet — der Reranker war nicht erreichbar, daher stehen sie in roher Suchreihenfolge und können ungenauer sein.',
   'chat.retry_notice':
     'Die erste Antwort passte nicht zu den gefundenen Belegen, daher wurde die Suche automatisch mit einer umformulierten Anfrage wiederholt: „{query}“',
   'chat.validation_mismatch_title':
