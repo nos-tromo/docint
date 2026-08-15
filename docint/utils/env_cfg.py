@@ -1886,7 +1886,10 @@ class PipelineConfig:
 # 3.2.0: table blocks whose structure geometry could not recover are sent to
 # the vision endpoint, which sees spanning headers that the cell positions
 # cannot express.
-PIPELINE_VERSION = "3.2.0"
+# 3.3.0: the text inside plotted figures (token axes, word clouds) is
+# FIGURE_TEXT and stays out of chunk text; on a real paper those bags of
+# tokens out-ranked the correct passage in the sparse lane.
+PIPELINE_VERSION = "3.3.0"
 
 
 def load_pipeline_config(

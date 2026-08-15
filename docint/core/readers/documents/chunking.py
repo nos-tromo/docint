@@ -38,7 +38,9 @@ _HEADING_BLOCK_TYPES = frozenset({BlockType.TITLE, BlockType.HEADER})
 _PROSE_BLOCK_TYPES = frozenset({BlockType.TEXT, BlockType.LIST, BlockType.CAPTION})
 # Page furniture belongs to the page, not the argument: a running head repeated
 # on every page would otherwise be embedded into every chunk of the document.
-_FURNITURE_BLOCK_TYPES = frozenset({BlockType.PAGE_HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER})
+_FURNITURE_BLOCK_TYPES = frozenset(
+    {BlockType.PAGE_HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER, BlockType.FIGURE_TEXT}
+)
 
 
 def _stable_chunk_id(doc_id: str, page_index: int, block_id: str, idx: int) -> str:

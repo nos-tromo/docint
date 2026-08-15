@@ -24,6 +24,11 @@ class BlockType(StrEnum):
     PAGE_HEADER = "page_header"
     FOOTER = "footer"
     PAGE_NUMBER = "page_number"
+    # The text *inside* a plotted figure — a token axis, a word cloud, tick
+    # labels: dozens of one-word lines. Not prose; kept out of body text like
+    # furniture, since as a bag of tokens it out-scores real passages on any
+    # query that shares a word with it.
+    FIGURE_TEXT = "figure_text"
 
 
 @dataclass

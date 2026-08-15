@@ -32,7 +32,9 @@ from docint.utils.llm_sanitize import looks_like_no_image_refusal, squeeze_char_
 from docint.utils.openai_cfg import OpenAIPipeline
 
 # Page furniture is not part of the page's text (mirrors chunking.py).
-_FURNITURE_BLOCK_TYPES = frozenset({BlockType.PAGE_HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER})
+_FURNITURE_BLOCK_TYPES = frozenset(
+    {BlockType.PAGE_HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER, BlockType.FIGURE_TEXT}
+)
 
 
 class OCREngine(ABC):

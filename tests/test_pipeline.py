@@ -18,6 +18,7 @@ from pdf_fixtures import (
     spanning_header_table_page,
     table_page,
     two_column_page,
+    word_list_figure_page,
     wrapped_header_table_page,
 )
 
@@ -211,7 +212,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "3.2.0"
+        assert cfg.pipeline_version == "3.3.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -443,6 +444,30 @@ class TestChunking:
         assert len(units) == 1
         assert units[0].text == "The body sentence that should survive."
         assert units[0].block_ids == ["b"]
+
+    def test_figure_text_blocks_never_enter_chunk_text(self) -> None:
+        """FIGURE_TEXT joins furniture in the chunker's skip set."""
+
+        def _block(block_id: str, kind: BlockType, text: str, order: int) -> LayoutBlock:
+            return LayoutBlock(
+                block_id=block_id,
+                page_index=0,
+                type=kind,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=order,
+                confidence=1.0,
+                text=text,
+            )
+
+        layout = {
+            0: [
+                _block("ft", BlockType.FIGURE_TEXT, "application\nmissing\n<EOS>\nopinion", 0),
+                _block("b", BlockType.TEXT, "The body sentence that should survive.", 1),
+            ]
+        }
+        units = build_coarse_units("doc", layout, {}, [], [])
+        assert len(units) == 1
+        assert units[0].text == "The body sentence that should survive."
 
     def test_header_replaces_previous_header_under_title(self) -> None:
         """Section paths stay title + current header; consecutive HEADERs do not stack."""
@@ -1104,7 +1129,40 @@ class TestLayoutAnalysis:
         assert "Body line one of page 2" in body
         assert "Quarterly Review" not in body and "Confidential" not in body
 
-    def test_analyze_document_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
+    def test_word_list_figure_text_is_not_body_text(self, tmp_path: Path) -> None:
+        """A figure's token axis is FIGURE_TEXT — never a TEXT block, never a heading."""
+        blocks = self._analyze(tmp_path, word_list_figure_page())
+        types = [b.type for b in blocks]
+        assert BlockType.FIGURE_TEXT in types
+        # The bag of words is not prose, and its outsized label is not a title.
+        body = " ".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "governments" not in body and "<EOS>" not in body
+        assert all(b.type not in (BlockType.TITLE, BlockType.HEADER) or "Layer5" not in b.text for b in blocks)
+        # The caption survives as ordinary text.
+        assert "Figure 4" in body
+
+    def test_short_lines_of_real_prose_stay_text(self, tmp_path: Path) -> None:
+        """A math-heavy paragraph has many short lines but stays TEXT (measured: 0.44 share, 14 chars)."""
+        runs = [TextRun("Since our model contains no recurrence, we inject position information.", x=60, y=700)]
+        y = 686.0
+        for token in (
+            "PE",
+            "(pos, 2i)",
+            "= sin(pos / 10000",
+            "2i / d",
+            "model",
+            ")",
+            "where pos is the position and i is the dimension.",
+        ):
+            runs.append(TextRun(token, x=60, y=y))
+            y -= 12
+        for i in range(8):
+            runs.append(
+                TextRun(f"Ordinary prose line number {i} carries on with the argument at length.", x=60, y=y - i * 12)
+            )
+        blocks = self._analyze(tmp_path, PageSpec(runs=runs))
+        assert BlockType.FIGURE_TEXT not in [b.type for b in blocks]
+
         """analyze_document() uses the caller's ParsedPdf when given one."""
         pdf = tmp_path / "doc.pdf"
         pdf.write_bytes(build_pdf([two_column_page()]))

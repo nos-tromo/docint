@@ -59,6 +59,14 @@ _BOLD_MARKERS = (
     "medi",
 )  # "medi": NimbusRomNo9L-Medi, LaTeX bold Times
 _WORD_RE = re.compile(r"[^\W\d_]{3,}")  # at least one real word (3+ letters)
+# A run of lines is the text inside a figure (an axis of tokens, a word cloud)
+# rather than prose when it is long and made almost entirely of one- or
+# two-word lines. Measured on a real paper: attention-heatmap pages sit at
+# 0.94-1.00 share of such lines with a median line of 3-5 characters; the
+# shortest-lined real prose (an equation-heavy paragraph) at 0.44 and 14.
+_FIGURE_TEXT_MIN_LINES = 15
+_FIGURE_TEXT_MIN_SHORT_SHARE = 0.6
+_FIGURE_TEXT_MAX_MEDIAN_CHARS = 8
 
 
 class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
@@ -191,6 +199,24 @@ def _with_paragraph_breaks(lines: list[TextLine]) -> list[TextLine | None]:
     return out
 
 
+def _looks_like_figure_text(lines: list[TextLine]) -> bool:
+    """Whether a run of lines is a figure's token axis rather than prose.
+
+    Args:
+        lines (list[TextLine]): The consecutive lines of one would-be TEXT block.
+
+    Returns:
+        bool: True when the run is long and made almost entirely of one- or two-word lines.
+    """
+    texts = [ln.text.strip() for ln in lines if ln.text.strip()]
+    if len(texts) < _FIGURE_TEXT_MIN_LINES:
+        return False
+    short = sum(1 for t in texts if len(t.split()) <= 2)
+    if short < _FIGURE_TEXT_MIN_SHORT_SHARE * len(texts):
+        return False
+    return statistics.median(len(t) for t in texts) <= _FIGURE_TEXT_MAX_MEDIAN_CHARS
+
+
 def _is_bold(font_name: str) -> bool:
     """Whether a PDF font name advertises a bold weight."""
     name = font_name.lower()
@@ -259,6 +285,12 @@ def _classify_headings(lines: list[TextLine], excluded: set[int]) -> dict[int, B
         if not text or len(text) > _HEADING_MAX_CHARS or text.endswith((".", ",", ";", ":")):
             continue
         if not _WORD_RE.search(text):
+            continue
+        # A figure's axis label ("Input-Input Layer5") is short, large and
+        # alone; require a heading to read like one: two words, or one real
+        # word of four letters or more that is not glued to digits.
+        words = text.split()
+        if len(words) < 2 and not re.fullmatch(r"[^\W\d_]{4,}", words[0] if words else ""):
             continue
         large = ln.font_size >= _HEADING_SIZE_RATIO * body
         bold = _is_bold(ln.font_name) and ln.font_size >= body - 0.5
@@ -394,21 +426,40 @@ def _build_text_blocks(
     blocks: list[LayoutBlock] = []
     run: list[TextLine] = []
 
-    def _flush_text() -> None:
-        """Emit the accumulated prose lines as one TEXT block."""
-        if run:
-            blocks.append(
-                LayoutBlock(
-                    block_id=f"block-{page_index}-{uuid.uuid4().hex[:8]}",
-                    page_index=page_index,
-                    type=BlockType.TEXT,
-                    bbox=_union_bbox(run),
-                    reading_order=0,
-                    confidence=1.0,
-                    text=lines_to_text(run),
-                )
+    def _emit_run(lines: list[TextLine], *, figure_text: bool) -> None:
+        """Append one TEXT / FIGURE_TEXT block for ``lines``."""
+        if not lines:
+            return
+        blocks.append(
+            LayoutBlock(
+                block_id=f"{'figtext' if figure_text else 'block'}-{page_index}-{uuid.uuid4().hex[:8]}",
+                page_index=page_index,
+                type=BlockType.FIGURE_TEXT if figure_text else BlockType.TEXT,
+                bbox=_union_bbox(lines),
+                reading_order=0,
+                confidence=0.8 if figure_text else 1.0,
+                text=lines_to_text(lines),
             )
-            run.clear()
+        )
+
+    def _flush_text() -> None:
+        """Emit the accumulated lines as one TEXT block — or FIGURE_TEXT when they are a token axis."""
+        if not run:
+            return
+        if _looks_like_figure_text(run):
+            # A figure's caption sits right under its token axis and gets swept
+            # into the same run; it is prose and must stay TEXT.
+            axis = list(run)
+            caption: list[TextLine] = []
+            while axis and len(axis[-1].text.split()) > 4:
+                caption.insert(0, axis.pop())
+            if axis and _looks_like_figure_text(axis):
+                _emit_run(axis, figure_text=True)
+                _emit_run(caption, figure_text=False)
+                run.clear()
+                return
+        _emit_run(list(run), figure_text=False)
+        run.clear()
 
     emitted_tables: set[int] = set()
     idx = 0
@@ -464,6 +515,23 @@ def _build_text_blocks(
         run.append(ln)
         idx += 1
     _flush_text()
+    # A heading immediately followed by a figure's token axis is the figure's
+    # own label ("Input-Input Layer5"), not a section heading: demote it so it
+    # neither resets the section path nor stands as a chunk boundary.
+    # A heading sitting directly above a plot's token axis (past any embedded
+    # image) is that plot's label — "Input-Input Layer5" — not a section
+    # heading: demote it. Only the *nearest* heading qualifies; the real
+    # heading further up ("Attention Visualizations") must survive, so a
+    # demoted label never counts as a token axis for the heading above it.
+    axis_ids = {id(b) for b in blocks if b.type == BlockType.FIGURE_TEXT}
+    for index in range(len(blocks) - 1):
+        if blocks[index].type not in (BlockType.TITLE, BlockType.HEADER):
+            continue
+        after = index + 1
+        while after < len(blocks) and blocks[after].type == BlockType.FIGURE:
+            after += 1
+        if after < len(blocks) and id(blocks[after]) in axis_ids:
+            blocks[index].type = BlockType.FIGURE_TEXT
     return blocks
 
 

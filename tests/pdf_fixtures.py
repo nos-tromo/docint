@@ -377,3 +377,51 @@ def spanning_header_table_page() -> PageSpec:
                 runs.append(TextRun(text, x=x, y=y))
     runs.append(TextRun("The following paragraph is ordinary body text, far below the table.", x=60, y=520))
     return PageSpec(runs=runs)
+
+
+def word_list_figure_page() -> PageSpec:
+    """A page whose text is the token axis of a plotted figure, not prose.
+
+    Mirrors an attention-heatmap or word-cloud figure: dozens of single words
+    laid out along an axis, one per line, plus a caption. Retrieval-wise this
+    is a bag of tokens that scores high on any query sharing a word with it.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    words = [
+        "application",
+        "missing",
+        "opinion",
+        "perfect",
+        "should",
+        "never",
+        "what",
+        "Law",
+        "The",
+        "just",
+        "this",
+        "are",
+        "will",
+        "but",
+        "my",
+        "we",
+        "be",
+        "its",
+        "in",
+        "is",
+        "governments",
+        "registration",
+        "American",
+        "majority",
+        "process",
+        "since",
+        "then",
+    ]
+    runs = [TextRun("Input-Input Layer5", x=60, y=740, size=14)]
+    for i, word in enumerate(words):
+        runs.append(TextRun(word, x=80, y=700 - i * 12, size=8))
+    runs.append(
+        TextRun("Figure 4: Two attention heads, also in layer 5 of 6, involved in anaphora resolution.", x=60, y=340)
+    )
+    return PageSpec(runs=runs)
