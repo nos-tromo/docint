@@ -28,6 +28,7 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `POST` | `/stream_query` | `Query` | Streaming variant of `/query` (SSE tokens). |
 | `POST` | `/search` | `Query` | Full-text keyword search over chunk text (no embeddings, no inference). |
 | `POST` | `/summarize` | `Query` | Collection-level (tree/map-reduce) summary: `200` from cache, `202` queues a job. |
+| `GET`  | `/summarize` | `Query` | Read-only: the cached summary (`200`) or `204` when there is none. Never queues. |
 | `GET`  | `/collections/ner` | `Query` | Full NER dump for the active collection. |
 | `GET`  | `/collections/ner/stats` | `Query` | Aggregated NER statistics. |
 | `GET`  | `/collections/ner/search` | `Query` | Search for entities by name/pattern. |
@@ -260,8 +261,31 @@ Qdrant name back to a client.
 | `409` | A summary build is already in flight for this collection — `detail` carries `{"message", "job_id"}` of the running job. |
 
 A collection that has never been summarized, or whose last automatic build
-failed, has no degraded fallback: the first read simply falls into the `202`
-path and builds one in the background — this is by design, not a bug.
+failed, has no degraded fallback: this endpoint answers `202` and builds one in
+the background. The SPA therefore does not open the Summary tab against it —
+it probes with `GET /summarize` first and reaches this route only when an
+operator presses Create or Refresh.
+
+### `GET /summarize`
+
+The read-only half. Returns the cached summary — the identical body the POST's
+cache hit returns, built by the same `_cached_summary_payload` — or reports that
+there is none. **It never queues a build.** Query parameter: `collection`, the
+caller's logical name, optional here (this path creates no job, so the
+process-default fallback is safe) unlike on the POST.
+
+| Status | Meaning |
+|---|---|
+| `200` | Cache hit — the `SummarizeOut` body below. |
+| `204` | Nothing cached for this collection. No body, no job queued. |
+| `404` | Caller does not own the collection. |
+
+The split is by HTTP method rather than a flag on the POST because the SPA
+fires this whenever the Summary tab opens. A build is a minutes-long job of up
+to `SUMMARY_MAX_LLM_CALLS` model calls, so a caller who forgot to pass some
+`queue=false` would start one by merely looking; a handler with no queue branch
+cannot. `204` rather than `404` on a miss keeps "there is nothing here yet"
+distinguishable from "you may not read this", which `404` already means.
 
 `200` response (`SummarizeOut`):
 

@@ -251,3 +251,107 @@ def test_summarize_cache_hit_without_collection_uses_default(
 
     assert res.status_code == 200
     assert res.json()["summary"] == "default-collection summary"
+
+
+def test_get_summarize_matches_the_post_cache_hit_body(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``GET`` and the ``POST``'s cache hit answer the same cache identically.
+
+    The two share ``_cached_summary_payload``; this is the fence that keeps
+    them from drifting into describing the same cached summary differently
+    (a missing validation field, a renamed key), which a client would see as
+    the summary changing shape depending on how it was fetched.
+    """
+    payload: dict[str, Any] = {
+        "response": "cached summary",
+        "sources": [],
+        "summary_diagnostics": None,
+    }
+    monkeypatch.setattr(api_module.rag, "cached_collection_summary", lambda: payload)
+
+    got = client.get("/summarize?collection=col")
+    posted = client.post("/summarize?collection=col")
+
+    assert got.status_code == 200
+    assert posted.status_code == 200
+    assert got.json() == posted.json()
+
+
+def test_get_summarize_cache_hit_returns_200(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cached summary answers 200, validation fields merged in."""
+    payload: dict[str, Any] = {
+        "response": "cached summary",
+        "sources": [],
+        "summary_diagnostics": None,
+    }
+    monkeypatch.setattr(api_module.rag, "cached_collection_summary", lambda: payload)
+
+    res = client.get("/summarize?collection=col")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["summary"] == "cached summary"
+    # The validation merge is part of the contract, not incidental: the SPA
+    # renders a banner from these fields, and a probe-loaded summary must not
+    # differ from a build-loaded one.
+    assert "validation_checked" in body
+
+
+def test_get_summarize_cache_miss_returns_204_and_queues_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A miss answers 204 and leaves the job registry untouched.
+
+    This is the whole reason the route exists. The SPA fires it whenever the
+    Summary tab opens, and a build is a minutes-long, up-to-``SUMMARY_MAX_LLM_CALLS``
+    job -- so the assertion is black-box (no job in the registry afterwards),
+    not "the runner was not called".
+    """
+    monkeypatch.setattr(api_module.rag, "cached_collection_summary", lambda: None)
+
+    res = client.get("/summarize?collection=col")
+
+    assert res.status_code == 204
+    assert res.content == b""
+    assert client.get("/ingest/jobs").json()["jobs"] == []
+
+
+def test_get_summarize_without_collection_uses_default(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read path honors the process-default fallback and never 400s.
+
+    The POST's queue path requires an explicit logical name so a physical one
+    cannot leak into a job snapshot. Reading creates no job, so the GET must
+    not inherit that 400.
+    """
+    payload: dict[str, Any] = {"response": "default-collection summary", "sources": [], "summary_diagnostics": None}
+    monkeypatch.setattr(api_module.rag, "cached_collection_summary", lambda: payload)
+
+    res = client.get("/summarize")
+
+    assert res.status_code == 200
+    assert res.json()["summary"] == "default-collection summary"
+
+
+def test_get_summarize_does_not_409_while_a_build_is_in_flight(
+    make_client: Callable[..., TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probing during someone else's build reports "nothing cached", not 409.
+
+    The probe is inert with respect to the job registry: it neither creates a
+    job nor collides with one. A 409 here would make opening the tab mid-build
+    look like an error.
+    """
+    gate = threading.Event()
+
+    def _blocking(state: Any, push: Any) -> dict[str, Any]:
+        gate.wait(timeout=5)
+        return {"empty": False, "resolution": None}
+
+    client = make_client(runner=_blocking)
+    monkeypatch.setattr(api_module.rag, "cached_collection_summary", lambda: None)
+
+    queued = client.post("/summarize?collection=col")
+    probed = client.get("/summarize?collection=col")
+
+    assert queued.status_code == 202
+    assert probed.status_code == 204
+    gate.set()
