@@ -1826,7 +1826,10 @@ class PipelineConfig:
 # geometry (XY-cut reading order, font-based TITLE/HEADER blocks, per-column
 # TEXT blocks, tight table/figure boxes). Bumped so cached artifacts from
 # the pypdf backbone are regenerated.
-PIPELINE_VERSION = "3.0.0"
+# 3.1.0: table blocks carry a reconstructed cell grid and read row-major,
+# page furniture (running head / footer / page number / margin stamp) is kept
+# out of body text, and words split by a line-break hyphen are rejoined.
+PIPELINE_VERSION = "3.1.0"
 
 
 def load_pipeline_config(

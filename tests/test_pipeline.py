@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, report_pages, two_column_page
+from pdf_fixtures import (
+    ImageBox,
+    PageSpec,
+    TextRun,
+    build_pdf,
+    report_pages,
+    table_page,
+    two_column_page,
+    wrapped_header_table_page,
+)
 
 from docint.core.readers.documents.artifacts import (
     load_manifest,
@@ -198,7 +208,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "3.0.0"
+        assert cfg.pipeline_version == "3.1.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -683,6 +693,24 @@ class TestArtifacts:
         path = save_table("doc1", table, tmp_path)
         assert path.exists()
 
+    def test_save_table_writes_a_quoted_csv(self, tmp_path: Path) -> None:
+        """A table with a cell grid is also written as CSV, with proper quoting."""
+        table = TableResult(
+            table_id="table-0-abc",
+            page_index=0,
+            bbox=BBox(x0=0, y0=0, x1=400, y1=100),
+            raw_text="A | B\n1 | 2",
+            cell_grid=[["Name", "Note"], ["Alpha", 'says "hi", loudly']],
+            confidence=0.7,
+        )
+        save_table("doc1", table, tmp_path)
+
+        csv_path = tmp_path / "doc1" / "tables" / "table-0-abc.csv"
+        assert csv_path.exists()
+        rows = list(csv.reader(csv_path.read_text().splitlines()))
+        assert rows == [["Name", "Note"], ["Alpha", 'says "hi", loudly']]
+        assert table.csv_path == str(csv_path)
+
     def test_save_image_metadata(self, tmp_path: Path) -> None:
         """Saved image metadata file should be created on disk."""
         image = ImageResult(
@@ -750,6 +778,25 @@ class TestExtraction:
         assert len(images) == 1
         assert images[0].page_index == 0
         assert images[0].metadata["confidence"] == 0.85
+
+    def test_extract_tables_carries_the_cell_grid(self, tmp_path: Path) -> None:
+        """TableResult.cell_grid is populated from the layout block's cells."""
+        layout = {
+            0: [
+                LayoutBlock(
+                    block_id="tbl1",
+                    page_index=0,
+                    type=BlockType.TABLE,
+                    bbox=BBox(x0=0, y0=0, x1=400, y1=100),
+                    reading_order=0,
+                    confidence=0.7,
+                    text="A | B\n1 | 2",
+                    cells=[["A", "B"], ["1", "2"]],
+                )
+            ]
+        }
+        tables = extract_tables(layout)
+        assert tables[0].cell_grid == [["A", "B"], ["1", "2"]]
 
     def test_extract_images_writes_one_png_per_figure_block(self, tmp_path: Path) -> None:
         """Each FIGURE block gets the embedded image drawn at its bbox, not the page's first image."""
@@ -850,6 +897,37 @@ class TestLayoutAnalysis:
         blocks = self._analyze(tmp_path, spec)
         figs = sorted((b for b in blocks if b.type == BlockType.FIGURE), key=lambda b: b.bbox.x0)
         assert [round(b.bbox.x0) for b in figs] == [50, 300]
+
+    def test_table_block_text_is_row_major(self, tmp_path: Path) -> None:
+        """A gridded table reads row by row, not column by column."""
+        blocks = self._analyze(tmp_path, table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert "Model | Accuracy | F1" in table.text
+        assert "Alpha | 89.3 | 88.1" in table.text
+        assert table.text.index("Alpha") < table.text.index("Accuracy") + len(table.text)
+        assert table.cells is not None
+        assert table.cells[0] == ["Model", "Accuracy", "F1"]
+        assert len(table.cells) == 4
+
+    def test_captioned_table_grid_covers_every_row(self, tmp_path: Path) -> None:
+        """A caption anchors the table the geometry found — not the text heuristic's guess."""
+        blocks = self._analyze(tmp_path, wrapped_header_table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.text.startswith("Table 1: Complexity by layer type")
+        assert table.cells is not None
+        first_column = [row[0] for row in table.cells]
+        assert "Self-Attention" in first_column
+        assert "Convolutional" in first_column
+        assert "O(1)" in table.text
+
+    def test_caption_less_table_is_still_a_table_block(self, tmp_path: Path) -> None:
+        """A bare grid with no 'Table N:' caption is detected geometrically."""
+        blocks = self._analyze(tmp_path, table_page(caption=None))
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.cells is not None and table.cells[0] == ["Model", "Accuracy", "F1"]
+        body = " ".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "Following prose paragraph" in body
+        assert "Gamma" not in body
 
     def test_detect_tables_via_caption(self, tmp_path: Path) -> None:
         """A 'Table N:' caption followed by short rows becomes a TABLE block with a tight bbox."""

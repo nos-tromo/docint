@@ -67,6 +67,9 @@ class LayoutBlock:
     reading_order: int
     confidence: float
     text: str = ""
+    # TABLE blocks only: the reconstructed cell grid (rows of cell texts),
+    # carried through to ``TableResult.cell_grid`` and the CSV artifact.
+    cells: list[list[str]] | None = None
 
 
 @dataclass

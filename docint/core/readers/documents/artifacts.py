@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -97,16 +98,19 @@ def save_table(doc_id: str, table: TableResult, artifacts_dir: Path) -> Path:
         Path: Path to the written file.
     """
     tables_dir = _ensure_dir(artifacts_dir / doc_id / "tables")
+
+    # Write the CSV first so its path is recorded in the JSON. Quoting goes
+    # through the csv module: a cell may itself contain a comma or a quote.
+    if table.cell_grid:
+        csv_path = tables_dir / f"{table.table_id}.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle).writerows(table.cell_grid)
+        table.csv_path = str(csv_path)
+        logger.debug("Saved table CSV: {}", csv_path)
+
     out = tables_dir / f"{table.table_id}.json"
     out.write_text(json.dumps(asdict(table), indent=2, default=str))
     logger.debug("Saved table {}: {}", table.table_id, out)
-
-    # Write CSV if cell grid is available
-    if table.cell_grid:
-        csv_path = tables_dir / f"{table.table_id}.csv"
-        lines = [",".join(row) for row in table.cell_grid]
-        csv_path.write_text("\n".join(lines))
-        logger.debug("Saved table CSV: {}", csv_path)
 
     return out
 

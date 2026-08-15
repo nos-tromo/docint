@@ -85,6 +85,9 @@ class ParsedPage:
         height: Page height in points.
         lines: Line cells, top-to-bottom / left-to-right, with horizontally
             adjacent cells on one baseline already merged (see :func:`merge_adjacent`).
+        cells: The same cells *before* merging — table reconstruction needs
+            them, since two adjacent table cells can sit closer than the merge
+            threshold and must not be glued into one.
         images: Embedded bitmaps with placement boxes.
     """
 
@@ -92,6 +95,7 @@ class ParsedPage:
     width: float
     height: float
     lines: list[TextLine] = field(default_factory=list)
+    cells: list[TextLine] = field(default_factory=list)
     images: list[ImagePlacement] = field(default_factory=list)
 
 
@@ -186,6 +190,7 @@ class ParsedPdf:
                     rotated=angle > _ROTATION_TOLERANCE,
                 )
             )
+        cells = sorted(lines, key=lambda ln: (-round(ln.bbox.y0, 1), ln.bbox.x0))
         lines = merge_adjacent(lines)
         images = [
             ImagePlacement(index=int(getattr(bmp, "index", idx)), bbox=_rect_to_bbox(bmp.rect))
@@ -196,6 +201,7 @@ class ParsedPdf:
             width=float(raw.dimension.width),
             height=float(raw.dimension.height),
             lines=lines,
+            cells=cells,
             images=images,
         )
         self._pages[page_index] = parsed

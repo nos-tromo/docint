@@ -19,6 +19,7 @@ from docint.core.readers.documents.parse import (
     lines_to_text,
     order_lines,
 )
+from docint.core.readers.documents.tables import build_grid, detect_geometric_tables, grid_to_text
 
 
 class LayoutAnalyzer(ABC):
@@ -68,8 +69,10 @@ class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
     * **PAGE_HEADER** / **FOOTER** / **PAGE_NUMBER** — page furniture (a
       running head, a footer, a page number, a rotated margin stamp), detected
       across the whole document and kept out of body text downstream.
-    * **TABLE** — a *"Table N:"* caption plus the short/tabular lines that
-      follow it (caption heuristic), with the union of those lines' boxes.
+    * **TABLE** — a *"Table N:"* caption plus the lines that follow it, or an
+      uncaptioned grid found by :func:`~docint.core.readers.documents.tables.detect_geometric_tables`.
+      The block's text is the reconstructed grid rendered row by row, and the
+      grid itself travels on ``LayoutBlock.cells``.
     * **TEXT** — everything else, one block per run of lines between headings
       / tables / column jumps, so each block has a tight bbox and its own text.
 
@@ -309,6 +312,42 @@ def _build_text_blocks(
             if o is not None:
                 table_lines[o] = table_no
 
+    # Geometric grids define a table's real extent. Where a caption sits just
+    # above one, the caption joins that region (the text heuristic's guess at
+    # where the table ends is only the fallback for grids too irregular to
+    # detect). Regions overlapping an already-claimed caption table are skipped.
+    next_table_no = (max(table_lines.values()) + 1) if table_lines else 0
+    claimed = [
+        _union_bbox([ordered[i] for i in table_lines if table_lines[i] == n]) for n in sorted(set(table_lines.values()))
+    ]
+    for region in detect_geometric_tables(page):
+        member_indices = [
+            i
+            for i, ln in enumerate(ordered)
+            if i not in furniture_at
+            and region.x0 - 1 <= ln.bbox.x0
+            and ln.bbox.x1 <= region.x1 + 1
+            and region.y0 - 1 <= ln.bbox.y0
+            and ln.bbox.y1 <= region.y1 + 1
+        ]
+        if len(member_indices) < 2:
+            continue
+        caption_index = _caption_above(ordered, region)
+        if caption_index is None and any(region.overlaps(box) for box in claimed):
+            continue
+        table_no = table_lines.get(caption_index) if caption_index is not None else None
+        if table_no is None:
+            table_no = next_table_no
+            next_table_no += 1
+        if caption_index is not None:
+            # Re-anchor the caption's table on the detected region: drop the
+            # lines the text heuristic had guessed at, keep the caption.
+            for i in [i for i, n in table_lines.items() if n == table_no and i != caption_index]:
+                del table_lines[i]
+            table_lines[caption_index] = table_no
+        for i in member_indices:
+            table_lines[i] = table_no
+
     headings = _classify_headings(ordered, set(table_lines) | set(furniture_at))
 
     blocks: list[LayoutBlock] = []
@@ -330,6 +369,7 @@ def _build_text_blocks(
             )
             run.clear()
 
+    emitted_tables: set[int] = set()
     idx = 0
     while idx < len(ordered):
         ln = ordered[idx]
@@ -349,23 +389,18 @@ def _build_text_blocks(
             idx += 1
             continue
         if idx in table_lines:
-            _flush_text()
             table_no = table_lines[idx]
-            members = []
-            while idx < len(ordered) and table_lines.get(idx) == table_no:
-                members.append(ordered[idx])
+            if table_no in emitted_tables:
                 idx += 1
-            blocks.append(
-                LayoutBlock(
-                    block_id=f"table-{page_index}-{uuid.uuid4().hex[:8]}",
-                    page_index=page_index,
-                    type=BlockType.TABLE,
-                    bbox=_union_bbox(members),
-                    reading_order=0,
-                    confidence=0.7,
-                    text="\n".join(m.text for m in members),
-                )
-            )
+                continue
+            _flush_text()
+            # All lines of this table, not merely the consecutive run: a
+            # caption's own wrapped lines sit between it and the grid it
+            # belongs to, and the two must stay one block.
+            members = [ordered[i] for i in sorted(i for i, n in table_lines.items() if n == table_no)]
+            blocks.append(_table_block(page, page_index, members))
+            emitted_tables.add(table_no)
+            idx += 1
             continue
         if idx in headings:
             _flush_text()
@@ -391,11 +426,72 @@ def _build_text_blocks(
     return blocks
 
 
+def _caption_above(ordered: list[TextLine], region: BBox) -> int | None:
+    """Index of a ``Table N:`` caption line sitting directly above ``region``.
+
+    Args:
+        ordered (list[TextLine]): The page's lines in reading order.
+        region (BBox): A detected table region.
+
+    Returns:
+        int | None: The caption's index, or ``None`` when the region has none.
+    """
+    best: tuple[float, int] | None = None
+    for idx, ln in enumerate(ordered):
+        if not _CAPTION_RE.match(ln.text.strip()):
+            continue
+        distance = ln.bbox.y0 - region.y1
+        height = max(ln.bbox.y1 - ln.bbox.y0, 1.0)
+        # Directly above (or overlapping the region's top edge) and within a
+        # few lines of it.
+        if -height <= distance <= _CAPTION_MAX_GAP_HEIGHTS * height and (best is None or distance < best[0]):
+            best = (distance, idx)
+    return best[1] if best else None
+
+
+def _table_block(page: ParsedPage, page_index: int, members: list[TextLine]) -> LayoutBlock:
+    """Build a TABLE block from the lines making up one table region.
+
+    The grid is rebuilt from the page's *unmerged* cells inside the region, so
+    the block's text reads row by row (``Model | Accuracy | F1``) instead of
+    column by column, which is the order the lines themselves arrive in. A
+    leading caption line is kept above the grid.
+
+    Args:
+        page (ParsedPage): The page the table sits on.
+        page_index (int): Zero-based page number.
+        members (list[TextLine]): Lines belonging to the table, in reading order.
+
+    Returns:
+        LayoutBlock: The TABLE block, with ``cells`` set when a grid was found.
+    """
+    bbox = _union_bbox(members)
+    caption = members[0].text.strip() if members and _CAPTION_RE.match(members[0].text.strip()) else None
+    body_lines = members[1:] if caption else members
+    grid: list[list[str]] = build_grid(page.cells, _union_bbox(body_lines)) if body_lines else []
+    body_text = grid_to_text(grid) if grid else "\n".join(m.text for m in body_lines)
+    text = f"{caption}\n{body_text}".strip() if caption else body_text
+    return LayoutBlock(
+        block_id=f"table-{page_index}-{uuid.uuid4().hex[:8]}",
+        page_index=page_index,
+        type=BlockType.TABLE,
+        bbox=bbox,
+        reading_order=0,
+        confidence=0.7,
+        text=text,
+        cells=grid or None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Table heuristics (text-based)
 # ---------------------------------------------------------------------------
 
 _CAPTION_RE = re.compile(r"^Table\s+\d+\s*[:.]", re.IGNORECASE)
+# How far above a detected grid a caption may sit and still belong to it, in
+# multiples of its own line height. Generous: an academic caption often wraps
+# onto three lines and is set off from the table by extra leading.
+_CAPTION_MAX_GAP_HEIGHTS = 8.0
 
 
 def _detect_table_regions(lines: list[str]) -> list[tuple[int, int]]:

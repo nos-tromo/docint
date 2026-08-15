@@ -190,3 +190,66 @@ def report_pages(count: int = 3, *, running_head: str = "Quarterly Review 2031")
         ]
         pages.append(PageSpec(runs=runs))
     return pages
+
+
+TABLE_ROWS: tuple[tuple[str, ...], ...] = (
+    ("Model", "Accuracy", "F1"),
+    ("Alpha", "89.3", "88.1"),
+    ("Beta", "91.0", "90.5"),
+    ("Gamma", "87.2", "86.4"),
+)
+
+
+def table_page(*, caption: str | None = "Table 1: Results summary") -> PageSpec:
+    """A page holding a column-aligned table, optionally captioned.
+
+    Args:
+        caption: Caption line above the table, or ``None`` for a bare grid.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs: list[TextRun] = []
+    top = 700.0
+    if caption is not None:
+        runs.append(TextRun(caption, x=60, y=top))
+        top -= 20
+    for row, values in enumerate(TABLE_ROWS):
+        for col, text in enumerate(values):
+            runs.append(TextRun(text, x=60 + col * 120, y=top - row * 14))
+    runs.append(TextRun("Following prose paragraph that is clearly not part of the table.", x=60, y=560))
+    return PageSpec(runs=runs)
+
+
+def wrapped_header_table_page(*, caption: str | None = "Table 1: Complexity by layer type") -> PageSpec:
+    """A table whose second header cell wraps onto a second line.
+
+    Mirrors a common academic-table shape: a column heading too long for its
+    column, so it occupies two lines while the other columns occupy one.
+
+    Args:
+        caption: Caption line above the table, or ``None``.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs: list[TextRun] = []
+    top = 700.0
+    if caption is not None:
+        runs.append(TextRun(caption, x=60, y=top))
+        top -= 24
+    runs.append(TextRun("Layer Type", x=60, y=top))
+    runs.append(TextRun("Complexity", x=240, y=top))
+    runs.append(TextRun("Path Length", x=400, y=top))
+    runs.append(TextRun("per Layer", x=240, y=top - 12))  # wrapped header cell
+    body = [
+        ("Self-Attention", "O(n2 d)", "O(1)"),
+        ("Recurrent", "O(n d2)", "O(n)"),
+        ("Convolutional", "O(k n d2)", "O(1)"),
+    ]
+    for row, values in enumerate(body):
+        y = top - 30 - row * 14
+        for col, (text, x) in enumerate(zip(values, (60, 240, 400), strict=True)):
+            runs.append(TextRun(text, x=x, y=y))
+            del col
+    return PageSpec(runs=runs)
