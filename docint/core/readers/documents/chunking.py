@@ -250,10 +250,12 @@ def _update_section_path(
 ) -> list[str]:
     """Update section path based on heading block type.
 
-    ``TITLE`` blocks reset the path (top-level heading); ``HEADER``
-    blocks nest under the current title.  This provides a simple but
-    reliable heading hierarchy based on layout block semantics rather
-    than string length.
+    ``TITLE`` blocks reset the path (top-level heading); a ``HEADER``
+    block nests under the current title and *replaces* the previous header,
+    so the path is at most ``[title, current header]`` — consecutive headers
+    (sub-sections, author names on a title page) do not stack up.  This
+    provides a simple but reliable heading hierarchy based on layout block
+    semantics rather than string length.
 
     Args:
         current_path (list[str]): The current section path.
@@ -268,5 +270,5 @@ def _update_section_path(
     if block_type == BlockType.TITLE:
         # Titles reset to top level
         return [new_heading]
-    # Headers nest under the current path
-    return [*current_path, new_heading]
+    # Headers nest under the title and replace the previous header
+    return [current_path[0], new_heading]

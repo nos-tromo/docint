@@ -13,7 +13,9 @@ dependencies = [
   # dependency drags in torch + the full NVIDIA CUDA stack (~4.5 GB) that this
   # CPU-only, remote-inference image must not ship. The extras docint actually
   # uses are declared directly below: docling-core[chunking] (DoclingNodeParser),
-  # docling-parse + rtree + scipy (imported eagerly by docling.document modules),
+  # docling-parse (also the PDF pipeline's text/geometry backbone, see
+  # core/readers/documents/parse.py) + rtree + scipy (imported eagerly by
+  # docling.document modules),
   # python-docx (docling's DOCX backend), openpyxl (pandas read_excel).
   "docling-core[chunking]>=2.91.0",
   "docling-parse>=7.10.0",
@@ -37,8 +39,7 @@ dependencies = [
   "pillow>=12.3.0",
   "prometheus-fastapi-instrumentator>=8.1.0",
   "pydantic>=2.13.4",
-  "pypdf>=6.15.0",
-  "pypdfium2>=5.5.0",  # page rasterisation in core/readers/documents/ocr.py
+  "pypdfium2>=5.5.0",  # page rasterisation (vision OCR) + embedded-image pixels in core/readers/documents/
   "python-docx>=1.2.0",
   "python-dotenv>=1.2.2",
   "python-magic>=0.4.27",

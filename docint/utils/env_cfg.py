@@ -1822,7 +1822,11 @@ class PipelineConfig:
 # (section-grouped coarse parents + sentence-clean fine children),
 # replacing the bespoke char-overlap chunker. Bumped so cached PDF
 # artifacts (chunks.jsonl) from the old chunker are regenerated.
-PIPELINE_VERSION = "2.0.0"
+# 3.0.0: PDF backbone moved from pypdf heuristics to docling-parse
+# geometry (XY-cut reading order, font-based TITLE/HEADER blocks, per-column
+# TEXT blocks, tight table/figure boxes). Bumped so cached artifacts from
+# the pypdf backbone are regenerated.
+PIPELINE_VERSION = "3.0.0"
 
 
 def load_pipeline_config(

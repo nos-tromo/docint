@@ -251,7 +251,7 @@ page-level PDF pipeline in `docint/core/readers/documents/`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PIPELINE_VERSION` | `1.0.0` | Semver marker written into pipeline artifacts. |
+| `PIPELINE_VERSION` | `3.0.0` | Semver marker written into pipeline artifacts. |
 | `PIPELINE_TEXT_COVERAGE_THRESHOLD` | `0.01` | Chars-per-area threshold used to classify a page as scanned. |
 | `PIPELINE_MAX_RETRIES` | `2` | Retry budget per page stage. |
 | `PIPELINE_MAX_WORKERS` | `4` | Parallel workers per document. |

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, two_column_page
 
 from docint.core.readers.documents.artifacts import (
     load_manifest,
@@ -20,10 +21,11 @@ from docint.core.readers.documents.artifacts import (
 from docint.core.readers.documents.chunking import build_coarse_units
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import (
-    PypdfLayoutAnalyzer,
-    _extract_image_bboxes_from_stream,
+    DoclingParseLayoutAnalyzer,
+    _detect_table_regions,
     _find_table_end,
-    _multiply_matrices,
+    _is_bold,
+    analyze_document,
 )
 from docint.core.readers.documents.models import (
     BBox,
@@ -38,12 +40,14 @@ from docint.core.readers.documents.models import (
     TableResult,
 )
 from docint.core.readers.documents.ocr import (
+    PdfTextEngine,
     build_page_text,
     extract_text_for_pages,
 )
 from docint.core.readers.documents.orchestrator import (
     DocumentPipelineOrchestrator,
 )
+from docint.core.readers.documents.parse import ParsedPage, ParsedPdf
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
@@ -194,7 +198,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "2.0.0"
+        assert cfg.pipeline_version == "3.0.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -262,113 +266,84 @@ class TestPipelineConfig:
 class TestTriage:
     """Tests for the PDF triage stage (digital, scanned, mixed detection)."""
 
-    def test_digital_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """Pages with sufficient text should not need OCR.
+    def test_digital_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Pages with sufficient text should not need OCR."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = "A" * 500
-        mock_mediabox = MagicMock()
-        mock_mediabox.width = 612.0
-        mock_mediabox.height = 792.0
-        mock_page.mediabox = mock_mediabox
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/doc.pdf", pipeline_config)
+        pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 1
         assert pages[0].has_text_layer is True
         assert pages[0].needs_ocr is False
         assert pages[0].status == "completed"
+        assert (pages[0].width, pages[0].height) == (612.0, 792.0)
+        assert pages[0].text_coverage > pipeline_config.text_coverage_threshold
 
-    def test_scanned_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """Pages with no text should need OCR.
+    def test_scanned_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Pages with no text should need OCR."""
+        pdf = tmp_path / "scan.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = ""
-        mock_mediabox = MagicMock()
-        mock_mediabox.width = 612.0
-        mock_mediabox.height = 792.0
-        mock_page.mediabox = mock_mediabox
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/scan.pdf", pipeline_config)
+        pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 1
         assert pages[0].has_text_layer is False
         assert pages[0].needs_ocr is True
+        assert pages[0].text_coverage == 0.0
 
-    def test_mixed_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """A PDF with mixed pages should classify each correctly.
+    def test_mixed_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A PDF with mixed pages should classify each correctly."""
+        pdf = tmp_path / "mixed.pdf"
+        pdf.write_bytes(build_pdf([two_column_page(), PageSpec()]))
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        digital_page = MagicMock()
-        digital_page.extract_text.return_value = "X" * 1000
-        digital_mb = MagicMock()
-        digital_mb.width = 612.0
-        digital_mb.height = 792.0
-        digital_page.mediabox = digital_mb
-
-        scanned_page = MagicMock()
-        scanned_page.extract_text.return_value = ""
-        scanned_mb = MagicMock()
-        scanned_mb.width = 612.0
-        scanned_mb.height = 792.0
-        scanned_page.mediabox = scanned_mb
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [digital_page, scanned_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/mixed.pdf", pipeline_config)
+        pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 2
         assert pages[0].needs_ocr is False
         assert pages[1].needs_ocr is True
 
-    def test_bad_page_does_not_crash(self, pipeline_config: PipelineConfig) -> None:
-        """A page that raises during extraction should be marked failed.
+    def test_bad_page_does_not_crash(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A page that raises during parsing should be marked failed, not abort triage."""
+        pdf = tmp_path / "bad.pdf"
+        pdf.write_bytes(build_pdf([two_column_page(), two_column_page()]))
+        real_page = ParsedPdf.page
 
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration fixture.
-        """
-        good_page = MagicMock()
-        good_page.extract_text.return_value = "A" * 500
-        good_mb = MagicMock()
-        good_mb.width = 612.0
-        good_mb.height = 792.0
-        good_page.mediabox = good_mb
+        def _flaky(self: ParsedPdf, page_index: int) -> ParsedPage:
+            if page_index == 1:
+                raise RuntimeError("corrupt page")
+            return real_page(self, page_index)
 
-        bad_page = MagicMock()
-        bad_page.extract_text.side_effect = RuntimeError("corrupt page")
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [good_page, bad_page]
-
-        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            pages = triage_pdf("/fake/bad.pdf", pipeline_config)
+        with patch.object(ParsedPdf, "page", _flaky):
+            pages = triage_pdf(pdf, pipeline_config)
 
         assert len(pages) == 2
         assert pages[0].status == "completed"
         assert pages[1].status == "failed"
+        assert pages[1].needs_ocr is True
         assert pages[1].error is not None
+
+    def test_unreadable_file_yields_single_failed_page(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A file docling-parse cannot open degrades to one failed page."""
+        bogus = tmp_path / "bogus.pdf"
+        bogus.write_bytes(b"not a pdf")
+
+        pages = triage_pdf(bogus, pipeline_config)
+
+        assert len(pages) == 1
+        assert pages[0].status == "failed"
+        assert pages[0].needs_ocr is True
+
+    def test_reuses_injected_parsed_document(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """When the orchestrator hands over an open ``ParsedPdf`` it is used as-is."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
+        with ParsedPdf(pdf) as parsed:
+            with patch("docint.core.readers.documents.triage.ParsedPdf") as ctor:
+                pages = triage_pdf(pdf, pipeline_config, parsed=parsed)
+            ctor.assert_not_called()
+        assert len(pages) == 1
+        assert pages[0].needs_ocr is False
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +402,32 @@ class TestChunking:
         assert text_units[0].text.startswith("Chapter 1: Introduction")
         # The heading is folded into its section's unit, never emitted alone.
         assert all(u.text.strip() != "Chapter 1: Introduction" for u in units)
+
+    def test_header_replaces_previous_header_under_title(self) -> None:
+        """Section paths stay title + current header; consecutive HEADERs do not stack."""
+
+        def _block(block_id: str, kind: BlockType, text: str, order: int) -> LayoutBlock:
+            return LayoutBlock(
+                block_id=block_id,
+                page_index=0,
+                type=kind,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=order,
+                confidence=1.0,
+                text=text,
+            )
+
+        layout = {
+            0: [
+                _block("t", BlockType.TITLE, "Model", 0),
+                _block("h1", BlockType.HEADER, "Encoder", 1),
+                _block("b1", BlockType.TEXT, "Encoder body sentence.", 2),
+                _block("h2", BlockType.HEADER, "Decoder", 3),
+                _block("b2", BlockType.TEXT, "Decoder body sentence.", 4),
+            ]
+        }
+        units = build_coarse_units("doc", layout, {}, [], [])
+        assert [u.section_path for u in units] == [["Model", "Encoder"], ["Model", "Decoder"]]
 
     def test_coarse_units_respect_size_cap(self) -> None:
         """Multiple blocks are grouped into units bounded by coarse_chunk_size."""
@@ -722,6 +723,62 @@ class TestExtraction:
         assert images[0].page_index == 0
         assert images[0].metadata["confidence"] == 0.85
 
+    def test_extract_images_writes_one_png_per_figure_block(self, tmp_path: Path) -> None:
+        """Each FIGURE block gets the embedded image drawn at its bbox, not the page's first image."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(
+            build_pdf(
+                [
+                    PageSpec(
+                        images=[
+                            ImageBox(x=50, y=600, w=100, h=50, pixels=(4, 2), rgb=(255, 0, 0)),
+                            ImageBox(x=300, y=100, w=120, h=80, pixels=(2, 4), rgb=(0, 0, 255)),
+                        ]
+                    )
+                ]
+            )
+        )
+        layout = analyze_document(
+            pdf, [PageInfo(page_index=0, has_text_layer=False, text_coverage=0.0, needs_ocr=True)]
+        )
+        out_dir = tmp_path / "images"
+
+        images = extract_images(layout, pdf, out_dir)
+
+        assert len(images) == 2
+        paths = {img.image_path for img in images}
+        assert len(paths) == 2 and all(p and Path(p).exists() for p in paths)
+        from PIL import Image
+
+        by_x = sorted(images, key=lambda i: i.bbox.x0)
+        left = Image.open(str(by_x[0].image_path))
+        right = Image.open(str(by_x[1].image_path))
+        assert left.size == (4, 2)
+        assert right.size == (2, 4)
+        assert left.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+        assert right.convert("RGB").getpixel((0, 0)) == (0, 0, 255)
+
+    def test_extract_images_survives_missing_pixels(self, tmp_path: Path) -> None:
+        """A FIGURE block whose bbox matches no image object still yields a result without a path."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("no images here", x=60, y=700)])]))
+        layout = {
+            0: [
+                LayoutBlock(
+                    block_id="fig1",
+                    page_index=0,
+                    type=BlockType.FIGURE,
+                    bbox=BBox(x0=0, y0=0, x1=200, y1=200),
+                    reading_order=0,
+                    confidence=0.85,
+                    text="",
+                )
+            ]
+        }
+        images = extract_images(layout, pdf, tmp_path / "images")
+        assert len(images) == 1
+        assert images[0].image_path is None
+
 
 # ---------------------------------------------------------------------------
 # Layout analysis tests
@@ -729,226 +786,181 @@ class TestExtraction:
 
 
 class TestLayoutAnalysis:
-    """Tests for PypdfLayoutAnalyzer image and table detection logic."""
+    """Tests for DoclingParseLayoutAnalyzer block detection on real PDFs."""
 
-    def test_detect_images_creates_figure_blocks(self) -> None:
-        """Pages with embedded images should produce FIGURE blocks."""
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = "Some text on the page."
+    @staticmethod
+    def _analyze(tmp_path: Path, spec: PageSpec) -> list[LayoutBlock]:
+        """Write a one-page PDF and return its layout blocks."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([spec]))
+        analyzer = DoclingParseLayoutAnalyzer(pdf)
+        try:
+            return analyzer.analyze_page(0)
+        finally:
+            analyzer.close()
 
-        # Simulate XObject with an /Image
-        mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
-        mock_image_obj.get_object.return_value = mock_image_obj
-
-        mock_xobj_dict = {"/Im1": mock_image_obj}
-        mock_xobj = MagicMock()
-        mock_xobj.get_object.return_value = mock_xobj_dict
-
-        mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
+    def test_detect_images_creates_figure_blocks_with_placement(self, tmp_path: Path) -> None:
+        """Embedded images become FIGURE blocks carrying their placement bbox."""
+        spec = PageSpec(
+            runs=[TextRun("Some text on the page.", x=60, y=700)],
+            images=[ImageBox(x=100, y=400, w=200, h=100)],
         )
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
+        blocks = self._analyze(tmp_path, spec)
 
         figure_blocks = [b for b in blocks if b.type == BlockType.FIGURE]
         text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
-        assert len(figure_blocks) >= 1
-        assert len(text_blocks) >= 1  # remaining text
+        assert len(figure_blocks) == 1
+        fig = figure_blocks[0].bbox
+        assert (fig.x0, fig.y0, fig.x1, fig.y1) == pytest.approx((100.0, 400.0, 300.0, 500.0))
+        assert figure_blocks[0].confidence == pytest.approx(0.9)
+        assert len(text_blocks) == 1
+        assert text_blocks[0].text == "Some text on the page."
 
-    def test_detect_tables_via_caption(self) -> None:
-        """Text containing 'Table N:' captions should produce TABLE blocks."""
-        table_text = (
-            "Some introductory text about the experiment.\n"
-            "Table 1: Results summary\n"
-            "Model    Accuracy   F1\n"
-            "BERT     89.3       88.1\n"
-            "GPT-2    91.0       90.5\n"
-            "\n"
-            "The results show clear improvement in accuracy."
-        )
+    def test_two_images_two_figure_blocks(self, tmp_path: Path) -> None:
+        """Every embedded image gets its own FIGURE block."""
+        spec = PageSpec(images=[ImageBox(x=50, y=600, w=100, h=50), ImageBox(x=300, y=100, w=120, h=80)])
+        blocks = self._analyze(tmp_path, spec)
+        figs = sorted((b for b in blocks if b.type == BlockType.FIGURE), key=lambda b: b.bbox.x0)
+        assert [round(b.bbox.x0) for b in figs] == [50, 300]
 
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = table_text
-        # No images
-        mock_resources = MagicMock()
-        mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
+    def test_detect_tables_via_caption(self, tmp_path: Path) -> None:
+        """A 'Table N:' caption followed by short rows becomes a TABLE block with a tight bbox."""
+        rows = [
+            "Some introductory text about the experiment.",
+            "Table 1: Results summary",
+            "Model    Accuracy   F1",
+            "BERT     89.3       88.1",
+            "GPT-2    91.0       90.5",
+        ]
+        runs = [TextRun(t, x=60, y=700 - 14 * i) for i, t in enumerate(rows)]
+        runs.append(TextRun("The results show clear improvement in accuracy.", x=60, y=580))
+        blocks = self._analyze(tmp_path, PageSpec(runs=runs))
 
         table_blocks = [b for b in blocks if b.type == BlockType.TABLE]
-        text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
         assert len(table_blocks) == 1
-        assert "Table 1:" in table_blocks[0].text
-        assert "Model" in table_blocks[0].text
-        # Remaining text should still exist (intro + conclusion)
-        assert len(text_blocks) >= 1
-        remaining = text_blocks[0].text
-        assert "introductory" in remaining
-        assert "Table 1:" not in remaining
+        table = table_blocks[0]
+        assert "Table 1:" in table.text
+        assert "BERT" in table.text
+        # Tight bbox: the table does not span the whole page.
+        assert table.bbox.y1 < 720 and table.bbox.y0 > 600
+        text = "\n".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "introductory" in text and "results show" in text
+        assert "Table 1:" not in text
 
-    def test_no_images_no_tables_produces_text_only(self) -> None:
-        """A plain text page should produce only TEXT blocks."""
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = "Just plain text. Nothing special."
-        mock_resources = MagicMock()
-        mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
+    def test_no_images_no_tables_produces_text_only(self, tmp_path: Path) -> None:
+        """Plain prose yields a single TEXT block with the page text."""
+        blocks = self._analyze(
+            tmp_path,
+            PageSpec(runs=[TextRun("Just plain prose.", x=60, y=700), TextRun("Second line.", x=60, y=686)]),
+        )
+        assert [b.type for b in blocks] == [BlockType.TEXT]
+        assert blocks[0].text == "Just plain prose.\nSecond line."
+        assert blocks[0].bbox.y0 > 600  # tight, not page-sized
 
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
-
+    def test_empty_page_produces_fallback_block(self, tmp_path: Path) -> None:
+        """A page with nothing on it still yields an empty TEXT block."""
+        blocks = self._analyze(tmp_path, PageSpec())
         assert len(blocks) == 1
         assert blocks[0].type == BlockType.TEXT
-        assert "plain text" in blocks[0].text
-
-    def test_empty_page_produces_fallback_block(self) -> None:
-        """A page with no text or images should still produce a block."""
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = ""
-        mock_resources = MagicMock()
-        mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
-
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
-
-        assert len(blocks) == 1
-        assert blocks[0].type == BlockType.TEXT
+        assert blocks[0].text == ""
         assert blocks[0].confidence == 0.0
 
-    def test_mixed_content_page(self) -> None:
-        """A page with images, tables, and text should produce all block types."""
-        mixed_text = (
-            "Introduction paragraph.\nTable 1: Key metrics\nMetric   Value\nLoss     0.5\n\nSome concluding remarks."
+    def test_two_columns_read_left_column_first(self, tmp_path: Path) -> None:
+        """Multi-column text is emitted column by column, one TEXT block per column."""
+        blocks = self._analyze(tmp_path, two_column_page())
+        text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
+        assert len(text_blocks) == 2
+        assert text_blocks[0].text.startswith("Left column line 1")
+        assert text_blocks[0].text.endswith("Left column line 3")
+        assert text_blocks[1].text.startswith("Right column line 1")
+        assert text_blocks[0].reading_order < text_blocks[1].reading_order
+
+    def test_medium_weight_font_counts_as_bold(self) -> None:
+        """LaTeX's bold Times ships as ``NimbusRomNo9L-Medi``; it must read as bold."""
+        assert _is_bold("/RCUMTF+NimbusRomNo9L-Medi") is True
+        assert _is_bold("/AECCXO+NimbusRomNo9L-Regu") is False
+        assert _is_bold("/Helvetica-Bold") is True
+
+    def test_large_bold_line_becomes_title_and_bold_line_header(self, tmp_path: Path) -> None:
+        """Font-based heading detection: biggest heading → TITLE, others → HEADER."""
+        spec = PageSpec(
+            runs=[
+                TextRun("Annual Report", x=60, y=740, size=20, bold=True),
+                TextRun("This is the body of the report, set in the regular face.", x=60, y=700, size=11),
+                TextRun("It continues for another line of ordinary prose.", x=60, y=686, size=11),
+                TextRun("Financial Summary", x=60, y=650, size=11, bold=True),
+                TextRun("Revenue rose in every quarter of the reporting period.", x=60, y=636, size=11),
+                TextRun("Costs stayed flat across the same period.", x=60, y=622, size=11),
+            ]
         )
+        blocks = self._analyze(tmp_path, spec)
+        kinds = [(b.type, b.text) for b in blocks]
+        assert (BlockType.TITLE, "Annual Report") in kinds
+        assert (BlockType.HEADER, "Financial Summary") in kinds
+        text_blocks = [b for b in blocks if b.type == BlockType.TEXT]
+        assert len(text_blocks) == 2  # split at the heading
+        assert "Annual Report" not in text_blocks[0].text
+        order = [b.type for b in sorted(blocks, key=lambda b: b.reading_order)]
+        assert order == [BlockType.TITLE, BlockType.TEXT, BlockType.HEADER, BlockType.TEXT]
 
-        mock_page = MagicMock()
-        mock_mb = MagicMock()
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-        mock_page.extract_text.return_value = mixed_text
+    def test_uniform_page_has_no_headings(self, tmp_path: Path) -> None:
+        """When every line looks alike nothing is promoted to a heading."""
+        runs = [TextRun(f"Line {i} of ordinary prose that ends here.", x=60, y=700 - 14 * i) for i in range(6)]
+        blocks = self._analyze(tmp_path, PageSpec(runs=runs))
+        assert all(b.type == BlockType.TEXT for b in blocks)
 
-        # Simulate image XObject
-        mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
-        mock_image_obj.get_object.return_value = mock_image_obj
-        mock_xobj_dict = {"/Im1": mock_image_obj}
-        mock_xobj = MagicMock()
-        mock_xobj.get_object.return_value = mock_xobj_dict
-        mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
+    def test_multi_line_paragraph_in_larger_font_is_not_a_heading(self, tmp_path: Path) -> None:
+        """Three consecutive same-style lines are a paragraph, however large the face."""
+        spec = PageSpec(
+            runs=[
+                TextRun("Provided proper attribution is given, permission is granted to", x=60, y=740, size=12),
+                TextRun("reproduce the tables and figures in this paper solely for use in", x=60, y=726, size=12),
+                TextRun("scholarly works.", x=60, y=712, size=12),
+                TextRun("The abstract body is set smaller than the notice above it and", x=60, y=680, size=9),
+                TextRun("runs on for a few lines so it clearly forms the page's body text.", x=60, y=669, size=9),
+                TextRun("A third body line keeps the median where it belongs.", x=60, y=658, size=9),
+                TextRun("And a fourth body line for good measure.", x=60, y=647, size=9),
+            ]
         )
+        blocks = self._analyze(tmp_path, spec)
+        assert all(b.type == BlockType.TEXT for b in blocks)
 
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
+    def test_rotated_stamp_is_never_a_heading(self, tmp_path: Path) -> None:
+        """A rotated side stamp stays TEXT even though its axis-aligned box is tall."""
+        spec = PageSpec(
+            runs=[
+                TextRun("Preprint stamp running up the margin", x=30, y=300, size=12, rotate90=True),
+                TextRun("Body line one of the page.", x=60, y=700, size=10),
+                TextRun("Body line two of the page.", x=60, y=688, size=10),
+                TextRun("Body line three of the page.", x=60, y=676, size=10),
+            ]
+        )
+        blocks = self._analyze(tmp_path, spec)
+        assert all(b.type == BlockType.TEXT for b in blocks)
 
-        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
-            mock_pypdf.PdfReader.return_value = mock_reader
-            analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
-            blocks = analyzer.analyze_page(0)
+    def test_two_letter_fragment_is_not_a_heading(self, tmp_path: Path) -> None:
+        """Short symbol-like fragments (math) never become headings."""
+        spec = PageSpec(
+            runs=[
+                TextRun("i K", x=200, y=500, size=16),
+                TextRun("Body line one of the page.", x=60, y=700, size=10),
+                TextRun("Body line two of the page.", x=60, y=688, size=10),
+                TextRun("Body line three of the page.", x=60, y=676, size=10),
+            ]
+        )
+        blocks = self._analyze(tmp_path, spec)
+        assert all(b.type == BlockType.TEXT for b in blocks)
 
-        block_types = {b.type for b in blocks}
-        assert BlockType.FIGURE in block_types
-        assert BlockType.TABLE in block_types
-        assert BlockType.TEXT in block_types
-
-
-class TestContentStreamParsing:
-    """Tests for the image bounding box extraction from content streams."""
-
-    def test_extract_image_bbox_from_simple_stream(self) -> None:
-        """Should extract correct bbox from cm + Do operators."""
-        stream = "q\n1 0 0 1 100 200 cm\n300 0 0 400 0 0 cm\n/Im1 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
-        assert "/Im1" in result
-        bbox = result["/Im1"]
-        assert bbox.x0 == pytest.approx(100.0)
-        assert bbox.y0 == pytest.approx(200.0)
-        assert bbox.x1 == pytest.approx(400.0)  # 100 + 300
-        assert bbox.y1 == pytest.approx(600.0)  # 200 + 400
-
-    def test_extract_with_scaling(self) -> None:
-        """Should handle scale + translate combos correctly."""
-        stream = "q\n1 0 0 1 196.559 397.582 cm\n.6 0 0 .6 0 0 cm\n364.8 0 0 537.36 0 0 cm\n/Im1 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
-        assert "/Im1" in result
-        bbox = result["/Im1"]
-        assert bbox.x0 == pytest.approx(196.559, abs=0.1)
-        assert bbox.y0 == pytest.approx(397.582, abs=0.1)
-        assert bbox.x1 == pytest.approx(415.439, abs=0.1)
-        assert bbox.y1 == pytest.approx(720.0, abs=0.1)
-
-    def test_unknown_image_name_ignored(self) -> None:
-        """Images not in the lookup set should be skipped."""
-        stream = "q\n300 0 0 400 100 200 cm\n/Im99 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
-        assert "/Im99" not in result
-        assert len(result) == 0
-
-    def test_multiple_images(self) -> None:
-        """Multiple images on one page should all get bboxes."""
-        stream = "q\n200 0 0 300 50 100 cm\n/Im1 Do\nQ\nq\n150 0 0 200 400 500 cm\n/Im2 Do\nQ\n"
-        result = _extract_image_bboxes_from_stream(stream, {"/Im1", "/Im2"})
-        assert len(result) == 2
-        assert "/Im1" in result
-        assert "/Im2" in result
-        assert result["/Im1"].x0 == pytest.approx(50.0)
-        assert result["/Im2"].x0 == pytest.approx(400.0)
+    def test_analyze_document_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
+        """analyze_document() uses the caller's ParsedPdf when given one."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
+        page_info = PageInfo(page_index=0, has_text_layer=True, text_coverage=1.0, needs_ocr=False)
+        with ParsedPdf(pdf) as parsed:
+            with patch("docint.core.readers.documents.layout.ParsedPdf") as ctor:
+                layout = analyze_document(pdf, [page_info], parsed=parsed)
+            ctor.assert_not_called()
+        assert layout.get(0)
 
 
 class TestTableDetection:
@@ -980,58 +992,21 @@ class TestTableDetection:
         end = _find_table_end(lines, 0)
         assert end == 2
 
-    def test_detect_tables_removes_table_from_text(self) -> None:
-        """Table regions should be excluded from the remaining text."""
-        text = (
-            "Introduction.\n"
-            "Table 1: Data\n"
-            "Col1  Col2  Col3\n"
-            "A     B     C\n"
-            "\n"
-            "Conclusion paragraph with enough text to not look like a table row."
-        )
-        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(text, 0, BBox(0, 0, 612, 792), 612.0, 792.0)
-        assert len(table_blocks) == 1
-        assert "Table 1:" in table_blocks[0].text
-        assert "Introduction" in remaining
-        assert "Conclusion" in remaining
-        assert "Table 1:" not in remaining
+    def test_detect_table_regions(self) -> None:
+        """Caption + rows form one region; surrounding prose is left out."""
+        lines = [
+            "Introduction.",
+            "Table 1: Data",
+            "Col1  Col2  Col3",
+            "A     B     C",
+            "",
+            "Conclusion paragraph with enough text to not look like a table row.",
+        ]
+        assert _detect_table_regions(lines) == [(1, 3)]
 
-    def test_no_table_returns_full_text(self) -> None:
-        """Without table captions, all text should remain."""
-        text = "Just regular text without any tables."
-        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(text, 0, BBox(0, 0, 612, 792), 612.0, 792.0)
-        assert len(table_blocks) == 0
-        assert remaining == text
-
-
-class TestMatrixMultiplication:
-    """Tests for the PDF affine matrix multiplication helper."""
-
-    def test_identity(self) -> None:
-        """Multiplying two identity matrices returns identity."""
-        identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-        result = _multiply_matrices(identity, identity)
-        assert result == pytest.approx(identity)
-
-    def test_translate(self) -> None:
-        """Translation matrix preserves tx/ty offsets."""
-        identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-        translate = [1.0, 0.0, 0.0, 1.0, 100.0, 200.0]
-        result = _multiply_matrices(identity, translate)
-        assert result[4] == pytest.approx(100.0)
-        assert result[5] == pytest.approx(200.0)
-
-    def test_scale_then_translate(self) -> None:
-        """Scaling after translation preserves the translation offset."""
-        translate = [1.0, 0.0, 0.0, 1.0, 50.0, 50.0]
-        scale = [2.0, 0.0, 0.0, 3.0, 0.0, 0.0]
-        result = _multiply_matrices(translate, scale)
-        # Scale should apply in current coord system, translation preserved
-        assert result[0] == pytest.approx(2.0)
-        assert result[3] == pytest.approx(3.0)
-        assert result[4] == pytest.approx(50.0)
-        assert result[5] == pytest.approx(50.0)
+    def test_no_table_no_regions(self) -> None:
+        """Without table captions, no regions are found."""
+        assert _detect_table_regions(["Just regular text without any tables."]) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1079,8 +1054,40 @@ class TestOCR:
         assert "Hello world" in result.full_text
         assert "Additional OCR text" in result.full_text
 
-    def test_extract_text_for_pages_vision_fallback(self) -> None:
-        """Vision engine should be tried when pypdf yields nothing on OCR pages."""
+    def test_pdf_text_engine_emits_one_span_per_line(self, tmp_path: Path) -> None:
+        """The digital text engine yields per-line spans with real boxes, in reading order."""
+        pdf = tmp_path / "cols.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
+
+        engine = PdfTextEngine(pdf)
+        try:
+            spans = engine.ocr_page(0)
+        finally:
+            engine.close()
+
+        assert len(spans) == 6
+        assert [s.text for s in spans[:3]] == ["Left column line 1", "Left column line 2", "Left column line 3"]
+        assert spans[3].text == "Right column line 1"
+        assert all(s.source == "pdf_text" for s in spans)
+        assert spans[0].bbox.x0 == pytest.approx(60.0, abs=1.0)
+        assert spans[3].bbox.x0 == pytest.approx(330.0, abs=1.0)
+        assert spans[0].bbox.y0 > spans[1].bbox.y0
+
+    def test_extract_text_for_pages_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
+        """extract_text_for_pages() uses the caller's ParsedPdf when given one."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("Some actual text.", x=60, y=700)])]))
+        page_info = PageInfo(page_index=0, has_text_layer=True, text_coverage=0.5, needs_ocr=True)
+        with ParsedPdf(pdf) as parsed:
+            with patch("docint.core.readers.documents.ocr.ParsedPdf") as ctor:
+                result = extract_text_for_pages(pdf, [page_info], {0: []}, parsed=parsed)
+            ctor.assert_not_called()
+        assert "Some actual text" in result[0].full_text
+
+    def test_extract_text_for_pages_vision_fallback(self, tmp_path: Path) -> None:
+        """Vision engine should be tried when the PDF text layer yields nothing on OCR pages."""
+        pdf = tmp_path / "scan.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
         page_info = PageInfo(
             page_index=0,
             has_text_layer=False,
@@ -1102,33 +1109,17 @@ class TestOCR:
             )
         ]
 
-        with patch("docint.core.readers.documents.ocr.pypdf") as mock_pypdf:
-            mock_page = MagicMock()
-            mock_page.extract_text.return_value = ""
-            mock_mb = MagicMock()
-            mock_mb.left = 0.0
-            mock_mb.bottom = 0.0
-            mock_mb.right = 612.0
-            mock_mb.top = 792.0
-            mock_page.mediabox = mock_mb
-            mock_reader = MagicMock()
-            mock_reader.pages = [mock_page]
-            mock_pypdf.PdfReader.return_value = mock_reader
-
-            result = extract_text_for_pages(
-                "/fake/scan.pdf",
-                [page_info],
-                layout,
-                vision_engine=mock_vision,
-            )
+        result = extract_text_for_pages(pdf, [page_info], layout, vision_engine=mock_vision)
 
         assert 0 in result
         assert "Vision-extracted text" in result[0].full_text
         assert result[0].source_mix == "ocr"
         mock_vision.ocr_page.assert_called_once()
 
-    def test_extract_text_for_pages_no_vision_when_text_found(self) -> None:
-        """Vision engine should NOT be called when pypdf yields text."""
+    def test_extract_text_for_pages_no_vision_when_text_found(self, tmp_path: Path) -> None:
+        """Vision engine should NOT be called when the PDF text layer yields text."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("Some actual text.", x=60, y=700)])]))
         page_info = PageInfo(
             page_index=0,
             has_text_layer=True,
@@ -1142,25 +1133,7 @@ class TestOCR:
 
         mock_vision = MagicMock()
 
-        with patch("docint.core.readers.documents.ocr.pypdf") as mock_pypdf:
-            mock_page = MagicMock()
-            mock_page.extract_text.return_value = "Some actual text."
-            mock_mb = MagicMock()
-            mock_mb.left = 0.0
-            mock_mb.bottom = 0.0
-            mock_mb.right = 612.0
-            mock_mb.top = 792.0
-            mock_page.mediabox = mock_mb
-            mock_reader = MagicMock()
-            mock_reader.pages = [mock_page]
-            mock_pypdf.PdfReader.return_value = mock_reader
-
-            result = extract_text_for_pages(
-                "/fake/doc.pdf",
-                [page_info],
-                layout,
-                vision_engine=mock_vision,
-            )
+        result = extract_text_for_pages(pdf, [page_info], layout, vision_engine=mock_vision)
 
         assert 0 in result
         assert "Some actual text" in result[0].full_text
@@ -1894,49 +1867,71 @@ class TestOCR:
 class TestOrchestrator:
     """Tests for the document pipeline orchestrator."""
 
-    def test_process_with_mocked_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
-        """Processing a mocked PDF should produce a completed manifest with artifacts."""
-        # Create a dummy file for hashing
+    def test_process_real_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Processing a digital PDF should produce a completed manifest with artifacts and chunks."""
         pdf_file = tmp_path / "test.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 dummy content for hashing")
-
-        # Mock pypdf
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = "Test document content. Second sentence."
-        mock_mb = MagicMock()
-        mock_mb.width = 612.0
-        mock_mb.height = 792.0
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
+        pdf_file.write_bytes(
+            build_pdf(
+                [
+                    PageSpec(
+                        runs=[
+                            TextRun("Report Title", x=60, y=740, size=20, bold=True),
+                            TextRun("Test document content. Second sentence.", x=60, y=700),
+                            TextRun("Third sentence with more content here.", x=60, y=686),
+                        ]
+                    )
+                ]
+            )
+        )
 
         orch = DocumentPipelineOrchestrator(config=pipeline_config)
-
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as mock_triage_pypdf,
-            patch("docint.core.readers.documents.layout.pypdf") as mock_layout_pypdf,
-            patch("docint.core.readers.documents.ocr.pypdf") as mock_ocr_pypdf,
-        ):
-            mock_triage_pypdf.PdfReader.return_value = mock_reader
-            mock_layout_pypdf.PdfReader.return_value = mock_reader
-            mock_ocr_pypdf.PdfReader.return_value = mock_reader
-
-            manifest = orch.process(pdf_file)
+        manifest = orch.process(pdf_file)
 
         assert manifest.status == "completed"
         assert manifest.pages_total == 1
         assert manifest.pages_failed == 0
-
-        # Check artifacts were created
+        assert manifest.pages_ocr == 0
 
         doc_id = compute_file_hash(pdf_file)
         artifacts_dir = Path(pipeline_config.artifacts_dir)
         assert (artifacts_dir / doc_id / "manifest.json").exists()
+        chunks_path = artifacts_dir / doc_id / "chunks.jsonl"
+        chunk = json.loads(chunks_path.read_text().strip().split("\n")[0])
+        assert chunk["section_path"] == ["Report Title"]
+        assert "Test document content" in chunk["text"]
+
+    def test_two_column_pdf_chunks_read_column_wise(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """End to end, a two-column page's chunk text keeps each column contiguous."""
+        pdf_file = tmp_path / "cols.pdf"
+        pdf_file.write_bytes(build_pdf([two_column_page()]))
+
+        manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        chunks_path = Path(pipeline_config.artifacts_dir) / manifest.doc_id / "chunks.jsonl"
+        text = "\n".join(json.loads(line)["text"] for line in chunks_path.read_text().strip().split("\n"))
+        assert text.index("Left column line 3") < text.index("Right column line 1")
+
+    def test_opens_document_once_and_closes_it(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """One ParsedPdf handle serves every stage and is released at the end."""
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(build_pdf([two_column_page(), two_column_page()]))
+        closes: list[int] = []
+        real_close = ParsedPdf.close
+
+        def _counting_close(self: ParsedPdf) -> None:
+            closes.append(1)
+            real_close(self)
+
+        with (
+            patch.object(ParsedPdf, "close", _counting_close),
+            patch("docint.core.readers.documents.orchestrator.ParsedPdf", wraps=ParsedPdf) as ctor,
+        ):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        assert ctor.call_count == 1
+        assert len(closes) == 1
 
     def test_idempotent_rerun(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Second run should reuse artifacts when pipeline version matches."""
@@ -1956,80 +1951,47 @@ class TestOrchestrator:
         )
 
         pdf_file = tmp_path / "test.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 idempotent test content")
-
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = "Idempotent test."
-        mock_mb = MagicMock()
-        mock_mb.width = 612.0
-        mock_mb.height = 792.0
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
+        pdf_file.write_bytes(build_pdf([PageSpec(runs=[TextRun("Idempotent test.", x=60, y=700)])]))
 
         orch = DocumentPipelineOrchestrator(config=config)
 
-        # First run
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as m1,
-            patch("docint.core.readers.documents.layout.pypdf") as m2,
-            patch("docint.core.readers.documents.ocr.pypdf") as m3,
-        ):
-            m1.PdfReader.return_value = mock_reader
-            m2.PdfReader.return_value = mock_reader
-            m3.PdfReader.return_value = mock_reader
-            manifest1 = orch.process(pdf_file)
-
+        manifest1 = orch.process(pdf_file)
         assert manifest1.status == "completed"
 
         # Second run — should skip processing
-        manifest2 = orch.process(pdf_file)
+        with patch("docint.core.readers.documents.orchestrator.triage_pdf") as triage:
+            manifest2 = orch.process(pdf_file)
+        triage.assert_not_called()
         assert manifest2.status == "completed"
         assert manifest2.doc_id == manifest1.doc_id
 
     def test_page_failure_isolation(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """A failing page should not crash the whole document."""
         pdf_file = tmp_path / "test.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 failure isolation test")
+        pdf_file.write_bytes(build_pdf([two_column_page(), two_column_page()]))
+        real_page = ParsedPdf.page
 
-        good_page = MagicMock()
-        good_page.extract_text.return_value = "Good page content."
-        good_mb = MagicMock()
-        good_mb.width = 612.0
-        good_mb.height = 792.0
-        good_mb.left = 0.0
-        good_mb.bottom = 0.0
-        good_mb.right = 612.0
-        good_mb.top = 792.0
-        good_page.mediabox = good_mb
+        def _flaky(self: ParsedPdf, page_index: int) -> ParsedPage:
+            if page_index == 1:
+                raise RuntimeError("corrupt")
+            return real_page(self, page_index)
 
-        bad_page = MagicMock()
-        bad_page.extract_text.side_effect = RuntimeError("corrupt")
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [good_page, bad_page]
-
-        orch = DocumentPipelineOrchestrator(config=pipeline_config)
-
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as m1,
-            patch("docint.core.readers.documents.layout.pypdf") as m2,
-            patch("docint.core.readers.documents.ocr.pypdf") as m3,
-        ):
-            m1.PdfReader.return_value = mock_reader
-            m2.PdfReader.return_value = mock_reader
-            m3.PdfReader.return_value = mock_reader
-            manifest = orch.process(pdf_file)
+        with patch.object(ParsedPdf, "page", _flaky):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
 
         assert manifest.status == "completed"
         assert manifest.pages_total == 2
-        # At least one page should be processed (the good one)
-        assert any(p.status == "completed" for p in manifest.pages)
+        assert [p.status for p in manifest.pages] == ["completed", "failed"]
+
+    def test_unreadable_pdf_fails_cleanly(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A file that cannot be opened yields a failed manifest, not an exception."""
+        pdf_file = tmp_path / "bogus.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 not really a pdf")
+
+        manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "failed"
+        assert manifest.error
 
     def test_retry_logic(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Stages should retry on transient failures."""
@@ -2049,11 +2011,7 @@ class TestOrchestrator:
         assert call_count == 2
 
     def test_scanned_pdf_injects_text_block(self, tmp_path: Path) -> None:
-        """A scanned PDF should get a synthetic TEXT block after vision OCR.
-
-        Args:
-            tmp_path: pytest fixture providing a temporary directory for test files.
-        """
+        """A scanned PDF should get a synthetic TEXT block after vision OCR."""
         config = PipelineConfig(
             text_coverage_threshold=0.01,
             pipeline_version="test-1.0.0",
@@ -2068,36 +2026,9 @@ class TestOrchestrator:
             vision_ocr_max_tokens=4096,
         )
 
+        # Scanned page: no text, but a full-page embedded image
         pdf_file = tmp_path / "scan.pdf"
-        pdf_file.write_bytes(b"%PDF-1.4 scanned page test")
-
-        # Scanned page: no text, but an embedded image
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = ""
-        mock_mb = MagicMock()
-        mock_mb.width = 612.0
-        mock_mb.height = 792.0
-        mock_mb.left = 0.0
-        mock_mb.bottom = 0.0
-        mock_mb.right = 612.0
-        mock_mb.top = 792.0
-        mock_page.mediabox = mock_mb
-
-        # Image XObject so layout produces a FIGURE block
-        mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
-        mock_image_obj.get_object.return_value = mock_image_obj
-        mock_xobj_dict = {"/Im1": mock_image_obj}
-        mock_xobj = MagicMock()
-        mock_xobj.get_object.return_value = mock_xobj_dict
-        mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
-        )
-
-        mock_reader = MagicMock()
-        mock_reader.pages = [mock_page]
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
 
         # Mock the vision OCR engine to return extracted text
         mock_vision_engine = MagicMock()
@@ -2112,23 +2043,16 @@ class TestOrchestrator:
 
         orch = DocumentPipelineOrchestrator(config=config)
 
-        with (
-            patch("docint.core.readers.documents.triage.pypdf") as m1,
-            patch("docint.core.readers.documents.layout.pypdf") as m2,
-            patch("docint.core.readers.documents.ocr.pypdf") as m3,
-            patch(
-                "docint.core.readers.documents.orchestrator.VisionOCREngine",
-                return_value=mock_vision_engine,
-            ),
+        with patch(
+            "docint.core.readers.documents.orchestrator.VisionOCREngine",
+            return_value=mock_vision_engine,
         ):
-            m1.PdfReader.return_value = mock_reader
-            m2.PdfReader.return_value = mock_reader
-            m3.PdfReader.return_value = mock_reader
             manifest = orch.process(pdf_file)
 
         assert manifest.status == "completed"
         assert manifest.pages_total == 1
         assert manifest.pages_ocr == 1
+        assert manifest.images_found == 1
 
         # Verify chunks were produced from the vision OCR text
         doc_id = compute_file_hash(pdf_file)
@@ -2137,7 +2061,6 @@ class TestOrchestrator:
         assert chunks_path.exists(), "Expected chunks.jsonl to be created"
         lines = [line for line in chunks_path.read_text().strip().split("\n") if line.strip()]
         assert len(lines) >= 1
-        import json
 
         chunk_data = json.loads(lines[0])
-        assert "vision OCR" in chunk_data["text"].lower() or "scanned" in chunk_data["text"].lower()
+        assert "vision ocr" in chunk_data["text"].lower() or "scanned" in chunk_data["text"].lower()
