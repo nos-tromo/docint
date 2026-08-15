@@ -30,17 +30,17 @@ export const de: Strings = {
   'common.delete_collection_error':
     'Sammlung {name} konnte nicht gelöscht werden. Prüfen Sie, ob Backend und Vektordatenbank erreichbar sind, und versuchen Sie es erneut.',
   'common.no_active_collection': 'Keine aktive Sammlung — wählen Sie eine aus, um Anfragen zu stellen.',
-  'common.sessions': 'Sitzungen',
+  'common.sessions': 'Sessions',
   'common.new_chat': 'Neuer Chat',
   'common.new_report': 'Neuer Bericht',
   'common.loading_chats': 'Lädt Chats...',
   'common.sessions_error_default': 'Chats konnten nicht geladen werden.',
   'common.sessions_error_auth':
-    'Der Sitzungsverlauf erfordert einen authentifizierten User.',
+    'Der Session-Verlauf erfordert einen authentifizierten User.',
   'common.no_chats_in_collection': 'Noch keine Chats in dieser Sammlung.',
   'common.select_collection_to_see_chats': 'Wählen Sie eine Sammlung aus, um deren Chats zu sehen.',
-  'common.session_title_fallback': 'Sitzung {id}',
-  'common.delete_session_aria': 'Sitzung löschen',
+  'common.session_title_fallback': 'Session {id}',
+  'common.delete_session_aria': 'Session löschen',
   'common.delete_session_confirm': 'Diesen Chat löschen?',
   'common.show_more': 'Mehr anzeigen',
   'common.show_less': 'Weniger anzeigen',
@@ -215,7 +215,7 @@ export const de: Strings = {
   'inspector.file_types': 'Dateitypen',
   'inspector.entity_types': 'Entitätstypen',
   'inspector.none_extracted': 'keine extrahiert',
-  'inspector.download_session_sources': 'Sitzungsquellen herunterladen (ZIP)',
+  'inspector.download_session_sources': 'Session-Quellen herunterladen (ZIP)',
 
   // shared locator / metadata chrome (entities, hate-speech, report)
   'common.loc_page': 'Seite {page}',
@@ -385,7 +385,7 @@ export const de: Strings = {
   'dashboard.top_k_label': 'top-k',
   'dashboard.min_mentions_label': 'Min. Erwähnungen',
   'dashboard.select_collection_entities': 'Wählen Sie eine Sammlung aus, um Entitäten zu sehen.',
-  'dashboard.recent_sessions': 'Letzte Sitzungen',
+  'dashboard.recent_sessions': 'Letzte Sessions',
   'dashboard.chart_empty': 'Noch keine Entitäten.',
   'dashboard.chart_mentions': 'Erwähnungen',
 
