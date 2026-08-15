@@ -277,31 +277,35 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        {state.phase === 'probing' && (
-          <span className="text-sm text-muted-foreground">{t('common.loading_ellipsis')}</span>
-        )}
-        {(state.phase === 'empty' || state.phase === 'failed') && (
-          // Text, not an icon: an empty panel has to say what its button will
-          // make. A drawing alone cannot introduce something not yet on screen.
-          <Button variant="primary" onClick={() => generate(false)} disabled={state.busy}>
-            {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
-          </Button>
-        )}
-        {state.phase === 'ready' && (
-          // The summary is already on screen, so the control that rebuilds it
-          // is chrome. Its label stays "Aktualisieren" —
-          // `analysis.coverage_partial_detail` tells the reader to click that
-          // word, and an icon whose name no longer says it would leave the
-          // sentence pointing at nothing.
-          <RefreshButton
-            label={t('analysis.summary_refresh')}
-            busy={state.busy}
-            onClick={() => generate(true)}
-          />
-        )}
-        {state.text && (
-          <div className="ml-auto flex items-center gap-2">
+      {/* Caption left, actions right — the row every other panel in the app
+          uses (the findings table, the hate-speech table, a chat turn). This
+          one used to put a *button* in the caption's slot, and that button
+          changed size with the state: a wide primary "Erstellen" became a 32px
+          refresh icon the moment content arrived, so the row's weight jumped
+          sides on load. The empty state now says what it is instead. */}
+      {state.phase === 'ready' && (
+        <div className="flex items-center justify-between gap-3">
+          <p className="min-w-0 truncate text-sm text-muted-foreground">
+            {t(
+              (state.meta?.sources?.length ?? 0) === 1
+                ? 'analysis.summary_caption_one'
+                : 'analysis.summary_caption_other',
+              { count: state.meta?.sources?.length ?? 0 }
+            )}
+            {state.meta?.summary_diagnostics?.partial === true && (
+              <> · {t('analysis.coverage_partial_label')}</>
+            )}
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Its label stays "Aktualisieren":
+                `analysis.coverage_partial_detail` tells the reader to click
+                that word, and an icon whose name no longer said it would
+                leave the sentence pointing at nothing. */}
+            <RefreshButton
+              label={t('analysis.summary_refresh')}
+              busy={state.busy}
+              onClick={() => generate(true)}
+            />
             <DownloadButton
               label={t('analysis.summary_download_md')}
               onClick={() =>
@@ -312,10 +316,28 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
                 )
               }
             />
-            {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+            {reportItem && reportDedupeKeys && (
+              <AddToReportButton item={reportItem} inReport={inReport} />
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {state.phase === 'probing' && (
+        <p className="text-sm text-muted-foreground">{t('common.loading_ellipsis')}</p>
+      )}
+
+      {(state.phase === 'empty' || state.phase === 'failed') && (
+        // An empty state explains itself and then offers the one thing to do,
+        // with a text label: a drawing cannot introduce something that is not
+        // on screen yet.
+        <div className="flex flex-col items-start gap-3 rounded-md border border-border border-dashed p-6">
+          <p className="text-sm text-muted-foreground">{t('analysis.summary_empty')}</p>
+          <Button variant="primary" onClick={() => generate(false)} disabled={state.busy}>
+            {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
+          </Button>
+        </div>
+      )}
 
       {state.building && (
         <div className="space-y-1.5" data-testid="summary-build-progress">
