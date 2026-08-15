@@ -120,6 +120,62 @@ class TestOrderLines:
         assert order_lines([]) == []
 
 
+class TestLineMerging:
+    """Horizontally adjacent cells on one baseline are one line."""
+
+    def test_section_number_and_title_merge(self, tmp_path: Path) -> None:
+        """A number and its title drawn as separate runs on one baseline become one line."""
+        pdf = tmp_path / "num.pdf"
+        pdf.write_bytes(
+            build_pdf(
+                [
+                    PageSpec(
+                        runs=[
+                            TextRun("1", x=60, y=700, size=12, bold=True),
+                            TextRun("Introduction", x=78, y=700, size=12, bold=True),
+                            TextRun("Body text follows on the next line.", x=60, y=680),
+                        ]
+                    )
+                ]
+            )
+        )
+        with ParsedPdf(pdf) as parsed:
+            texts = [ln.text for ln in parsed.page(0).lines]
+        assert "1 Introduction" in texts
+        assert len(texts) == 2
+
+    def test_distant_cells_on_one_baseline_stay_separate(self, tmp_path: Path) -> None:
+        """Two columns' first lines share a baseline but are far apart — never merged."""
+        pdf = tmp_path / "cols.pdf"
+        pdf.write_bytes(build_pdf([two_column_page()]))
+        with ParsedPdf(pdf) as parsed:
+            texts = [ln.text for ln in parsed.page(0).lines]
+        assert "Left column line 1" in texts and "Right column line 1" in texts
+
+    def test_rotated_line_keeps_true_font_size(self, tmp_path: Path) -> None:
+        """A 90-degree stamp reports its real font size and is flagged rotated."""
+        pdf = tmp_path / "rot.pdf"
+        pdf.write_bytes(
+            build_pdf(
+                [
+                    PageSpec(
+                        runs=[
+                            TextRun("Vertical side stamp text", x=30, y=300, size=12, rotate90=True),
+                            TextRun("Upright body line.", x=60, y=700, size=12),
+                        ]
+                    )
+                ]
+            )
+        )
+        with ParsedPdf(pdf) as parsed:
+            by_text = {ln.text: ln for ln in parsed.page(0).lines}
+        stamp = by_text["Vertical side stamp text"]
+        body = by_text["Upright body line."]
+        assert stamp.rotated is True and body.rotated is False
+        assert stamp.font_size == pytest.approx(body.font_size, abs=1.5)
+        assert stamp.bbox.y1 - stamp.bbox.y0 > 60  # the axis-aligned box is tall
+
+
 class TestLinesToText:
     """Joining ordered lines into page text."""
 

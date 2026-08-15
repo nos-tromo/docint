@@ -25,6 +25,7 @@ class TextRun:
         y: Baseline y position.
         size: Font size in points.
         bold: Use Helvetica-Bold instead of Helvetica.
+        rotate90: Draw the run rotated 90 degrees counter-clockwise (text runs upward).
     """
 
     text: str
@@ -32,6 +33,7 @@ class TextRun:
     y: float
     size: float = 11.0
     bold: bool = False
+    rotate90: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,8 +106,12 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
         content = io.BytesIO()
         for run in spec.runs:
             font = "/F2" if run.bold else "/F1"
+            # Tm sets the text matrix: identity for upright text, a 90-degree
+            # rotation for vertical text (as in an arXiv-style side stamp).
+            matrix = b"0 1 -1 0" if run.rotate90 else b"1 0 0 1"
             content.write(
-                b"BT %s %g Tf %g %g Td (%s) Tj ET\n" % (font.encode(), run.size, run.x, run.y, _escape(run.text))
+                b"BT %s %g Tf %s %g %g Tm (%s) Tj ET\n"
+                % (font.encode(), run.size, matrix, run.x, run.y, _escape(run.text))
             )
         xobjects: list[tuple[str, int]] = []
         for idx, img in enumerate(spec.images):

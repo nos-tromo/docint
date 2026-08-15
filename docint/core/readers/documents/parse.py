@@ -30,6 +30,13 @@ from loguru import logger
 
 from docint.core.readers.documents.models import BBox
 
+# Radians; anything beyond this is treated as rotated text (a 90-degree stamp is 1.57).
+_ROTATION_TOLERANCE = 0.05
+# Two cells on one baseline closer than this many font sizes are one line
+# (a section number and its title, a word broken into two runs); farther
+# apart they are separate lines (table cells, columns).
+_MERGE_GAP_FONT_SIZES = 1.5
+
 
 @dataclass(frozen=True)
 class TextLine:
@@ -39,13 +46,17 @@ class TextLine:
         text: The line's text.
         bbox: Axis-aligned bounding box in bottom-left-origin points.
         font_name: The PDF font name (e.g. ``/Helvetica-Bold``); empty when unknown.
-        font_size: Approximate font size in points (the cell rectangle's height).
+        font_size: Approximate font size in points — the height of the cell
+            rectangle *in the text's own frame*, so a rotated line reports its
+            real size rather than the height of its axis-aligned box.
+        rotated: Whether the line is drawn at an angle (e.g. a side stamp).
     """
 
     text: str
     bbox: BBox
     font_name: str = ""
     font_size: float = 0.0
+    rotated: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,7 +80,8 @@ class ParsedPage:
         page_index: Zero-based page number.
         width: Page width in points.
         height: Page height in points.
-        lines: Line cells in the parser's native (content-stream) order.
+        lines: Line cells, top-to-bottom / left-to-right, with horizontally
+            adjacent cells on one baseline already merged (see :func:`merge_adjacent`).
         images: Embedded bitmaps with placement boxes.
     """
 
@@ -157,15 +169,20 @@ class ParsedPdf:
             text = str(cell.text or "")
             if not text.strip():
                 continue
-            bbox = _rect_to_bbox(cell.rect)
+            rect = cell.rect
+            bbox = _rect_to_bbox(rect)
+            angle = abs(float(getattr(rect, "angle", 0.0) or 0.0))
+            frame_height = float(getattr(rect, "height", 0.0) or 0.0)
             lines.append(
                 TextLine(
                     text=text,
                     bbox=bbox,
                     font_name=str(getattr(cell, "font_name", "") or ""),
-                    font_size=round(bbox.y1 - bbox.y0, 2),
+                    font_size=round(frame_height if frame_height > 0 else bbox.y1 - bbox.y0, 2),
+                    rotated=angle > _ROTATION_TOLERANCE,
                 )
             )
+        lines = merge_adjacent(lines)
         images = [
             ImagePlacement(index=int(getattr(bmp, "index", idx)), bbox=_rect_to_bbox(bmp.rect))
             for idx, bmp in enumerate(raw.bitmap_resources)
@@ -195,6 +212,55 @@ class ParsedPdf:
     def __exit__(self, *exc_info: object) -> None:
         """Close the document on exit."""
         self.close()
+
+
+# ---------------------------------------------------------------------------
+# Line merging
+# ---------------------------------------------------------------------------
+
+
+def merge_adjacent(lines: list[TextLine]) -> list[TextLine]:
+    """Merge horizontally adjacent cells that share a baseline into one line.
+
+    docling-parse emits a separate line cell per text run, so a section
+    number and its title (``1`` + ``Introduction``) or a word split across
+    two runs arrive as two cells. Cells whose baselines match (within 0.3 of
+    the line height) and whose horizontal gap is at most 1.5 font sizes are
+    joined with a space; anything farther apart — table cells, the two
+    columns of a page — stays separate. Rotated cells are never merged.
+
+    Args:
+        lines (list[TextLine]): Cells in any order.
+
+    Returns:
+        list[TextLine]: Merged lines, top-to-bottom then left-to-right.
+    """
+    ordered = sorted(lines, key=lambda ln: (-round(ln.bbox.y0, 1), ln.bbox.x0))
+    merged: list[TextLine] = []
+    for ln in ordered:
+        if merged:
+            prev = merged[-1]
+            height = max(prev.bbox.y1 - prev.bbox.y0, ln.bbox.y1 - ln.bbox.y0, 1.0)
+            same_baseline = abs(prev.bbox.y0 - ln.bbox.y0) <= 0.3 * height
+            gap = ln.bbox.x0 - prev.bbox.x1
+            size = max(prev.font_size, ln.font_size, 1.0)
+            if not prev.rotated and not ln.rotated and same_baseline and -0.5 <= gap <= _MERGE_GAP_FONT_SIZES * size:
+                longer = prev if len(prev.text) >= len(ln.text) else ln
+                merged[-1] = TextLine(
+                    text=f"{prev.text.rstrip()} {ln.text.lstrip()}",
+                    bbox=BBox(
+                        x0=min(prev.bbox.x0, ln.bbox.x0),
+                        y0=min(prev.bbox.y0, ln.bbox.y0),
+                        x1=max(prev.bbox.x1, ln.bbox.x1),
+                        y1=max(prev.bbox.y1, ln.bbox.y1),
+                    ),
+                    font_name=longer.font_name,
+                    font_size=max(prev.font_size, ln.font_size),
+                    rotated=False,
+                )
+                continue
+        merged.append(ln)
+    return merged
 
 
 # ---------------------------------------------------------------------------

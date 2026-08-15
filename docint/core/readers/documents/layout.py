@@ -43,7 +43,16 @@ class LayoutAnalyzer(ABC):
 _HEADING_MAX_CHARS = 120
 _HEADING_SIZE_RATIO = 1.15
 _HEADING_MAX_SHARE = 0.5
-_BOLD_MARKERS = ("bold", "black", "heavy", "semibold", "demibold")
+_HEADING_MAX_RUN = 2  # a run of more than this many same-style lines is a paragraph
+_BOLD_MARKERS = (
+    "bold",
+    "black",
+    "heavy",
+    "semibold",
+    "demibold",
+    "medi",
+)  # "medi": NimbusRomNo9L-Medi, LaTeX bold Times
+_WORD_RE = re.compile(r"[^\W\d_]{3,}")  # at least one real word (3+ letters)
 
 
 class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
@@ -177,15 +186,47 @@ def _is_bold(font_name: str) -> bool:
     return any(marker in name for marker in _BOLD_MARKERS)
 
 
+def _style_run_lengths(lines: list[TextLine]) -> list[int]:
+    """For each line, the length of the same-style run it belongs to.
+
+    Consecutive lines with the same font name, the same size (within 0.5 pt)
+    and normal leading (vertical gap below 0.8 x the font size) form a run —
+    the shape of a wrapped paragraph.
+
+    Args:
+        lines (list[TextLine]): Lines in reading order.
+
+    Returns:
+        list[int]: Run length per line index.
+    """
+    lengths = [1] * len(lines)
+    start = 0
+    for idx in range(1, len(lines) + 1):
+        if idx < len(lines):
+            prev, cur = lines[idx - 1], lines[idx]
+            same_style = prev.font_name == cur.font_name and abs(prev.font_size - cur.font_size) < 0.5
+            gap = prev.bbox.y0 - cur.bbox.y1
+            close = -0.5 * max(cur.font_size, 1.0) <= gap < 0.8 * max(cur.font_size, 1.0)
+            if same_style and close:
+                continue
+        for j in range(start, idx):
+            lengths[j] = idx - start
+        start = idx
+    return lengths
+
+
 def _classify_headings(lines: list[TextLine], excluded: set[int]) -> dict[int, BlockType]:
     """Decide which of ``lines`` are headings.
 
     A line is a heading candidate when it is short (≤ 120 chars, not ending in
-    sentence punctuation) and either set ≥ 1.15 x the body font size or set in a
-    bold face at body size or larger. Candidates with the page's largest heading
-    size (when that size is itself larger than body) are ``TITLE``; the rest
-    ``HEADER``. When more than half of the page's lines qualify, nothing is
-    promoted — the page simply has a uniform (or uniformly bold) face.
+    sentence punctuation), contains a real word, is not rotated, and either set
+    ≥ 1.15 x the body font size or set in a bold face at body size or larger.
+    A candidate that sits in a run of more than two consecutive same-style
+    lines at normal leading is a paragraph, not a heading, however large the
+    face. Candidates with the page's largest heading size (when that size is
+    itself larger than body) are ``TITLE``; the rest ``HEADER``. When more
+    than half of the page's lines qualify, nothing is promoted — the page
+    simply has a uniform (or uniformly bold) face.
 
     Args:
         lines (list[TextLine]): Ordered lines of the page.
@@ -198,14 +239,15 @@ def _classify_headings(lines: list[TextLine], excluded: set[int]) -> dict[int, B
     if len(sizes) < 2:
         return {}
     body = statistics.median(sizes)
+    run_lengths = _style_run_lengths(lines)
     candidates: dict[int, float] = {}
     for idx, ln in enumerate(lines):
-        if idx in excluded:
+        if idx in excluded or ln.rotated or run_lengths[idx] > _HEADING_MAX_RUN:
             continue
         text = ln.text.strip()
         if not text or len(text) > _HEADING_MAX_CHARS or text.endswith((".", ",", ";", ":")):
             continue
-        if not any(ch.isalpha() for ch in text):
+        if not _WORD_RE.search(text):
             continue
         large = ln.font_size >= _HEADING_SIZE_RATIO * body
         bold = _is_bold(ln.font_name) and ln.font_size >= body - 0.5

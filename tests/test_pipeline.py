@@ -24,6 +24,7 @@ from docint.core.readers.documents.layout import (
     DoclingParseLayoutAnalyzer,
     _detect_table_regions,
     _find_table_end,
+    _is_bold,
     analyze_document,
 )
 from docint.core.readers.documents.models import (
@@ -401,6 +402,32 @@ class TestChunking:
         assert text_units[0].text.startswith("Chapter 1: Introduction")
         # The heading is folded into its section's unit, never emitted alone.
         assert all(u.text.strip() != "Chapter 1: Introduction" for u in units)
+
+    def test_header_replaces_previous_header_under_title(self) -> None:
+        """Section paths stay title + current header; consecutive HEADERs do not stack."""
+
+        def _block(block_id: str, kind: BlockType, text: str, order: int) -> LayoutBlock:
+            return LayoutBlock(
+                block_id=block_id,
+                page_index=0,
+                type=kind,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=order,
+                confidence=1.0,
+                text=text,
+            )
+
+        layout = {
+            0: [
+                _block("t", BlockType.TITLE, "Model", 0),
+                _block("h1", BlockType.HEADER, "Encoder", 1),
+                _block("b1", BlockType.TEXT, "Encoder body sentence.", 2),
+                _block("h2", BlockType.HEADER, "Decoder", 3),
+                _block("b2", BlockType.TEXT, "Decoder body sentence.", 4),
+            ]
+        }
+        units = build_coarse_units("doc", layout, {}, [], [])
+        assert [u.section_path for u in units] == [["Model", "Encoder"], ["Model", "Decoder"]]
 
     def test_coarse_units_respect_size_cap(self) -> None:
         """Multiple blocks are grouped into units bounded by coarse_chunk_size."""
@@ -848,6 +875,12 @@ class TestLayoutAnalysis:
         assert text_blocks[1].text.startswith("Right column line 1")
         assert text_blocks[0].reading_order < text_blocks[1].reading_order
 
+    def test_medium_weight_font_counts_as_bold(self) -> None:
+        """LaTeX's bold Times ships as ``NimbusRomNo9L-Medi``; it must read as bold."""
+        assert _is_bold("/RCUMTF+NimbusRomNo9L-Medi") is True
+        assert _is_bold("/AECCXO+NimbusRomNo9L-Regu") is False
+        assert _is_bold("/Helvetica-Bold") is True
+
     def test_large_bold_line_becomes_title_and_bold_line_header(self, tmp_path: Path) -> None:
         """Font-based heading detection: biggest heading → TITLE, others → HEADER."""
         spec = PageSpec(
@@ -874,6 +907,48 @@ class TestLayoutAnalysis:
         """When every line looks alike nothing is promoted to a heading."""
         runs = [TextRun(f"Line {i} of ordinary prose that ends here.", x=60, y=700 - 14 * i) for i in range(6)]
         blocks = self._analyze(tmp_path, PageSpec(runs=runs))
+        assert all(b.type == BlockType.TEXT for b in blocks)
+
+    def test_multi_line_paragraph_in_larger_font_is_not_a_heading(self, tmp_path: Path) -> None:
+        """Three consecutive same-style lines are a paragraph, however large the face."""
+        spec = PageSpec(
+            runs=[
+                TextRun("Provided proper attribution is given, permission is granted to", x=60, y=740, size=12),
+                TextRun("reproduce the tables and figures in this paper solely for use in", x=60, y=726, size=12),
+                TextRun("scholarly works.", x=60, y=712, size=12),
+                TextRun("The abstract body is set smaller than the notice above it and", x=60, y=680, size=9),
+                TextRun("runs on for a few lines so it clearly forms the page's body text.", x=60, y=669, size=9),
+                TextRun("A third body line keeps the median where it belongs.", x=60, y=658, size=9),
+                TextRun("And a fourth body line for good measure.", x=60, y=647, size=9),
+            ]
+        )
+        blocks = self._analyze(tmp_path, spec)
+        assert all(b.type == BlockType.TEXT for b in blocks)
+
+    def test_rotated_stamp_is_never_a_heading(self, tmp_path: Path) -> None:
+        """A rotated side stamp stays TEXT even though its axis-aligned box is tall."""
+        spec = PageSpec(
+            runs=[
+                TextRun("Preprint stamp running up the margin", x=30, y=300, size=12, rotate90=True),
+                TextRun("Body line one of the page.", x=60, y=700, size=10),
+                TextRun("Body line two of the page.", x=60, y=688, size=10),
+                TextRun("Body line three of the page.", x=60, y=676, size=10),
+            ]
+        )
+        blocks = self._analyze(tmp_path, spec)
+        assert all(b.type == BlockType.TEXT for b in blocks)
+
+    def test_two_letter_fragment_is_not_a_heading(self, tmp_path: Path) -> None:
+        """Short symbol-like fragments (math) never become headings."""
+        spec = PageSpec(
+            runs=[
+                TextRun("i K", x=200, y=500, size=16),
+                TextRun("Body line one of the page.", x=60, y=700, size=10),
+                TextRun("Body line two of the page.", x=60, y=688, size=10),
+                TextRun("Body line three of the page.", x=60, y=676, size=10),
+            ]
+        )
+        blocks = self._analyze(tmp_path, spec)
         assert all(b.type == BlockType.TEXT for b in blocks)
 
     def test_analyze_document_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
