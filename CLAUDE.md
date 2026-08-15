@@ -239,9 +239,16 @@ uses a matching `basename`, and the frontend's nginx template strips the
 `/docint` prefix internally before falling through to the existing
 root-anchored locations (SSE endpoints included), redirecting bare `/` to
 `/docint/`. NB: every NEW backend route must be registered in BOTH
-`frontend/nginx/default.conf`'s proxied-prefix regex and
-`frontend/vite.config.ts`'s `API_PREFIXES`, or the SPA fallback silently
-serves index.html for it (bit us with `/whoami`). The gateway is the sole production entry point and is what
+`frontend/nginx/default.conf`'s proxied-prefix regex and the `API_PREFIXES` list
+in `frontend/src/lib/devProxy.ts` (which `vite.config.ts` imports), or the SPA
+fallback silently serves index.html for it (bit us with `/whoami`). The reverse
+collision exists too and is worse, because it only shows on a page *reload*: a
+backend prefix that is also an SPA route sends the page to the API. `/ingest` is
+exactly that — the ingest screen and the CLI/batch `POST /ingest` — so both
+layers split that one path by method (nginx's `$ingest_spa_page` map plus its
+`@spa_shell` named location; `spaShellBypass` on the dev side), and
+`devProxy.test.ts` asserts the two stay in step. Everything under `/ingest/`
+is API-only. The gateway is the sole production entry point and is what
 injects `X-Auth-User` for the backend's trusted-header principal seam
 (`docint/core/auth/principal.py`) — production leaves `DOCINT_DEFAULT_IDENTITY`
 unset so requests without that header are rejected as unauthenticated. The
