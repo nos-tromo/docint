@@ -49,6 +49,10 @@ _MIN_FULL_ROW_SHARE = 0.7
 # A vertical gap this many median line heights wide ends a table: the next
 # block of text is something else.
 _MAX_ROW_GAP_HEIGHTS = 2.5
+# A caption's wrapped lines share its left edge and read as a sentence; table
+# rows are indented differently and hold short cells.
+_CAPTION_INDENT_TOLERANCE = 3.0
+_CAPTION_LINE_MIN_CHARS = 60
 
 
 def _median_height(cells: list[TextLine]) -> float:
@@ -159,6 +163,68 @@ def grid_to_text(grid: list[list[str]]) -> str:
         str: One line per row.
     """
     return "\n".join(" | ".join(row).strip() for row in grid)
+
+
+def caption_extent(page: ParsedPage, caption: BBox) -> BBox | None:
+    """Where the table under a ``Table N:`` caption ends.
+
+    A caption is already proof that what follows is a table, so this asks only
+    about extent, not about whether the region qualifies as a grid. That
+    matters for the tables geometry cannot validate — multi-level headers,
+    spanning cells, cells split into several runs by mathematical notation —
+    which are real tables all the same, and whose rows must still be rendered
+    row by row rather than column by column.
+
+    The caption's own wrapped lines are skipped (a lone cell, or a cell longer
+    than a table cell would be, is prose), and the region ends at the first
+    vertical gap wider than the table's line spacing.
+
+    Args:
+        page (ParsedPage): The page the caption sits on.
+        caption (BBox): Bounding box of the caption line.
+
+    Returns:
+        BBox | None: The table's area, or ``None`` when nothing follows the caption.
+    """
+    cells = [c for c in page.cells if c.text.strip()]
+    if not cells:
+        return None
+    max_gap = _MAX_ROW_GAP_HEIGHTS * _median_height(cells)
+    rows = [row for row in group_rows(cells) if max(c.bbox.y1 for c in row) <= caption.y0 + 1]
+
+    members: list[TextLine] = []
+    previous_bottom: float | None = None
+    for row in rows:
+        looks_like_prose = (
+            len(row) < _MIN_ROW_CELLS
+            or any(len(c.text.strip()) > _MAX_CELL_CHARS for c in row)
+            # A caption's wrapped line starts at the caption's own left edge and
+            # carries a sentence's worth of text — even when inline maths chops
+            # it into short runs, which is what makes the cell-length test miss it.
+            or (
+                abs(row[0].bbox.x0 - caption.x0) <= _CAPTION_INDENT_TOLERANCE
+                and sum(len(c.text.strip()) for c in row) > _CAPTION_LINE_MIN_CHARS
+            )
+        )
+        if not members:
+            # Still inside the caption's own paragraph.
+            if looks_like_prose:
+                continue
+        else:
+            top = max(c.bbox.y1 for c in row)
+            if previous_bottom is not None and previous_bottom - top > max_gap:
+                break
+        members.extend(row)
+        previous_bottom = min(c.bbox.y0 for c in row)
+
+    if not members:
+        return None
+    return BBox(
+        x0=min(c.bbox.x0 for c in members),
+        y0=min(c.bbox.y0 for c in members),
+        x1=max(c.bbox.x1 for c in members),
+        y1=max(c.bbox.y1 for c in members),
+    )
 
 
 def _has_label_column(cells: list[TextLine], bands: list[tuple[float, float]]) -> bool:

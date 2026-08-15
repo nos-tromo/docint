@@ -13,6 +13,7 @@ from pdf_fixtures import (
     PageSpec,
     TextRun,
     build_pdf,
+    irregular_table_page,
     report_pages,
     table_page,
     two_column_page,
@@ -919,6 +920,32 @@ class TestLayoutAnalysis:
         assert "Self-Attention" in first_column
         assert "Convolutional" in first_column
         assert "O(1)" in table.text
+
+    def test_irregular_captioned_table_still_reads_row_by_row(self, tmp_path: Path) -> None:
+        """A table geometry cannot validate is still a table: its rows stay rows."""
+        blocks = self._analyze(tmp_path, irregular_table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.text.startswith("Table 2: Scores and cost on both corpora")
+        alpha = next(line for line in table.text.splitlines() if line.startswith("Alpha"))
+        assert "23.8" in alpha and "39.2" in alpha
+        beta = next(line for line in table.text.splitlines() if line.startswith("Beta"))
+        assert "24.6" in beta and "41.0" in beta
+        # The caption's own wrapped line is not a table row, and the paragraph
+        # below the table is not part of it.
+        assert "Values are averages" not in table.text
+        assert "ordinary body text" not in table.text
+
+    def test_irregular_table_reports_no_cell_grid(self, tmp_path: Path) -> None:
+        """When the structure was not recovered, no grid is claimed (so no CSV)."""
+        blocks = self._analyze(tmp_path, irregular_table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.cells is None or all(len(row) >= 2 for row in table.cells)
+
+    def test_prose_below_an_irregular_table_stays_text(self, tmp_path: Path) -> None:
+        """The paragraph under the table is still emitted as body text."""
+        blocks = self._analyze(tmp_path, irregular_table_page())
+        body = " ".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "ordinary body text" in body
 
     def test_caption_less_table_is_still_a_table_block(self, tmp_path: Path) -> None:
         """A bare grid with no 'Table N:' caption is detected geometrically."""

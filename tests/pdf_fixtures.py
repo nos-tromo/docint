@@ -253,3 +253,86 @@ def wrapped_header_table_page(*, caption: str | None = "Table 1: Complexity by l
             runs.append(TextRun(text, x=x, y=y))
             del col
     return PageSpec(runs=runs)
+
+
+def irregular_table_page() -> PageSpec:
+    """A captioned table whose structure cannot be recovered as a clean grid.
+
+    Mirrors the academic tables that defeat geometric validation: the caption
+    wraps onto a second line of prose, the header has two levels (a group
+    heading spanning two sub-columns), one data cell is split into several runs
+    the way mathematical notation is, and one row has a missing cell. The rows
+    are still rows, so the text must come out row by row.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs = [
+        TextRun("Table 2: Scores and cost on both corpora", x=60, y=700),
+        TextRun("Values are averages over three runs; lower cost is better.", x=60, y=688),
+        # Two-level header: a group heading over two sub-columns.
+        TextRun("Score", x=250, y=660),
+        TextRun("Cost", x=420, y=660),
+        TextRun("Model", x=60, y=646),
+        TextRun("EN-DE", x=230, y=646),
+        TextRun("EN-FR", x=310, y=646),
+        TextRun("EN-DE", x=400, y=646),
+        TextRun("EN-FR", x=470, y=646),
+        # Data rows: one with a math-style split cell, one missing a value.
+        TextRun("Alpha", x=60, y=628),
+        TextRun("23.8", x=230, y=628),
+        TextRun("39.2", x=310, y=628),
+        TextRun("2", x=400, y=628),
+        TextRun(". 3", x=410, y=630),
+        TextRun("10", x=424, y=628),
+        TextRun("19", x=438, y=632),
+        TextRun("1.4", x=470, y=628),
+        TextRun("Beta", x=60, y=614),
+        TextRun("24.6", x=230, y=614),
+        TextRun("41.0", x=310, y=614),
+        TextRun("9.6", x=470, y=614),
+        TextRun("Gamma", x=60, y=600),
+        TextRun("26.4", x=230, y=600),
+        TextRun("41.8", x=310, y=600),
+        TextRun("3.3", x=400, y=600),
+        TextRun("9.8", x=470, y=600),
+        # Prose well below the table.
+        TextRun("The following paragraph is ordinary body text, far below the table.", x=60, y=520),
+    ]
+    return PageSpec(runs=runs)
+
+
+def math_caption_table_page() -> PageSpec:
+    """A captioned table whose caption wraps into a line broken up by inline maths.
+
+    Mirrors the academic pattern where the caption's second line reads
+    "for different layer types. n is the sequence length, d is ..." — the
+    italic symbols split it into many short runs, so it does not look like
+    prose cell by cell, yet it is prose and must not join the table.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs = [
+        TextRun("Table 1: Maximum path lengths and per-layer complexity", x=60, y=700),
+        # Caption continuation, chopped up by inline maths symbols.
+        TextRun("for different layer types.", x=60, y=688),
+        TextRun("n", x=210, y=688),
+        TextRun("is the sequence length and", x=230, y=688),
+        TextRun("d", x=385, y=688),
+        TextRun("the dimension.", x=405, y=688),
+        # The table itself.
+        TextRun("Layer Type", x=80, y=660),
+        TextRun("Complexity", x=250, y=660),
+        TextRun("Path Length", x=400, y=660),
+        TextRun("Self-Attention", x=80, y=646),
+        TextRun("O(n2 d)", x=250, y=646),
+        TextRun("O(1)", x=400, y=646),
+        TextRun("Recurrent", x=80, y=632),
+        TextRun("O(n d2)", x=250, y=632),
+        TextRun("O(n)", x=400, y=632),
+        TextRun("Convolutional", x=80, y=618),
+        TextRun("O(k n d2)", x=250, y=618),
+        TextRun("O(1)", x=400, y=618),
+    ]
+    return PageSpec(runs=runs)

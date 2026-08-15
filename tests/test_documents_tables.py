@@ -8,15 +8,18 @@ from pdf_fixtures import (
     PageSpec,
     TextRun,
     build_pdf,
+    irregular_table_page,
+    math_caption_table_page,
     table_page,
     two_column_page,
     wrapped_header_table_page,
 )
 
 from docint.core.readers.documents.models import BBox
-from docint.core.readers.documents.parse import ParsedPdf, TextLine
+from docint.core.readers.documents.parse import ParsedPage, ParsedPdf, TextLine
 from docint.core.readers.documents.tables import (
     build_grid,
+    caption_extent,
     detect_geometric_tables,
     grid_to_text,
 )
@@ -162,3 +165,71 @@ class TestGeometricDetection:
         pdf.write_bytes(build_pdf([PageSpec(runs=runs)]))
         with ParsedPdf(pdf) as parsed:
             assert detect_geometric_tables(parsed.page(0)) == []
+
+
+class TestCaptionExtent:
+    """A caption is proof of a table; geometry only says where it ends."""
+
+    @staticmethod
+    def _caption_bbox(page: ParsedPage) -> BBox:
+        """Bbox of the page's ``Table N:`` caption line."""
+        line = next(ln for ln in page.lines if ln.text.strip().lower().startswith("table "))
+        return line.bbox
+
+    def test_extent_covers_the_rows_below_the_caption(self, tmp_path: Path) -> None:
+        """The region spans the table's rows and stops before the prose below."""
+        pdf = tmp_path / "irregular.pdf"
+        pdf.write_bytes(build_pdf([irregular_table_page()]))
+        with ParsedPdf(pdf) as parsed:
+            page = parsed.page(0)
+            region = caption_extent(page, self._caption_bbox(page))
+        assert region is not None
+        # Header row at y=660 down to the last data row at y=600.
+        assert region.y1 > 655 and region.y0 < 605
+        assert region.y0 > 560  # the paragraph at y=520 is not part of it
+
+    def test_caption_prose_is_not_part_of_the_table(self, tmp_path: Path) -> None:
+        """The caption's own wrapped line is skipped, not read as a table row."""
+        pdf = tmp_path / "irregular.pdf"
+        pdf.write_bytes(build_pdf([irregular_table_page()]))
+        with ParsedPdf(pdf) as parsed:
+            page = parsed.page(0)
+            region = caption_extent(page, self._caption_bbox(page))
+        assert region is not None
+        text = grid_to_text(build_grid(page.cells, region))
+        assert "Values are averages" not in text
+
+    def test_rows_read_row_by_row(self, tmp_path: Path) -> None:
+        """Even without a clean grid, each data row's cells stay on one line."""
+        pdf = tmp_path / "irregular.pdf"
+        pdf.write_bytes(build_pdf([irregular_table_page()]))
+        with ParsedPdf(pdf) as parsed:
+            page = parsed.page(0)
+            region = caption_extent(page, self._caption_bbox(page))
+        assert region is not None
+        text = grid_to_text(build_grid(page.cells, region))
+        alpha = next(line for line in text.splitlines() if line.startswith("Alpha"))
+        assert "23.8" in alpha and "39.2" in alpha
+        beta = next(line for line in text.splitlines() if line.startswith("Beta"))
+        assert "24.6" in beta and "41.0" in beta
+
+    def test_no_rows_below_the_caption(self, tmp_path: Path) -> None:
+        """A caption with nothing under it has no extent."""
+        pdf = tmp_path / "lonely.pdf"
+        pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("Table 9: A caption alone", x=60, y=100)])]))
+        with ParsedPdf(pdf) as parsed:
+            page = parsed.page(0)
+            assert caption_extent(page, self._caption_bbox(page)) is None
+
+    def test_caption_line_split_by_maths_is_still_prose(self, tmp_path: Path) -> None:
+        """A wrapped caption chopped into short runs by inline maths is not a table row."""
+        pdf = tmp_path / "mathcaption.pdf"
+        pdf.write_bytes(build_pdf([math_caption_table_page()]))
+        with ParsedPdf(pdf) as parsed:
+            page = parsed.page(0)
+            region = caption_extent(page, self._caption_bbox(page))
+        assert region is not None
+        grid = build_grid(page.cells, region)
+        assert grid[0] == ["Layer Type", "Complexity", "Path Length"]
+        assert len(grid) == 4
+        assert "sequence length" not in grid_to_text(grid)

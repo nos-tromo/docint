@@ -19,7 +19,12 @@ from docint.core.readers.documents.parse import (
     lines_to_text,
     order_lines,
 )
-from docint.core.readers.documents.tables import build_grid, detect_geometric_tables, grid_to_text
+from docint.core.readers.documents.tables import (
+    build_grid,
+    caption_extent,
+    detect_geometric_tables,
+    grid_to_text,
+)
 
 
 class LayoutAnalyzer(ABC):
@@ -317,6 +322,7 @@ def _build_text_blocks(
     # where the table ends is only the fallback for grids too irregular to
     # detect). Regions overlapping an already-claimed caption table are skipped.
     next_table_no = (max(table_lines.values()) + 1) if table_lines else 0
+    geometry_anchored: set[int] = set()
     claimed = [
         _union_bbox([ordered[i] for i in table_lines if table_lines[i] == n]) for n in sorted(set(table_lines.values()))
     ]
@@ -347,6 +353,41 @@ def _build_text_blocks(
             table_lines[caption_index] = table_no
         for i in member_indices:
             table_lines[i] = table_no
+        geometry_anchored.add(table_no)
+
+    # A caption with no detected grid under it is still a table — geometry just
+    # could not validate its structure (multi-level headers, spanning cells,
+    # maths split across runs). Take the extent from the rows below the caption
+    # so at least the rows come out as rows; the text heuristic's guess is the
+    # last resort, for a caption with nothing detectable beneath it at all.
+    for caption_index, caption_line in enumerate(ordered):
+        if not _CAPTION_RE.match(caption_line.text.strip()):
+            continue
+        table_no = table_lines.get(caption_index)
+        if table_no is not None and table_no in geometry_anchored:
+            continue  # a detected grid already defines this table's extent
+        region = caption_extent(page, caption_line.bbox)
+        if region is None:
+            continue
+        if table_no is None:
+            table_no = next_table_no
+            next_table_no += 1
+        else:
+            # Drop what the text heuristic guessed; the geometry below the
+            # caption is the better answer.
+            for i in [i for i, n in table_lines.items() if n == table_no and i != caption_index]:
+                del table_lines[i]
+        table_lines[caption_index] = table_no
+        for i, ln in enumerate(ordered):
+            if i in furniture_at or i in table_lines:
+                continue
+            if (
+                region.x0 - 1 <= ln.bbox.x0
+                and ln.bbox.x1 <= region.x1 + 1
+                and region.y0 - 1 <= ln.bbox.y0
+                and ln.bbox.y1 <= region.y1 + 1
+            ):
+                table_lines[i] = table_no
 
     headings = _classify_headings(ordered, set(table_lines) | set(furniture_at))
 
@@ -471,6 +512,11 @@ def _table_block(page: ParsedPage, page_index: int, members: list[TextLine]) -> 
     grid: list[list[str]] = build_grid(page.cells, _union_bbox(body_lines)) if body_lines else []
     body_text = grid_to_text(grid) if grid else "\n".join(m.text for m in body_lines)
     text = f"{caption}\n{body_text}".strip() if caption else body_text
+    # A single-column or single-row "grid" is not a recovered structure, only
+    # the rows rendered in order. Keep that text — it is what retrieval needs —
+    # but claim no cell grid, so no one-column CSV is written.
+    if len(grid) < 2 or max((len(row) for row in grid), default=0) < 2:
+        grid = []
     return LayoutBlock(
         block_id=f"table-{page_index}-{uuid.uuid4().hex[:8]}",
         page_index=page_index,
