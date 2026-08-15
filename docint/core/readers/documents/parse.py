@@ -36,6 +36,9 @@ _ROTATION_TOLERANCE = 0.05
 # (a section number and its title, a word broken into two runs); farther
 # apart they are separate lines (table cells, columns).
 _MERGE_GAP_FONT_SIZES = 1.5
+# Hyphen characters that can end a wrapped word: ASCII, U+2010 HYPHEN,
+# U+00AD SOFT HYPHEN. Dashes (en/em) are punctuation and never join lines.
+_SOFT_HYPHENS = ("-", "\u2010", "\u00ad")
 
 
 @dataclass(frozen=True)
@@ -350,11 +353,43 @@ def order_lines(lines: list[TextLine]) -> list[TextLine]:
     return _xy_cut(list(lines), min_gap)
 
 
+def dehyphenate_join(previous: str, following: str) -> str | None:
+    """Return the joined word when a line break splits one word, else ``None``.
+
+    A wrapped word ends its line with a hyphen straight after a letter and
+    continues on the next line with a lowercase letter (``Bundes-`` /
+    ``regierung``). An uppercase or digit continuation is a real compound or a
+    range (``Ost-`` / ``West``, ``1990-`` / ``1995``) and keeps its hyphen, as
+    does a dash used as punctuation (en/em dash) or a line that is only a hyphen.
+
+    Args:
+        previous (str): Text of the line ending in a hyphen.
+        following (str): Text of the next line.
+
+    Returns:
+        str | None: The two lines joined without the hyphen, or ``None`` when
+            they must stay separate.
+    """
+    left = previous.rstrip()
+    right = following.lstrip()
+    if not left or not right or left[-1] not in _SOFT_HYPHENS:
+        return None
+    stem = left[:-1]
+    if not stem or not stem[-1].isalpha():
+        return None
+    if not right[0].isalpha() or not right[0].islower():
+        return None
+    return f"{stem}{right}"
+
+
 def lines_to_text(lines: list[TextLine]) -> str:
     """Join already-ordered lines into page text.
 
     Consecutive lines are separated by a newline; a vertical gap larger than
-    1.5 x the median line height inserts a blank line (paragraph break).
+    1.5 x the median line height inserts a blank line (paragraph break). A word
+    split across two consecutive lines by a hyphen is rejoined
+    (see :func:`dehyphenate_join`), so the embedded and indexed token is the
+    real word rather than its two halves.
 
     Args:
         lines (list[TextLine]): Lines in reading order.
@@ -370,7 +405,15 @@ def lines_to_text(lines: list[TextLine]) -> str:
     for ln in lines:
         if prev is not None:
             gap = prev.bbox.y0 - ln.bbox.y1
-            parts.append("\n\n" if gap > para_gap else "\n")
+            if gap > para_gap:
+                parts.append("\n\n")
+            else:
+                joined = dehyphenate_join(parts[-1], ln.text)
+                if joined is not None:
+                    parts[-1] = joined
+                    prev = ln
+                    continue
+                parts.append("\n")
         parts.append(ln.text)
         prev = ln
     return "".join(parts)

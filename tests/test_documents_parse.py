@@ -190,6 +190,56 @@ class TestLinesToText:
         assert lines_to_text(lines) == "A\n\nB"
 
 
+class TestDehyphenation:
+    """Soft hyphens at a line break are joined back into one word."""
+
+    def test_german_compound_is_joined(self) -> None:
+        """``Bundes-`` + ``regierung`` becomes one word, no hyphen, no newline."""
+        lines = [_line("Die Bundes-", 60, 700, 300, 710), _line("regierung entschied.", 60, 686, 300, 696)]
+        assert lines_to_text(lines) == "Die Bundesregierung entschied."
+
+    def test_english_word_is_joined(self) -> None:
+        """A hyphen splitting an ordinary English word is removed."""
+        lines = [_line("inter-", 60, 700, 300, 710), _line("national trade", 60, 686, 300, 696)]
+        assert lines_to_text(lines) == "international trade"
+
+    def test_uppercase_continuation_keeps_the_hyphen(self) -> None:
+        """``Ost-`` + ``West`` is a real compound, not a wrap: hyphen and break stay."""
+        lines = [_line("Ost-", 60, 700, 300, 710), _line("West-Konflikt", 60, 686, 300, 696)]
+        assert lines_to_text(lines) == "Ost-\nWest-Konflikt"
+
+    def test_digit_continuation_keeps_the_hyphen(self) -> None:
+        """A range like ``1990-`` / ``1995`` is not a wrapped word."""
+        lines = [_line("Zeitraum 1990-", 60, 700, 300, 710), _line("1995 insgesamt", 60, 686, 300, 696)]
+        assert lines_to_text(lines) == "Zeitraum 1990-\n1995 insgesamt"
+
+    def test_en_dash_is_not_a_soft_hyphen(self) -> None:
+        """An en dash ends a clause; it never joins two lines."""
+        lines = [_line("der Vertrag –", 60, 700, 300, 710), _line("so hiess es", 60, 686, 300, 696)]
+        assert lines_to_text(lines) == "der Vertrag –\nso hiess es"
+
+    def test_paragraph_break_never_joins(self) -> None:
+        """A hyphen before a paragraph gap keeps the blank line (and the hyphen)."""
+        lines = [_line("Kapitel-", 60, 700, 300, 710), _line("uebersicht folgt", 60, 620, 300, 630)]
+        assert lines_to_text(lines) == "Kapitel-\n\nuebersicht folgt"
+
+    def test_unicode_hyphen_variants_are_joined(self) -> None:
+        """U+2010 HYPHEN and U+00AD SOFT HYPHEN behave like ASCII ``-``."""
+        assert (
+            lines_to_text([_line("Fach\u2010", 60, 700, 300, 710), _line("bereich", 60, 686, 300, 696)])
+            == "Fachbereich"
+        )
+        assert (
+            lines_to_text([_line("Fach\u00ad", 60, 700, 300, 710), _line("bereich", 60, 686, 300, 696)])
+            == "Fachbereich"
+        )
+
+    def test_lone_hyphen_line_is_left_alone(self) -> None:
+        """A line that is only a hyphen has no word to join."""
+        lines = [_line("-", 60, 700, 300, 710), _line("bullet item", 60, 686, 300, 696)]
+        assert lines_to_text(lines) == "-\nbullet item"
+
+
 class TestRealTwoColumnPage:
     """End-to-end: a real two-column PDF reads column by column."""
 
