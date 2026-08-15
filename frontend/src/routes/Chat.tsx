@@ -348,7 +348,7 @@ export function Chat() {
     // panel reflows the transcript smoothly instead of making it pop.
     <div
       className="p-8 grid gap-6 h-full transition-[grid-template-columns] duration-300 ease-out"
-      style={{ gridTemplateColumns: sidePanelOpen ? '1fr 22rem' : '1fr 2.75rem' }}
+      style={{ gridTemplateColumns: sidePanelOpen ? '1fr 22rem' : '1fr 2rem' }}
     >
       {/* min-h-0 on the section (grid item) and the messages list (flex
           item) lets them shrink below their content, so the list scrolls
@@ -417,7 +417,7 @@ export function Chat() {
             e.preventDefault()
             void send()
           }}
-          className="mt-4 flex items-end gap-2"
+          className="mt-4 flex items-end gap-2 pr-2"
         >
           <textarea
             value={draft}
@@ -457,33 +457,39 @@ export function Chat() {
 
           It does carry one bit of state, because that bit has consequences
           while hidden: a live scope tints the control, since a chat answering
-          from hand-picked chunks behind a shut panel is a trap. Padding stays
-          put in both states so the tint appears without nudging anything. */}
-      <aside className="flex h-full min-h-0 gap-2 overflow-hidden">
-        <div className="flex shrink-0 flex-col items-center gap-2">
-          <button
-            type="button"
-            onClick={toggleSidePanel}
-            aria-expanded={sidePanelOpen}
-            aria-controls="chat-side-panel"
-            aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
-            // 32px square, like every control in the chat header: both columns
-            // start on the same line, so matching the size is what puts this
-            // button on that line rather than 4px above it.
-            className={cn(
-              'flex h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
-              scopedChunkIds.length > 0
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
-            )}
-            data-scoped={scopedChunkIds.length > 0 || undefined}
-          >
-            <RailChevron open={sidePanelOpen} />
-          </button>
-        </div>
+          from hand-picked chunks behind a shut panel is a trap.
+
+          The rail sits *inside* this column rather than in the gap beside it.
+          It used to be a third column, so the space between the chat and the
+          search panel measured 24px + a 32px button + 8px = 64, against 32px
+          from the sidebar's seam to the chat text — the same page with two
+          different gutters, because a nearly invisible control was standing in
+          whitespace. Here the gap is only the grid's own `gap-6`, which with
+          the columns' `pr-2` comes to the 32px the left side already had. */}
+      <aside className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
+        <button
+          type="button"
+          onClick={toggleSidePanel}
+          aria-expanded={sidePanelOpen}
+          aria-controls="chat-side-panel"
+          aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
+          // 32px square, like every control in the chat header: both columns
+          // start on the same line, so matching the size is what puts this
+          // button on that line rather than 4px above it. `self-start` keeps
+          // it that size now that it is a flex *column* item.
+          className={cn(
+            'flex h-8 w-8 shrink-0 items-center justify-center self-start rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
+            scopedChunkIds.length > 0
+              ? 'bg-primary/15 text-primary'
+              : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
+          )}
+          data-scoped={scopedChunkIds.length > 0 || undefined}
+        >
+          <RailChevron open={sidePanelOpen} />
+        </button>
         {/* Kept mounted while collapsed so a running search stays warm and
             the typed query survives a collapse. */}
-        <div id="chat-side-panel" hidden={!sidePanelOpen} className="h-full min-h-0 min-w-0 flex-1">
+        <div id="chat-side-panel" hidden={!sidePanelOpen} className="min-h-0 min-w-0 flex-1">
           <SearchPanel sessionId={currentSessionId} />
         </div>
       </aside>
