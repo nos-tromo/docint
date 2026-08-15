@@ -1,5 +1,5 @@
-import { apiPost } from './client'
-import type { SummarizeResult } from './types'
+import { apiGetOrNull, apiPost } from './client'
+import type { SummarizeResult, SummaryResponse } from './types'
 
 /**
  * Build a query string for the summary endpoint. `refresh` bypasses the
@@ -31,3 +31,17 @@ function summaryQuery(refresh?: boolean, collection?: string): string {
  */
 export const summarize = (refresh?: boolean, collection?: string) =>
   apiPost<SummarizeResult>('/summarize' + summaryQuery(refresh, collection))
+
+/**
+ * Read the collection's cached summary without ever queueing a build.
+ *
+ * `null` means the server has nothing stored (204), so the caller renders its
+ * "create" state rather than starting work nobody asked for.
+ *
+ * Deliberately *not* `summarize(false, collection)`: that POST answers a cache
+ * miss by queueing a background build — minutes of map-reduce over the whole
+ * collection — which is exactly what a panel that fires on mount must not do.
+ * The GET has no queue branch at all, so it cannot.
+ */
+export const cachedSummary = (collection?: string) =>
+  apiGetOrNull<SummaryResponse>('/summarize' + summaryQuery(false, collection))

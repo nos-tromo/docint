@@ -53,15 +53,34 @@ export function withOwner(pathAndQuery: string): string {
   return `${pathAndQuery}${sep}owner=${encodeURIComponent(ownerParam)}`
 }
 
-export async function apiGet<T>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
-  const qs = params
-    ? '?' +
-      Object.entries(params)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-        .join('&')
-    : ''
-  return handle<T>(await fetch(url(withOwner(path + qs))))
+type QueryParams = Record<string, string | number | boolean | undefined>
+
+function queryString(params?: QueryParams): string {
+  if (!params) return ''
+  const qs = Object.entries(params)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&')
+  return qs ? `?${qs}` : ''
+}
+
+export async function apiGet<T>(path: string, params?: QueryParams): Promise<T> {
+  return handle<T>(await fetch(url(withOwner(path + queryString(params)))))
+}
+
+/**
+ * GET for an endpoint that answers 204 when the thing asked for simply does
+ * not exist yet — distinct from 404, which stays an `ApiError`.
+ *
+ * `handle<T>` is deliberately left alone: teaching it about 204 would widen
+ * every existing caller's return type to `T | null` for the sake of the one
+ * endpoint that needs it (`GET /summarize`, where 204 means "nothing cached",
+ * not "no such collection").
+ */
+export async function apiGetOrNull<T>(path: string, params?: QueryParams): Promise<T | null> {
+  const res = await fetch(url(withOwner(path + queryString(params))))
+  if (res.status === 204) return null
+  return handle<T>(res)
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {

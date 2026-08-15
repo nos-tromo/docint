@@ -1,18 +1,18 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { SummaryPanel } from './SummaryPanel'
 import { useUiStore } from '@/stores/ui'
-import { summarize } from '@/api/analysis'
+import { cachedSummary, summarize } from '@/api/analysis'
 import { streamSseGet } from '@/api/sse'
 import { ApiError } from '@/api/client'
-import type { SummarizeResult } from '@/api/types'
 import type { SseEvent } from '@/api/sse'
 
-vi.mock('@/api/analysis', () => ({ summarize: vi.fn() }))
+vi.mock('@/api/analysis', () => ({ summarize: vi.fn(), cachedSummary: vi.fn() }))
 vi.mock('@/api/sse', () => ({ streamSseGet: vi.fn() }))
 
 const mockSummarize = summarize as unknown as ReturnType<typeof vi.fn>
+const mockCachedSummary = cachedSummary as unknown as ReturnType<typeof vi.fn>
 const mockStreamSseGet = streamSseGet as unknown as ReturnType<typeof vi.fn>
 
 /**
@@ -71,24 +71,104 @@ beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'c1' })
   mockSummarize.mockReset()
   mockStreamSseGet.mockReset()
+  // Nothing cached by default, so the panel settles into its create state and
+  // the build-path tests below still start from a Generate click.
+  mockCachedSummary.mockReset()
+  mockCachedSummary.mockResolvedValue(null)
 })
 
 describe('SummaryPanel cache hit', () => {
-  it('renders a cached summary immediately on 200', async () => {
-    const cached: SummarizeResult = {
+  it('renders the cached summary on mount, with no click and no build', async () => {
+    mockCachedSummary.mockResolvedValue({
       summary: 'A summary.',
       sources: [{ id: 's1', filename: 'handbook.pdf', page: 3, text: 'chunk', citation_index: 1 }]
-    }
-    mockSummarize.mockResolvedValue(cached)
+    })
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+
+    expect(await screen.findByText('A summary.')).toBeInTheDocument()
+    expect(screen.getByTestId('source-pill')).toHaveTextContent('handbook.pdf · page 3')
+    // The whole reason the probe is a GET: opening the tab must never queue a
+    // build, which is what `summarize` does on a cache miss.
+    expect(mockSummarize).not.toHaveBeenCalled()
+    expect(mockStreamSseGet).not.toHaveBeenCalled()
+    // And what is offered is the rebuild, not the create.
+    expect(screen.getByRole('button', { name: /refresh/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /generate/i })).not.toBeInTheDocument()
+  })
+
+  it('offers the create action when nothing is cached', async () => {
+    render(<SummaryPanel />)
+
+    expect(await screen.findByRole('button', { name: /generate/i })).toBeInTheDocument()
+    expect(mockSummarize).not.toHaveBeenCalled()
+  })
+
+  it('offers the create action when the probe itself fails', async () => {
+    // A transport blip on the read must not lock the panel out of building.
+    mockCachedSummary.mockRejectedValue(new Error('network'))
+
+    render(<SummaryPanel />)
+
+    expect(await screen.findByRole('button', { name: /generate/i })).toBeInTheDocument()
+  })
+
+  it('keeps the old summary on screen while a refresh rebuilds it', async () => {
+    mockCachedSummary.mockResolvedValue({ summary: 'Old summary.', sources: [] })
+    mockSummarize
+      .mockResolvedValueOnce({ job_id: 'j1' })
+      .mockResolvedValueOnce({ summary: 'New summary.', sources: [] })
+    const frames = gatedFramesOf([
+      { event: 'summary_progress', data: { job_id: 'j1', mapped: 1, total_units: 2 } },
+      { event: 'summary_completed', data: { job_id: 'j1' } }
+    ])
+    mockStreamSseGet.mockReturnValue(frames.stream)
+
+    render(<SummaryPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /refresh/i }))
+    frames.release()
+
+    // A rebuild takes minutes. Blanking the panel for that whole time — which
+    // is what resetting the reducer on 'start' used to do — leaves the
+    // operator with nothing while they wait for something they already had.
+    await waitFor(() => {
+      expect(screen.getByText(/summarizing 1\/2 units/i)).toBeInTheDocument()
+    })
+    expect(screen.getByText('Old summary.')).toBeInTheDocument()
+
+    frames.release()
+    await waitFor(() => {
+      expect(screen.getByText('New summary.')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Old summary.')).not.toBeInTheDocument()
+  })
+
+  it('keeps the summary and shows the error when a refresh fails', async () => {
+    mockCachedSummary.mockResolvedValue({ summary: 'Old summary.', sources: [] })
+    mockSummarize.mockRejectedValue(new Error('boom'))
+
+    render(<SummaryPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /refresh/i }))
 
     await waitFor(() => {
-      expect(screen.getByText('A summary.')).toBeInTheDocument()
+      expect(screen.getByText('Old summary.')).toBeInTheDocument()
     })
-    expect(screen.getByTestId('source-pill')).toHaveTextContent('handbook.pdf · page 3')
-    expect(mockStreamSseGet).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /refresh/i })).toBeInTheDocument()
+  })
+
+  it('re-probes when the collection changes', async () => {
+    mockCachedSummary.mockResolvedValueOnce({ summary: 'Collection one.', sources: [] })
+    mockCachedSummary.mockResolvedValueOnce({ summary: 'Collection two.', sources: [] })
+
+    render(<SummaryPanel />)
+    expect(await screen.findByText('Collection one.')).toBeInTheDocument()
+
+    await act(async () => {
+      useUiStore.setState({ selectedCollection: 'c2' })
+    })
+
+    expect(await screen.findByText('Collection two.')).toBeInTheDocument()
+    expect(mockCachedSummary).toHaveBeenLastCalledWith('c2')
   })
 })
 
@@ -104,7 +184,7 @@ describe('SummaryPanel job-driven build', () => {
     mockStreamSseGet.mockReturnValue(frames.stream)
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     // Progress is asserted while completion is still gated behind `release`,
     // so the render under test cannot be superseded before it is observed.
@@ -137,7 +217,7 @@ describe('SummaryPanel job-driven build', () => {
     mockStreamSseGet.mockReturnValue(frames.stream)
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     // The foreign job's frames must not resolve the panel: progress for the
     // real job (j1) must still show before the summary lands. j1's completion
@@ -166,7 +246,7 @@ describe('SummaryPanel job-driven build', () => {
     )
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     await waitFor(() => {
       expect(screen.getByText('Adopted summary.')).toBeInTheDocument()
@@ -200,7 +280,7 @@ describe('SummaryPanel job-driven build', () => {
     )
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     await waitFor(() => {
       expect(screen.getByText('Partial summary.')).toBeInTheDocument()
@@ -226,7 +306,7 @@ describe('SummaryPanel job-driven build', () => {
       .mockReturnValueOnce(framesOf([{ event: 'summary_completed', data: { job_id: 'j2' } }]))
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     await waitFor(() => {
       expect(screen.getByText('Rebuilt summary.')).toBeInTheDocument()
@@ -250,7 +330,7 @@ describe('SummaryPanel job-driven build', () => {
       .mockReturnValueOnce(framesOf([{ event: 'summary_completed', data: { job_id: 'j2' } }]))
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     await waitFor(() => {
       expect(screen.getByText(/summary generation failed/i)).toBeInTheDocument()
@@ -267,7 +347,7 @@ describe('SummaryPanel job-driven build', () => {
     )
 
     render(<SummaryPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /generate/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /generate/i }))
 
     await waitFor(() => {
       expect(screen.getByText(/\(summary_failed\)/)).toBeInTheDocument()
