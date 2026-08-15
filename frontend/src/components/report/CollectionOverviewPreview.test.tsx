@@ -17,22 +17,28 @@ const overview: CollectionOverviewSnapshot = {
 }
 
 describe('CollectionOverviewPreview', () => {
-  it('keeps the manifest behind its heading until asked', () => {
+  it('arrives folded, with its totals on the bar and the manifest clipped', () => {
     render(<CollectionOverviewPreview overview={overview} />)
-    // The counts are the summary and stay put; the table is the detail. A
-    // sixteen-row manifest opening by default pushed the report's own findings
-    // off the screen.
-    expect(screen.getByText(/1 document ·/)).toBeInTheDocument()
-    expect(screen.queryByText('a.pdf')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /document overview/i })).toHaveAttribute(
-      'aria-expanded',
-      'false'
-    )
+    const bar = screen.getByRole('button', { name: /document overview/i })
+    // A sixteen-row manifest opening by default pushed the report's own
+    // findings off the screen, so it arrives shut — but not blank: the totals
+    // ride on the bar and the first rows peek out below it, clipped rather
+    // than unmounted, so a folded section still says what is in it.
+    expect(bar).toHaveAttribute('aria-expanded', 'false')
+    expect(bar).toHaveTextContent(/1 document ·/)
+    const panel = document.getElementById(bar.getAttribute('aria-controls') ?? '')
+    expect(panel).not.toBeNull()
+    expect(panel!.style.maxHeight).not.toBe('')
   })
 
   it('renders the strip and the manifest row with a truncated hash once opened', async () => {
     render(<CollectionOverviewPreview overview={overview} />)
-    await userEvent.click(screen.getByRole('button', { name: /document overview/i }))
+    const bar = screen.getByRole('button', { name: /document overview/i })
+    await userEvent.click(bar)
+    // Opened, the cap comes off entirely — the manifest scrolls in its own box
+    // rather than being held to a peek.
+    const panel = document.getElementById(bar.getAttribute('aria-controls') ?? '')
+    expect(panel!.style.maxHeight).toBe('')
     expect(screen.getByText('a.pdf')).toBeInTheDocument()
     expect(screen.getByText('0123456789ab')).toBeInTheDocument()
     expect(screen.queryByText('0123456789abcdef')).not.toBeInTheDocument()

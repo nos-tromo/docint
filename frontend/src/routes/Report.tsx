@@ -12,6 +12,7 @@ import {
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
+import { ReportSection } from '@/components/report/ReportSection'
 import {
   useCreateReport,
   useDeleteReport,
@@ -402,10 +403,7 @@ export function Report() {
                   const sectionItems = items.filter((i) => i.artifact_type === type)
                   if (sectionItems.length === 0) return null
                   return (
-                    <div key={type} className="space-y-2">
-                      <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-                        {label} ({sectionItems.length})
-                      </h2>
+                    <ReportSection key={type} title={label} count={`(${sectionItems.length})`}>
                       {sectionItems.map((item, si) => (
                         <div key={item.id} className="rounded-md border border-border bg-muted p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">
@@ -456,7 +454,7 @@ export function Report() {
                           />
                         </div>
                       ))}
-                    </div>
+                    </ReportSection>
                   )
                 })}
                 {overviewToShow && <CollectionOverviewPreview overview={overviewToShow} />}
