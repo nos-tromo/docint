@@ -1,4 +1,5 @@
 import type { CollectionOverviewSnapshot } from '@/api/types'
+import { ReportSection } from '@/components/report/ReportSection'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 
@@ -33,17 +34,26 @@ function count(
  */
 export function CollectionOverviewPreview({ overview }: { overview: CollectionOverviewSnapshot }) {
   const t = useT()
+  // One string rather than a row of spans: it is the bar's trailing text, and
+  // the separators are what the count-strip test reads out of textContent.
+  const countStrip = [
+    count(overview.document_count, 'document', t),
+    count(overview.node_count, 'node', t),
+    count(overview.file_types.length, 'filetype', t),
+    count(overview.entity_types.length, 'entitytype', t)
+  ].join(' · ')
   return (
-    <div className="space-y-2">
-      <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-        {t('report.document_overview')}
-      </h2>
-      <div className="text-xs text-muted-foreground">
-        {count(overview.document_count, 'document', t)} · {count(overview.node_count, 'node', t)} ·{' '}
-        {count(overview.file_types.length, 'filetype', t)} ·{' '}
-        {count(overview.entity_types.length, 'entitytype', t)}
-      </div>
-      <div className="overflow-auto rounded-md border border-border">
+    // The manifest is the longest thing in a report and the least often read —
+    // sixteen documents pushed the report's own findings off the screen. Its
+    // totals ride on the bar, so a folded overview still says how much is
+    // behind it, and they keep the bar's accessible name distinct from the
+    // "Document overview" checkbox in the metadata row above.
+    <ReportSection
+      title={t('report.document_overview')}
+      count={countStrip}
+      defaultOpen={false}
+    >
+      <div className="max-h-[60vh] overflow-auto rounded-md border border-border">
         <table className="w-full text-xs">
           <thead className="text-muted-foreground">
             <tr>
@@ -65,6 +75,6 @@ export function CollectionOverviewPreview({ overview }: { overview: CollectionOv
           </tbody>
         </table>
       </div>
-    </div>
+    </ReportSection>
   )
 }

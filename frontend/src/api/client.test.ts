@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { apiGet, apiPost, apiDelete, ApiError, apiBase } from './client'
+import { apiGet, apiGetOrNull, apiPost, apiDelete, ApiError, apiBase } from './client'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -53,5 +53,33 @@ describe('client', () => {
   it('throws ApiError on non-2xx', async () => {
     mockFetch({ detail: 'bad' }, { status: 400, ok: false })
     await expect(apiGet('/x')).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('apiGetOrNull', () => {
+  it('returns null on 204 without touching the empty body', async () => {
+    // A 204 carries no body at all, so `handle`'s unconditional res.json()
+    // would reject. That is the whole reason this entry point exists.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 204,
+        json: async () => {
+          throw new SyntaxError('Unexpected end of JSON input')
+        }
+      })
+    )
+    await expect(apiGetOrNull('/summarize')).resolves.toBeNull()
+  })
+
+  it('returns the parsed body on 200', async () => {
+    mockFetch({ summary: 'text' })
+    await expect(apiGetOrNull<{ summary: string }>('/summarize')).resolves.toEqual({ summary: 'text' })
+  })
+
+  it('still throws on 404 — absent is not the same as forbidden', async () => {
+    mockFetch({ detail: 'nope' }, { status: 404 })
+    await expect(apiGetOrNull('/summarize')).rejects.toBeInstanceOf(ApiError)
   })
 })

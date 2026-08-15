@@ -165,29 +165,32 @@ export function Analysis() {
       {tab === 'ner' && (
         <div className="space-y-3">
           {collection && (
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div
-                role="group"
-                aria-label={t('entities.view_group_aria')}
-                className="inline-flex overflow-hidden rounded-md border border-border text-sm"
-              >
-                {NER_VIEW_IDS.map((v) => (
-                  <button
-                    key={v}
-                    type="button"
-                    aria-pressed={nerView === v}
-                    onClick={() => setNerView(v)}
-                    className={cn(
-                      'px-3 py-1 transition-colors',
-                      nerView === v
-                        ? 'bg-muted text-foreground'
-                        : 'text-muted-foreground hover:text-foreground'
-                    )}
-                  >
-                    {nerViewLabel[v]}
-                  </button>
-                ))}
-              </div>
+            // Full width, halves: the two views are peers, and the pair now
+            // spans exactly the findings table below it — which is simply
+            // 100% of this column, so `w-full` lands flush by construction.
+            // The wrapper this used to sit in had one child and a
+            // `justify-between` left over from whatever once sat beside it.
+            <div
+              role="group"
+              aria-label={t('entities.view_group_aria')}
+              className="flex w-full overflow-hidden rounded-md border border-border text-sm"
+            >
+              {NER_VIEW_IDS.map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  aria-pressed={nerView === v}
+                  onClick={() => setNerView(v)}
+                  className={cn(
+                    'flex-1 px-3 py-1.5 text-center transition-colors',
+                    nerView === v
+                      ? 'bg-muted text-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {nerViewLabel[v]}
+                </button>
+              ))}
             </div>
           )}
           {!collection ? (

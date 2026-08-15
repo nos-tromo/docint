@@ -1,4 +1,5 @@
 import { useRef, useState, type DragEvent } from 'react'
+import { Button } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -119,16 +120,21 @@ export function Dropzone({
       )}
     >
       <p>{t('upload.drop_hint')}</p>
-      <button
-        type="button"
-        className="mt-3 underline"
-        onClick={(e) => {
-          e.stopPropagation()
-          folderInputRef.current?.click()
-        }}
-      >
-        {t('upload.choose_folder')}
-      </button>
+      {/* A real button, not underlined text: it opens a picker like every
+          other control on this screen, and an underline in the middle of a
+          drop target reads as a link to somewhere. */}
+      <div className="mt-3">
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={(e) => {
+            e.stopPropagation()
+            folderInputRef.current?.click()
+          }}
+        >
+          {t('upload.choose_folder')}
+        </Button>
+      </div>
       <input
         ref={inputRef}
         type="file"

@@ -1,3 +1,4 @@
+import { ExternalLinkIcon } from '@infra/ui'
 import type { MetadataPillItem } from '@/lib/referenceMetadata'
 
 /**
@@ -15,13 +16,18 @@ export function MetadataPills({ items }: { items: MetadataPillItem[] }) {
           className="inline-flex items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]"
         >
           {item.href ? (
+            // The leaving-arrow is drawn and driven by `href`, not appended to
+            // the pill's copy — a symbol living in a translation string is one
+            // a translator can drop, and `↗` renders as an emoji on some
+            // platforms.
             <a
               href={item.href}
               target="_blank"
               rel="noreferrer"
-              className="text-blue-400 hover:text-blue-300 break-all"
+              className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300 break-all"
             >
               {item.value}
+              <ExternalLinkIcon className="h-3 w-3 shrink-0" />
             </a>
           ) : (
             <>

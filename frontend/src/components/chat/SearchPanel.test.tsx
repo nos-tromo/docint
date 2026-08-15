@@ -643,7 +643,7 @@ describe('SearchPanel bulk selection', () => {
     })
   })
 
-  it('disables both controls when there is nothing loaded to select', async () => {
+  it('disables the bulk control when there is nothing loaded and nothing picked', async () => {
     mockApi({
       status: 'ok',
       hits: [],
@@ -655,8 +655,44 @@ describe('SearchPanel bulk selection', () => {
     renderPanel()
 
     await screen.findByTestId('search-no-matches')
+    // Nothing to select and nothing to let go of — the one state where the
+    // toggle has no direction to point in.
     expect(screen.getByRole('button', { name: /select all 0 loaded/i })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /clear selection/i })).toBeDisabled()
+  })
+
+  it('flips to clearing once every loaded hit is picked, and back again', async () => {
+    mockApi(twoHits)
+
+    renderPanel()
+
+    // Off: the control offers the selection.
+    const select = await screen.findByRole('button', { name: /select all 2 loaded/i })
+    expect(select).toHaveAttribute('aria-pressed', 'false')
+    await userEvent.click(select)
+
+    // On: the same control now offers to undo it. One button, two directions —
+    // the whole point of collapsing the pair.
+    const clear = await screen.findByRole('button', { name: /clear selection/i })
+    expect(clear).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(clear)
+
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({})
+    })
+    expect(await screen.findByRole('button', { name: /select all 2 loaded/i })).toBeInTheDocument()
+  })
+
+  it('still offers selecting when only some loaded hits are picked', async () => {
+    // Half-selected is not selected: the toggle must not read as "on" and
+    // strand the operator one click from losing what they picked.
+    useSearchUiStore.setState({
+      scopes: { [SESSION]: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
+    })
+    mockApi(twoHits)
+
+    renderPanel()
+
+    expect(await screen.findByRole('button', { name: /select all 2 loaded/i })).toBeInTheDocument()
   })
 })
 

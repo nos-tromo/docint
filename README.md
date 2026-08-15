@@ -354,16 +354,21 @@ the summary prompts or the `SUMMARY_MAP_WINDOW_TOKENS` /
 changes that fingerprint too, so cached summaries are invalidated once, the
 next time a summary is built.
 
-The endpoint itself is job-backed, mirroring ingestion: a cache hit answers
-`200` immediately; a cache miss, or an explicit `refresh=true`, queues a
+Reading and building are separate routes. `GET /summarize` only ever reads: it
+answers `200` with the stored summary or `204` when there is none, and queues
+nothing. `POST /summarize` is job-backed, mirroring ingestion: a cache hit
+answers `200` immediately; a cache miss, or an explicit `refresh=true`, queues a
 background build and answers `202 {job_id}`, with progress on the same
 owner-multiplexed `GET /ingest/jobs/events` stream ingestion uses
 (`summary_started` / `summary_progress` / `summary_completed`). A second call
-while a build is already running answers `409` with that build's `job_id`. A
-collection that has never been summarized — or whose last automatic build
-failed — has no degraded fallback: the first view builds one, live, in the
-background. `SUMMARY_ON_INGEST` (default `true`) also triggers a rebuild as
-the last stage of every ingest job.
+while a build is already running answers `409` with that build's `job_id`.
+
+The split exists because the SPA fires the read whenever the Summary tab opens.
+A build is minutes of map-reduce over the whole collection, so the tab shows
+what is already stored and offers a **Create** button when there is nothing —
+it never starts a build merely because someone looked. `SUMMARY_ON_INGEST`
+(default `true`) triggers a rebuild as the last stage of every ingest job, so a
+normally-ingested collection already has one to show.
 
 That post-ingest rebuild is fail-soft: if it raises (an LLM outage, for
 example), the ingest job does not fail — it surfaces a `warning` event

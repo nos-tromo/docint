@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button } from '@infra/ui'
-import { cn } from '@/lib/cn'
+import { IconButton, ReportCheckIcon, ReportIcon, WarningIcon } from '@infra/ui'
 import type { Report, ReportItemInput } from '@/api/types'
 import { reportKey, useAddReportItem, useCreateReport, useRemoveReportItem } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
@@ -64,25 +63,24 @@ export function AddToReportButton({ item, inReport, className }: Props) {
     }
   }
 
-  const label = pending
-    ? '…'
-    : failed
-      ? t('report.retry')
-      : inReport
-        ? t('report.in_report')
-        : t('report.add_button')
+  // Icon-only, like the translate and preview actions it sits beside: the
+  // accessible name carries the verb ("Add to report"), the drawing carries the
+  // state — a page for "not yet", the same page with a check for "in report",
+  // so the toggle reads without hovering for the tooltip. A failed round-trip
+  // swaps in the warning marker and tints danger; the label then says "Retry".
+  const label = failed ? t('report.retry') : inReport ? t('report.in_report') : t('report.add_title')
+  const hint = failed ? t('report.retry_title') : inReport ? t('report.remove_title') : undefined
+  const Icon = failed ? WarningIcon : inReport ? ReportCheckIcon : ReportIcon
   return (
-    <Button
-      type="button"
+    <IconButton
+      icon={<Icon />}
+      label={label}
+      hint={hint}
       variant={failed ? 'danger' : inReport ? 'secondary' : 'ghost'}
-      size="sm"
-      disabled={pending}
+      busy={pending}
       aria-pressed={inReport}
-      title={failed ? t('report.retry_title') : inReport ? t('report.remove_title') : t('report.add_title')}
       onClick={handleClick}
-      className={cn('shrink-0 whitespace-nowrap', className)}
-    >
-      {label}
-    </Button>
+      className={className}
+    />
   )
 }

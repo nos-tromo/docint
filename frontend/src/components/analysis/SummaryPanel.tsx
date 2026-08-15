@@ -1,9 +1,9 @@
 import { useEffect, useReducer, useRef } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Button, DownloadButton, useTheme } from '@infra/ui'
+import { Button, DownloadButton, RefreshButton, useTheme } from '@infra/ui'
 import { cn } from '@/lib/cn'
-import { summarize } from '@/api/analysis'
+import { cachedSummary, summarize } from '@/api/analysis'
 import { streamSseGet } from '@/api/sse'
 import { INGEST_JOB_EVENTS_PATH } from '@/api/jobs'
 import { ApiError } from '@/api/client'
@@ -19,9 +19,18 @@ import { summarySnapshot } from '@/lib/reportSnapshots'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { useT } from '@/i18n/LanguageContext'
 
+/**
+ * What the panel is showing, independent of whether work is in flight.
+ *
+ * `busy`/`building` say whether a build is running; `phase` says what the
+ * operator can see and therefore which control to offer. Keeping them apart is
+ * what lets a rebuild run *over* a summary that stays on screen.
+ */
+type Phase = 'probing' | 'empty' | 'ready' | 'failed'
+
 interface State {
+  phase: Phase
   text: string
-  done: boolean
   busy: boolean
   building: boolean
   jobId: string | null
@@ -31,6 +40,9 @@ interface State {
   error: string | null
 }
 type Action =
+  | { type: 'reset' }
+  | { type: 'probed'; meta: SummaryResponse | null }
+  | { type: 'probe_failed'; error: string }
   | { type: 'start' }
   | { type: 'building'; jobId: string }
   | { type: 'progress'; mapped: number | null; totalUnits: number | null }
@@ -38,8 +50,8 @@ type Action =
   | { type: 'fail'; error: string }
 
 const initialState: State = {
+  phase: 'probing',
   text: '',
-  done: false,
   busy: false,
   building: false,
   jobId: null,
@@ -51,23 +63,52 @@ const initialState: State = {
 
 function reducer(s: State, a: Action): State {
   switch (a.type) {
+    case 'reset':
+      return initialState
+    case 'probed':
+      // The probe is slower than a click. If the operator already pressed
+      // Create or Refresh, this answer is stale by definition and must not
+      // stomp the build it lost the race to.
+      if (s.busy || s.building) return s
+      return a.meta && a.meta.summary.trim()
+        ? { ...s, phase: 'ready', meta: a.meta, text: a.meta.summary, error: null }
+        : { ...s, phase: 'empty', meta: null, text: '', error: null }
+    case 'probe_failed':
+      // A probe that could not run is not a summary that failed to build: the
+      // create action stays offered, so a transport blip cannot lock the panel.
+      if (s.busy || s.building) return s
+      return { ...s, phase: 'empty', error: a.error }
     case 'start':
-      return { ...initialState, busy: true }
+      // Deliberately not `{ ...initialState, busy: true }`, which is what this
+      // was: that blanked a perfectly good summary the moment Refresh was
+      // pressed, leaving an empty panel for the minutes a rebuild takes. Keep
+      // what is on screen and reset only the run's own fields; the text is
+      // replaced in one step when the new one lands.
+      return { ...s, busy: true, error: null, building: false, jobId: null, mapped: null, totalUnits: null }
     case 'building':
       return { ...s, building: true, jobId: a.jobId, mapped: null, totalUnits: null }
     case 'progress':
       return { ...s, mapped: a.mapped, totalUnits: a.totalUnits }
-    case 'done':
+    case 'done': {
+      const text = a.meta.summary || s.text
       return {
         ...s,
         busy: false,
         building: false,
-        done: true,
+        error: null,
         meta: a.meta,
-        text: a.meta.summary || s.text
+        text,
+        // A build that legitimately produced nothing (an empty collection)
+        // goes back to offering the create action rather than sitting on a
+        // blank "ready" panel.
+        phase: text ? 'ready' : 'empty'
       }
+    }
     case 'fail':
-      return { ...s, busy: false, building: false, done: true, error: a.error }
+      // A refresh that failed over an existing summary keeps showing it and
+      // adds the error line. Only a failure with nothing to show is a failed
+      // panel.
+      return { ...s, busy: false, building: false, error: a.error, phase: s.text ? 'ready' : 'failed' }
   }
 }
 
@@ -90,13 +131,42 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
   // unmount as well as on a terminal frame — mirrors `useIngestJobStream`'s
   // AbortController idiom.
   const controllerRef = useRef<AbortController | null>(null)
+  // `useT()` returns a fresh function on every render, so `t` cannot be a
+  // dependency below — it would re-run the probe on every render, and each run
+  // may cost a server-side validation pass. A ref is the stable handle.
+  const tRef = useRef(t)
+  tRef.current = t
 
+  // Read what is already cached, and never build. The panel is mounted only
+  // while its tab is open, so this runs on every visit — hence the GET, whose
+  // handler has no queue branch at all: `summarize(false, …)` would answer a
+  // cache miss by starting a minutes-long build nobody asked for.
   useEffect(() => {
+    // Switching collections abandons any build this panel was following. The
+    // events stream is owner-multiplexed, so an un-torn-down subscription
+    // would keep dispatching the previous collection's frames into the new
+    // collection's state.
+    controllerRef.current?.abort()
+    controllerRef.current = null
+    dispatch({ type: 'reset' })
+    if (!collection) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const cached = await cachedSummary(collection)
+        if (!cancelled) dispatch({ type: 'probed', meta: cached })
+      } catch (e) {
+        if (cancelled) return
+        const d = describeError(e)
+        dispatch({ type: 'probe_failed', error: tRef.current(d.key, d.vars) })
+      }
+    })()
     return () => {
+      cancelled = true
       controllerRef.current?.abort()
       controllerRef.current = null
     }
-  }, [])
+  }, [collection])
 
   // `finish`/`runBuild` are mutually recursive: after a `summary_completed`
   // frame, `finish` refetches and — if the refetch itself carries a fresh
@@ -207,15 +277,35 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
 
   return (
     <div className="space-y-3">
-      <div className="flex gap-2">
-        <Button variant="primary" onClick={() => generate(false)} disabled={state.busy}>
-          {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
-        </Button>
-        <Button variant="secondary" onClick={() => generate(true)} disabled={state.busy}>
-          {t('analysis.summary_refresh')}
-        </Button>
-        {state.text && (
-          <div className="ml-auto flex items-center gap-2">
+      {/* Caption left, actions right — the row every other panel in the app
+          uses (the findings table, the hate-speech table, a chat turn). This
+          one used to put a *button* in the caption's slot, and that button
+          changed size with the state: a wide primary "Erstellen" became a 32px
+          refresh icon the moment content arrived, so the row's weight jumped
+          sides on load. The empty state now says what it is instead. */}
+      {state.phase === 'ready' && (
+        <div className="flex items-center justify-between gap-3">
+          <p className="min-w-0 truncate text-sm text-muted-foreground">
+            {t(
+              (state.meta?.sources?.length ?? 0) === 1
+                ? 'analysis.summary_caption_one'
+                : 'analysis.summary_caption_other',
+              { count: state.meta?.sources?.length ?? 0 }
+            )}
+            {state.meta?.summary_diagnostics?.partial === true && (
+              <> · {t('analysis.coverage_partial_label')}</>
+            )}
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Its label stays "Aktualisieren":
+                `analysis.coverage_partial_detail` tells the reader to click
+                that word, and an icon whose name no longer said it would
+                leave the sentence pointing at nothing. */}
+            <RefreshButton
+              label={t('analysis.summary_refresh')}
+              busy={state.busy}
+              onClick={() => generate(true)}
+            />
             <DownloadButton
               label={t('analysis.summary_download_md')}
               onClick={() =>
@@ -226,10 +316,28 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
                 )
               }
             />
-            {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+            {reportItem && reportDedupeKeys && (
+              <AddToReportButton item={reportItem} inReport={inReport} />
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {state.phase === 'probing' && (
+        <p className="text-sm text-muted-foreground">{t('common.loading_ellipsis')}</p>
+      )}
+
+      {(state.phase === 'empty' || state.phase === 'failed') && (
+        // An empty state explains itself and then offers the one thing to do,
+        // with a text label: a drawing cannot introduce something that is not
+        // on screen yet.
+        <div className="flex flex-col items-start gap-3 rounded-md border border-border border-dashed p-6">
+          <p className="text-sm text-muted-foreground">{t('analysis.summary_empty')}</p>
+          <Button variant="primary" onClick={() => generate(false)} disabled={state.busy}>
+            {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
+          </Button>
+        </div>
+      )}
 
       {state.building && (
         <div className="space-y-1.5" data-testid="summary-build-progress">

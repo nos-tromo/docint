@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { ValidationBanner } from './ValidationBanner'
+import type { ValidationFields } from '@/api/types'
 
 describe('ValidationBanner', () => {
   it('renders the validated state when the answer is grounded', () => {
@@ -59,5 +60,19 @@ describe('ValidationBanner', () => {
     expect(
       screen.getByText(/skipped or unavailable/i)
     ).toBeInTheDocument()
+  })
+})
+
+describe('ValidationBanner markers are drawn, never typed', () => {
+  // `⚠` and `ⓘ` both carry emoji presentation on some platforms, so the typed
+  // form could arrive full-colour beside monochrome chrome.
+  it.each([
+    ['mismatch', { validation_checked: true, validation_mismatch: true }],
+    ['passed', { validation_checked: true, validation_mismatch: false }],
+    ['unavailable', { validation_checked: false }]
+  ])('draws the %s tone marker as an icon', (_name, fields) => {
+    const { container } = render(<ValidationBanner v={fields as ValidationFields} />)
+    expect(container.querySelector('svg')).not.toBeNull()
+    expect(container.textContent).not.toMatch(/[⚠✓ⓘ]/)
   })
 })

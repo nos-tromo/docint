@@ -880,9 +880,10 @@ class SummaryDiagnosticsOut(BaseModel):
 class SummarizeOut(BaseModel):
     """Response payload for a collection-level summary request.
 
-    Documents the ``200`` (cache-hit) shape of ``POST /summarize``. ``job_id``
-    is unused there; it exists only so this model also documents the ``202``
-    (queued-build) shape's single field. The endpoint declares
+    Documents the ``200`` (cache-hit) shape of ``POST /summarize`` and the
+    identical ``200`` shape of ``GET /summarize`` -- both build their body with
+    ``_cached_summary_payload``. ``job_id`` is unused in either; it exists only
+    so this model also documents the POST's ``202`` (queued-build) shape. The endpoint declares
     ``response_model=None`` and returns explicit ``JSONResponse``s (its status
     code varies by outcome), so this class is documentation/typing only.
     """
@@ -3636,6 +3637,55 @@ def get_job_manager() -> IngestJobManager:
     return job_manager
 
 
+def _cached_summary_payload(physical: str) -> dict[str, Any] | None:
+    """Build the API payload for a collection's cached tree summary, or ``None``.
+
+    The single source of the ``200`` body that both ``GET /summarize`` and the
+    cache-hit branch of ``POST /summarize`` return, so the two can never drift
+    into describing the same cached summary differently.
+
+    ``rag.cached_collection_summary()`` is a pure read -- a KV lookup plus a
+    revision/fingerprint compare. The ``_validation_payload`` merge below is
+    not: with ``RESPONSE_VALIDATION_ENABLED`` on (the default) it runs the
+    validation agent, which may call the text model. Callers must therefore
+    treat this whole function as blocking IO -- it is why the GET handler is a
+    plain ``def`` (FastAPI runs it in a worker thread) and why the POST hops
+    through ``to_thread.run_sync``.
+
+    A cached-but-blank summary is deliberately returned as a payload rather
+    than folded into ``None``: reporting it as a miss would make the POST queue
+    a rebuild for every collection that legitimately summarizes to nothing, and
+    the SPA's bounded re-attach would then surface that benign case as a
+    failure. Callers decide what an empty summary means.
+
+    Args:
+        physical (str): The resolved, owner-namespaced Qdrant collection.
+
+    Returns:
+        dict[str, Any] | None: The ``SummarizeOut`` body, or ``None`` when
+        nothing is cached for this collection.
+    """
+    with rag.collection_scope(physical):
+        data = rag.cached_collection_summary()
+    if not isinstance(data, dict):
+        return None
+    summary = str(data.get("response") or "")
+    sources = data.get("sources") if isinstance(data.get("sources"), list) else []
+    summary_diagnostics = data.get("summary_diagnostics") if isinstance(data.get("summary_diagnostics"), dict) else None
+    validation = _validation_payload(
+        question=rag.summarize_prompt,
+        answer=summary,
+        sources=sources,
+        summary_diagnostics=summary_diagnostics,
+    )
+    return {
+        "summary": summary,
+        "sources": sources,
+        "summary_diagnostics": summary_diagnostics,
+        **validation,
+    }
+
+
 @app.post("/summarize", response_model=None, tags=["Query"])
 async def summarize(
     refresh: bool = Query(False),
@@ -3684,28 +3734,9 @@ async def summarize(
     """
     physical = _resolve_request_collection(collection, principal)
     if not refresh:
-        with rag.collection_scope(physical):
-            data = rag.cached_collection_summary()
-        if isinstance(data, dict):
-            summary = str(data.get("response") or "")
-            sources = data.get("sources") if isinstance(data.get("sources"), list) else []
-            summary_diagnostics = (
-                data.get("summary_diagnostics") if isinstance(data.get("summary_diagnostics"), dict) else None
-            )
-            validation = _validation_payload(
-                question=rag.summarize_prompt,
-                answer=summary,
-                sources=sources,
-                summary_diagnostics=summary_diagnostics,
-            )
-            return JSONResponse(
-                {
-                    "summary": summary,
-                    "sources": sources,
-                    "summary_diagnostics": summary_diagnostics,
-                    **validation,
-                }
-            )
+        payload = await to_thread.run_sync(_cached_summary_payload, physical)
+        if payload is not None:
+            return JSONResponse(payload)
 
     logical_name = (collection or "").strip()
     if not logical_name:
@@ -3725,6 +3756,51 @@ async def summarize(
             detail={"message": "Summary generation already in progress.", "job_id": state.job_id},
         )
     return JSONResponse({"job_id": state.job_id}, status_code=202)
+
+
+@app.get("/summarize", response_model=None, tags=["Query"])
+def summarize_cached(
+    collection: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 -- FastAPI dependency marker
+) -> Response:
+    """Serve the cached collection summary, or report that there is none.
+
+    The read-only half of ``POST /summarize``: a hit answers 200 with the
+    identical body (:func:`_cached_summary_payload` builds both), a miss
+    answers 204, and nothing is ever queued.
+
+    The distinction is carried by the HTTP method rather than by a flag on the
+    POST because the SPA fires this automatically whenever the Summary tab is
+    opened. A build is a minutes-long job of up to ``SUMMARY_MAX_LLM_CALLS``
+    model calls, so a caller who forgot to pass some ``queue=false`` would
+    start one by merely looking at a collection; a handler with no queue branch
+    in it cannot.
+
+    204 rather than 404 on a miss: ``_resolve_request_collection`` already
+    spends 404 on "collection not owned / not found", and a client must be able
+    to tell "you may not read this" from "there is nothing here yet".
+
+    Declared ``def`` rather than ``async def`` on purpose -- building the
+    payload is blocking IO (see :func:`_cached_summary_payload`), so FastAPI
+    must run it in a worker thread instead of on the event loop.
+
+    Args:
+        collection (str | None): The caller's logical collection name.
+            Optional: this path never creates a job, so the process-default
+            fallback in ``_resolve_request_collection`` is safe here, unlike
+            the POST's queue path which 400s without it.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        Response: 200 ``SummarizeOut`` JSON on a hit; 204 with no body on a miss.
+
+    Raises:
+        HTTPException: 400/404 from collection resolution.
+    """
+    payload = _cached_summary_payload(_resolve_request_collection(collection, principal))
+    if payload is None:
+        return Response(status_code=204)
+    return JSONResponse(payload)
 
 
 @app.post("/ingest/upload", tags=["Ingestion"])

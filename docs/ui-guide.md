@@ -44,6 +44,7 @@ which proxies API calls to the backend on `:8000`.
 | `/ingest` | `src/routes/Ingest.tsx` | Ingest |
 | `/analysis` | `src/routes/Analysis.tsx` | Analysis |
 | `/inspector` | `src/routes/Inspector.tsx` | Inspector |
+| `/report` | `src/routes/Report.tsx` | Report |
 
 ### Dashboard (`src/routes/Dashboard.tsx`)
 
@@ -84,12 +85,20 @@ per-stage status.
 Three tabs: **NER**, **Hate Speech** (`HateSpeechTable`), and **Summary**
 (`SummaryPanel`). Pre-warms the NER aggregate when opened.
 
-The **Summary** tab calls `POST /summarize`: a cache hit renders
-immediately; a cache miss (or the panel's **Refresh** action) follows the
-returned `job_id` on the shared ingest-job SSE stream and shows a build
-progress bar (mapped units / total units) while the tree summarizer runs,
-then renders the result with its coverage diagnostics once
-`summary_completed` arrives.
+The **Summary** tab reads before it builds. On open — and whenever the
+selected collection changes — it probes `GET /summarize`, which only ever
+reads: a stored summary renders straight away beside a **Refresh** icon,
+and `204` (nothing stored) leaves a labelled **Create** button instead. A
+build is minutes of map-reduce, so it starts only when an operator presses
+one of those two, never because a tab was opened.
+
+Creating and refreshing go through `POST /summarize`, which answers `202`
+with a `job_id`; the panel follows it on the shared ingest-job SSE stream
+and shows a progress bar (mapped units / total units) while the tree
+summarizer runs, then renders the result with its coverage diagnostics once
+`summary_completed` arrives. A refresh leaves the previous summary on
+screen throughout — blanking the panel for the length of a rebuild would
+take away what the operator already had.
 
 The **NER** tab opens with a **Table / Graph** view toggle (only one is shown
 at a time):

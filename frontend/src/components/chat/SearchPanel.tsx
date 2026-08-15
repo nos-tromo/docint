@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Banner, Button, Card, Input, RemoveButton } from '@infra/ui'
+import { Banner, Button, Card, Input, SearchButton, XIcon } from '@infra/ui'
+import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
@@ -83,6 +84,12 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
     for (const hit of hits) next[hit.id] = hit.est_tokens
     return next
   }
+  // Whether the toggle is currently "on". A live selection with nothing loaded
+  // counts as on too: the control's only remaining job there is to clear it.
+  const allLoadedSelected =
+    hits.length > 0
+      ? hits.every((hit) => hit.id in scope.tokens)
+      : selectedIds.length > 0
   const projectedTokens = Object.values(allLoadedTokens()).reduce((sum, n) => sum + n, 0)
   const projectedOverBudget = scope.usableTokens > 0 && projectedTokens > scope.usableTokens
 
@@ -153,9 +160,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
           aria-label={t('search.title')}
           className="min-w-0 flex-1"
         />
-        <Button type="submit" variant="secondary" size="sm">
-          {t('search.submit')}
-        </Button>
+        {/* size="md" matches the Input's h-10: the pair never lined up while
+            this was a sm button beside a taller field. */}
+        <SearchButton label={t('search.submit')} type="submit" variant="secondary" size="md" />
       </form>
 
       {!collection ? (
@@ -215,27 +222,44 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                   </>
                 )}
               </p>
+              {/* One control, both directions: pick everything loaded, press
+                  again to let it all go. Two buttons sat side by side where
+                  only one was ever live, and a selection is a state you flip,
+                  not two commands you choose between.
+
+                  It also has to stay reachable when a selection outlives a
+                  zero-hit search — there are no hits to select, but the
+                  chunks picked under an earlier query are still answering
+                  the next question, so clearing them must not vanish with
+                  the list they came from. */}
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                disabled={hits.length === 0}
-                aria-label={t('search.select_all_loaded', { count: hits.length })}
-                title={`${t('search.select_all_loaded_title', { count: hits.length })} ${t(
-                  'search.select_all_cost',
-                  { tokens: formatTokens(projectedTokens) }
-                )}`}
-                onClick={() => void commitScope(allLoadedTokens())}
-                className="h-7 w-7 shrink-0 px-0"
+                disabled={hits.length === 0 && selectedIds.length === 0}
+                aria-label={
+                  allLoadedSelected
+                    ? t('search.clear_selection')
+                    : t('search.select_all_loaded', { count: hits.length })
+                }
+                title={
+                  allLoadedSelected
+                    ? t('search.clear_selection')
+                    : `${t('search.select_all_loaded_title', { count: hits.length })} ${t(
+                        'search.select_all_cost',
+                        { tokens: formatTokens(projectedTokens) }
+                      )}`
+                }
+                aria-pressed={allLoadedSelected}
+                onClick={() => void commitScope(allLoadedSelected ? {} : allLoadedTokens())}
+                className={cn('h-7 w-7 shrink-0 px-0', allLoadedSelected && 'text-primary')}
               >
-                <CheckAllIcon className="h-4 w-4" />
+                {allLoadedSelected ? (
+                  <XIcon className="h-4 w-4" />
+                ) : (
+                  <CheckAllIcon className="h-4 w-4" />
+                )}
               </Button>
-              <RemoveButton
-                label={t('search.clear_selection')}
-                disabled={selectedIds.length === 0}
-                onClick={() => void commitScope({})}
-                className="h-7"
-              />
             </div>
           )}
           {hits.length > 0 && projectedOverBudget && (

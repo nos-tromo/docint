@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { CollectionOverviewPreview } from './CollectionOverviewPreview'
 import type { CollectionOverviewSnapshot } from '@/api/types'
@@ -16,8 +17,28 @@ const overview: CollectionOverviewSnapshot = {
 }
 
 describe('CollectionOverviewPreview', () => {
-  it('renders the strip and the manifest row with a truncated hash', () => {
+  it('arrives folded, with its totals on the bar and the manifest clipped', () => {
     render(<CollectionOverviewPreview overview={overview} />)
+    const bar = screen.getByRole('button', { name: /document overview/i })
+    // A sixteen-row manifest opening by default pushed the report's own
+    // findings off the screen, so it arrives shut — but not blank: the totals
+    // ride on the bar and the first rows peek out below it, clipped rather
+    // than unmounted, so a folded section still says what is in it.
+    expect(bar).toHaveAttribute('aria-expanded', 'false')
+    expect(bar).toHaveTextContent(/1 document ·/)
+    const panel = document.getElementById(bar.getAttribute('aria-controls') ?? '')
+    expect(panel).not.toBeNull()
+    expect(panel!.style.maxHeight).not.toBe('')
+  })
+
+  it('renders the strip and the manifest row with a truncated hash once opened', async () => {
+    render(<CollectionOverviewPreview overview={overview} />)
+    const bar = screen.getByRole('button', { name: /document overview/i })
+    await userEvent.click(bar)
+    // Opened, the cap comes off entirely — the manifest scrolls in its own box
+    // rather than being held to a peek.
+    const panel = document.getElementById(bar.getAttribute('aria-controls') ?? '')
+    expect(panel!.style.maxHeight).toBe('')
     expect(screen.getByText('a.pdf')).toBeInTheDocument()
     expect(screen.getByText('0123456789ab')).toBeInTheDocument()
     expect(screen.queryByText('0123456789abcdef')).not.toBeInTheDocument()

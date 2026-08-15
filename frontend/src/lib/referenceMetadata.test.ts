@@ -85,7 +85,7 @@ describe('referenceMetadataPills', () => {
   it('renders URLs as link pills with the open-link label', () => {
     const pills = referenceMetadataPills({ posting_url: 'https://fb.example/p1' })
     expect(pills).toEqual([
-      { key: 'posting_url', value: 'Open link ↗', href: 'https://fb.example/p1' }
+      { key: 'posting_url', value: 'Open link', href: 'https://fb.example/p1' }
     ])
   })
 
@@ -136,7 +136,7 @@ describe('referenceMetadataPills', () => {
     expect(pills).toContainEqual({ key: 'url', value: 'javascript:alert(1)' })
     expect(pills).toContainEqual({
       key: 'posting_url',
-      value: 'Open link ↗',
+      value: 'Open link',
       href: 'https://fb.example/p1'
     })
   })
