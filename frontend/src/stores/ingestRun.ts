@@ -177,10 +177,17 @@ export const useIngestRunStore = create<IngestRunState>()(
         }
 
         try {
+          // Measured from the synthetic `start` event's own stamp — the exact
+          // instant `deriveIngestStatus` anchors the card's timer to — so the
+          // duration the server ends up logging and echoing back covers the
+          // upload leg the user was already watching tick.
+          const runStartedAt = get().uploadEvents[0]?.receivedAt
           const { job_id } = await createIngestJob({
             collection,
             ner,
-            hate_speech: hate
+            hate_speech: hate,
+            upload_elapsed_ms:
+              runStartedAt === undefined ? undefined : Date.now() - runStartedAt
           })
           set({
             activeJobId: job_id,

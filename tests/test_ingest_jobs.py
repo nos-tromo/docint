@@ -4,13 +4,48 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+import logging
+import re
+import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _pytest.logging import LogCaptureFixture
+from loguru import logger
 
-from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, format_sse
+from docint.core.jobs import (
+    MAX_UPLOAD_LEAD_S,
+    IngestJobManager,
+    IngestJobState,
+    JobStatus,
+    _clamp_lead,
+    format_sse,
+)
+
+
+@pytest.fixture
+def loguru_caplog_info(caplog: LogCaptureFixture) -> Iterable[LogCaptureFixture]:
+    """Bridge loguru INFO records into ``caplog`` for the duration of a test.
+
+    Loguru bypasses ``logging``, so the stdlib ``caplog`` fixture sees none
+    of its records by default. Mirrors the fixture of the same name in
+    ``tests/test_ingest.py``.
+
+    Args:
+        caplog: The standard pytest log-capture fixture.
+
+    Yields:
+        The same ``caplog`` fixture, now populated with loguru-sourced
+        records at INFO level and above.
+    """
+    handler_id = logger.add(caplog.handler, level="INFO", format="{message}")
+    caplog.set_level(logging.INFO)
+    try:
+        yield caplog
+    finally:
+        logger.remove(handler_id)
 
 
 def _state() -> IngestJobState:
@@ -29,6 +64,14 @@ def _state() -> IngestJobState:
 
 def _events(frames: list[str]) -> list[str]:
     return [line[len("event: ") :] for f in frames for line in f.splitlines() if line.startswith("event: ")]
+
+
+def _data_of(frame: str) -> dict[str, Any]:
+    """Return one SSE frame's decoded payload."""
+    for line in frame.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[len("data: ") :])
+    raise AssertionError(f"frame carries no data line: {frame!r}")
 
 
 def test_history_keeps_only_the_latest_progress_frame() -> None:
@@ -130,6 +173,175 @@ async def test_worker_runs_to_completion_with_no_subscriber() -> None:
     assert state.status is JobStatus.COMPLETED
     assert state.message == "working"
     assert state.finished_at is not None
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_completed_job_logs_how_long_the_whole_run_took(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """The job's terminal line reports the run an operator waited for.
+
+    The window logged here is the one ``snapshot()`` reports and the one the
+    SPA's ingest card freezes on. Timing any single stage instead — the
+    pipeline call alone, say — logs a number roughly half the card's, which
+    is the mismatch this pins.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    completed = [r for r in loguru_caplog_info.messages if "completed in" in r]
+    assert completed, f"no completion line logged; got {loguru_caplog_info.messages}"
+    assert re.search(rf"Job {state.job_id} \(ingest\) completed in \d{{2}}:\d{{2}}\.", completed[-1]), completed[-1]
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_failed_job_logs_how_long_it_ran_before_failing(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A failure reports its duration too — a slow failure is a symptom.
+
+    An ingest that dies after twenty minutes on an unreachable endpoint and
+    one that dies immediately on a bad payload read identically without it.
+    """
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    failed = [r for r in loguru_caplog_info.messages if "failed after" in r]
+    assert failed, f"no failure line logged; got {loguru_caplog_info.messages}"
+    assert re.search(rf"Job {state.job_id} \(ingest\) failed after \d{{2}}:\d{{2}}\.", failed[-1]), failed[-1]
+    await manager.stop()
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected"),
+    [
+        (-1.0, 0.0),
+        (0.0, 0.0),
+        (12.5, 12.5),
+        (MAX_UPLOAD_LEAD_S + 1, MAX_UPLOAD_LEAD_S),
+        (float("inf"), 0.0),
+        (float("nan"), 0.0),
+    ],
+)
+def test_upload_lead_is_clamped_to_a_plausible_run(reported: float, expected: float) -> None:
+    """A caller-reported lead bounds a log line, so it must stay sane.
+
+    Args:
+        reported (float): What the client claimed it spent uploading.
+        expected (float): The value the job is allowed to run with.
+    """
+    assert _clamp_lead(reported) == expected
+
+
+@pytest.mark.anyio
+async def test_terminal_frame_carries_the_run_duration() -> None:
+    """The SPA renders the server's number instead of deriving its own.
+
+    Two nearly equal durations floored on either side of the wire disagree by
+    a whole second whenever their difference straddles a boundary, so the card
+    must read the value the completion line logged, not one of its own.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    payload = _data_of(state.history()[-1])
+    assert payload["duration_ms"] == state.duration_ms
+    assert isinstance(payload["duration_ms"], int)
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_failure_frame_carries_the_run_duration() -> None:
+    """A failed run reports its duration too — a slow failure is a symptom."""
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    payload = _data_of(state.history()[-1])
+    assert payload["code"] == "ingestion_failed"
+    assert payload["duration_ms"] == state.duration_ms
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_upload_lead_is_folded_into_the_run_duration(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """The run starts when the user did, not when the job was created.
+
+    The upload leg happens before any job exists, so the client reports it and
+    the job carries it. Without this the log undercounts exactly the stretch
+    the ingest card was already ticking through.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="mydocs",
+        physical="p1",
+        batch_dir=Path("/nonexistent/batch"),
+        upload_lead_s=30.0,
+    )
+    await _drain(manager, state)
+
+    assert state.duration_s is not None
+    assert state.duration_s >= 30.0
+    assert state.run_started_at < state.created_at
+    completed = [r for r in loguru_caplog_info.messages if "completed in" in r]
+    assert re.search(r"completed in 00:3\d\.", completed[-1]), completed[-1]
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_queue_wait_counts_toward_the_run_duration() -> None:
+    """A job that waited for a worker slot waited as far as the user is concerned.
+
+    The clock starts at creation, not at slot acquisition: with concurrency 1
+    the second run's card ticks through the queue, so its logged duration has
+    to as well.
+    """
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        time.sleep(0.05)
+        return {"empty": False, "resolution": None}
+
+    manager = IngestJobManager(runner=runner, concurrency=1)
+    first = await _create(manager, physical="p1")
+    second = await _create(manager, physical="p2")
+    await _drain(manager, first)
+    await _drain(manager, second)
+
+    assert first.duration_s is not None
+    assert second.duration_s is not None
+    # The second job ran the same 50 ms as the first, plus the first's whole
+    # run spent queued — so it is strictly longer, with a wide margin.
+    assert second.duration_s > first.duration_s
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_snapshot_reports_the_run_window() -> None:
+    """A reattaching client gets the same anchor and the same total."""
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    assert state.snapshot()["duration_ms"] is None  # unfinished: no total yet
+    await _drain(manager, state)
+
+    payload = state.snapshot()
+    assert payload["duration_ms"] == state.duration_ms
+    assert payload["run_started_at"] == state.run_started_at.isoformat()
     await manager.stop()
 
 

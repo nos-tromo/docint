@@ -205,85 +205,86 @@ def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert calls.build_query_engine is False
 
 
-@pytest.mark.parametrize(
-    ("seconds", "expected"),
-    [
-        (0.0, "00:00"),
-        (-5.0, "00:00"),
-        (0.9, "00:00"),
-        (59.0, "00:59"),
-        (60.0, "01:00"),
-        (3_599.0, "59:59"),
-        (3_600.0, "1:00:00"),
-        (86_399.0, "23:59:59"),
-        (86_400.0, "1d 00:00:00"),
-        (151_237.0, "1d 18:00:37"),
-    ],
-)
-def test_format_elapsed_scales_past_mm_ss(seconds: float, expected: str) -> None:
-    """The log's duration must scale rather than overflow one column.
+class _SilentRAG:
+    """RAG test double that ingests without touching Qdrant or a model."""
 
-    Mirrors the SPA's ``formatDuration``
-    (``frontend/src/lib/ingestStatus.ts``) exactly so an operator can compare
-    a log line against the ingest card without converting units: MM:SS under
-    an hour, H:MM:SS under a day, and ``Nd HH:MM:SS`` beyond. Rolling hours
-    into the minutes column is the bug this pins — a ~42 h run must not read
-    as ``2500:37``.
+    def __init__(self, **kwargs: Any) -> None:
+        """Accept and ignore every RAG construction kwarg.
 
-    Args:
-        seconds (float): Elapsed wall-clock seconds.
-        expected (str): The formatted duration.
-    """
-    assert ingest._format_elapsed(seconds) == expected
+        Args:
+            **kwargs: Ignored collection / hybrid configuration.
+        """
+
+    def ingest_docs(self, *args: Any, **kwargs: Any) -> None:
+        """Stand in for a real ingest.
+
+        Args:
+            *args: Ignored positional ingest arguments.
+            **kwargs: Ignored ingest flags.
+        """
+
+    def unload_models(self) -> None:
+        """No-op model unload for the test double."""
+        return None
 
 
-def test_ingest_docs_logs_the_elapsed_time(
+def test_main_logs_the_elapsed_time(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     loguru_caplog_info: LogCaptureFixture,
 ) -> None:
-    """The completion line must carry how long the run took.
+    """The CLI's completion line must carry how long the run took.
 
-    Both API call sites route through ``ingest_docs``, so this line is what
-    an operator reads in the backend container log for every ingest — the
-    SPA's frozen timer is not visible there.
+    This path has no job and no ingest card, so the log line is the only
+    record of the duration. It is timed around the whole ``ingest_docs``
+    call — model loading included — because that is what the operator
+    waited for.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         tmp_path (Path): Temporary directory path for the test.
         loguru_caplog_info (LogCaptureFixture): Loguru-to-caplog bridge at INFO.
     """
+    monkeypatch.setattr(ingest, "init_logger", lambda: None)
+    monkeypatch.setattr(ingest, "set_offline_env", lambda: None)
+    monkeypatch.setattr(ingest, "load_path_env", lambda: SimpleNamespace(data=tmp_path))
+    monkeypatch.setattr(ingest, "get_collection", lambda: "demo")
+    monkeypatch.setattr(ingest, "RAG", _SilentRAG)
 
-    class DummyRAG:
-        """Dummy RAG that spends a measurable moment ingesting."""
-
-        def __init__(self, **kwargs: Any) -> None:
-            """Accept and ignore every RAG construction kwarg.
-
-            Args:
-                **kwargs: Ignored collection / hybrid configuration.
-            """
-
-        def ingest_docs(self, *args: Any, **kwargs: Any) -> None:
-            """Stand in for a real ingest.
-
-            Args:
-                *args: Ignored positional ingest arguments.
-                **kwargs: Ignored ingest flags.
-            """
-
-        def unload_models(self) -> None:
-            """No-op model unload for the test double."""
-            return None
-
-    monkeypatch.setattr(ingest, "RAG", DummyRAG)
-    ingest.ingest_docs("demo", tmp_path)
+    ingest.main()
 
     completion = [r for r in loguru_caplog_info.messages if r.startswith("Ingestion complete")]
     assert completion, f"no completion line logged; got {loguru_caplog_info.messages}"
     # A bare "Ingestion complete." is the regression: the duration went
     # unrecorded anywhere an operator could read it after the fact.
     assert re.fullmatch(r"Ingestion complete in \d{2}:\d{2}\.", completion[-1]), completion[-1]
+
+
+def test_ingest_docs_does_not_log_a_run_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """The pipeline helper must not report a duration of its own.
+
+    ``ingest_docs`` is one stage of a run: under the job API the same run
+    goes on to resolve entities and build the collection summary, and the
+    ``RAG`` construction inside this call precedes any clock started around
+    the pipeline itself. A duration logged here therefore reads as the run
+    total while measuring roughly half of it — the mismatch against the
+    ingest card's timer that this pins. Whoever owns the whole run times it
+    (``main``, ``core/api.py``'s ``ingest``, ``IngestJobManager._run``).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory path for the test.
+        loguru_caplog_info (LogCaptureFixture): Loguru-to-caplog bridge at INFO.
+    """
+    monkeypatch.setattr(ingest, "RAG", _SilentRAG)
+
+    ingest.ingest_docs("demo", tmp_path)
+
+    assert not [r for r in loguru_caplog_info.messages if "complete in" in r], loguru_caplog_info.messages
 
 
 def test_ingest_docs_leaves_enable_hybrid_unset_when_hybrid_is_none(

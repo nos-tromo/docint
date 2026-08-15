@@ -97,7 +97,17 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   but **not** a backend restart (in-memory by design, mirroring Nextext's
   `nextext/api/jobs.py`); the staged files remain on disk and hash dedup makes
   a re-run cheap. The module holds no docint domain imports — the pipeline call
-  is injected as a `runner`.
+  is injected as a `runner`. **A run's duration is computed once, here, and
+  rendered identically in the backend log and the SPA's ingest card**: the
+  clock starts at job *creation* (so a queue wait counts) offset by the
+  client-reported `upload_elapsed_ms` (so the upload leg counts), and the same
+  value is logged, put on the terminal frame as `duration_ms`, and exposed on
+  the snapshot alongside `run_started_at`. Do not reintroduce a client-derived
+  elapsed for a finished run: two nearly equal durations floored on either
+  side of the wire disagree by a whole second whenever their difference
+  straddles a boundary, which is how one run came to report `00:18` in the log
+  and `00:19` on the card. `started_at` keeps its own meaning (worker slot
+  acquired) for queue-depth analysis.
 - `docint/agents/orchestrator.py` — Coordinates understanding, clarification, retrieval, and generation agents
 - `docint/core/ingest/ingestion_pipeline.py` — Document processing, chunking, metadata extraction
 - `docint/core/ingest/social_linker.py` — Joins a social export's `postings.csv` to its `media.csv` manifest + files (counter-stripped `Media ID`, basename resolution within one flat directory) and routes each linked file to the right backend: still images through `images_service.py` (CLIP); audio/video by delegating per-file Nextext routing to the shared `media_transcribe.py` engine. Every artifact — image embedding, keyframe, transcript segment — is stamped with the parent posting's `posting_uuid`, which `_attach_posting_group` uses to group a post with all its media at retrieval time. Artifacts additionally carry the posting's own reference fields (`posting_network`/`posting_author`/`posting_timestamp`/`posting_url`/`posting_text`, built via `build_posting_reference_index` from the `TableReader` postings profile) merged *additively* into their `reference_metadata` — a transcript segment keeps `network: nextext`/`type: transcript_segment`. Pre-existing collections need a re-ingest to gain these fields (no payload migration).

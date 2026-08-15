@@ -513,8 +513,22 @@ export interface IngestJobSnapshot {
   empty: boolean
   resolution: Record<string, number> | null
   created_at: string
+  /**
+   * When the run began, upload leg included — earlier than `created_at` by
+   * the client-reported upload time and than `started_at` by the queue wait.
+   * This is the anchor a reattached elapsed timer ticks from; `started_at`
+   * keeps its own meaning (the worker slot was acquired).
+   */
+  run_started_at: string
   started_at: string | null
   finished_at: string | null
+  /**
+   * The run's total duration, computed once server-side. The card renders
+   * this rather than its own start/finish delta: two nearly equal durations
+   * floored on either side of the wire disagree by a whole second whenever
+   * their difference straddles a boundary. `null` until the run ends.
+   */
+  duration_ms: number | null
 }
 
 export interface AppConfig {

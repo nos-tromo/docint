@@ -8,42 +8,9 @@ from pathlib import Path
 from loguru import logger
 
 from docint.core.rag import RAG, EmptyIngestionError
+from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logger_cfg import init_logger
-
-_SECONDS_PER_DAY = 86_400
-_SECONDS_PER_HOUR = 3_600
-
-
-def _format_elapsed(seconds: float) -> str:
-    """Format an elapsed duration for the completion log line.
-
-    Mirrors the SPA's ``formatDuration``
-    (``frontend/src/lib/ingestStatus.ts``) so a log line and the ingest
-    card's frozen timer can be compared without converting units. The
-    duration *scales* rather than overflowing one column: rolling hours
-    into the minutes place renders a ~42 h run as ``2500:37``.
-
-    Args:
-        seconds (float): Elapsed wall-clock seconds. Non-positive and
-            non-finite inputs yield ``"00:00"`` rather than a negative or
-            nonsense duration.
-
-    Returns:
-        str: ``MM:SS`` under an hour, ``H:MM:SS`` under a day, and
-        ``Nd HH:MM:SS`` beyond (DIN 1301 day symbol, shared across locales).
-    """
-    total = int(seconds)
-    if total <= 0:
-        return "00:00"
-    days, remainder = divmod(total, _SECONDS_PER_DAY)
-    hours, remainder = divmod(remainder, _SECONDS_PER_HOUR)
-    minutes, secs = divmod(remainder, 60)
-    if days > 0:
-        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
 
 
 def get_collection() -> str:
@@ -91,10 +58,16 @@ def ingest_docs(
         The CLI skips query engine creation so that large generation and reranker models
         are not loaded unnecessarily during ingestion jobs.
     """
+    # Deliberately untimed: this is one stage of a run, not a run. Under the
+    # job API the same run also resolves entities and builds the collection
+    # summary afterwards, and a duration logged here would exclude both — plus
+    # the RAG construction just above, whose embedding-tokenizer load alone
+    # cost 1.8 s of a 9.4 s run in the trace that motivated this. Each caller
+    # that owns a whole run times it instead (see :func:`main`,
+    # ``core/api.py``'s ``ingest``, and ``IngestJobManager._run``).
     rag = (
         RAG(qdrant_collection=qdrant_col) if hybrid is None else RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
     )
-    started_at = time.monotonic()
     try:
         rag.ingest_docs(
             data_dir,
@@ -105,13 +78,6 @@ def ingest_docs(
         )
     finally:
         rag.unload_models()
-    # Both API call sites route through here, so this is the only place a
-    # completed ingest's duration reaches an operator reading the backend
-    # log — the SPA's frozen timer is not visible there. Measured across
-    # the whole call including model unload: that is the wall clock the
-    # caller actually waited. It therefore covers less than the SPA's
-    # client-anchored timer, which starts at the upload rather than here.
-    logger.info("Ingestion complete in {}.", _format_elapsed(time.monotonic() - started_at))
 
 
 def main() -> None:
@@ -121,11 +87,17 @@ def main() -> None:
     surfaces as a warning and a clean exit rather than a traceback or
     non-zero exit code — the underlying ``RAG`` already removed the
     empty SQLite KV store and retained the uploaded source files.
+
+    Times the run from here rather than inside :func:`ingest_docs` so the
+    duration covers everything the operator waited for, model loading
+    included. There is no job and no ingest card on this path, so this line
+    is the only record of how long the run took.
     """
     init_logger()
     set_offline_env()
     data_path = load_path_env().data
     qdrant_col = get_collection()
+    started_ticks = time.monotonic()
     try:
         ingest_docs(qdrant_col, data_path)
     except EmptyIngestionError as exc:
@@ -134,6 +106,8 @@ def main() -> None:
             "removed; uploaded source files are retained.",
             exc.collection_name,
         )
+    else:
+        logger.info("Ingestion complete in {}.", format_elapsed(time.monotonic() - started_ticks))
 
 
 if __name__ == "__main__":

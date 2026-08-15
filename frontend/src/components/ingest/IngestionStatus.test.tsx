@@ -86,9 +86,31 @@ describe('IngestionStatus completion timing', () => {
     expect(screen.queryByText(/Duration:/)).not.toBeInTheDocument()
   })
 
-  it('omits the timer when no start time is known', () => {
+  it('omits the timer when nothing was measured at all', () => {
     render(<IngestionStatus status={completeStatus()} />)
     expect(screen.getByText('2 files indexed · 10 chunks')).toBeInTheDocument()
     expect(screen.queryByText('00:00')).not.toBeInTheDocument()
+  })
+
+  it('renders the server duration in preference to its own delta', () => {
+    // The reported bug: the card floored its own start→finish (19.0 s) while
+    // the backend log floored the run it measured (18.9 s), so one run showed
+    // two durations a second apart. The server's number is the only one now.
+    render(
+      <IngestionStatus
+        status={completeStatus({
+          startedAt: 0,
+          finishedAt: 19_004,
+          durationMs: 18_942
+        })}
+      />
+    )
+    expect(screen.getByText('00:18')).toBeInTheDocument()
+    expect(screen.queryByText('00:19')).not.toBeInTheDocument()
+  })
+
+  it('shows the timer for a reattached run that has only the server duration', () => {
+    render(<IngestionStatus status={completeStatus({ durationMs: 65_000 })} />)
+    expect(screen.getByText('01:05')).toBeInTheDocument()
   })
 })
