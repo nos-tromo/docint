@@ -3618,10 +3618,7 @@ class RAG:
                     continue
                 payload = dict(getattr(point, "payload", {}) or {})
                 if kind == "image":
-                    text = str(payload.get("llm_description") or "").strip()
-                    tags = payload.get("llm_tags")
-                    if isinstance(tags, list) and tags:
-                        text = f"{text}\n\nTags: {', '.join(str(t) for t in tags)}".strip()
+                    text = self._image_caption_text(payload)
                 else:
                     text = str(payload.get("text") or "").strip()
                     if not text:
@@ -4629,22 +4626,29 @@ class RAG:
 
     @staticmethod
     def _image_caption_text(payload: dict[str, Any]) -> str:
-        """Assemble an image's evidence body from its caption and tags.
+        """Assemble an image's evidence body from what was stored for it.
+
+        The text printed *inside* the image comes first, then the caption, then
+        the tags — the same order the stored node text uses. Without the printed
+        text here the words would be searchable but invisible to the ranker and
+        to the model, so a screenshot would still be judged by its caption
+        alone.
 
         Args:
             payload (dict[str, Any]): An `_images` companion point payload.
 
         Returns:
-            str: The caption, the caption plus its tags, the tags alone, or an
-            empty string when the image carries neither.
+            str: The parts the image actually carries, joined by blank lines,
+            or an empty string when it carries none.
         """
+        ocr_text = str(payload.get("ocr_text") or "").strip()
         description = str(payload.get("llm_description") or "").strip()
         tags_raw = payload.get("llm_tags")
         tags: list[str] = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
-        if not tags:
-            return description
-        tag_line = f"Tags: {', '.join(tags)}"
-        return f"{description}\n\n{tag_line}" if description else tag_line
+        parts = [ocr_text, description]
+        if tags:
+            parts.append(f"Tags: {', '.join(tags)}")
+        return "\n\n".join(part for part in parts if part).strip()
 
     def get_source_by_node_id(
         self,
