@@ -329,7 +329,9 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
     result = api_module._run_ingest_job(state, lambda ev, p: None)
 
     assert not built
-    assert result == {"empty": False, "resolution": None}
+    # ``stats`` is None here only because the stubbed ingest_docs returns
+    # nothing; a real run carries the counters the summary line reports.
+    assert result == {"empty": False, "resolution": None, "stats": None}
 
 
 def test_run_job_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None:

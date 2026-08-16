@@ -168,9 +168,51 @@ async def test_completed_job_logs_how_long_the_whole_run_took(
     state = await _create(manager)
     await _drain(manager, state)
 
-    completed = [r for r in loguru_caplog_info.messages if "completed in" in r]
+    completed = [r for r in loguru_caplog_info.messages if "Ingest job completed" in r]
     assert completed, f"no completion line logged; got {loguru_caplog_info.messages}"
-    assert re.search(rf"Job {state.job_id} \(ingest\) completed in \d{{2}}:\d{{2}}\.", completed[-1]), completed[-1]
+    assert re.search(rf"job_id={state.job_id} .*duration=\d{{2}}:\d{{2}} ", completed[-1]), completed[-1]
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_completion_line_reports_what_the_run_actually_did(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A duration and an opaque job id are not a summary.
+
+    Files processed, skipped and failed, plus chunk counts, existed only as
+    locals inside ``ingest_docs`` and were reachable exclusively through the
+    ``INGEST_BENCHMARK_ENABLED`` line — so a default deployment finished a
+    run and reported nothing about it.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        return {
+            "empty": False,
+            "resolution": {"minted": 214, "attached": 57, "processed": 900, "skipped": 3},
+            "stats": {
+                "files_processed": 3,
+                "files_skipped": 1,
+                "files_failed": 0,
+                "docs": 3,
+                "nodes": 1284,
+            },
+        }
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    line = next(m for m in loguru_caplog_info.messages if "Ingest job completed" in m)
+    assert "collection='mydocs'" in line
+    assert "files_processed=3 files_skipped=1 files_failed=0 docs=3 nodes=1284" in line
+    assert "entities_minted=214 entities_attached=57" in line
+    assert "empty=false" in line
+    # Both forms, so the log and the SPA's ingest card cannot disagree.
+    assert f"duration_ms={state.duration_ms}" in line
     await manager.stop()
 
 
@@ -191,9 +233,11 @@ async def test_failed_job_logs_how_long_it_ran_before_failing(
     state = await _create(manager)
     await _drain(manager, state)
 
-    failed = [r for r in loguru_caplog_info.messages if "failed after" in r]
+    failed = [r for r in loguru_caplog_info.messages if "Ingest job failed" in r]
     assert failed, f"no failure line logged; got {loguru_caplog_info.messages}"
-    assert re.search(rf"Job {state.job_id} \(ingest\) failed after \d{{2}}:\d{{2}}\.", failed[-1]), failed[-1]
+    assert re.search(rf"job_id={state.job_id} .*duration=\d{{2}}:\d{{2}} ", failed[-1]), failed[-1]
+    # A failed run produced no counters, so it must not claim empty=false.
+    assert "empty=" not in failed[-1]
     await manager.stop()
 
 
@@ -527,8 +571,8 @@ async def test_upload_lead_is_folded_into_the_run_duration(
     assert state.duration_s is not None
     assert state.duration_s >= 30.0
     assert state.run_started_at < state.created_at
-    completed = [r for r in loguru_caplog_info.messages if "completed in" in r]
-    assert re.search(r"completed in 00:3\d\.", completed[-1]), completed[-1]
+    completed = [r for r in loguru_caplog_info.messages if "Ingest job completed" in r]
+    assert re.search(r"duration=00:3\d ", completed[-1]), completed[-1]
     await manager.stop()
 
 

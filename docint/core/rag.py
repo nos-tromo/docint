@@ -839,6 +839,81 @@ class EmptyIngestionError(Exception):
         super().__init__(message or f"No content was ingested into '{collection_name}'.")
 
 
+@dataclass(frozen=True, slots=True)
+class IngestStats:
+    """What one ingestion run actually did.
+
+    These counters lived only as locals inside ``ingest_docs`` and were
+    reachable exclusively through the ``INGEST_BENCHMARK_ENABLED`` line,
+    which is tuning telemetry rather than operator information — so a
+    default deployment finished a run and reported nothing about it.
+    Returning them lets the job layer log a run summary unconditionally.
+
+    Attributes:
+        files_processed: Files whose content this run actually ingested.
+        files_skipped: Files the collection already held, across all three
+            dedup gates. The three sets are disjoint by construction: the
+            PDF hashes are added to ``processed_hashes`` before the legacy
+            pipeline runs, so they never reach the generic gates, and the
+            pre-filter removes files from ``dir_reader.input_files`` before
+            the post-load gate can see them.
+        files_failed: Distinct file hashes in batches that raised.
+        docs: Documents emitted, across the core and streaming lanes.
+        nodes: Nodes persisted, across both lanes.
+    """
+
+    files_processed: int
+    files_skipped: int
+    files_failed: int
+    docs: int
+    nodes: int
+
+
+def _build_ingest_stats(
+    *,
+    core_pdf_reader: CorePDFPipelineReader,
+    pipeline: DocumentIngestionPipeline,
+    manifest_started: set[str],
+    ingest_failures: list[tuple[set[str], str]],
+    total_docs: int,
+    total_nodes: int,
+) -> IngestStats:
+    """Aggregate one run's counters from the objects that already hold them.
+
+    The skip total is assembled here rather than threaded through the call
+    chain: each gate already tracks what it declined, so the aggregation is
+    a read of three existing fields. Shared by the sync and async ingest
+    paths, which are otherwise near-duplicates that drift.
+
+    Args:
+        core_pdf_reader (CorePDFPipelineReader): The PDF lane's reader.
+        pipeline (DocumentIngestionPipeline): The generic lane's pipeline.
+        manifest_started (set[str]): Hashes this run began work on.
+        ingest_failures (list[tuple[set[str], str]]): Per-batch failures as
+            ``(file_hashes, error)``.
+        total_docs (int): Documents emitted across both lanes.
+        total_nodes (int): Nodes persisted across both lanes.
+
+    Returns:
+        IngestStats: The run's counters.
+    """
+    # Read defensively: both objects are injectable and stubbed in tests, and
+    # this runs at the very end of a run that may have taken an hour. A
+    # summary line must not be what destroys it.
+    skipped = (
+        len(getattr(core_pdf_reader, "skipped_hashes", ()))
+        + int(getattr(pipeline, "prefilter_skipped", 0))
+        + len(getattr(pipeline, "skipped_hashes", ()))
+    )
+    return IngestStats(
+        files_processed=len(manifest_started),
+        files_skipped=skipped,
+        files_failed=len({fh for hashes, _ in ingest_failures for fh in hashes}),
+        docs=total_docs,
+        nodes=total_nodes,
+    )
+
+
 class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
     """Deduplicate and diversify row-level social/table retrieval results."""
 
@@ -6215,7 +6290,7 @@ class RAG:
         progress_callback: Callable[[str], None] | None = None,
         ner: bool | None = None,
         hate_speech: bool | None = None,
-    ) -> None:
+    ) -> IngestStats:
         """Ingest documents from the specified directory into the Qdrant collection.
 
         Args:
@@ -6229,6 +6304,10 @@ class RAG:
                 env default.
             hate_speech (bool | None): Per-request hate-speech override;
                 ``None`` keeps the env default.
+
+        Returns:
+            IngestStats: What the run did, for the job layer's run summary.
+            Callers that do not need it may ignore it.
 
         Raises:
             EmptyIngestionError: When no documents/nodes were produced and the
@@ -6463,7 +6542,17 @@ class RAG:
                 persist_batches=persist_batches,
             )
         self._bump_summary_revision(self.qdrant_collection)
-        logger.info("Documents ingested successfully.")
+        # No "Documents ingested successfully." line here any more: it carried
+        # no counters and claimed success even when ingest_failures was
+        # non-empty. The job layer logs the run summary instead.
+        return _build_ingest_stats(
+            core_pdf_reader=core_pdf_reader,
+            pipeline=pipeline,
+            manifest_started=manifest_started,
+            ingest_failures=ingest_failures,
+            total_docs=total_docs,
+            total_nodes=total_nodes,
+        )
 
     async def asingest_docs(
         self,
@@ -6473,7 +6562,7 @@ class RAG:
         progress_callback: Callable[[str], None] | None = None,
         ner: bool | None = None,
         hate_speech: bool | None = None,
-    ) -> None:
+    ) -> IngestStats:
         """Asynchronously ingest documents from the specified directory into the Qdrant collection.
 
         Args:
@@ -6486,6 +6575,11 @@ class RAG:
                 env default.
             hate_speech (bool | None): Per-request hate-speech override;
                 ``None`` keeps the env default.
+
+        Returns:
+            IngestStats: What the run did. Mirrors :meth:`ingest_docs` — the
+            two are near-duplicates, so every counter change must land in
+            both or they drift apart silently.
 
         Raises:
             RuntimeError: If the index is not initialized for async ingestion.
@@ -6699,7 +6793,14 @@ class RAG:
                 persist_batches=persist_batches,
             )
         self._bump_summary_revision(self.qdrant_collection)
-        logger.info("Documents ingested successfully.")
+        return _build_ingest_stats(
+            core_pdf_reader=core_pdf_reader,
+            pipeline=pipeline,
+            manifest_started=manifest_started,
+            ingest_failures=ingest_failures,
+            total_docs=total_docs,
+            total_nodes=total_nodes,
+        )
 
     def run_query(
         self,

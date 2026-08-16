@@ -110,6 +110,52 @@ def _clamp_lead(seconds: float) -> float:
     return min(max(seconds, 0.0), MAX_UPLOAD_LEAD_S)
 
 
+def _summary_fields(state: IngestJobState, stats: dict[str, Any] | None, *, failed: bool = False) -> str:
+    """Render a finished run's counters as one greppable field list.
+
+    The old completion line said only ``Job <id> (ingest) completed in
+    MM:SS.`` — an opaque id and a duration, with no collection and no
+    counts. Everything a run knew about itself was either discarded or
+    locked behind ``INGEST_BENCHMARK_ENABLED``, which is tuning telemetry
+    rather than operator information.
+
+    ``stats`` is rendered generically, key by key, so this module keeps no
+    knowledge of docint's ingest domain and the summary job can supply its
+    own counters through the same path.
+
+    Both ``duration`` and ``duration_ms`` are emitted: the first is what a
+    human reads, the second is the exact integer the SPA's ingest card
+    renders. Printing both is what makes the log and the card provably
+    agree rather than nearly agree.
+
+    Args:
+        state (IngestJobState): The finished job.
+        stats (dict[str, Any] | None): Counters from the runner's result,
+            or ``None`` on a failure (the run never produced any).
+        failed (bool, optional): Whether this is the failure path. Passed
+            explicitly rather than read from ``state.status``, which the
+            caller has not updated yet at the point it logs. A failed run
+            has no ``empty`` to report — it never got far enough to know.
+
+    Returns:
+        str: Space-separated ``key=value`` pairs.
+    """
+    fields = [
+        f"job_id={state.job_id}",
+        f"collection={state.logical_name!r}",
+        f"duration={format_elapsed(state.duration_s or 0.0)}",
+        f"duration_ms={state.duration_ms}",
+    ]
+    for key, value in (stats or {}).items():
+        fields.append(f"{key}={value}")
+    for key in ("minted", "attached"):
+        if state.resolution and key in state.resolution:
+            fields.append(f"entities_{key}={state.resolution[key]}")
+    if not failed:
+        fields.append(f"empty={str(state.empty).lower()}")
+    return " ".join(fields)
+
+
 def format_sse(event: str, data: dict[str, Any]) -> str:
     """Render a payload as an SSE frame.
 
@@ -984,10 +1030,9 @@ class IngestJobManager:
                     _log(line)
                 state.duration_s = state.elapsed_s()
                 logger.exception(
-                    "Job {} ({}) failed after {}.",
-                    state.job_id,
-                    state.kind,
-                    format_elapsed(state.duration_s),
+                    "{} job failed | {}",
+                    state.kind.capitalize(),
+                    _summary_fields(state, None, failed=True),
                 )
                 state.status = JobStatus.FAILED
                 state.error = names["failed_message"]
@@ -1011,10 +1056,9 @@ class IngestJobManager:
             state.finished_at = _utcnow()
             state.duration_s = state.elapsed_s()
             logger.info(
-                "Job {} ({}) completed in {}.",
-                state.job_id,
-                state.kind,
-                format_elapsed(state.duration_s),
+                "{} job completed | {}",
+                state.kind.capitalize(),
+                _summary_fields(state, result.get("stats")),
             )
             terminal: dict[str, Any] = {
                 "collection": state.logical_name,

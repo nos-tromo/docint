@@ -7,6 +7,7 @@ import time
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -49,7 +50,7 @@ from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
-from docint.core.rag import RAG, EmptyIngestionError
+from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -3686,8 +3687,9 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         return {"empty": True, "resolution": None}
 
     empty = False
+    stats: IngestStats | None = None
     try:
-        ingest_module.ingest_docs(
+        stats = ingest_module.ingest_docs(
             state.physical,
             state.batch_dir,
             state.hybrid,
@@ -3751,7 +3753,15 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
             logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
             push("warning", {"message": "Collection summary generation failed."})
 
-    return {"empty": empty, "resolution": resolution}
+    # ``stats`` rides the result dict as a plain mapping of ints so
+    # ``core/jobs.py`` can render it on the run-summary line without
+    # importing a docint domain type — the property that keeps the job
+    # registry testable without Qdrant or models.
+    return {
+        "empty": empty,
+        "resolution": resolution,
+        "stats": asdict(stats) if stats is not None else None,
+    }
 
 
 def _run_summary_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
