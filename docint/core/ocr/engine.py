@@ -96,7 +96,8 @@ class DocumentOcrEngine:
         max_pixels (int | None): Total-pixel budget of the dots family. Must not
             exceed the server's own cap: that model returns boxes in the frame
             of the image it actually saw, so a larger image comes back with
-            coordinates that cannot be mapped home.
+            coordinates that cannot be mapped home. Smaller is safe — it is
+            just a smaller page.
         max_tokens (int | None): Generation budget per call.
         region_max_dimension (int | None): Longest side of a rendered region.
     """
@@ -105,7 +106,9 @@ class DocumentOcrEngine:
     _DEFAULT_MAX_RETRIES: int = 1
     _DEFAULT_MAX_IMAGE_DIM: int = 1024
     _DEFAULT_REGION_MAX_DIM: int = 1536
-    _DEFAULT_MAX_PIXELS: int = 2_000_000
+    # 28*28*2560 — the vision tower's own default budget, and what
+    # vllm-service's `ocr` backend caps at (OCR_MM_PROCESSOR_KWARGS).
+    _DEFAULT_MAX_PIXELS: int = 2_007_040
     _DEFAULT_MAX_TOKENS: int = 4096
     # Consecutive calls nothing answered at all before the engine stops
     # calling the endpoint for the rest of the document.

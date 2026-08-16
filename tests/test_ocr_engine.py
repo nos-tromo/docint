@@ -18,6 +18,7 @@ from docint.core.ocr.families import (
     OcrBox,
     OcrCategory,
     OcrFrame,
+    OcrLimits,
     OcrTask,
     aligned_size,
     clean_json_array,
@@ -102,6 +103,16 @@ class TestAlignedSize:
         assert width % 28 == 0 and height % 28 == 0
         assert width * height <= 2_000_000
         assert abs(width / height - 612.0 / 792.0) < 0.03
+
+    def test_the_default_budget_is_the_servers_own(self) -> None:
+        """28*28*2560 is what vllm-service's `ocr` backend caps at.
+
+        Rendering above the cap is the one setting that breaks a layout model
+        silently: it resizes the image itself and answers in the frame of the
+        image it saw, not the one that was sent.
+        """
+        assert DocumentOcrEngine._DEFAULT_MAX_PIXELS == 28 * 28 * 2560
+        assert OcrLimits().max_pixels == DocumentOcrEngine._DEFAULT_MAX_PIXELS
 
     def test_small_budget_still_yields_a_usable_image(self) -> None:
         """A tight budget shrinks the image rather than failing."""

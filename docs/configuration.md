@@ -280,7 +280,7 @@ page-level PDF pipeline in `docint/core/readers/documents/`.
 | `PIPELINE_OCR_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request timeout for an OCR call. Set it only to give OCR a *tighter* budget than the rest of the app — an OCR model takes a minute or two per page where a chat model takes seconds, so a fixed low value cuts every page off mid-flight and surfaces as `Request timed out`. |
 | `PIPELINE_OCR_MAX_RETRIES` | `1` | SDK retries per call. |
 | `PIPELINE_OCR_MAX_IMAGE_DIM` | `1024` | Longest side of an image sent to a model that reads text only. |
-| `PIPELINE_OCR_MAX_PIXELS` | `2000000` | Pixel budget of a page rendered for a *layout* model. Must match the server's own cap (vllm-service `OCR_MM_PROCESSOR_KWARGS`) — a model that resizes the render itself reports boxes against an image the caller never saw. |
+| `PIPELINE_OCR_MAX_PIXELS` | `2007040` | Pixel budget of a page rendered for a *layout* model. Must not **exceed** the server's own cap (vllm-service `OCR_MM_PROCESSOR_KWARGS`, same default) — a model that resizes the render itself reports boxes against an image the caller never saw. Below the cap is safe: it is just a smaller page. |
 | `PIPELINE_OCR_MAX_TOKENS` | `4096` | Max tokens the model may generate per call. Raise it for a layout model: a full page of JSON is far longer than a page of text. |
 | `PIPELINE_TABLE_OCR` | `true` | Re-read tables whose structure the geometric pass could not recover. |
 | `PIPELINE_TABLE_OCR_MAX_IMAGE_DIM` | `1536` | Longest side of a rendered table region — larger than a page's, since a table's digits must stay legible. |

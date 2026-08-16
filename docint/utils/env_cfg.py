@@ -1894,11 +1894,12 @@ class PipelineConfig:
     ocr_max_retries: int
     ocr_max_image_dimension: int
     ocr_max_tokens: int
-    # Pixel budget for a page sent to the OCR model. Must match the server's
-    # own cap (vllm-service ``OCR_MM_PROCESSOR_KWARGS``): a layout model that
-    # resizes the render itself reports coordinates against an image the
-    # caller never saw.
-    ocr_max_pixels: int = 2_000_000
+    # Pixel budget for a page sent to the OCR model. Must not *exceed* the
+    # server's own cap (vllm-service ``OCR_MM_PROCESSOR_KWARGS``): a layout
+    # model that resizes the render itself reports coordinates against an
+    # image the caller never saw. Below the cap is merely a smaller page, so
+    # the shipped default is the cap — 28*28*2560, the vision tower's own.
+    ocr_max_pixels: int = 2_007_040
     # Re-read tables whose structure geometry could not recover. Regions are
     # rendered larger than pages: a table's digits must stay legible.
     enable_table_ocr: bool = True
@@ -1940,7 +1941,7 @@ def load_pipeline_config(
     default_ocr_max_retries: int = 1,
     default_ocr_max_image_dimension: int = 1024,
     default_ocr_max_tokens: int = 4096,
-    default_ocr_max_pixels: int = 2_000_000,
+    default_ocr_max_pixels: int = 2_007_040,
     default_enable_table_ocr: bool = True,
     default_table_ocr_max_image_dimension: int = 1536,
 ) -> PipelineConfig:
@@ -1967,6 +1968,7 @@ def load_pipeline_config(
         default_ocr_max_pixels (int): Default pixel budget of a page rendered for a layout model.
             Must not exceed the server's own cap (vllm-service ``OCR_MM_PROCESSOR_KWARGS``
             max_pixels): the model returns boxes in the frame of the image it actually saw.
+            Defaults to that cap's own default, ``28*28*2560``.
         default_enable_table_ocr (bool): Default flag for re-reading tables whose structure the
             geometric pass could not recover.
         default_table_ocr_max_image_dimension (int): Default longest side of a rendered table
