@@ -470,14 +470,41 @@ Loaded by `load_runtime_env()` (`env_cfg.py:1070`).
 |---|---|---|
 | `USE_DEVICE` | `auto` | Preferred device for local auxiliary models: `auto`, `cpu`, `mps`, `cuda`, or `cuda:<index>`. When set to `cpu`, `CUDA_VISIBLE_DEVICES=""` is forced at import time to prevent accidental GPU context init. |
 
+## Logging — `LoggingConfig`
+
+Loaded by `load_logging_env()` (`docint/utils/env_cfg.py`), applied by
+`init_logger()` (`docint/utils/logger_cfg.py`).
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | Minimum level for the single stderr sink. There is no file sink; under Docker the compose `local` driver owns retention (50 MB × 5, compressed). |
+| `LOG_PROGRESS_INTERVAL_S` | `30` | Seconds between heartbeat lines while one long job stage repeats the same progress message. Stage changes and a stage's final count always log regardless. `0` disables throttling and logs every progress message — the debug setting; on a large ingest it is thousands of lines. |
+
+Two behaviours are wired here rather than being configurable, because
+neither has a defensible "off":
+
+- **Uvicorn's loggers are re-dispatched into loguru**, so `docker logs`
+  carries one format on one stream. Only `uvicorn`, `uvicorn.error` and
+  `uvicorn.access` are bridged — never the root logger, which would pull
+  in httpx, qdrant-client, llama-index and transformers at a volume
+  nobody can predict for an airgapped deployment.
+- **The container healthcheck's own access lines are dropped.** It probes
+  `GET /version` from loopback every 30 s (every 3 s during
+  `start_period`), which on a measured run was roughly half of stdout.
+  The filter is narrow and fails open: a `/version` that returns 5xx, or
+  one from any non-loopback caller, is kept.
+
+See also `INGEST_BENCHMARK_ENABLED` under
+[Ingestion](#ingestion--ingestionconfig), which adds per-run throughput
+telemetry (`nodes_per_s`, batch counts) on top of the run summary.
+
 ## Paths — `PathConfig`
 
-Loaded by `load_path_env()` (`env_cfg.py:785`). Every path expands `~`.
+Loaded by `load_path_env()` (`docint/utils/env_cfg.py`). Every path expands `~`.
 
 | Variable | Default | Description |
 |---|---|---|
 | `DATA_PATH` | `~/docint/data` | Root directory for ingestion inputs. Compose pins it to `/var/lib/docint/pipeline/data` (the `pipeline-storage` volume) — the container's `$HOME` is read-only. |
-| `LOG_PATH` | `<repo>/.logs/docint.log` | Rotating log file. |
 | `QUERIES_PATH` | `~/docint/queries.txt` | Default query input file for the CLI. |
 | `RESULTS_PATH` | `~/docint/results` | Directory for CLI export artifacts. Compose: `/var/lib/docint/pipeline/results`. |
 | `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. |

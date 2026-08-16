@@ -304,13 +304,63 @@ mounted (or writable) for the whole ingest run.
 
 ## Observability
 
-- `INGEST_BENCHMARK_ENABLED=true` enables per-batch throughput logs from
-  `DocumentIngestionPipeline`.
-- `LOG_PATH` controls the rotating log sink (loguru, 5 MB rotation, 3
-  file retention — see `docint/utils/logger_cfg.py`).
-- Progress callbacks are the mechanism behind the SSE events from
-  `POST /ingest/upload`. Library callers can pass their own callback to
-  `RAG.ingest_docs()` — the CLI uses `logger.info`.
+### Reading a run in the log
+
+`docker logs -f docint-backend-1` narrates a whole run. Every line a job
+produces carries the full `job_id`, so one run can be isolated even when
+`DOCINT_INGEST_CONCURRENCY` lets two interleave:
+
+```console
+$ docker logs docint-backend-1 | grep 3d9f1c72e84b41a6b0d5c7f29ae61b30
+```
+
+Four shapes, in order (invented filenames):
+
+```
+Ingest job started | job_id=3d9f1c… collection='field-notes' files=3 bytes=18.0 MB by_type=pdf:1,docx:1,csv:1 hybrid=true ner=true hate_speech=false resolve=true
+Ingest input 1/3 | job_id=3d9f1c… file='annual-report-2024.pdf' type=pdf bytes=8.0 MB
+Job 3d9f1c… (ingest) progress: Core pipeline processing PDF (1/3): annual-report-2024.pdf
+Job 3d9f1c… (ingest) progress: Extracting entities: 840/2000 chunks processed
+Ingest job completed | job_id=3d9f1c… collection='field-notes' duration=14:22 duration_ms=862431 files_processed=3 files_skipped=1 files_failed=0 docs=3 nodes=1284 entities_minted=214 entities_attached=57 empty=false
+```
+
+A batch of more than 50 files lists the first 50 and then prints
+`Ingest inputs truncated | … listed=50 omitted=452`; the header's
+`files=` and `bytes=` always cover the whole batch.
+
+The summary reports `duration` and `duration_ms` both — the second is the
+exact integer the SPA's ingest card renders, so the two provably agree
+rather than nearly agreeing.
+
+### Progress and the throttle
+
+The pipeline reports progress per chunk, which is written for a client
+that renders the latest message and discards the rest. `core/jobs.py`
+tees those messages to the log through a throttle
+(`docint/utils/logfmt.py`): a stage announces itself, then heartbeats
+once per `LOG_PROGRESS_INTERVAL_S` (default 30) until its counter reaches
+its total, and its last observed value is always logged even if the stage
+stops short. Warnings pushed by the runner are never throttled.
+
+Set `LOG_PROGRESS_INTERVAL_S=0` to log every progress message. On a large
+ingest that is thousands of lines.
+
+Note the two callers differ only in what they pass, not in what they see:
+the CLI passes `logger.info` as `RAG.ingest_docs()`'s `progress_callback`
+and the job runner passes an SSE publisher — but since the job layer tees,
+both now produce a readable log. (Before that tee, the API path was nearly
+silent while the SPA saw everything, which is the defect this section used
+to describe from the wrong side.)
+
+### Extra telemetry
+
+`INGEST_BENCHMARK_ENABLED=true` adds a per-run throughput line
+(`nodes_per_s`, `enrich_batches`, `persist_batches`, batch sizes) for
+tuning. It is telemetry, not operator information — the run summary above
+is emitted regardless.
+
+Retention is the compose logging driver's job (`docker/compose.yaml`,
+`local` driver, 50 MB × 5, compressed). There is no file sink.
 
 ## Adding a new reader
 
