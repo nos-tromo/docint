@@ -375,7 +375,15 @@ Captioning and reading are different questions about the same picture, and both
 are asked. The caption says what an image *shows*; `IMAGE_OCR_ENABLED` adds what
 it *says*, stored as `ocr_text` on the image point, put ahead of the caption in
 the node text and in the full-text search index, so a screenshot is findable by
-the words printed in it rather than only through a paraphrase of them.
+the words printed in it rather than only through a paraphrase of them. The
+same applies to a figure lifted out of a PDF and to a standalone image file —
+one code path reads them all.
+
+Turning it on affects **newly ingested** images only: there is no payload
+migration, so an existing collection gains `ocr_text` by being re-ingested (file
+hashes make an unchanged document cheap to re-run, but the images themselves are
+cached by hash — clear the `_images` companion, or ingest into a fresh
+collection, to have them read).
 
 The floor is applied to the **reranker** score, not to CLIP similarity, because raw
 CLIP cosine is not comparable across queries — measured on a live collection, an
