@@ -243,10 +243,17 @@ class ProgressLogThrottle:
 
     A message is logged when it is the first of a new stage, when its
     counter reaches its total, or when ``interval_s`` has passed since
-    this stage last logged. Anything else is held as *pending* and
-    released by the next stage change or by :meth:`flush`, so a stage
-    that stops short of its total still leaves its last observed value on
-    the record rather than trailing off mid-count.
+    *that stage* last logged. Anything else is held as pending and
+    released by :meth:`flush`, so a stage that stops short of its total
+    still leaves its last observed value on the record rather than
+    trailing off mid-count.
+
+    State is kept **per stage key**, not for one "current" stage. NER and
+    hate-speech detection run concurrently over the same chunks, so their
+    messages interleave: with a single current-stage cursor every message
+    differs from the one before it, every message reads as a stage change,
+    and nothing throttles at all. That is not hypothetical — it is what a
+    live run did before this was keyed per stage.
     """
 
     def __init__(
@@ -266,9 +273,8 @@ class ProgressLogThrottle:
         self._interval_s = interval_s
         self._time_fn = time_fn
         self._lock = threading.Lock()
-        self._last_key: str | None = None
-        self._last_logged_at: float | None = None
-        self._pending: str | None = None
+        self._last_logged_at: dict[str, float] = {}
+        self._pending: dict[str, str] = {}
 
     def observe(self, message: str) -> list[str]:
         """Record one progress message and return what should be logged.
@@ -277,50 +283,45 @@ class ProgressLogThrottle:
             message (str): The progress message the runner just emitted.
 
         Returns:
-            list[str]: Zero, one, or two messages to log, in order. Two
-            happens when a new stage starts while the previous stage had
-            an unlogged tick: the stranded tick is released first so the
-            stage it belongs to does not end mid-count.
+            list[str]: The message, or an empty list if it was held. A
+            list rather than an optional so callers iterate one way.
         """
         with self._lock:
             key = progress_key(message)
             now = self._time_fn()
 
-            if key != self._last_key:
-                stranded = self._pending
-                self._last_key = key
-                self._pending = None
-                self._last_logged_at = now
-                return [stranded, message] if stranded is not None else [message]
+            last = self._last_logged_at.get(key)
+            if last is None:
+                # First sighting of this stage — always worth announcing.
+                self._last_logged_at[key] = now
+                return [message]
 
             if self._interval_s <= 0:
-                self._last_logged_at = now
+                self._last_logged_at[key] = now
                 return [message]
 
             counter = parse_counter(message)
-            if counter is not None and counter[0] >= counter[1]:
-                self._pending = None
-                self._last_logged_at = now
+            reached_total = counter is not None and counter[0] >= counter[1]
+            if reached_total or (now - last) >= self._interval_s:
+                self._pending.pop(key, None)
+                self._last_logged_at[key] = now
                 return [message]
 
-            if self._last_logged_at is None or (now - self._last_logged_at) >= self._interval_s:
-                self._pending = None
-                self._last_logged_at = now
-                return [message]
-
-            self._pending = message
+            self._pending[key] = message
             return []
 
     def flush(self) -> list[str]:
-        """Release a held message, if any.
+        """Release every held message.
 
-        Called on a job's terminal paths so the last thing a stage said
-        is on the record even when it never reached its total.
+        Called on a job's terminal paths so the last thing each stage said
+        is on the record even when it never reached its total — which is
+        most useful precisely when a run died partway through one.
 
         Returns:
-            list[str]: The pending message, or an empty list.
+            list[str]: The pending messages, ordered by stage key so the
+            output is deterministic, or an empty list.
         """
         with self._lock:
-            pending = self._pending
-            self._pending = None
-            return [pending] if pending is not None else []
+            pending = [self._pending[key] for key in sorted(self._pending)]
+            self._pending.clear()
+            return pending

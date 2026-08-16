@@ -290,24 +290,75 @@ def test_the_final_value_always_logs() -> None:
     ]
 
 
-def test_a_stage_that_stops_short_is_released_by_the_next_stage() -> None:
+def test_interleaved_stages_are_throttled_independently() -> None:
+    """NER and hate-speech run concurrently, so their ticks interleave.
+
+    Keyed on a single "current stage", every message differs from the one
+    before it, every message reads as a stage change, and nothing throttles
+    at all. A live run logged all 26 ticks of a 13-chunk batch that way —
+    which at 2000 chunks is the flood the throttle exists to prevent.
+    """
+    clock = _FakeClock()
+    throttle = ProgressLogThrottle(30.0, time_fn=clock)
+    emitted: list[str] = []
+
+    for n in range(1, 101):
+        emitted += throttle.observe(f"Extracting entities: {n}/2000 chunks processed")
+        emitted += throttle.observe(f"Detecting hate speech: {n}/2000 chunks processed")
+
+    # Exactly one opening tick per stage; the rest are inside the interval.
+    assert len(emitted) == 2, emitted
+    assert "Extracting entities: 1/2000" in emitted[0]
+    assert "Detecting hate speech: 1/2000" in emitted[1]
+
+
+def test_each_interleaved_stage_keeps_its_own_heartbeat() -> None:
+    """One stage heartbeating must not reset another stage's clock."""
+    clock = _FakeClock()
+    throttle = ProgressLogThrottle(30.0, time_fn=clock)
+
+    throttle.observe("Extracting entities: 1/2000 chunks processed")
+    clock.advance(20.0)
+    throttle.observe("Detecting hate speech: 1/2000 chunks processed")
+    clock.advance(11.0)
+
+    # 31s since NER last logged: due. 11s since hate-speech did: not.
+    assert throttle.observe("Extracting entities: 9/2000 chunks processed") != []
+    assert throttle.observe("Detecting hate speech: 9/2000 chunks processed") == []
+
+
+def test_a_stage_that_stops_short_is_released_by_flush() -> None:
     """A stage that never reaches its total must not trail off mid-count."""
     clock = _FakeClock()
     throttle = ProgressLogThrottle(30.0, time_fn=clock)
 
     throttle.observe("Extracting entities: 1/2000 chunks processed")
-    throttle.observe("Extracting entities: 7/2000 chunks processed")  # held
+    assert throttle.observe("Extracting entities: 7/2000 chunks processed") == []  # held
 
-    out = throttle.observe("Detecting hate speech: 1/2000 chunks processed")
+    assert throttle.flush() == ["Extracting entities: 7/2000 chunks processed"]
 
-    assert out == [
-        "Extracting entities: 7/2000 chunks processed",
+
+def test_flush_releases_every_stage_not_just_the_last() -> None:
+    """Two stages can both be mid-count when a run dies."""
+    clock = _FakeClock()
+    throttle = ProgressLogThrottle(30.0, time_fn=clock)
+
+    for message in (
+        "Extracting entities: 1/2000 chunks processed",
         "Detecting hate speech: 1/2000 chunks processed",
+        "Extracting entities: 7/2000 chunks processed",
+        "Detecting hate speech: 5/2000 chunks processed",
+    ):
+        throttle.observe(message)
+
+    assert throttle.flush() == [
+        "Detecting hate speech: 5/2000 chunks processed",
+        "Extracting entities: 7/2000 chunks processed",
     ]
 
 
-def test_flush_releases_a_held_tick() -> None:
-    """The job's terminal path must not swallow the last thing a stage said."""
+def test_flush_is_idempotent() -> None:
+    """A released tick must not be emitted twice by a second terminal path."""
     clock = _FakeClock()
     throttle = ProgressLogThrottle(30.0, time_fn=clock)
 
