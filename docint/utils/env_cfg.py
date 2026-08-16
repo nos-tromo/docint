@@ -1437,53 +1437,6 @@ def load_clip_client_env(
 
 
 @dataclass(frozen=True)
-class TableVlmClientConfig:
-    """Dataclass for the remote vision service used to recover table structure."""
-
-    api_base: str
-    api_key: str | None
-    model: str
-    timeout: float
-
-
-def load_table_vlm_env(
-    default_api_base: str,
-    default_api_key: str | None,
-    default_model: str,
-    default_timeout: float,
-) -> "TableVlmClientConfig":
-    """Load the table-structure vision endpoint settings.
-
-    Defaults to whatever vision endpoint and model the rest of the app already
-    uses, so the lane works on an unchanged stack; ``TABLE_VLM_API_BASE`` /
-    ``TABLE_VLM_API_KEY`` / ``TABLE_VLM_MODEL`` point it at a dedicated
-    document-parsing model instead, without a code change.
-
-    Args:
-        default_api_base (str): Fallback endpoint (the shared OpenAI-compatible base).
-        default_api_key (str | None): Fallback API key.
-        default_model (str): Fallback model id (the configured vision model).
-        default_timeout (float): Fallback per-request timeout in seconds.
-
-    Returns:
-        TableVlmClientConfig: The resolved client configuration.
-    """
-    raw_key = os.getenv("TABLE_VLM_API_KEY")
-    if raw_key is not None and raw_key.strip():
-        api_key: str | None = raw_key.strip()
-    elif default_api_key and default_api_key.strip():
-        api_key = default_api_key.strip()
-    else:
-        api_key = None
-    return TableVlmClientConfig(
-        api_base=os.getenv("TABLE_VLM_API_BASE", default_api_base).rstrip("/"),
-        api_key=api_key,
-        model=os.getenv("TABLE_VLM_MODEL", default_model),
-        timeout=float(os.getenv("TABLE_VLM_TIMEOUT", default_timeout)),
-    )
-
-
-@dataclass(frozen=True)
 class OcrClientConfig:
     """Dataclass for the remote document OCR / layout VLM (the ``ocr`` backend)."""
 
@@ -1909,25 +1862,23 @@ class PipelineConfig:
     max_retries: int
     force_reprocess: bool
     max_workers: int
-    enable_vision_ocr: bool
-    vision_ocr_timeout: float
-    vision_ocr_max_retries: int
-    vision_ocr_max_image_dimension: int
-    vision_ocr_max_tokens: int
-    # Table-structure vision lane. Defaulted so every existing construction of
-    # this config keeps working.
-    enable_table_vlm: bool = True
-    table_vlm_timeout: float = 0.0
-    table_vlm_max_retries: int = 1
-    table_vlm_max_image_dimension: int = 1536
-    table_vlm_max_tokens: int = 4096
-    # Layout-OCR lane (the ``ocr`` backend): scanned pages get real layout
-    # blocks instead of one plain-text blob. Active only when OCR_MODEL is set.
-    enable_layout_ocr: bool = True
-    layout_ocr_timeout: float = 0.0
-    layout_ocr_max_retries: int = 1
-    layout_ocr_max_pixels: int = 2_000_000
-    layout_ocr_max_tokens: int = 16384
+    # The OCR lane: pages with no text of their own are read by the OCR model
+    # (docint/core/ocr). One engine serves both the pages and the table
+    # regions below, so these are its settings, not a per-caller set.
+    enable_ocr: bool
+    ocr_timeout: float
+    ocr_max_retries: int
+    ocr_max_image_dimension: int
+    ocr_max_tokens: int
+    # Pixel budget for a page sent to the OCR model. Must match the server's
+    # own cap (vllm-service ``OCR_MM_PROCESSOR_KWARGS``): a layout model that
+    # resizes the render itself reports coordinates against an image the
+    # caller never saw.
+    ocr_max_pixels: int = 2_000_000
+    # Re-read tables whose structure geometry could not recover. Regions are
+    # rendered larger than pages: a table's digits must stay legible.
+    enable_table_ocr: bool = True
+    table_ocr_max_image_dimension: int = 1536
 
 
 # 2.0.0: PDF chunking unified onto the hierarchical SentenceSplitter
@@ -1960,21 +1911,14 @@ def load_pipeline_config(
     default_max_retries: int = 2,
     default_force_reprocess: bool = False,
     default_max_workers: int = 4,
-    default_enable_vision_ocr: bool = True,
-    default_vision_ocr_timeout: float | None = None,
-    default_vision_ocr_max_retries: int = 1,
-    default_vision_ocr_max_image_dimension: int = 1024,
-    default_vision_ocr_max_tokens: int = 4096,
-    default_enable_table_vlm: bool = True,
-    default_table_vlm_timeout: float | None = None,
-    default_table_vlm_max_retries: int = 1,
-    default_table_vlm_max_image_dimension: int = 1536,
-    default_table_vlm_max_tokens: int = 4096,
-    default_enable_layout_ocr: bool = True,
-    default_layout_ocr_timeout: float | None = None,
-    default_layout_ocr_max_retries: int = 1,
-    default_layout_ocr_max_pixels: int = 2_000_000,
-    default_layout_ocr_max_tokens: int = 16384,
+    default_enable_ocr: bool = True,
+    default_ocr_timeout: float | None = None,
+    default_ocr_max_retries: int = 1,
+    default_ocr_max_image_dimension: int = 1024,
+    default_ocr_max_tokens: int = 4096,
+    default_ocr_max_pixels: int = 2_000_000,
+    default_enable_table_ocr: bool = True,
+    default_table_ocr_max_image_dimension: int = 1536,
 ) -> PipelineConfig:
     """Build a ``PipelineConfig`` from environment variables with sensible defaults.
 
@@ -1987,35 +1931,22 @@ def load_pipeline_config(
         default_max_retries (int): Default maximum retry attempts per page stage.
         default_force_reprocess (bool): Default flag to force reprocessing of pages.
         default_max_workers (int): Default maximum parallel workers for document processing.
-        default_enable_vision_ocr (bool): Default flag to enable vision OCR fallback for scanned
-            pages.
-        default_vision_ocr_timeout (float | None): Default per-request timeout in seconds for
-            vision OCR API calls. ``None`` inherits ``OPENAI_TIMEOUT``, so the OCR client cannot
-            silently undercut the budget configured for the very endpoint it calls.
-        default_vision_ocr_max_retries (int): Default maximum retries for a single vision OCR
-            API call.
-        default_vision_ocr_max_image_dimension (int): Default max pixel dimension for images sent
-            to the vision OCR endpoint.
-        default_enable_table_vlm (bool): Default flag for the table-structure vision lane, which
-            runs only for tables whose structure the geometric reconstruction could not recover.
-        default_table_vlm_timeout (float | None): Default per-request timeout in seconds for the
-            table-structure lane. ``None`` inherits ``OPENAI_TIMEOUT``.
-        default_table_vlm_max_retries (int): Default maximum retries for a single table.
-        default_table_vlm_max_image_dimension (int): Default max pixel dimension for the rendered
-            table region (larger than the OCR lane's: a table's digits must stay legible).
-        default_table_vlm_max_tokens (int): Default maximum tokens the model may generate per table.
-        default_enable_layout_ocr (bool): Default flag for the layout-OCR lane, which sends pages
-            that need OCR to the document OCR model (``OCR_MODEL``) for layout + text; off when no
-            model is configured.
-        default_layout_ocr_timeout (float | None): Default per-request timeout in seconds for that
-            lane. ``None`` inherits ``OPENAI_TIMEOUT``.
-        default_layout_ocr_max_retries (int): Default SDK retries per page.
-        default_layout_ocr_max_pixels (int): Default pixel budget of the rendered page. Must not
-            exceed the server's own cap (vllm-service ``OCR_MM_PROCESSOR_KWARGS`` max_pixels): the
-            model returns boxes in the frame of the image it actually saw.
-        default_layout_ocr_max_tokens (int): Default maximum tokens the model may generate per page.
-        default_vision_ocr_max_tokens (int): Default maximum number of tokens the vision LLM may
-            generate per OCR request.
+        default_enable_ocr (bool): Default flag for the OCR lane — pages that need OCR are
+            read by the OCR model (``OCR_MODEL``, else the general vision model).
+        default_ocr_timeout (float | None): Default per-request timeout in seconds. ``None``
+            inherits ``OPENAI_TIMEOUT``: an OCR model is far slower than a chat one, and a
+            text-sized budget reads as an endpoint fault when it is only a slow page.
+        default_ocr_max_retries (int): Default SDK retries per call.
+        default_ocr_max_image_dimension (int): Default longest side of an image sent to a model
+            that reads text only.
+        default_ocr_max_tokens (int): Default maximum tokens the model may generate per call.
+        default_ocr_max_pixels (int): Default pixel budget of a page rendered for a layout model.
+            Must not exceed the server's own cap (vllm-service ``OCR_MM_PROCESSOR_KWARGS``
+            max_pixels): the model returns boxes in the frame of the image it actually saw.
+        default_enable_table_ocr (bool): Default flag for re-reading tables whose structure the
+            geometric pass could not recover.
+        default_table_ocr_max_image_dimension (int): Default longest side of a rendered table
+            region — larger than a page's, since a table's digits must stay legible.
 
     Returns:
         PipelineConfig: A fully-initialised ``PipelineConfig``.
@@ -2025,32 +1956,30 @@ def load_pipeline_config(
         - max_retries (int): Maximum retry attempts per stage on a given page.
         - force_reprocess (bool): When True, ignore existing artifacts and reprocess.
         - max_workers (int): Maximum parallel workers for document-level processing.
-        - enable_vision_ocr (bool): When True, use the vision LLM as a fallback OCR engine for
-            scanned pages that have no extractable text layer.
-        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls.
-            Defaults to the global ``OPENAI_TIMEOUT``; set ``PIPELINE_VISION_OCR_TIMEOUT`` to
-            give OCR a tighter budget than the rest of the app.
-        - vision_ocr_max_retries (int): Maximum retries for a single vision OCR API call.
-        - vision_ocr_max_image_dimension (int): Maximum pixel dimension (width or height) for
-            images sent to the vision OCR endpoint. Larger renders are down-scaled before
-            encoding.
-        - vision_ocr_max_tokens (int): Maximum number of tokens the vision LLM may generate per
-            OCR request. Keeps response time bounded.
+        - enable_ocr (bool): When True, pages with no text layer are read by the OCR model.
+        - ocr_timeout (float): Per-request timeout in seconds for OCR calls. Defaults to the
+            global ``OPENAI_TIMEOUT``; set ``PIPELINE_OCR_TIMEOUT`` to give OCR its own budget.
+        - ocr_max_retries (int): SDK retries for a single OCR call.
+        - ocr_max_image_dimension (int): Longest side of an image sent to a text-only OCR model.
+        - ocr_max_tokens (int): Maximum tokens the model may generate per call.
+        - ocr_max_pixels (int): Pixel budget of a page rendered for a layout model.
+        - enable_table_ocr (bool): When True, weakly-structured tables are re-read.
+        - table_ocr_max_image_dimension (int): Longest side of a rendered table region.
     """
     pipeline_version = os.getenv("PIPELINE_VERSION", default_pipeline_version).strip()
     if not pipeline_version:
         pipeline_version = default_pipeline_version
 
-    # Vision OCR shares the chat endpoint, so an unset budget follows
-    # OPENAI_TIMEOUT rather than a fixed value that a slow vision model would
-    # blow through on every page.
-    raw_vision_ocr_timeout = os.getenv("PIPELINE_VISION_OCR_TIMEOUT")
-    if raw_vision_ocr_timeout is not None and raw_vision_ocr_timeout.strip():
-        vision_ocr_timeout = float(raw_vision_ocr_timeout)
-    elif default_vision_ocr_timeout is not None:
-        vision_ocr_timeout = float(default_vision_ocr_timeout)
+    # An unset budget follows OPENAI_TIMEOUT rather than a fixed value: an OCR
+    # model takes a minute or two per page where a chat model takes seconds,
+    # and a timeout mid-page is indistinguishable from a dead endpoint.
+    raw_ocr_timeout = os.getenv("PIPELINE_OCR_TIMEOUT")
+    if raw_ocr_timeout is not None and raw_ocr_timeout.strip():
+        ocr_timeout = float(raw_ocr_timeout)
+    elif default_ocr_timeout is not None:
+        ocr_timeout = float(default_ocr_timeout)
     else:
-        vision_ocr_timeout = load_openai_env().timeout
+        ocr_timeout = load_openai_env().timeout
 
     return PipelineConfig(
         text_coverage_threshold=float(os.getenv("PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold)),
@@ -2059,40 +1988,17 @@ def load_pipeline_config(
         max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
         force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower() in {"true", "1", "yes"},
         max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
-        enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower() in {"true", "1", "yes"},
-        vision_ocr_timeout=vision_ocr_timeout,
-        vision_ocr_max_retries=int(os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)),
-        vision_ocr_max_image_dimension=int(
-            os.getenv(
-                "PIPELINE_VISION_OCR_MAX_IMAGE_DIM",
-                default_vision_ocr_max_image_dimension,
-            )
-        ),
-        vision_ocr_max_tokens=int(os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)),
-        enable_table_vlm=os.getenv("PIPELINE_TABLE_VLM", str(default_enable_table_vlm).lower()).lower()
+        enable_ocr=os.getenv("PIPELINE_OCR_ENABLED", str(default_enable_ocr).lower()).lower() in {"true", "1", "yes"},
+        ocr_timeout=ocr_timeout,
+        ocr_max_retries=int(os.getenv("PIPELINE_OCR_MAX_RETRIES", default_ocr_max_retries)),
+        ocr_max_image_dimension=int(os.getenv("PIPELINE_OCR_MAX_IMAGE_DIM", default_ocr_max_image_dimension)),
+        ocr_max_tokens=int(os.getenv("PIPELINE_OCR_MAX_TOKENS", default_ocr_max_tokens)),
+        ocr_max_pixels=int(os.getenv("PIPELINE_OCR_MAX_PIXELS", default_ocr_max_pixels)),
+        enable_table_ocr=os.getenv("PIPELINE_TABLE_OCR", str(default_enable_table_ocr).lower()).lower()
         in {"true", "1", "yes"},
-        table_vlm_timeout=float(
-            os.getenv(
-                "PIPELINE_TABLE_VLM_TIMEOUT",
-                default_table_vlm_timeout if default_table_vlm_timeout is not None else load_openai_env().timeout,
-            )
+        table_ocr_max_image_dimension=int(
+            os.getenv("PIPELINE_TABLE_OCR_MAX_IMAGE_DIM", default_table_ocr_max_image_dimension)
         ),
-        table_vlm_max_retries=int(os.getenv("PIPELINE_TABLE_VLM_MAX_RETRIES", default_table_vlm_max_retries)),
-        table_vlm_max_image_dimension=int(
-            os.getenv("PIPELINE_TABLE_VLM_MAX_IMAGE_DIM", default_table_vlm_max_image_dimension)
-        ),
-        table_vlm_max_tokens=int(os.getenv("PIPELINE_TABLE_VLM_MAX_TOKENS", default_table_vlm_max_tokens)),
-        enable_layout_ocr=os.getenv("PIPELINE_LAYOUT_OCR", str(default_enable_layout_ocr).lower()).lower()
-        in {"true", "1", "yes"},
-        layout_ocr_timeout=float(
-            os.getenv(
-                "PIPELINE_LAYOUT_OCR_TIMEOUT",
-                default_layout_ocr_timeout if default_layout_ocr_timeout is not None else load_openai_env().timeout,
-            )
-        ),
-        layout_ocr_max_retries=int(os.getenv("PIPELINE_LAYOUT_OCR_MAX_RETRIES", default_layout_ocr_max_retries)),
-        layout_ocr_max_pixels=int(os.getenv("PIPELINE_OCR_MAX_PIXELS", default_layout_ocr_max_pixels)),
-        layout_ocr_max_tokens=int(os.getenv("PIPELINE_LAYOUT_OCR_MAX_TOKENS", default_layout_ocr_max_tokens)),
     )
 
 

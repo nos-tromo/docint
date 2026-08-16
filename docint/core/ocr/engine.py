@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pypdfium2
@@ -98,11 +98,13 @@ class DocumentOcrEngine:
             of the image it actually saw, so a larger image comes back with
             coordinates that cannot be mapped home.
         max_tokens (int | None): Generation budget per call.
+        region_max_dimension (int | None): Longest side of a rendered region.
     """
 
     _DEFAULT_TIMEOUT: float = 60.0
     _DEFAULT_MAX_RETRIES: int = 1
     _DEFAULT_MAX_IMAGE_DIM: int = 1024
+    _DEFAULT_REGION_MAX_DIM: int = 1536
     _DEFAULT_MAX_PIXELS: int = 2_000_000
     _DEFAULT_MAX_TOKENS: int = 4096
     # Consecutive calls nothing answered at all before the engine stops
@@ -132,6 +134,7 @@ class DocumentOcrEngine:
         max_image_dimension: int | None = None,
         max_pixels: int | None = None,
         max_tokens: int | None = None,
+        region_max_dimension: int | None = None,
         model: str | None = None,
     ) -> None:
         """Build the client and pick the model's family."""
@@ -151,6 +154,7 @@ class DocumentOcrEngine:
         self.limits = OcrLimits(
             max_pixels=max_pixels if max_pixels is not None else self._DEFAULT_MAX_PIXELS,
             max_dim=max_image_dimension if max_image_dimension is not None else self._DEFAULT_MAX_IMAGE_DIM,
+            region_max_dim=(region_max_dimension if region_max_dimension is not None else self._DEFAULT_REGION_MAX_DIM),
             max_tokens=max_tokens if max_tokens is not None else self._DEFAULT_MAX_TOKENS,
         )
         self._timeout = timeout if timeout is not None else cfg.timeout
@@ -213,9 +217,10 @@ class DocumentOcrEngine:
         )
         region_w = max(width - crop[0] - crop[2], 1.0)
         region_h = max(height - crop[1] - crop[3], 1.0)
-        base = self._render(page, region_w, region_h, crop=crop)
+        limits = replace(self.limits, max_dim=self.limits.region_max_dim)
+        base = self._render(page, region_w, region_h, crop=crop, limits=limits)
         frame = OcrFrame(width=region_w, height=region_h, offset_x=crop[0], offset_y=crop[1])
-        return self._read(base, OcrTask.TABLE, frame, context=f"region on page {page_index}")
+        return self._read(base, OcrTask.TABLE, frame, context=f"region on page {page_index}", limits=limits)
 
     def read_image(self, image: PILImage.Image | bytes, *, context: str = "image") -> list[OcrBlock]:
         """Read an image that is not a PDF page.
@@ -258,6 +263,7 @@ class DocumentOcrEngine:
         height: float,
         *,
         crop: tuple[float, float, float, float] | None = None,
+        limits: OcrLimits | None = None,
     ) -> PILImage.Image:
         """Rasterise a page (or a crop of it) at the family's resolution.
 
@@ -266,19 +272,33 @@ class DocumentOcrEngine:
             width (float): Width of the area being rendered, in points.
             height (float): Its height, in points.
             crop (tuple | None): Amount to cut off each side, in points.
+            limits (OcrLimits | None): Limits to render against; the engine's own by default.
 
         Returns:
             PILImage.Image: The rendered image.
         """
-        target = self.family.target_pixels(width, height, self.limits)
+        active = limits or self.limits
+        target = self.family.target_pixels(width, height, active)
         if target is not None:
             scale = max(target[0] / max(width, 1.0), target[1] / max(height, 1.0))
+        elif crop is not None:
+            # A region is rendered to fill the cap rather than at a fixed DPI:
+            # it is small, and every pixel spent on it is a legible digit.
+            scale = active.max_dim / max(width, height, 1.0)
         else:
             scale = getattr(self.family, "render_dpi", 120) / 72
         kwargs = {"crop": crop} if crop is not None else {}
         return page.render(scale=scale, **kwargs).to_pil()
 
-    def _read(self, base: PILImage.Image, task: OcrTask, frame: OcrFrame, *, context: str) -> list[OcrBlock]:
+    def _read(
+        self,
+        base: PILImage.Image,
+        task: OcrTask,
+        frame: OcrFrame,
+        *,
+        context: str,
+        limits: OcrLimits | None = None,
+    ) -> list[OcrBlock]:
         """Send an image, retry as the family allows, and parse the answer.
 
         Args:
@@ -286,6 +306,7 @@ class DocumentOcrEngine:
             task (OcrTask): What is being read.
             frame (OcrFrame): Coordinate frame for the answer.
             context (str): Description used in logs.
+            limits (OcrLimits | None): Limits for this read; the engine's own by default.
 
         Returns:
             list[OcrBlock]: Parsed blocks, or empty when nothing was read.
@@ -295,8 +316,9 @@ class DocumentOcrEngine:
             logger.debug("OCR disabled for this document; skipping {}", context)
             return []
 
+        active = limits or self.limits
         prompt = self.family.prompt(task)
-        sent = self.family.prepare(base, self.limits, context=context)
+        sent = self.family.prepare(base, active, context=context)
         answer: str | None = None
         responded = False
         reachable = False
@@ -306,7 +328,7 @@ class DocumentOcrEngine:
         except OcrError as first_error:
             reachable = isinstance(first_error, OcrRejected)
             time.sleep(self._RETRY_BACKOFF_SECONDS)
-            reduced = self.family.degrade(sent, self.limits, context=context)
+            reduced = self.family.degrade(sent, active, context=context)
             if reduced is not None:
                 logger.info("OCR retrying {} at reduced resolution ({}x{})", context, reduced.width, reduced.height)
                 sent = reduced
@@ -322,7 +344,7 @@ class DocumentOcrEngine:
         self._consecutive_failures = 0
 
         if not (answer and answer.strip()):
-            escalation = self.family.escalate(base, sent, self.limits, context=context)
+            escalation = self.family.escalate(base, sent, active, context=context)
             if escalation is not None:
                 bigger, bigger_prompt = escalation
                 logger.info("OCR answer for {} was empty; retrying at {}x{}", context, bigger.width, bigger.height)

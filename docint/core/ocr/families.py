@@ -123,6 +123,9 @@ class OcrLimits:
 
     max_pixels: int = 2_000_000
     max_dim: int = 1024
+    # A region is a fraction of a page, so the same longest side buys it far
+    # more detail — and a table read at page resolution loses its digits.
+    region_max_dim: int = 1536
     max_tokens: int = 4096
 
 

@@ -1,23 +1,22 @@
-"""OCR fallback for scanned pages."""
+"""Reading a page's text: the embedded text layer, and OCR blocks as layout.
+
+The OCR *client* lives in :mod:`docint.core.ocr` — one engine for every
+caller. This module is the documents-side half: the text-layer engine, the
+translation of the engine's answer into :class:`LayoutBlock` s, and the
+aggregation of both into a page's :class:`PageText`.
+"""
 
 from __future__ import annotations
 
-import base64
-import re
-import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from io import BytesIO
+from dataclasses import replace
 from pathlib import Path
 
-import pypdfium2
 from loguru import logger
-from openai import APIConnectionError, APIStatusError, APITimeoutError
-from openai import OpenAI as _OpenAI
-from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
-from PIL import Image as PILImage
 from typing_extensions import override
 
+from docint.core.ocr import OcrBlock, OcrCategory
+from docint.core.readers.documents.furniture import looks_like_page_number
 from docint.core.readers.documents.models import (
     BBox,
     BlockType,
@@ -27,14 +26,77 @@ from docint.core.readers.documents.models import (
     PageText,
 )
 from docint.core.readers.documents.parse import ParsedPdf, order_lines
-from docint.utils.env_cfg import load_model_env, load_openai_env
-from docint.utils.llm_sanitize import looks_like_no_image_refusal, squeeze_char_runs, strip_reasoning
-from docint.utils.openai_cfg import OpenAIPipeline
 
 # Page furniture is not part of the page's text (mirrors chunking.py).
 _FURNITURE_BLOCK_TYPES = frozenset(
     {BlockType.PAGE_HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER, BlockType.FIGURE_TEXT}
 )
+
+# What the OCR package's categories mean to a document. ``PAGE_FOOTER`` is
+# resolved per block: a footer that reads as nothing but a number is a page
+# number, and the chunker treats the two alike anyway.
+_CATEGORY_TO_BLOCK = {
+    OcrCategory.TITLE: BlockType.TITLE,
+    OcrCategory.SECTION_HEADER: BlockType.HEADER,
+    OcrCategory.TEXT: BlockType.TEXT,
+    OcrCategory.LIST_ITEM: BlockType.LIST,
+    OcrCategory.CAPTION: BlockType.CAPTION,
+    # A footnote and a formula are body content, not furniture: they are
+    # printed because they carry meaning, and a reader citing the page
+    # expects them in it.
+    OcrCategory.FOOTNOTE: BlockType.TEXT,
+    OcrCategory.FORMULA: BlockType.TEXT,
+    OcrCategory.TABLE: BlockType.TABLE,
+    OcrCategory.PICTURE: BlockType.FIGURE,
+    OcrCategory.PAGE_HEADER: BlockType.PAGE_HEADER,
+    OcrCategory.PAGE_FOOTER: BlockType.FOOTER,
+}
+
+
+def blocks_from_ocr(
+    page_index: int, blocks: list[OcrBlock], *, keep: list[LayoutBlock] | None = None
+) -> list[LayoutBlock]:
+    """Translate one page's OCR answer into layout blocks.
+
+    The engine speaks its own vocabulary so that reading pixels does not
+    depend on the document reader; this is where that vocabulary becomes a
+    page's layout. Blocks arrive in the model's reading order and keep it.
+
+    Args:
+        page_index (int): Zero-based page number.
+        blocks (list[OcrBlock]): What the OCR engine read on that page.
+        keep (list[LayoutBlock] | None): Blocks from the geometric pass to
+            retain ahead of the OCR ones — used for the figures on a page
+            whose OCR model reads text only and so cannot report them.
+
+    Returns:
+        list[LayoutBlock]: Layout blocks in reading order, renumbered.
+    """
+    kept = list(keep or [])
+    out: list[LayoutBlock] = []
+    for order, block in enumerate(kept):
+        out.append(replace(block, reading_order=order))
+
+    for offset, block in enumerate(blocks):
+        text = block.text.strip()
+        block_type = _CATEGORY_TO_BLOCK.get(block.category, BlockType.TEXT)
+        if block_type is BlockType.FOOTER and looks_like_page_number(text):
+            block_type = BlockType.PAGE_NUMBER
+        order = len(kept) + offset
+        out.append(
+            LayoutBlock(
+                block_id=f"ocr-{page_index}-{offset}",
+                page_index=page_index,
+                type=block_type,
+                bbox=BBox(x0=block.bbox.x0, y0=block.bbox.y0, x1=block.bbox.x1, y1=block.bbox.y1),
+                reading_order=order,
+                confidence=0.9,
+                text=text,
+                cells=block.cells,
+                cells_source="ocr" if block.cells else "geometry",
+            )
+        )
+    return out
 
 
 class OCREngine(ABC):
@@ -103,503 +165,6 @@ class PdfTextEngine(OCREngine):
         return spans
 
 
-class VisionOCRError(RuntimeError):
-    """A vision OCR call did not produce text.
-
-    Subclasses ``RuntimeError`` so callers that catch the broad type keep
-    working; the two subclasses below carry the distinction that decides
-    whether the whole document should be given up on.
-    """
-
-
-class VisionOCRUnreachable(VisionOCRError):
-    """Nothing came back — a timeout, or the endpoint could not be reached.
-
-    This is the failure the per-document budget exists for: every further
-    page would spend the full timeout for the same nothing.
-    """
-
-
-class VisionOCRRejected(VisionOCRError):
-    """The endpoint answered, with an error status.
-
-    Costs one page, not the document. Measured on the dev stack, these come
-    back in 0.5-1.0s (against 68-117s for a successful page) in bursts that
-    recover within seconds, so the next page is usually fine.
-    """
-
-
-@dataclass
-class VisionOCRStats:
-    """What the vision OCR lane did across one document.
-
-    Attributes:
-        pages_failed: Pages that reached the engine but produced no text.
-        pages_skipped: Pages not attempted at all because the failure budget
-            had already given up on the document.
-    """
-
-    pages_failed: int = 0
-    pages_skipped: int = 0
-
-
-class VisionOCREngine(OCREngine):
-    """OCR engine that renders pages to images and uses a vision LLM.
-
-    Uses ``pypdfium2`` to rasterise the page and the OpenAI-compatible
-    vision endpoint with the ``ocr`` prompt to extract text.  This is
-    the fallback when ``PypdfTextEngine`` returns nothing for pages
-    flagged as needing OCR (i.e. scanned / screenshot PDFs).
-
-    To avoid blocking the pipeline on slow endpoints the engine:
-
-    * renders at a conservative DPI and caps the pixel dimensions,
-    * encodes the image as JPEG (much smaller payload than PNG),
-    * sends the request through a dedicated OpenAI client whose timeout
-      and retry count are configured independently of the shared chat
-      client (see ``PIPELINE_VISION_OCR_TIMEOUT``),
-    * caps the response length with ``max_tokens``,
-    * on a timeout, automatically retries once at half resolution,
-    * gives up on the document once several consecutive pages fail
-      outright, so an unreachable endpoint costs seconds rather than
-      minutes per page.
-    """
-
-    # Default limits used when no explicit values are supplied.
-    _DEFAULT_TIMEOUT: float = 60.0
-    # Consecutive pages that may fail with no response at all before the
-    # engine stops calling the endpoint for the rest of the document.
-    _MAX_CONSECUTIVE_PAGE_FAILURES: int = 3
-    # Pause before the half-resolution retry. Upstream rejections arrive in
-    # bursts lasting a few seconds; retrying immediately lands inside the same
-    # burst, which is what made a transient blip cost whole pages.
-    _RETRY_BACKOFF_SECONDS: float = 2.0
-    _DEFAULT_MAX_RETRIES: int = 1
-    _DEFAULT_MAX_IMAGE_DIM: int = 1024
-    _EMPTY_RETRY_MAX_IMAGE_DIM: int = 1536
-    _DEFAULT_RENDER_DPI: int = 120
-    _DEFAULT_MAX_TOKENS: int = 4096
-    _JPEG_QUALITY: int = 80
-    _REFUSAL_MAX_CHARS: int = 280
-    _REFUSAL_MAX_LINES: int = 4
-    _REFUSAL_PATTERNS: tuple[re.Pattern[str], ...] = (
-        re.compile(r"i(?:'| a)?m sorry[, ]+i (?:can(?:not|'t)|won't) assist"),
-        re.compile(r"i (?:can(?:not|'t)|won't) assist with that"),
-        re.compile(r"i (?:can(?:not|'t)|won't) help with that"),
-        re.compile(r"i(?:'| a)?m unable to help with that"),
-        re.compile(r"as an ai(?: language model)?[, ]+i (?:can(?:not|'t)|won't)"),
-        re.compile(r"i cannot comply with that request"),
-    )
-
-    def __init__(
-        self,
-        file_path: str | Path,
-        *,
-        timeout: float | None = None,
-        max_retries: int | None = None,
-        max_image_dimension: int | None = None,
-        max_tokens: int | None = None,
-    ) -> None:
-        """Initialize the vision OCR engine.
-
-        Args:
-            file_path (str | Path): Path to the source PDF.
-            timeout (float | None): Per-request timeout in seconds for vision API calls.
-                Defaults to ``60`` seconds.
-            max_retries (int | None): Maximum retries for a single vision API call.
-                Defaults to ``1``.
-            max_image_dimension (int | None): Maximum pixel width or height for the
-                rendered page image.  Larger renders are proportionally
-                down-scaled before being sent to the API.  Defaults to ``1024``.
-            max_tokens (int | None): Maximum number of tokens the vision LLM may generate
-                per request.  Defaults to ``4096``.
-
-        Raises:
-            ImportError: If ``pypdfium2`` is not installed.
-            RuntimeError: If the vision pipeline or OCR prompt cannot be loaded.
-        """
-        self._file_path = Path(file_path)
-        self._pdf = pypdfium2.PdfDocument(str(self._file_path))
-        self._pipeline = OpenAIPipeline()
-        self._ocr_prompt = self._pipeline.load_prompt(kw="ocr")
-
-        self._timeout = timeout if timeout is not None else self._DEFAULT_TIMEOUT
-        self._max_retries = max_retries if max_retries is not None else self._DEFAULT_MAX_RETRIES
-        self._max_image_dim = max_image_dimension if max_image_dimension is not None else self._DEFAULT_MAX_IMAGE_DIM
-        self._max_tokens = max_tokens if max_tokens is not None else self._DEFAULT_MAX_TOKENS
-        self._consecutive_page_failures = 0
-        self._disabled = False
-        self.ocr_stats = VisionOCRStats()
-
-        # Build a dedicated OpenAI client with the OCR-specific
-        # timeout / retry settings so we don't block the pipeline for
-        # the full global ``OPENAI_TIMEOUT * (1 + OPENAI_MAX_RETRIES)``
-        # duration on large or slow pages.
-        _oai = load_openai_env()
-        self._vision_client = _OpenAI(
-            api_key=_oai.api_key,
-            base_url=_oai.api_base,
-            timeout=self._timeout,
-            max_retries=self._max_retries,
-        )
-
-    @override
-    def ocr_page(self, page_index: int, *, file_path: Path | None = None) -> list[OCRSpan]:
-        """Render *page_index* to an image and extract text via vision LLM.
-
-        The page is rasterised at 120 DPI, capped to
-        ``max_image_dimension`` pixels, and encoded as JPEG.  If the
-        first attempt times out the engine retries once with the image
-        at half resolution.
-
-        Args:
-            page_index (int): Zero-based page number.
-            file_path (Path | None): Ignored (present for interface compatibility).
-
-        Returns:
-            list[OCRSpan]: List of ``OCRSpan`` items with the extracted text.
-        """
-        spans: list[OCRSpan] = []
-        if self._disabled:
-            self.ocr_stats.pages_skipped += 1
-            logger.debug(
-                "Vision OCR disabled after {} consecutive failures; skipping page {}",
-                self._MAX_CONSECUTIVE_PAGE_FAILURES,
-                page_index,
-            )
-            return spans
-        try:
-            page = self._pdf[page_index]
-            # Render at configured DPI (scale = DPI / 72).
-            bitmap = page.render(scale=self._DEFAULT_RENDER_DPI / 72)
-            base_image = bitmap.to_pil()
-            pil_image = base_image.copy()
-
-            # Down-scale if either dimension exceeds the configured cap.
-            pil_image = self._cap_image(pil_image, self._max_image_dim, page_index)
-
-            # First attempt at configured resolution.
-            img_b64 = self._encode_jpeg(pil_image)
-            logger.debug(
-                "Vision OCR page {} — image {}x{}, payload ~{:.0f} KiB",
-                page_index,
-                pil_image.width,
-                pil_image.height,
-                len(img_b64) * 3 / 4 / 1024,
-            )
-
-            # ``responded`` distinguishes "the model answered, but with
-            # nothing" from "no attempt ever reached the model".  Only the
-            # former is worth a higher-detail retry; escalating after a
-            # transport failure just sends a bigger payload to an endpoint
-            # that already proved too slow.
-            text: str | None = None
-            responded = False
-            # ``reachable`` records whether anything ever answered for this
-            # page. Only a page nothing answered for counts toward the
-            # per-document budget -- an endpoint that returns an error is
-            # present, just unhappy, and the next page is usually fine.
-            reachable = False
-            try:
-                text = self._call_vision_ocr(img_b64)
-                responded = True
-            except VisionOCRError as first_error:
-                reachable = isinstance(first_error, VisionOCRRejected)
-                # On timeout / error, retry once at half resolution. Wait
-                # first: upstream rejections arrive in bursts lasting a few
-                # seconds, and an immediate retry lands inside the same one.
-                half_dim = max(self._max_image_dim // 2, 256)
-                logger.info(
-                    "Vision OCR retrying page {} at reduced resolution (max {}px)",
-                    page_index,
-                    half_dim,
-                )
-                time.sleep(self._RETRY_BACKOFF_SECONDS)
-                pil_image = self._cap_image(pil_image, half_dim, page_index)
-                img_b64 = self._encode_jpeg(pil_image)
-                try:
-                    text = self._call_vision_ocr(img_b64)
-                    responded = True
-                except VisionOCRError as retry_error:  # logged inside _call_vision_ocr
-                    reachable = reachable or isinstance(retry_error, VisionOCRRejected)
-
-            if not responded:
-                self._note_page_failure(page_index, reachable=reachable)
-                return spans
-
-            self._consecutive_page_failures = 0
-
-            # Empty-output recovery pass at a higher detail setting.
-            if not (text and text.strip()):
-                recovery_dim = max(self._max_image_dim, self._EMPTY_RETRY_MAX_IMAGE_DIM)
-                recovery_image = self._cap_image(base_image.copy(), recovery_dim, page_index)
-                if (
-                    recovery_image.size != pil_image.size
-                    or max(recovery_image.width, recovery_image.height) > self._max_image_dim
-                ):
-                    recovery_b64 = self._encode_jpeg(recovery_image)
-                    logger.info(
-                        "Vision OCR returned empty text for page {}; retrying with higher-detail image {}x{}",
-                        page_index,
-                        recovery_image.width,
-                        recovery_image.height,
-                    )
-                    recovery_prompt = (
-                        f"{self._ocr_prompt}\n\n"
-                        "Important: The text may be non-Latin (for example Arabic). "
-                        "Return all visible text exactly as it appears. "
-                        "Do not summarize or translate."
-                    )
-                    # Track the image actually sent before the call, so the
-                    # give-up warning below reports the payload that failed
-                    # rather than the previous attempt's.
-                    pil_image = recovery_image
-                    img_b64 = recovery_b64
-                    try:
-                        text = self._call_vision_ocr(
-                            recovery_b64,
-                            prompt_override=recovery_prompt,
-                        )
-                    except VisionOCRError:
-                        pass  # logged inside _call_vision_ocr
-
-            if text and text.strip():
-                width = float(page.get_width())
-                height = float(page.get_height())
-                spans.append(
-                    OCRSpan(
-                        text=text.strip(),
-                        bbox=BBox(x0=0.0, y0=0.0, x1=width, y1=height),
-                        confidence=0.7,
-                        source="vision_ocr",
-                    )
-                )
-                logger.info(
-                    "Vision OCR produced {} chars for page {}",
-                    len(text.strip()),
-                    page_index,
-                )
-            else:
-                # Answered, but with nothing usable — still a page the reader
-                # will not see, so it belongs in the summary.
-                self.ocr_stats.pages_failed += 1
-                logger.warning(
-                    "Vision OCR returned empty text for page {} (image {}x{}, payload ~{:.0f} KiB)",
-                    page_index,
-                    pil_image.width,
-                    pil_image.height,
-                    len(img_b64) * 3 / 4 / 1024,
-                )
-        except Exception as exc:
-            self.ocr_stats.pages_failed += 1
-            logger.warning("Vision OCR failed for page {}: {}", page_index, exc)
-        return spans
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _note_page_failure(self, page_index: int, *, reachable: bool) -> None:
-        """Record a page that produced no text.
-
-        Only a page that nothing answered for counts toward the per-document
-        budget. That budget exists to stop spending a full timeout per page on
-        an endpoint that never answers; an endpoint returning an error status
-        costs about a second and typically recovers within a few, so it must
-        cost its own page and no more.
-
-        Args:
-            page_index (int): Zero-based number of the page that failed.
-            reachable (bool): Whether the endpoint answered at all for this
-                page, even if only with an error status.
-        """
-        self.ocr_stats.pages_failed += 1
-        if reachable:
-            # Do not reset the consecutive counter: an unreachable endpoint
-            # interleaved with rejections is still unreachable.
-            logger.warning(
-                "Vision OCR endpoint rejected page {}; skipping the page and continuing",
-                page_index,
-            )
-            return
-
-        self._consecutive_page_failures += 1
-        logger.warning(
-            "Vision OCR got no response for page {} ({}/{} consecutive failures)",
-            page_index,
-            self._consecutive_page_failures,
-            self._MAX_CONSECUTIVE_PAGE_FAILURES,
-        )
-        if self._consecutive_page_failures >= self._MAX_CONSECUTIVE_PAGE_FAILURES:
-            self._disabled = True
-            logger.error(
-                "Vision OCR endpoint unresponsive after {} consecutive pages; "
-                "disabling vision OCR for the rest of this document",
-                self._consecutive_page_failures,
-            )
-
-    @staticmethod
-    def _cap_image(
-        pil_image: PILImage.Image,
-        max_dim: int,
-        page_index: int,
-    ) -> PILImage.Image:
-        """Down-scale *pil_image* so neither axis exceeds *max_dim*.
-
-        Args:
-            pil_image (PILImage.Image): The PIL image to be down-scaled.
-            max_dim (int): The maximum allowed dimension for the image.
-            page_index (int): The index of the page being processed.
-
-        Returns:
-            PILImage.Image: The down-scaled PIL image.
-        """
-        cur_max = max(pil_image.width, pil_image.height)
-        if cur_max > max_dim:
-            ratio = max_dim / cur_max
-            new_w = max(int(pil_image.width * ratio), 1)
-            new_h = max(int(pil_image.height * ratio), 1)
-            pil_image = pil_image.resize((new_w, new_h))
-            logger.debug(
-                "Resized OCR image for page {} to {}x{}",
-                page_index,
-                new_w,
-                new_h,
-            )
-        return pil_image
-
-    @classmethod
-    def _encode_jpeg(cls, pil_image: PILImage.Image) -> str:
-        """Encode a PIL image as JPEG and return its base64 representation.
-
-        Args:
-            pil_image (PILImage.Image): The PIL image to be encoded.
-
-        Returns:
-            str: Base64-encoded string of the JPEG image.
-        """
-        buf = BytesIO()
-        # Convert RGBA → RGB before JPEG encoding.
-        if pil_image.mode in ("RGBA", "P"):
-            pil_image = pil_image.convert("RGB")
-        pil_image.save(buf, format="JPEG", quality=cls._JPEG_QUALITY)
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-    def _call_vision_ocr(self, img_b64: str, *, prompt_override: str | None = None) -> str:
-        """Send the base64-encoded image to the vision LLM for OCR.
-
-        Uses the dedicated ``_vision_client`` which has the shorter
-        OCR-specific timeout and retry count, preventing the pipeline from
-        blocking for ``OPENAI_TIMEOUT * (1 + OPENAI_MAX_RETRIES)`` on
-        unresponsive endpoints.
-
-        Args:
-            img_b64 (str): Base64-encoded JPEG image data.
-            prompt_override (str | None): Optional prompt text for this specific OCR call.
-
-        Returns:
-            str: Extracted text string (may be empty).
-
-        Raises:
-            RuntimeError: If the vision inference fails.
-        """
-        vision_model_id = load_model_env().vision_model
-
-        prompt_text = prompt_override or self._ocr_prompt
-        content_parts: list[ChatCompletionContentPartParam] = [
-            {"type": "text", "text": prompt_text},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
-            },
-        ]
-        messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": content_parts}]
-
-        try:
-            request_kwargs: dict[str, object] = {}
-            if self._pipeline.reasoning_effort is not None:
-                request_kwargs["reasoning_effort"] = self._pipeline.reasoning_effort
-
-            response = self._vision_client.chat.completions.create(  # type: ignore[call-overload]
-                model=vision_model_id,
-                messages=messages,
-                max_tokens=self._max_tokens,
-                seed=self._pipeline.seed,
-                temperature=self._pipeline.temperature,
-                top_p=self._pipeline.top_p,
-                **request_kwargs,
-            )
-            raw = response.choices[0].message.content or ""
-            text, captured = strip_reasoning(raw)
-            if captured:
-                logger.debug(
-                    "Stripped {} chars of reasoning from vision OCR response",
-                    len(captured),
-                )
-            if looks_like_no_image_refusal(text):
-                logger.warning("Vision OCR reported no image despite image being attached; treating as empty text")
-                return ""
-            if self._looks_like_refusal(text):
-                logger.warning("Vision OCR returned refusal-style output; treating as empty text")
-                return ""
-            # Degenerate-repetition guard: a form's dotted fill-in line can
-            # lock the model into repeating the fill character until
-            # ``max_tokens`` — observed live as 65392 dots per page, stored
-            # and embedded as real content. A big squeeze also means the
-            # page burned most of its generation budget on filler, which is
-            # worth surfacing.
-            squeezed = squeeze_char_runs(text)
-            if len(squeezed) < len(text) - 1000:
-                logger.warning(
-                    "Vision OCR output was {} chars of repeated filler; squeezed to {} chars",
-                    len(text),
-                    len(squeezed),
-                )
-            return squeezed
-        except APIStatusError as e:
-            # The endpoint answered. Costs this page, not the document.
-            logger.error("Error during vision OCR inference: {}", e)
-            raise VisionOCRRejected(f"Vision OCR inference failed: {e}") from e
-        except (APITimeoutError, APIConnectionError) as e:
-            logger.error("Error during vision OCR inference: {}", e)
-            raise VisionOCRUnreachable(f"Vision OCR inference failed: {e}") from e
-        except Exception as e:
-            # Unclassifiable: treat as unreachable so the per-document budget
-            # still protects against a failure mode we have not seen yet.
-            logger.error("Error during vision OCR inference: {}", e)
-            raise VisionOCRUnreachable(f"Vision OCR inference failed: {e}") from e
-
-    @classmethod
-    def _looks_like_refusal(cls, text: str) -> bool:
-        """Return whether *text* looks like a safety refusal/disclaimer.
-
-        The check is intentionally conservative and only flags short,
-        single-message responses that match common refusal phrases.
-
-        Args:
-            text (str): OCR model output.
-
-        Returns:
-            bool: True when the text appears to be a refusal message.
-        """
-        normalized = " ".join(text.strip().lower().split())
-        if not normalized:
-            return False
-        if len(normalized) > cls._REFUSAL_MAX_CHARS:
-            return False
-        non_empty_lines = [line for line in text.splitlines() if line.strip()]
-        if len(non_empty_lines) > cls._REFUSAL_MAX_LINES:
-            return False
-        return any(pattern.search(normalized) for pattern in cls._REFUSAL_PATTERNS)
-
-    def close(self) -> None:
-        """Release the underlying ``pypdfium2`` document handle."""
-        try:
-            self._pdf.close()
-        except Exception:
-            pass
-
-
 def build_page_text(
     page_info: PageInfo,
     layout_blocks: list[LayoutBlock],
@@ -662,26 +227,20 @@ def extract_text_for_pages(
     pages: list[PageInfo],
     layout: dict[int, list[LayoutBlock]],
     *,
-    vision_engine: OCREngine | None = None,
     parsed: ParsedPdf | None = None,
-    layout_ocr_pages: set[int] | None = None,
 ) -> dict[int, PageText]:
-    """Extract text for all pages, applying OCR fallback where needed.
+    """Extract each page's text from its own text layer.
 
-    When *vision_engine* is provided and the page's own text layer (read
-    through the docling-parse backbone) yields nothing for a page that
-    ``needs_ocr``, the vision engine is tried as a secondary fallback.
+    Pages this cannot answer for — a scan has no text layer — are read by the
+    OCR engine, which the orchestrator drives afterwards: what it returns is a
+    page's *layout*, not a set of spans, so it belongs on the stage that owns
+    the layout.
 
     Args:
         file_path (str | Path): Path to the PDF.
         pages (list[PageInfo]): Page triage results.
         layout (dict[int, list[LayoutBlock]]): Layout blocks per page.
-        vision_engine (OCREngine | None): Optional secondary OCR engine (e.g. ``VisionOCREngine``)
-            used when the text-layer extraction returns nothing.
         parsed (ParsedPdf | None): Open document handle to reuse.
-        layout_ocr_pages (set[int] | None): Pages whose blocks (text included)
-            already came from the layout-OCR model; they take no further OCR
-            and their text is marked as OCR-sourced.
 
     Returns:
         dict[int, PageText]: Mapping of ``page_index`` → ``PageText``.
@@ -689,15 +248,10 @@ def extract_text_for_pages(
     file_path = Path(file_path)
     engine = PdfTextEngine(file_path, parsed=parsed)
     result: dict[int, PageText] = {}
-    ocr_pages = layout_ocr_pages or set()
 
     try:
         for page_info in pages:
-            if page_info.page_index in ocr_pages:
-                blocks = layout.get(page_info.page_index, [])
-                result[page_info.page_index] = build_page_text(page_info, blocks, [], block_source="ocr")
-                continue
-            result[page_info.page_index] = _extract_page_text(file_path, page_info, layout, engine, vision_engine)
+            result[page_info.page_index] = _extract_page_text(file_path, page_info, layout, engine)
     finally:
         engine.close()
 
@@ -709,16 +263,14 @@ def _extract_page_text(
     page_info: PageInfo,
     layout: dict[int, list[LayoutBlock]],
     engine: OCREngine,
-    vision_engine: OCREngine | None,
 ) -> PageText:
-    """Extract one page's text: text layer first, vision OCR as fallback.
+    """Extract one page's text from the text layer.
 
     Args:
         file_path (Path): Path to the PDF.
         page_info (PageInfo): Triage result for the page.
         layout (dict[int, list[LayoutBlock]]): Layout blocks per page.
         engine (OCREngine): Text-layer engine used for ``needs_ocr`` pages.
-        vision_engine (OCREngine | None): Secondary engine when the text layer is empty.
 
     Returns:
         PageText: The page's aggregated text.
@@ -729,21 +281,6 @@ def _extract_page_text(
             ocr_spans = engine.ocr_page(page_info.page_index, file_path=file_path)
         except Exception as exc:
             logger.warning("OCR failed for page {}: {}", page_info.page_index, exc)
-
-        # Vision OCR fallback when the text layer yields nothing.
-        if not ocr_spans and vision_engine is not None:
-            try:
-                logger.info(
-                    "Attempting vision OCR fallback for page {}",
-                    page_info.page_index,
-                )
-                ocr_spans = vision_engine.ocr_page(page_info.page_index, file_path=file_path)
-            except Exception as exc:
-                logger.warning(
-                    "Vision OCR fallback failed for page {}: {}",
-                    page_info.page_index,
-                    exc,
-                )
 
     blocks = layout.get(page_info.page_index, [])
     return build_page_text(page_info, blocks, ocr_spans)
