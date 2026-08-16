@@ -96,10 +96,9 @@ The PDF pipeline is page-level and has its own sub-modules:
 | `documents/triage.py` | Classifies pages as text / scanned / mixed from the text-layer coverage against `PIPELINE_TEXT_COVERAGE_THRESHOLD`. |
 | `documents/layout.py` | Builds layout blocks from the parsed geometry: `FIGURE` per embedded image, `TITLE`/`HEADER` for short lines set larger or bolder than the body text (they become the chunker's `section_path`), `PAGE_HEADER`/`FOOTER`/`PAGE_NUMBER` for page furniture, `TABLE` for a *"Table N:"* caption or an uncaptioned grid, and per-column/section `TEXT` blocks. |
 | `documents/furniture.py` | Finds running heads, footers, page numbers and rotated margin stamps by band position and repetition across pages. Those blocks are kept out of chunk text and page text. |
-| `documents/table_vlm.py` | Recovers the structure of tables the geometry could not: renders the table's region and asks the remote vision model for HTML, expanding `rowspan`/`colspan` into the flat grid. Fail-soft; off with `PIPELINE_TABLE_VLM=false`. |
-| `documents/imaging.py` | Bounding and JPEG-encoding of rendered regions, shared by the OCR and table lanes. |
+
 | `documents/tables.py` | Rebuilds a table's cell grid from cell positions (baselines → rows, whitespace → columns), renders it row-major for the chunk text, and finds tables that carry no caption. |
-| `documents/ocr.py` | Text extraction for pages that need OCR: the page's own text layer first (per-line spans), then — when `PIPELINE_ENABLE_VISION_OCR=true` — the remote vision LLM as the OCR fallback. |
+| `documents/ocr.py` | Text extraction for pages that need OCR: the page's own text layer first (per-line spans), plus the translation of what the OCR engine read back into layout blocks. |
 | `documents/extraction.py` | Collects tables (row-major text + cell grid, written as CSV) and images (the embedded image drawn at each `FIGURE` block, via pypdfium2) into the intermediate pipeline model. |
 | `documents/chunking.py` | Splits the extracted text into coarse parent chunks and fine child chunks. |
 | `documents/artifacts.py` | Persists intermediate artifacts under `PIPELINE_ARTIFACTS_DIR` so reruns are incremental. |
@@ -108,10 +107,34 @@ The PDF pipeline is page-level and has its own sub-modules:
 | `documents/config.py` | Thin re-export of `load_pipeline_config()` from `env_cfg`. |
 | `documents/models.py` | Dataclasses shared by the pipeline stages. |
 
+Two of those stages need pixels read rather than parsed — a page with no text
+layer, and a table whose structure the cell positions could not express. Both
+call the one OCR engine (`docint/core/ocr/`, see below), so they share its
+endpoint and its per-document failure budget.
+
 Tuning lives in [`PipelineConfig`](configuration.md#pipeline--pipelineconfig).
-Key knobs: `PIPELINE_TEXT_COVERAGE_THRESHOLD`,
-`PIPELINE_ENABLE_VISION_OCR`, `PIPELINE_MAX_WORKERS`,
-`PIPELINE_FORCE_REPROCESS`, `PIPELINE_VISION_OCR_*`.
+Key knobs: `PIPELINE_TEXT_COVERAGE_THRESHOLD`, `PIPELINE_OCR_ENABLED`,
+`PIPELINE_MAX_WORKERS`, `PIPELINE_FORCE_REPROCESS`, `PIPELINE_OCR_*`,
+`PIPELINE_TABLE_OCR`.
+
+### Reading pixels — `core/ocr/`
+
+Reading text out of an image is one task, so it has one implementation. A
+scanned page, a table's region and an image file all go through
+`DocumentOcrEngine`, which owns the client, the rendering, the reachable /
+answered-with-an-error distinction and the budget that stops calling a dead
+endpoint. What a given model expects and returns is a *family* behind one
+interface:
+
+| Family | Models | What comes back |
+|---|---|---|
+| `dots` | `dots-studio/dots.mocr`, `rednote-hilab/dots.ocr` | Layout JSON: one element per block with a bounding box, a category (title, section header, text, list item, caption, footnote, formula, table, picture, page header/footer) and its text; tables as HTML, expanded into a cell grid. Pages are rendered on the model's own 28-px grid so its internal resize is a no-op and the boxes map straight home. |
+| `generic` | anything else, incl. plain recognition models and general vision models | Plain text, as one block spanning the image. Half-resolution retry on failure, higher-resolution retry on an empty answer. |
+
+`OCR_MODEL` picks the family and the endpoint (see
+[`OcrClientConfig`](configuration.md#document-ocr--ocrclientconfig)). Unset,
+the general vision model reads pages exactly as it did before, and image OCR
+stays off.
 
 ### Images — `images.py`
 
@@ -121,6 +144,9 @@ ingestion path:
 - Images are hashed and, if `IMAGE_CACHE_BY_HASH=true`, embeddings are
   looked up before recomputation.
 - CLIP (`IMAGE_EMBED_MODEL`) produces the dense vector.
+- When `IMAGE_OCR_ENABLED` is on, the OCR engine reads the text printed
+  inside the image and stores it as `ocr_text` — ahead of the caption in
+  the node text and in the search index, since it is what a reader typed.
 - When `IMAGE_TAGGING_ENABLED=true`, the vision LLM is called to produce
   tags / captions. Images exceeding `IMAGE_TAGGING_MAX_IMAGE_DIM` are
   down-scaled first.

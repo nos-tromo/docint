@@ -25,7 +25,7 @@ from docint.core.readers.documents.models import (
     PageInfo,
     PageText,
 )
-from docint.core.readers.documents.parse import ParsedPdf, order_lines
+from docint.core.readers.documents.parse import ParsedPdf, dehyphenate_join, order_lines
 
 # Page furniture is not part of the page's text (mirrors chunking.py).
 _FURNITURE_BLOCK_TYPES = frozenset(
@@ -53,6 +53,33 @@ _CATEGORY_TO_BLOCK = {
 }
 
 
+def _rejoin_wrapped_words(text: str) -> str:
+    """Rejoin words a line break split, inside one block's text.
+
+    The text-layer path does this per line cell (``parse.dehyphenate_join``);
+    a block read by a model arrives as one string with the same breaks in it,
+    and a query for ``Bundesregierung`` must find the page either way.
+
+    Args:
+        text (str): The block's text as the model returned it.
+
+    Returns:
+        str: The text with wrapped words rejoined.
+    """
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return text
+    out: list[str] = []
+    for line in lines:
+        if out:
+            joined = dehyphenate_join(out[-1], line)
+            if joined is not None:
+                out[-1] = joined
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def blocks_from_ocr(
     page_index: int, blocks: list[OcrBlock], *, keep: list[LayoutBlock] | None = None
 ) -> list[LayoutBlock]:
@@ -78,7 +105,7 @@ def blocks_from_ocr(
         out.append(replace(block, reading_order=order))
 
     for offset, block in enumerate(blocks):
-        text = block.text.strip()
+        text = _rejoin_wrapped_words(block.text.strip())
         block_type = _CATEGORY_TO_BLOCK.get(block.category, BlockType.TEXT)
         if block_type is BlockType.FOOTER and looks_like_page_number(text):
             block_type = BlockType.PAGE_NUMBER

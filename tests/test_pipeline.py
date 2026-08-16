@@ -263,7 +263,7 @@ class TestPipelineConfig:
         assert cfg.ocr_timeout == 240.0
 
     def test_ocr_timeout_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An explicit ``PIPELINE_VISION_OCR_TIMEOUT`` still overrides the inherited value.
+        """An explicit ``PIPELINE_OCR_TIMEOUT`` still overrides the inherited value.
 
         Args:
             monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for env manipulation.
@@ -1383,6 +1383,20 @@ class TestOCR:
         assert all(b.page_index == 3 for b in blocks)
         assert blocks[3].cells == [["Model", "Score"]]
         assert blocks[3].cells_source == "ocr"
+
+    def test_a_word_split_across_lines_is_rejoined(self) -> None:
+        """However the page was read, a wrapped word is one word."""
+        read = [
+            OcrBlock(
+                category=OcrCategory.TEXT,
+                bbox=OcrBox(50, 500, 560, 690),
+                text="Der Bundes-\nregierung wurde berichtet.\nOst-\nWest-Vergleich folgt.",
+            )
+        ]
+        text = blocks_from_ocr(0, read)[0].text
+        assert "Bundesregierung" in text
+        # A capitalised continuation is a real compound, not a wrap.
+        assert "Ost-\nWest-Vergleich" in text
 
     def test_a_footer_that_is_only_a_number_is_a_page_number(self) -> None:
         """The chunker treats the two alike, but the artifact should say which."""

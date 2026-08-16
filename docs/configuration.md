@@ -80,10 +80,30 @@ identifiers, with provider-specific fallbacks.
 | `EMBED_TOKENIZER_REPO` | `BAAI/bge-m3` (ollama / vllm) / `""` (openai) | Hugging Face repository ID of the tokenizer used for offline token counting at ingestion time. Empty string for providers (e.g. `openai`) where the embedding endpoint handles tokenization. Snapshot must be in the HF cache; run `uv run load-models` to populate it. |
 | `SPARSE_MODEL` | `BAAI/bge-m3` | Sparse retrieval model. Same value on every provider — sparse encoding is always a remote call (`RemoteSparseEncoder`), so there is no per-provider default to pick. |
 | `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
-| `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Vision-OCR model. |
+| `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
 | `NER_MODEL` | `gliner-community/gliner_large-v2.5` | GLiNER NER model. |
 | `IMAGE_EMBED_MODEL` | `openai/clip-vit-base-patch32` | Image embedding model (CLIP). |
+
+## Document OCR — `OcrClientConfig`
+
+Loaded by `load_ocr_client_env()`. One endpoint answers every "read this
+image" in docint: scanned PDF pages, table regions, and image files alike
+(`docint/core/ocr/`). Unset, the general vision endpoint is used and image
+OCR stays off, which is exactly the behaviour docint had before this
+existed.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OCR_MODEL` | `""` (unset) | Model id of the document OCR model. Setting it also turns image OCR on by default. A **layout** model (`dots-studio/dots.mocr`, `rednote-hilab/dots.ocr`) returns bounding boxes, categories and tables as HTML; anything else is asked for plain text. |
+| `OCR_API_BASE` | `OPENAI_API_BASE` | Endpoint serving that model — e.g. the vllm-service `ocr` backend via the router. |
+| `OCR_API_KEY` | `OPENAI_API_KEY` | API key for that endpoint. |
+| `OCR_TIMEOUT` | `OPENAI_TIMEOUT` | Client timeout. A page takes a minute or two, not seconds. |
+
+`OCR_MODEL` is the seam a dedicated document-parsing model plugs into
+without a code change. It replaces the `TABLE_VLM_*` knobs, which were a
+stand-in for exactly this: table structure is now recovered by the same
+engine, against the same endpoint, under the same budget.
 
 ## Host endpoints — `HostConfig`
 
@@ -251,39 +271,42 @@ page-level PDF pipeline in `docint/core/readers/documents/`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PIPELINE_VERSION` | `3.1.0` | Semver marker written into pipeline artifacts. |
-| `PIPELINE_TABLE_VLM` | `true` | Re-read tables whose structure the geometric pass could not recover with the vision model. |
-| `PIPELINE_TABLE_VLM_TIMEOUT` | `OPENAI_TIMEOUT` | Per-request timeout for the table-structure lane. |
-| `PIPELINE_TABLE_VLM_MAX_RETRIES` | `1` | Retries per table. |
-| `PIPELINE_TABLE_VLM_MAX_IMAGE_DIM` | `1536` | Max pixel dimension of the rendered table region. |
-| `PIPELINE_TABLE_VLM_MAX_TOKENS` | `4096` | Max tokens the model may generate per table. |
-| `TABLE_VLM_API_BASE` | `OPENAI_API_BASE` | Endpoint for table-structure recovery; point it at a document-parsing model to use one. |
-| `TABLE_VLM_API_KEY` | `OPENAI_API_KEY` | API key for that endpoint. |
-| `TABLE_VLM_MODEL` | `VISION_MODEL` | Model id used for table-structure recovery. |
-| `TABLE_VLM_TIMEOUT` | `OPENAI_TIMEOUT` | Client timeout for that endpoint. |
+| `PIPELINE_VERSION` | `3.4.0` | Semver marker written into pipeline artifacts. |
 | `PIPELINE_TEXT_COVERAGE_THRESHOLD` | `0.01` | Chars-per-area threshold used to classify a page as scanned. |
 | `PIPELINE_MAX_RETRIES` | `2` | Retry budget per page stage. |
 | `PIPELINE_MAX_WORKERS` | `4` | Parallel workers per document. |
 | `PIPELINE_FORCE_REPROCESS` | `false` | Ignore cached artifacts. |
-| `PIPELINE_ENABLE_VISION_OCR` | `true` | Use the vision LLM as an OCR fallback. |
-| `PIPELINE_VISION_OCR_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request timeout for the vision OCR call. Set it only to give OCR a *tighter* budget than the rest of the app — vision models are typically far slower on image input than on text, so a fixed low value cuts every page off mid-flight and surfaces as `Request timed out`. |
-| `PIPELINE_VISION_OCR_MAX_RETRIES` | `1` | Per-call retries. |
-| `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` | `1024` | Max pixel dimension for rendered OCR images. |
-| `PIPELINE_VISION_OCR_MAX_TOKENS` | `4096` | Max tokens the vision LLM may generate per OCR call. |
+| `PIPELINE_OCR_ENABLED` | `true` | Read pages that have no text layer of their own through the OCR engine. |
+| `PIPELINE_OCR_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request timeout for an OCR call. Set it only to give OCR a *tighter* budget than the rest of the app — an OCR model takes a minute or two per page where a chat model takes seconds, so a fixed low value cuts every page off mid-flight and surfaces as `Request timed out`. |
+| `PIPELINE_OCR_MAX_RETRIES` | `1` | SDK retries per call. |
+| `PIPELINE_OCR_MAX_IMAGE_DIM` | `1024` | Longest side of an image sent to a model that reads text only. |
+| `PIPELINE_OCR_MAX_PIXELS` | `2000000` | Pixel budget of a page rendered for a *layout* model. Must match the server's own cap (vllm-service `OCR_MM_PROCESSOR_KWARGS`) — a model that resizes the render itself reports boxes against an image the caller never saw. |
+| `PIPELINE_OCR_MAX_TOKENS` | `4096` | Max tokens the model may generate per call. Raise it for a layout model: a full page of JSON is far longer than a page of text. |
+| `PIPELINE_TABLE_OCR` | `true` | Re-read tables whose structure the geometric pass could not recover. |
+| `PIPELINE_TABLE_OCR_MAX_IMAGE_DIM` | `1536` | Longest side of a rendered table region — larger than a page's, since a table's digits must stay legible. |
 | `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` (via `PathConfig`) | Root dir for pipeline artifacts. |
 
-The vision OCR lane distinguishes two failure modes, because they deserve
-opposite responses. An endpoint that **never answers** (timeout, connection
-refused) would cost a full `PIPELINE_VISION_OCR_TIMEOUT` on every remaining
-page, so after three consecutive such pages the lane is disabled for the rest
-of the document. An endpoint that **answers with an error status** costs about
-a second and typically recovers within a few, so it costs its own page and
-nothing more — a transient upstream burst must not discard a document.
+Both lanes — scanned pages and weak tables — read through the one engine in
+`docint/core/ocr/`, against the endpoint configured by `OCR_*` above, and share
+its per-document failure budget. Which model is configured decides how much
+comes back: a **layout** model (dots.ocr / dots.mocr) returns headings, text,
+tables with cells, figures and page furniture, so a scanned page chunks exactly
+like a digital one; any other model is asked for plain text and yields one block
+per page, which is what this pipeline did before.
 
-Both are reported in the pipeline summary as `pages_ocr_failed` (pages that
-produced no text) and `pages_ocr_skipped` (pages not attempted after the lane
-was disabled). Note that `pages_ocr` counts pages that *needed* OCR, not pages
-that got it — check the other two before concluding a document was fully read.
+The engine distinguishes two failure modes, because they deserve opposite
+responses. An endpoint that **never answers** (timeout, connection refused)
+would cost a full `PIPELINE_OCR_TIMEOUT` on every remaining page, so after three
+consecutive such calls the engine stops calling for the rest of the document. An
+endpoint that **answers with an error status** costs about a second and typically
+recovers within a few, so it costs its own call and nothing more — a transient
+upstream burst must not discard a document.
+
+Outcomes are reported in the pipeline summary as `pages_ocr_read`,
+`pages_ocr_failed` (attempted, produced nothing) and `pages_ocr_skipped` (not
+attempted after the engine gave up). Note that `pages_ocr` counts pages that
+*needed* OCR, not pages that got it — check the other three before concluding a
+document was fully read.
 
 ## Ingestion — `IngestionConfig`
 
@@ -336,6 +359,9 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:264`).
 | `IMAGE_RETRIEVE_TOP_K` | `5` | CLIP candidates the image lane contributes to each query's ranking. |
 | `IMAGE_RERANK_MIN_SCORE` | `0.05` | Minimum reranker relevance score for a retrieved image to surface as a source. |
 | `IMAGE_TAGGING_MAX_IMAGE_DIM` | `1024` | Max dimension for images sent to the vision tagging endpoint. |
+| `IMAGE_OCR_ENABLED` | on when `OCR_MODEL` is set | Read the text *inside* an image (a screenshot, a photographed letter, a slide) and store it as `ocr_text`. |
+| `KEYFRAME_OCR_ENABLED` | `false` | Read video keyframes too. Off by default: a clip contributes many frames and only slides tend to carry text. |
+| `IMAGE_OCR_MAX_IMAGE_DIM` | `1536` | Longest side of an image sent to be read. |
 
 Images retrieve as ordinary sources: `IMAGE_RETRIEVE_TOP_K` CLIP candidates join
 the text hits *before* ranking, so the shared reranker scores both modalities in
@@ -344,6 +370,12 @@ model therefore sees images in its context and can cite them by number.
 `IMAGE_RERANK_MIN_SCORE` then drops the ones that are merely nearest rather than
 relevant — the top-n cut alone cannot protect a sparse collection, where an
 irrelevant image would take a slot for lack of competition.
+
+Captioning and reading are different questions about the same picture, and both
+are asked. The caption says what an image *shows*; `IMAGE_OCR_ENABLED` adds what
+it *says*, stored as `ocr_text` on the image point, put ahead of the caption in
+the node text and in the full-text search index, so a screenshot is findable by
+the words printed in it rather than only through a paraphrase of them.
 
 The floor is applied to the **reranker** score, not to CLIP similarity, because raw
 CLIP cosine is not comparable across queries — measured on a live collection, an
