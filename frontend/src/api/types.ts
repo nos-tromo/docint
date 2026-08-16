@@ -66,6 +66,13 @@ export interface ChatFinalEvent extends ValidationFields {
   retrieval_mode?: string
   /** How many chunks that scope held. */
   scoped_chunk_count?: number
+  /**
+   * Whether the sources went through the reranker. `applied: false` means the
+   * reranker was unreachable and the sources are in raw retrieval order — a
+   * degraded turn the transcript must not present as a normal one. Absent
+   * when no reranker was in the loop (scoped turn, no sources).
+   */
+  rerank?: { applied: boolean; error?: string | null } | null
   /** `true` when this answer came from a corrective retry, not the first attempt. */
   retried?: boolean
   /** The reformulated retrieval query that retry used. */

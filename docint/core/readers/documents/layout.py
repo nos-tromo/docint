@@ -19,6 +19,12 @@ from docint.core.readers.documents.parse import (
     lines_to_text,
     order_lines,
 )
+from docint.core.readers.documents.tables import (
+    build_grid,
+    caption_extent,
+    detect_geometric_tables,
+    grid_to_text,
+)
 
 
 class LayoutAnalyzer(ABC):
@@ -53,6 +59,14 @@ _BOLD_MARKERS = (
     "medi",
 )  # "medi": NimbusRomNo9L-Medi, LaTeX bold Times
 _WORD_RE = re.compile(r"[^\W\d_]{3,}")  # at least one real word (3+ letters)
+# A run of lines is the text inside a figure (an axis of tokens, a word cloud)
+# rather than prose when it is long and made almost entirely of one- or
+# two-word lines. Measured on a real paper: attention-heatmap pages sit at
+# 0.94-1.00 share of such lines with a median line of 3-5 characters; the
+# shortest-lined real prose (an equation-heavy paragraph) at 0.44 and 14.
+_FIGURE_TEXT_MIN_LINES = 15
+_FIGURE_TEXT_MIN_SHORT_SHARE = 0.6
+_FIGURE_TEXT_MAX_MEDIAN_CHARS = 8
 
 
 class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
@@ -65,8 +79,13 @@ class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
       page's body text, or in a bold face at body size. The largest heading
       size on the page is ``TITLE`` (resets the section path downstream), the
       rest ``HEADER`` (nests).
-    * **TABLE** — a *"Table N:"* caption plus the short/tabular lines that
-      follow it (caption heuristic), with the union of those lines' boxes.
+    * **PAGE_HEADER** / **FOOTER** / **PAGE_NUMBER** — page furniture (a
+      running head, a footer, a page number, a rotated margin stamp), detected
+      across the whole document and kept out of body text downstream.
+    * **TABLE** — a *"Table N:"* caption plus the lines that follow it, or an
+      uncaptioned grid found by :func:`~docint.core.readers.documents.tables.detect_geometric_tables`.
+      The block's text is the reconstructed grid rendered row by row, and the
+      grid itself travels on ``LayoutBlock.cells``.
     * **TEXT** — everything else, one block per run of lines between headings
       / tables / column jumps, so each block has a tight bbox and its own text.
 
@@ -121,8 +140,8 @@ class DoclingParseLayoutAnalyzer(LayoutAnalyzer):
                     )
                 )
 
-            # --- Text: headings, tables, prose ---
-            blocks.extend(_build_text_blocks(page, page_index))
+            # --- Text: furniture, headings, tables, prose ---
+            blocks.extend(_build_text_blocks(page, page_index, self._doc.furniture.get(page_index, {})))
 
             # Fallback: if nothing was detected at all, emit an empty TEXT block
             if not blocks:
@@ -178,6 +197,24 @@ def _with_paragraph_breaks(lines: list[TextLine]) -> list[TextLine | None]:
         out.append(ln)
         prev = ln
     return out
+
+
+def _looks_like_figure_text(lines: list[TextLine]) -> bool:
+    """Whether a run of lines is a figure's token axis rather than prose.
+
+    Args:
+        lines (list[TextLine]): The consecutive lines of one would-be TEXT block.
+
+    Returns:
+        bool: True when the run is long and made almost entirely of one- or two-word lines.
+    """
+    texts = [ln.text.strip() for ln in lines if ln.text.strip()]
+    if len(texts) < _FIGURE_TEXT_MIN_LINES:
+        return False
+    short = sum(1 for t in texts if len(t.split()) <= 2)
+    if short < _FIGURE_TEXT_MIN_SHORT_SHARE * len(texts):
+        return False
+    return statistics.median(len(t) for t in texts) <= _FIGURE_TEXT_MAX_MEDIAN_CHARS
 
 
 def _is_bold(font_name: str) -> bool:
@@ -249,6 +286,12 @@ def _classify_headings(lines: list[TextLine], excluded: set[int]) -> dict[int, B
             continue
         if not _WORD_RE.search(text):
             continue
+        # A figure's axis label ("Input-Input Layer5") is short, large and
+        # alone; require a heading to read like one: two words, or one real
+        # word of four letters or more that is not glued to digits.
+        words = text.split()
+        if len(words) < 2 and not re.fullmatch(r"[^\W\d_]{4,}", words[0] if words else ""):
+            continue
         large = ln.font_size >= _HEADING_SIZE_RATIO * body
         bold = _is_bold(ln.font_name) and ln.font_size >= body - 0.5
         if large or bold:
@@ -263,19 +306,35 @@ def _classify_headings(lines: list[TextLine], excluded: set[int]) -> dict[int, B
     }
 
 
-def _build_text_blocks(page: ParsedPage, page_index: int) -> list[LayoutBlock]:
-    """Turn a page's lines into TITLE / HEADER / TABLE / TEXT blocks in reading order.
+def _build_text_blocks(
+    page: ParsedPage,
+    page_index: int,
+    furniture: dict[int, BlockType] | None = None,
+) -> list[LayoutBlock]:
+    """Turn a page's lines into furniture / heading / table / TEXT blocks in reading order.
 
     Args:
         page (ParsedPage): The parsed page.
         page_index (int): Zero-based page number (for block ids).
+        furniture (dict[int, BlockType] | None): Page-furniture classification
+            keyed by index into ``page.lines`` (see
+            :func:`~docint.core.readers.documents.furniture.detect_furniture`).
+            Those lines become their own blocks and take no part in heading,
+            table or prose detection.
 
     Returns:
         list[LayoutBlock]: Blocks in reading order (``reading_order`` unset).
     """
+    # Keyed by object identity: ``order_lines`` reorders the very same
+    # ``TextLine`` objects, and a ``TextLine`` is not hashable (its ``BBox``
+    # is a plain dataclass).
+    furniture_by_id = {id(page.lines[i]): kind for i, kind in (furniture or {}).items() if i < len(page.lines)}
     ordered = order_lines(page.lines)
     if not ordered:
         return []
+    furniture_at: dict[int, BlockType] = {
+        idx: furniture_by_id[id(ln)] for idx, ln in enumerate(ordered) if id(ln) in furniture_by_id
+    }
 
     marked = _with_paragraph_breaks(ordered)
     # Table regions are found on the text view (blank-line markers included),
@@ -290,48 +349,150 @@ def _build_text_blocks(page: ParsedPage, page_index: int) -> list[LayoutBlock]:
             if o is not None:
                 table_lines[o] = table_no
 
-    headings = _classify_headings(ordered, set(table_lines))
+    # Geometric grids define a table's real extent. Where a caption sits just
+    # above one, the caption joins that region (the text heuristic's guess at
+    # where the table ends is only the fallback for grids too irregular to
+    # detect). Regions overlapping an already-claimed caption table are skipped.
+    next_table_no = (max(table_lines.values()) + 1) if table_lines else 0
+    geometry_anchored: set[int] = set()
+    claimed = [
+        _union_bbox([ordered[i] for i in table_lines if table_lines[i] == n]) for n in sorted(set(table_lines.values()))
+    ]
+    for region in detect_geometric_tables(page):
+        member_indices = [
+            i
+            for i, ln in enumerate(ordered)
+            if i not in furniture_at
+            and region.x0 - 1 <= ln.bbox.x0
+            and ln.bbox.x1 <= region.x1 + 1
+            and region.y0 - 1 <= ln.bbox.y0
+            and ln.bbox.y1 <= region.y1 + 1
+        ]
+        if len(member_indices) < 2:
+            continue
+        caption_index = _caption_above(ordered, region)
+        if caption_index is None and any(region.overlaps(box) for box in claimed):
+            continue
+        table_no = table_lines.get(caption_index) if caption_index is not None else None
+        if table_no is None:
+            table_no = next_table_no
+            next_table_no += 1
+        if caption_index is not None:
+            # Re-anchor the caption's table on the detected region: drop the
+            # lines the text heuristic had guessed at, keep the caption.
+            for i in [i for i, n in table_lines.items() if n == table_no and i != caption_index]:
+                del table_lines[i]
+            table_lines[caption_index] = table_no
+        for i in member_indices:
+            table_lines[i] = table_no
+        geometry_anchored.add(table_no)
+
+    # A caption with no detected grid under it is still a table — geometry just
+    # could not validate its structure (multi-level headers, spanning cells,
+    # maths split across runs). Take the extent from the rows below the caption
+    # so at least the rows come out as rows; the text heuristic's guess is the
+    # last resort, for a caption with nothing detectable beneath it at all.
+    for caption_index, caption_line in enumerate(ordered):
+        if not _CAPTION_RE.match(caption_line.text.strip()):
+            continue
+        table_no = table_lines.get(caption_index)
+        if table_no is not None and table_no in geometry_anchored:
+            continue  # a detected grid already defines this table's extent
+        region = caption_extent(page, caption_line.bbox)
+        if region is None:
+            continue
+        if table_no is None:
+            table_no = next_table_no
+            next_table_no += 1
+        else:
+            # Drop what the text heuristic guessed; the geometry below the
+            # caption is the better answer.
+            for i in [i for i, n in table_lines.items() if n == table_no and i != caption_index]:
+                del table_lines[i]
+        table_lines[caption_index] = table_no
+        for i, ln in enumerate(ordered):
+            if i in furniture_at or i in table_lines:
+                continue
+            if (
+                region.x0 - 1 <= ln.bbox.x0
+                and ln.bbox.x1 <= region.x1 + 1
+                and region.y0 - 1 <= ln.bbox.y0
+                and ln.bbox.y1 <= region.y1 + 1
+            ):
+                table_lines[i] = table_no
+
+    headings = _classify_headings(ordered, set(table_lines) | set(furniture_at))
 
     blocks: list[LayoutBlock] = []
     run: list[TextLine] = []
 
-    def _flush_text() -> None:
-        """Emit the accumulated prose lines as one TEXT block."""
-        if run:
-            blocks.append(
-                LayoutBlock(
-                    block_id=f"block-{page_index}-{uuid.uuid4().hex[:8]}",
-                    page_index=page_index,
-                    type=BlockType.TEXT,
-                    bbox=_union_bbox(run),
-                    reading_order=0,
-                    confidence=1.0,
-                    text=lines_to_text(run),
-                )
+    def _emit_run(lines: list[TextLine], *, figure_text: bool) -> None:
+        """Append one TEXT / FIGURE_TEXT block for ``lines``."""
+        if not lines:
+            return
+        blocks.append(
+            LayoutBlock(
+                block_id=f"{'figtext' if figure_text else 'block'}-{page_index}-{uuid.uuid4().hex[:8]}",
+                page_index=page_index,
+                type=BlockType.FIGURE_TEXT if figure_text else BlockType.TEXT,
+                bbox=_union_bbox(lines),
+                reading_order=0,
+                confidence=0.8 if figure_text else 1.0,
+                text=lines_to_text(lines),
             )
-            run.clear()
+        )
 
+    def _flush_text() -> None:
+        """Emit the accumulated lines as one TEXT block — or FIGURE_TEXT when they are a token axis."""
+        if not run:
+            return
+        if _looks_like_figure_text(run):
+            # A figure's caption sits right under its token axis and gets swept
+            # into the same run; it is prose and must stay TEXT.
+            axis = list(run)
+            caption: list[TextLine] = []
+            while axis and len(axis[-1].text.split()) > 4:
+                caption.insert(0, axis.pop())
+            if axis and _looks_like_figure_text(axis):
+                _emit_run(axis, figure_text=True)
+                _emit_run(caption, figure_text=False)
+                run.clear()
+                return
+        _emit_run(list(run), figure_text=False)
+        run.clear()
+
+    emitted_tables: set[int] = set()
     idx = 0
     while idx < len(ordered):
         ln = ordered[idx]
-        if idx in table_lines:
+        if idx in furniture_at:
             _flush_text()
-            table_no = table_lines[idx]
-            members = []
-            while idx < len(ordered) and table_lines.get(idx) == table_no:
-                members.append(ordered[idx])
-                idx += 1
             blocks.append(
                 LayoutBlock(
-                    block_id=f"table-{page_index}-{uuid.uuid4().hex[:8]}",
+                    block_id=f"furniture-{page_index}-{uuid.uuid4().hex[:8]}",
                     page_index=page_index,
-                    type=BlockType.TABLE,
-                    bbox=_union_bbox(members),
+                    type=furniture_at[idx],
+                    bbox=ln.bbox,
                     reading_order=0,
-                    confidence=0.7,
-                    text="\n".join(m.text for m in members),
+                    confidence=0.8,
+                    text=ln.text.strip(),
                 )
             )
+            idx += 1
+            continue
+        if idx in table_lines:
+            table_no = table_lines[idx]
+            if table_no in emitted_tables:
+                idx += 1
+                continue
+            _flush_text()
+            # All lines of this table, not merely the consecutive run: a
+            # caption's own wrapped lines sit between it and the grid it
+            # belongs to, and the two must stay one block.
+            members = [ordered[i] for i in sorted(i for i, n in table_lines.items() if n == table_no)]
+            blocks.append(_table_block(page, page_index, members))
+            emitted_tables.add(table_no)
+            idx += 1
             continue
         if idx in headings:
             _flush_text()
@@ -354,7 +515,86 @@ def _build_text_blocks(page: ParsedPage, page_index: int) -> list[LayoutBlock]:
         run.append(ln)
         idx += 1
     _flush_text()
+    # A heading immediately followed by a figure's token axis is the figure's
+    # own label ("Input-Input Layer5"), not a section heading: demote it so it
+    # neither resets the section path nor stands as a chunk boundary.
+    # A heading sitting directly above a plot's token axis (past any embedded
+    # image) is that plot's label — "Input-Input Layer5" — not a section
+    # heading: demote it. Only the *nearest* heading qualifies; the real
+    # heading further up ("Attention Visualizations") must survive, so a
+    # demoted label never counts as a token axis for the heading above it.
+    axis_ids = {id(b) for b in blocks if b.type == BlockType.FIGURE_TEXT}
+    for index in range(len(blocks) - 1):
+        if blocks[index].type not in (BlockType.TITLE, BlockType.HEADER):
+            continue
+        after = index + 1
+        while after < len(blocks) and blocks[after].type == BlockType.FIGURE:
+            after += 1
+        if after < len(blocks) and id(blocks[after]) in axis_ids:
+            blocks[index].type = BlockType.FIGURE_TEXT
     return blocks
+
+
+def _caption_above(ordered: list[TextLine], region: BBox) -> int | None:
+    """Index of a ``Table N:`` caption line sitting directly above ``region``.
+
+    Args:
+        ordered (list[TextLine]): The page's lines in reading order.
+        region (BBox): A detected table region.
+
+    Returns:
+        int | None: The caption's index, or ``None`` when the region has none.
+    """
+    best: tuple[float, int] | None = None
+    for idx, ln in enumerate(ordered):
+        if not _CAPTION_RE.match(ln.text.strip()):
+            continue
+        distance = ln.bbox.y0 - region.y1
+        height = max(ln.bbox.y1 - ln.bbox.y0, 1.0)
+        # Directly above (or overlapping the region's top edge) and within a
+        # few lines of it.
+        if -height <= distance <= _CAPTION_MAX_GAP_HEIGHTS * height and (best is None or distance < best[0]):
+            best = (distance, idx)
+    return best[1] if best else None
+
+
+def _table_block(page: ParsedPage, page_index: int, members: list[TextLine]) -> LayoutBlock:
+    """Build a TABLE block from the lines making up one table region.
+
+    The grid is rebuilt from the page's *unmerged* cells inside the region, so
+    the block's text reads row by row (``Model | Accuracy | F1``) instead of
+    column by column, which is the order the lines themselves arrive in. A
+    leading caption line is kept above the grid.
+
+    Args:
+        page (ParsedPage): The page the table sits on.
+        page_index (int): Zero-based page number.
+        members (list[TextLine]): Lines belonging to the table, in reading order.
+
+    Returns:
+        LayoutBlock: The TABLE block, with ``cells`` set when a grid was found.
+    """
+    bbox = _union_bbox(members)
+    caption = members[0].text.strip() if members and _CAPTION_RE.match(members[0].text.strip()) else None
+    body_lines = members[1:] if caption else members
+    grid: list[list[str]] = build_grid(page.cells, _union_bbox(body_lines)) if body_lines else []
+    body_text = grid_to_text(grid) if grid else "\n".join(m.text for m in body_lines)
+    text = f"{caption}\n{body_text}".strip() if caption else body_text
+    # A single-column or single-row "grid" is not a recovered structure, only
+    # the rows rendered in order. Keep that text — it is what retrieval needs —
+    # but claim no cell grid, so no one-column CSV is written.
+    if len(grid) < 2 or max((len(row) for row in grid), default=0) < 2:
+        grid = []
+    return LayoutBlock(
+        block_id=f"table-{page_index}-{uuid.uuid4().hex[:8]}",
+        page_index=page_index,
+        type=BlockType.TABLE,
+        bbox=bbox,
+        reading_order=0,
+        confidence=0.7,
+        text=text,
+        cells=grid or None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +602,10 @@ def _build_text_blocks(page: ParsedPage, page_index: int) -> list[LayoutBlock]:
 # ---------------------------------------------------------------------------
 
 _CAPTION_RE = re.compile(r"^Table\s+\d+\s*[:.]", re.IGNORECASE)
+# How far above a detected grid a caption may sit and still belong to it, in
+# multiples of its own line height. Generous: an academic caption often wraps
+# onto three lines and is set off from the table by extra leading.
+_CAPTION_MAX_GAP_HEIGHTS = 8.0
 
 
 def _detect_table_regions(lines: list[str]) -> list[tuple[int, int]]:

@@ -28,7 +28,7 @@ from docling_core.types.doc.page import TextCellUnit
 from docling_parse.pdf_parser import ContentConfig, ContentLevel, DoclingPdfParser
 from loguru import logger
 
-from docint.core.readers.documents.models import BBox
+from docint.core.readers.documents.models import BBox, BlockType
 
 # Radians; anything beyond this is treated as rotated text (a 90-degree stamp is 1.57).
 _ROTATION_TOLERANCE = 0.05
@@ -36,6 +36,9 @@ _ROTATION_TOLERANCE = 0.05
 # (a section number and its title, a word broken into two runs); farther
 # apart they are separate lines (table cells, columns).
 _MERGE_GAP_FONT_SIZES = 1.5
+# Hyphen characters that can end a wrapped word: ASCII, U+2010 HYPHEN,
+# U+00AD SOFT HYPHEN. Dashes (en/em) are punctuation and never join lines.
+_SOFT_HYPHENS = ("-", "\u2010", "\u00ad")
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,9 @@ class ParsedPage:
         height: Page height in points.
         lines: Line cells, top-to-bottom / left-to-right, with horizontally
             adjacent cells on one baseline already merged (see :func:`merge_adjacent`).
+        cells: The same cells *before* merging — table reconstruction needs
+            them, since two adjacent table cells can sit closer than the merge
+            threshold and must not be glued into one.
         images: Embedded bitmaps with placement boxes.
     """
 
@@ -89,6 +95,7 @@ class ParsedPage:
     width: float
     height: float
     lines: list[TextLine] = field(default_factory=list)
+    cells: list[TextLine] = field(default_factory=list)
     images: list[ImagePlacement] = field(default_factory=list)
 
 
@@ -139,6 +146,7 @@ class ParsedPdf:
             ),
         )
         self._pages: dict[int, ParsedPage] = {}
+        self._furniture: dict[int, dict[int, BlockType]] | None = None
 
     @property
     def file_path(self) -> Path:
@@ -182,6 +190,7 @@ class ParsedPdf:
                     rotated=angle > _ROTATION_TOLERANCE,
                 )
             )
+        cells = sorted(lines, key=lambda ln: (-round(ln.bbox.y0, 1), ln.bbox.x0))
         lines = merge_adjacent(lines)
         images = [
             ImagePlacement(index=int(getattr(bmp, "index", idx)), bbox=_rect_to_bbox(bmp.rect))
@@ -192,10 +201,32 @@ class ParsedPdf:
             width=float(raw.dimension.width),
             height=float(raw.dimension.height),
             lines=lines,
+            cells=cells,
             images=images,
         )
         self._pages[page_index] = parsed
         return parsed
+
+    @property
+    def furniture(self) -> dict[int, dict[int, BlockType]]:
+        """Page furniture map, computed once per document.
+
+        Detection is document-level (it needs to see which band lines repeat
+        across pages), while the layout stage runs page by page — so the map is
+        computed on first access and cached here.
+
+        Returns:
+            dict[int, dict[int, BlockType]]: Page index → line index → block type.
+        """
+        cached = self._furniture
+        if cached is None:
+            # Imported here, not at module scope: furniture.py builds on this
+            # module, so a top-level import would be circular.
+            from docint.core.readers.documents.furniture import detect_furniture
+
+            cached = detect_furniture(self)
+            self._furniture = cached
+        return cached
 
     def close(self) -> None:
         """Release the native document handle."""
@@ -204,6 +235,7 @@ class ParsedPdf:
         except Exception as exc:  # pragma: no cover - best effort
             logger.debug("docling-parse unload failed for {}: {}", self._file_path, exc)
         self._pages.clear()
+        self._furniture = None
 
     def __enter__(self) -> ParsedPdf:
         """Enter the context manager."""
@@ -350,11 +382,43 @@ def order_lines(lines: list[TextLine]) -> list[TextLine]:
     return _xy_cut(list(lines), min_gap)
 
 
+def dehyphenate_join(previous: str, following: str) -> str | None:
+    """Return the joined word when a line break splits one word, else ``None``.
+
+    A wrapped word ends its line with a hyphen straight after a letter and
+    continues on the next line with a lowercase letter (``Bundes-`` /
+    ``regierung``). An uppercase or digit continuation is a real compound or a
+    range (``Ost-`` / ``West``, ``1990-`` / ``1995``) and keeps its hyphen, as
+    does a dash used as punctuation (en/em dash) or a line that is only a hyphen.
+
+    Args:
+        previous (str): Text of the line ending in a hyphen.
+        following (str): Text of the next line.
+
+    Returns:
+        str | None: The two lines joined without the hyphen, or ``None`` when
+            they must stay separate.
+    """
+    left = previous.rstrip()
+    right = following.lstrip()
+    if not left or not right or left[-1] not in _SOFT_HYPHENS:
+        return None
+    stem = left[:-1]
+    if not stem or not stem[-1].isalpha():
+        return None
+    if not right[0].isalpha() or not right[0].islower():
+        return None
+    return f"{stem}{right}"
+
+
 def lines_to_text(lines: list[TextLine]) -> str:
     """Join already-ordered lines into page text.
 
     Consecutive lines are separated by a newline; a vertical gap larger than
-    1.5 x the median line height inserts a blank line (paragraph break).
+    1.5 x the median line height inserts a blank line (paragraph break). A word
+    split across two consecutive lines by a hyphen is rejoined
+    (see :func:`dehyphenate_join`), so the embedded and indexed token is the
+    real word rather than its two halves.
 
     Args:
         lines (list[TextLine]): Lines in reading order.
@@ -370,7 +434,15 @@ def lines_to_text(lines: list[TextLine]) -> str:
     for ln in lines:
         if prev is not None:
             gap = prev.bbox.y0 - ln.bbox.y1
-            parts.append("\n\n" if gap > para_gap else "\n")
+            if gap > para_gap:
+                parts.append("\n\n")
+            else:
+                joined = dehyphenate_join(parts[-1], ln.text)
+                if joined is not None:
+                    parts[-1] = joined
+                    prev = ln
+                    continue
+                parts.append("\n")
         parts.append(ln.text)
         prev = ln
     return "".join(parts)

@@ -16,9 +16,19 @@ class BlockType(StrEnum):
     TABLE = "table"
     FIGURE = "figure"
     CAPTION = "caption"
+    # HEADER is a section sub-heading (it nests the chunker's section_path).
+    # Page furniture — the running head repeated on every page, the footer, the
+    # page number, a rotated margin stamp — is PAGE_HEADER / FOOTER /
+    # PAGE_NUMBER and is skipped when building body text.
     HEADER = "header"
+    PAGE_HEADER = "page_header"
     FOOTER = "footer"
     PAGE_NUMBER = "page_number"
+    # The text *inside* a plotted figure — a token axis, a word cloud, tick
+    # labels: dozens of one-word lines. Not prose; kept out of body text like
+    # furniture, since as a bag of tokens it out-scores real passages on any
+    # query that shares a word with it.
+    FIGURE_TEXT = "figure_text"
 
 
 @dataclass
@@ -62,6 +72,11 @@ class LayoutBlock:
     reading_order: int
     confidence: float
     text: str = ""
+    # TABLE blocks only: the reconstructed cell grid (rows of cell texts),
+    # carried through to ``TableResult.cell_grid`` and the CSV artifact, and
+    # where that grid came from ("geometry" or "vlm").
+    cells: list[list[str]] | None = None
+    cells_source: str = "geometry"
 
 
 @dataclass
@@ -111,6 +126,9 @@ class TableResult:
     cell_grid: list[list[str]] | None = None
     confidence: float = 0.0
     csv_path: str | None = None
+    # Where the grid came from: cell geometry, or a vision model re-reading the
+    # rendered region (the only way to see a header spanning several columns).
+    structure_source: str = "geometry"
 
 
 @dataclass
@@ -161,5 +179,9 @@ class DocumentManifest:
     # ``pages_failed=0``.
     pages_ocr_failed: int = 0
     pages_ocr_skipped: int = 0
+    # Table-structure vision lane: tables it recovered, and tables it could not
+    # (those keep their geometric grid).
+    tables_structured: int = 0
+    tables_structure_failed: int = 0
     status: str = "pending"
     error: str | None = None

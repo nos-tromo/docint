@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pdf_fixtures import ImageBox, PageSpec, TextRun, build_pdf, two_column_page
+from pdf_fixtures import (
+    ImageBox,
+    PageSpec,
+    TextRun,
+    build_pdf,
+    irregular_table_page,
+    report_pages,
+    spanning_header_table_page,
+    table_page,
+    two_column_page,
+    word_list_figure_page,
+    wrapped_header_table_page,
+)
 
 from docint.core.readers.documents.artifacts import (
     load_manifest,
@@ -48,6 +61,7 @@ from docint.core.readers.documents.orchestrator import (
     DocumentPipelineOrchestrator,
 )
 from docint.core.readers.documents.parse import ParsedPage, ParsedPdf
+from docint.core.readers.documents.table_vlm import TableVlmStats
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
@@ -198,7 +212,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "3.0.0"
+        assert cfg.pipeline_version == "3.3.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -402,6 +416,58 @@ class TestChunking:
         assert text_units[0].text.startswith("Chapter 1: Introduction")
         # The heading is folded into its section's unit, never emitted alone.
         assert all(u.text.strip() != "Chapter 1: Introduction" for u in units)
+
+    def test_furniture_blocks_never_enter_chunk_text(self) -> None:
+        """PAGE_HEADER / FOOTER / PAGE_NUMBER blocks are skipped by the chunker."""
+
+        def _block(block_id: str, kind: BlockType, text: str, order: int) -> LayoutBlock:
+            return LayoutBlock(
+                block_id=block_id,
+                page_index=0,
+                type=kind,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=order,
+                confidence=1.0,
+                text=text,
+            )
+
+        layout = {
+            0: [
+                _block("ph", BlockType.PAGE_HEADER, "Quarterly Review 2031", 0),
+                _block("b", BlockType.TEXT, "The body sentence that should survive.", 1),
+                _block("ft", BlockType.FOOTER, "Confidential draft", 2),
+                _block("pn", BlockType.PAGE_NUMBER, "7", 3),
+            ]
+        }
+        units = build_coarse_units("doc", layout, {}, [], [])
+
+        assert len(units) == 1
+        assert units[0].text == "The body sentence that should survive."
+        assert units[0].block_ids == ["b"]
+
+    def test_figure_text_blocks_never_enter_chunk_text(self) -> None:
+        """FIGURE_TEXT joins furniture in the chunker's skip set."""
+
+        def _block(block_id: str, kind: BlockType, text: str, order: int) -> LayoutBlock:
+            return LayoutBlock(
+                block_id=block_id,
+                page_index=0,
+                type=kind,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=order,
+                confidence=1.0,
+                text=text,
+            )
+
+        layout = {
+            0: [
+                _block("ft", BlockType.FIGURE_TEXT, "application\nmissing\n<EOS>\nopinion", 0),
+                _block("b", BlockType.TEXT, "The body sentence that should survive.", 1),
+            ]
+        }
+        units = build_coarse_units("doc", layout, {}, [], [])
+        assert len(units) == 1
+        assert units[0].text == "The body sentence that should survive."
 
     def test_header_replaces_previous_header_under_title(self) -> None:
         """Section paths stay title + current header; consecutive HEADERs do not stack."""
@@ -655,6 +721,24 @@ class TestArtifacts:
         path = save_table("doc1", table, tmp_path)
         assert path.exists()
 
+    def test_save_table_writes_a_quoted_csv(self, tmp_path: Path) -> None:
+        """A table with a cell grid is also written as CSV, with proper quoting."""
+        table = TableResult(
+            table_id="table-0-abc",
+            page_index=0,
+            bbox=BBox(x0=0, y0=0, x1=400, y1=100),
+            raw_text="A | B\n1 | 2",
+            cell_grid=[["Name", "Note"], ["Alpha", 'says "hi", loudly']],
+            confidence=0.7,
+        )
+        save_table("doc1", table, tmp_path)
+
+        csv_path = tmp_path / "doc1" / "tables" / "table-0-abc.csv"
+        assert csv_path.exists()
+        rows = list(csv.reader(csv_path.read_text().splitlines()))
+        assert rows == [["Name", "Note"], ["Alpha", 'says "hi", loudly']]
+        assert table.csv_path == str(csv_path)
+
     def test_save_image_metadata(self, tmp_path: Path) -> None:
         """Saved image metadata file should be created on disk."""
         image = ImageResult(
@@ -722,6 +806,25 @@ class TestExtraction:
         assert len(images) == 1
         assert images[0].page_index == 0
         assert images[0].metadata["confidence"] == 0.85
+
+    def test_extract_tables_carries_the_cell_grid(self, tmp_path: Path) -> None:
+        """TableResult.cell_grid is populated from the layout block's cells."""
+        layout = {
+            0: [
+                LayoutBlock(
+                    block_id="tbl1",
+                    page_index=0,
+                    type=BlockType.TABLE,
+                    bbox=BBox(x0=0, y0=0, x1=400, y1=100),
+                    reading_order=0,
+                    confidence=0.7,
+                    text="A | B\n1 | 2",
+                    cells=[["A", "B"], ["1", "2"]],
+                )
+            ]
+        }
+        tables = extract_tables(layout)
+        assert tables[0].cell_grid == [["A", "B"], ["1", "2"]]
 
     def test_extract_images_writes_one_png_per_figure_block(self, tmp_path: Path) -> None:
         """Each FIGURE block gets the embedded image drawn at its bbox, not the page's first image."""
@@ -822,6 +925,63 @@ class TestLayoutAnalysis:
         blocks = self._analyze(tmp_path, spec)
         figs = sorted((b for b in blocks if b.type == BlockType.FIGURE), key=lambda b: b.bbox.x0)
         assert [round(b.bbox.x0) for b in figs] == [50, 300]
+
+    def test_table_block_text_is_row_major(self, tmp_path: Path) -> None:
+        """A gridded table reads row by row, not column by column."""
+        blocks = self._analyze(tmp_path, table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert "Model | Accuracy | F1" in table.text
+        assert "Alpha | 89.3 | 88.1" in table.text
+        assert table.text.index("Alpha") < table.text.index("Accuracy") + len(table.text)
+        assert table.cells is not None
+        assert table.cells[0] == ["Model", "Accuracy", "F1"]
+        assert len(table.cells) == 4
+
+    def test_captioned_table_grid_covers_every_row(self, tmp_path: Path) -> None:
+        """A caption anchors the table the geometry found — not the text heuristic's guess."""
+        blocks = self._analyze(tmp_path, wrapped_header_table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.text.startswith("Table 1: Complexity by layer type")
+        assert table.cells is not None
+        first_column = [row[0] for row in table.cells]
+        assert "Self-Attention" in first_column
+        assert "Convolutional" in first_column
+        assert "O(1)" in table.text
+
+    def test_irregular_captioned_table_still_reads_row_by_row(self, tmp_path: Path) -> None:
+        """A table geometry cannot validate is still a table: its rows stay rows."""
+        blocks = self._analyze(tmp_path, irregular_table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.text.startswith("Table 2: Scores and cost on both corpora")
+        alpha = next(line for line in table.text.splitlines() if line.startswith("Alpha"))
+        assert "23.8" in alpha and "39.2" in alpha
+        beta = next(line for line in table.text.splitlines() if line.startswith("Beta"))
+        assert "24.6" in beta and "41.0" in beta
+        # The caption's own wrapped line is not a table row, and the paragraph
+        # below the table is not part of it.
+        assert "Values are averages" not in table.text
+        assert "ordinary body text" not in table.text
+
+    def test_irregular_table_reports_no_cell_grid(self, tmp_path: Path) -> None:
+        """When the structure was not recovered, no grid is claimed (so no CSV)."""
+        blocks = self._analyze(tmp_path, irregular_table_page())
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.cells is None or all(len(row) >= 2 for row in table.cells)
+
+    def test_prose_below_an_irregular_table_stays_text(self, tmp_path: Path) -> None:
+        """The paragraph under the table is still emitted as body text."""
+        blocks = self._analyze(tmp_path, irregular_table_page())
+        body = " ".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "ordinary body text" in body
+
+    def test_caption_less_table_is_still_a_table_block(self, tmp_path: Path) -> None:
+        """A bare grid with no 'Table N:' caption is detected geometrically."""
+        blocks = self._analyze(tmp_path, table_page(caption=None))
+        table = next(b for b in blocks if b.type == BlockType.TABLE)
+        assert table.cells is not None and table.cells[0] == ["Model", "Accuracy", "F1"]
+        body = " ".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "Following prose paragraph" in body
+        assert "Gamma" not in body
 
     def test_detect_tables_via_caption(self, tmp_path: Path) -> None:
         """A 'Table N:' caption followed by short rows becomes a TABLE block with a tight bbox."""
@@ -925,8 +1085,8 @@ class TestLayoutAnalysis:
         blocks = self._analyze(tmp_path, spec)
         assert all(b.type == BlockType.TEXT for b in blocks)
 
-    def test_rotated_stamp_is_never_a_heading(self, tmp_path: Path) -> None:
-        """A rotated side stamp stays TEXT even though its axis-aligned box is tall."""
+    def test_rotated_stamp_is_furniture_not_a_heading(self, tmp_path: Path) -> None:
+        """A rotated margin stamp is page furniture, never a heading, however tall its box."""
         spec = PageSpec(
             runs=[
                 TextRun("Preprint stamp running up the margin", x=30, y=300, size=12, rotate90=True),
@@ -936,7 +1096,10 @@ class TestLayoutAnalysis:
             ]
         )
         blocks = self._analyze(tmp_path, spec)
-        assert all(b.type == BlockType.TEXT for b in blocks)
+        by_type = {b.type: b.text for b in blocks}
+        assert by_type.get(BlockType.PAGE_HEADER) == "Preprint stamp running up the margin"
+        assert BlockType.TITLE not in by_type and BlockType.HEADER not in by_type
+        assert "stamp" not in by_type.get(BlockType.TEXT, "")
 
     def test_two_letter_fragment_is_not_a_heading(self, tmp_path: Path) -> None:
         """Short symbol-like fragments (math) never become headings."""
@@ -951,7 +1114,55 @@ class TestLayoutAnalysis:
         blocks = self._analyze(tmp_path, spec)
         assert all(b.type == BlockType.TEXT for b in blocks)
 
-    def test_analyze_document_reuses_injected_parsed_document(self, tmp_path: Path) -> None:
+    def test_running_head_footer_and_number_become_furniture_blocks(self, tmp_path: Path) -> None:
+        """Layout emits PAGE_HEADER / FOOTER / PAGE_NUMBER blocks, not TEXT."""
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(build_pdf(report_pages(3)))
+        pages = [PageInfo(page_index=i, has_text_layer=True, text_coverage=1.0, needs_ocr=False) for i in range(3)]
+        layout = analyze_document(pdf, pages)
+
+        by_type = {b.type: b.text for b in layout[1]}
+        assert by_type.get(BlockType.PAGE_HEADER) == "Quarterly Review 2031"
+        assert by_type.get(BlockType.FOOTER) == "Confidential draft"
+        assert by_type.get(BlockType.PAGE_NUMBER) == "2"
+        body = " ".join(b.text for b in layout[1] if b.type == BlockType.TEXT)
+        assert "Body line one of page 2" in body
+        assert "Quarterly Review" not in body and "Confidential" not in body
+
+    def test_word_list_figure_text_is_not_body_text(self, tmp_path: Path) -> None:
+        """A figure's token axis is FIGURE_TEXT — never a TEXT block, never a heading."""
+        blocks = self._analyze(tmp_path, word_list_figure_page())
+        types = [b.type for b in blocks]
+        assert BlockType.FIGURE_TEXT in types
+        # The bag of words is not prose, and its outsized label is not a title.
+        body = " ".join(b.text for b in blocks if b.type == BlockType.TEXT)
+        assert "governments" not in body and "<EOS>" not in body
+        assert all(b.type not in (BlockType.TITLE, BlockType.HEADER) or "Layer5" not in b.text for b in blocks)
+        # The caption survives as ordinary text.
+        assert "Figure 4" in body
+
+    def test_short_lines_of_real_prose_stay_text(self, tmp_path: Path) -> None:
+        """A math-heavy paragraph has many short lines but stays TEXT (measured: 0.44 share, 14 chars)."""
+        runs = [TextRun("Since our model contains no recurrence, we inject position information.", x=60, y=700)]
+        y = 686.0
+        for token in (
+            "PE",
+            "(pos, 2i)",
+            "= sin(pos / 10000",
+            "2i / d",
+            "model",
+            ")",
+            "where pos is the position and i is the dimension.",
+        ):
+            runs.append(TextRun(token, x=60, y=y))
+            y -= 12
+        for i in range(8):
+            runs.append(
+                TextRun(f"Ordinary prose line number {i} carries on with the argument at length.", x=60, y=y - i * 12)
+            )
+        blocks = self._analyze(tmp_path, PageSpec(runs=runs))
+        assert BlockType.FIGURE_TEXT not in [b.type for b in blocks]
+
         """analyze_document() uses the caller's ParsedPdf when given one."""
         pdf = tmp_path / "doc.pdf"
         pdf.write_bytes(build_pdf([two_column_page()]))
@@ -1053,6 +1264,35 @@ class TestOCR:
         assert result.source_mix == "mixed"
         assert "Hello world" in result.full_text
         assert "Additional OCR text" in result.full_text
+
+    def test_furniture_blocks_are_left_out_of_page_text(self) -> None:
+        """build_page_text() ignores furniture blocks when assembling the page text."""
+        page_info = PageInfo(page_index=0, has_text_layer=True, text_coverage=1.0, needs_ocr=False)
+        blocks = [
+            LayoutBlock(
+                block_id="ph",
+                page_index=0,
+                type=BlockType.PAGE_HEADER,
+                bbox=BBox(x0=0, y0=760, x1=612, y1=780),
+                reading_order=0,
+                confidence=0.8,
+                text="Quarterly Review 2031",
+            ),
+            LayoutBlock(
+                block_id="b",
+                page_index=0,
+                type=BlockType.TEXT,
+                bbox=BBox(x0=0, y0=100, x1=612, y1=700),
+                reading_order=1,
+                confidence=1.0,
+                text="The body sentence that should survive.",
+            ),
+        ]
+
+        result = build_page_text(page_info, blocks, [])
+
+        assert result.full_text == "The body sentence that should survive."
+        assert len(result.pdf_text_spans) == 1
 
     def test_pdf_text_engine_emits_one_span_per_line(self, tmp_path: Path) -> None:
         """The digital text engine yields per-line spans with real boxes, in reading order."""
@@ -1992,6 +2232,109 @@ class TestOrchestrator:
 
         assert manifest.status == "failed"
         assert manifest.error
+
+    def test_table_structure_lane_replaces_a_flattened_grid(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """A table geometry flattened is re-read by the vision lane, rows and all."""
+        pdf_file = tmp_path / "spanning.pdf"
+        pdf_file.write_bytes(build_pdf([spanning_header_table_page()]))
+
+        engine = MagicMock()
+        engine.disabled = False
+        engine.stats = TableVlmStats(tables_recovered=1)
+        engine.structure_for.return_value = [
+            ["Model", "Score EN-DE", "Score EN-FR"],
+            ["Alpha", "23.8", "39.2"],
+        ]
+
+        with patch(
+            "docint.core.readers.documents.orchestrator.TableStructureEngine",
+            return_value=engine,
+        ) as engine_cls:
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        engine_cls.assert_called_once()
+        engine.structure_for.assert_called_once()
+        engine.close.assert_called_once()
+        assert manifest.status == "completed"
+        assert manifest.tables_structured == 1
+
+        table = json.loads(
+            next((Path(pipeline_config.artifacts_dir) / manifest.doc_id / "tables").glob("*.json")).read_text()
+        )
+        assert table["cell_grid"][0] == ["Model", "Score EN-DE", "Score EN-FR"]
+        assert table["structure_source"] == "vlm"
+
+        chunks = (Path(pipeline_config.artifacts_dir) / manifest.doc_id / "chunks.jsonl").read_text()
+        assert "Model | Score EN-DE | Score EN-FR" in chunks
+        assert "Table 2: Scores and cost on both corpora" in chunks
+
+    def test_table_structure_lane_is_skipped_for_a_clean_grid(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """A table geometry recovered cleanly costs no vision call."""
+        pdf_file = tmp_path / "clean.pdf"
+        pdf_file.write_bytes(build_pdf([table_page()]))
+
+        with patch("docint.core.readers.documents.orchestrator.TableStructureEngine") as engine_cls:
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        engine_cls.assert_not_called()
+        assert manifest.status == "completed"
+        assert manifest.tables_structured == 0
+
+    def test_table_structure_lane_can_be_switched_off(self, tmp_path: Path) -> None:
+        """With the knob off the lane never runs, however weak the grid."""
+        config = PipelineConfig(
+            text_coverage_threshold=0.01,
+            pipeline_version="test-1.0.0",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            max_retries=1,
+            force_reprocess=True,
+            max_workers=1,
+            enable_vision_ocr=False,
+            vision_ocr_timeout=60.0,
+            vision_ocr_max_retries=1,
+            vision_ocr_max_image_dimension=1024,
+            vision_ocr_max_tokens=4096,
+            enable_table_vlm=False,
+        )
+        pdf_file = tmp_path / "spanning.pdf"
+        pdf_file.write_bytes(build_pdf([spanning_header_table_page()]))
+
+        with patch("docint.core.readers.documents.orchestrator.TableStructureEngine") as engine_cls:
+            manifest = DocumentPipelineOrchestrator(config=config).process(pdf_file)
+
+        engine_cls.assert_not_called()
+        assert manifest.status == "completed"
+
+    def test_table_structure_failure_keeps_the_geometric_grid(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """When the model cannot answer, the table keeps what geometry found."""
+        pdf_file = tmp_path / "spanning.pdf"
+        pdf_file.write_bytes(build_pdf([spanning_header_table_page()]))
+
+        engine = MagicMock()
+        engine.disabled = False
+        engine.stats = TableVlmStats(tables_failed=1)
+        engine.structure_for.return_value = None
+
+        with patch(
+            "docint.core.readers.documents.orchestrator.TableStructureEngine",
+            return_value=engine,
+        ):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        assert manifest.tables_structured == 0
+        assert manifest.tables_structure_failed == 1
+        table = json.loads(
+            next((Path(pipeline_config.artifacts_dir) / manifest.doc_id / "tables").glob("*.json")).read_text()
+        )
+        assert table["structure_source"] == "geometry"
+        assert "Alpha" in table["raw_text"]
 
     def test_retry_logic(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Stages should retry on transient failures."""

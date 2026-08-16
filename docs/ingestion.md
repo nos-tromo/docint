@@ -94,9 +94,13 @@ The PDF pipeline is page-level and has its own sub-modules:
 |---|---|
 | `documents/parse.py` | The docling-parse backbone: opens the PDF once per document and exposes each page's line cells (text, bbox, font name/size) and embedded-image placements; computes reading order with a recursive XY-cut so multi-column pages read column by column. No models, no network. |
 | `documents/triage.py` | Classifies pages as text / scanned / mixed from the text-layer coverage against `PIPELINE_TEXT_COVERAGE_THRESHOLD`. |
-| `documents/layout.py` | Builds layout blocks from the parsed geometry: `FIGURE` per embedded image, `TITLE`/`HEADER` for short lines set larger or bolder than the body text (they become the chunker's `section_path`), `TABLE` for a *"Table N:"* caption plus its rows, and per-column/section `TEXT` blocks. |
+| `documents/layout.py` | Builds layout blocks from the parsed geometry: `FIGURE` per embedded image, `TITLE`/`HEADER` for short lines set larger or bolder than the body text (they become the chunker's `section_path`), `PAGE_HEADER`/`FOOTER`/`PAGE_NUMBER` for page furniture, `TABLE` for a *"Table N:"* caption or an uncaptioned grid, and per-column/section `TEXT` blocks. |
+| `documents/furniture.py` | Finds running heads, footers, page numbers and rotated margin stamps by band position and repetition across pages. Those blocks are kept out of chunk text and page text. |
+| `documents/table_vlm.py` | Recovers the structure of tables the geometry could not: renders the table's region and asks the remote vision model for HTML, expanding `rowspan`/`colspan` into the flat grid. Fail-soft; off with `PIPELINE_TABLE_VLM=false`. |
+| `documents/imaging.py` | Bounding and JPEG-encoding of rendered regions, shared by the OCR and table lanes. |
+| `documents/tables.py` | Rebuilds a table's cell grid from cell positions (baselines → rows, whitespace → columns), renders it row-major for the chunk text, and finds tables that carry no caption. |
 | `documents/ocr.py` | Text extraction for pages that need OCR: the page's own text layer first (per-line spans), then — when `PIPELINE_ENABLE_VISION_OCR=true` — the remote vision LLM as the OCR fallback. |
-| `documents/extraction.py` | Collects tables (raw text) and images (the embedded image drawn at each `FIGURE` block, via pypdfium2) into the intermediate pipeline model. |
+| `documents/extraction.py` | Collects tables (row-major text + cell grid, written as CSV) and images (the embedded image drawn at each `FIGURE` block, via pypdfium2) into the intermediate pipeline model. |
 | `documents/chunking.py` | Splits the extracted text into coarse parent chunks and fine child chunks. |
 | `documents/artifacts.py` | Persists intermediate artifacts under `PIPELINE_ARTIFACTS_DIR` so reruns are incremental. |
 | `documents/orchestrator.py` | Glues the stages above into a single per-document run. |

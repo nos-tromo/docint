@@ -46,6 +46,19 @@ function retryQuery(turn: ChatTurnData): string | undefined {
   return turn.retryQuery ?? turn.meta?.retry_query
 }
 
+/**
+ * Whether the server reported that this turn's sources were *not* re-ranked.
+ *
+ * The reranker degrades silently by design (a transport failure returns the
+ * raw retrieval order rather than failing the turn). Measured on a live stack,
+ * that let a day-long outage ship every answer's top-5 by fusion order with
+ * nothing on screen to tell it apart from a healthy turn.
+ */
+function rerankWasSkipped(turn: ChatTurnData): boolean {
+  if (!turn.done || !turn.meta?.rerank) return false
+  return turn.meta.rerank.applied === false
+}
+
 function scopeWasDropped(turn: ChatTurnData): boolean {
   if (!turn.done || !turn.scopeRequested || !turn.meta) return false
   return turn.meta.retrieval_mode !== 'scoped'
@@ -158,6 +171,16 @@ export function ChatTurn({
           >
             <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
             {t('chat.scope_not_applied', { count: turn.scopeRequested ?? 0 })}
+          </div>
+        )}
+        {rerankWasSkipped(turn) && (
+          <div
+            className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
+            data-testid="rerank-not-applied"
+            role="alert"
+          >
+            <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
+            {t('chat.rerank_not_applied')}
           </div>
         )}
         {turn.meta && <ValidationBanner v={turn.meta} />}

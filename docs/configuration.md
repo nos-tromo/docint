@@ -251,7 +251,16 @@ page-level PDF pipeline in `docint/core/readers/documents/`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PIPELINE_VERSION` | `3.0.0` | Semver marker written into pipeline artifacts. |
+| `PIPELINE_VERSION` | `3.1.0` | Semver marker written into pipeline artifacts. |
+| `PIPELINE_TABLE_VLM` | `true` | Re-read tables whose structure the geometric pass could not recover with the vision model. |
+| `PIPELINE_TABLE_VLM_TIMEOUT` | `OPENAI_TIMEOUT` | Per-request timeout for the table-structure lane. |
+| `PIPELINE_TABLE_VLM_MAX_RETRIES` | `1` | Retries per table. |
+| `PIPELINE_TABLE_VLM_MAX_IMAGE_DIM` | `1536` | Max pixel dimension of the rendered table region. |
+| `PIPELINE_TABLE_VLM_MAX_TOKENS` | `4096` | Max tokens the model may generate per table. |
+| `TABLE_VLM_API_BASE` | `OPENAI_API_BASE` | Endpoint for table-structure recovery; point it at a document-parsing model to use one. |
+| `TABLE_VLM_API_KEY` | `OPENAI_API_KEY` | API key for that endpoint. |
+| `TABLE_VLM_MODEL` | `VISION_MODEL` | Model id used for table-structure recovery. |
+| `TABLE_VLM_TIMEOUT` | `OPENAI_TIMEOUT` | Client timeout for that endpoint. |
 | `PIPELINE_TEXT_COVERAGE_THRESHOLD` | `0.01` | Chars-per-area threshold used to classify a page as scanned. |
 | `PIPELINE_MAX_RETRIES` | `2` | Retry budget per page stage. |
 | `PIPELINE_MAX_WORKERS` | `4` | Parallel workers per document. |

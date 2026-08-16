@@ -27,9 +27,9 @@ def extract_tables(
 ) -> list[TableResult]:
     """Extract table regions from layout blocks.
 
-    For each ``TABLE`` block the raw text and bounding box are captured.
-    Structure-level cell grids are populated when the layout backend
-    provides them; otherwise only the text is stored (best-effort).
+    For each ``TABLE`` block the row-major text, the bounding box and the
+    reconstructed cell grid are captured (the grid is ``None`` when the region
+    was too irregular to rebuild, in which case only the text is stored).
 
     Args:
         layout (dict[int, list[LayoutBlock]]): Mapping of page index → list of ``LayoutBlock``.
@@ -49,7 +49,9 @@ def extract_tables(
                     page_index=page_idx,
                     bbox=block.bbox,
                     raw_text=block.text,
+                    cell_grid=block.cells,
                     confidence=block.confidence,
+                    structure_source=block.cells_source,
                 )
             )
     logger.info("Extracted {} tables from layout blocks", len(tables))

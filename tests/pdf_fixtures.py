@@ -163,3 +163,265 @@ def two_column_page() -> PageSpec:
     for i in range(3):
         runs.append(TextRun(f"Right column line {i + 1}", x=330, y=700 - 14 * i))
     return PageSpec(runs=runs)
+
+
+def report_pages(count: int = 3, *, running_head: str = "Quarterly Review 2031") -> list[PageSpec]:
+    """A multi-page document with a running head, a footer and page numbers.
+
+    Each page carries the same head and footer text plus its own page number,
+    with a few lines of body prose in between.
+
+    Args:
+        count: Number of pages.
+        running_head: Text repeated at the top of every page.
+
+    Returns:
+        list[PageSpec]: One spec per page.
+    """
+    pages: list[PageSpec] = []
+    for page_no in range(1, count + 1):
+        runs = [
+            TextRun(running_head, x=60, y=760, size=9),
+            TextRun(f"Body line one of page {page_no} with enough words to read as prose.", x=60, y=700),
+            TextRun(f"Body line two of page {page_no} continuing the same paragraph here.", x=60, y=686),
+            TextRun(f"Body line three of page {page_no} rounding the paragraph off nicely.", x=60, y=672),
+            TextRun("Confidential draft", x=60, y=40, size=8),
+            TextRun(str(page_no), x=300, y=26, size=9),
+        ]
+        pages.append(PageSpec(runs=runs))
+    return pages
+
+
+TABLE_ROWS: tuple[tuple[str, ...], ...] = (
+    ("Model", "Accuracy", "F1"),
+    ("Alpha", "89.3", "88.1"),
+    ("Beta", "91.0", "90.5"),
+    ("Gamma", "87.2", "86.4"),
+)
+
+
+def table_page(*, caption: str | None = "Table 1: Results summary") -> PageSpec:
+    """A page holding a column-aligned table, optionally captioned.
+
+    Args:
+        caption: Caption line above the table, or ``None`` for a bare grid.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs: list[TextRun] = []
+    top = 700.0
+    if caption is not None:
+        runs.append(TextRun(caption, x=60, y=top))
+        top -= 20
+    for row, values in enumerate(TABLE_ROWS):
+        for col, text in enumerate(values):
+            runs.append(TextRun(text, x=60 + col * 120, y=top - row * 14))
+    runs.append(TextRun("Following prose paragraph that is clearly not part of the table.", x=60, y=560))
+    return PageSpec(runs=runs)
+
+
+def wrapped_header_table_page(*, caption: str | None = "Table 1: Complexity by layer type") -> PageSpec:
+    """A table whose second header cell wraps onto a second line.
+
+    Mirrors a common academic-table shape: a column heading too long for its
+    column, so it occupies two lines while the other columns occupy one.
+
+    Args:
+        caption: Caption line above the table, or ``None``.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs: list[TextRun] = []
+    top = 700.0
+    if caption is not None:
+        runs.append(TextRun(caption, x=60, y=top))
+        top -= 24
+    runs.append(TextRun("Layer Type", x=60, y=top))
+    runs.append(TextRun("Complexity", x=240, y=top))
+    runs.append(TextRun("Path Length", x=400, y=top))
+    runs.append(TextRun("per Layer", x=240, y=top - 12))  # wrapped header cell
+    body = [
+        ("Self-Attention", "O(n2 d)", "O(1)"),
+        ("Recurrent", "O(n d2)", "O(n)"),
+        ("Convolutional", "O(k n d2)", "O(1)"),
+    ]
+    for row, values in enumerate(body):
+        y = top - 30 - row * 14
+        for col, (text, x) in enumerate(zip(values, (60, 240, 400), strict=True)):
+            runs.append(TextRun(text, x=x, y=y))
+            del col
+    return PageSpec(runs=runs)
+
+
+def irregular_table_page() -> PageSpec:
+    """A captioned table whose structure cannot be recovered as a clean grid.
+
+    Mirrors the academic tables that defeat geometric validation: the caption
+    wraps onto a second line of prose, the header has two levels (a group
+    heading spanning two sub-columns), one data cell is split into several runs
+    the way mathematical notation is, and one row has a missing cell. The rows
+    are still rows, so the text must come out row by row.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs = [
+        TextRun("Table 2: Scores and cost on both corpora", x=60, y=700),
+        TextRun("Values are averages over three runs; lower cost is better.", x=60, y=688),
+        # Two-level header: a group heading over two sub-columns.
+        TextRun("Score", x=250, y=660),
+        TextRun("Cost", x=420, y=660),
+        TextRun("Model", x=60, y=646),
+        TextRun("EN-DE", x=230, y=646),
+        TextRun("EN-FR", x=310, y=646),
+        TextRun("EN-DE", x=400, y=646),
+        TextRun("EN-FR", x=470, y=646),
+        # Data rows: one with a math-style split cell, one missing a value.
+        TextRun("Alpha", x=60, y=628),
+        TextRun("23.8", x=230, y=628),
+        TextRun("39.2", x=310, y=628),
+        TextRun("2", x=400, y=628),
+        TextRun(". 3", x=410, y=630),
+        TextRun("10", x=424, y=628),
+        TextRun("19", x=438, y=632),
+        TextRun("1.4", x=470, y=628),
+        TextRun("Beta", x=60, y=614),
+        TextRun("24.6", x=230, y=614),
+        TextRun("41.0", x=310, y=614),
+        TextRun("9.6", x=470, y=614),
+        TextRun("Gamma", x=60, y=600),
+        TextRun("26.4", x=230, y=600),
+        TextRun("41.8", x=310, y=600),
+        TextRun("3.3", x=400, y=600),
+        TextRun("9.8", x=470, y=600),
+        # Prose well below the table.
+        TextRun("The following paragraph is ordinary body text, far below the table.", x=60, y=520),
+    ]
+    return PageSpec(runs=runs)
+
+
+def math_caption_table_page() -> PageSpec:
+    """A captioned table whose caption wraps into a line broken up by inline maths.
+
+    Mirrors the academic pattern where the caption's second line reads
+    "for different layer types. n is the sequence length, d is ..." — the
+    italic symbols split it into many short runs, so it does not look like
+    prose cell by cell, yet it is prose and must not join the table.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs = [
+        TextRun("Table 1: Maximum path lengths and per-layer complexity", x=60, y=700),
+        # Caption continuation, chopped up by inline maths symbols.
+        TextRun("for different layer types.", x=60, y=688),
+        TextRun("n", x=210, y=688),
+        TextRun("is the sequence length and", x=230, y=688),
+        TextRun("d", x=385, y=688),
+        TextRun("the dimension.", x=405, y=688),
+        # The table itself.
+        TextRun("Layer Type", x=80, y=660),
+        TextRun("Complexity", x=250, y=660),
+        TextRun("Path Length", x=400, y=660),
+        TextRun("Self-Attention", x=80, y=646),
+        TextRun("O(n2 d)", x=250, y=646),
+        TextRun("O(1)", x=400, y=646),
+        TextRun("Recurrent", x=80, y=632),
+        TextRun("O(n d2)", x=250, y=632),
+        TextRun("O(n)", x=400, y=632),
+        TextRun("Convolutional", x=80, y=618),
+        TextRun("O(k n d2)", x=250, y=618),
+        TextRun("O(1)", x=400, y=618),
+    ]
+    return PageSpec(runs=runs)
+
+
+def spanning_header_table_page() -> PageSpec:
+    """A captioned table whose two-level header geometry cannot express.
+
+    Mirrors the shape that defeats cell geometry in real papers: group headings
+    (``Score``, ``Cost``) sit over two sub-columns each, and most rows fill only
+    some of those sub-columns. The reconstructed grid is therefore full of holes
+    — which is exactly what marks it as needing a second opinion from a model
+    that can see the spans.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    runs = [
+        TextRun("Table 2: Scores and cost on both corpora", x=60, y=700),
+        # Group headings, each over two sub-columns.
+        TextRun("Score", x=250, y=660),
+        TextRun("Cost", x=420, y=660),
+        TextRun("Model", x=60, y=646),
+        TextRun("EN-DE", x=230, y=646),
+        TextRun("EN-FR", x=310, y=646),
+        TextRun("EN-DE", x=400, y=646),
+        TextRun("EN-FR", x=470, y=646),
+    ]
+    # Sparse data rows: most report only one or two of the four metrics.
+    rows: list[tuple[str, str, str, str, str]] = [
+        ("Alpha", "23.8", "", "", ""),
+        ("Beta", "", "39.2", "", "1.0"),
+        ("Gamma", "24.6", "39.9", "2.3", "1.4"),
+        ("Delta", "25.1", "", "", ""),
+        ("Epsilon", "26.0", "40.5", "", ""),
+    ]
+    for index, (label, de_score, fr_score, de_cost, fr_cost) in enumerate(rows):
+        y = 628 - index * 14
+        runs.append(TextRun(label, x=60, y=y))
+        for text, x in ((de_score, 230), (fr_score, 310), (de_cost, 400), (fr_cost, 470)):
+            if text:
+                runs.append(TextRun(text, x=x, y=y))
+    runs.append(TextRun("The following paragraph is ordinary body text, far below the table.", x=60, y=520))
+    return PageSpec(runs=runs)
+
+
+def word_list_figure_page() -> PageSpec:
+    """A page whose text is the token axis of a plotted figure, not prose.
+
+    Mirrors an attention-heatmap or word-cloud figure: dozens of single words
+    laid out along an axis, one per line, plus a caption. Retrieval-wise this
+    is a bag of tokens that scores high on any query sharing a word with it.
+
+    Returns:
+        PageSpec: The page specification.
+    """
+    words = [
+        "application",
+        "missing",
+        "opinion",
+        "perfect",
+        "should",
+        "never",
+        "what",
+        "Law",
+        "The",
+        "just",
+        "this",
+        "are",
+        "will",
+        "but",
+        "my",
+        "we",
+        "be",
+        "its",
+        "in",
+        "is",
+        "governments",
+        "registration",
+        "American",
+        "majority",
+        "process",
+        "since",
+        "then",
+    ]
+    runs = [TextRun("Input-Input Layer5", x=60, y=740, size=14)]
+    for i, word in enumerate(words):
+        runs.append(TextRun(word, x=80, y=700 - i * 12, size=8))
+    runs.append(
+        TextRun("Figure 4: Two attention heads, also in layer 5 of 6, involved in anaphora resolution.", x=60, y=340)
+    )
+    return PageSpec(runs=runs)

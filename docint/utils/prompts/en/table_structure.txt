@@ -1,0 +1,11 @@
+You are reading one table from a document image.
+
+Return the table as a single HTML table.
+- Output only the `<table>` element. No explanation, no code fence, no other text.
+- Use `<tr>` for every row and `<td>` for every cell; use `<th>` for header cells.
+- Where a header or cell covers several columns or rows, say so with `colspan` or `rowspan`.
+- Transcribe the cell contents exactly as printed, in the original language and script.
+- Write symbols and mathematical notation as plain text (`d_model`, `3.3 x 10^18`), never as LaTeX markup.
+- Keep empty cells as empty cells (`<td></td>`); do not shift values into them.
+- Do not include the table's caption, footnotes, or surrounding prose.
+- If the image contains no table, return nothing.

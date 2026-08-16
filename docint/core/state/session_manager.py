@@ -543,6 +543,7 @@ class SessionManager:
             "retrieval_query": normalized.get("retrieval_query"),
             "coverage_unit": normalized.get("coverage_unit"),
             "retrieval_mode": normalized.get("retrieval_mode"),
+            "rerank": normalized.get("rerank"),
             "turn_idx": turn_idx,
         }
         if scoped_node_ids:

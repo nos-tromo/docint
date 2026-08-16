@@ -108,6 +108,37 @@ describe('ChatTurn', () => {
     expect(screen.getByTestId('scope-not-applied')).toBeInTheDocument()
   })
 
+  it('flags a turn whose sources were not re-ranked', () => {
+    // Measured on a live stack: the reranker had been down for a day and every
+    // answer shipped its top-5 by raw fusion order, indistinguishable from a
+    // healthy turn. The final frame now says so; the transcript must show it.
+    const meta = {
+      session_id: 's',
+      sources: [{ id: 1 }],
+      retrieval_mode: 'rewrite_compact',
+      rerank: { applied: false, error: 'upstream down' }
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta })
+
+    expect(screen.getByTestId('rerank-not-applied')).toBeInTheDocument()
+  })
+
+  it('stays quiet when the sources were re-ranked, or no reranker was in the loop', () => {
+    const healthy = {
+      session_id: 's',
+      sources: [{ id: 1 }],
+      retrieval_mode: 'rewrite_compact',
+      rerank: { applied: true, error: null }
+    } as unknown as ChatFinalEvent
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta: healthy })
+    expect(screen.queryByTestId('rerank-not-applied')).not.toBeInTheDocument()
+
+    const absent = { session_id: 's', sources: [], retrieval_mode: 'scoped' } as unknown as ChatFinalEvent
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta: absent })
+    expect(screen.queryByTestId('rerank-not-applied')).not.toBeInTheDocument()
+  })
+
   it('names the corrective retry a reloaded session replays', () => {
     // The live retry frame is long gone by then; the provenance has to come
     // off the persisted turn or a reloaded transcript would present a second

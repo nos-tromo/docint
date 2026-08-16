@@ -1,0 +1,11 @@
+Du liest eine Tabelle aus einem Dokumentbild.
+
+Gib die Tabelle als eine einzige HTML-Tabelle zurück.
+- Gib nur das `<table>`-Element aus. Keine Erklärung, kein Code-Block, kein weiterer Text.
+- Verwende `<tr>` für jede Zeile und `<td>` für jede Zelle; `<th>` für Kopfzellen.
+- Wenn eine Kopfzeile oder Zelle mehrere Spalten oder Zeilen umfasst, gib das mit `colspan` bzw. `rowspan` an.
+- Übertrage die Zellinhalte exakt wie gedruckt, in der ursprünglichen Sprache und Schrift.
+- Schreibe Symbole und mathematische Notation als reinen Text (`d_model`, `3.3 x 10^18`), niemals als LaTeX-Markup.
+- Leere Zellen bleiben leer (`<td></td>`); verschiebe keine Werte in sie hinein.
+- Übernimm weder die Tabellenunterschrift noch Fußnoten oder umgebenden Fließtext.
+- Enthält das Bild keine Tabelle, gib nichts zurück.
