@@ -9,7 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
@@ -220,8 +220,14 @@ def _make_png_bytes(color: tuple[int, int, int] = (120, 10, 10)) -> bytes:
     return buffer.getvalue()
 
 
-def _build_service() -> tuple[ImageIngestionService, FakeQdrantClient, FakeVectorStore]:
+def _build_service(
+    *, ocr_enabled: bool = False, keyframe_ocr_enabled: bool = False
+) -> tuple[ImageIngestionService, FakeQdrantClient, FakeVectorStore]:
     """Construct an ``ImageIngestionService`` wired to fake backends.
+
+    Args:
+        ocr_enabled (bool): Whether the text inside an image is read.
+        keyframe_ocr_enabled (bool): Whether video keyframes are read too.
 
     Returns:
         A tuple of (service, fake Qdrant client, fake vector store).
@@ -236,6 +242,8 @@ def _build_service() -> tuple[ImageIngestionService, FakeQdrantClient, FakeVecto
         fail_on_embedding_error=False,
         fail_on_tagging_error=False,
         retrieve_top_k=5,
+        ocr_enabled=ocr_enabled,
+        keyframe_ocr_enabled=keyframe_ocr_enabled,
     )
     model_cfg = SimpleNamespace(image_embed_model="openai/clip-vit-base-patch32")
     client = FakeQdrantClient()
@@ -799,3 +807,126 @@ def test_query_similar_images_by_text_propagates_the_node_id() -> None:
     matches = service.query_similar_images_by_text("a query", top_k=1, source_collection="coll")
 
     assert matches[0]["node_id"] == "0298c8c6-aaab-559b-bd58-2bb428b853b2"
+
+
+# ---------------------------------------------------------------------------
+# Reading the text inside an image
+# ---------------------------------------------------------------------------
+
+
+def _ocr_engine(text: str) -> Any:
+    """An OCR engine stand-in that reads one block of *text* from any image."""
+    engine = MagicMock()
+    blocks: list[SimpleNamespace] = [SimpleNamespace(text=text, category="text", bbox=None, cells=None)] if text else []
+    engine.read_image.return_value = blocks
+    return engine
+
+
+def test_the_words_inside_an_image_are_read_and_stored() -> None:
+    """A screenshot's own words are what a reader searched for, so they are kept."""
+    service, _, _ = _build_service(ocr_enabled=True)
+    engine = _ocr_engine("INVOICE 2031-0042\nTotal due: 1.240,00")
+
+    with patch("docint.core.ingest.images_service.build_engine", return_value=engine):
+        record = service.ingest_image(
+            ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+            context=IngestContext(source_collection="docs"),
+        )
+
+    assert record.status == "stored"
+    assert record.ocr_text.startswith("INVOICE 2031-0042")
+    assert record.payload["ocr_text"].startswith("INVOICE 2031-0042")
+    engine.read_image.assert_called_once()
+
+
+def test_the_read_words_come_before_the_caption_in_the_node_text() -> None:
+    """The caption paraphrases; the words are the thing itself."""
+    service, _, vector_store = _build_service(ocr_enabled=True)
+
+    with patch("docint.core.ingest.images_service.build_engine", return_value=_ocr_engine("INVOICE 2031-0042")):
+        service.ingest_image(
+            ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+            context=IngestContext(source_collection="docs"),
+        )
+
+    text = vector_store.add_calls[0][0].text
+    assert text.index("INVOICE 2031-0042") < text.index("Tags:")
+    assert text.startswith("INVOICE 2031-0042")
+
+
+def test_an_image_is_not_read_when_the_lane_is_off() -> None:
+    """An unchanged stack pays no OCR call per image."""
+    service, _, _ = _build_service(ocr_enabled=False)
+
+    with patch("docint.core.ingest.images_service.build_engine") as build:
+        record = service.ingest_image(
+            ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+            context=IngestContext(source_collection="docs"),
+        )
+
+    build.assert_not_called()
+    assert record.ocr_text == ""
+    assert record.payload["ocr_text"] == ""
+
+
+def test_an_unreadable_image_still_stores_its_caption() -> None:
+    """Most images carry no text at all; that is not a failed ingestion."""
+    service, _, _ = _build_service(ocr_enabled=True)
+    engine = MagicMock()
+    engine.read_image.side_effect = RuntimeError("endpoint down")
+
+    with patch("docint.core.ingest.images_service.build_engine", return_value=engine):
+        record = service.ingest_image(
+            ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+            context=IngestContext(source_collection="docs"),
+        )
+
+    assert record.status == "stored"
+    assert record.ocr_text == ""
+    assert record.llm_description
+
+
+def test_one_engine_serves_every_image_of_a_batch() -> None:
+    """Building a client per image would cost more than the reads do."""
+    service, _, _ = _build_service(ocr_enabled=True)
+
+    with patch("docint.core.ingest.images_service.build_engine", return_value=_ocr_engine("A")) as build:
+        for colour in ((10, 20, 30), (40, 50, 60), (70, 80, 90)):
+            service.ingest_image(
+                ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(colour), mime_type="image/png"),
+                context=IngestContext(source_collection="docs"),
+            )
+
+    build.assert_called_once()
+
+
+def test_keyframes_are_not_read_unless_asked() -> None:
+    """A clip contributes many frames and most carry no text."""
+    service, _, _ = _build_service(ocr_enabled=True, keyframe_ocr_enabled=False)
+    engine = _ocr_engine("SLIDE 3")
+
+    with patch("docint.core.ingest.images_service.build_engine", return_value=engine):
+        records = service.ingest_keyframe_set(
+            [_make_png_bytes((1, 2, 3))],
+            context=IngestContext(source_collection="docs"),
+            source_doc_id="clip-1",
+        )
+
+    engine.read_image.assert_not_called()
+    assert records and records[0].ocr_text == ""
+
+
+def test_keyframes_are_read_when_asked() -> None:
+    """Slides are the case that carries text, and they are worth having."""
+    service, _, _ = _build_service(ocr_enabled=True, keyframe_ocr_enabled=True)
+    engine = _ocr_engine("SLIDE 3: Results")
+
+    with patch("docint.core.ingest.images_service.build_engine", return_value=engine):
+        records = service.ingest_keyframe_set(
+            [_make_png_bytes((1, 2, 3))],
+            context=IngestContext(source_collection="docs"),
+            source_doc_id="clip-1",
+        )
+
+    assert records[0].ocr_text == "SLIDE 3: Results"
+    assert records[0].payload["ocr_text"] == "SLIDE 3: Results"

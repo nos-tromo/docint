@@ -82,6 +82,38 @@ def test_image_id_backs_the_identity_when_no_point_id_is_present() -> None:
     assert src["id"] == "img-9f2c"
 
 
+def test_the_words_inside_the_image_lead_its_evidence_body() -> None:
+    """Stored but unread would mean the ranker still judges the caption alone.
+
+    An image's ``ocr_text`` is what a reader searched for; it has to reach the
+    reranker and the generator, not only the keyword index.
+    """
+    payload = dict(IMAGE_PAYLOAD, ocr_text="Bauantrag 2031/44 — Erweiterung Halle B")
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["text"].startswith("Bauantrag 2031/44")
+    assert "hand-drawn site plan" in src["text"]
+    assert src["text"].index("Bauantrag") < src["text"].index("hand-drawn")
+
+
+def test_an_image_with_only_printed_words_still_has_a_body() -> None:
+    """A screenshot the captioner could not describe is still evidence."""
+    payload = {k: v for k, v in IMAGE_PAYLOAD.items() if k not in {"llm_description", "llm_tags"}}
+    payload["ocr_text"] = "Bauantrag 2031/44"
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["text"] == "Bauantrag 2031/44"
+
+
+def test_an_image_without_printed_words_reads_as_before() -> None:
+    """The commonest image carries no text, and nothing about it changes."""
+    src = RAG._source_from_payload(collection="uabc__docs", payload=IMAGE_PAYLOAD)
+
+    assert src["text"] == "A hand-drawn site plan with a numbered legend.\n\nTags: plan, legend"
+
+
 def test_tags_alone_still_produce_a_body() -> None:
     """An image with tags but no caption is not left with empty evidence."""
     payload = {k: v for k, v in IMAGE_PAYLOAD.items() if k != "llm_description"}

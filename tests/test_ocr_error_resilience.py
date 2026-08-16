@@ -1,6 +1,6 @@
-"""Tests that a burst of upstream vision errors costs pages, not the document.
+"""Tests that a burst of upstream OCR errors costs pages, not the document.
 
-Measured against the dev stack: a successful vision OCR page takes 68-117s, a
+Measured against the dev stack: a successful OCR page takes 68-117s, a
 successful image tagging call 3.5-17s, and *every* failure came back in
 0.5-1.0s carrying an upstream HTTP 500. Those fast rejects arrive in bursts of
 a few seconds with immediate recovery either side.
@@ -8,7 +8,7 @@ a few seconds with immediate recovery either side.
 Two behaviours turned that blip into lost work. The OCR failure budget --
 built to stop bleeding a full timeout per page against an *unreachable*
 endpoint -- counted answered-with-an-error the same as no-answer-at-all, so
-three fast 500s disabled vision OCR for the whole document (19 of 30 pages
+three fast 500s disabled OCR for the whole document (19 of 30 pages
 went unread, reported as ``pages_failed=0``). And both retry paths fire
 immediately, landing the retry inside the same burst.
 """
@@ -24,7 +24,7 @@ from openai import APIConnectionError, APITimeoutError, InternalServerError
 from PIL import Image as PILImage
 
 from docint.core.ingest.images_service import ImageIngestionService
-from docint.core.readers.documents.ocr import VisionOCREngine
+from docint.core.ocr.engine import DocumentOcrEngine
 
 
 def _http_500() -> InternalServerError:
@@ -56,13 +56,15 @@ def _connection_error() -> APIConnectionError:
     return APIConnectionError(request=httpx.Request("POST", "http://ollama:11434/v1/chat/completions"))
 
 
-def _build_engine() -> VisionOCREngine:
-    """Build a VisionOCREngine over a stubbed PDF and client.
+def _build_engine() -> DocumentOcrEngine:
+    """Build a DocumentOcrEngine over a stubbed PDF and client.
 
     Returns:
-        VisionOCREngine: An engine whose pages render to a small blank image.
+        DocumentOcrEngine: An engine whose pages render to a small blank image.
     """
     page = MagicMock()
+    page.get_width.return_value = 612.0
+    page.get_height.return_value = 792.0
     bitmap = MagicMock()
     bitmap.to_pil.return_value = PILImage.new("RGB", (200, 200), color="white")
     page.render.return_value = bitmap
@@ -70,10 +72,12 @@ def _build_engine() -> VisionOCREngine:
     pdf.__getitem__ = MagicMock(return_value=page)
 
     with (
-        patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
-        patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
-        patch("docint.core.readers.documents.ocr._OpenAI"),
-        patch("docint.core.readers.documents.ocr.load_openai_env"),
+        patch("docint.core.ocr.engine.pypdfium2") as mock_pdfium,
+        patch("docint.core.ocr.engine.OpenAIPipeline") as MockPipeline,
+        patch("docint.core.ocr.engine._OpenAI"),
+        patch("docint.core.ocr.engine.load_openai_env"),
+        patch("docint.core.ocr.engine.load_ocr_client_env") as mock_ocr_env,
+        patch("docint.core.ocr.engine.load_model_env") as mock_model_env,
     ):
         mock_pdfium.PdfDocument.return_value = pdf
         pipeline_instance = MagicMock()
@@ -83,10 +87,16 @@ def _build_engine() -> VisionOCREngine:
         pipeline_instance.top_p = 0.0
         pipeline_instance.reasoning_effort = None
         MockPipeline.return_value = pipeline_instance
-        return VisionOCREngine("/fake/doc.pdf", timeout=30.0, max_retries=0, max_image_dimension=256, max_tokens=512)
+        # A model with no layout contract: the lane this incident was measured on.
+        mock_ocr_env.return_value.model = ""
+        mock_ocr_env.return_value.api_base = "http://vision:8000/v1"
+        mock_ocr_env.return_value.api_key = "sk-test"
+        mock_ocr_env.return_value.timeout = 30.0
+        mock_model_env.return_value.vision_model = "some/vision-model"
+        return DocumentOcrEngine("/fake/doc.pdf", timeout=30.0, max_retries=0, max_image_dimension=256, max_tokens=512)
 
 
-def _run_pages(engine: VisionOCREngine, error: Exception, pages: int) -> MagicMock:
+def _run_pages(engine: DocumentOcrEngine, error: Exception, pages: int) -> MagicMock:
     """Fail ``pages`` consecutive pages with ``error``.
 
     Args:
@@ -98,12 +108,12 @@ def _run_pages(engine: VisionOCREngine, error: Exception, pages: int) -> MagicMo
         MagicMock: The patched ``create`` call, for call-count assertions.
     """
     with (
-        patch("docint.core.readers.documents.ocr.load_model_env"),
-        patch("docint.core.readers.documents.ocr.time.sleep"),
-        patch.object(engine._vision_client.chat.completions, "create", side_effect=error) as create,
+        patch("docint.core.ocr.engine.load_model_env"),
+        patch("docint.core.ocr.engine.time.sleep"),
+        patch.object(engine._client.chat.completions, "create", side_effect=error) as create,
     ):
         for index in range(pages):
-            engine.ocr_page(index)
+            engine.read_page(index)
         return create
 
 
@@ -118,7 +128,7 @@ def test_a_burst_of_upstream_errors_does_not_disable_the_document() -> None:
 
     _run_pages(engine, _http_500(), pages=4)
 
-    assert engine._disabled is False
+    assert engine.disabled is False
 
 
 def test_the_endpoint_is_still_called_after_a_burst_of_upstream_errors() -> None:
@@ -127,17 +137,17 @@ def test_the_endpoint_is_still_called_after_a_burst_of_upstream_errors() -> None
     _run_pages(engine, _http_500(), pages=3)
 
     with (
-        patch("docint.core.readers.documents.ocr.load_model_env"),
-        patch("docint.core.readers.documents.ocr.time.sleep"),
-        patch.object(engine._vision_client.chat.completions, "create") as create,
+        patch("docint.core.ocr.engine.load_model_env"),
+        patch("docint.core.ocr.engine.time.sleep"),
+        patch.object(engine._client.chat.completions, "create") as create,
     ):
         response = MagicMock()
         response.choices = [MagicMock()]
         response.choices[0].message.content = "Recovered text"
         create.return_value = response
-        spans = engine.ocr_page(3)
+        blocks = engine.read_page(3)
 
-    assert [span.text for span in spans] == ["Recovered text"]
+    assert [block.text for block in blocks] == ["Recovered text"]
 
 
 @pytest.mark.parametrize("error_factory", [_timeout, _connection_error])
@@ -147,7 +157,7 @@ def test_an_endpoint_that_never_answers_still_disables_the_document(error_factor
 
     _run_pages(engine, error_factory(), pages=3)
 
-    assert engine._disabled is True
+    assert engine.disabled is True
 
 
 def test_a_page_the_endpoint_rejected_yields_no_text() -> None:
@@ -155,13 +165,13 @@ def test_a_page_the_endpoint_rejected_yields_no_text() -> None:
     engine = _build_engine()
 
     with (
-        patch("docint.core.readers.documents.ocr.load_model_env"),
-        patch("docint.core.readers.documents.ocr.time.sleep"),
-        patch.object(engine._vision_client.chat.completions, "create", side_effect=_http_500()),
+        patch("docint.core.ocr.engine.load_model_env"),
+        patch("docint.core.ocr.engine.time.sleep"),
+        patch.object(engine._client.chat.completions, "create", side_effect=_http_500()),
     ):
-        spans = engine.ocr_page(0)
+        blocks = engine.read_page(0)
 
-    assert spans == []
+    assert blocks == []
 
 
 def test_pages_without_ocr_text_are_counted() -> None:
@@ -170,8 +180,8 @@ def test_pages_without_ocr_text_are_counted() -> None:
 
     _run_pages(engine, _http_500(), pages=3)
 
-    assert engine.ocr_stats.pages_failed == 3
-    assert engine.ocr_stats.pages_skipped == 0
+    assert engine.stats.pages_failed == 3
+    assert engine.stats.pages_skipped == 0
 
 
 def test_pages_skipped_by_the_failure_budget_are_counted_separately() -> None:
@@ -179,12 +189,12 @@ def test_pages_skipped_by_the_failure_budget_are_counted_separately() -> None:
     engine = _build_engine()
     _run_pages(engine, _timeout(), pages=3)
 
-    with patch("docint.core.readers.documents.ocr.load_model_env"):
-        engine.ocr_page(3)
-        engine.ocr_page(4)
+    with patch("docint.core.ocr.engine.load_model_env"):
+        engine.read_page(3)
+        engine.read_page(4)
 
-    assert engine._disabled is True
-    assert engine.ocr_stats.pages_skipped == 2
+    assert engine.disabled is True
+    assert engine.stats.pages_skipped == 2
 
 
 def test_the_half_resolution_retry_waits_for_the_burst_to_pass() -> None:
@@ -196,11 +206,11 @@ def test_the_half_resolution_retry_waits_for_the_burst_to_pass() -> None:
     engine = _build_engine()
 
     with (
-        patch("docint.core.readers.documents.ocr.load_model_env"),
-        patch("docint.core.readers.documents.ocr.time.sleep") as sleep,
-        patch.object(engine._vision_client.chat.completions, "create", side_effect=_http_500()),
+        patch("docint.core.ocr.engine.load_model_env"),
+        patch("docint.core.ocr.engine.time.sleep") as sleep,
+        patch.object(engine._client.chat.completions, "create", side_effect=_http_500()),
     ):
-        engine.ocr_page(0)
+        engine.read_page(0)
 
     assert sleep.call_count == 1
     assert sleep.call_args[0][0] > 0
@@ -262,14 +272,14 @@ def test_degenerate_ocr_output_is_squeezed_before_storage() -> None:
     engine = _build_engine()
 
     with (
-        patch("docint.core.readers.documents.ocr.load_model_env"),
-        patch.object(engine._vision_client.chat.completions, "create") as create,
+        patch("docint.core.ocr.engine.load_model_env"),
+        patch.object(engine._client.chat.completions, "create") as create,
     ):
         response = MagicMock()
         response.choices = [MagicMock()]
         response.choices[0].message.content = "URKUNDE\n\nLiebe/r:" + "." * 65392
         create.return_value = response
-        spans = engine.ocr_page(0)
+        blocks = engine.read_page(0)
 
-    assert len(spans) == 1
-    assert spans[0].text == "URKUNDE\n\nLiebe/r:" + "." * 20
+    assert len(blocks) == 1
+    assert blocks[0].text == "URKUNDE\n\nLiebe/r:" + "." * 20

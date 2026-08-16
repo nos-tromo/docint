@@ -18,8 +18,20 @@ from __future__ import annotations
 
 import statistics
 
+from docint.core.ocr.html_table import grid_to_text
 from docint.core.readers.documents.models import BBox
 from docint.core.readers.documents.parse import ParsedPage, TextLine
+
+# ``grid_to_text`` is re-exported: it defines how a table reads as text, and
+# that must be the same whether the grid came from geometry or from a model.
+__all__ = [
+    "build_grid",
+    "caption_extent",
+    "detect_geometric_tables",
+    "grid_to_text",
+    "group_rows",
+    "needs_structure",
+]
 
 # Cells whose baselines differ by less than this share of the median cell
 # height belong to one row.
@@ -154,18 +166,6 @@ def build_grid(cells: list[TextLine], bbox: BBox) -> list[list[str]]:
             texts[_band_index(cell, bands)].append(cell.text.strip())
         grid.append([" ".join(parts) for parts in texts])
     return grid
-
-
-def grid_to_text(grid: list[list[str]]) -> str:
-    """Render a grid row-major, cells separated by ``" | "``.
-
-    Args:
-        grid (list[list[str]]): Rows of cell texts.
-
-    Returns:
-        str: One line per row.
-    """
-    return "\n".join(" | ".join(row).strip() for row in grid)
 
 
 def needs_structure(grid: list[list[str]] | None) -> bool:

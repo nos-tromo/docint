@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pypdfium2
 import pypdfium2.raw as pdfium_raw
@@ -152,9 +153,12 @@ def _try_extract_embedded_image(
                     match = obj
                     break
             if match is None:
-                logger.debug("No image object matches bbox {} on page {}", bbox, page_index)
-                return None
-            pil_image = match.get_bitmap().to_pil()
+                # A figure region reported by the layout model inside a scanned
+                # page (or a vector drawing) has no embedded object of its own:
+                # crop it out of the page render instead.
+                pil_image = _render_region(page, bbox)
+            else:
+                pil_image = match.get_bitmap().to_pil()
             output_dir.mkdir(parents=True, exist_ok=True)
             img_path = output_dir / f"{image_id}.png"
             pil_image.save(str(img_path), "PNG")
@@ -165,6 +169,30 @@ def _try_extract_embedded_image(
     except Exception as exc:
         logger.debug("Embedded image extraction failed: {}", exc)
     return None
+
+
+_CROP_DPI = 150
+
+
+def _render_region(page: pypdfium2.PdfPage, bbox: BBox) -> Any:
+    """Render just ``bbox`` of ``page`` (bottom-left-origin points) as a PIL image.
+
+    Args:
+        page (pypdfium2.PdfPage): The page.
+        bbox (BBox): Region in points.
+
+    Returns:
+        Any: A PIL image of the region.
+    """
+    width = float(page.get_width())
+    height = float(page.get_height())
+    crop = (
+        max(0.0, bbox.x0),
+        max(0.0, bbox.y0),
+        max(0.0, width - bbox.x1),
+        max(0.0, height - bbox.y1),
+    )
+    return page.render(scale=_CROP_DPI / 72, crop=crop).to_pil()
 
 
 def _bbox_to_dict(bbox: BBox) -> dict[str, float]:

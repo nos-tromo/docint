@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from docint.core.ocr import DocumentOcrEngine, OcrBox, build_engine
 from docint.core.readers.documents.artifacts import (
     load_manifest,
     save_chunks,
@@ -33,16 +34,63 @@ from docint.core.readers.documents.models import (
     TableResult,
 )
 from docint.core.readers.documents.ocr import (
-    OCREngine,
-    VisionOCREngine,
+    blocks_from_ocr,
+    build_page_text,
     extract_text_for_pages,
 )
 from docint.core.readers.documents.parse import ParsedPdf
-from docint.core.readers.documents.table_vlm import TableStructureEngine
 from docint.core.readers.documents.tables import grid_to_text, needs_structure
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.env_cfg import PipelineConfig, load_ingestion_env, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
+
+
+class _OcrLane:
+    """The document's OCR engine, built on first use and closed once.
+
+    Both pipeline callers — scanned pages and weakly-structured tables — read
+    through the same engine, so they also share its per-document budget: an
+    endpoint that has stopped answering stops being called for either. Building
+    it lazily keeps a document that needs neither from opening a render handle.
+    """
+
+    def __init__(self, file_path: Path, config: PipelineConfig) -> None:
+        """Remember what to build from; build nothing yet.
+
+        Args:
+            file_path (Path): Path to the PDF.
+            config (PipelineConfig): Pipeline configuration.
+        """
+        self._file_path = file_path
+        self._config = config
+        self._engine: DocumentOcrEngine | None = None
+        self._built = False
+
+    def get(self) -> DocumentOcrEngine | None:
+        """Return the engine, building it on the first call.
+
+        Returns:
+            DocumentOcrEngine | None: The engine, or ``None`` when one cannot
+                be built (no endpoint configured, bad client settings).
+        """
+        if not self._built:
+            self._built = True
+            self._engine = build_engine(
+                self._file_path,
+                timeout=self._config.ocr_timeout,
+                max_retries=self._config.ocr_max_retries,
+                max_image_dimension=self._config.ocr_max_image_dimension,
+                max_pixels=self._config.ocr_max_pixels,
+                max_tokens=self._config.ocr_max_tokens,
+                region_max_dimension=self._config.table_ocr_max_image_dimension,
+            )
+        return self._engine
+
+    def close(self) -> None:
+        """Release the engine's document handle, if one was ever built."""
+        if self._engine is not None:
+            self._engine.close()
+            self._engine = None
 
 
 class DocumentPipelineOrchestrator:
@@ -146,6 +194,38 @@ class DocumentPipelineOrchestrator:
         Returns:
             DocumentManifest: The completed manifest.
         """
+        # One OCR engine serves the whole document — the scanned pages below
+        # and the tables after them — so a dead endpoint is discovered once.
+        ocr_lane = _OcrLane(file_path, self.config)
+        try:
+            return self._run_stages(file_path, doc_id, manifest, parsed, artifacts_dir, start, ocr_lane)
+        finally:
+            ocr_lane.close()
+
+    def _run_stages(
+        self,
+        file_path: Path,
+        doc_id: str,
+        manifest: DocumentManifest,
+        parsed: ParsedPdf,
+        artifacts_dir: Path,
+        start: float,
+        ocr_lane: _OcrLane,
+    ) -> DocumentManifest:
+        """Run the stages over an open document handle and an OCR lane.
+
+        Args:
+            file_path (Path): Path to the PDF.
+            doc_id (str): Deterministic document hash.
+            manifest (DocumentManifest): Manifest to fill in.
+            parsed (ParsedPdf): Open docling-parse handle shared by the stages.
+            artifacts_dir (Path): Artifacts root.
+            start (float): ``time.monotonic()`` at the start of processing.
+            ocr_lane (_OcrLane): The document's lazily-built OCR engine.
+
+        Returns:
+            DocumentManifest: The completed manifest.
+        """
         # --- Stage 1: Triage ---
         pages = self._run_with_retry("triage", lambda: triage_pdf(file_path, self.config, parsed=parsed))
         if pages is None:
@@ -188,38 +268,15 @@ class DocumentPipelineOrchestrator:
                 page_info.status = "failed"
                 page_info.error = "Layout analysis failed"
 
-        # --- Stage 3: OCR / text extraction ---
-        vision_engine: OCREngine | None = None
-        if self.config.enable_vision_ocr and any(p.needs_ocr for p in pages):
-            try:
-                vision_engine = VisionOCREngine(
-                    file_path,
-                    timeout=self.config.vision_ocr_timeout,
-                    max_retries=self.config.vision_ocr_max_retries,
-                    max_image_dimension=self.config.vision_ocr_max_image_dimension,
-                    max_tokens=self.config.vision_ocr_max_tokens,
-                )
-                logger.info("Vision OCR engine initialised for {}", file_path.name)
-            except Exception as exc:
-                logger.debug("Vision OCR engine not available: {}", exc)
-
+        # --- Stage 3: text extraction ---
         page_texts: dict[int, PageText] = {}
         for page_info in pages:
             if page_info.status == "failed":
                 continue
 
             def _extract_text(pi: PageInfo = page_info) -> dict[int, PageText]:
-                """Extract text for a single page via OCR or native extractors."""
-                return (
-                    extract_text_for_pages(
-                        file_path,
-                        [pi],
-                        layout,
-                        vision_engine=vision_engine,
-                        parsed=parsed,
-                    )
-                    or {}
-                )
+                """Extract text for a single page from its own text layer."""
+                return extract_text_for_pages(file_path, [pi], layout, parsed=parsed) or {}
 
             result = self._run_with_retry(
                 f"ocr-page-{page_info.page_index}",
@@ -227,22 +284,19 @@ class DocumentPipelineOrchestrator:
             )
             if result is not None:
                 page_texts.update(result)
-                for pt in result.values():
-                    save_page_text(doc_id, pt, artifacts_dir)
             else:
                 page_info.status = "failed"
                 page_info.error = "Text extraction failed"
 
-        # ``pages_ocr`` counts pages that *needed* OCR, not pages that got it,
-        # so without these a document whose vision lane failed or was given up
-        # on still summarized as pages_failed=0.
-        vision_stats = getattr(vision_engine, "ocr_stats", None)
-        if vision_stats is not None:
-            manifest.pages_ocr_failed = vision_stats.pages_failed
-            manifest.pages_ocr_skipped = vision_stats.pages_skipped
+        # --- Stage 3b: pages with no text of their own go to the OCR engine ---
+        # A page that needed OCR and still has nothing is what the OCR model is
+        # for. What comes back is the page's layout — headings, text, tables
+        # with cells, figures, furniture — so scanned pages flow through the
+        # same chunker and artifacts as digital ones.
+        self._read_scanned_pages(ocr_lane, doc_id, pages, layout, page_texts, manifest, artifacts_dir)
 
-        if vision_engine is not None and hasattr(vision_engine, "close"):
-            vision_engine.close()
+        for page_text in page_texts.values():
+            save_page_text(doc_id, page_text, artifacts_dir)
 
         # Inject synthetic TEXT blocks for OCR pages whose layout only
         # contains non-text blocks (e.g. a lone FIGURE for a scanned
@@ -279,10 +333,10 @@ class DocumentPipelineOrchestrator:
                 len(pt.full_text),
             )
 
-        # --- Stage 3b: table structure from the vision endpoint ---
+        # --- Stage 3c: table structure from the OCR model ---
         # Only for tables the geometric pass could not recover: a header
         # spanning columns leaves blanks that cell positions cannot fill.
-        self._recover_table_structure(file_path, doc_id, layout, manifest, artifacts_dir)
+        self._recover_table_structure(ocr_lane, doc_id, layout, manifest, artifacts_dir)
 
         # --- Stage 4: Table extraction ---
         tables: list[TableResult] = self._run_with_retry("tables", lambda: extract_tables(layout)) or []
@@ -325,13 +379,13 @@ class DocumentPipelineOrchestrator:
 
     def _recover_table_structure(
         self,
-        file_path: Path,
+        ocr_lane: _OcrLane,
         doc_id: str,
         layout: dict[int, list[LayoutBlock]],
         manifest: DocumentManifest,
         artifacts_dir: Path,
     ) -> None:
-        """Re-read weakly-structured tables with the vision model, in place.
+        """Re-read weakly-structured tables through the OCR engine, in place.
 
         Runs before table extraction so the recovered grid flows through
         ``TableResult`` and the CSV artifact untouched, and re-renders the
@@ -340,13 +394,13 @@ class DocumentPipelineOrchestrator:
         answers. Every failure is soft: the geometric grid stays.
 
         Args:
-            file_path (Path): Path to the PDF.
+            ocr_lane (_OcrLane): The document's OCR engine.
             doc_id (str): Deterministic document hash.
             layout (dict[int, list[LayoutBlock]]): Layout blocks per page (mutated).
             manifest (DocumentManifest): Manifest to record counters on.
             artifacts_dir (Path): Artifacts root (layout artifacts are re-saved).
         """
-        if not self.config.enable_table_vlm:
+        if not self.config.enable_table_ocr:
             return
         candidates = [
             (page_index, block)
@@ -356,45 +410,159 @@ class DocumentPipelineOrchestrator:
         ]
         if not candidates:
             return
-
-        try:
-            engine = TableStructureEngine(
-                file_path,
-                timeout=self.config.table_vlm_timeout,
-                max_retries=self.config.table_vlm_max_retries,
-                max_image_dimension=self.config.table_vlm_max_image_dimension,
-                max_tokens=self.config.table_vlm_max_tokens,
-            )
-        except Exception as exc:
-            logger.debug("Table structure engine not available: {}", exc)
+        engine = ocr_lane.get()
+        if engine is None:
+            logger.debug("No OCR engine; {} weak tables keep their geometric grid", len(candidates))
             return
 
+        recovered = failed = skipped = 0
         changed_pages: set[int] = set()
-        try:
-            for page_index, block in candidates:
-                grid = engine.structure_for(page_index, block.bbox)
-                if not grid:
-                    continue
-                caption = block.text.splitlines()[0] if block.text.splitlines() else ""
-                body = grid_to_text(grid)
-                block.text = f"{caption}\n{body}".strip() if _CAPTION_RE.match(caption) else body
-                block.cells = grid
-                block.cells_source = "vlm"
-                changed_pages.add(page_index)
-        finally:
-            stats = engine.stats
-            engine.close()
+        for page_index, block in candidates:
+            if engine.disabled:
+                skipped += 1
+                continue
+            grid = self._table_grid(engine, page_index, block)
+            if not grid:
+                failed += 1
+                continue
+            caption = block.text.splitlines()[0] if block.text.splitlines() else ""
+            body = grid_to_text(grid)
+            block.text = f"{caption}\n{body}".strip() if _CAPTION_RE.match(caption) else body
+            block.cells = grid
+            block.cells_source = "ocr"
+            changed_pages.add(page_index)
+            recovered += 1
 
-        manifest.tables_structured = stats.tables_recovered
-        manifest.tables_structure_failed = stats.tables_failed
+        manifest.tables_structured = recovered
+        manifest.tables_structure_failed = failed
         for page_index in changed_pages:
             save_layout(doc_id, page_index, layout[page_index], artifacts_dir)
         logger.info(
-            "Table structure lane: {} recovered, {} failed, {} skipped",
-            stats.tables_recovered,
-            stats.tables_failed,
-            stats.tables_skipped,
+            "Table structure lane ({}): {} recovered, {} failed, {} skipped",
+            engine.model,
+            recovered,
+            failed,
+            skipped,
         )
+
+    @staticmethod
+    def _table_grid(engine: DocumentOcrEngine, page_index: int, block: LayoutBlock) -> list[list[str]] | None:
+        """Read one table region and return its cell grid, if the model gave one.
+
+        Args:
+            engine (DocumentOcrEngine): The document's OCR engine.
+            page_index (int): Zero-based page number.
+            block (LayoutBlock): The TABLE block to re-read.
+
+        Returns:
+            list[list[str]] | None: The grid, or ``None`` when the region came
+                back without one.
+        """
+        bbox = block.bbox
+        read = engine.read_region(page_index, OcrBox(x0=bbox.x0, y0=bbox.y0, x1=bbox.x1, y1=bbox.y1))
+        for candidate in read:
+            if candidate.cells:
+                return candidate.cells
+        return None
+
+    def _read_scanned_pages(
+        self,
+        ocr_lane: _OcrLane,
+        doc_id: str,
+        pages: list[PageInfo],
+        layout: dict[int, list[LayoutBlock]],
+        page_texts: dict[int, PageText],
+        manifest: DocumentManifest,
+        artifacts_dir: Path,
+    ) -> None:
+        """Read pages with no text of their own through the OCR engine, in place.
+
+        Args:
+            ocr_lane (_OcrLane): The document's OCR engine.
+            doc_id (str): Deterministic document hash.
+            pages (list[PageInfo]): Triage results.
+            layout (dict[int, list[LayoutBlock]]): Layout blocks per page (mutated).
+            page_texts (dict[int, PageText]): Page texts so far (mutated).
+            manifest (DocumentManifest): Manifest to record counters on.
+            artifacts_dir (Path): Artifacts root (layout artifacts are re-saved).
+        """
+        if not self.config.enable_ocr:
+            return
+        candidates = [
+            p
+            for p in pages
+            if p.needs_ocr
+            and p.status != "failed"
+            and not (page_texts[p.page_index].full_text.strip() if p.page_index in page_texts else "")
+        ]
+        if not candidates:
+            return
+        engine = ocr_lane.get()
+        if engine is None:
+            logger.debug("No OCR engine; {} scanned pages stay empty", len(candidates))
+            return
+
+        read = failed = skipped = 0
+        for page_info in candidates:
+            if engine.disabled:
+                skipped += 1
+                continue
+            if self._read_one_scanned_page(engine, page_info, doc_id, layout, page_texts, artifacts_dir):
+                read += 1
+            else:
+                failed += 1
+
+        manifest.pages_ocr_read = read
+        manifest.pages_ocr_failed = failed
+        manifest.pages_ocr_skipped = skipped
+        logger.info(
+            "OCR lane ({}, {} family): {} pages read, {} failed, {} skipped",
+            engine.model,
+            engine.family.name,
+            read,
+            failed,
+            skipped,
+        )
+
+    @staticmethod
+    def _read_one_scanned_page(
+        engine: DocumentOcrEngine,
+        page_info: PageInfo,
+        doc_id: str,
+        layout: dict[int, list[LayoutBlock]],
+        page_texts: dict[int, PageText],
+        artifacts_dir: Path,
+    ) -> bool:
+        """Read one page and let the answer stand in for its layout and text.
+
+        Args:
+            engine (DocumentOcrEngine): The OCR engine to read with.
+            page_info (PageInfo): Triage result for the page.
+            doc_id (str): Deterministic document hash.
+            layout (dict[int, list[LayoutBlock]]): Layout blocks per page (mutated).
+            page_texts (dict[int, PageText]): Page texts (mutated).
+            artifacts_dir (Path): Artifacts root.
+
+        Returns:
+            bool: Whether the model read anything on that page.
+        """
+        index = page_info.page_index
+        read = engine.read_page(index)
+        if not read:
+            return False
+
+        # A model that enumerates picture regions has described the whole page,
+        # so its answer replaces the layout. One that reads text only says
+        # nothing about figures — there the geometric pass keeps them, or a
+        # scan's own illustrations would be dropped for having been read.
+        existing = layout.get(index, [])
+        keep = None if engine.reads_layout else [b for b in existing if b.type == BlockType.FIGURE]
+        blocks = blocks_from_ocr(index, read, keep=keep)
+
+        layout[index] = blocks
+        save_layout(doc_id, index, blocks, artifacts_dir)
+        page_texts[index] = build_page_text(page_info, blocks, [], block_source="ocr")
+        return True
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -439,7 +607,7 @@ class DocumentPipelineOrchestrator:
         logger.info(
             "Pipeline complete | doc_id={} file={} duration_ms={} "
             "pages_total={} pages_ocr={} pages_failed={} "
-            "pages_ocr_failed={} pages_ocr_skipped={} "
+            "pages_ocr_read={} pages_ocr_failed={} pages_ocr_skipped={} "
             "tables={} images={} chunks={}",
             manifest.doc_id[:12],
             manifest.file_name,
@@ -447,6 +615,7 @@ class DocumentPipelineOrchestrator:
             manifest.pages_total,
             manifest.pages_ocr,
             manifest.pages_failed,
+            manifest.pages_ocr_read,
             manifest.pages_ocr_failed,
             manifest.pages_ocr_skipped,
             manifest.tables_found,

@@ -173,14 +173,14 @@ class DocumentManifest:
     pages_total: int = 0
     pages_ocr: int = 0
     pages_failed: int = 0
-    # Vision OCR outcomes, distinct from ``pages_ocr`` (which counts pages
-    # that *needed* OCR, not pages that got it). Without these a document
-    # whose vision lane failed or was given up on still reported
-    # ``pages_failed=0``.
+    # OCR lane outcomes, distinct from ``pages_ocr`` (which counts pages that
+    # *needed* OCR, not pages that got it). Without these a document whose OCR
+    # lane failed or was given up on still reported ``pages_failed=0``.
+    pages_ocr_read: int = 0
     pages_ocr_failed: int = 0
     pages_ocr_skipped: int = 0
-    # Table-structure vision lane: tables it recovered, and tables it could not
-    # (those keep their geometric grid).
+    # Tables the OCR model restructured, and tables it could not (those keep
+    # their geometric grid).
     tables_structured: int = 0
     tables_structure_failed: int = 0
     status: str = "pending"

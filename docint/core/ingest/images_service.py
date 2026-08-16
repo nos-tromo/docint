@@ -20,6 +20,7 @@ from loguru import logger
 from PIL import Image
 from qdrant_client import QdrantClient, models
 
+from docint.core.ocr import DocumentOcrEngine, build_engine
 from docint.core.search.index import ensure_search_index, write_search_text
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.utils.clip_client import RemoteCLIPBackend
@@ -138,6 +139,9 @@ class StoredImageRecord:
     payload: dict[str, Any]
     llm_description: str
     llm_tags: list[str]
+    # The text printed inside the image, when it was read. Empty when the lane
+    # is off, unreachable, or the image simply carries no words.
+    ocr_text: str = ""
     error: str | None = None
 
 
@@ -420,6 +424,8 @@ class ImageIngestionService:
     _vector_stores: dict[str, QdrantVectorStore] = field(default_factory=dict, init=False, repr=False)
     _embedding_backend_error: str | None = field(default=None, init=False, repr=False)
     _tagging_backend_error: str | None = field(default=None, init=False, repr=False)
+    _ocr_engine: DocumentOcrEngine | None = field(default=None, init=False, repr=False)
+    _ocr_engine_built: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Lazily construct a Qdrant client when one wasn't injected."""
@@ -521,6 +527,49 @@ class ImageIngestionService:
             )
             return None
         return self.tagging_backend
+
+    def _get_ocr_engine(self) -> DocumentOcrEngine | None:
+        """Return the OCR engine, building it on first use.
+
+        Returns:
+            DocumentOcrEngine | None: The engine, or ``None`` when reading images
+                is switched off or no engine can be built.
+        """
+        if not self.img_ingestion_config.ocr_enabled:
+            return None
+        # Built once and kept: the engine holds no document handle on this
+        # path, only a client worth reusing across a batch of images.
+        if not self._ocr_engine_built:
+            self._ocr_engine_built = True
+            self._ocr_engine = build_engine(max_image_dimension=self.img_ingestion_config.ocr_max_dimension)
+        return self._ocr_engine
+
+    def _read_image_text(self, image_bytes: bytes, *, context: str) -> str:
+        """Read the text printed inside an image.
+
+        A caption says what a picture *shows*; this is what it *says*. A
+        screenshot, a photographed letter or a slide carries its meaning in
+        words that no caption reproduces, and until they are read the image is
+        retrievable only by the caption's paraphrase of it.
+
+        Args:
+            image_bytes (bytes): The image.
+            context (str): Description used in logs.
+
+        Returns:
+            str: The text read, or ``""`` when there was none or the lane
+                could not answer — never a raised exception, since an image
+                with no readable text is the normal case, not a failure.
+        """
+        engine = self._get_ocr_engine()
+        if engine is None:
+            return ""
+        try:
+            blocks = engine.read_image(image_bytes, context=context)
+        except Exception as exc:
+            logger.warning("Reading text in {} failed: {}", context, exc)
+            return ""
+        return "\n".join(block.text.strip() for block in blocks if block.text.strip()).strip()
 
     @staticmethod
     def _hash_image_bytes(image_bytes: bytes) -> str:
@@ -892,6 +941,7 @@ class ImageIngestionService:
                     payload=existing_payload,
                     llm_description=description,
                     llm_tags=tags_list,
+                    ocr_text=str(existing_payload.get("ocr_text") or ""),
                 )
 
         description = ""
@@ -908,6 +958,8 @@ class ImageIngestionService:
                 if self.img_ingestion_config.fail_on_tagging_error:
                     raise
                 logger.warning("Image tagging failed for {}: {}", image_id[:12], exc)
+
+        ocr_text = self._read_image_text(image_bytes, context=f"image {image_id[:12]}")
 
         embedding: list[float] | None = None
         embed_error: str | None = None
@@ -953,6 +1005,7 @@ class ImageIngestionService:
             "created_at": datetime.now(UTC).isoformat(),
             "llm_description": description,
             "llm_tags": tags,
+            "ocr_text": ocr_text,
             "vector_name": self.img_ingestion_config.vector_name,
             "image_collection": target_collection,
             "occurrences": [occurrence],
@@ -966,7 +1019,10 @@ class ImageIngestionService:
         if tag_error:
             image_payload["tagging_error"] = tag_error
 
-        text_parts = [description.strip()]
+        # The words a page carries come before the caption's paraphrase of
+        # it: they are what a reader searched for, and what the reranker can
+        # match exactly rather than approximately.
+        text_parts = [ocr_text.strip(), description.strip()]
         if tags:
             text_parts.append("Tags: " + ", ".join(tags))
         node_text = "\n\n".join([part for part in text_parts if part]).strip()
@@ -996,6 +1052,7 @@ class ImageIngestionService:
                 payload=image_payload,
                 llm_description=description,
                 llm_tags=tags,
+                ocr_text=ocr_text,
                 error=str(exc),
             )
 
@@ -1006,6 +1063,7 @@ class ImageIngestionService:
             payload=image_payload,
             llm_description=description,
             llm_tags=tags,
+            ocr_text=ocr_text,
             error=tag_error,
         )
 
@@ -1089,7 +1147,14 @@ class ImageIngestionService:
 
             image_id = self._hash_image_bytes(frame_bytes)
             point_id = self._point_id_from_image_id(image_id)
-            text_parts = [description.strip()]
+            # A clip contributes many frames and most carry no text; slides are
+            # the case that does, so reading them is opt-in per deployment.
+            frame_ocr = (
+                self._read_image_text(frame_bytes, context=f"keyframe {image_id[:12]}")
+                if self.img_ingestion_config.keyframe_ocr_enabled
+                else ""
+            )
+            text_parts = [frame_ocr.strip(), description.strip()]
             if tags:
                 text_parts.append("Tags: " + ", ".join(tags))
             node_text = "\n\n".join(part for part in text_parts if part).strip()
@@ -1103,6 +1168,7 @@ class ImageIngestionService:
                 "file_type": "image/jpeg",
                 "llm_description": description,
                 "llm_tags": tags,
+                "ocr_text": frame_ocr,
                 "vector_name": self.img_ingestion_config.vector_name,
                 "image_collection": target_collection,
             }
@@ -1132,6 +1198,7 @@ class ImageIngestionService:
                     payload=payload,
                     llm_description=description,
                     llm_tags=tags,
+                    ocr_text=frame_ocr,
                 )
             )
         return records
