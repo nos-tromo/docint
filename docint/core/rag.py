@@ -172,6 +172,7 @@ from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit, partition_units, payload_text
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
+from docint.utils.duration import format_elapsed
 from docint.utils.embed_chunking import (
     effective_budget,
     estimate_tokens,
@@ -837,6 +838,81 @@ class EmptyIngestionError(Exception):
         """
         self.collection_name = collection_name
         super().__init__(message or f"No content was ingested into '{collection_name}'.")
+
+
+@dataclass(frozen=True, slots=True)
+class IngestStats:
+    """What one ingestion run actually did.
+
+    These counters lived only as locals inside ``ingest_docs`` and were
+    reachable exclusively through the ``INGEST_BENCHMARK_ENABLED`` line,
+    which is tuning telemetry rather than operator information — so a
+    default deployment finished a run and reported nothing about it.
+    Returning them lets the job layer log a run summary unconditionally.
+
+    Attributes:
+        files_processed: Files whose content this run actually ingested.
+        files_skipped: Files the collection already held, across all three
+            dedup gates. The three sets are disjoint by construction: the
+            PDF hashes are added to ``processed_hashes`` before the legacy
+            pipeline runs, so they never reach the generic gates, and the
+            pre-filter removes files from ``dir_reader.input_files`` before
+            the post-load gate can see them.
+        files_failed: Distinct file hashes in batches that raised.
+        docs: Documents emitted, across the core and streaming lanes.
+        nodes: Nodes persisted, across both lanes.
+    """
+
+    files_processed: int
+    files_skipped: int
+    files_failed: int
+    docs: int
+    nodes: int
+
+
+def _build_ingest_stats(
+    *,
+    core_pdf_reader: CorePDFPipelineReader,
+    pipeline: DocumentIngestionPipeline,
+    manifest_started: set[str],
+    ingest_failures: list[tuple[set[str], str]],
+    total_docs: int,
+    total_nodes: int,
+) -> IngestStats:
+    """Aggregate one run's counters from the objects that already hold them.
+
+    The skip total is assembled here rather than threaded through the call
+    chain: each gate already tracks what it declined, so the aggregation is
+    a read of three existing fields. Shared by the sync and async ingest
+    paths, which are otherwise near-duplicates that drift.
+
+    Args:
+        core_pdf_reader (CorePDFPipelineReader): The PDF lane's reader.
+        pipeline (DocumentIngestionPipeline): The generic lane's pipeline.
+        manifest_started (set[str]): Hashes this run began work on.
+        ingest_failures (list[tuple[set[str], str]]): Per-batch failures as
+            ``(file_hashes, error)``.
+        total_docs (int): Documents emitted across both lanes.
+        total_nodes (int): Nodes persisted across both lanes.
+
+    Returns:
+        IngestStats: The run's counters.
+    """
+    # Read defensively: both objects are injectable and stubbed in tests, and
+    # this runs at the very end of a run that may have taken an hour. A
+    # summary line must not be what destroys it.
+    skipped = (
+        len(getattr(core_pdf_reader, "skipped_hashes", ()))
+        + int(getattr(pipeline, "prefilter_skipped", 0))
+        + len(getattr(pipeline, "skipped_hashes", ()))
+    )
+    return IngestStats(
+        files_processed=len(manifest_started),
+        files_skipped=skipped,
+        files_failed=len({fh for hashes, _ in ingest_failures for fh in hashes}),
+        docs=total_docs,
+        nodes=total_nodes,
+    )
 
 
 class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
@@ -4096,7 +4172,11 @@ class RAG:
                 exc,
             )
 
-    def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
+    def _persist_node_batches(
+        self,
+        nodes: list[BaseNode],
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
         """Persist nodes in micro-batches to reduce crash-loss windows.
 
         Each batch is written to the KV docstore first and to the vector
@@ -4109,6 +4189,12 @@ class RAG:
 
         Args:
             nodes (list[BaseNode]): Ingestion nodes to persist.
+            progress_callback (Callable[[str], None] | None): Optional sink
+                for per-batch progress. Embedding and persistence is the
+                longest stage of a large ingest and reported nothing, so it
+                was the last window in a run where the log went quiet for
+                minutes. Reported rather than logged directly so the job
+                layer's throttle collapses it like every other stage.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -4126,6 +4212,8 @@ class RAG:
                 len(batches),
                 len(batch),
             )
+            if progress_callback is not None:
+                progress_callback(f"Embedding and storing: {batch_no}/{len(batches)} batches processed")
             vector_candidates = self._select_vector_nodes(batch)
             (
                 prepared_vector_nodes,
@@ -4229,14 +4317,20 @@ class RAG:
             self.docstore_batch_size,
         )
 
-    async def _apersist_node_batches(self, nodes: list[BaseNode]) -> None:
+    async def _apersist_node_batches(
+        self,
+        nodes: list[BaseNode],
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
         """Asynchronously persist nodes in micro-batches.
 
         Mirrors :meth:`_persist_node_batches` — see its docstring for the
-        failure-logging semantics.
+        failure-logging semantics and why persistence reports progress.
 
         Args:
             nodes (list[BaseNode]): Ingestion nodes to persist.
+            progress_callback (Callable[[str], None] | None): Optional sink
+                for per-batch progress.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -4254,6 +4348,8 @@ class RAG:
                 len(batches),
                 len(batch),
             )
+            if progress_callback is not None:
+                progress_callback(f"Embedding and storing: {batch_no}/{len(batches)} batches processed")
             vector_candidates = self._select_vector_nodes(batch)
             (
                 prepared_vector_nodes,
@@ -6215,7 +6311,7 @@ class RAG:
         progress_callback: Callable[[str], None] | None = None,
         ner: bool | None = None,
         hate_speech: bool | None = None,
-    ) -> None:
+    ) -> IngestStats:
         """Ingest documents from the specified directory into the Qdrant collection.
 
         Args:
@@ -6229,6 +6325,10 @@ class RAG:
                 env default.
             hate_speech (bool | None): Per-request hate-speech override;
                 ``None`` keeps the env default.
+
+        Returns:
+            IngestStats: What the run did, for the job layer's run summary.
+            Callers that do not need it may ignore it.
 
         Raises:
             EmptyIngestionError: When no documents/nodes were produced and the
@@ -6327,7 +6427,7 @@ class RAG:
                     manifest_in_flight.add(file_hash)
                 if nodes:
                     try:
-                        self._persist_node_batches(nodes)
+                        self._persist_node_batches(nodes, progress_callback)
                     except Exception as exc:
                         per_batch = {file_hash} if file_hash else set(manifest_in_flight)
                         _handle_batch_failure(per_batch, exc)
@@ -6364,7 +6464,7 @@ class RAG:
                         manifest_in_flight.add(fh)
                     if nodes:
                         try:
-                            self._persist_node_batches(nodes)
+                            self._persist_node_batches(nodes, progress_callback)
                         except Exception as exc:
                             _handle_batch_failure(batch_hashes, exc)
                             manifest_in_flight -= batch_hashes
@@ -6382,7 +6482,7 @@ class RAG:
                     if docs:
                         streaming_docs += len(docs)
                     if nodes:
-                        self._persist_node_batches(nodes)
+                        self._persist_node_batches(nodes, progress_callback)
                         streaming_nodes += len(nodes)
                         persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
         except Exception as exc:
@@ -6463,7 +6563,17 @@ class RAG:
                 persist_batches=persist_batches,
             )
         self._bump_summary_revision(self.qdrant_collection)
-        logger.info("Documents ingested successfully.")
+        # No "Documents ingested successfully." line here any more: it carried
+        # no counters and claimed success even when ingest_failures was
+        # non-empty. The job layer logs the run summary instead.
+        return _build_ingest_stats(
+            core_pdf_reader=core_pdf_reader,
+            pipeline=pipeline,
+            manifest_started=manifest_started,
+            ingest_failures=ingest_failures,
+            total_docs=total_docs,
+            total_nodes=total_nodes,
+        )
 
     async def asingest_docs(
         self,
@@ -6473,7 +6583,7 @@ class RAG:
         progress_callback: Callable[[str], None] | None = None,
         ner: bool | None = None,
         hate_speech: bool | None = None,
-    ) -> None:
+    ) -> IngestStats:
         """Asynchronously ingest documents from the specified directory into the Qdrant collection.
 
         Args:
@@ -6486,6 +6596,11 @@ class RAG:
                 env default.
             hate_speech (bool | None): Per-request hate-speech override;
                 ``None`` keeps the env default.
+
+        Returns:
+            IngestStats: What the run did. Mirrors :meth:`ingest_docs` — the
+            two are near-duplicates, so every counter change must land in
+            both or they drift apart silently.
 
         Raises:
             RuntimeError: If the index is not initialized for async ingestion.
@@ -6576,7 +6691,7 @@ class RAG:
                     manifest_in_flight.add(file_hash)
                 if nodes:
                     try:
-                        await self._apersist_node_batches(nodes)
+                        await self._apersist_node_batches(nodes, progress_callback)
                     except Exception as exc:
                         per_batch = {file_hash} if file_hash else set(manifest_in_flight)
                         _handle_batch_failure(per_batch, exc)
@@ -6604,7 +6719,7 @@ class RAG:
                         manifest_in_flight.add(fh)
                     if nodes:
                         try:
-                            await self._apersist_node_batches(nodes)
+                            await self._apersist_node_batches(nodes, progress_callback)
                         except Exception as exc:
                             _handle_batch_failure(batch_hashes, exc)
                             manifest_in_flight -= batch_hashes
@@ -6622,7 +6737,7 @@ class RAG:
                     if docs:
                         streaming_docs += len(docs)
                     if nodes:
-                        await self._apersist_node_batches(nodes)
+                        await self._apersist_node_batches(nodes, progress_callback)
                         streaming_nodes += len(nodes)
                         persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
         except Exception as exc:
@@ -6699,7 +6814,14 @@ class RAG:
                 persist_batches=persist_batches,
             )
         self._bump_summary_revision(self.qdrant_collection)
-        logger.info("Documents ingested successfully.")
+        return _build_ingest_stats(
+            core_pdf_reader=core_pdf_reader,
+            pipeline=pipeline,
+            manifest_started=manifest_started,
+            ingest_failures=ingest_failures,
+            total_docs=total_docs,
+            total_nodes=total_nodes,
+        )
 
     def run_query(
         self,
@@ -7806,6 +7928,13 @@ class RAG:
         # and the cache write must notice rather than stamp a stale summary.
         build_revision = self._get_summary_revision()
 
+        # SUMMARY_ON_INGEST defaults true, so this map-reduce is the tail of
+        # every ingest and can issue up to SUMMARY_MAX_LLM_CALLS model calls.
+        # It logged nothing at all, which is what turned the end of a run into
+        # twenty-one minutes of silence in the container log. The scroll below
+        # is itself slow on a large collection, so say so before it starts.
+        summary_started_at = time.monotonic()
+        logger.info("Tree summary scanning collection | collection={!r}", self.qdrant_collection)
         units = partition_units(self._iter_collection_points())
         total_units = len(units)
         kinds = {unit.kind for unit in units}
@@ -7894,6 +8023,14 @@ class RAG:
             reduce_fanin=self.summary_config.reduce_fanin,
             max_llm_calls=self.summary_config.max_llm_calls,
             progress=progress,
+        )
+        logger.info(
+            "Tree summary start | collection={!r} units={} unit={} fanin={} max_llm_calls={}",
+            self.qdrant_collection,
+            total_units,
+            coverage_unit,
+            self.summary_config.reduce_fanin,
+            self.summary_config.max_llm_calls,
         )
         result = summarizer.build(units)
 
@@ -7984,6 +8121,28 @@ class RAG:
             "partial": result.partial or covered_units == 0,
             "llm_calls": result.llm_calls,
         }
+
+        # The counters are already assembled above; this only renders them.
+        # A partial build is logged at WARNING because a truncated summary is
+        # otherwise indistinguishable from a complete one in the log.
+        summary_line = (
+            "Tree summary complete | collection={!r} units={} covered={} coverage={} "
+            "partial={} llm_calls={} sources={} duration={}"
+        )
+        summary_args = (
+            self.qdrant_collection,
+            total_units,
+            covered_units,
+            round(coverage_ratio, 4),
+            str(diagnostics["partial"]).lower(),
+            result.llm_calls,
+            len(sources),
+            format_elapsed(time.monotonic() - summary_started_at),
+        )
+        if diagnostics["partial"]:
+            logger.warning(summary_line, *summary_args)
+        else:
+            logger.info(summary_line, *summary_args)
 
         payload = {
             "query": self.summarize_prompt,
@@ -8346,7 +8505,24 @@ class RAG:
         # German query silently misses its title-case match. "not_indexed" is
         # both the honest label and the one that points at the remedy.
         if not status.get("with_search_text") or not status.get("indexed"):
+            # An investigator searching an unindexed collection gets an empty
+            # result set that looks like "no matches". The honest label goes
+            # to the SPA; before this it went nowhere else, so an operator had
+            # no way to know a `make search-index` backfill was owed.
+            logger.warning(
+                "Search index missing | collection={!r} with_search_text={} indexed={} — run `make search-index`",
+                collection,
+                status.get("with_search_text"),
+                status.get("indexed"),
+            )
             return {**empty, "status": "not_indexed"}
+        if not status.get("complete"):
+            logger.warning(
+                "Search index incomplete | collection={!r} missing={} total={} — results are partial",
+                collection,
+                status.get("missing"),
+                status.get("total"),
+            )
 
         keywords = parse_keywords(query)
         search_filter = build_search_filter(keywords, base_filter=base_filter)
@@ -8853,7 +9029,22 @@ class RAG:
             raise ValueError("qdrant_collection must be set to resolve entities")
 
         def _emit(message: str) -> None:
-            """Forward a progress message to the callback when present."""
+            """Forward a progress message to the callback when present.
+
+            This logs unconditionally, unlike the CLI shim's
+            ``progress_callback or (lambda msg: logger.info(msg))`` — which
+            is why entity resolution was the one stage already visible in
+            the container log.
+
+            Callers on the job path must therefore pass **no**
+            ``progress_callback``: ``jobs.py`` now tees every pushed
+            progress message to the log, so threading one through here
+            would log each message twice. ``api.py``'s two call sites both
+            call ``resolve_entities()`` bare for exactly this reason.
+
+            Args:
+                message (str): The progress message.
+            """
             if progress_callback is not None:
                 progress_callback(message)
             logger.info(message)

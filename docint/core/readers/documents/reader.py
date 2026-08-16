@@ -32,6 +32,11 @@ class CorePDFPipelineReader:
     Attributes:
         data_dir: Root ingestion path (directory or single file).
         discovered_hashes: File hashes observed while scanning PDF sources.
+        skipped_hashes: File hashes this reader declined because the
+            collection already holds them. Read by ``RAG.ingest_docs`` for
+            the run summary's ``files_skipped`` — a sibling of
+            ``discovered_hashes`` rather than a counter threaded through
+            the call chain.
     """
 
     data_dir: Path
@@ -41,6 +46,7 @@ class CorePDFPipelineReader:
     image_ingestion_service: ImageIngestionService | None = None
     hierarchical_node_parser: HierarchicalNodeParser | None = None
     discovered_hashes: set[str] = field(default_factory=set, init=False)
+    skipped_hashes: set[str] = field(default_factory=set, init=False)
 
     def _apply_ner(
         self,
@@ -449,6 +455,7 @@ class CorePDFPipelineReader:
             Tuples of ``(docs, nodes, file_hash)`` for each successfully-processed PDF.
         """
         self.discovered_hashes.clear()
+        self.skipped_hashes.clear()
         pdf_files = self._iter_pdf_files(self.data_dir)
         if not pdf_files:
             return
@@ -462,6 +469,7 @@ class CorePDFPipelineReader:
             self.discovered_hashes.add(file_hash)
 
             if file_hash in existing_hashes or file_hash in emitted_hashes:
+                self.skipped_hashes.add(file_hash)
                 if progress_callback:
                     progress_callback(f"Skipping already ingested PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
                 continue

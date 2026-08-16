@@ -388,3 +388,65 @@ def test_reduce_exception_propagates() -> None:
 
     with pytest.raises(RuntimeError, match="synthesis down"):
         _summarizer(flaky, _small_fetch).build([_unit("a")])
+
+
+# ---------------------------------------------------------------------------
+# logging — the map-reduce ran in total silence
+# ---------------------------------------------------------------------------
+
+
+def test_build_narrates_map_fold_and_synthesis(loguru_caplog_info: pytest.LogCaptureFixture) -> None:
+    """SUMMARY_ON_INGEST defaults true, so this is the tail of every ingest.
+
+    It issued up to max_llm_calls model calls and logged nothing, which is
+    what turned the end of a run into twenty-one minutes of silence. The
+    fold tiers were worse than the map loop: they call no progress callback
+    either, so they were invisible to the SPA as well.
+
+    Args:
+        loguru_caplog_info: Bridged INFO capture.
+    """
+    llm = FakeLLM()
+    units = [_unit(f"u{i}") for i in range(25)]
+
+    _summarizer(llm, _small_fetch, reduce_fanin=5).build(units)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert "Tree summary map | units=25 cached=0 misses=25" in combined
+    assert "Tree summary fold | tier=1 briefs=25 fanin=5" in combined
+    assert "Tree summary synthesis | briefs=" in combined
+
+
+def test_build_reports_how_much_was_already_cached(loguru_caplog_info: pytest.LogCaptureFixture) -> None:
+    """Cache hits decide whether a build takes seconds or minutes.
+
+    Args:
+        loguru_caplog_info: Bridged INFO capture.
+    """
+    llm = FakeLLM()
+    cache = DictCache()
+    units = [_unit(f"u{i}") for i in range(4)]
+    _summarizer(llm, _small_fetch, cache=cache).build(units)
+    loguru_caplog_info.clear()
+
+    _summarizer(FakeLLM(), _small_fetch, cache=cache).build(units)
+
+    assert any("Tree summary map | units=4 cached=4 misses=0" in m for m in loguru_caplog_info.messages)
+
+
+def test_a_capped_build_says_so(loguru_caplog: pytest.LogCaptureFixture) -> None:
+    """A truncated summary reads exactly like a complete one.
+
+    The only prior signal was a flag on the payload, so an operator reading
+    the log could not tell that a summary had been cut short.
+
+    Args:
+        loguru_caplog: Bridged WARNING capture.
+    """
+    llm = FakeLLM()
+    units = [_unit(f"u{i}") for i in range(40)]
+
+    result = _summarizer(llm, _small_fetch, reduce_fanin=2, max_llm_calls=42).build(units)
+
+    assert result.partial is True
+    assert any("hit the LLM call cap" in m for m in loguru_caplog.messages)

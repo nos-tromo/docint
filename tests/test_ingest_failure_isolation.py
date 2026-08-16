@@ -209,7 +209,7 @@ def _make_rag_with_streaming_pipeline(
         lambda *a, **k: True,
     )
 
-    def _record_persist(self: RAG, nodes: list[Any]) -> None:
+    def _record_persist(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
         persist_calls.append(list(nodes))
         if nodes and any(getattr(n, "node_id", "") == "fail-me" for n in nodes):
             raise ConnectionError("connection reset")
@@ -296,7 +296,7 @@ def test_skip_and_continue_async_path(caplog: pytest.LogCaptureFixture, monkeypa
 
     apersist_calls: list[Any] = []
 
-    async def _arecord(self: RAG, nodes: list[Any]) -> None:
+    async def _arecord(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
         apersist_calls.append(list(nodes))
         if any(getattr(n, "node_id", "") == "fail-me" for n in nodes):
             raise ConnectionError("connection reset")

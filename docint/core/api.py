@@ -7,6 +7,7 @@ import time
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -49,7 +50,7 @@ from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
-from docint.core.rag import RAG, EmptyIngestionError
+from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -72,8 +73,10 @@ from docint.utils.env_cfg import (
     load_response_validation_env,
     load_summary_env,
     resolve_enable_hybrid,
+    set_offline_env,
 )
 from docint.utils.hashing import compute_file_hash
+from docint.utils.logfmt import format_bytes
 from docint.utils.logger_cfg import init_logger
 from docint.utils.openai_cfg import EmbeddingEndpointError
 from docint.utils.translate_client import translate
@@ -90,6 +93,10 @@ __all__ = [
 ]
 
 init_logger()
+# Announce the offline mode *after* the sink exists. Importing ``env_cfg``
+# already applied the vars silently; logging it there would print on
+# loguru's default handler, in a different format from every line after it.
+set_offline_env()
 
 # CORS allowlist for the Vite dev server during local development.
 allowed_origins = load_host_env().cors_allowed_origins.split(",")
@@ -3680,8 +3687,9 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         return {"empty": True, "resolution": None}
 
     empty = False
+    stats: IngestStats | None = None
     try:
-        ingest_module.ingest_docs(
+        stats = ingest_module.ingest_docs(
             state.physical,
             state.batch_dir,
             state.hybrid,
@@ -3745,7 +3753,15 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
             logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
             push("warning", {"message": "Collection summary generation failed."})
 
-    return {"empty": empty, "resolution": resolution}
+    # ``stats`` rides the result dict as a plain mapping of ints so
+    # ``core/jobs.py`` can render it on the run-summary line without
+    # importing a docint domain type — the property that keeps the job
+    # registry testable without Qdrant or models.
+    return {
+        "empty": empty,
+        "resolution": resolution,
+        "stats": asdict(stats) if stats is not None else None,
+    }
 
 
 def _run_summary_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
@@ -4043,6 +4059,7 @@ async def ingest_upload(
             },
         )
 
+        staged_bytes = 0
         for upload in files:
             dest = _safe_relative_dest(batch_dir, upload.filename or "upload")
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -4061,6 +4078,7 @@ async def ingest_upload(
                             {"filename": filename, "bytes_written": bytes_written},
                         )
 
+                staged_bytes += bytes_written
                 # We calculate hash but don't store the file index anymore
                 file_hash = compute_file_hash(dest)
                 yield _format_sse(
@@ -4082,6 +4100,16 @@ async def ingest_upload(
                 )
                 return
 
+        # An upload that is never finalized creates no job, so without this
+        # line it leaves no trace in the log at all. Per-file detail belongs
+        # to the run-start banner, which knows the job id; this is only the
+        # batch landing on disk.
+        logger.info(
+            "Upload batch staged | collection={!r} files={} bytes={}",
+            name,
+            len(files),
+            format_bytes(staged_bytes),
+        )
         yield _format_sse(
             "upload_complete",
             {"collection": name, "files_saved": len(files)},

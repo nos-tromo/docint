@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
-from loguru import logger
 
+import docint.core.jobs as jobs_module
 from docint.core.jobs import (
     MAX_UPLOAD_LEAD_S,
     IngestJobManager,
@@ -23,29 +22,7 @@ from docint.core.jobs import (
     _clamp_lead,
     format_sse,
 )
-
-
-@pytest.fixture
-def loguru_caplog_info(caplog: LogCaptureFixture) -> Iterable[LogCaptureFixture]:
-    """Bridge loguru INFO records into ``caplog`` for the duration of a test.
-
-    Loguru bypasses ``logging``, so the stdlib ``caplog`` fixture sees none
-    of its records by default. Mirrors the fixture of the same name in
-    ``tests/test_ingest.py``.
-
-    Args:
-        caplog: The standard pytest log-capture fixture.
-
-    Yields:
-        The same ``caplog`` fixture, now populated with loguru-sourced
-        records at INFO level and above.
-    """
-    handler_id = logger.add(caplog.handler, level="INFO", format="{message}")
-    caplog.set_level(logging.INFO)
-    try:
-        yield caplog
-    finally:
-        logger.remove(handler_id)
+from docint.utils.logfmt import ProgressLogThrottle, describe_inputs
 
 
 def _state() -> IngestJobState:
@@ -191,9 +168,51 @@ async def test_completed_job_logs_how_long_the_whole_run_took(
     state = await _create(manager)
     await _drain(manager, state)
 
-    completed = [r for r in loguru_caplog_info.messages if "completed in" in r]
+    completed = [r for r in loguru_caplog_info.messages if "Ingest job completed" in r]
     assert completed, f"no completion line logged; got {loguru_caplog_info.messages}"
-    assert re.search(rf"Job {state.job_id} \(ingest\) completed in \d{{2}}:\d{{2}}\.", completed[-1]), completed[-1]
+    assert re.search(rf"job_id={state.job_id} .*duration=\d{{2}}:\d{{2}} ", completed[-1]), completed[-1]
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_completion_line_reports_what_the_run_actually_did(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A duration and an opaque job id are not a summary.
+
+    Files processed, skipped and failed, plus chunk counts, existed only as
+    locals inside ``ingest_docs`` and were reachable exclusively through the
+    ``INGEST_BENCHMARK_ENABLED`` line — so a default deployment finished a
+    run and reported nothing about it.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        return {
+            "empty": False,
+            "resolution": {"minted": 214, "attached": 57, "processed": 900, "skipped": 3},
+            "stats": {
+                "files_processed": 3,
+                "files_skipped": 1,
+                "files_failed": 0,
+                "docs": 3,
+                "nodes": 1284,
+            },
+        }
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    line = next(m for m in loguru_caplog_info.messages if "Ingest job completed" in m)
+    assert "collection='mydocs'" in line
+    assert "files_processed=3 files_skipped=1 files_failed=0 docs=3 nodes=1284" in line
+    assert "entities_minted=214 entities_attached=57" in line
+    assert "empty=false" in line
+    # Both forms, so the log and the SPA's ingest card cannot disagree.
+    assert f"duration_ms={state.duration_ms}" in line
     await manager.stop()
 
 
@@ -214,9 +233,262 @@ async def test_failed_job_logs_how_long_it_ran_before_failing(
     state = await _create(manager)
     await _drain(manager, state)
 
-    failed = [r for r in loguru_caplog_info.messages if "failed after" in r]
+    failed = [r for r in loguru_caplog_info.messages if "Ingest job failed" in r]
     assert failed, f"no failure line logged; got {loguru_caplog_info.messages}"
-    assert re.search(rf"Job {state.job_id} \(ingest\) failed after \d{{2}}:\d{{2}}\.", failed[-1]), failed[-1]
+    assert re.search(rf"job_id={state.job_id} .*duration=\d{{2}}:\d{{2}} ", failed[-1]), failed[-1]
+    # A failed run produced no counters, so it must not claim empty=false.
+    assert "empty=" not in failed[-1]
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_run_banner_names_every_staged_file_with_size_and_type(
+    loguru_caplog_info: LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """Nothing in the log said what a run was about to ingest.
+
+    Filenames used to appear only as a side effect of whichever reader
+    happened to log one, non-PDF inputs produced no per-file line at all,
+    and no line anywhere carried a size or a type.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        tmp_path (Path): Temporary batch directory.
+    """
+    (tmp_path / "annual-report.pdf").write_bytes(b"x" * 2048)
+    (tmp_path / "meeting-notes.docx").write_bytes(b"y" * 512)
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path,
+        hybrid=True,
+        ner=True,
+        hate_speech=False,
+        resolve=True,
+    )
+    await _drain(manager, state)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert f"Ingest job started | job_id={state.job_id} collection='field-notes' files=2" in combined
+    assert "bytes=2.5 KB" in combined
+    assert "hybrid=true ner=true hate_speech=false resolve=true" in combined
+    assert "file='annual-report.pdf' type=pdf bytes=2.0 KB" in combined
+    assert "file='meeting-notes.docx' type=docx bytes=512 B" in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_run_banner_truncates_a_large_batch_but_says_so(
+    loguru_caplog_info: LogCaptureFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capped listing that did not admit it would read as complete.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        tmp_path (Path): Temporary batch directory.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(jobs_module, "describe_inputs", lambda root, _limit: describe_inputs(root, limit=2))
+    for i in range(5):
+        (tmp_path / f"doc-{i}.pdf").write_bytes(b"x" * 10)
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path,
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    await _drain(manager, state)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert "files=5" in combined
+    assert f"Ingest inputs truncated | job_id={state.job_id} listed=2 omitted=3" in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_summary_job_banner_carries_identity_only(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A summary rebuild stages no files, so it has no inventory to report.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        kind="summary",
+    )
+    await _drain(manager, state)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert f"Summary job started | job_id={state.job_id} collection='field-notes'" in combined
+    assert "Summary input" not in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_batch_dir_never_fails_the_run(
+    loguru_caplog_info: LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """The banner describes a run; it must not be able to stop one.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        tmp_path (Path): Temporary directory whose child does not exist.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path / "never-created",
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    await _drain(manager, state)
+
+    assert state.status is JobStatus.COMPLETED
+    assert any("Ingest job started" in m for m in loguru_caplog_info.messages)
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_runner_progress_reaches_the_log(
+    loguru_caplog_info: LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Progress went to the client stream and nowhere else.
+
+    The CLI passed ``logger.info`` as the pipeline's progress sink and got a
+    readable run; the API passed an SSE publisher and got six-minute silences
+    in the container log. Same code, same run.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("LOG_PROGRESS_INTERVAL_S", "0")
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    assert any(f"Job {state.job_id} (ingest) progress: working" in m for m in loguru_caplog_info.messages), (
+        f"progress never reached the log; got {loguru_caplog_info.messages}"
+    )
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_runner_warnings_reach_the_log(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A pushed warning used to produce no log line at all.
+
+    "No staged files found" is exactly the kind of thing an operator goes
+    to the log for, and it was visible only to an attached browser.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        push("warning", {"message": "No ingestable files found."})
+        return {"empty": True, "resolution": None}
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    assert any("warning: No ingestable files found." in m for m in loguru_caplog_info.messages), (
+        f"warning never reached the log; got {loguru_caplog_info.messages}"
+    )
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_per_chunk_ticks_are_throttled_but_the_last_one_survives(
+    loguru_caplog_info: LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hundreds of ticks collapse to a heartbeat without losing the tail.
+
+    A raw tee of the progress stream would bury the log; dropping the held
+    tick would end the stage mid-count. Neither is acceptable.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("LOG_PROGRESS_INTERVAL_S", "3600")
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        for n in range(1, 201):
+            push("ingestion_progress", {"message": f"Extracting entities: {n}/500 chunks processed"})
+        return {"empty": False, "resolution": None}
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    ticks = [m for m in loguru_caplog_info.messages if "Extracting entities" in m]
+    assert len(ticks) == 2, f"expected an opening tick and a flushed tail, got {ticks}"
+    assert "1/500" in ticks[0]
+    assert "200/500" in ticks[1], "the last thing the stage said must survive the throttle"
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_a_throwing_log_tee_never_fails_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The log tee describes a run; it must not be able to end one.
+
+    ``ingestion_pipeline`` re-raises whatever a progress callback threw via
+    ``future.result()``, so an exception raised while deciding whether to
+    log would fail the batch it was only meant to narrate. The client
+    stream must be unaffected too.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    def _boom(self: ProgressLogThrottle, message: str) -> list[str]:
+        """Fail the way a future refactor might.
+
+        Args:
+            self (ProgressLogThrottle): The throttle instance.
+            message (str): The progress message.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("throttle exploded")
+
+    monkeypatch.setattr(ProgressLogThrottle, "observe", _boom)
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    assert state.status is JobStatus.COMPLETED
+    # The client stream still carries the progress the log could not render.
+    assert state.message == "working"
     await manager.stop()
 
 
@@ -299,8 +571,8 @@ async def test_upload_lead_is_folded_into_the_run_duration(
     assert state.duration_s is not None
     assert state.duration_s >= 30.0
     assert state.run_started_at < state.created_at
-    completed = [r for r in loguru_caplog_info.messages if "completed in" in r]
-    assert re.search(r"completed in 00:3\d\.", completed[-1]), completed[-1]
+    completed = [r for r in loguru_caplog_info.messages if "Ingest job completed" in r]
+    assert re.search(r"duration=00:3\d ", completed[-1]), completed[-1]
     await manager.stop()
 
 

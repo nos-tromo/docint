@@ -4125,27 +4125,20 @@ def _capture_loguru(caplog: pytest.LogCaptureFixture) -> Callable[[], None]:
     sink on the loguru logger that forwards every record into caplog's
     captured handler and returns a cleanup callable.
 
+    Adding ``caplog.handler`` directly is the same bridge the shared
+    ``loguru_caplog`` / ``loguru_caplog_info`` fixtures in
+    ``tests/conftest.py`` use. Those are fixtures; this stays a callable
+    because its call sites need the sink torn down inside a ``finally``
+    that also wraps a ``pytest.raises`` block.
+
     Args:
         caplog: Pytest log capture fixture.
 
     Returns:
         A zero-argument cleanup callable that removes the sink.
     """
-    sink_id = _loguru_logger.add(
-        lambda message: caplog.records.append(
-            logging.LogRecord(
-                name="loguru",
-                level=logging.ERROR,
-                pathname="",
-                lineno=0,
-                msg=str(message),
-                args=None,
-                exc_info=None,
-            )
-        ),
-        level="ERROR",
-        format="{message}",
-    )
+    sink_id = _loguru_logger.add(caplog.handler, level="ERROR", format="{message}")
+    caplog.set_level(logging.ERROR)
 
     def _cleanup() -> None:
         _loguru_logger.remove(sink_id)
@@ -5700,7 +5693,7 @@ def test_rag_init_uses_embedding_config_for_embed_client_envelope(
 
 def test_rag_init_warns_when_embed_worst_case_wait_exceeds_one_hour(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    loguru_caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``RAG.__post_init__`` must WARN when ``timeout * (1 + retries) > 3600``.
 
@@ -5716,39 +5709,28 @@ def test_rag_init_warns_when_embed_worst_case_wait_exceeds_one_hour(
 
     Args:
         monkeypatch: The monkeypatch fixture.
-        caplog: Captures emitted log records via the loguru-to-stdlib
+        loguru_caplog: Captures emitted log records via the loguru-to-stdlib
             bridge installed in ``conftest.py``.
     """
-    import logging
+    caplog = loguru_caplog
 
-    from loguru import logger
+    monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
+    monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "2000")
+    monkeypatch.setenv("EMBED_MAX_RETRIES", "1")
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "16")
 
-    handler_id = logger.add(
-        caplog.handler,
-        level="WARNING",
-        format="{message}",
-    )
-    caplog.set_level(logging.WARNING)
-    try:
-        monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
-        monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "2000")
-        monkeypatch.setenv("EMBED_MAX_RETRIES", "1")
-        monkeypatch.setenv("EMBED_BATCH_SIZE", "16")
+    caplog.clear()
+    RAG(qdrant_collection="warn-test-over")
 
-        caplog.clear()
-        RAG(qdrant_collection="warn-test-over")
+    messages = "\n".join(str(r.getMessage()) for r in caplog.records)
+    assert "worst-case wait" in messages.lower(), f"Expected worst-case-wait WARNING, got: {messages!r}"
 
-        messages = "\n".join(str(r.getMessage()) for r in caplog.records)
-        assert "worst-case wait" in messages.lower(), f"Expected worst-case-wait WARNING, got: {messages!r}"
+    monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "1800")
+    caplog.clear()
+    RAG(qdrant_collection="warn-test-boundary")
 
-        monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "1800")
-        caplog.clear()
-        RAG(qdrant_collection="warn-test-boundary")
-
-        messages = "\n".join(str(r.getMessage()) for r in caplog.records)
-        assert "worst-case wait" not in messages.lower(), f"Exactly-3600s boundary must not WARN, got: {messages!r}"
-    finally:
-        logger.remove(handler_id)
+    messages = "\n".join(str(r.getMessage()) for r in caplog.records)
+    assert "worst-case wait" not in messages.lower(), f"Exactly-3600s boundary must not WARN, got: {messages!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -6700,3 +6682,60 @@ def test_indexable_text_falls_back_to_an_image_caption() -> None:
 def test_indexable_text_prefers_the_stored_chunk_text() -> None:
     """A document chunk must be unaffected by the image fallback."""
     assert RAG._extract_indexable_text({"text": "a document chunk"}) == "a document chunk"
+
+
+# ---------------------------------------------------------------------------
+# run-summary counters
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_stats_sums_all_three_skip_gates() -> None:
+    """A run had no skip total at all — the gates counted locally and logged.
+
+    Of the four dedup gates, three are real skips and they are disjoint by
+    construction: PDF hashes join ``processed_hashes`` before the legacy
+    pipeline runs, so they never reach the generic gates, and the pre-filter
+    removes files from ``dir_reader.input_files`` before the post-load gate
+    can see them. Summing is therefore correct, not double-counting.
+    """
+    from docint.core.rag import _build_ingest_stats
+
+    core_reader = types.SimpleNamespace(skipped_hashes={"h1", "h2"})
+    pipeline = types.SimpleNamespace(prefilter_skipped=3, skipped_hashes={"h9"})
+
+    stats = _build_ingest_stats(
+        core_pdf_reader=cast(Any, core_reader),
+        pipeline=cast(Any, pipeline),
+        manifest_started={"a", "b", "c"},
+        ingest_failures=[({"f1", "f2"}, "boom"), ({"f2"}, "boom again")],
+        total_docs=3,
+        total_nodes=1284,
+    )
+
+    assert stats.files_skipped == 6
+    assert stats.files_processed == 3
+    # A hash appearing in two failed batches is one failed file, not two.
+    assert stats.files_failed == 2
+    assert stats.docs == 3
+    assert stats.nodes == 1284
+
+
+def test_ingest_stats_tolerates_a_reader_without_the_counters() -> None:
+    """The summary runs at the end of a run that may have taken an hour.
+
+    Both objects are injectable, so a duck-typed stand-in that predates the
+    counters must degrade to reporting zero skips rather than raise and
+    destroy the run it was only meant to describe.
+    """
+    from docint.core.rag import _build_ingest_stats
+
+    stats = _build_ingest_stats(
+        core_pdf_reader=cast(Any, types.SimpleNamespace()),
+        pipeline=cast(Any, types.SimpleNamespace()),
+        manifest_started=set(),
+        ingest_failures=[],
+        total_docs=0,
+        total_nodes=0,
+    )
+
+    assert stats.files_skipped == 0

@@ -147,16 +147,30 @@ and chat. It ships with:
    cheap (hash-deduped).
 - **A run has exactly one duration.** The server measures it once — from the
    moment the user started, upload leg included, through the queue wait and
-   every stage of the job — and both the backend log (`Job <id> (ingest)
-   completed in 00:19.`) and the ingest card's timer show that same value. The
-   card gets it from `duration_ms` on the terminal SSE frame, and a reattached
+   every stage of the job — and both the backend log's run summary
+   (`Ingest job completed | … duration=00:19 duration_ms=19004 …`) and the
+   ingest card's timer show that same value. The card gets it from
+   `duration_ms` on the terminal SSE frame, and a reattached
    client from the job snapshot's `duration_ms` / `run_started_at`
-   (`started_at` still means "a worker slot was acquired"). Because the upload
-   happens before the job exists, the SPA reports how long it took as
+   (`started_at` still means "a worker slot was acquired"). The log prints
+   both forms for the same reason — a readable one and the exact integer the
+   card renders, so the two can be compared rather than trusted. Because the
+   upload happens before the job exists, the SPA reports how long it took as
    `upload_elapsed_ms` on `POST /ingest/finalize` — an elapsed duration, never
    a timestamp, so no client clock is trusted, and it is clamped server-side.
    Deriving a second duration on the client is what previously let one run
    report two numbers a second apart.
+- **Reading the backend log.** `docker logs -f docint-backend-1` narrates a
+   whole ingest: a start banner naming every staged file with its size and
+   type, per-file progress, a throttled heartbeat through the long
+   enrich/embed/persist stages, the collection-summary build, and the run
+   summary above. Every line of a run carries its `job_id`, so
+   `docker logs docint-backend-1 | grep <job_id>` isolates one run. Chat
+   turns get one `Turn complete | …` line each (retrieval mode, source and
+   image counts, rerank state, duration). Queries, answers and document text
+   are never logged — only their shapes. Details and knobs:
+   [docs/ingestion.md](docs/ingestion.md#observability) and
+   [docs/configuration.md](docs/configuration.md#logging--loggingconfig).
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
   database URL.

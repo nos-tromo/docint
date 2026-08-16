@@ -7,7 +7,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from docint.core.rag import RAG, EmptyIngestionError
+from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logger_cfg import init_logger
@@ -30,7 +30,7 @@ def ingest_docs(
     *,
     ner: bool | None = None,
     hate_speech: bool | None = None,
-) -> None:
+) -> IngestStats | None:
     """Ingest documents from the specified directory into the Qdrant collection.
 
     Args:
@@ -46,6 +46,10 @@ def ingest_docs(
             default (``NER_ENABLED``).
         hate_speech (bool | None): Per-request hate-speech override; ``None``
             keeps the env default (``ENABLE_HATE_SPEECH_DETECTION``).
+
+    Returns:
+        IngestStats | None: What the run did, forwarded for the job layer's
+        run summary. ``None`` only if a test double stands in for ``RAG``.
 
     Raises:
         EmptyIngestionError: When the source directory yielded no usable
@@ -69,7 +73,11 @@ def ingest_docs(
         RAG(qdrant_collection=qdrant_col) if hybrid is None else RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
     )
     try:
-        rag.ingest_docs(
+        # The ``logger.info`` fallback applies only when the caller supplied
+        # no callback — i.e. on the terminal CLI path. Callers that pass one
+        # (the job runner passes an SSE publisher) do not lose the narrative
+        # any more: ``core/jobs.py`` tees every pushed message to the log.
+        return rag.ingest_docs(
             data_dir,
             build_query_engine=False,
             progress_callback=progress_callback or (lambda msg: logger.info(msg)),

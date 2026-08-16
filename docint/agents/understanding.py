@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Any, cast
 
 from llama_index.core.llms import LLM
+from loguru import logger
 from typing_extensions import override
 
 from docint.agents.context import TurnContext
@@ -165,8 +166,12 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
                 reason=result.get("reason"),
                 rewritten_query=result.get("rewritten_query"),
             )
-        except Exception:
-            # Fallback for robustness
+        except Exception as exc:
+            # Fallback for robustness. Logged because the degradation is
+            # otherwise invisible: every subsequent turn silently loses
+            # intent detection and query rewriting, and the answers merely
+            # get worse. The exception is rendered, never the user's input.
+            logger.warning("Understanding agent LLM call failed; defaulting to QA intent: {}", exc)
             return IntentAnalysis(
                 intent="qa",
                 confidence=0.5,
@@ -227,6 +232,10 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             match = re.search(r"\{.*\}", clean_text, re.DOTALL)
             if match:
                 return cast(dict[str, Any], json.loads(match.group(0)))
+            # A model that has stopped emitting parseable JSON degrades every
+            # turn from here on. Only the length is logged — the text is the
+            # model's reply to the user's question.
+            logger.warning("Intent analysis returned unparseable output ({} chars); defaulting to QA", len(clean_text))
             return {
                 "intent": "qa",
                 "rewritten_query": None,

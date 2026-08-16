@@ -1,10 +1,9 @@
 """Tests for the CLI ingest entry point and ingestion pipeline."""
 
-import logging
 import re
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Never, cast
@@ -13,35 +12,10 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 from llama_index.core import Document
 from llama_index.core.schema import TextNode
-from loguru import logger
 
 import docint.cli.ingest as ingest
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
-
-
-@pytest.fixture
-def loguru_caplog_info(caplog: LogCaptureFixture) -> Iterable[LogCaptureFixture]:
-    """Bridge loguru INFO records into ``caplog`` for the duration of a test.
-
-    Loguru bypasses ``logging``, so the stdlib ``caplog`` fixture sees none
-    of its records by default. Mirrors the ``loguru_caplog`` fixture in
-    ``tests/test_embedding_tokenizer.py``, lowered to INFO because the
-    completion line this file asserts on is informational, not a warning.
-
-    Args:
-        caplog: The standard pytest log-capture fixture.
-
-    Yields:
-        The same ``caplog`` fixture, now populated with loguru-sourced
-        records at INFO level and above.
-    """
-    handler_id = logger.add(caplog.handler, level="INFO", format="{message}")
-    caplog.set_level(logging.INFO)
-    try:
-        yield caplog
-    finally:
-        logger.remove(handler_id)
 
 
 def test_parse_hate_speech_payload_extracts_first_json_object_from_noisy_output() -> None:

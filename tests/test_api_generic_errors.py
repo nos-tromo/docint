@@ -77,6 +77,27 @@ def test_validation_error_returns_generic_body(client: TestClient) -> None:
     assert resp.json() == {"detail": "Invalid request."}
 
 
+def test_validation_error_does_not_log_the_submitted_question(client: TestClient) -> None:
+    """A malformed /query body must not put the question in the log.
+
+    Pydantic attaches the offending value to every error it raises, so the
+    validation handler was the one path on this API by which a user's
+    question could reach a log line. Sending the question as a list makes it
+    the rejected ``input`` — exactly the field that used to be logged.
+    """
+    records, sink_id = _capture_logs()
+    try:
+        resp = client.post("/query", json={"question": [MARKER]})
+        assert resp.status_code == 422
+    finally:
+        logger.remove(sink_id)
+
+    combined = "\n".join(records)
+    assert MARKER not in combined, f"the submitted question reached the log: {combined!r}"
+    # The diagnostic itself must survive; only the value is withheld.
+    assert any("Validation error on POST /query" in r for r in records)
+
+
 def test_swept_endpoint_returns_static_detail_and_logs_marker(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:

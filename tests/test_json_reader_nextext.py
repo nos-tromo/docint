@@ -3,46 +3,15 @@
 from __future__ import annotations
 
 import json
-import logging
 import math
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
 from llama_index.core import Document
-from loguru import logger
 
 from docint.core.readers.json import CustomJSONReader
-
-
-@pytest.fixture
-def loguru_caplog(caplog: LogCaptureFixture) -> Iterable[LogCaptureFixture]:
-    """Bridge loguru records into ``caplog`` for the duration of a test.
-
-    Loguru bypasses ``logging`` so the stdlib ``caplog`` fixture does not see
-    its records out of the box. This fixture adds a temporary loguru sink
-    that re-emits every record through the stdlib handler ``caplog``
-    attaches to the root logger, then tears the sink down on exit.
-
-    Args:
-        caplog: The standard pytest log-capture fixture.
-
-    Yields:
-        The same ``caplog`` fixture, now populated with loguru-sourced
-        records at WARNING level and above.
-    """
-    handler_id = logger.add(
-        caplog.handler,
-        level="WARNING",
-        format="{message}",
-    )
-    caplog.set_level(logging.WARNING)
-    try:
-        yield caplog
-    finally:
-        logger.remove(handler_id)
 
 
 def _write_jsonl(path: Path, entries: list[dict[str, Any]]) -> None:

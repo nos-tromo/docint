@@ -244,8 +244,10 @@ Dockerfile's entrypoint).
 ## Exit codes and logging
 
 - All commands initialise loguru through `init_logger()`
-  (`docint/utils/logger_cfg.py`). Stderr is at `INFO`, rotating file
-  logs at `DEBUG` go to `LOG_PATH`.
+  (`docint/utils/logger_cfg.py`). There is **one sink, stderr**, at
+  `LOG_LEVEL` (default `INFO`); the file sink was removed and `LOG_PATH`
+  no longer exists. Under Docker, retention is the compose logging
+  driver's job (`docker/compose.yaml`, `local` driver, 50 MB × 5).
 - `ingest`, `resolve`, `query`, `query-eval`, `verify`, and `load-models`
-  return non-zero exit codes on unhandled exceptions. Use the log file for
-  diagnostics.
+  return non-zero exit codes on unhandled exceptions. Redirect stderr if
+  you want a file to read afterwards.

@@ -212,6 +212,16 @@ class DocumentIngestionPipeline:
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
+    # Files this pipeline declined because the collection already holds them.
+    # Read by ``RAG.ingest_docs`` for the run summary's ``files_skipped``,
+    # which had no source of truth at all before: the two gates counted
+    # locally and logged, and nothing aggregated them. Kept as two fields
+    # because the gates run at different stages — ``prefilter_skipped``
+    # before any file is loaded, ``skipped_hashes`` after. They are disjoint:
+    # the pre-filter removes files from ``dir_reader.input_files``, so the
+    # post-load gate never sees them.
+    prefilter_skipped: int = field(default=0, init=False)
+    skipped_hashes: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to load configurations and set up components."""
@@ -726,8 +736,9 @@ class DocumentIngestionPipeline:
                 logger.warning(f"Failed to compute hash for {file_path}, skipping pre-filter: {e}")
                 filtered_files.append(path_obj)
 
+        self.prefilter_skipped = skipped_count
         if skipped_count > 0:
-            logger.info(f"Skipping {skipped_count} files that already exist in the collection.")
+            logger.info("Skipping {} files that already exist in the collection.", skipped_count)
             self.dir_reader.input_files = filtered_files
 
     def _ensure_file_hashes(self, docs: list[Document]) -> list[Document]:
@@ -1086,6 +1097,7 @@ class DocumentIngestionPipeline:
                     filename = origin.get("filename") or origin.get("file_path") or origin.get("path") or ""
             skipped[file_hash] = filename
 
+        self.skipped_hashes.update(skipped)
         if skipped:
             display = [name or h[:12] for h, name in skipped.items()]
             logger.info(

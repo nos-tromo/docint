@@ -43,7 +43,8 @@ from anyio import to_thread
 from loguru import logger
 
 from docint.utils.duration import format_elapsed
-from docint.utils.env_cfg import load_ingest_concurrency, load_summary_concurrency
+from docint.utils.env_cfg import load_ingest_concurrency, load_logging_env, load_summary_concurrency
+from docint.utils.logfmt import ProgressLogThrottle, describe_inputs, format_by_type, format_bytes
 
 #: Per-kind SSE event names and failure copy. Keyed by :attr:`IngestJobState.kind`.
 #: ``"ingest"`` preserves the pre-existing event names exactly (backward
@@ -78,6 +79,11 @@ TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "summary_comp
 #: real upload and short enough that a bogus value cannot claim a nonsense run.
 MAX_UPLOAD_LEAD_S: float = 86_400.0
 
+#: Most files the run-start banner lists individually. Beyond this it prints a
+#: rollup naming how many it left out — a silently truncated listing would read
+#: as the whole batch.
+INPUT_LIST_LIMIT: int = 50
+
 
 def _utcnow() -> datetime:
     """Return a timezone-aware UTC timestamp.
@@ -102,6 +108,52 @@ def _clamp_lead(seconds: float) -> float:
     if not math.isfinite(seconds):
         return 0.0
     return min(max(seconds, 0.0), MAX_UPLOAD_LEAD_S)
+
+
+def _summary_fields(state: IngestJobState, stats: dict[str, Any] | None, *, failed: bool = False) -> str:
+    """Render a finished run's counters as one greppable field list.
+
+    The old completion line said only ``Job <id> (ingest) completed in
+    MM:SS.`` — an opaque id and a duration, with no collection and no
+    counts. Everything a run knew about itself was either discarded or
+    locked behind ``INGEST_BENCHMARK_ENABLED``, which is tuning telemetry
+    rather than operator information.
+
+    ``stats`` is rendered generically, key by key, so this module keeps no
+    knowledge of docint's ingest domain and the summary job can supply its
+    own counters through the same path.
+
+    Both ``duration`` and ``duration_ms`` are emitted: the first is what a
+    human reads, the second is the exact integer the SPA's ingest card
+    renders. Printing both is what makes the log and the card provably
+    agree rather than nearly agree.
+
+    Args:
+        state (IngestJobState): The finished job.
+        stats (dict[str, Any] | None): Counters from the runner's result,
+            or ``None`` on a failure (the run never produced any).
+        failed (bool, optional): Whether this is the failure path. Passed
+            explicitly rather than read from ``state.status``, which the
+            caller has not updated yet at the point it logs. A failed run
+            has no ``empty`` to report — it never got far enough to know.
+
+    Returns:
+        str: Space-separated ``key=value`` pairs.
+    """
+    fields = [
+        f"job_id={state.job_id}",
+        f"collection={state.logical_name!r}",
+        f"duration={format_elapsed(state.duration_s or 0.0)}",
+        f"duration_ms={state.duration_ms}",
+    ]
+    for key, value in (stats or {}).items():
+        fields.append(f"{key}={value}")
+    for key in ("minted", "attached"):
+        if state.resolution and key in state.resolution:
+            fields.append(f"entities_{key}={state.resolution[key]}")
+    if not failed:
+        fields.append(f"empty={str(state.empty).lower()}")
+    return " ".join(fields)
 
 
 def format_sse(event: str, data: dict[str, Any]) -> str:
@@ -758,6 +810,79 @@ class IngestJobManager:
             # owner's finished-job backlog is trimmed exactly once per run.
             await self._prune_terminal(state.owner)
 
+    async def _log_run_banner(self, state: IngestJobState) -> None:
+        """Log what a run is about to do, before it starts doing it.
+
+        Until now nothing marked a run's beginning in the log at all — the
+        ``started`` frame went only to attached clients — and no line
+        anywhere named the staged files, their sizes, or their types. The
+        first thing an operator saw was a per-document line from whichever
+        reader happened to log one.
+
+        Every line carries the full ``job_id``, so one ``grep`` reconstructs
+        a run even when ``DOCINT_INGEST_CONCURRENCY`` lets two interleave.
+
+        The inventory walk runs on a worker thread: ``_run`` is on the event
+        loop, and a network-backed volume must not stall it. Failure is
+        swallowed — a banner is a log line and must not be able to fail a
+        run.
+
+        Args:
+            state (IngestJobState): The job about to execute.
+        """
+        label = state.kind.capitalize()
+        try:
+            inventory = (
+                None
+                if state.batch_dir is None
+                else await to_thread.run_sync(describe_inputs, state.batch_dir, INPUT_LIST_LIMIT)
+            )
+        except Exception:
+            inventory = None
+
+        if inventory is None:
+            logger.info(
+                "{} job started | job_id={} collection={!r}",
+                label,
+                state.job_id,
+                state.logical_name,
+            )
+            return
+
+        logger.info(
+            "{} job started | job_id={} collection={!r} files={} bytes={} by_type={} "
+            "hybrid={} ner={} hate_speech={} resolve={}",
+            label,
+            state.job_id,
+            state.logical_name,
+            inventory.total_files,
+            format_bytes(inventory.total_bytes),
+            format_by_type(inventory.by_type),
+            str(state.hybrid).lower(),
+            str(state.ner).lower(),
+            str(state.hate_speech).lower(),
+            str(state.resolve).lower(),
+        )
+        for index, item in enumerate(inventory.files, start=1):
+            logger.info(
+                "{} input {}/{} | job_id={} file={!r} type={} bytes={}",
+                label,
+                index,
+                inventory.total_files,
+                state.job_id,
+                item.name,
+                item.kind,
+                format_bytes(item.size_bytes),
+            )
+        if inventory.omitted:
+            logger.info(
+                "{} inputs truncated | job_id={} listed={} omitted={}",
+                label,
+                state.job_id,
+                len(inventory.files),
+                inventory.omitted,
+            )
+
     async def _run(self, state: IngestJobState) -> None:
         """Execute the job body, holding a worker slot for its duration.
 
@@ -821,6 +946,56 @@ class IngestJobManager:
                 """
                 self._dispatch(state, event_name, _frame(event_name, payload))
 
+            def _log(message: str, *, warning: bool = False) -> None:
+                """Write one runner message to the log, tagged with the job.
+
+                Every line a job produces carries the full ``job_id``, so
+                ``docker logs | grep <job_id>`` reconstructs one run even when
+                ``DOCINT_INGEST_CONCURRENCY`` lets two interleave.
+
+                Args:
+                    message (str): The runner's own message, verbatim.
+                    warning (bool, optional): Log at WARNING instead of INFO.
+                """
+                write = logger.warning if warning else logger.info
+                write(
+                    "Job {} ({}) {}: {}",
+                    state.job_id,
+                    state.kind,
+                    "warning" if warning else "progress",
+                    message,
+                )
+
+            def _tee(event_name: str, payload: dict[str, Any]) -> None:
+                """Mirror a runner event into the log.
+
+                The runner's progress messages were written for a client that
+                renders the latest and discards the rest, so they arrive per
+                chunk — thousands per run. ``throttle`` decides which an
+                operator sees; warnings are never throttled, and until now
+                reached no log at all.
+
+                Never raises: ``ingestion_pipeline`` re-raises whatever a
+                progress callback threw via ``future.result()``, so an
+                exception here would fail the batch it was only meant to
+                describe.
+
+                Args:
+                    event_name (str): SSE event name.
+                    payload (dict[str, Any]): JSON-serializable payload.
+                """
+                try:
+                    message = str(payload.get("message") or "").strip()
+                    if not message:
+                        return
+                    if event_name in PROGRESS_EVENTS:
+                        for line in throttle.observe(message):
+                            _log(line)
+                    elif event_name == "warning":
+                        _log(message, warning=True)
+                except Exception:
+                    pass
+
             def _push(event_name: str, payload: dict[str, Any]) -> None:
                 """Publish an event from the worker thread (thread-safe).
 
@@ -830,24 +1005,34 @@ class IngestJobManager:
                 threadsafe hop back onto the loop thread. ``_worker``'s own
                 frames use ``_emit`` instead; see its docstring for why.
 
+                The log tee runs before the hop, on the worker thread, so the
+                line lands when the event happened rather than a loop
+                iteration later. loguru's sink is thread-safe.
+
                 Args:
                     event_name (str): SSE event name.
                     payload (dict[str, Any]): JSON-serializable payload.
                 """
+                _tee(event_name, payload)
                 frame = _frame(event_name, payload)
                 loop.call_soon_threadsafe(self._dispatch, state, event_name, frame)
 
+            throttle = ProgressLogThrottle(load_logging_env().progress_interval_s)
             names = KIND_EVENTS[state.kind]
             _emit(names["started"], {"collection": state.logical_name})
+            await self._log_run_banner(state)
             try:
                 result = await to_thread.run_sync(self._runner, state, _push)
             except Exception:
+                # Release a held tick first: how far a stage got before it
+                # died is the most useful line in a failed run.
+                for line in throttle.flush():
+                    _log(line)
                 state.duration_s = state.elapsed_s()
                 logger.exception(
-                    "Job {} ({}) failed after {}.",
-                    state.job_id,
-                    state.kind,
-                    format_elapsed(state.duration_s),
+                    "{} job failed | {}",
+                    state.kind.capitalize(),
+                    _summary_fields(state, None, failed=True),
                 )
                 state.status = JobStatus.FAILED
                 state.error = names["failed_message"]
@@ -863,16 +1048,17 @@ class IngestJobManager:
                     },
                 )
                 return
+            for line in throttle.flush():
+                _log(line)
             state.empty = bool(result.get("empty", False))
             state.resolution = result.get("resolution")
             state.status = JobStatus.COMPLETED
             state.finished_at = _utcnow()
             state.duration_s = state.elapsed_s()
             logger.info(
-                "Job {} ({}) completed in {}.",
-                state.job_id,
-                state.kind,
-                format_elapsed(state.duration_s),
+                "{} job completed | {}",
+                state.kind.capitalize(),
+                _summary_fields(state, result.get("stats")),
             )
             terminal: dict[str, Any] = {
                 "collection": state.logical_name,
