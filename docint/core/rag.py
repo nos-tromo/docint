@@ -4172,7 +4172,11 @@ class RAG:
                 exc,
             )
 
-    def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
+    def _persist_node_batches(
+        self,
+        nodes: list[BaseNode],
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
         """Persist nodes in micro-batches to reduce crash-loss windows.
 
         Each batch is written to the KV docstore first and to the vector
@@ -4185,6 +4189,12 @@ class RAG:
 
         Args:
             nodes (list[BaseNode]): Ingestion nodes to persist.
+            progress_callback (Callable[[str], None] | None): Optional sink
+                for per-batch progress. Embedding and persistence is the
+                longest stage of a large ingest and reported nothing, so it
+                was the last window in a run where the log went quiet for
+                minutes. Reported rather than logged directly so the job
+                layer's throttle collapses it like every other stage.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -4202,6 +4212,8 @@ class RAG:
                 len(batches),
                 len(batch),
             )
+            if progress_callback is not None:
+                progress_callback(f"Embedding and storing: {batch_no}/{len(batches)} batches processed")
             vector_candidates = self._select_vector_nodes(batch)
             (
                 prepared_vector_nodes,
@@ -4305,14 +4317,20 @@ class RAG:
             self.docstore_batch_size,
         )
 
-    async def _apersist_node_batches(self, nodes: list[BaseNode]) -> None:
+    async def _apersist_node_batches(
+        self,
+        nodes: list[BaseNode],
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
         """Asynchronously persist nodes in micro-batches.
 
         Mirrors :meth:`_persist_node_batches` — see its docstring for the
-        failure-logging semantics.
+        failure-logging semantics and why persistence reports progress.
 
         Args:
             nodes (list[BaseNode]): Ingestion nodes to persist.
+            progress_callback (Callable[[str], None] | None): Optional sink
+                for per-batch progress.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -4330,6 +4348,8 @@ class RAG:
                 len(batches),
                 len(batch),
             )
+            if progress_callback is not None:
+                progress_callback(f"Embedding and storing: {batch_no}/{len(batches)} batches processed")
             vector_candidates = self._select_vector_nodes(batch)
             (
                 prepared_vector_nodes,
@@ -6407,7 +6427,7 @@ class RAG:
                     manifest_in_flight.add(file_hash)
                 if nodes:
                     try:
-                        self._persist_node_batches(nodes)
+                        self._persist_node_batches(nodes, progress_callback)
                     except Exception as exc:
                         per_batch = {file_hash} if file_hash else set(manifest_in_flight)
                         _handle_batch_failure(per_batch, exc)
@@ -6444,7 +6464,7 @@ class RAG:
                         manifest_in_flight.add(fh)
                     if nodes:
                         try:
-                            self._persist_node_batches(nodes)
+                            self._persist_node_batches(nodes, progress_callback)
                         except Exception as exc:
                             _handle_batch_failure(batch_hashes, exc)
                             manifest_in_flight -= batch_hashes
@@ -6462,7 +6482,7 @@ class RAG:
                     if docs:
                         streaming_docs += len(docs)
                     if nodes:
-                        self._persist_node_batches(nodes)
+                        self._persist_node_batches(nodes, progress_callback)
                         streaming_nodes += len(nodes)
                         persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
         except Exception as exc:
@@ -6671,7 +6691,7 @@ class RAG:
                     manifest_in_flight.add(file_hash)
                 if nodes:
                     try:
-                        await self._apersist_node_batches(nodes)
+                        await self._apersist_node_batches(nodes, progress_callback)
                     except Exception as exc:
                         per_batch = {file_hash} if file_hash else set(manifest_in_flight)
                         _handle_batch_failure(per_batch, exc)
@@ -6699,7 +6719,7 @@ class RAG:
                         manifest_in_flight.add(fh)
                     if nodes:
                         try:
-                            await self._apersist_node_batches(nodes)
+                            await self._apersist_node_batches(nodes, progress_callback)
                         except Exception as exc:
                             _handle_batch_failure(batch_hashes, exc)
                             manifest_in_flight -= batch_hashes
@@ -6717,7 +6737,7 @@ class RAG:
                     if docs:
                         streaming_docs += len(docs)
                     if nodes:
-                        await self._apersist_node_batches(nodes)
+                        await self._apersist_node_batches(nodes, progress_callback)
                         streaming_nodes += len(nodes)
                         persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
         except Exception as exc:
