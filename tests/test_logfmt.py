@@ -6,10 +6,18 @@ Every filename here is invented; none of it corresponds to real data.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import pytest
 
-from docint.utils.logfmt import ProgressLogThrottle, parse_counter, progress_key
+from docint.utils.logfmt import (
+    ProgressLogThrottle,
+    describe_inputs,
+    format_by_type,
+    format_bytes,
+    parse_counter,
+    progress_key,
+)
 
 
 class _FakeClock:
@@ -34,6 +42,147 @@ class _FakeClock:
             seconds (float): Seconds to advance by.
         """
         self.now += seconds
+
+
+# ---------------------------------------------------------------------------
+# format_bytes — must agree with the SPA, which describes the same upload
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # These are the cases frontend/src/lib/ingestStatus.test.ts pins for
+        # formatBytes. The log and the ingest card must not disagree about
+        # the size of the same file.
+        (0, "0 B"),
+        (-5, "0 B"),
+        (1023, "1023 B"),
+        (1024, "1.0 KB"),
+        (1024 * 1024, "1.0 MB"),
+        (1_500_000, "1.4 MB"),
+    ],
+)
+def test_format_bytes_matches_the_spa(value: int, expected: str) -> None:
+    """Port parity with ``formatBytes``, truncation included.
+
+    Args:
+        value (int): Byte count.
+        expected (str): What the SPA renders for it.
+    """
+    assert format_bytes(value) == expected
+
+
+def test_format_bytes_caps_at_terabytes() -> None:
+    """The unit ladder ends at TB rather than overflowing its list."""
+    assert format_bytes(1024**5).endswith(" TB")
+
+
+def test_format_bytes_survives_a_nonfinite_count() -> None:
+    """A size we cannot render must not raise inside a log call."""
+    assert format_bytes(float("inf")) == "0 B"
+    assert format_bytes(float("nan")) == "0 B"
+
+
+# ---------------------------------------------------------------------------
+# describe_inputs — the banner's inventory
+# ---------------------------------------------------------------------------
+
+
+def test_describe_inputs_reports_names_types_and_sizes(tmp_path: Path) -> None:
+    """The whole point: what was staged, how big, and of what type.
+
+    Args:
+        tmp_path (Path): Temporary batch directory.
+    """
+    (tmp_path / "annual-report.pdf").write_bytes(b"x" * 2048)
+    (tmp_path / "meeting-notes.docx").write_bytes(b"y" * 512)
+
+    inventory = describe_inputs(tmp_path)
+
+    assert inventory.total_files == 2
+    assert inventory.total_bytes == 2560
+    assert [(f.name, f.kind, f.size_bytes) for f in inventory.files] == [
+        ("annual-report.pdf", "pdf", 2048),
+        ("meeting-notes.docx", "docx", 512),
+    ]
+
+
+def test_describe_inputs_walks_nested_directories(tmp_path: Path) -> None:
+    """Uploads preserve subdirectories, so a flat listing would miss files.
+
+    Args:
+        tmp_path (Path): Temporary batch directory.
+    """
+    nested = tmp_path / "archive" / "2024"
+    nested.mkdir(parents=True)
+    (nested / "survey.csv").write_bytes(b"z" * 10)
+
+    inventory = describe_inputs(tmp_path)
+
+    assert inventory.total_files == 1
+    assert inventory.files[0].name == str(Path("archive") / "2024" / "survey.csv")
+
+
+def test_describe_inputs_counts_by_type(tmp_path: Path) -> None:
+    """The header rollup is what makes a long inventory scannable.
+
+    Args:
+        tmp_path (Path): Temporary batch directory.
+    """
+    for name in ("a.pdf", "b.pdf", "c.docx"):
+        (tmp_path / name).write_bytes(b"x")
+
+    inventory = describe_inputs(tmp_path)
+
+    assert dict(inventory.by_type) == {"pdf": 2, "docx": 1}
+    assert format_by_type(inventory.by_type).startswith("pdf:2")
+
+
+def test_describe_inputs_reports_extensionless_files(tmp_path: Path) -> None:
+    """A file with no extension still has to be accounted for.
+
+    Args:
+        tmp_path (Path): Temporary batch directory.
+    """
+    (tmp_path / "README").write_bytes(b"x")
+
+    assert describe_inputs(tmp_path).files[0].kind == "none"
+
+
+def test_describe_inputs_caps_the_listing_but_not_the_totals(tmp_path: Path) -> None:
+    """A 500-file batch must not print 500 lines, nor under-report itself.
+
+    Args:
+        tmp_path (Path): Temporary batch directory.
+    """
+    for i in range(10):
+        (tmp_path / f"doc-{i:02d}.pdf").write_bytes(b"x" * 100)
+
+    inventory = describe_inputs(tmp_path, limit=3)
+
+    assert len(inventory.files) == 3
+    assert inventory.omitted == 7
+    assert inventory.total_files == 10
+    assert inventory.total_bytes == 1000
+
+
+def test_describe_inputs_on_a_missing_directory_is_empty_not_an_error(tmp_path: Path) -> None:
+    """A banner is a log line; it must never be able to fail a run.
+
+    Args:
+        tmp_path (Path): Temporary directory whose child does not exist.
+    """
+    inventory = describe_inputs(tmp_path / "nope")
+
+    assert inventory.total_files == 0
+    assert inventory.total_bytes == 0
+    assert inventory.files == ()
+
+
+def test_format_by_type_handles_an_empty_rollup() -> None:
+    """An empty batch renders a word, not an empty field."""
+    assert format_by_type(()) == "none"
 
 
 # ---------------------------------------------------------------------------

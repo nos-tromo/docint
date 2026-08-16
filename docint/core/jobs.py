@@ -44,7 +44,7 @@ from loguru import logger
 
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import load_ingest_concurrency, load_logging_env, load_summary_concurrency
-from docint.utils.logfmt import ProgressLogThrottle
+from docint.utils.logfmt import ProgressLogThrottle, describe_inputs, format_by_type, format_bytes
 
 #: Per-kind SSE event names and failure copy. Keyed by :attr:`IngestJobState.kind`.
 #: ``"ingest"`` preserves the pre-existing event names exactly (backward
@@ -78,6 +78,11 @@ TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "summary_comp
 #: Upper bound on a caller-reported upload lead. A day is far longer than any
 #: real upload and short enough that a bogus value cannot claim a nonsense run.
 MAX_UPLOAD_LEAD_S: float = 86_400.0
+
+#: Most files the run-start banner lists individually. Beyond this it prints a
+#: rollup naming how many it left out — a silently truncated listing would read
+#: as the whole batch.
+INPUT_LIST_LIMIT: int = 50
 
 
 def _utcnow() -> datetime:
@@ -759,6 +764,79 @@ class IngestJobManager:
             # owner's finished-job backlog is trimmed exactly once per run.
             await self._prune_terminal(state.owner)
 
+    async def _log_run_banner(self, state: IngestJobState) -> None:
+        """Log what a run is about to do, before it starts doing it.
+
+        Until now nothing marked a run's beginning in the log at all — the
+        ``started`` frame went only to attached clients — and no line
+        anywhere named the staged files, their sizes, or their types. The
+        first thing an operator saw was a per-document line from whichever
+        reader happened to log one.
+
+        Every line carries the full ``job_id``, so one ``grep`` reconstructs
+        a run even when ``DOCINT_INGEST_CONCURRENCY`` lets two interleave.
+
+        The inventory walk runs on a worker thread: ``_run`` is on the event
+        loop, and a network-backed volume must not stall it. Failure is
+        swallowed — a banner is a log line and must not be able to fail a
+        run.
+
+        Args:
+            state (IngestJobState): The job about to execute.
+        """
+        label = state.kind.capitalize()
+        try:
+            inventory = (
+                None
+                if state.batch_dir is None
+                else await to_thread.run_sync(describe_inputs, state.batch_dir, INPUT_LIST_LIMIT)
+            )
+        except Exception:
+            inventory = None
+
+        if inventory is None:
+            logger.info(
+                "{} job started | job_id={} collection={!r}",
+                label,
+                state.job_id,
+                state.logical_name,
+            )
+            return
+
+        logger.info(
+            "{} job started | job_id={} collection={!r} files={} bytes={} by_type={} "
+            "hybrid={} ner={} hate_speech={} resolve={}",
+            label,
+            state.job_id,
+            state.logical_name,
+            inventory.total_files,
+            format_bytes(inventory.total_bytes),
+            format_by_type(inventory.by_type),
+            str(state.hybrid).lower(),
+            str(state.ner).lower(),
+            str(state.hate_speech).lower(),
+            str(state.resolve).lower(),
+        )
+        for index, item in enumerate(inventory.files, start=1):
+            logger.info(
+                "{} input {}/{} | job_id={} file={!r} type={} bytes={}",
+                label,
+                index,
+                inventory.total_files,
+                state.job_id,
+                item.name,
+                item.kind,
+                format_bytes(item.size_bytes),
+            )
+        if inventory.omitted:
+            logger.info(
+                "{} inputs truncated | job_id={} listed={} omitted={}",
+                label,
+                state.job_id,
+                len(inventory.files),
+                inventory.omitted,
+            )
+
     async def _run(self, state: IngestJobState) -> None:
         """Execute the job body, holding a worker slot for its duration.
 
@@ -896,6 +974,7 @@ class IngestJobManager:
             throttle = ProgressLogThrottle(load_logging_env().progress_interval_s)
             names = KIND_EVENTS[state.kind]
             _emit(names["started"], {"collection": state.logical_name})
+            await self._log_run_banner(state)
             try:
                 result = await to_thread.run_sync(self._runner, state, _push)
             except Exception:

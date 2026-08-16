@@ -14,10 +14,21 @@ directly with a fake clock.
 
 from __future__ import annotations
 
+import math
+import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+
+#: Unit labels for :func:`format_bytes`, mirroring the SPA's ``formatBytes``.
+_BYTE_UNITS: tuple[str, ...] = ("KB", "MB", "GB", "TB")
+
+#: Extension reported for a file that has none.
+_UNKNOWN_KIND = "none"
 
 #: Matches the first ``n/m`` counter in a progress message.
 _COUNTER_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
@@ -25,6 +36,158 @@ _COUNTER_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 #: Collapses every run of digits, so messages that differ only by their
 #: counters share a key.
 _DIGITS_RE = re.compile(r"\d+")
+
+
+def format_bytes(n: float) -> str:
+    """Render a byte count the way the SPA's ingest card renders it.
+
+    Deliberately a port of ``formatBytes`` in
+    ``frontend/src/lib/ingestStatus.ts``, down to the truncation: binary
+    sizing with decimal-style labels, one decimal place, floored rather
+    than rounded so ``1.499 MB`` reads as ``1.4 MB``. The log and the card
+    describe the same upload, so they must not disagree about its size.
+
+    Args:
+        n (float): Byte count.
+
+    Returns:
+        str: A human-readable size such as ``"0 B"``, ``"1023 B"``, or
+        ``"1.4 MB"``.
+    """
+    if not math.isfinite(n) or n <= 0:
+        return "0 B"
+    if n < 1024:
+        return f"{int(n)} B"
+    value = n / 1024
+    unit_idx = 0
+    while value >= 1024 and unit_idx < len(_BYTE_UNITS) - 1:
+        value /= 1024
+        unit_idx += 1
+    truncated = math.floor(value * 10) / 10
+    return f"{truncated:.1f} {_BYTE_UNITS[unit_idx]}"
+
+
+@dataclass(frozen=True)
+class InputFile:
+    """One staged file, as the run-start banner describes it.
+
+    Attributes:
+        name: Path relative to the batch directory, so nesting stays visible.
+        kind: Lowercased extension without the dot, or ``"none"``.
+        size_bytes: Size on disk.
+    """
+
+    name: str
+    kind: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class InputInventory:
+    """What a job is about to ingest.
+
+    Attributes:
+        files: The listed files, capped at the caller's limit.
+        total_files: Every file found, including those beyond the cap.
+        total_bytes: Total size of every file found.
+        by_type: ``(extension, count)`` pairs, most frequent first, over
+            every file found.
+        omitted: How many files the cap left out.
+    """
+
+    files: tuple[InputFile, ...]
+    total_files: int
+    total_bytes: int
+    by_type: tuple[tuple[str, int], ...]
+    omitted: int
+
+
+def _iter_files(root: Path) -> Iterator[os.DirEntry[str]]:
+    """Walk ``root`` recursively, yielding file entries.
+
+    Uses ``os.scandir`` so each entry's ``stat`` is served from the
+    directory read where the platform allows it. Unreadable directories
+    are skipped rather than raising — an inventory is a log line, and must
+    not be able to fail a run.
+
+    Args:
+        root (Path): Directory to walk.
+
+    Yields:
+        os.DirEntry[str]: One entry per regular file found.
+    """
+    stack = [str(root)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            yield entry
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+
+def describe_inputs(root: Path, limit: int = 50) -> InputInventory:
+    """Inventory the files staged under ``root``.
+
+    This is the first thing in the ingest path that asks the filesystem how
+    big anything is — nothing else computes a size, so the banner cannot
+    borrow one. One ``stat`` per file is the whole cost.
+
+    Args:
+        root (Path): The job's batch directory.
+        limit (int, optional): Most files to list individually. Totals and
+            ``by_type`` still cover every file found. Defaults to 50.
+
+    Returns:
+        InputInventory: The staged inventory; empty if ``root`` is missing
+        or unreadable.
+    """
+    found: list[InputFile] = []
+    total_bytes = 0
+    kinds: Counter[str] = Counter()
+
+    for entry in _iter_files(root):
+        try:
+            size = entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            size = 0
+        name = os.path.relpath(entry.path, str(root))
+        kind = Path(entry.name).suffix.lstrip(".").lower() or _UNKNOWN_KIND
+        found.append(InputFile(name=name, kind=kind, size_bytes=size))
+        total_bytes += size
+        kinds[kind] += 1
+
+    found.sort(key=lambda f: f.name)
+    capped = max(0, limit)
+    return InputInventory(
+        files=tuple(found[:capped]),
+        total_files=len(found),
+        total_bytes=total_bytes,
+        by_type=tuple(kinds.most_common()),
+        omitted=max(0, len(found) - capped),
+    )
+
+
+def format_by_type(by_type: tuple[tuple[str, int], ...]) -> str:
+    """Render a by-extension rollup for the banner header.
+
+    Args:
+        by_type (tuple[tuple[str, int], ...]): ``(extension, count)`` pairs.
+
+    Returns:
+        str: A compact rollup such as ``"pdf:2,docx:1"``, or ``"none"``
+        when there is nothing to describe.
+    """
+    if not by_type:
+        return "none"
+    return ",".join(f"{kind}:{count}" for kind, count in by_type)
 
 
 def progress_key(message: str) -> str:

@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from _pytest.logging import LogCaptureFixture
 
+import docint.core.jobs as jobs_module
 from docint.core.jobs import (
     MAX_UPLOAD_LEAD_S,
     IngestJobManager,
@@ -21,7 +22,7 @@ from docint.core.jobs import (
     _clamp_lead,
     format_sse,
 )
-from docint.utils.logfmt import ProgressLogThrottle
+from docint.utils.logfmt import ProgressLogThrottle, describe_inputs
 
 
 def _state() -> IngestJobState:
@@ -193,6 +194,135 @@ async def test_failed_job_logs_how_long_it_ran_before_failing(
     failed = [r for r in loguru_caplog_info.messages if "failed after" in r]
     assert failed, f"no failure line logged; got {loguru_caplog_info.messages}"
     assert re.search(rf"Job {state.job_id} \(ingest\) failed after \d{{2}}:\d{{2}}\.", failed[-1]), failed[-1]
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_run_banner_names_every_staged_file_with_size_and_type(
+    loguru_caplog_info: LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """Nothing in the log said what a run was about to ingest.
+
+    Filenames used to appear only as a side effect of whichever reader
+    happened to log one, non-PDF inputs produced no per-file line at all,
+    and no line anywhere carried a size or a type.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        tmp_path (Path): Temporary batch directory.
+    """
+    (tmp_path / "annual-report.pdf").write_bytes(b"x" * 2048)
+    (tmp_path / "meeting-notes.docx").write_bytes(b"y" * 512)
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path,
+        hybrid=True,
+        ner=True,
+        hate_speech=False,
+        resolve=True,
+    )
+    await _drain(manager, state)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert f"Ingest job started | job_id={state.job_id} collection='field-notes' files=2" in combined
+    assert "bytes=2.5 KB" in combined
+    assert "hybrid=true ner=true hate_speech=false resolve=true" in combined
+    assert "file='annual-report.pdf' type=pdf bytes=2.0 KB" in combined
+    assert "file='meeting-notes.docx' type=docx bytes=512 B" in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_run_banner_truncates_a_large_batch_but_says_so(
+    loguru_caplog_info: LogCaptureFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capped listing that did not admit it would read as complete.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        tmp_path (Path): Temporary batch directory.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(jobs_module, "describe_inputs", lambda root, _limit: describe_inputs(root, limit=2))
+    for i in range(5):
+        (tmp_path / f"doc-{i}.pdf").write_bytes(b"x" * 10)
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path,
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    await _drain(manager, state)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert "files=5" in combined
+    assert f"Ingest inputs truncated | job_id={state.job_id} listed=2 omitted=3" in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_summary_job_banner_carries_identity_only(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A summary rebuild stages no files, so it has no inventory to report.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        kind="summary",
+    )
+    await _drain(manager, state)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert f"Summary job started | job_id={state.job_id} collection='field-notes'" in combined
+    assert "Summary input" not in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_batch_dir_never_fails_the_run(
+    loguru_caplog_info: LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """The banner describes a run; it must not be able to stop one.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        tmp_path (Path): Temporary directory whose child does not exist.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path / "never-created",
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    await _drain(manager, state)
+
+    assert state.status is JobStatus.COMPLETED
+    assert any("Ingest job started" in m for m in loguru_caplog_info.messages)
     await manager.stop()
 
 

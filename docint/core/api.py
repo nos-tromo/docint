@@ -75,6 +75,7 @@ from docint.utils.env_cfg import (
     set_offline_env,
 )
 from docint.utils.hashing import compute_file_hash
+from docint.utils.logfmt import format_bytes
 from docint.utils.logger_cfg import init_logger
 from docint.utils.openai_cfg import EmbeddingEndpointError
 from docint.utils.translate_client import translate
@@ -4048,6 +4049,7 @@ async def ingest_upload(
             },
         )
 
+        staged_bytes = 0
         for upload in files:
             dest = _safe_relative_dest(batch_dir, upload.filename or "upload")
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -4066,6 +4068,7 @@ async def ingest_upload(
                             {"filename": filename, "bytes_written": bytes_written},
                         )
 
+                staged_bytes += bytes_written
                 # We calculate hash but don't store the file index anymore
                 file_hash = compute_file_hash(dest)
                 yield _format_sse(
@@ -4087,6 +4090,16 @@ async def ingest_upload(
                 )
                 return
 
+        # An upload that is never finalized creates no job, so without this
+        # line it leaves no trace in the log at all. Per-file detail belongs
+        # to the run-start banner, which knows the job id; this is only the
+        # batch landing on disk.
+        logger.info(
+            "Upload batch staged | collection={!r} files={} bytes={}",
+            name,
+            len(files),
+            format_bytes(staged_bytes),
+        )
         yield _format_sse(
             "upload_complete",
             {"collection": name, "files_saved": len(files)},
