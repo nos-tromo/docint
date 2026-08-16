@@ -21,6 +21,7 @@ from docint.core.jobs import (
     _clamp_lead,
     format_sse,
 )
+from docint.utils.logfmt import ProgressLogThrottle
 
 
 def _state() -> IngestJobState:
@@ -192,6 +193,128 @@ async def test_failed_job_logs_how_long_it_ran_before_failing(
     failed = [r for r in loguru_caplog_info.messages if "failed after" in r]
     assert failed, f"no failure line logged; got {loguru_caplog_info.messages}"
     assert re.search(rf"Job {state.job_id} \(ingest\) failed after \d{{2}}:\d{{2}}\.", failed[-1]), failed[-1]
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_runner_progress_reaches_the_log(
+    loguru_caplog_info: LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Progress went to the client stream and nowhere else.
+
+    The CLI passed ``logger.info`` as the pipeline's progress sink and got a
+    readable run; the API passed an SSE publisher and got six-minute silences
+    in the container log. Same code, same run.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("LOG_PROGRESS_INTERVAL_S", "0")
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    assert any(f"Job {state.job_id} (ingest) progress: working" in m for m in loguru_caplog_info.messages), (
+        f"progress never reached the log; got {loguru_caplog_info.messages}"
+    )
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_runner_warnings_reach_the_log(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A pushed warning used to produce no log line at all.
+
+    "No staged files found" is exactly the kind of thing an operator goes
+    to the log for, and it was visible only to an attached browser.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        push("warning", {"message": "No ingestable files found."})
+        return {"empty": True, "resolution": None}
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    assert any("warning: No ingestable files found." in m for m in loguru_caplog_info.messages), (
+        f"warning never reached the log; got {loguru_caplog_info.messages}"
+    )
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_per_chunk_ticks_are_throttled_but_the_last_one_survives(
+    loguru_caplog_info: LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hundreds of ticks collapse to a heartbeat without losing the tail.
+
+    A raw tee of the progress stream would bury the log; dropping the held
+    tick would end the stage mid-count. Neither is acceptable.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("LOG_PROGRESS_INTERVAL_S", "3600")
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        for n in range(1, 201):
+            push("ingestion_progress", {"message": f"Extracting entities: {n}/500 chunks processed"})
+        return {"empty": False, "resolution": None}
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    ticks = [m for m in loguru_caplog_info.messages if "Extracting entities" in m]
+    assert len(ticks) == 2, f"expected an opening tick and a flushed tail, got {ticks}"
+    assert "1/500" in ticks[0]
+    assert "200/500" in ticks[1], "the last thing the stage said must survive the throttle"
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_a_throwing_log_tee_never_fails_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The log tee describes a run; it must not be able to end one.
+
+    ``ingestion_pipeline`` re-raises whatever a progress callback threw via
+    ``future.result()``, so an exception raised while deciding whether to
+    log would fail the batch it was only meant to narrate. The client
+    stream must be unaffected too.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    def _boom(self: ProgressLogThrottle, message: str) -> list[str]:
+        """Fail the way a future refactor might.
+
+        Args:
+            self (ProgressLogThrottle): The throttle instance.
+            message (str): The progress message.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("throttle exploded")
+
+    monkeypatch.setattr(ProgressLogThrottle, "observe", _boom)
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    assert state.status is JobStatus.COMPLETED
+    # The client stream still carries the progress the log could not render.
+    assert state.message == "working"
     await manager.stop()
 
 

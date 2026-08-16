@@ -8853,7 +8853,22 @@ class RAG:
             raise ValueError("qdrant_collection must be set to resolve entities")
 
         def _emit(message: str) -> None:
-            """Forward a progress message to the callback when present."""
+            """Forward a progress message to the callback when present.
+
+            This logs unconditionally, unlike the CLI shim's
+            ``progress_callback or (lambda msg: logger.info(msg))`` — which
+            is why entity resolution was the one stage already visible in
+            the container log.
+
+            Callers on the job path must therefore pass **no**
+            ``progress_callback``: ``jobs.py`` now tees every pushed
+            progress message to the log, so threading one through here
+            would log each message twice. ``api.py``'s two call sites both
+            call ``resolve_entities()`` bare for exactly this reason.
+
+            Args:
+                message (str): The progress message.
+            """
             if progress_callback is not None:
                 progress_callback(message)
             logger.info(message)
