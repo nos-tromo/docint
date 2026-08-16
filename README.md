@@ -336,15 +336,22 @@ text chunks by the same reranker on the same scale, shown to the model as part
 of the evidence, numbered like any other citation, and quotable in the
 collection summary alongside its document's text.
 
-What the model sees of an image is its stored caption and tags, written at
-ingest time. No pixels are sent at query time, and no vision call happens on
-the chat path.
+What the model sees of an image is what was stored for it at ingest time: its
+caption and tags, and — where a document OCR model is configured — the text
+printed *inside* it. A caption says what a picture shows; OCR says what it
+says, which is what someone searching for a screenshot's wording actually
+typed, so it is stored ahead of the caption and indexed for keyword search
+too. No pixels are sent at query time, and no vision call happens on the chat
+path.
 
-Two settings shape the lane:
+Settings that shape the lane:
 
 - `IMAGE_RETRIEVE_TOP_K` (default `5`) — how many CLIP candidates enter the
   ranking. They then compete with text chunks for the answer's source slots;
   a query with no relevant imagery spends none of them.
+- `IMAGE_OCR_ENABLED` (on when `OCR_MODEL` is set) — read the text inside
+  images. `KEYFRAME_OCR_ENABLED` (default off) extends that to video
+  keyframes, where usually only slides carry text.
 - `IMAGE_RERANK_MIN_SCORE` (default `0.05`) — the reranker score an image
   caption must reach. The floor sits on the reranker, never on raw CLIP
   similarity, which is not comparable across queries: an unrelated query and a
