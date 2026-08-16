@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from docint.core.readers.documents.layout_vlm import LayoutOcrStats
 from pdf_fixtures import (
     ImageBox,
     PageSpec,
@@ -212,7 +214,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "3.3.0"
+        assert cfg.pipeline_version == "3.4.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -861,8 +863,37 @@ class TestExtraction:
         assert left.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
         assert right.convert("RGB").getpixel((0, 0)) == (0, 0, 255)
 
-    def test_extract_images_survives_missing_pixels(self, tmp_path: Path) -> None:
-        """A FIGURE block whose bbox matches no image object still yields a result without a path."""
+    def test_figure_without_an_image_object_is_cropped_from_the_render(self, tmp_path: Path) -> None:
+        """A picture region inside a scanned page has no embedded object of its own; crop the page."""
+        pdf = tmp_path / "scan.pdf"
+        pdf.write_bytes(
+            build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792, pixels=(6, 8), rgb=(0, 128, 0))])])
+        )
+        layout = {
+            0: [
+                LayoutBlock(
+                    block_id="fig1",
+                    page_index=0,
+                    type=BlockType.FIGURE,
+                    bbox=BBox(x0=100, y0=100, x1=300, y1=250),
+                    reading_order=0,
+                    confidence=0.7,
+                    text="",
+                )
+            ]
+        }
+        images = extract_images(layout, pdf, tmp_path / "images")
+        assert len(images) == 1
+        assert images[0].image_path and Path(images[0].image_path).exists()
+        from PIL import Image
+
+        crop = Image.open(images[0].image_path)
+        # 200 x 150 pt region rendered at the crop dpi keeps its aspect ratio.
+        assert abs(crop.width / crop.height - 200 / 150) < 0.05
+        assert crop.convert("RGB").getpixel((crop.width // 2, crop.height // 2)) == (0, 128, 0)
+
+    def test_extract_images_crops_when_no_image_object_matches(self, tmp_path: Path) -> None:
+        """A FIGURE block with no embedded object of its own is served from the page render."""
         pdf = tmp_path / "doc.pdf"
         pdf.write_bytes(build_pdf([PageSpec(runs=[TextRun("no images here", x=60, y=700)])]))
         layout = {
@@ -880,7 +911,7 @@ class TestExtraction:
         }
         images = extract_images(layout, pdf, tmp_path / "images")
         assert len(images) == 1
-        assert images[0].image_path is None
+        assert images[0].image_path and Path(images[0].image_path).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -2335,6 +2366,128 @@ class TestOrchestrator:
         )
         assert table["structure_source"] == "geometry"
         assert "Alpha" in table["raw_text"]
+
+    @staticmethod
+    def _layout_ocr_engine(blocks_by_page: dict[int, list[LayoutBlock] | None]) -> MagicMock:
+        """A stand-in LayoutOcrEngine answering from a fixed table."""
+        engine = MagicMock()
+        engine.disabled = False
+        engine.family = "dots"
+        engine.model = "dots-studio/dots.mocr"
+        engine.stats = LayoutOcrStats()
+
+        def _layout_for(page_index: int) -> list[LayoutBlock] | None:
+            blocks = blocks_by_page.get(page_index)
+            if blocks:
+                engine.stats.pages_recovered += 1
+            else:
+                engine.stats.pages_failed += 1
+            return blocks
+
+        engine.layout_for.side_effect = _layout_for
+        return engine
+
+    def test_scanned_page_takes_its_layout_from_the_ocr_model(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """A page that needs OCR gets real blocks (heading, text, table) and OCR-sourced page text."""
+        pdf_file = tmp_path / "scan.pdf"
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
+        blocks = [
+            LayoutBlock("t", 0, BlockType.TITLE, BBox(50, 700, 400, 730), 0, 0.7, "Scanned Report"),
+            LayoutBlock("b", 0, BlockType.TEXT, BBox(50, 500, 560, 690), 1, 0.7, "Body read from the scan."),
+            LayoutBlock(
+                "tb",
+                0,
+                BlockType.TABLE,
+                BBox(50, 300, 560, 480),
+                2,
+                0.7,
+                "Model | Score\nAlpha | 1",
+                cells=[["Model", "Score"], ["Alpha", "1"]],
+                cells_source="vlm",
+            ),
+        ]
+        engine = self._layout_ocr_engine({0: blocks})
+        vision = MagicMock()
+
+        with (
+            patch("docint.core.readers.documents.orchestrator.LayoutOcrEngine", return_value=engine),
+            patch("docint.core.readers.documents.orchestrator.VisionOCREngine", return_value=vision),
+            patch("docint.core.readers.documents.orchestrator.TableStructureEngine"),
+        ):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        assert manifest.pages_ocr == 1
+        assert manifest.pages_ocr_layout == 1
+        vision.ocr_page.assert_not_called()  # the layout lane answered; no plain-text fallback
+        engine.close.assert_called_once()
+
+        root = Path(pipeline_config.artifacts_dir) / manifest.doc_id
+        page_text = json.loads((root / "pages" / "0" / "text.json").read_text())
+        assert page_text["source_mix"] == "ocr"
+        assert "Body read from the scan." in page_text["full_text"]
+        chunks = [json.loads(line) for line in (root / "chunks.jsonl").read_text().splitlines() if line.strip()]
+        assert any(c["section_path"] == ["Scanned Report"] for c in chunks)
+        assert any("Model | Score" in c["text"] for c in chunks)
+        table = json.loads(next((root / "tables").glob("*.json")).read_text())
+        assert table["cell_grid"] == [["Model", "Score"], ["Alpha", "1"]]
+        assert table["structure_source"] == "vlm"
+
+    def test_layout_ocr_failure_falls_back_to_plain_vision_ocr(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """When the layout model cannot answer, the page still gets text the old way."""
+        pipeline_config = replace(pipeline_config, enable_vision_ocr=True)
+        pdf_file = tmp_path / "scan.pdf"
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
+        engine = self._layout_ocr_engine({0: None})
+        vision = MagicMock()
+        vision.ocr_page.return_value = [
+            OCRSpan(
+                text="Text from the plain vision lane.", bbox=BBox(0, 0, 612, 792), confidence=0.7, source="vision_ocr"
+            )
+        ]
+
+        with (
+            patch("docint.core.readers.documents.orchestrator.LayoutOcrEngine", return_value=engine),
+            patch("docint.core.readers.documents.orchestrator.VisionOCREngine", return_value=vision),
+        ):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        assert manifest.pages_ocr_layout == 0
+        vision.ocr_page.assert_called_once()
+        chunks = (Path(pipeline_config.artifacts_dir) / manifest.doc_id / "chunks.jsonl").read_text()
+        assert "plain vision lane" in chunks
+
+    def test_layout_ocr_is_not_built_without_a_model(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """OCR_MODEL unset: the lane never runs and behaviour is exactly as before."""
+        pdf_file = tmp_path / "scan.pdf"
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
+
+        with (
+            patch(
+                "docint.core.readers.documents.orchestrator.LayoutOcrEngine",
+                side_effect=RuntimeError("OCR_MODEL is not configured"),
+            ) as ctor,
+            patch("docint.core.readers.documents.orchestrator.VisionOCREngine"),
+        ):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+
+        assert manifest.status == "completed"
+        ctor.assert_called_once()
+        assert manifest.pages_ocr_layout == 0
+
+    def test_layout_ocr_is_skipped_for_digital_pages(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Pages with a text layer never touch the OCR model."""
+        pdf_file = tmp_path / "digital.pdf"
+        pdf_file.write_bytes(build_pdf([two_column_page()]))
+        with patch("docint.core.readers.documents.orchestrator.LayoutOcrEngine") as ctor:
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+        assert manifest.status == "completed"
+        ctor.assert_not_called()
 
     def test_retry_logic(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Stages should retry on transient failures."""

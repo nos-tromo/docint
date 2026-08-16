@@ -21,6 +21,7 @@ from docint.core.readers.documents.artifacts import (
 from docint.core.readers.documents.chunking import build_coarse_units
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import _CAPTION_RE, analyze_document
+from docint.core.readers.documents.layout_vlm import LayoutOcrEngine
 from docint.core.readers.documents.models import (
     BBox,
     BlockType,
@@ -188,9 +189,18 @@ class DocumentPipelineOrchestrator:
                 page_info.status = "failed"
                 page_info.error = "Layout analysis failed"
 
+        # --- Stage 2b: layout from the document OCR model for scanned pages ---
+        # A page without a text layer gave the geometric pass nothing to work
+        # with. When an OCR model is configured, it reads the page's layout —
+        # headings, text, tables with cells, figures, furniture — and those
+        # blocks replace the page's layout, so scanned pages flow through the
+        # same chunker and artifacts as digital ones. Pages it cannot answer
+        # for fall through to the plain-text vision OCR below.
+        layout_ocr_pages = self._recover_scanned_layout(file_path, doc_id, pages, layout, manifest, artifacts_dir)
+
         # --- Stage 3: OCR / text extraction ---
         vision_engine: OCREngine | None = None
-        if self.config.enable_vision_ocr and any(p.needs_ocr for p in pages):
+        if self.config.enable_vision_ocr and any(p.needs_ocr and p.page_index not in layout_ocr_pages for p in pages):
             try:
                 vision_engine = VisionOCREngine(
                     file_path,
@@ -217,6 +227,7 @@ class DocumentPipelineOrchestrator:
                         layout,
                         vision_engine=vision_engine,
                         parsed=parsed,
+                        layout_ocr_pages=layout_ocr_pages,
                     )
                     or {}
                 )
@@ -395,6 +406,68 @@ class DocumentPipelineOrchestrator:
             stats.tables_failed,
             stats.tables_skipped,
         )
+
+    def _recover_scanned_layout(
+        self,
+        file_path: Path,
+        doc_id: str,
+        pages: list[PageInfo],
+        layout: dict[int, list[LayoutBlock]],
+        manifest: DocumentManifest,
+        artifacts_dir: Path,
+    ) -> set[int]:
+        """Read scanned pages' layout with the document OCR model, in place.
+
+        Args:
+            file_path (Path): Path to the PDF.
+            doc_id (str): Deterministic document hash.
+            pages (list[PageInfo]): Triage results.
+            layout (dict[int, list[LayoutBlock]]): Layout blocks per page (mutated).
+            manifest (DocumentManifest): Manifest to record counters on.
+            artifacts_dir (Path): Artifacts root (layout artifacts are re-saved).
+
+        Returns:
+            set[int]: Pages whose layout (and text) now come from the model.
+        """
+        recovered: set[int] = set()
+        if not self.config.enable_layout_ocr:
+            return recovered
+        candidates = [p for p in pages if p.needs_ocr and p.status != "failed"]
+        if not candidates:
+            return recovered
+        try:
+            engine = LayoutOcrEngine(
+                file_path,
+                timeout=self.config.layout_ocr_timeout,
+                max_retries=self.config.layout_ocr_max_retries,
+                max_pixels=self.config.layout_ocr_max_pixels,
+                max_tokens=self.config.layout_ocr_max_tokens,
+            )
+        except Exception as exc:
+            # No OCR model configured (the common case) or the client cannot
+            # be built: the plain-text vision lane handles these pages.
+            logger.debug("Layout OCR lane not available: {}", exc)
+            return recovered
+        try:
+            for page_info in candidates:
+                blocks = engine.layout_for(page_info.page_index)
+                if not blocks:
+                    continue
+                layout[page_info.page_index] = blocks
+                save_layout(doc_id, page_info.page_index, blocks, artifacts_dir)
+                recovered.add(page_info.page_index)
+        finally:
+            stats = engine.stats
+            engine.close()
+        manifest.pages_ocr_layout = stats.pages_recovered
+        logger.info(
+            "Layout OCR lane ({}): {} pages recovered, {} failed, {} skipped",
+            engine.model,
+            stats.pages_recovered,
+            stats.pages_failed,
+            stats.pages_skipped,
+        )
+        return recovered
 
     # ------------------------------------------------------------------
     # Internal helpers

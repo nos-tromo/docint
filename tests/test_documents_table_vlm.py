@@ -14,6 +14,7 @@ from docint.core.readers.documents.models import BBox
 from docint.core.readers.documents.table_vlm import (
     TableStructureEngine,
     parse_html_table,
+    table_grid_from_dots,
 )
 from docint.core.readers.documents.tables import needs_structure
 
@@ -255,3 +256,100 @@ class TestTableStructureEngine:
             assert engine.structure_for(0, BBox(x0=0, y0=0, x1=612, y1=792)) is None
             create.assert_not_called()
         assert engine.stats.tables_skipped == 1
+
+
+class TestDotsTableAnswers:
+    """A dots-family model answers with layout JSON; the table's HTML is inside it."""
+
+    def test_table_element_html_becomes_the_grid(self) -> None:
+        """The first Table element's HTML is expanded like a plain HTML answer."""
+        answer = (
+            '[{"bbox": [0, 0, 500, 30], "category": "Caption", "text": "Table 2: Scores"}, '
+            '{"bbox": [0, 40, 500, 300], "category": "Table", '
+            '"text": "<table><tr><td>Model</td><td colspan=\'2\'>BLEU</td></tr>'
+            '<tr><td>Alpha</td><td>1</td><td>2</td></tr></table>"}]'
+        )
+        assert table_grid_from_dots(answer) == [["Model", "BLEU", "BLEU"], ["Alpha", "1", "2"]]
+
+    def test_no_table_element_is_no_answer(self) -> None:
+        """A layout with no Table element gives nothing (the geometric grid stays)."""
+        assert table_grid_from_dots('[{"bbox": [0, 0, 10, 10], "category": "Text", "text": "hi"}]') is None
+        assert table_grid_from_dots("junk") is None
+
+
+class TestTableEngineWithDotsModel:
+    """When the configured table model is dots, the engine uses its layout prompt and JSON."""
+
+    @staticmethod
+    def _engine(tmp_path: Path, model: str) -> tuple[TableStructureEngine, MagicMock]:
+        page = MagicMock()
+        page.get_width.return_value = 612.0
+        page.get_height.return_value = 792.0
+        bitmap = MagicMock()
+        bitmap.to_pil.return_value = PILImage.new("RGB", (400, 200), color="white")
+        page.render.return_value = bitmap
+        pdf = MagicMock()
+        pdf.__getitem__ = MagicMock(return_value=page)
+        with (
+            patch("docint.core.readers.documents.table_vlm.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.table_vlm.OpenAIPipeline") as mock_pipeline_cls,
+            patch("docint.core.readers.documents.table_vlm._OpenAI"),
+            patch("docint.core.readers.documents.table_vlm.load_openai_env"),
+            patch("docint.core.readers.documents.table_vlm.load_table_vlm_env") as mock_table_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = pdf
+            pipeline = MagicMock()
+            pipeline.load_prompt.return_value = "Return the table as HTML"
+            pipeline.seed = 42
+            pipeline.temperature = 0.0
+            pipeline.top_p = 0.1
+            pipeline.reasoning_effort = None
+            mock_pipeline_cls.return_value = pipeline
+            mock_table_env.return_value.model = model
+            mock_table_env.return_value.api_base = "http://ocr:8000/v1"
+            mock_table_env.return_value.api_key = "sk-test"
+            mock_table_env.return_value.timeout = 30.0
+            engine = TableStructureEngine(tmp_path / "doc.pdf", timeout=30.0, max_retries=0)
+        return engine, page
+
+    def test_dots_model_gets_the_layout_prompt_and_json_is_parsed(self, tmp_path: Path) -> None:
+        """Prompt is dots' own layout task; the Table element's HTML becomes the grid."""
+        engine, _ = self._engine(tmp_path, "dots-studio/dots.mocr")
+        answer = (
+            '[{"bbox": [0, 0, 500, 300], "category": "Table", "text": "<table><tr><td>A</td><td>B</td></tr></table>"}]'
+        )
+        with (
+            patch("docint.core.readers.documents.table_vlm.time.sleep"),
+            patch.object(engine._client.chat.completions, "create", return_value=_response(answer)) as create,
+        ):
+            grid = engine.structure_for(0, BBox(x0=0, y0=0, x1=612, y1=792))
+        assert grid == [["A", "B"]]
+        parts = create.call_args[1]["messages"][0]["content"]
+        prompt = next(part["text"] for part in parts if part["type"] == "text")
+        assert "layout" in prompt.lower() and "bbox" in prompt.lower()
+
+    def test_generic_model_keeps_the_html_prompt(self, tmp_path: Path) -> None:
+        """Any other model is asked for HTML directly, as before."""
+        engine, _ = self._engine(tmp_path, "Qwen/Qwen3.5-2B")
+        with (
+            patch("docint.core.readers.documents.table_vlm.time.sleep"),
+            patch.object(
+                engine._client.chat.completions,
+                "create",
+                return_value=_response("<table><tr><td>A</td><td>B</td></tr></table>"),
+            ) as create,
+        ):
+            assert engine.structure_for(0, BBox(x0=0, y0=0, x1=612, y1=792)) == [["A", "B"]]
+        parts = create.call_args[1]["messages"][0]["content"]
+        assert next(part["text"] for part in parts if part["type"] == "text") == "Return the table as HTML"
+
+
+def test_table_lane_defaults_to_the_ocr_model_when_one_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With OCR_MODEL set, tables go to the document model unless TABLE_VLM_MODEL says otherwise."""
+    from docint.utils.env_cfg import resolve_table_vlm_default_model
+
+    monkeypatch.delenv("TABLE_VLM_MODEL", raising=False)
+    monkeypatch.setenv("OCR_MODEL", "dots-studio/dots.mocr")
+    assert resolve_table_vlm_default_model("Qwen/Qwen3.5-2B") == "dots-studio/dots.mocr"
+    monkeypatch.delenv("OCR_MODEL", raising=False)
+    assert resolve_table_vlm_default_model("Qwen/Qwen3.5-2B") == "Qwen/Qwen3.5-2B"

@@ -183,5 +183,8 @@ class DocumentManifest:
     # (those keep their geometric grid).
     tables_structured: int = 0
     tables_structure_failed: int = 0
+    # Pages that needed OCR and got real layout (headings, tables, figures)
+    # from the document OCR model instead of one plain-text blob.
+    pages_ocr_layout: int = 0
     status: str = "pending"
     error: str | None = None

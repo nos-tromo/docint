@@ -43,7 +43,7 @@ _PAGE_NUMBER_PATTERNS = (
 )
 
 
-def _looks_like_page_number(text: str) -> bool:
+def looks_like_page_number(text: str) -> bool:
     """Whether ``text`` reads as a page number in any common style."""
     stripped = text.strip()
     if not stripped or len(stripped) > 20:
@@ -129,7 +129,7 @@ def detect_furniture(parsed: ParsedPdf) -> dict[int, dict[int, BlockType]]:
                 rotated_margin.add((page_index, line_index))
                 continue
             banded[(page_index, line_index)] = band
-            if _looks_like_page_number(text):
+            if looks_like_page_number(text):
                 page_numbers.add((page_index, line_index))
                 continue
             key = (_repetition_key(text), band)

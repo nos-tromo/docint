@@ -604,6 +604,8 @@ def build_page_text(
     page_info: PageInfo,
     layout_blocks: list[LayoutBlock],
     ocr_spans: list[OCRSpan],
+    *,
+    block_source: str = "pdf_text",
 ) -> PageText:
     """Aggregate text sources for a page into a ``PageText`` result.
 
@@ -611,6 +613,8 @@ def build_page_text(
         page_info (PageInfo): Triage info for the page.
         layout_blocks (list[LayoutBlock]): Layout blocks detected on the page.
         ocr_spans (list[OCRSpan]): OCR spans for pages that needed OCR.
+        block_source (str): Where the blocks' text came from — ``"pdf_text"``
+            for a text layer, ``"ocr"`` when the layout-OCR model read the page.
 
     Returns:
         PageText: A ``PageText`` combining all sources.
@@ -625,15 +629,15 @@ def build_page_text(
                     text=block.text.strip(),
                     bbox=block.bbox,
                     confidence=block.confidence,
-                    source="pdf_text",
+                    source=block_source,
                 )
             )
 
     all_spans = pdf_spans + ocr_spans
     full_text = "\n".join(s.text for s in all_spans if s.text.strip())
 
-    has_pdf = bool(pdf_spans)
-    has_ocr = bool(ocr_spans)
+    has_pdf = bool(pdf_spans) and block_source == "pdf_text"
+    has_ocr = bool(ocr_spans) or (bool(pdf_spans) and block_source != "pdf_text")
     if has_pdf and has_ocr:
         source_mix = "mixed"
     elif has_ocr:
@@ -660,6 +664,7 @@ def extract_text_for_pages(
     *,
     vision_engine: OCREngine | None = None,
     parsed: ParsedPdf | None = None,
+    layout_ocr_pages: set[int] | None = None,
 ) -> dict[int, PageText]:
     """Extract text for all pages, applying OCR fallback where needed.
 
@@ -674,6 +679,9 @@ def extract_text_for_pages(
         vision_engine (OCREngine | None): Optional secondary OCR engine (e.g. ``VisionOCREngine``)
             used when the text-layer extraction returns nothing.
         parsed (ParsedPdf | None): Open document handle to reuse.
+        layout_ocr_pages (set[int] | None): Pages whose blocks (text included)
+            already came from the layout-OCR model; they take no further OCR
+            and their text is marked as OCR-sourced.
 
     Returns:
         dict[int, PageText]: Mapping of ``page_index`` → ``PageText``.
@@ -681,9 +689,14 @@ def extract_text_for_pages(
     file_path = Path(file_path)
     engine = PdfTextEngine(file_path, parsed=parsed)
     result: dict[int, PageText] = {}
+    ocr_pages = layout_ocr_pages or set()
 
     try:
         for page_info in pages:
+            if page_info.page_index in ocr_pages:
+                blocks = layout.get(page_info.page_index, [])
+                result[page_info.page_index] = build_page_text(page_info, blocks, [], block_source="ocr")
+                continue
             result[page_info.page_index] = _extract_page_text(file_path, page_info, layout, engine, vision_engine)
     finally:
         engine.close()

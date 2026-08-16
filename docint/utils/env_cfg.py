@@ -1484,6 +1484,57 @@ def load_table_vlm_env(
 
 
 @dataclass(frozen=True)
+class OcrClientConfig:
+    """Dataclass for the remote document OCR / layout VLM (the ``ocr`` backend)."""
+
+    api_base: str
+    api_key: str | None
+    model: str
+    timeout: float
+
+    @property
+    def enabled(self) -> bool:
+        """Whether a document OCR model is configured at all."""
+        return bool(self.model.strip())
+
+
+def load_ocr_client_env(
+    default_api_base: str,
+    default_api_key: str | None,
+    default_timeout: float,
+) -> "OcrClientConfig":
+    """Load the document OCR / layout VLM endpoint settings.
+
+    ``OCR_MODEL`` names the model served by vllm-service's ``ocr`` backend
+    (default there: ``dots-studio/dots.mocr``); when it is unset the layout-OCR
+    lane is off and scanned pages go through the general vision model as
+    before. ``OCR_API_BASE`` / ``OCR_API_KEY`` / ``OCR_TIMEOUT`` inherit the
+    shared OpenAI-compatible endpoint, like every other ``*_API_BASE`` knob.
+
+    Args:
+        default_api_base (str): Fallback endpoint (the shared OpenAI-compatible base).
+        default_api_key (str | None): Fallback API key.
+        default_timeout (float): Fallback per-request timeout in seconds.
+
+    Returns:
+        OcrClientConfig: The resolved client configuration.
+    """
+    raw_key = os.getenv("OCR_API_KEY")
+    if raw_key is not None and raw_key.strip():
+        api_key: str | None = raw_key.strip()
+    elif default_api_key and default_api_key.strip():
+        api_key = default_api_key.strip()
+    else:
+        api_key = None
+    return OcrClientConfig(
+        api_base=os.getenv("OCR_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        model=os.getenv("OCR_MODEL", "").strip(),
+        timeout=float(os.getenv("OCR_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
 class RerankClientConfig:
     """Dataclass for the remote rerank service HTTP client."""
 
@@ -1870,6 +1921,13 @@ class PipelineConfig:
     table_vlm_max_retries: int = 1
     table_vlm_max_image_dimension: int = 1536
     table_vlm_max_tokens: int = 4096
+    # Layout-OCR lane (the ``ocr`` backend): scanned pages get real layout
+    # blocks instead of one plain-text blob. Active only when OCR_MODEL is set.
+    enable_layout_ocr: bool = True
+    layout_ocr_timeout: float = 0.0
+    layout_ocr_max_retries: int = 1
+    layout_ocr_max_pixels: int = 2_000_000
+    layout_ocr_max_tokens: int = 16384
 
 
 # 2.0.0: PDF chunking unified onto the hierarchical SentenceSplitter
@@ -1889,7 +1947,10 @@ class PipelineConfig:
 # 3.3.0: the text inside plotted figures (token axes, word clouds) is
 # FIGURE_TEXT and stays out of chunk text; on a real paper those bags of
 # tokens out-ranked the correct passage in the sparse lane.
-PIPELINE_VERSION = "3.3.0"
+# 3.4.0: pages that need OCR go through the document OCR / layout model when
+# one is configured (OCR_MODEL), yielding real layout blocks - headings,
+# tables with cells, figures, furniture - instead of one plain-text blob.
+PIPELINE_VERSION = "3.4.0"
 
 
 def load_pipeline_config(
@@ -1909,6 +1970,11 @@ def load_pipeline_config(
     default_table_vlm_max_retries: int = 1,
     default_table_vlm_max_image_dimension: int = 1536,
     default_table_vlm_max_tokens: int = 4096,
+    default_enable_layout_ocr: bool = True,
+    default_layout_ocr_timeout: float | None = None,
+    default_layout_ocr_max_retries: int = 1,
+    default_layout_ocr_max_pixels: int = 2_000_000,
+    default_layout_ocr_max_tokens: int = 16384,
 ) -> PipelineConfig:
     """Build a ``PipelineConfig`` from environment variables with sensible defaults.
 
@@ -1938,6 +2004,16 @@ def load_pipeline_config(
         default_table_vlm_max_image_dimension (int): Default max pixel dimension for the rendered
             table region (larger than the OCR lane's: a table's digits must stay legible).
         default_table_vlm_max_tokens (int): Default maximum tokens the model may generate per table.
+        default_enable_layout_ocr (bool): Default flag for the layout-OCR lane, which sends pages
+            that need OCR to the document OCR model (``OCR_MODEL``) for layout + text; off when no
+            model is configured.
+        default_layout_ocr_timeout (float | None): Default per-request timeout in seconds for that
+            lane. ``None`` inherits ``OPENAI_TIMEOUT``.
+        default_layout_ocr_max_retries (int): Default SDK retries per page.
+        default_layout_ocr_max_pixels (int): Default pixel budget of the rendered page. Must not
+            exceed the server's own cap (vllm-service ``OCR_MM_PROCESSOR_KWARGS`` max_pixels): the
+            model returns boxes in the frame of the image it actually saw.
+        default_layout_ocr_max_tokens (int): Default maximum tokens the model may generate per page.
         default_vision_ocr_max_tokens (int): Default maximum number of tokens the vision LLM may
             generate per OCR request.
 
@@ -2006,6 +2082,17 @@ def load_pipeline_config(
             os.getenv("PIPELINE_TABLE_VLM_MAX_IMAGE_DIM", default_table_vlm_max_image_dimension)
         ),
         table_vlm_max_tokens=int(os.getenv("PIPELINE_TABLE_VLM_MAX_TOKENS", default_table_vlm_max_tokens)),
+        enable_layout_ocr=os.getenv("PIPELINE_LAYOUT_OCR", str(default_enable_layout_ocr).lower()).lower()
+        in {"true", "1", "yes"},
+        layout_ocr_timeout=float(
+            os.getenv(
+                "PIPELINE_LAYOUT_OCR_TIMEOUT",
+                default_layout_ocr_timeout if default_layout_ocr_timeout is not None else load_openai_env().timeout,
+            )
+        ),
+        layout_ocr_max_retries=int(os.getenv("PIPELINE_LAYOUT_OCR_MAX_RETRIES", default_layout_ocr_max_retries)),
+        layout_ocr_max_pixels=int(os.getenv("PIPELINE_OCR_MAX_PIXELS", default_layout_ocr_max_pixels)),
+        layout_ocr_max_tokens=int(os.getenv("PIPELINE_LAYOUT_OCR_MAX_TOKENS", default_layout_ocr_max_tokens)),
     )
 
 

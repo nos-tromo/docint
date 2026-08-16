@@ -1,10 +1,8 @@
-"""Image helpers shared by the pipeline's two remote-vision lanes.
+"""Image bounding and encoding for the OCR engine.
 
-Page OCR and table-structure recovery both render part of a PDF, bound the
-result to what the endpoint will accept, and send it as base64 JPEG. Keeping
-that in one place stops the two lanes from drifting apart on image size or
-encoding — a difference there shows up as a model behaving differently for
-reasons unrelated to the prompt.
+Every OCR call sends pixels to the same endpoint, so how an image is bounded
+and encoded lives in one place: a difference here shows up as a model behaving
+differently for reasons that have nothing to do with the prompt.
 """
 
 from __future__ import annotations
@@ -35,7 +33,7 @@ def cap_image(pil_image: PILImage.Image, max_dim: int, *, context: str = "") -> 
         new_w = max(int(pil_image.width * ratio), 1)
         new_h = max(int(pil_image.height * ratio), 1)
         pil_image = pil_image.resize((new_w, new_h))
-        logger.debug("Resized image {} to {}x{}", context, new_w, new_h)
+        logger.debug("Resized OCR image {} to {}x{}", context, new_w, new_h)
     return pil_image
 
 
@@ -55,3 +53,19 @@ def encode_jpeg(pil_image: PILImage.Image, quality: int = JPEG_QUALITY) -> str:
         pil_image = pil_image.convert("RGB")
     pil_image.save(buf, format="JPEG", quality=quality)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def image_from_bytes(data: bytes) -> PILImage.Image:
+    """Decode image bytes into a PIL image in a mode JPEG can carry.
+
+    Args:
+        data (bytes): Raw image bytes of any Pillow-readable format.
+
+    Returns:
+        PILImage.Image: The decoded image.
+    """
+    image = PILImage.open(BytesIO(data))
+    image.load()
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+    return image
