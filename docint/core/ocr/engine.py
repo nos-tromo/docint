@@ -323,7 +323,7 @@ class DocumentOcrEngine:
         responded = False
         reachable = False
         try:
-            answer = self._call(sent, prompt, context=context)
+            answer = self._call(sent, prompt, context=context, limits=active)
             responded = True
         except OcrError as first_error:
             reachable = isinstance(first_error, OcrRejected)
@@ -333,7 +333,7 @@ class DocumentOcrEngine:
                 logger.info("OCR retrying {} at reduced resolution ({}x{})", context, reduced.width, reduced.height)
                 sent = reduced
             try:
-                answer = self._call(sent, prompt, context=context)
+                answer = self._call(sent, prompt, context=context, limits=active)
                 responded = True
             except OcrError as retry_error:
                 reachable = reachable or isinstance(retry_error, OcrRejected)
@@ -350,7 +350,7 @@ class DocumentOcrEngine:
                 logger.info("OCR answer for {} was empty; retrying at {}x{}", context, bigger.width, bigger.height)
                 sent = bigger
                 try:
-                    answer = self._call(bigger, bigger_prompt, context=context)
+                    answer = self._call(bigger, bigger_prompt, context=context, limits=active)
                 except OcrError:
                     pass  # logged in _call
 
@@ -365,13 +365,16 @@ class DocumentOcrEngine:
         logger.info("OCR read {} blocks for {}", len(blocks), context)
         return blocks
 
-    def _call(self, image: PILImage.Image, prompt: str, *, context: str) -> str:
+    def _call(self, image: PILImage.Image, prompt: str, *, context: str, limits: OcrLimits) -> str:
         """Send one request and return the cleaned answer.
 
         Args:
             image (PILImage.Image): The image to send.
             prompt (str): The instruction.
             context (str): Description used in logs.
+            limits (OcrLimits): Limits for this read — the same ones the image
+                was prepared against, so a per-read override cannot apply to
+                the picture and silently not to the token budget.
 
         Returns:
             str: The answer, possibly empty.
@@ -395,7 +398,7 @@ class DocumentOcrEngine:
             response = self._client.chat.completions.create(  # type: ignore[call-overload]
                 model=self.model,
                 messages=messages,
-                max_tokens=self.limits.max_tokens,
+                max_tokens=limits.max_tokens,
                 seed=self._pipeline.seed,
                 temperature=self._pipeline.temperature,
                 top_p=self._pipeline.top_p,
