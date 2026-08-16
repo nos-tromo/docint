@@ -98,12 +98,23 @@ def test_path_config_artifacts_env_override(monkeypatch: pytest.MonkeyPatch, tmp
 
 
 def test_init_logger_honors_log_level(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """init_logger should install a stderr sink whose level honors LOG_LEVEL."""
+    """init_logger should install a stderr sink whose level honors LOG_LEVEL.
+
+    ``init_logger`` calls ``logger.remove()`` and installs a sink on the
+    process-wide loguru logger, so without the ``finally`` below this test
+    would leave a DEBUG stderr sink installed for every test that runs after
+    it. Tests that capture log output add their own sink (the
+    ``loguru_caplog`` fixtures in ``conftest.py``), so tearing every sink
+    down is the correct baseline to restore.
+    """
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-    init_logger()
-    logger.debug("debug-level message")
-    captured = capsys.readouterr()
-    assert "debug-level message" in captured.err
+    try:
+        init_logger()
+        logger.debug("debug-level message")
+        captured = capsys.readouterr()
+        assert "debug-level message" in captured.err
+    finally:
+        logger.remove()
 
 
 def test_load_summary_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

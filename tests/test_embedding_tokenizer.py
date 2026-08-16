@@ -23,43 +23,11 @@ contract.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
-from loguru import logger
-
-
-@pytest.fixture
-def loguru_caplog(caplog: LogCaptureFixture) -> Iterable[LogCaptureFixture]:
-    """Bridge loguru records into ``caplog`` for the duration of a test.
-
-    Loguru bypasses ``logging`` so the stdlib ``caplog`` fixture does
-    not see its records out of the box. This fixture adds a temporary
-    loguru sink that re-emits every record through the stdlib handler
-    ``caplog`` attaches to the root logger, then tears the sink down on
-    exit. Mirrors the ``loguru_caplog`` fixture in
-    ``tests/test_json_reader_nextext.py``.
-
-    Args:
-        caplog: The standard pytest log-capture fixture.
-
-    Yields:
-        The same ``caplog`` fixture, now populated with loguru-sourced
-        records at WARNING level and above.
-    """
-    handler_id = logger.add(
-        caplog.handler,
-        level="WARNING",
-        format="{message}",
-    )
-    caplog.set_level(logging.WARNING)
-    try:
-        yield caplog
-    finally:
-        logger.remove(handler_id)
 
 
 class _StubTokenizer:

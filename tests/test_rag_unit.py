@@ -4125,27 +4125,20 @@ def _capture_loguru(caplog: pytest.LogCaptureFixture) -> Callable[[], None]:
     sink on the loguru logger that forwards every record into caplog's
     captured handler and returns a cleanup callable.
 
+    Adding ``caplog.handler`` directly is the same bridge the shared
+    ``loguru_caplog`` / ``loguru_caplog_info`` fixtures in
+    ``tests/conftest.py`` use. Those are fixtures; this stays a callable
+    because its call sites need the sink torn down inside a ``finally``
+    that also wraps a ``pytest.raises`` block.
+
     Args:
         caplog: Pytest log capture fixture.
 
     Returns:
         A zero-argument cleanup callable that removes the sink.
     """
-    sink_id = _loguru_logger.add(
-        lambda message: caplog.records.append(
-            logging.LogRecord(
-                name="loguru",
-                level=logging.ERROR,
-                pathname="",
-                lineno=0,
-                msg=str(message),
-                args=None,
-                exc_info=None,
-            )
-        ),
-        level="ERROR",
-        format="{message}",
-    )
+    sink_id = _loguru_logger.add(caplog.handler, level="ERROR", format="{message}")
+    caplog.set_level(logging.ERROR)
 
     def _cleanup() -> None:
         _loguru_logger.remove(sink_id)
@@ -5700,7 +5693,7 @@ def test_rag_init_uses_embedding_config_for_embed_client_envelope(
 
 def test_rag_init_warns_when_embed_worst_case_wait_exceeds_one_hour(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    loguru_caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``RAG.__post_init__`` must WARN when ``timeout * (1 + retries) > 3600``.
 
@@ -5716,39 +5709,28 @@ def test_rag_init_warns_when_embed_worst_case_wait_exceeds_one_hour(
 
     Args:
         monkeypatch: The monkeypatch fixture.
-        caplog: Captures emitted log records via the loguru-to-stdlib
+        loguru_caplog: Captures emitted log records via the loguru-to-stdlib
             bridge installed in ``conftest.py``.
     """
-    import logging
+    caplog = loguru_caplog
 
-    from loguru import logger
+    monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
+    monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "2000")
+    monkeypatch.setenv("EMBED_MAX_RETRIES", "1")
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "16")
 
-    handler_id = logger.add(
-        caplog.handler,
-        level="WARNING",
-        format="{message}",
-    )
-    caplog.set_level(logging.WARNING)
-    try:
-        monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
-        monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "2000")
-        monkeypatch.setenv("EMBED_MAX_RETRIES", "1")
-        monkeypatch.setenv("EMBED_BATCH_SIZE", "16")
+    caplog.clear()
+    RAG(qdrant_collection="warn-test-over")
 
-        caplog.clear()
-        RAG(qdrant_collection="warn-test-over")
+    messages = "\n".join(str(r.getMessage()) for r in caplog.records)
+    assert "worst-case wait" in messages.lower(), f"Expected worst-case-wait WARNING, got: {messages!r}"
 
-        messages = "\n".join(str(r.getMessage()) for r in caplog.records)
-        assert "worst-case wait" in messages.lower(), f"Expected worst-case-wait WARNING, got: {messages!r}"
+    monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "1800")
+    caplog.clear()
+    RAG(qdrant_collection="warn-test-boundary")
 
-        monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "1800")
-        caplog.clear()
-        RAG(qdrant_collection="warn-test-boundary")
-
-        messages = "\n".join(str(r.getMessage()) for r in caplog.records)
-        assert "worst-case wait" not in messages.lower(), f"Exactly-3600s boundary must not WARN, got: {messages!r}"
-    finally:
-        logger.remove(handler_id)
+    messages = "\n".join(str(r.getMessage()) for r in caplog.records)
+    assert "worst-case wait" not in messages.lower(), f"Exactly-3600s boundary must not WARN, got: {messages!r}"
 
 
 # ---------------------------------------------------------------------------

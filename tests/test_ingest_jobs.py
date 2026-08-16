@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
-from loguru import logger
 
 from docint.core.jobs import (
     MAX_UPLOAD_LEAD_S,
@@ -23,29 +21,6 @@ from docint.core.jobs import (
     _clamp_lead,
     format_sse,
 )
-
-
-@pytest.fixture
-def loguru_caplog_info(caplog: LogCaptureFixture) -> Iterable[LogCaptureFixture]:
-    """Bridge loguru INFO records into ``caplog`` for the duration of a test.
-
-    Loguru bypasses ``logging``, so the stdlib ``caplog`` fixture sees none
-    of its records by default. Mirrors the fixture of the same name in
-    ``tests/test_ingest.py``.
-
-    Args:
-        caplog: The standard pytest log-capture fixture.
-
-    Yields:
-        The same ``caplog`` fixture, now populated with loguru-sourced
-        records at INFO level and above.
-    """
-    handler_id = logger.add(caplog.handler, level="INFO", format="{message}")
-    caplog.set_level(logging.INFO)
-    try:
-        yield caplog
-    finally:
-        logger.remove(handler_id)
 
 
 def _state() -> IngestJobState:

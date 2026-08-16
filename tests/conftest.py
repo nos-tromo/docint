@@ -1,5 +1,6 @@
 """Shared pytest configuration and fixtures for the docint test suite."""
 
+import logging
 import sys
 import time
 import types
@@ -7,7 +8,9 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from fastapi.testclient import TestClient
+from loguru import logger
 
 
 class _MagicModule(types.ModuleType):
@@ -106,6 +109,52 @@ def _hermetic_hybrid_env() -> Iterator[None]:
         mp.delenv(name, raising=False)
     yield
     mp.undo()
+
+
+@pytest.fixture
+def loguru_caplog(caplog: LogCaptureFixture) -> Iterator[LogCaptureFixture]:
+    """Bridge loguru WARNING records into ``caplog`` for the duration of a test.
+
+    Loguru bypasses the stdlib ``logging`` module, so ``caplog`` sees none of
+    its records by default. Adding ``caplog.handler`` as a loguru sink is the
+    whole bridge; asserting on ``caplog.text`` then works as it would for a
+    stdlib logger.
+
+    Args:
+        caplog: The standard pytest log-capture fixture.
+
+    Yields:
+        The same ``caplog`` fixture, now populated with loguru-sourced
+        records at WARNING level and above.
+    """
+    handler_id = logger.add(caplog.handler, level="WARNING", format="{message}")
+    caplog.set_level(logging.WARNING)
+    try:
+        yield caplog
+    finally:
+        logger.remove(handler_id)
+
+
+@pytest.fixture
+def loguru_caplog_info(caplog: LogCaptureFixture) -> Iterator[LogCaptureFixture]:
+    """Bridge loguru INFO records into ``caplog`` for the duration of a test.
+
+    The INFO-level twin of :func:`loguru_caplog`, for the run-narrative lines
+    (banner, per-file progress, run summary) that are emitted at INFO.
+
+    Args:
+        caplog: The standard pytest log-capture fixture.
+
+    Yields:
+        The same ``caplog`` fixture, now populated with loguru-sourced
+        records at INFO level and above.
+    """
+    handler_id = logger.add(caplog.handler, level="INFO", format="{message}")
+    caplog.set_level(logging.INFO)
+    try:
+        yield caplog
+    finally:
+        logger.remove(handler_id)
 
 
 def run_ingest(
