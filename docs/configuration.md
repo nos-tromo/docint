@@ -112,7 +112,7 @@ Loaded by `load_host_env()` (`env_cfg.py:220`).
 | Variable | Default | Description |
 |---|---|---|
 | `BACKEND_HOST` | `http://localhost:8000` | Internal backend URL used by the frontend container. |
-| `BACKEND_PUBLIC_HOST` | `BACKEND_HOST` | External URL used for document preview links. |
+| `BACKEND_PUBLIC_HOST` | `http://localhost:8000` | External URL used for document preview links. It does **not** inherit `BACKEND_HOST`: `env_cfg.py:544` falls back to the same literal default as `BACKEND_HOST` does, not to whatever `BACKEND_HOST` was set to. Setting only `BACKEND_HOST` in production therefore leaves preview links pointing at localhost. Set both. |
 | `QDRANT_HOST` | `http://localhost:6333` | Qdrant REST URL. |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated CORS origins (the Vite dev server). |
 
@@ -264,6 +264,103 @@ is unreachable — deliberately **not** fail-soft like the reranker,
 because a transport failure partway through an ingest would otherwise
 write dense-only points into a hybrid collection and corrupt it.
 
+## Rerank client — `RerankClientConfig`
+
+Loaded by `load_rerank_client_env()`. Reranking is always a remote call:
+`VLLMRerankPostprocessor` POSTs to `{RERANK_API_BASE}/rerank` in the Jina shape
+on every provider. Transport failure degrades to the original retrieval order
+rather than failing the query — there is no local fallback model.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RERANK_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the rerank endpoint. The full vllm-service router exposes `/v1/rerank`; for the `rerank-only` deployment shape set `http://rerank-only:8000`. |
+| `RERANK_API_KEY` | inherits `OPENAI_API_KEY` | Bearer token. `rerank-only` has no auth; the full router requires the master key. |
+| `RERANK_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request HTTP timeout in seconds. |
+
+## CLIP client — `CLIPClientConfig`
+
+Loaded by `load_clip_client_env()`. CLIP image+text embedding is a remote
+service hosted by vllm-service; docint POSTs to `{CLIP_API_BASE}/clip/embed_*`
+and probes `{CLIP_API_BASE}/clip/dimension` at construction to size the
+`_images` collection without spending an embed call. Like the NER client and
+unlike the others, these do **not** inherit the OpenAI settings.
+
+The CLIP model identity is set on the vllm-service container (`CLIP_MODEL`
+there); docint does not read `IMAGE_EMBED_MODEL` any more.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLIP_API_BASE` | `http://vllm-router:4000` | Base URL of the CLIP service. For the `clip-only` deployment shape set `http://clip-only:8000`. |
+| `CLIP_API_KEY` | *unset* | Sent as `Authorization: Bearer …` when set. Required by the router, absent on `clip-only`. |
+| `CLIP_TIMEOUT` | `30.0` | Per-request HTTP timeout in seconds. |
+
+## Entity resolution — `ResolutionConfig`
+
+Loaded by `load_resolution_env()`. Entity resolution is the only mechanism that
+merges *semantically* similar entities (`USA` / `United States`); the
+`orthographic` merge mode in `core/ner.py` only collapses spelling variants.
+The pipeline is normalize → exact alias → type-blocked vector match → LLM
+tie-break → mint, persisted one point per canonical entity in the hidden
+`{collection}_entities` companion.
+
+Out-of-range values here **raise** at startup rather than warning.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RES_AUTO_RESOLVE` | `true` | Run resolution as a stage inside the ingest job. When off, resolve on demand via the `resolve` CLI or `POST /collections/entities/resolve`. |
+| `RES_BATCH_SIZE` | inherits `INGESTION_BATCH_SIZE` (`50`) | Embed/resolve batch cadence; bounds memory on large collections. Must be ≥ 1. |
+| `RES_CASE_NORMALIZE` | `true` | Case-fold surface forms before matching. |
+| `RES_EMBED_THRESHOLD` | `0.86` | Cosine floor, in `[0, 1]`, above which a vector match is accepted as the same entity. |
+| `RES_LLM_TIEBREAK` | `true` | Ask the chat model to adjudicate near-threshold pairs. Conservative by design: it merges only on an explicit yes. |
+| `RES_VECTOR_K` | `5` | Candidates fetched from the entity index per surface form, in `[1, 100]`. |
+
+## Nextext media processing — `NextextConfig`
+
+Loaded by `load_nextext_env()`. docint ships no media runtime: audio and video
+are forwarded to a remote [Nextext](https://github.com/nos-tromo/nextext)
+service, which returns a transcript plus keyframes. Leaving `NEXTEXT_API_BASE`
+unset disables the path — video/audio is skipped fail-soft and images are
+unaffected.
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEXTEXT_API_BASE` | *empty* (disabled) | Base URL of the Nextext API. **Must include Nextext's `/api/v1` prefix** (e.g. `http://nextext-backend:8000/api/v1`): docint calls `{base}/jobs`, so omitting it 404s every request. |
+| `NEXTEXT_API_KEY` | *unset* | Sent as `Authorization: Bearer …` when set. Current Nextext does not validate it — forward-compatible no-op. |
+| `NEXTEXT_AUTH_HEADER` | `X-Auth-User` | Trusted identity header docint sends. Must match Nextext's own `NEXTEXT_AUTH_HEADER`, which it uses to resolve the caller and without which it answers 401. |
+| `NEXTEXT_IDENTITY` | `docint` | Identity sent under that header. Set it empty to send no header and fall back to Nextext's server-side default identity. |
+| `NEXTEXT_MAX_CONCURRENCY` | `4` | Clips submitted to Nextext in parallel per ingest (cache misses only). |
+| `NEXTEXT_POLL_INTERVAL` | `2.0` | Seconds between job-status polls. |
+| `NEXTEXT_POLL_MAX_SECONDS` | `1800.0` | Wall-clock budget per job before the status becomes `timeout`. |
+| `NEXTEXT_TIMEOUT` | `30.0` | Per-request HTTP timeout in seconds. |
+
+Keyframe sampling is configured **here**, on the docint side, and forwarded as
+per-job options — Nextext has no server-side keyframe knob, and its schema
+defaults apply only to callers that omit these fields.
+
+| Variable | Default | Description |
+|---|---|---|
+| `KEYFRAMES_MAX` | `20` | Hard ceiling on frames per clip. Nextext rejects more than 200. |
+| `KEYFRAMES_PER_MINUTE` | `4` | Target frames sampled per minute of video. |
+| `KEYFRAME_DEDUP_COSINE` | `0.95` | Client-side near-duplicate pruning before storage, in `[0, 1]`. A frame whose cosine similarity to an already-kept frame reaches this is dropped. |
+
+## Metrics — `MetricsConfig`
+
+Loaded by `load_metrics_env()`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `METRICS_ENABLED` | `true` | Expose `GET /metrics` (Prometheus request counters and histograms) for the obs-plane scrape target. Aggregate only — no document or user data. Unauthenticated, like `/version` and `/config`. |
+
+## Serve bind — `ServeConfig`
+
+Loaded by `load_serve_config()`. Used by the `serve` entry point; the Docker
+image sets its own bind in the container CMD.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOCINT_HOST` | `0.0.0.0` | Interface uvicorn binds. |
+| `DOCINT_PORT` | `8000` | Port uvicorn binds. |
+
 ## Pipeline — `PipelineConfig`
 
 Loaded by `load_pipeline_config()` (`env_cfg.py:850`). Controls the
@@ -316,7 +413,7 @@ sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 | Variable | Default | Description |
 |---|---|---|
 | `COARSE_CHUNK_SIZE` | `8192` | Parent chunk token budget. |
-| `FINE_CHUNK_SIZE` | `8192` | Child chunk token budget. |
+| `FINE_CHUNK_SIZE` | `1024` | Child chunk token budget. |
 | `FINE_CHUNK_OVERLAP` | `0` | Overlap between child chunks. |
 | `SENTENCE_SPLITTER_CHUNK_SIZE` | `1024` | Sentence splitter chunk size (bytes). |
 | `SENTENCE_SPLITTER_CHUNK_OVERLAP` | `64` | Sentence splitter overlap. |
@@ -328,6 +425,12 @@ sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 | `DOCSTORE_MAX_RETRIES` | `3` | Retry budget for docstore upserts. |
 | `DOCSTORE_RETRY_BACKOFF_SECONDS` | `0.25` | Initial retry backoff. |
 | `DOCSTORE_RETRY_BACKOFF_MAX_SECONDS` | `2.0` | Max retry backoff. |
+| `INGEST_FAIL_FAST` | `false` | Abort the run on the first file that fails instead of skipping it. |
+| `INGEST_MANIFEST_ENABLED` | `true` | SQLite ingest manifest. Also caches Nextext transcripts by media-file hash, so re-ingesting an unchanged clip skips the round-trip entirely. |
+| `INGEST_PIPELINE_OVERLAP_ENABLED` | `false` | Overlap reading and embedding stages instead of running them in sequence. |
+| `INGEST_QUEUE_MAX_SIZE` | `4` | Documents buffered between the reader and the embedder when overlap is on. |
+| `STREAMING_READERS_ENABLED` | `true` | Readers yield documents as they parse rather than materialising a whole file first, which bounds peak memory on large CSV/JSONL files. |
+| `MEDIA_FILETYPES` | see below | Audio/video extensions the standalone media pre-pass claims, comma-separated; a leading dot is added if omitted and entries are lowercased. These route through Nextext, **not** the generic reader whitelist. Default: `.mp4,.mov,.mkv,.webm,.avi,.m4v,.mpg,.mpeg,.mp3,.m4a,.wav,.flac,.aac,.ogg,.opus,.wma`. |
 
 Ingest *jobs* (the server-owned runs behind `POST /ingest/finalize`) take one
 knob of their own, read by `load_ingest_concurrency()`:
@@ -410,6 +513,20 @@ Loaded by `load_ner_env()` (`env_cfg.py:582`).
 | `NER_ENABLED` | `true` | Run entity/relation extraction during ingestion. |
 | `NER_MAX_CHARS` | `1024` | Max chars per node passed to GLiNER. |
 | `NER_MAX_WORKERS` | `4` | Parallel NER workers. |
+
+### NER endpoint — `NERClientConfig`
+
+Loaded by `load_ner_client_env()`. NER is a remote service (Ray Serve GLiNER
+hosted by vllm-service), reached at `{NER_API_BASE}/gliner`. Unlike the embed,
+sparse, rerank and OCR clients, these do **not** inherit `OPENAI_API_BASE` /
+`OPENAI_API_KEY`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `NER_API_BASE` | `http://vllm-router:4000` | Base URL of the GLiNER service. For the `gliner-only` deployment shape (no router), set `http://gliner-only:8000`. |
+| `NER_API_KEY` | *unset* | Sent as `Authorization: Bearer …` when set. The router enforces auth (use the master key); the `gliner-only` shape has none, so leave it unset there. |
+| `NER_THRESHOLD` | `0.3` | GLiNER confidence floor below which a span is discarded. |
+| `NER_TIMEOUT` | `30.0` | Per-request HTTP timeout in seconds. |
 
 ## Hate-speech detection — `HateSpeechConfig`
 
@@ -501,6 +618,10 @@ Loaded by `load_frontend_env()` (`env_cfg.py:111`).
 | `FRONTEND_COLLECTION_TIMEOUT` | `120` | Seconds the UI will wait for `/collections/list` before falling back. |
 | `NER_GRAPH_TOP_K` | `80` | Default node count for the Analysis entity-graph view; the SPA seeds its control from this. |
 | `NER_GRAPH_MAX_TOP_K` | `500` | Ceiling for the graph node count (API clamp + UI control max). Raise for large corpora. |
+| `DOCINT_CLIENT_MAX_BODY_SIZE` | `1g` | Maximum upload size, in nginx size syntax. Read **twice**: the backend advertises it via `GET /config` so the SPA can size upload batches, and the frontend nginx image reads the same variable to enforce `client_max_body_size`. The two must stay in sync — a backend-only change lets the SPA send batches nginx then rejects. |
+
+All five values above are served to the SPA by `GET /config`, alongside
+`RESPONSE_LANGUAGE`.
 
 ## Runtime device — `RuntimeConfig`
 
