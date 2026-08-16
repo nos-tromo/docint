@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -29,6 +30,80 @@ from docint.core.state.turn import Turn
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
+
+
+def _log_turn_summary(
+    *,
+    collection: str,
+    session_id: str | None,
+    turn_idx: int | None,
+    response: dict[str, Any],
+    elapsed_s: float,
+) -> None:
+    """Log one line describing a finished chat turn.
+
+    A turn produced no success-path log line at any level: every statement
+    on the retrieval path was an error or a degradation, so a healthy
+    backend answering questions was indistinguishable from an idle one, and
+    a slow turn left nothing to attribute the time to.
+
+    Everything below already exists on the response and was discarded —
+    retrieval mode, scope size, the three-state rerank stamp, the GraphRAG
+    skip reason, the source counts.
+
+    **The query and the answer are never logged**, only their shapes. That
+    is the whole reason this takes a response dict rather than the text:
+    there is no path here through which document or question content can
+    reach the log.
+
+    Args:
+        collection (str): The physical collection the turn ran against.
+        session_id (str | None): The conversation this turn belongs to.
+        turn_idx (int | None): Index of the turn within that conversation.
+        response (dict[str, Any]): The normalized turn payload.
+        elapsed_s (float): Wall-clock seconds the turn took.
+    """
+    try:
+        sources = response.get("sources") or []
+        images = sum(1 for src in sources if isinstance(src, dict) and src.get("image_id"))
+        rerank = response.get("rerank")
+        if not isinstance(rerank, dict):
+            # None is a third state, not a synonym for "not applied": it
+            # means no reranker was in the loop at all (a scoped turn, or
+            # zero sources to rank).
+            rerank_state = "none"
+        elif rerank.get("applied"):
+            rerank_state = "applied"
+        else:
+            rerank_state = "failed"
+
+        graph_debug = response.get("graph_debug")
+        if not isinstance(graph_debug, dict):
+            graph_state = "none"
+        elif graph_debug.get("applied"):
+            graph_state = "applied"
+        else:
+            graph_state = f"skipped:{graph_debug.get('reason') or 'unknown'}"
+
+        fields = [
+            f"collection={collection!r}",
+            f"session={session_id}",
+            f"turn={turn_idx}",
+            f"mode={response.get('retrieval_mode')}",
+            f"sources={len(sources)}",
+            f"images={images}",
+            f"rerank={rerank_state}",
+            f"graphrag={graph_state}",
+            f"duration={elapsed_s:.1f}s",
+        ]
+        scoped = response.get("scoped_chunk_count")
+        if scoped is not None:
+            fields.insert(4, f"scoped_chunks={scoped}")
+        logger.info("Turn complete | {}", " ".join(fields))
+    except Exception:
+        # A turn has already been answered and persisted by this point.
+        # Describing it must not be able to undo that.
+        pass
 
 
 class SessionCollectionMismatchError(Exception):
@@ -322,6 +397,7 @@ class SessionManager:
             logger.error("ValueError: Chat prompt cannot be empty.")
             raise ValueError("Chat prompt cannot be empty.")
 
+        turn_started_at = time.monotonic()
         engine = (
             self.rag.build_query_engine(
                 metadata_filters=metadata_filters,
@@ -392,6 +468,13 @@ class SessionManager:
         )
         if replace_turn_idx is None:
             self._maybe_update_summary(session_id)
+        _log_turn_summary(
+            collection=self.rag.qdrant_collection,
+            session_id=session_id,
+            turn_idx=response.get("turn_idx"),
+            response=response,
+            elapsed_s=time.monotonic() - turn_started_at,
+        )
         return response
 
     def stream_chat(
@@ -457,6 +540,7 @@ class SessionManager:
         if self.rag.index is None:
             raise RuntimeError("Index not initialized")
 
+        turn_started_at = time.monotonic()
         streaming_engine = self.rag.build_query_engine(
             metadata_filters=metadata_filters,
             streaming=True,
@@ -548,6 +632,15 @@ class SessionManager:
         }
         if scoped_node_ids:
             final["scoped_chunk_count"] = len(list(scoped_node_ids))
+        # Logged before the yield: a client that disconnects mid-stream must
+        # not be able to erase the record of a turn the backend fully paid for.
+        _log_turn_summary(
+            collection=self.rag.qdrant_collection,
+            session_id=session_id,
+            turn_idx=turn_idx,
+            response=final,
+            elapsed_s=time.monotonic() - turn_started_at,
+        )
         yield final
 
     def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:

@@ -1,9 +1,40 @@
 """Global error handlers: generic client-visible bodies, full detail to logs."""
 
+from collections.abc import Sequence
+from typing import Any
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from loguru import logger
+
+
+def redact_validation_errors(errors: Sequence[Any]) -> list[dict[str, Any]]:
+    """Strip submitted values out of pydantic validation errors.
+
+    A pydantic error carries the offending ``input`` alongside its location
+    and type. On this API that input is user content — a malformed
+    ``POST /query`` body puts the question itself in the log, which is the
+    one path by which query text could ever reach it. The location and the
+    error type are what an operator needs; the value is not.
+
+    Args:
+        errors (Sequence[Any]): ``RequestValidationError.errors()`` output.
+
+    Returns:
+        list[dict[str, Any]]: The same errors with ``input`` replaced by a
+        marker and ``ctx`` dropped (it can embed the value too).
+    """
+    redacted: list[dict[str, Any]] = []
+    for error in errors:
+        if not isinstance(error, dict):
+            redacted.append({"type": "unknown"})
+            continue
+        safe = {key: value for key, value in error.items() if key not in {"input", "ctx"}}
+        if "input" in error:
+            safe["input"] = "<redacted>"
+        redacted.append(safe)
+    return redacted
 
 
 def install_error_handlers(app: FastAPI) -> None:
@@ -15,7 +46,12 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _handle_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
-        logger.warning(f"Validation error on {request.method} {request.url.path}: {exc.errors()}")
+        logger.warning(
+            "Validation error on {} {}: {}",
+            request.method,
+            request.url.path,
+            redact_validation_errors(exc.errors()),
+        )
         return JSONResponse(status_code=422, content={"detail": "Invalid request."})
 
     @app.exception_handler(Exception)

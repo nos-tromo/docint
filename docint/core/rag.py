@@ -8485,7 +8485,24 @@ class RAG:
         # German query silently misses its title-case match. "not_indexed" is
         # both the honest label and the one that points at the remedy.
         if not status.get("with_search_text") or not status.get("indexed"):
+            # An investigator searching an unindexed collection gets an empty
+            # result set that looks like "no matches". The honest label goes
+            # to the SPA; before this it went nowhere else, so an operator had
+            # no way to know a `make search-index` backfill was owed.
+            logger.warning(
+                "Search index missing | collection={!r} with_search_text={} indexed={} — run `make search-index`",
+                collection,
+                status.get("with_search_text"),
+                status.get("indexed"),
+            )
             return {**empty, "status": "not_indexed"}
+        if not status.get("complete"):
+            logger.warning(
+                "Search index incomplete | collection={!r} missing={} total={} — results are partial",
+                collection,
+                status.get("missing"),
+                status.get("total"),
+            )
 
         keywords = parse_keywords(query)
         search_filter = build_search_filter(keywords, base_filter=base_filter)
