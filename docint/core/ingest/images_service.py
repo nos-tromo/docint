@@ -537,6 +537,8 @@ class ImageIngestionService:
         """
         if not self.img_ingestion_config.ocr_enabled:
             return None
+        # Built once and kept: the engine holds no document handle on this
+        # path, only a client worth reusing across a batch of images.
         if not self._ocr_engine_built:
             self._ocr_engine_built = True
             self._ocr_engine = build_engine(max_image_dimension=self.img_ingestion_config.ocr_max_dimension)
@@ -568,12 +570,6 @@ class ImageIngestionService:
             logger.warning("Reading text in {} failed: {}", context, exc)
             return ""
         return "\n".join(block.text.strip() for block in blocks if block.text.strip()).strip()
-
-    def close(self) -> None:
-        """Release the OCR engine, if one was built."""
-        if self._ocr_engine is not None:
-            self._ocr_engine.close()
-            self._ocr_engine = None
 
     @staticmethod
     def _hash_image_bytes(image_bytes: bytes) -> str:
