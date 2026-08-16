@@ -429,7 +429,7 @@ sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 | `INGEST_MANIFEST_ENABLED` | `true` | SQLite ingest manifest. Also caches Nextext transcripts by media-file hash, so re-ingesting an unchanged clip skips the round-trip entirely. |
 | `INGEST_PIPELINE_OVERLAP_ENABLED` | `false` | Overlap reading and embedding stages instead of running them in sequence. |
 | `INGEST_QUEUE_MAX_SIZE` | `4` | Documents buffered between the reader and the embedder when overlap is on. |
-| `STREAMING_READERS_ENABLED` | `true` | Readers yield documents as they parse rather than materialising a whole file first. (The loader's docstring says "default false"; the code default is `True`.) |
+| `STREAMING_READERS_ENABLED` | `true` | Readers yield documents as they parse rather than materialising a whole file first, which bounds peak memory on large CSV/JSONL files. |
 | `MEDIA_FILETYPES` | see below | Audio/video extensions the standalone media pre-pass claims, comma-separated; a leading dot is added if omitted and entries are lowercased. These route through Nextext, **not** the generic reader whitelist. Default: `.mp4,.mov,.mkv,.webm,.avi,.m4v,.mpg,.mpeg,.mp3,.m4a,.wav,.flac,.aac,.ogg,.opus,.wma`. |
 
 Ingest *jobs* (the server-owned runs behind `POST /ingest/finalize`) take one

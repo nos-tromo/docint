@@ -964,8 +964,8 @@ def load_ingestion_env(
         - streaming_readers_enabled (bool): When true, dispatch to each
             reader's ``iter_documents()`` generator directly instead of
             routing through ``SimpleDirectoryReader.load_file()``. Reduces
-            peak memory for large CSV/JSONL files. Default false; enable via
-            ``STREAMING_READERS_ENABLED=true``.
+            peak memory for large CSV/JSONL files. Default true; disable via
+            ``STREAMING_READERS_ENABLED=false``.
         - ingest_queue_max_size (int): Maximum number of pre-enriched
             batches buffered between producer and consumer when
             overlap is enabled. Bounds memory under back-pressure.
@@ -1069,7 +1069,9 @@ def load_ingestion_env(
         ),
         fine_chunk_overlap=int(os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)),
         fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
-        hierarchical_chunking_enabled=str(os.getenv("HIERARCHICAL_CHUNKING_ENABLED", "true")).lower()
+        hierarchical_chunking_enabled=str(
+            os.getenv("HIERARCHICAL_CHUNKING_ENABLED", default_hierarchical_chunking_enabled)
+        ).lower()
         in {"true", "1", "yes"},
         ingestion_batch_size=int(os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)),
         sentence_splitter_chunk_overlap=int(
@@ -1403,6 +1405,7 @@ def load_resolution_env(
     default_case_normalize: bool = True,
     default_vector_k: int = 5,
     default_batch_size: int = 50,
+    default_auto_resolve: bool = True,
 ) -> ResolutionConfig:
     """Load entity-resolution configuration from environment variables.
 
@@ -1417,6 +1420,8 @@ def load_resolution_env(
             entity vector index per surface form.
         default_batch_size (int): Embed/resolve batch size used when neither
             ``RES_BATCH_SIZE`` nor ``INGESTION_BATCH_SIZE`` is set.
+        default_auto_resolve (bool): Whether resolution runs as a stage inside
+            the ingest job rather than only on demand.
 
     Returns:
         ResolutionConfig: Resolved configuration.
@@ -1472,7 +1477,7 @@ def load_resolution_env(
         case_normalize=str(os.getenv("RES_CASE_NORMALIZE", default_case_normalize)).lower() in {"true", "1", "yes"},
         vector_k=vector_k,
         batch_size=batch_size,
-        auto_resolve=str(os.getenv("RES_AUTO_RESOLVE", "true")).lower() in {"true", "1", "yes"},
+        auto_resolve=str(os.getenv("RES_AUTO_RESOLVE", default_auto_resolve)).lower() in {"true", "1", "yes"},
     )
 
 
@@ -2076,7 +2081,8 @@ def load_pipeline_config(
         pipeline_version=pipeline_version,
         artifacts_dir=str(load_path_env().artifacts),
         max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
-        force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower() in {"true", "1", "yes"},
+        force_reprocess=str(os.getenv("PIPELINE_FORCE_REPROCESS", default_force_reprocess)).lower()
+        in {"true", "1", "yes"},
         max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
         enable_ocr=os.getenv("PIPELINE_OCR_ENABLED", str(default_enable_ocr).lower()).lower() in {"true", "1", "yes"},
         ocr_timeout=ocr_timeout,
