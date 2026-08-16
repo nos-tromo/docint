@@ -172,6 +172,7 @@ from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit, partition_units, payload_text
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
+from docint.utils.duration import format_elapsed
 from docint.utils.embed_chunking import (
     effective_budget,
     estimate_tokens,
@@ -7907,6 +7908,13 @@ class RAG:
         # and the cache write must notice rather than stamp a stale summary.
         build_revision = self._get_summary_revision()
 
+        # SUMMARY_ON_INGEST defaults true, so this map-reduce is the tail of
+        # every ingest and can issue up to SUMMARY_MAX_LLM_CALLS model calls.
+        # It logged nothing at all, which is what turned the end of a run into
+        # twenty-one minutes of silence in the container log. The scroll below
+        # is itself slow on a large collection, so say so before it starts.
+        summary_started_at = time.monotonic()
+        logger.info("Tree summary scanning collection | collection={!r}", self.qdrant_collection)
         units = partition_units(self._iter_collection_points())
         total_units = len(units)
         kinds = {unit.kind for unit in units}
@@ -7995,6 +8003,14 @@ class RAG:
             reduce_fanin=self.summary_config.reduce_fanin,
             max_llm_calls=self.summary_config.max_llm_calls,
             progress=progress,
+        )
+        logger.info(
+            "Tree summary start | collection={!r} units={} unit={} fanin={} max_llm_calls={}",
+            self.qdrant_collection,
+            total_units,
+            coverage_unit,
+            self.summary_config.reduce_fanin,
+            self.summary_config.max_llm_calls,
         )
         result = summarizer.build(units)
 
@@ -8085,6 +8101,28 @@ class RAG:
             "partial": result.partial or covered_units == 0,
             "llm_calls": result.llm_calls,
         }
+
+        # The counters are already assembled above; this only renders them.
+        # A partial build is logged at WARNING because a truncated summary is
+        # otherwise indistinguishable from a complete one in the log.
+        summary_line = (
+            "Tree summary complete | collection={!r} units={} covered={} coverage={} "
+            "partial={} llm_calls={} sources={} duration={}"
+        )
+        summary_args = (
+            self.qdrant_collection,
+            total_units,
+            covered_units,
+            round(coverage_ratio, 4),
+            str(diagnostics["partial"]).lower(),
+            result.llm_calls,
+            len(sources),
+            format_elapsed(time.monotonic() - summary_started_at),
+        )
+        if diagnostics["partial"]:
+            logger.warning(summary_line, *summary_args)
+        else:
+            logger.info(summary_line, *summary_args)
 
         payload = {
             "query": self.summarize_prompt,

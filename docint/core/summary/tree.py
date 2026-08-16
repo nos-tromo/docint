@@ -390,6 +390,16 @@ class TreeSummarizer:
             else:
                 misses.append(unit)
 
+        # How much of this build is already paid for decides whether it takes
+        # seconds or minutes, and it is the first thing worth knowing.
+        logger.info(
+            "Tree summary map | units={} cached={} misses={} max_llm_calls={}",
+            total_units,
+            total_units - len(misses),
+            len(misses),
+            self.max_llm_calls,
+        )
+
         # Second pass: map the cache misses, respecting the call cap. Progress
         # is reported for cache hits first (input order), then for each
         # mapped/failed miss, since hits already resolved in the first pass.
@@ -432,7 +442,20 @@ class TreeSummarizer:
         # 500. On exhaustion the tier stops and the briefs folded so far are
         # trimmed to one synthesis-sized group, which also guarantees the loop
         # terminates instead of re-folding the same oversized list forever.
+        # The fold tiers report to nothing — `self._progress` is called only
+        # in the map loop above — so they were invisible to the SPA as well as
+        # the log, while issuing an LLM call per group. There are O(log n) of
+        # them, so they need no throttling.
+        tier = 0
         while len(briefs) > self.reduce_fanin:
+            tier += 1
+            logger.info(
+                "Tree summary fold | tier={} briefs={} fanin={} llm_calls={}",
+                tier,
+                len(briefs),
+                self.reduce_fanin,
+                self._calls,
+            )
             folded: list[str] = []
             capped = False
             for group in _chunked(briefs, self.reduce_fanin):
@@ -441,6 +464,15 @@ class TreeSummarizer:
                     break
                 folded.append(self._complete(self._fold_prompt.format(summaries_block="\n\n".join(group))))
             if capped:
+                # A truncated summary reads exactly like a complete one; the
+                # only prior signal was a flag on the payload.
+                logger.warning(
+                    "Tree summary hit the LLM call cap | tier={} max_llm_calls={} folded={} briefs={}",
+                    tier,
+                    self.max_llm_calls,
+                    len(folded),
+                    len(briefs),
+                )
                 self._partial = True
                 # `folded` holds every fold that completed before the cap
                 # tripped this tier — inherently bounded by `max_llm_calls`,
@@ -459,6 +491,7 @@ class TreeSummarizer:
         diagnostics = {"covered_units": covered_units, "total_units": total_units, "partial": partial}
         # The final synthesis call is deliberately exempt from the cap: a
         # capped build must still produce a summary, not an empty response.
+        logger.info("Tree summary synthesis | briefs={} llm_calls={}", len(briefs), self._calls)
         response = self._complete(self._build_synthesis_prompt(briefs, diagnostics))
 
         return TreeSummaryResult(
