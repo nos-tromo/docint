@@ -12,27 +12,44 @@ from loguru import logger
 load_dotenv()
 
 
-def set_offline_env() -> None:
-    """Log the current offline mode status.
+def _apply_offline_env() -> bool:
+    """Apply the Hugging Face offline env vars without logging.
 
-    The actual env vars (HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, etc.) are set at
-    module level immediately after ``load_dotenv()`` so they are available before
-    ``huggingface_hub`` / ``transformers`` cache their values at import time.
-    This function re-applies them (idempotent) and emits a log message.
+    Split out from :func:`set_offline_env` so module import can apply the
+    settings silently. Importing this module is what runs it, and that
+    happens long before ``init_logger()`` installs the configured sink — a
+    log call here would escape on loguru's *default* handler and print in a
+    different format from every other line in the run.
+
+    Returns:
+        bool: ``True`` when offline mode is active, ``False`` otherwise.
     """
-    if str(os.getenv("DOCINT_OFFLINE", "1")).lower() in {"1", "true", "yes"}:
+    offline = str(os.getenv("DOCINT_OFFLINE", "1")).lower() in {"1", "true", "yes"}
+    if offline:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
         os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    return offline
 
+
+def set_offline_env() -> None:
+    """Re-apply the offline env vars and log the resulting mode.
+
+    The vars themselves are already set at module import (see
+    :func:`_apply_offline_env`) so they land before ``huggingface_hub`` /
+    ``transformers`` cache their values. Re-applying is idempotent; the
+    reason to call this explicitly is the log line, so call it *after*
+    ``init_logger()``.
+    """
+    if _apply_offline_env():
         logger.info("Set Hugging Face libraries to offline mode.")
     else:
         logger.info("Hugging Face libraries are in online mode.")
 
 
-set_offline_env()  # Apply offline settings at module load time
+_apply_offline_env()  # Apply offline settings at module load time, silently.
 
 
 def resolve_hf_cache_path(cache_dir: Path, repo_id: str, filename: str | None = None) -> Path | None:
@@ -527,6 +544,53 @@ def load_host_env(
         backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", default_backend_host),
         qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
+    )
+
+
+@dataclass(frozen=True)
+class LoggingConfig:
+    """Dataclass for logging configuration.
+
+    Attributes:
+        level: Minimum level for the stderr sink (loguru level name).
+        progress_interval_s: Seconds between heartbeat lines while a long
+            job stage repeats the same progress message. ``0`` disables
+            throttling and logs every progress message.
+    """
+
+    level: str
+    progress_interval_s: float
+
+
+def load_logging_env(
+    default_level: str = "INFO",
+    default_progress_interval_s: float = 30.0,
+) -> LoggingConfig:
+    """Loads logging configuration from environment variables or defaults.
+
+    Args:
+        default_level (str): Default minimum level for the stderr sink.
+        default_progress_interval_s (float): Default seconds between
+            heartbeat lines for a repeating job stage.
+
+    Returns:
+        LoggingConfig: Dataclass containing logging configuration.
+        - level (str): Minimum level for the stderr sink.
+        - progress_interval_s (float): Heartbeat interval; ``0`` disables
+            throttling. A negative or unparseable value falls back to the
+            default rather than raising — a typo in an operator's ``.env``
+            must not stop the backend from booting.
+    """
+    raw_interval = os.getenv("LOG_PROGRESS_INTERVAL_S")
+    try:
+        interval = default_progress_interval_s if raw_interval is None else float(raw_interval)
+    except ValueError:
+        interval = default_progress_interval_s
+    if interval < 0 or math.isnan(interval):
+        interval = default_progress_interval_s
+    return LoggingConfig(
+        level=os.getenv("LOG_LEVEL", default_level),
+        progress_interval_s=interval,
     )
 
 

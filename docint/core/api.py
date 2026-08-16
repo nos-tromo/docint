@@ -72,6 +72,7 @@ from docint.utils.env_cfg import (
     load_response_validation_env,
     load_summary_env,
     resolve_enable_hybrid,
+    set_offline_env,
 )
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
@@ -90,6 +91,10 @@ __all__ = [
 ]
 
 init_logger()
+# Announce the offline mode *after* the sink exists. Importing ``env_cfg``
+# already applied the vars silently; logging it there would print on
+# loguru's default handler, in a different format from every line after it.
+set_offline_env()
 
 # CORS allowlist for the Vite dev server during local development.
 allowed_origins = load_host_env().cors_allowed_origins.split(",")
