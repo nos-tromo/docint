@@ -201,6 +201,7 @@ def test_image_iter_documents_yields_one_document(tmp_path: Path, monkeypatch: p
     class FakeRecord:
         llm_description = "a cat"
         llm_tags: ClassVar[list[str]] = ["cat", "animal"]
+        ocr_text = ""
         image_id = "img-1"
         point_id = "pt-1"
         error: str | None = None
@@ -226,6 +227,7 @@ def test_image_load_data_matches_iter_documents(tmp_path: Path, monkeypatch: pyt
     class FakeRecord:
         llm_description = "a dog"
         llm_tags: ClassVar[list[str]] = []
+        ocr_text = ""
         image_id = ""
         point_id = ""
         error: str | None = None

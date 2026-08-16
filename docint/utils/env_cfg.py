@@ -709,6 +709,13 @@ class ImageIngestionConfig:
     retrieve_top_k: int
     rerank_min_score: float = 0.05
     tagging_max_image_dimension: int = 1024
+    # Reading the text *inside* an image (a screenshot, a photographed letter,
+    # a slide) — a different question from captioning it, answered by the OCR
+    # engine. Defaults to on wherever a document OCR model is configured, so an
+    # unchanged stack does not start paying a general vision call per image.
+    ocr_enabled: bool = False
+    keyframe_ocr_enabled: bool = False
+    ocr_max_dimension: int = 1536
 
 
 def load_image_ingestion_config(
@@ -723,6 +730,9 @@ def load_image_ingestion_config(
     default_retrieve_top_k: int = 5,
     default_rerank_min_score: float = 0.05,
     default_tagging_max_image_dimension: int = 1024,
+    default_image_ocr_enabled: bool | None = None,
+    default_keyframe_ocr_enabled: bool = False,
+    default_image_ocr_max_dimension: int = 1536,
 ) -> ImageIngestionConfig:
     """Load image ingestion settings from environment variables.
 
@@ -745,6 +755,11 @@ def load_image_ingestion_config(
             floor is applied to the reranker's score instead. Default is 0.05.
         default_tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled. Default is 1024.
+        default_image_ocr_enabled (bool | None): Whether to read the text inside an image.
+            ``None`` follows whether a document OCR model is configured (``OCR_MODEL``).
+        default_keyframe_ocr_enabled (bool): Whether video keyframes are read too. Off by
+            default: a clip contributes many frames, and only slides tend to carry text.
+        default_image_ocr_max_dimension (int): Longest side of an image sent to be read.
 
     Returns:
         ImageIngestionConfig: Dataclass containing image ingestion configuration.
@@ -760,7 +775,12 @@ def load_image_ingestion_config(
         - rerank_min_score (float): Minimum reranker relevance score for an image to surface.
         - tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled.
+        - ocr_enabled (bool): Whether the text inside an image is read.
+        - keyframe_ocr_enabled (bool): Whether video keyframes are read too.
+        - ocr_max_dimension (int): Longest side of an image sent to be read.
     """
+    if default_image_ocr_enabled is None:
+        default_image_ocr_enabled = bool(os.getenv("OCR_MODEL", "").strip())
     return ImageIngestionConfig(
         enabled=str(os.getenv("IMAGE_INGESTION_ENABLED", default_image_ingestion_enabled)).lower()
         in {"1", "true", "yes"},
@@ -779,6 +799,10 @@ def load_image_ingestion_config(
         retrieve_top_k=int(os.getenv("IMAGE_RETRIEVE_TOP_K", default_retrieve_top_k)),
         rerank_min_score=float(os.getenv("IMAGE_RERANK_MIN_SCORE", default_rerank_min_score)),
         tagging_max_image_dimension=int(os.getenv("IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension)),
+        ocr_enabled=str(os.getenv("IMAGE_OCR_ENABLED", default_image_ocr_enabled)).lower() in {"1", "true", "yes"},
+        keyframe_ocr_enabled=str(os.getenv("KEYFRAME_OCR_ENABLED", default_keyframe_ocr_enabled)).lower()
+        in {"1", "true", "yes"},
+        ocr_max_dimension=int(os.getenv("IMAGE_OCR_MAX_IMAGE_DIM", default_image_ocr_max_dimension)),
     )
 
 

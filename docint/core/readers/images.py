@@ -127,9 +127,13 @@ class ImageReader(BaseReader):
             ),
             context=IngestContext(source_collection=self.source_collection),
         )
-        text = record.llm_description.strip()
+        # A screenshot or a photographed page says more in its own words than
+        # in a caption of them, so those come first — the same order the image
+        # collection's node text uses.
+        parts = [record.ocr_text.strip(), record.llm_description.strip()]
         if record.llm_tags:
-            text = f"{text}\n\nTags: {', '.join(record.llm_tags)}" if text else f"Tags: {', '.join(record.llm_tags)}"
+            parts.append(f"Tags: {', '.join(record.llm_tags)}")
+        text = "\n\n".join(part for part in parts if part).strip()
         if not text:
             text = f"Image file: {file_path.name}"
 
@@ -140,6 +144,8 @@ class ImageReader(BaseReader):
             image_meta["image_point_id"] = record.point_id
         if record.llm_description:
             image_meta["llm_description"] = record.llm_description
+        if record.ocr_text:
+            image_meta["ocr_text"] = record.ocr_text
         if record.llm_tags:
             image_meta["llm_tags"] = record.llm_tags
         if record.error:
