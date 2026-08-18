@@ -54,6 +54,7 @@ const AGGREGATE_OK: AggregateResult = {
   total: 5,
   unassigned: 0,
   groups: [{ value: 'acme_news', count: 5, samples: [HIT] }],
+  limit: 100,
   index_status: INDEX_STATUS
 }
 
@@ -796,6 +797,7 @@ describe('SearchPanel groups mode', () => {
         total: 0,
         unassigned: 0,
         groups: [],
+        limit: 100,
         index_status: { ...INDEX_STATUS, with_search_text: 0, complete: false }
       }
     })
@@ -807,6 +809,42 @@ describe('SearchPanel groups mode', () => {
 
     expect(await screen.findByTestId('search-not-indexed')).toBeInTheDocument()
     expect(screen.queryByTestId('search-no-groups')).toBeNull()
+  })
+
+  it('shows the capped notice once the group list reaches the effective limit', async () => {
+    const capped: AggregateResult = {
+      status: 'ok',
+      group_by: 'author',
+      total: 2,
+      unassigned: 0,
+      groups: [
+        { value: 'acme_news', count: 1, samples: [] },
+        { value: 'beta_daily', count: 1, samples: [] }
+      ],
+      limit: 2,
+      index_status: INDEX_STATUS
+    }
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: capped })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    const summary = await screen.findByTestId('search-groups-summary')
+    expect(summary.textContent).toMatch(/Showing the 2 largest groups/)
+  })
+
+  it('omits the capped notice while the group list is under the effective limit', async () => {
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    const summary = await screen.findByTestId('search-groups-summary')
+    expect(summary.textContent).not.toMatch(/largest groups/)
   })
 
   it("pins one of a group's sample chunks into the scope", async () => {

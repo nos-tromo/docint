@@ -227,6 +227,7 @@ const AGGREGATE_RESULT = {
   total: 0,
   unassigned: 0,
   groups: [],
+  limit: 100,
   index_status: INDEX_STATUS
 }
 

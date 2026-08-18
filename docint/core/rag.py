@@ -8646,8 +8646,10 @@ class RAG:
                 key — reported as ``0`` rather than a misleading number when
                 the group list was truncated at ``limit_groups``, since the
                 truncated groups' own matches would otherwise be counted as
-                unassigned), ``groups`` (``value``/``count``/``samples``) and
-                ``index_status``.
+                unassigned), ``groups`` (``value``/``count``/``samples``),
+                ``limit`` (the clamped ``limit_groups`` actually applied, so a
+                caller can tell a full group list from a truncated one without
+                assuming the default) and ``index_status``.
 
         Raises:
             KeywordTooShortError: When a keyword cannot be indexed.
@@ -8657,6 +8659,7 @@ class RAG:
         collection = self.qdrant_collection
         keywords: list[str] = parse_keywords(query) if query.strip() else []
         status = search_index_status(self.qdrant_client, collection)
+        limit = max(1, min(int(limit_groups), MAX_GROUP_LIMIT))
         result: dict[str, Any] = {
             "status": "ok",
             "group_by": group_by,
@@ -8664,6 +8667,7 @@ class RAG:
             "unassigned": 0,
             "groups": [],
             "index_status": status,
+            "limit": limit,
         }
         if keywords:
             if not status.get("with_search_text") or not status.get("indexed"):
@@ -8677,7 +8681,6 @@ class RAG:
 
         self._ensure_group_indexes_once(collection)
         group_filter = build_group_filter(keywords, base_filter=base_filter)
-        limit = max(1, min(int(limit_groups), MAX_GROUP_LIMIT))
         samples = max(0, min(int(samples_per_group), MAX_SAMPLES_PER_GROUP))
 
         groups = facet_groups(self.qdrant_client, collection, key, group_filter=group_filter, limit=limit)

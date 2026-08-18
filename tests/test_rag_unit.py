@@ -6328,6 +6328,7 @@ def test_search_aggregate_groups_matching_chunks_with_samples(monkeypatch: pytes
     assert result["group_by"] == "author"
     assert result["total"] == 4
     assert result["unassigned"] == 1  # 4 matches, 3 carry an author
+    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
     assert [g["value"] for g in result["groups"]] == ["acme_news", "beta_daily"]
     assert result["groups"][0]["count"] == 2
     assert result["groups"][0]["samples"][0]["id"] == "p-acme_news"
@@ -6362,6 +6363,7 @@ def test_search_aggregate_with_no_keywords_facets_the_whole_collection(monkeypat
     assert result["status"] == "ok"
     assert result["groups"] == [{"value": "Instagram", "count": 3, "samples": []}]
     assert result["unassigned"] == 0
+    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
 
 
 def test_search_aggregate_with_keywords_reports_not_indexed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6384,6 +6386,10 @@ def test_search_aggregate_with_keywords_reports_not_indexed(monkeypatch: pytest.
 
     assert result["status"] == "not_indexed"
     assert result["groups"] == []
+    # The clamped limit must still be the real one here, not a zero-ish
+    # default — otherwise an empty `groups` list on an unindexed collection
+    # would satisfy `len(groups) >= limit` and read as "capped" to a caller.
+    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
 
 
 def test_search_aggregate_rejects_unknown_group_field() -> None:

@@ -330,10 +330,10 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                   {t('search.groups_unassigned', { count: grouped.data.unassigned })}
                 </>
               )}
-              {grouped.data.groups.length === 100 && (
+              {grouped.data.groups.length >= grouped.data.limit && (
                 <>
                   {' · '}
-                  {t('search.groups_capped', { limit: 100 })}
+                  {t('search.groups_capped', { limit: grouped.data.limit })}
                 </>
               )}
             </p>

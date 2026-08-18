@@ -188,6 +188,9 @@ export interface AggregateResult {
   /** Matches with no value for the field; 0 when the group list was capped. */
   unassigned: number
   groups: AggregateGroup[]
+  /** The clamped `limit_groups` actually applied — compare against
+   *  `groups.length` to detect a capped list instead of assuming the default. */
+  limit: number
   index_status: SearchIndexStatus
 }
 

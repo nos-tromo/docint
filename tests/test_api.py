@@ -280,6 +280,7 @@ class DummyRAG:
             "total": 2,
             "unassigned": 0,
             "groups": [{"value": "acme_news", "count": 2, "samples": []}],
+            "limit": kwargs.get("limit_groups", 100),
             "index_status": {"indexed": True, "total": 2, "with_search_text": 2, "missing": 0, "complete": True},
         }
 
@@ -4788,6 +4789,7 @@ def test_search_aggregate_returns_groups_for_the_scoped_collection(client: TestC
     assert body["group_by"] == "author"
     assert body["groups"][0] == {"value": "acme_news", "count": 2, "samples": []}
     assert body["unassigned"] == 0
+    assert body["limit"] == 100
 
 
 def test_search_aggregate_accepts_a_blank_query(client: TestClient) -> None:
@@ -4809,14 +4811,19 @@ def test_search_aggregate_rejects_an_unknown_group_field(client: TestClient) -> 
 
 
 def test_search_aggregate_forwards_sizing(client: TestClient) -> None:
-    """The group and sample limits reach the RAG layer unchanged."""
-    client.post(
+    """The group and sample limits reach the RAG layer unchanged.
+
+    The effective ``limit`` also comes back in the response, so the frontend
+    can compare it against ``groups.length`` instead of assuming the default.
+    """
+    response = client.post(
         "/search/aggregate",
         json={"question": "election", "group_by": "author", "limit_groups": 7, "samples_per_group": 3},
     )
     last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
     assert last_aggregate["limit_groups"] == 7
     assert last_aggregate["samples_per_group"] == 3
+    assert response.json()["limit"] == 7
 
 
 def test_scope_can_be_set_and_read_back(client: TestClient) -> None:

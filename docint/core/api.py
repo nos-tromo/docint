@@ -907,8 +907,10 @@ class AggregateIn(BaseModel):
     question: str = ""
     collection: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
-    #: A short name from ``GROUP_BY_FIELDS`` — validated by the RAG layer.
-    group_by: str
+    #: Restates ``GROUP_BY_FIELDS`` as a closed enum so the OpenAPI schema is
+    #: self-documenting; the endpoint's whitelist check against
+    #: ``GROUP_BY_FIELDS`` itself stays in place as defense in depth.
+    group_by: Literal["author", "author_id", "network", "posting_author", "type", "speaker", "language", "file_name"]
     limit_groups: int = Field(default=DEFAULT_GROUP_LIMIT, ge=1, le=MAX_GROUP_LIMIT)
     samples_per_group: int = Field(default=2, ge=0, le=MAX_SAMPLES_PER_GROUP)
 
@@ -931,6 +933,9 @@ class AggregateOut(BaseModel):
     #: chunks when grouping by author). ``0`` when the group list was capped.
     unassigned: int = 0
     groups: list[AggregateGroupOut] = []
+    #: The clamped ``limit_groups`` actually applied, echoed back so a caller
+    #: can detect a truncated group list without hard-coding the default.
+    limit: int = 0
     index_status: dict[str, Any] = {}
 
 

@@ -44,6 +44,7 @@ const RESULT: AggregateResult = {
     { value: 'acme_news', count: 5, samples: [HIT1, HIT2] },
     { value: 'beta_daily', count: 2, samples: [] }
   ],
+  limit: 100,
   index_status: INDEX_STATUS
 }
 
