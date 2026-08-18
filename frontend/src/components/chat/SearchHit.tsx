@@ -6,7 +6,7 @@ import type { SearchHit } from '@/api/types'
 import { useChunkText } from '@/hooks/useSearch'
 import type { Strings } from '@/i18n'
 import { cn } from '@/lib/cn'
-import { keywordSegments } from '@/lib/highlight'
+import { highlightSegments, keywordSegments } from '@/lib/highlight'
 import { CheckCircleIcon, CircleIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -33,9 +33,13 @@ function hitLabel(
  * read as the search having matched something else.
  */
 function Highlighted({ text, keywords }: { text: string; keywords: string[] }) {
+  const segments =
+    keywords.length > 1
+      ? highlightSegments(text, [keywords.join(' ')])
+      : keywordSegments(text, keywords)
   return (
     <>
-      {keywordSegments(text, keywords).map((segment, i) =>
+      {segments.map((segment, i) =>
         segment.highlight ? (
           <mark key={i} className="rounded bg-yellow-200/70 px-0.5 text-foreground dark:bg-yellow-500/30">
             {segment.text}

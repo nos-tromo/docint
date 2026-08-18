@@ -56,7 +56,7 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     normalize_numeric_bound,
 )
-from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
+from docint.core.search.fulltext import parse_keywords
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
@@ -888,7 +888,7 @@ class SearchOut(BaseModel):
     #: none are, so ``make search-index`` has never run here.
     status: Literal["ok", "partial", "not_indexed"]
     hits: list[dict[str, Any]] = []
-    total: int = 0
+    total: int | None = 0
     next_cursor: str | None = None
     index_status: dict[str, Any] = {}
 
@@ -1532,11 +1532,8 @@ def search_collection(
     # Validate at the boundary rather than deep in the RAG layer: an unusable
     # query should be refused before a collection is even resolved. An empty
     # keyword list would otherwise reach the search as "match everything".
-    try:
-        if not parse_keywords(payload.question):
-            raise HTTPException(status_code=422, detail="Invalid request.")
-    except KeywordTooShortError as e:
-        raise HTTPException(status_code=422, detail="Invalid request.") from e
+    if not parse_keywords(payload.question):
+        raise HTTPException(status_code=422, detail="Invalid request.")
 
     try:
         with _scoped_collection(payload.collection, principal):

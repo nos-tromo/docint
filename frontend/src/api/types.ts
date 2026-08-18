@@ -131,7 +131,7 @@ export interface SearchIndexStatus {
 export interface SearchResult {
   status: 'ok' | 'partial' | 'not_indexed'
   hits: SearchHit[]
-  total: number
+  total: number | null
   next_cursor: string | null
   index_status: SearchIndexStatus
 }

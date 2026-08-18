@@ -201,7 +201,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               >
                 {search.data && (
                   <>
-                    {t('search.hits', { count: search.data.total })}
+                    {search.data.total != null
+                      ? t('search.hits', { count: search.data.total })
+                      : t('search.results')}
                     {' · '}
                     {search.data.next_cursor
                       ? t('search.docs_more', { count: docCount })
