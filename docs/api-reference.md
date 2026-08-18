@@ -242,6 +242,84 @@ Status and errors:
   matches, silently reducing the whole search to zero hits.
 - `404` — the collection is not owned by the caller.
 
+### `POST /search/aggregate`
+
+Exhaustive, grouped search over chunk payload — the "find all" counterpart to
+`/search` above. `/search` ranks and pages top-k; this returns **every**
+matching chunk, counted per value of one payload field, so "which authors
+mention X" is answered completely rather than by whoever ranked highest. One
+native Qdrant `facet()` call, not a scan — no embedding call and no inference.
+
+Request:
+
+```json
+{
+  "question": "berlin konferenz",
+  "collection": "<logical name>",
+  "metadata_filters": [],
+  "group_by": "author",
+  "limit_groups": 100,
+  "samples_per_group": 2
+}
+```
+
+- `question` — whitespace-separated keywords, same AND semantics as `/search`.
+  **May be blank**: a keyword-less call groups the whole (filtered)
+  collection — a facet is a count, not a scan, so this is a legitimate call
+  and not an unbounded dump.
+- `group_by` — one of `author`, `author_id`, `network`, `posting_author`,
+  `type`, `speaker`, `language`, `file_name` (`422` otherwise). A closed
+  whitelist, not an arbitrary payload path.
+- `limit_groups` — maximum groups returned, `1..500` (default `100`).
+- `samples_per_group` — sample hits fetched per group for preview/pinning,
+  `0..5` (default `2`).
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "group_by": "author",
+  "total": 37,
+  "unassigned": 0,
+  "groups": [
+    {"value": "user_a1b2", "count": 21, "samples": [{"...": "a SearchHit"}]},
+    {"value": "user_c3d4", "count": 16, "samples": [{"...": "a SearchHit"}]}
+  ],
+  "index_status": {
+    "indexed": true,
+    "total": 724,
+    "with_search_text": 724,
+    "missing": 0,
+    "complete": true
+  }
+}
+```
+
+- `total` counts matching **chunks**, not posts or documents — coarse parent
+  chunks are excluded the same way `/search` excludes them, so a hierarchical
+  collection cannot double-count one logical hit through its parent and
+  child.
+- `unassigned` is matches carrying no value for `group_by` (e.g. grouping
+  document chunks by `author`). It is `0` — not a computed remainder — when
+  the group list was capped at `limit_groups`, because the truncated groups'
+  own matches would otherwise be misread as unassigned.
+- `groups` is sorted by count desc, then value asc. Each group's `samples`
+  are ordinary `SearchHit`s (see `/search` above), pinnable into scope the
+  same way.
+- `status`/`index_status` carry the same three meanings as `/search`:
+  `not_indexed` when a keyword call hits an unbackfilled collection (a
+  blank query never returns `not_indexed`, since it needs no `search_text`
+  index — only the group-by field's own index, which is created lazily on
+  first use if `make search-index` has not run yet), `partial` during an
+  incomplete backfill, `ok` otherwise.
+- `422` — `group_by` is not one of the whitelisted fields, or `question` is
+  non-blank but contains a keyword shorter than 2 characters.
+- `404` — the collection is not owned by the caller.
+
+This lane covers the **text lane only**; the `_images` companion that
+`/search` also covers is not yet grouped.
+
 ### `POST /summarize`
 
 Serves the collection's cached tree summary, or queues a rebuild. Query

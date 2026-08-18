@@ -180,6 +180,37 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   **replaced the two entity-occurrence chat query modes**, which searched the
   NER aggregate and silently returned whichever entity was most frequent rather
   than the one asked about.
+  **A second lane counts instead of ranking** (`aggregate.py` →
+  `RAG.search_aggregate()` → `POST /search/aggregate`, under the same
+  `/search` prefix as the keyword lane, so it needs no new nginx/devProxy
+  entry). Ranked retrieval and the keyword lane both return top-k; an
+  investigation often needs the complete set — every author, every network,
+  every file — so this lane runs one Qdrant `facet()` per group-by key
+  instead of a scan, with no embedding or inference in the path. The key is
+  a closed whitelist (`GROUP_BY_FIELDS`: `author`, `author_id`, `network`,
+  `posting_author`, `type`, `speaker`, `language`, `file_name`) — an
+  arbitrary payload path would let a caller enumerate any field — and
+  faceting needs its own `KEYWORD` payload index per key, so
+  `ensure_group_indexes()` creates them idempotently: `RAG.create_index()`
+  ensures them at ingest just like the `search_text` index above (new
+  collections need no operator step), `make search-index` backports them for
+  pre-existing ones, and a lazy per-process `_ensure_group_indexes_once()`
+  covers the gap between the two so a first grouped call never fails for
+  want of the backport. Counts are **chunks, not posts or documents** — the
+  same coarse-parent exclusion the keyword lane uses (`not_coarse_condition()`,
+  now factored into `fulltext.py` and shared) applies here too, or a
+  hierarchical collection would double-count a logical hit through its
+  parent and child. Keywords are optional: a blank query groups the *whole*
+  (filtered) collection, because a facet is a count, not a scan — the
+  keyword lane has no equivalent, since returning every row with no query
+  there would not be a search. `unassigned` (matches carrying no value for
+  the group-by key) is reported as `0` rather than a computed number
+  whenever the group list was capped at `limit_groups`, since the truncated
+  groups' own matches would otherwise be misread as unassigned. This
+  milestone is the **text lane only** — the `_images` companion is not yet
+  grouped. The SPA's search panel gets a **Groups** mode beside **Hits**
+  (`SearchGroups.tsx`): one row per value with its count, samples fetched on
+  expand, each pinnable into the chat scope exactly like a hits-mode tile.
 - `docint/utils/ner_client.py` — Thin HTTP client for the remote GLiNER service hosted by `vllm-service` (full stack: `http://vllm-router:4000/gliner` with Bearer auth; gliner-only shape: `http://gliner-only:8000/gliner` with no auth). Replaces the in-process GLiNER runtime previously shipped here.
 - `docint/utils/clip_client.py` — Thin HTTP client for the remote CLIP image+text embedding service hosted by `vllm-service`. Same dual-shape posture as the NER client (full stack via router with Bearer auth; `clip-only` shape at `http://clip-only:8000` with no auth). `RemoteCLIPBackend` satisfies the `ImageEmbeddingBackend` Protocol so `core/ingest/images_service.py` swaps in place. Probes `/clip/dimension` at construction to size Qdrant `_images` collections without burning an embed call. `IMAGE_EMBED_MODEL` is no longer read by docint — set `CLIP_MODEL` on the vllm-service container instead. Override the endpoint via `CLIP_API_BASE` / `CLIP_API_KEY` / `CLIP_TIMEOUT`.
 - **An image's own words are read, not only described** (`images_service.ingest_image` → `core/ocr`). The caption and tags say what a picture *shows*; `ocr_text` is what it *says* — the text printed inside a screenshot, a photographed letter, a slide. It is stored on the `_images` payload, put **ahead of** the caption in the node text and in `search_text`, and (for a standalone file) in the Document text that `ImageReader` contributes to the main collection, because the printed words are what a reader typed and what the reranker can match exactly rather than approximately. Gated by `IMAGE_OCR_ENABLED`, which **defaults to whether `OCR_MODEL` is set** so an unchanged stack does not start paying a call per image; keyframes need `KEYFRAME_OCR_ENABLED` on top (a clip contributes many frames, and only slides tend to carry text). Reading never raises — an image with no words is the normal case, not a failure. Applies to standalone files, social images and PDF-extracted figures alike (one code path, `ingest_image`). Pre-existing collections need a re-ingest to gain the field (no payload migration), and image points are cached by hash, so a re-run only reads images the `_images` companion has not seen.

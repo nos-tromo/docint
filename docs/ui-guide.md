@@ -73,6 +73,14 @@ rail is a bare toggle that tints while a scope is live. Icon-only controls draw 
 `src/components/common/icons.tsx`; never a text glyph, whose shape is
 whatever font the viewer's browser happens to pick.
 
+The panel has two modes, toggled without losing the submitted query or scope:
+**Hits** (ranked top-k, the default) and **Groups** (`SearchGroups.tsx`) —
+every matching chunk counted per value of a payload field (author, network,
+file, …), for "which authors mention X" questions a ranked answer cannot
+settle. A blank query in Groups mode groups the whole filtered collection.
+Each group is a row with its count and, on expand, a handful of sample
+chunks pinnable into scope exactly like a Hits tile.
+
 ### Ingest (`src/routes/Ingest.tsx`)
 
 Drag-and-drop upload (`src/components/ingest/Dropzone.tsx`) into a selected
