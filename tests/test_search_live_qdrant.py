@@ -21,6 +21,7 @@ from collections.abc import Iterator
 import pytest
 from qdrant_client import QdrantClient, models
 
+from docint.core.search.aggregate import FacetGroup, build_group_filter, ensure_group_indexes, facet_groups
 from docint.core.search.fulltext import build_search_filter
 from docint.core.search.index import SEARCH_TEXT_FIELD, search_index_params, write_search_text
 
@@ -165,3 +166,43 @@ def test_coarse_parent_chunks_are_excluded_but_untagged_ones_are_not(
     )
 
     assert _ids(client, name, ["Parteitag"]) == [1, 3]
+
+
+def test_facet_groups_counts_every_matching_chunk(collection: tuple[QdrantClient, str]) -> None:
+    """The grouped lane counts every matching chunk per author, exhaustively.
+
+    Distinguishes the "find all" lane from ranked retrieval: two chunks match
+    "election" and share ``author=a1`` — a top-k answer could still undercount
+    by surfacing only one of them.
+    """
+    client, name = collection
+    rows = {1: "election night", 2: "election day", 3: "weather"}
+    authors = {1: "a1", 2: "a1", 3: "a2"}
+    client.upsert(
+        name,
+        points=[
+            models.PointStruct(
+                id=pid,
+                vector=[0.1, 0.2],
+                payload={"reference_metadata": {"author": authors[pid]}},
+            )
+            for pid in rows
+        ],
+        wait=True,
+    )
+    write_search_text(client, name, rows, wait=True)
+    assert ensure_group_indexes(client, name) is True
+    time.sleep(1.0)  # let the new payload indexes catch up
+
+    f = build_group_filter(["election"], base_filter=None)
+    groups = facet_groups(client, name, "reference_metadata.author", group_filter=f, limit=10)
+    assert groups == [FacetGroup("a1", 2)]
+
+    groups_all = facet_groups(
+        client,
+        name,
+        "reference_metadata.author",
+        group_filter=build_group_filter([], base_filter=None),
+        limit=10,
+    )
+    assert groups_all == [FacetGroup("a1", 2), FacetGroup("a2", 1)]
