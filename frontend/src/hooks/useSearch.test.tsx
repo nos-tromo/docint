@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { useChunkText, useScope, useSearch } from './useSearch'
+import { useAggregate, useChunkText, useScope, useSearch } from './useSearch'
 import { ApiError } from '@/api/client'
 import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
@@ -218,5 +218,62 @@ describe('useScope', () => {
 
     const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
     expect(call![1].method).toBe('DELETE')
+  })
+})
+
+const AGGREGATE_RESULT = {
+  status: 'ok',
+  group_by: 'author',
+  total: 0,
+  unassigned: 0,
+  groups: [],
+  index_status: INDEX_STATUS
+}
+
+describe('useAggregate', () => {
+  it('posts the query, group field and collection to /search/aggregate', async () => {
+    const fetchMock = mockFetch(AGGREGATE_RESULT)
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    const { result } = renderHook(() => useAggregate('election', 'author', true), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search/aggregate'))
+    expect(call).toBeDefined()
+    expect(JSON.parse(call![1].body)).toMatchObject({
+      question: 'election',
+      group_by: 'author',
+      collection: 'docs'
+    })
+  })
+
+  it('does not fetch while disabled', async () => {
+    const fetchMock = mockFetch(AGGREGATE_RESULT)
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    renderHook(() => useAggregate('election', 'author', false), { wrapper })
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search/aggregate'))).toBe(false)
+  })
+
+  it('fetches a blank query — grouping the whole collection is a facet, not a scan', async () => {
+    const fetchMock = mockFetch({ ...AGGREGATE_RESULT, group_by: 'network' })
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    const { result } = renderHook(() => useAggregate('   ', 'network', true), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search/aggregate'))
+    expect(JSON.parse(call![1].body)).toMatchObject({ question: '', group_by: 'network' })
+  })
+
+  it('does not fetch without a collection selected', async () => {
+    const fetchMock = mockFetch(AGGREGATE_RESULT)
+
+    renderHook(() => useAggregate('election', 'author', true), { wrapper })
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search/aggregate'))).toBe(false)
   })
 })
