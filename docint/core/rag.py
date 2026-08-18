@@ -150,8 +150,9 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
-from docint.core.search.fulltext import build_search_filter, parse_keywords
+from docint.core.search.fulltext import build_search_filter, matches_phrase, parse_keywords
 from docint.core.search.index import (
+    SEARCH_TEXT_FIELD,
     ensure_search_index,
     image_companion_name,
     search_index_status,
@@ -8493,7 +8494,8 @@ class RAG:
                 ``total``, ``next_cursor`` and ``index_status`` counts.
 
         Raises:
-            KeywordTooShortError: When a keyword cannot be indexed.
+            Nothing — short words are silently dropped from the keyword
+            list. An all-short query returns an empty result set.
         """
         collection = self.qdrant_collection
         status = search_index_status(self.qdrant_client, collection)
@@ -8537,6 +8539,12 @@ class RAG:
         companion = image_companion_name(collection)
         has_images = self._collection_exists(companion)
 
+        # Phrase matching uses the raw query words (including short ones like
+        # "a") so the substring check matches the actual text. The Qdrant
+        # pre-filter only gets the indexable keywords.
+        query_words = [w for w in str(query or "").split() if w]
+        phrase_active = len(query_words) > 1
+
         # Lanes run in sequence — documents, then images — and a page fills
         # across the boundary. Hard match is a filter, not a ranker, so there
         # is no meaningful interleaving to preserve; what matters is that a
@@ -8549,8 +8557,13 @@ class RAG:
         hits: list[dict[str, Any]] = []
         next_cursor: str | None = None
 
+        def _scroll(name: str, n: int, off: Any) -> tuple[list[Any], Any]:
+            if phrase_active:
+                return self._scroll_search_lane_filtered(name, search_filter, n, off, query_words)
+            return self._scroll_search_lane(name, search_filter, n, off)
+
         if lane == "text":
-            points, next_offset = self._scroll_search_lane(collection, search_filter, page_size, offset)
+            points, next_offset = _scroll(collection, page_size, offset)
             hits.extend(self._search_hits(collection, points, kind="text"))
             if next_offset is not None:
                 next_cursor = encode_cursor(next_offset, extra={"lane": "text"})
@@ -8558,14 +8571,18 @@ class RAG:
                 lane, offset = "image", None
 
         if lane == "image" and has_images and next_cursor is None and len(hits) < page_size:
-            points, next_offset = self._scroll_search_lane(companion, search_filter, page_size - len(hits), offset)
+            points, next_offset = _scroll(companion, page_size - len(hits), offset)
             hits.extend(self._search_hits(companion, points, kind="image"))
             if next_offset is not None:
                 next_cursor = encode_cursor(next_offset, extra={"lane": "image"})
 
-        total = self._search_total(collection, search_filter)
-        if has_images:
-            total += self._search_total(companion, search_filter)
+        total: int | None
+        if phrase_active:
+            total = None
+        else:
+            total = self._search_total(collection, search_filter)
+            if has_images:
+                total += self._search_total(companion, search_filter)
 
         # "partial" is a distinct status rather than a nested field so a caller
         # cannot miss incomplete coverage by ignoring ``index_status``. A search
@@ -8621,6 +8638,56 @@ class RAG:
             with_vectors=False,
         )
         return list(points), next_offset
+
+    _PHRASE_OVERFETCH_RATIO = 3
+
+    def _scroll_search_lane_filtered(
+        self,
+        name: str,
+        search_filter: qdrant_models.Filter,
+        limit: int,
+        offset: Any,
+        keywords: list[str],
+    ) -> tuple[list[Any], Any]:
+        """Scroll one lane with client-side phrase post-filtering.
+
+        Over-fetches by ``_PHRASE_OVERFETCH_RATIO`` and loops until *limit*
+        phrase-matching points are collected or the lane is exhausted.
+
+        Args:
+            name (str): Collection to scroll.
+            search_filter (qdrant_models.Filter): Compiled keyword filter.
+            limit (int): Maximum phrase-matching points to return.
+            offset (Any): Scroll offset from the cursor, or ``None``.
+            keywords (list[str]): Keywords whose contiguous occurrence is
+                checked via ``matches_phrase``.
+
+        Returns:
+            tuple[list[Any], Any]: Accepted points and the next offset (the
+                id of the last accepted point when the page is full, or the
+                Qdrant offset when the batch is exhausted, or ``None``).
+        """
+        accepted: list[Any] = []
+        current_offset = offset
+        while len(accepted) < limit:
+            fetch = max(limit, (limit - len(accepted)) * self._PHRASE_OVERFETCH_RATIO)
+            points, qdrant_next = self._scroll_search_lane(name, search_filter, fetch, current_offset)
+            if not points:
+                return accepted, None
+
+            for point in points:
+                payload = getattr(point, "payload", None) or {}
+                text = str(payload.get(SEARCH_TEXT_FIELD) or "")
+                if matches_phrase(text, keywords):
+                    accepted.append(point)
+                    if len(accepted) >= limit:
+                        return accepted, getattr(point, "id", qdrant_next)
+
+            if qdrant_next is None:
+                return accepted, None
+            current_offset = qdrant_next
+
+        return accepted, None
 
     def _search_total(self, name: str, search_filter: qdrant_models.Filter) -> int:
         """Return the exact number of matches in one lane.

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-import pytest
 from qdrant_client import models
 
 from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.fulltext import (
-    KeywordTooShortError,
     build_search_filter,
+    matches_phrase,
     parse_keywords,
 )
 from docint.core.search.index import SEARCH_TEXT_FIELD
@@ -26,16 +25,19 @@ def test_parse_keywords_deduplicates_case_insensitively() -> None:
     assert parse_keywords("Berlin berlin BERLIN") == ["Berlin"]
 
 
-def test_parse_keywords_rejects_a_keyword_below_the_index_minimum() -> None:
-    """A one-character keyword is unindexable and can never match.
+def test_parse_keywords_drops_short_words_silently() -> None:
+    """A one-character keyword is unindexable but valid inside a phrase.
 
-    Accepting it would contribute a condition that matches nothing, so a
-    two-keyword search would silently return zero hits.
+    Short words are dropped from the keyword list (Qdrant pre-filter) so
+    they don't contribute a condition that can never match. The phrase
+    post-filter still checks the full query text.
     """
-    with pytest.raises(KeywordTooShortError) as excinfo:
-        parse_keywords("Berlin a")
+    assert parse_keywords("Berlin a") == ["Berlin"]
 
-    assert "a" in str(excinfo.value)
+
+def test_parse_keywords_returns_nothing_when_all_keywords_are_too_short() -> None:
+    """Every word below the index minimum yields an empty list."""
+    assert parse_keywords("a b c") == []
 
 
 def test_parse_keywords_returns_nothing_for_blank_input() -> None:
@@ -87,3 +89,41 @@ def test_build_search_filter_merges_the_callers_metadata_filter() -> None:
 def test_build_search_filter_returns_none_without_keywords() -> None:
     """No keywords means no search — never an unfiltered scan of everything."""
     assert build_search_filter([]) is None
+
+
+# ---------- matches_phrase ----------
+
+
+def test_matches_phrase_single_keyword_always_matches() -> None:
+    """A single keyword has no adjacency to check."""
+    assert matches_phrase("anything at all", ["Berlin"])
+
+
+def test_matches_phrase_matches_contiguous_text() -> None:
+    """Adjacent keywords in the text are a phrase match."""
+    assert matches_phrase("This is about machine learning today", ["machine", "learning"])
+
+
+def test_matches_phrase_rejects_non_contiguous() -> None:
+    """Words present but separated by other text are not a phrase."""
+    assert not matches_phrase("The machine stopped learning", ["machine", "learning"])
+
+
+def test_matches_phrase_is_case_insensitive() -> None:
+    """Mixed case in the text must not prevent a match."""
+    assert matches_phrase("Machine Learning is great", ["machine", "learning"])
+
+
+def test_matches_phrase_normalizes_whitespace() -> None:
+    """Extra whitespace between words should not break phrase matching."""
+    assert matches_phrase("about  machine\tlearning  today", ["machine", "learning"])
+
+
+def test_matches_phrase_empty_keywords_always_matches() -> None:
+    """No keywords means no phrase constraint."""
+    assert matches_phrase("anything", [])
+
+
+def test_matches_phrase_requires_keyword_order() -> None:
+    """Reversed keyword order must not match."""
+    assert not matches_phrase("learning machine", ["machine", "learning"])

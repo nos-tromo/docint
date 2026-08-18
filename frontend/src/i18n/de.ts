@@ -155,6 +155,7 @@ export const de: Strings = {
   'search.select_collection': 'Wählen Sie eine Sammlung aus, um sie zu durchsuchen.',
   'search.kind_image': 'Bild',
   'search.hits': '{count} Treffer',
+  'search.results': 'Ergebnisse',
   'search.docs': '{count} Dokumente',
   'search.docs_more': '{count}+ Dokumente',
   'search.no_matches': 'Kein Abschnitt enthält alle Suchbegriffe.',

@@ -147,6 +147,7 @@ export const en = {
   'search.select_collection': 'Select a collection to search it.',
   'search.kind_image': 'Image',
   'search.hits': '{count} hits',
+  'search.results': 'Results',
   'search.docs': '{count} docs',
   'search.docs_more': '{count}+ docs',
   'search.no_matches': 'No chunk contains every keyword.',

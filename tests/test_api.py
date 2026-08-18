@@ -4742,13 +4742,20 @@ def test_search_returns_hits_for_the_scoped_collection(client: TestClient) -> No
     assert isinstance(body["hits"], list)
 
 
-def test_search_rejects_a_keyword_below_the_index_minimum(client: TestClient) -> None:
-    """An unindexable keyword can never match, so it must be refused.
+def test_search_silently_drops_a_short_keyword_when_others_remain(client: TestClient) -> None:
+    """A short word like 'a' is unindexable but valid inside a phrase.
 
-    Accepting it would add a condition matching nothing, silently reducing the
-    whole search to zero hits.
+    It is dropped from the Qdrant pre-filter; the phrase post-filter still
+    checks the full query text. The request must not be rejected.
     """
     response = client.post("/search", json={"question": "berlin a"})
+
+    assert response.status_code != 422
+
+
+def test_search_rejects_a_query_of_only_short_keywords(client: TestClient) -> None:
+    """When every keyword is too short for the index, the result is empty."""
+    response = client.post("/search", json={"question": "a b"})
 
     assert response.status_code == 422
 
