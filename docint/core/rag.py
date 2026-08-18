@@ -113,11 +113,13 @@ from qdrant_client import models as qdrant_models
 # private re-exports without an explicit ``__all__``,
 # so list every test-reachable third-party symbol here.
 __all__ = [
+    "GROUP_BY_FIELDS",
     "RAG",
     "EmptyIngestionError",
     "QueryBundle",
     "ResponseMode",
     "RetrieverQueryEngine",
+    "UnknownGroupFieldError",
     "VectorStoreQueryMode",
     "logger",
     "qdrant_models",
@@ -150,6 +152,18 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
+from docint.core.search.aggregate import (
+    DEFAULT_GROUP_LIMIT,
+    GROUP_BY_FIELDS,
+    MAX_GROUP_LIMIT,
+    MAX_SAMPLES_PER_GROUP,
+    UnknownGroupFieldError,
+    build_group_filter,
+    ensure_group_indexes,
+    facet_groups,
+    group_payload_key,
+    member_filter,
+)
 from docint.core.search.fulltext import build_search_filter, parse_keywords
 from docint.core.search.index import (
     ensure_search_index,
@@ -2699,6 +2713,7 @@ class RAG:
     _query_engine_cache: OrderedDict[str, RetrieverQueryEngine] = field(
         default_factory=OrderedDict, init=False, repr=False
     )
+    _group_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
@@ -4915,6 +4930,11 @@ class RAG:
         # Full-text search needs a lowercase prefix index on `search_text`.
         # Idempotent and fail-soft, like the posting_uuid index above.
         ensure_search_index(self.qdrant_client, self.qdrant_collection)
+
+        # Grouped search facets on payload keys, which need KEYWORD indexes.
+        # Same idempotent, fail-soft posture as the two indexes above.
+        if ensure_group_indexes(self.qdrant_client, self.qdrant_collection):
+            self._group_indexes_ensured.add(self.qdrant_collection)
 
     def create_query_engine(self) -> None:
         """Create the query engine with a retriever and reranker.
@@ -8578,6 +8598,120 @@ class RAG:
             "next_cursor": next_cursor,
             "index_status": status,
         }
+
+    def _ensure_group_indexes_once(self, collection: str) -> None:
+        """Ensure the grouped lane's payload indexes once per process per collection.
+
+        Collections ingested before the grouped lane shipped have no such
+        indexes; ``make search-index`` backports them, but a first grouped
+        call must not fail in the meantime. ``create_payload_index`` is
+        idempotent, so this only saves round-trips.
+
+        Args:
+            collection (str): Physical collection name.
+        """
+        if collection in self._group_indexes_ensured:
+            return
+        if ensure_group_indexes(self.qdrant_client, collection):
+            self._group_indexes_ensured.add(collection)
+
+    def search_aggregate(
+        self,
+        query: str,
+        *,
+        group_by: str,
+        base_filter: qdrant_models.Filter | None = None,
+        limit_groups: int = DEFAULT_GROUP_LIMIT,
+        samples_per_group: int = 2,
+    ) -> dict[str, Any]:
+        """Count every matching chunk per value of a payload field.
+
+        The exhaustive counterpart to :meth:`search_fulltext`: no top-k, no
+        ranking, no inference — one native facet for the counts, one filtered
+        scroll per group for its sample hits. Keywords are optional; without
+        them the (filtered) whole collection is grouped.
+
+        Args:
+            query (str): Whitespace-separated keywords; may be blank.
+            group_by (str): A short name from ``GROUP_BY_FIELDS``.
+            base_filter (qdrant_models.Filter | None): Caller's metadata filter.
+            limit_groups (int): Maximum groups, clamped to ``[1, MAX_GROUP_LIMIT]``.
+            samples_per_group (int): Sample hits per group, clamped to
+                ``[0, MAX_SAMPLES_PER_GROUP]``.
+
+        Returns:
+            dict[str, Any]: ``status`` (as for keyword search; always ``"ok"``
+                for a keyword-less call), ``group_by``, ``total`` matching
+                chunks, ``unassigned`` (matches carrying no value for the
+                key — reported as ``0`` rather than a misleading number when
+                the group list was truncated at ``limit_groups``, since the
+                truncated groups' own matches would otherwise be counted as
+                unassigned), ``groups`` (``value``/``count``/``samples``) and
+                ``index_status``.
+
+        Raises:
+            KeywordTooShortError: When a keyword cannot be indexed.
+            UnknownGroupFieldError: When ``group_by`` is not whitelisted.
+        """
+        key = group_payload_key(group_by)
+        collection = self.qdrant_collection
+        keywords: list[str] = parse_keywords(query) if query.strip() else []
+        status = search_index_status(self.qdrant_client, collection)
+        result: dict[str, Any] = {
+            "status": "ok",
+            "group_by": group_by,
+            "total": 0,
+            "unassigned": 0,
+            "groups": [],
+            "index_status": status,
+        }
+        if keywords:
+            if not status.get("with_search_text") or not status.get("indexed"):
+                logger.warning(
+                    "Search index missing | collection={!r} — grouped search over keywords needs `make search-index`",
+                    collection,
+                )
+                return {**result, "status": "not_indexed"}
+            if not status.get("complete"):
+                result["status"] = "partial"
+
+        self._ensure_group_indexes_once(collection)
+        group_filter = build_group_filter(keywords, base_filter=base_filter)
+        limit = max(1, min(int(limit_groups), MAX_GROUP_LIMIT))
+        samples = max(0, min(int(samples_per_group), MAX_SAMPLES_PER_GROUP))
+
+        groups = facet_groups(self.qdrant_client, collection, key, group_filter=group_filter, limit=limit)
+        total = self._search_total(collection, group_filter)
+        assigned = sum(g.count for g in groups)
+
+        out_groups: list[dict[str, Any]] = []
+        for group in groups:
+            sample_hits: list[dict[str, Any]] = []
+            if samples > 0:
+                points, _ = self.qdrant_client.scroll(
+                    collection_name=collection,
+                    scroll_filter=member_filter(key, group.value, group_filter),
+                    limit=samples,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                sample_hits = self._search_hits(collection, list(points), kind="text")
+            out_groups.append({"value": group.value, "count": group.count, "samples": sample_hits})
+
+        result.update(
+            total=total,
+            unassigned=max(0, total - assigned) if len(groups) < limit else 0,
+            groups=out_groups,
+        )
+        logger.info(
+            "Grouped search | collection={!r} group_by={} groups={} total={} status={}",
+            collection,
+            group_by,
+            len(out_groups),
+            total,
+            result["status"],
+        )
+        return result
 
     def _collection_exists(self, name: str) -> bool:
         """Return whether a collection exists, treating an outage as absent.
