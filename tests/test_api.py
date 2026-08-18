@@ -263,6 +263,26 @@ class DummyRAG:
             },
         }
 
+    def search_aggregate(self, query: str, **kwargs: Any) -> dict[str, Any]:
+        """Record the call and return one synthetic group.
+
+        Args:
+            query (str): Raw keywords, possibly blank.
+            **kwargs (Any): ``group_by``, filter and sizing arguments.
+
+        Returns:
+            dict[str, Any]: A well-formed grouped result.
+        """
+        self.last_aggregate = {"query": query, **kwargs}
+        return {
+            "status": "ok",
+            "group_by": kwargs["group_by"],
+            "total": 2,
+            "unassigned": 0,
+            "groups": [{"value": "acme_news", "count": 2, "samples": []}],
+            "index_status": {"indexed": True, "total": 2, "with_search_text": 2, "missing": 0, "complete": True},
+        }
+
     def probe_rerank_endpoint(self) -> None:
         """Satisfy the lifespan rerank probe without touching the network."""
         return None
@@ -4758,6 +4778,45 @@ def test_search_requires_a_query(client: TestClient) -> None:
     response = client.post("/search", json={"question": "   "})
 
     assert response.status_code == 422
+
+
+def test_search_aggregate_returns_groups_for_the_scoped_collection(client: TestClient) -> None:
+    """The endpoint returns the RAG layer's groups under the owner's collection."""
+    response = client.post("/search/aggregate", json={"question": "election", "group_by": "author"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["group_by"] == "author"
+    assert body["groups"][0] == {"value": "acme_news", "count": 2, "samples": []}
+    assert body["unassigned"] == 0
+
+
+def test_search_aggregate_accepts_a_blank_query(client: TestClient) -> None:
+    """Grouping the whole collection is a legitimate ask (a facet, not a scan)."""
+    response = client.post("/search/aggregate", json={"question": "  ", "group_by": "network"})
+    assert response.status_code == 200
+
+
+def test_search_aggregate_rejects_a_keyword_below_the_index_minimum(client: TestClient) -> None:
+    """An unindexable keyword can never match, so it must be refused."""
+    response = client.post("/search/aggregate", json={"question": "election a", "group_by": "author"})
+    assert response.status_code == 422
+
+
+def test_search_aggregate_rejects_an_unknown_group_field(client: TestClient) -> None:
+    """Faceting is a closed whitelist — an unlisted field is refused, not passed through."""
+    response = client.post("/search/aggregate", json={"question": "election", "group_by": "reference_metadata.author"})
+    assert response.status_code == 422
+
+
+def test_search_aggregate_forwards_sizing(client: TestClient) -> None:
+    """The group and sample limits reach the RAG layer unchanged."""
+    client.post(
+        "/search/aggregate",
+        json={"question": "election", "group_by": "author", "limit_groups": 7, "samples_per_group": 3},
+    )
+    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
+    assert last_aggregate["limit_groups"] == 7
+    assert last_aggregate["samples_per_group"] == 3
 
 
 def test_scope_can_be_set_and_read_back(client: TestClient) -> None:
