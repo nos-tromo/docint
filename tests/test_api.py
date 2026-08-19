@@ -5021,6 +5021,61 @@ def test_export_search_csv_rejects_a_keyword_search_over_an_unindexed_collection
     assert response.status_code == 409
 
 
+def test_export_search_csv_rejects_a_partially_indexed_collection(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backfill still midway must not silently ship a truncated export.
+
+    ``with_search_text=40`` alone reads as "indexed" to the old zero-coverage
+    check; ``complete=False`` (60 chunks still missing) is what must trip the
+    gate — a CSV has no ``status: "partial"`` field to carry its own
+    incompleteness once downloaded.
+    """
+    monkeypatch.setattr(
+        api_module,
+        "search_index_status",
+        lambda client, collection: {
+            "indexed": True,
+            "total": 100,
+            "with_search_text": 40,
+            "missing": 60,
+            "complete": False,
+        },
+    )
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 409
+    assert "60" in response.json()["detail"]
+
+
+def test_export_search_csv_allows_an_empty_collection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty collection has nothing to index, so it streams a header-only CSV, not a 409.
+
+    ``total=0`` also makes ``with_search_text`` falsy, which must not read as
+    "needs a backfill" — there is nothing to back-fill.
+    """
+    monkeypatch.setattr(
+        api_module,
+        "search_index_status",
+        lambda client, collection: {
+            "indexed": False,
+            "total": 0,
+            "with_search_text": 0,
+            "missing": 0,
+            "complete": False,
+        },
+    )
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = []
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    assert rows == [list(SEARCH_EXPORT_COLUMNS)]
+
+
 def test_export_search_csv_social_lane_fills_group_column(client: TestClient) -> None:
     """The grouped lane accepts a blank question and each row carries its own group."""
     rag = cast(DummyRAG, api_module.rag)

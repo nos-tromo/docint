@@ -1669,9 +1669,14 @@ def export_search_csv(
     ``POST /search``); ``group_by`` set streams the grouped/social lane (a
     blank question groups the whole collection, exactly like
     ``POST /search/aggregate``). Unlike the JSON endpoints, a keyword search
-    over an unindexed collection is refused outright (409) rather than
-    degrading to an empty result set — an empty CSV would otherwise read as
-    "no matches" instead of "the index needs a backfill".
+    over a collection that is unindexed *or only partially indexed* (a
+    backfill still running or interrupted) is refused outright (409) rather
+    than degrading to an incomplete result set — a CSV has no
+    ``status: "partial"`` field to carry its own incompleteness once
+    downloaded, so a truncated export would otherwise read as the complete
+    one. An empty collection is not a partial index: it streams a
+    header-only CSV rather than 409ing with a remedy that names nothing to
+    fix.
 
     Args:
         collection (str | None): Caller's logical collection; owner-gated and
@@ -1694,8 +1699,9 @@ def export_search_csv(
     Raises:
         HTTPException: 422 for a keyword-less hits-lane query, an unusable
             keyword, an unknown group field, or malformed ``metadata_filters``;
-            409 when a keyword search runs over an unindexed collection;
-            400/404 from collection resolution; 500 on unexpected failure.
+            409 when a keyword search runs over a non-empty collection that is
+            unindexed or only partially indexed; 400/404 from collection
+            resolution; 500 on unexpected failure.
     """
     if group_by is not None and group_by not in GROUP_BY_FIELDS:
         raise HTTPException(status_code=422, detail="Invalid request.")
@@ -1726,14 +1732,37 @@ def export_search_csv(
         with _scoped_collection(collection, principal) as physical:
             if keywords:
                 index_status = search_index_status(rag.qdrant_client, physical)
-                if not index_status.get("with_search_text") or not index_status.get("indexed"):
+                total = int(index_status.get("total") or 0)
+                # An empty collection has nothing to index, so
+                # with_search_text=0 there is the honest state, not a missing
+                # backfill: it streams a header-only CSV below rather than
+                # 409ing with a "run make search-index" remedy that names
+                # nothing to fix. A non-empty collection must be both indexed
+                # AND complete — `complete` catches a backfill still midway
+                # (with_search_text > 0 but missing > 0), which the old
+                # `with_search_text`-only check let straight through. A CSV
+                # outlives the UI that produced it: unlike `/search`, which
+                # can carry `status: "partial"` beside a banner, an export has
+                # no channel of its own to report incompleteness once
+                # downloaded, so a partial index is refused outright rather
+                # than risk an investigator filing a truncated set as the
+                # complete evidence.
+                if total > 0 and (not index_status.get("indexed") or not index_status.get("complete")):
+                    missing = index_status.get("missing")
                     logger.warning(
-                        "Search export refused | collection={!r} — collection needs `make search-index`",
+                        "Search export refused | collection={!r} indexed={} total={} with_search_text={} missing={}",
                         physical,
+                        index_status.get("indexed"),
+                        total,
+                        index_status.get("with_search_text"),
+                        missing,
                     )
                     raise HTTPException(
                         status_code=409,
-                        detail="Collection is not search-indexed. Run `make search-index` first.",
+                        detail=(
+                            f"Collection is not fully search-indexed ({missing} of {total} chunks "
+                            "missing). Run `make search-index` first."
+                        ),
                     )
 
             marked_from_scope: list[str] = (
