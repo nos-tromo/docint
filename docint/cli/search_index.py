@@ -18,6 +18,7 @@ from loguru import logger
 
 from docint.cli._collection import CollectionNotFoundError, resolve_collection_name
 from docint.core.rag import RAG
+from docint.core.search.aggregate import ensure_group_indexes
 from docint.core.search.index import backfill_search_text, ensure_search_index, image_companion_name
 from docint.utils.env_cfg import set_offline_env
 from docint.utils.logger_cfg import init_logger
@@ -66,6 +67,13 @@ def build_search_index(collection: str) -> None:
                 physical,
             )
             raise SystemExit(1)
+
+        if not ensure_group_indexes(rag.qdrant_client, physical):
+            logger.warning(
+                "Could not create every grouped-search index on '{}' — grouped search may fail until "
+                "Qdrant is reachable.",
+                physical,
+            )
 
         summary = backfill_search_text(
             rag.qdrant_client,

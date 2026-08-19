@@ -144,6 +144,56 @@ export interface SearchRequest {
   cursor?: string
 }
 
+/** Group-by fields the backend whitelists (mirrors GROUP_BY_FIELDS in
+ *  docint/core/search/aggregate.py, same order). */
+export const GROUP_BY_FIELDS = [
+  'author',
+  'author_id',
+  'network',
+  'posting_author',
+  'type',
+  'speaker',
+  'language',
+  'file_name'
+] as const
+export type GroupByField = (typeof GROUP_BY_FIELDS)[number]
+
+export interface AggregateRequest {
+  question: string
+  collection?: string
+  metadata_filters?: MetadataFilter[]
+  group_by: GroupByField
+  limit_groups?: number
+  samples_per_group?: number
+}
+
+export interface AggregateGroup {
+  value: string
+  /** Matching chunks carrying this value — chunks, not posts or documents. */
+  count: number
+  samples: SearchHit[]
+}
+
+/**
+ * A grouped (exhaustive) search response (`POST /search/aggregate`).
+ *
+ * The counterpart to `SearchResult`: no top-k, no ranking — every matching
+ * chunk, counted per value of `group_by`. `status` carries the same three
+ * meanings as `SearchResult.status`.
+ */
+export interface AggregateResult {
+  status: 'ok' | 'partial' | 'not_indexed'
+  group_by: GroupByField
+  total: number
+  /** Matches with no value for the field; 0 when the group list was capped. */
+  unassigned: number
+  groups: AggregateGroup[]
+  /** The clamped `limit_groups` actually applied — compare against
+   *  `groups.length` to detect a capped list instead of assuming the default. */
+  limit: number
+  index_status: SearchIndexStatus
+}
+
 /**
  * One chunk's full text (`GET /search/chunk`).
  *

@@ -56,7 +56,14 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     normalize_numeric_bound,
 )
-from docint.core.search.fulltext import parse_keywords
+from docint.core.search.aggregate import (
+    DEFAULT_GROUP_LIMIT,
+    GROUP_BY_FIELDS,
+    MAX_GROUP_LIMIT,
+    MAX_SAMPLES_PER_GROUP,
+    UnknownGroupFieldError,
+)
+from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
@@ -893,6 +900,45 @@ class SearchOut(BaseModel):
     index_status: dict[str, Any] = {}
 
 
+class AggregateIn(BaseModel):
+    """Request payload for a grouped (exhaustive) search."""
+
+    #: May be blank: a keyword-less call groups the whole filtered collection.
+    question: str = ""
+    collection: str | None = None
+    metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
+    #: Restates ``GROUP_BY_FIELDS`` as a closed enum so the OpenAPI schema is
+    #: self-documenting; the endpoint's whitelist check against
+    #: ``GROUP_BY_FIELDS`` itself stays in place as defense in depth.
+    group_by: Literal["author", "author_id", "network", "posting_author", "type", "speaker", "language", "file_name"]
+    limit_groups: int = Field(default=DEFAULT_GROUP_LIMIT, ge=1, le=MAX_GROUP_LIMIT)
+    samples_per_group: int = Field(default=2, ge=0, le=MAX_SAMPLES_PER_GROUP)
+
+
+class AggregateGroupOut(BaseModel):
+    """One group: a payload value, how many matching chunks carry it, samples."""
+
+    value: str
+    count: int
+    samples: list[dict[str, Any]] = []
+
+
+class AggregateOut(BaseModel):
+    """Every matching chunk, counted per value of one payload field."""
+
+    status: Literal["ok", "partial", "not_indexed"]
+    group_by: str
+    total: int = 0
+    #: Matching chunks that carry no value for ``group_by`` (e.g. document
+    #: chunks when grouping by author). ``0`` when the group list was capped.
+    unassigned: int = 0
+    groups: list[AggregateGroupOut] = []
+    #: The clamped ``limit_groups`` actually applied, echoed back so a caller
+    #: can detect a truncated group list without hard-coding the default.
+    limit: int = 0
+    index_status: dict[str, Any] = {}
+
+
 class QueryOut(BaseModel):
     """Grounded answer plus retrieval provenance for a RAG query."""
 
@@ -1548,6 +1594,55 @@ def search_collection(
         raise
     except Exception as e:
         logger.opt(exception=e).error("Error running collection search")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+@app.post("/search/aggregate", response_model=AggregateOut, tags=["Query"])
+def search_collection_aggregate(
+    payload: AggregateIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> AggregateOut:
+    """Return every matching chunk, counted per value of one payload field.
+
+    The exhaustive counterpart to ``/search``: no top-k and no ranking, so
+    "which authors mention X" is answered completely. Keywords are optional —
+    blank groups the whole (filtered) collection.
+
+    Args:
+        payload (AggregateIn): Keywords, group-by field, filters and sizing.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        AggregateOut: Groups with counts and sample hits, plus index state.
+
+    Raises:
+        HTTPException: 422 for an unusable keyword or unknown group field,
+            400/404 from collection resolution, 500 on unexpected failure.
+    """
+    if payload.group_by not in GROUP_BY_FIELDS:
+        raise HTTPException(status_code=422, detail="Invalid request.")
+    try:
+        if payload.question.strip():
+            parse_keywords(payload.question)
+    except KeywordTooShortError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+
+    try:
+        with _scoped_collection(payload.collection, principal):
+            data = rag.search_aggregate(
+                payload.question,
+                group_by=payload.group_by,
+                base_filter=build_qdrant_filter(payload.metadata_filters),
+                limit_groups=payload.limit_groups,
+                samples_per_group=payload.samples_per_group,
+            )
+        return AggregateOut(**data)
+    except HTTPException:
+        raise
+    except UnknownGroupFieldError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+    except Exception as e:
+        logger.exception("Error running grouped collection search")
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 

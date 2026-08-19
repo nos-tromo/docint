@@ -8,7 +8,14 @@ import {
 } from './searchUi'
 
 beforeEach(() => {
-  useSearchUiStore.setState({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false })
+  useSearchUiStore.setState({
+    drafts: {},
+    queries: {},
+    scopes: {},
+    filtersOpen: false,
+    mode: 'hits',
+    groupBy: 'author'
+  })
 })
 
 describe('searchKeyFor', () => {
@@ -83,5 +90,45 @@ describe('clearScope', () => {
     useSearchUiStore.getState().clearScope('sess-1')
 
     expect(useSearchUiStore.getState().scopes).toBe(before)
+  })
+})
+
+describe('searchUi mode state', () => {
+  it('defaults to hits mode grouped by author', () => {
+    const s = useSearchUiStore.getState()
+    expect(s.mode).toBe('hits')
+    expect(s.groupBy).toBe('author')
+  })
+
+  it('switches mode and group field', () => {
+    useSearchUiStore.getState().setMode('groups')
+    useSearchUiStore.getState().setGroupBy('network')
+
+    expect(useSearchUiStore.getState().mode).toBe('groups')
+    expect(useSearchUiStore.getState().groupBy).toBe('network')
+  })
+})
+
+describe('searchUi persistence migration', () => {
+  it('migrates a version-1 blob by filling the new defaults', () => {
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false }, 1) as unknown as {
+      mode: string
+      groupBy: string
+    }
+
+    expect(migrated.mode).toBe('hits')
+    expect(migrated.groupBy).toBe('author')
+  })
+
+  it('keeps the rest of a version-1 blob intact', () => {
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: { new: 'partei' }, queries: {}, scopes: {}, filtersOpen: true },
+      1
+    ) as unknown as { drafts: Record<string, string>; filtersOpen: boolean }
+
+    expect(migrated.drafts).toEqual({ new: 'partei' })
+    expect(migrated.filtersOpen).toBe(true)
   })
 })

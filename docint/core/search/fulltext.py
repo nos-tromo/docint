@@ -69,6 +69,27 @@ def matches_phrase(text: str, keywords: list[str]) -> bool:
     return phrase in normalized
 
 
+def not_coarse_condition() -> models.Filter:
+    """Return the condition that excludes coarse parent chunks.
+
+    Expressed as "not coarse" rather than "is fine": a collection ingested
+    without hierarchical chunking tags nothing, and requiring ``fine`` would
+    return zero hits there. Shared by keyword search and the grouped lane so
+    both count a logical hit once.
+
+    Returns:
+        models.Filter: A ``must_not`` filter on the hierarchy tag.
+    """
+    return models.Filter(
+        must_not=[
+            models.FieldCondition(
+                key=_HIER_TYPE_FIELD,
+                match=models.MatchValue(value=_HIER_COARSE),
+            )
+        ]
+    )
+
+
 def build_search_filter(
     keywords: Sequence[str],
     *,
@@ -99,14 +120,5 @@ def build_search_filter(
     conditions: list[Any] = [
         models.FieldCondition(key=SEARCH_TEXT_FIELD, match=models.MatchText(text=keyword)) for keyword in keywords
     ]
-    conditions.append(
-        models.Filter(
-            must_not=[
-                models.FieldCondition(
-                    key=_HIER_TYPE_FIELD,
-                    match=models.MatchValue(value=_HIER_COARSE),
-                )
-            ]
-        )
-    )
+    conditions.append(not_coarse_condition())
     return merge_qdrant_filters(base_filter, conditions)

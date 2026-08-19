@@ -7,7 +7,7 @@ import { SearchPanel, formatTokens, queryKeywords } from './SearchPanel'
 import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
-import type { SearchResult } from '@/api/types'
+import type { AggregateResult, SearchResult } from '@/api/types'
 
 const SESSION = 'sess-1'
 
@@ -48,15 +48,37 @@ const SCOPE_OK = { chunk_ids: ['p1'], est_tokens: 1200, usable_tokens: 22000, mi
 
 const CHUNK_OK = { body: { id: 'p1', text: FULL_TEXT } }
 
-/** Route by URL so one mock serves /search, /search/chunk and the scope endpoints. */
+const AGGREGATE_OK: AggregateResult = {
+  status: 'ok',
+  group_by: 'author',
+  total: 5,
+  unassigned: 0,
+  groups: [{ value: 'acme_news', count: 5, samples: [HIT] }],
+  limit: 100,
+  index_status: INDEX_STATUS
+}
+
+/** Route by URL so one mock serves /search, /search/aggregate, /search/chunk
+ *  and the scope endpoints. */
 function mockApi(
   search: SearchResult,
   scope: { body: unknown; status?: number } = { body: SCOPE_OK },
-  chunk: { body: unknown; status?: number } = CHUNK_OK
+  chunk: { body: unknown; status?: number } = CHUNK_OK,
+  aggregate: { body: unknown; status?: number } = { body: AGGREGATE_OK }
 ) {
   const fn = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
     const u = typeof req === 'string' ? req : String(req)
-    // Checked before '/scope' *and* before the generic '/search' fallthrough.
+    // Checked before '/scope' and the generic '/search' fallthrough — and
+    // before '/search/chunk' would matter too, though the two never collide.
+    if (u.includes('/search/aggregate')) {
+      const status = aggregate.status ?? 200
+      return Promise.resolve({
+        ok: status < 400,
+        status,
+        json: async () => aggregate.body,
+        text: async () => JSON.stringify(aggregate.body)
+      })
+    }
     if (u.includes('/search/chunk')) {
       const status = chunk.status ?? 200
       return Promise.resolve({
@@ -105,7 +127,9 @@ beforeEach(() => {
     drafts: {},
     queries: { [SESSION]: 'Partei', new: 'Partei' },
     scopes: {},
-    filtersOpen: false
+    filtersOpen: false,
+    mode: 'hits',
+    groupBy: 'author'
   })
 })
 
@@ -714,6 +738,138 @@ describe('SearchPanel scope', () => {
     await screen.findByText(/alpha\.pdf/)
     expect(screen.queryByRole('button', { name: /filters/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /retrieval/i })).toBeNull()
+  })
+})
+
+describe('SearchPanel groups mode', () => {
+  const hitsResult: SearchResult = {
+    status: 'ok',
+    hits: [HIT],
+    total: 1,
+    next_cursor: null,
+    index_status: INDEX_STATUS
+  }
+
+  it('switching to Groups fetches the aggregate with the default group-by', async () => {
+    const fetchMock = mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search/aggregate'))
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ group_by: 'author' })
+    })
+  })
+
+  it('choosing a different group-by field re-fetches the aggregate', async () => {
+    const fetchMock = mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search/aggregate'))).toBe(true)
+    })
+
+    const trigger = await screen.findByRole('combobox', { name: /group by/i })
+    await userEvent.click(trigger)
+    await userEvent.click(await screen.findByRole('option', { name: 'Network' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls
+        .filter(([u]) => String(u).includes('/search/aggregate'))
+        .at(-1)
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ group_by: 'network' })
+    })
+  })
+
+  it('shows the not_indexed banner in Groups mode too', async () => {
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, {
+      body: {
+        status: 'not_indexed',
+        group_by: 'author',
+        total: 0,
+        unassigned: 0,
+        groups: [],
+        limit: 100,
+        index_status: { ...INDEX_STATUS, with_search_text: 0, complete: false }
+      }
+    })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    expect(await screen.findByTestId('search-not-indexed')).toBeInTheDocument()
+    expect(screen.queryByTestId('search-no-groups')).toBeNull()
+  })
+
+  it('shows the capped notice once the group list reaches the effective limit', async () => {
+    const capped: AggregateResult = {
+      status: 'ok',
+      group_by: 'author',
+      total: 2,
+      unassigned: 0,
+      groups: [
+        { value: 'acme_news', count: 1, samples: [] },
+        { value: 'beta_daily', count: 1, samples: [] }
+      ],
+      limit: 2,
+      index_status: INDEX_STATUS
+    }
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: capped })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    const summary = await screen.findByTestId('search-groups-summary')
+    expect(summary.textContent).toMatch(/Showing the 2 largest groups/)
+  })
+
+  it('omits the capped notice while the group list is under the effective limit', async () => {
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    const summary = await screen.findByTestId('search-groups-summary')
+    expect(summary.textContent).not.toMatch(/largest groups/)
+  })
+
+  it("pins one of a group's sample chunks into the scope", async () => {
+    const fetchMock = mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    const disclosure = await screen.findByRole('button', { name: /show sample chunks/i })
+    await userEvent.click(disclosure)
+
+    const tile = await screen.findByRole('button', { name: /alpha\.pdf/i })
+    await userEvent.click(tile)
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
+      expect(call).toBeDefined()
+      expect(call![1]!.method).toBe('PUT')
+      expect(JSON.parse(String(call![1]!.body))).toEqual({ chunk_ids: ['p1'] })
+    })
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200 })
+    })
   })
 })
 

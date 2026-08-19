@@ -1,5 +1,5 @@
 import { apiGet, apiPost } from './client'
-import type { ChunkText, SearchRequest, SearchResult } from './types'
+import type { AggregateRequest, AggregateResult, ChunkText, SearchRequest, SearchResult } from './types'
 
 /**
  * Run a full-text keyword search over the caller's collection.
@@ -28,3 +28,15 @@ export const searchCollection = (body: SearchRequest) => apiPost<SearchResult>('
  */
 export const fetchChunkText = (id: string, collection?: string) =>
   apiGet<ChunkText>('/search/chunk', { id, collection })
+
+/**
+ * Group every matching chunk by one payload field (`POST /search/aggregate`).
+ *
+ * The exhaustive counterpart to `searchCollection`: no top-k, no ranking. A
+ * blank `question` groups the whole (filtered) collection.
+ *
+ * @param body - Query, group-by field, collection, filters and sizing.
+ * @returns The groups plus the collection's search-index state.
+ */
+export const aggregateCollection = (body: AggregateRequest) =>
+  apiPost<AggregateResult>('/search/aggregate', body)

@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { Banner, Button, Card, Input, SearchButton, XIcon } from '@infra/ui'
+import { Banner, Button, Card, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
-import type { SearchHit } from '@/api/types'
-import { useSearch, useScope } from '@/hooks/useSearch'
+import type { GroupByField, SearchHit } from '@/api/types'
+import { GROUP_BY_FIELDS } from '@/api/types'
+import { useAggregate, useSearch, useScope } from '@/hooks/useSearch'
 import {
   scopeChunkIds,
   scopeEstTokens,
@@ -13,6 +14,7 @@ import {
   useSearchUiStore
 } from '@/stores/searchUi'
 import { useUiStore } from '@/stores/ui'
+import { SearchGroups } from '@/components/chat/SearchGroups'
 import { SearchHitRow } from '@/components/chat/SearchHit'
 import { CheckAllIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
@@ -65,8 +67,17 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const setScopeTokens = useSearchUiStore((s) => s.setScopeTokens)
   const setScopeMeta = useSearchUiStore((s) => s.setScopeMeta)
   const scope = useSearchUiStore((s) => scopeFor(s, key))
+  const mode = useSearchUiStore((s) => s.mode)
+  const groupBy = useSearchUiStore((s) => s.groupBy)
+  const setMode = useSearchUiStore((s) => s.setMode)
+  const setGroupBy = useSearchUiStore((s) => s.setGroupBy)
 
-  const search = useSearch(query)
+  // Hits mode keeps the ranked top-k query; Groups mode runs the exhaustive
+  // facet query instead. Both read the same submitted `query` and filters, so
+  // switching modes never re-asks the question.
+  const search = useSearch(mode === 'hits' ? query : '')
+  const grouped = useAggregate(query, groupBy, mode === 'groups')
+  const active = mode === 'groups' ? grouped : search
   const { set } = useScope(sessionId)
   const [scopeError, setScopeError] = useState<string | null>(null)
 
@@ -133,11 +144,11 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
     return commitScope(next)
   }
 
-  const searchError = (): string => {
-    if (search.error instanceof ApiError && search.error.status === 422) {
+  const activeError = (): string => {
+    if (active.error instanceof ApiError && active.error.status === 422) {
       return t('search.error_query')
     }
-    const described = describeError(search.error)
+    const described = describeError(active.error)
     return t(described.key, described.vars)
   }
 
@@ -165,16 +176,53 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         <SearchButton label={t('search.submit')} type="submit" variant="secondary" size="md" />
       </form>
 
+      {/* Hits (ranked top-k) vs Groups (exhaustive, faceted by a payload
+          field) — a toggle rather than two panels, so the query and the
+          scope stay put across the switch. The group-by picker only makes
+          sense once Groups is chosen. */}
+      <div className="flex items-center gap-2" data-testid="search-mode-row">
+        <Button
+          type="button"
+          variant={mode === 'hits' ? 'secondary' : 'ghost'}
+          size="sm"
+          aria-pressed={mode === 'hits'}
+          onClick={() => setMode('hits')}
+        >
+          {t('search.mode_hits')}
+        </Button>
+        <Button
+          type="button"
+          variant={mode === 'groups' ? 'secondary' : 'ghost'}
+          size="sm"
+          aria-pressed={mode === 'groups'}
+          onClick={() => setMode('groups')}
+        >
+          {t('search.mode_groups')}
+        </Button>
+        {mode === 'groups' && (
+          <SelectMenu
+            options={GROUP_BY_FIELDS.map((field) => ({
+              value: field,
+              label: t(`search.group_by.${field}`)
+            }))}
+            value={groupBy}
+            onChange={(value) => setGroupBy(value as GroupByField)}
+            label={t('search.group_by')}
+            className="min-w-0"
+          />
+        )}
+      </div>
+
       {!collection ? (
         <p className="text-xs text-muted-foreground">{t('search.select_collection')}</p>
       ) : (
         <>
-          {search.isFetching && (
+          {active.isFetching && (
             <p className="text-xs text-muted-foreground">{t('search.searching')}</p>
           )}
-          {search.isError && (
+          {active.isError && (
             <p className="text-xs text-red-500" role="alert">
-              {searchError()}
+              {activeError()}
             </p>
           )}
           {/* One line for everything the result set is — hits, documents, what
@@ -193,7 +241,7 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               afford full sentences, so that is where the promise ("the results
               loaded so far, not every match") and the projected cost live —
               the *danger* case keeps its own visible line below. */}
-          {(search.data || selectedIds.length > 0) && (
+          {mode === 'hits' && (search.data || selectedIds.length > 0) && (
             <div className="flex items-center gap-1" data-testid="scope-bulk">
               <p
                 className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
@@ -264,9 +312,32 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               </Button>
             </div>
           )}
-          {hits.length > 0 && projectedOverBudget && (
+          {mode === 'hits' && hits.length > 0 && projectedOverBudget && (
             <p className="text-xs text-red-500" data-testid="select-all-over-budget">
               {t('search.select_all_over_budget', { total: formatTokens(scope.usableTokens) })}
+            </p>
+          )}
+          {/* The exhaustive counterpart of the hits-mode summary line above:
+              every matching chunk was counted, not just what is on screen, so
+              there is nothing more to load and no select-all. */}
+          {mode === 'groups' && grouped.data && (
+            <p className="text-xs text-muted-foreground" data-testid="search-groups-summary">
+              {t('search.groups_summary', {
+                groups: grouped.data.groups.length,
+                total: grouped.data.total
+              })}
+              {grouped.data.unassigned > 0 && (
+                <>
+                  {' · '}
+                  {t('search.groups_unassigned', { count: grouped.data.unassigned })}
+                </>
+              )}
+              {grouped.data.groups.length >= grouped.data.limit && (
+                <>
+                  {' · '}
+                  {t('search.groups_capped', { limit: grouped.data.limit })}
+                </>
+              )}
             </p>
           )}
         </>
@@ -283,34 +354,46 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         </p>
       )}
 
-      {/* The three states below are deliberately separate branches. */}
-      {search.data?.status === 'not_indexed' && (
+      {/* The three states below are deliberately separate branches. Hits and
+          Groups share them — a collection with no search index, or a partial
+          backfill, means the same thing for either query. */}
+      {active.data?.status === 'not_indexed' && (
         <Banner variant="info" data-testid="search-not-indexed">
           {t('search.not_indexed')}
         </Banner>
       )}
-      {search.data?.status === 'partial' && (
+      {active.data?.status === 'partial' && (
         <Banner variant="danger" data-testid="search-partial">
-          {t('search.partial_warning', { count: search.data.index_status?.missing ?? 0 })}
+          {t('search.partial_warning', { count: active.data.index_status?.missing ?? 0 })}
         </Banner>
       )}
-      {search.data?.status === 'ok' && hits.length === 0 && (
+      {mode === 'hits' && active.data?.status === 'ok' && hits.length === 0 && (
         <p className="text-xs text-muted-foreground" data-testid="search-no-matches">
           {t('search.no_matches')}
         </p>
       )}
 
-      <ul className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
-        {hits.map((hit) => (
-          <SearchHitRow
-            key={hit.id}
-            hit={hit}
-            keywords={keywords}
-            selected={hit.id in scope.tokens}
-            onToggle={toggle}
-          />
-        ))}
-      </ul>
+      {mode === 'hits' && (
+        <ul className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
+          {hits.map((hit) => (
+            <SearchHitRow
+              key={hit.id}
+              hit={hit}
+              keywords={keywords}
+              selected={hit.id in scope.tokens}
+              onToggle={toggle}
+            />
+          ))}
+        </ul>
+      )}
+      {mode === 'groups' && grouped.data && (
+        <SearchGroups
+          result={grouped.data}
+          keywords={keywords}
+          selectedTokens={scope.tokens}
+          onToggle={toggle}
+        />
+      )}
     </Card>
   )
 }

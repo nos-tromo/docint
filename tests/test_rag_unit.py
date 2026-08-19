@@ -6277,6 +6277,149 @@ def test_search_fulltext_flags_a_partially_indexed_collection(
     assert result["index_status"]["missing"] == 936
 
 
+def _index_ok() -> dict[str, Any]:
+    return {"indexed": True, "total": 3, "with_search_text": 3, "missing": 0, "complete": True}
+
+
+def test_search_aggregate_groups_matching_chunks_with_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every author with a match is returned, with counts and sample hits."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    payload_a = {
+        "text": "election night",
+        "file_name": "posts.csv",
+        "row": 1,
+        "reference_metadata": {"author": "acme_news", "network": "Instagram"},
+    }
+    payload_b = {
+        "text": "election day",
+        "file_name": "posts.csv",
+        "row": 2,
+        "reference_metadata": {"author": "beta_daily", "network": "Instagram"},
+    }
+    scroll_calls: list[dict[str, Any]] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scroll_calls.append(kwargs)
+        value = kwargs["scroll_filter"].must[-1].match.value
+        payload = payload_a if value == "acme_news" else payload_b
+        return [types.SimpleNamespace(id=f"p-{value}", payload=payload)], None
+
+    facet_calls: list[dict[str, Any]] = []
+
+    def facet(**kwargs: Any) -> Any:
+        facet_calls.append(kwargs)
+        return types.SimpleNamespace(
+            hits=[types.SimpleNamespace(value="acme_news", count=2), types.SimpleNamespace(value="beta_daily", count=1)]
+        )
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=scroll,
+            facet=facet,
+            count=lambda **kwargs: types.SimpleNamespace(count=4),
+            create_payload_index=lambda **kwargs: None,
+        ),
+    )
+
+    result = rag.search_aggregate("election", group_by="author", samples_per_group=1)
+
+    assert result["status"] == "ok"
+    assert result["group_by"] == "author"
+    assert result["total"] == 4
+    assert result["unassigned"] == 1  # 4 matches, 3 carry an author
+    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
+    assert [g["value"] for g in result["groups"]] == ["acme_news", "beta_daily"]
+    assert result["groups"][0]["count"] == 2
+    assert result["groups"][0]["samples"][0]["id"] == "p-acme_news"
+    assert result["groups"][0]["samples"][0]["filename"] == "posts.csv"
+    assert facet_calls[0]["key"] == "reference_metadata.author"
+    assert all(c["limit"] == 1 for c in scroll_calls)
+
+
+def test_search_aggregate_with_no_keywords_facets_the_whole_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """'List every author' needs no keyword and no search index."""
+    rag = RAG(qdrant_collection="test")
+    status_calls: list[str] = []
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kw: (
+            status_calls.append(collection)
+            or {"indexed": False, "total": 3, "with_search_text": 0, "missing": 3, "complete": False}
+        ),
+    )
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            facet=lambda **kwargs: types.SimpleNamespace(hits=[types.SimpleNamespace(value="Instagram", count=3)]),
+            count=lambda **kwargs: types.SimpleNamespace(count=3),
+            create_payload_index=lambda **kwargs: None,
+        ),
+    )
+
+    result = rag.search_aggregate("", group_by="network", samples_per_group=0)
+
+    assert result["status"] == "ok"
+    assert result["groups"] == [{"value": "Instagram", "count": 3, "samples": []}]
+    assert result["unassigned"] == 0
+    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
+
+
+def test_search_aggregate_with_keywords_reports_not_indexed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A keyword facet over an unindexed collection would silently under-count."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        rag_module,
+        "search_index_status",
+        lambda client, collection, **kw: {
+            "indexed": False,
+            "total": 3,
+            "with_search_text": 0,
+            "missing": 3,
+            "complete": False,
+        },
+    )
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(create_payload_index=lambda **kwargs: None))
+
+    result = rag.search_aggregate("election", group_by="author")
+
+    assert result["status"] == "not_indexed"
+    assert result["groups"] == []
+    # The clamped limit must still be the real one here, not a zero-ish
+    # default — otherwise an empty `groups` list on an unindexed collection
+    # would satisfy `len(groups) >= limit` and read as "capped" to a caller.
+    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
+
+
+def test_search_aggregate_rejects_unknown_group_field() -> None:
+    """A payload path outside the whitelist must never reach the facet call."""
+    rag = RAG(qdrant_collection="test")
+    with pytest.raises(rag_module.UnknownGroupFieldError):
+        rag.search_aggregate("election", group_by="reference_metadata.author")
+
+
+def test_search_aggregate_ensures_group_indexes_once_per_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-process index-ensure cache saves round-trips on repeat calls."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    calls: list[str] = []
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            facet=lambda **kwargs: types.SimpleNamespace(hits=[]),
+            count=lambda **kwargs: types.SimpleNamespace(count=0),
+            create_payload_index=lambda **kwargs: calls.append(kwargs["field_name"]),
+        ),
+    )
+    rag.search_aggregate("", group_by="author", samples_per_group=0)
+    first = len(calls)
+    rag.search_aggregate("", group_by="network", samples_per_group=0)
+    assert first == len(rag_module.GROUP_BY_FIELDS)
+    assert len(calls) == first  # second call did not re-create
+
+
 def test_scoped_retriever_returns_exactly_the_selected_chunks() -> None:
     """A scope answers from the chosen chunks and nothing else.
 
