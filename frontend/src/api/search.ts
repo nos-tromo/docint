@@ -50,31 +50,46 @@ export const aggregateCollection = (body: AggregateRequest) =>
   apiPost<AggregateResult>('/search/aggregate', body)
 
 /**
- * Build an absolute URL for the grouped-search CSV download
- * (`GET /search/aggregate/export.csv`).
+ * Build an absolute URL for the search CSV export (`GET /search/export.csv`).
  *
- * Mirrors `aggregateCollection`'s inputs so the export always reflects
- * exactly what the panel currently shows. Use this as the `href` of a
- * download anchor so the browser handles the streaming response natively.
+ * One endpoint, two lanes, selected the same way as the JSON endpoints:
+ * `groupBy` omitted streams the keyword hits lane (the backend requires
+ * `question` there), `groupBy` set streams the grouped/social lane (a blank
+ * `question` groups the whole collection). `sessionId` and `markedIds` both
+ * mark chunks for the export server-side — a stored chat scope and an
+ * unsaved local selection respectively — and are unioned there, so passing
+ * both is safe. Use this as the `href` of a download anchor so the browser
+ * handles the streaming response natively.
  *
  * @param collection - Caller's logical collection.
- * @param groupBy - The payload field to group by.
- * @param question - Whitespace-separated keywords; may be blank.
- * @param filters - Metadata filters currently applied.
+ * @param opts.question - Whitespace-separated keywords; required by the
+ *   backend for the hits lane, optional for the grouped lane.
+ * @param opts.groupBy - The payload field to group by, or omitted for the
+ *   keyword hits lane.
+ * @param opts.filters - Metadata filters currently applied.
+ * @param opts.sessionId - The open session, if any, whose stored chat scope
+ *   should count as marked too.
+ * @param opts.markedIds - Qdrant point ids the caller has selected locally.
  * @returns An absolute URL to the CSV export endpoint.
  */
-export function aggregateExportHref(
+export function searchExportHref(
   collection: string,
-  groupBy: GroupByField,
-  question: string,
-  filters: MetadataFilter[]
+  opts: {
+    question: string
+    groupBy?: GroupByField
+    filters: MetadataFilter[]
+    sessionId?: string | null
+    markedIds?: string[]
+  }
 ): string {
   const owner = getOwnerParam()
   const params = new URLSearchParams()
   params.set('collection', collection)
-  params.set('group_by', groupBy)
-  if (question.trim()) params.set('question', question.trim())
-  if (filters.length) params.set('metadata_filters', JSON.stringify(filters))
+  if (opts.question.trim()) params.set('question', opts.question.trim())
+  if (opts.groupBy) params.set('group_by', opts.groupBy)
+  if (opts.filters.length) params.set('metadata_filters', JSON.stringify(opts.filters))
+  if (opts.sessionId) params.set('session_id', opts.sessionId)
+  if (opts.markedIds?.length) params.set('marked_ids', opts.markedIds.join(','))
   if (owner) params.set('owner', owner)
-  return url(`/search/aggregate/export.csv?${params}`)
+  return url(`/search/export.csv?${params}`)
 }

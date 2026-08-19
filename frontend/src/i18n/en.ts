@@ -196,7 +196,7 @@ export const en = {
   'search.groups_summary': '{groups} results · {total} matching chunks',
   'search.groups_unassigned': '{count} without a value',
   'search.groups_capped': 'Showing the {limit} largest results',
-  'search.export_groups': 'Export CSV',
+  'search.export_results': 'Export CSV',
   'search.group_count': '{count} chunks',
   'search.group_expand': 'Show sample chunks',
   'search.group_collapse': 'Hide sample chunks',

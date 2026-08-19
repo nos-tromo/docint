@@ -58,6 +58,21 @@ const AGGREGATE_OK: AggregateResult = {
   index_status: INDEX_STATUS
 }
 
+/** Two groups, each with a distinct sample — enough to prove mark-all in
+ *  Social mode collects samples across every group, not just the first. */
+const AGGREGATE_TWO: AggregateResult = {
+  status: 'ok',
+  group_by: 'author',
+  total: 2,
+  unassigned: 0,
+  groups: [
+    { value: 'acme_news', count: 1, samples: [HIT] },
+    { value: 'beta_daily', count: 1, samples: [HIT2] }
+  ],
+  limit: 100,
+  index_status: INDEX_STATUS
+}
+
 /** Route by URL so one mock serves /search, /search/aggregate, /search/chunk
  *  and the scope endpoints. */
 function mockApi(
@@ -831,7 +846,7 @@ describe('SearchPanel groups mode', () => {
     await screen.findByText(/alpha\.pdf/)
     await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
-    const summary = await screen.findByTestId('search-groups-summary')
+    const summary = await screen.findByTestId('search-summary')
     expect(summary.textContent).toMatch(/Showing the 2 largest results/)
   })
 
@@ -843,7 +858,7 @@ describe('SearchPanel groups mode', () => {
     await screen.findByText(/alpha\.pdf/)
     await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
-    const summary = await screen.findByTestId('search-groups-summary')
+    const summary = await screen.findByTestId('search-summary')
     expect(summary.textContent).not.toMatch(/largest results/)
   })
 
@@ -857,10 +872,43 @@ describe('SearchPanel groups mode', () => {
 
     const link = await screen.findByRole('link', { name: 'Export CSV' })
     const href = link.getAttribute('href') ?? ''
-    expect(href).toContain('/search/aggregate/export.csv')
+    expect(href).toContain('/search/export.csv')
     expect(href).toContain('collection=docs')
     expect(href).toContain('group_by=author')
     expect(href).toContain('question=Partei')
+    // Nothing pinned yet, so the export is unmarked — only a live selection
+    // adds marked_ids (see the Hits-mode export test below).
+    expect(href).not.toContain('marked_ids')
+  })
+
+  it('shows a CSV export link in Hits mode with no group_by, gaining marked_ids once a hit is selected', async () => {
+    // The same endpoint and href builder serve both lanes now; Hits must
+    // never send group_by, and must pick up marked_ids reactively.
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+
+    const hrefBefore = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(hrefBefore).toContain('/search/export.csv')
+    expect(hrefBefore).toContain('collection=docs')
+    expect(hrefBefore).toContain('question=Partei')
+    expect(hrefBefore).not.toContain('group_by')
+    expect(hrefBefore).not.toContain('marked_ids')
+
+    await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
+
+    await waitFor(() => {
+      const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+      expect(href).toContain('marked_ids=p1')
+    })
   })
 
   it('omits the CSV export link when there are no groups', async () => {
@@ -873,7 +921,7 @@ describe('SearchPanel groups mode', () => {
     await screen.findByText(/alpha\.pdf/)
     await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
-    await screen.findByTestId('search-groups-summary')
+    await screen.findByTestId('search-summary')
     expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
   })
 
@@ -902,9 +950,10 @@ describe('SearchPanel groups mode', () => {
     })
   })
 
-  it('shows the token meter in Social mode once a sample is pinned', async () => {
-    // Groups/Social mode has no select-all row (samples aren't "everything
-    // loaded"), but budget feedback still applies to whatever is pinned.
+  it('shows the token meter inline in Social mode once a sample is pinned, beside a working mark-all', async () => {
+    // The summary row is unified across modes now: Social gets the same
+    // mark-all control Hits has, sized over whatever aggregate samples are
+    // loaded, and the token meter renders inline in the same <p> either way.
     mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
 
     renderPanel()
@@ -919,9 +968,61 @@ describe('SearchPanel groups mode', () => {
     await userEvent.click(tile)
 
     await waitFor(() => {
-      expect(screen.getByTestId('token-meter')).toHaveTextContent('≈1.2k / 22.0k tokens')
+      const meter = screen.getByTestId('token-meter')
+      expect(meter).toHaveTextContent('≈1.2k / 22.0k tokens')
+      expect(screen.getByTestId('search-summary')).toContainElement(meter)
     })
-    expect(screen.queryByTestId('scope-bulk')).toBeNull()
+    // The one loaded sample is now selected, so the bulk control flips to
+    // "clear" — Social's mark-all behaves exactly like Hits' does.
+    expect(screen.getByRole('button', { name: /clear selection/i })).toBeInTheDocument()
+  })
+
+  it('mark-all in Social pins every loaded sample across groups, not just the first', async () => {
+    const fetchMock = mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_TWO })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+
+    const selectAll = await screen.findByRole('button', { name: /select all 2 loaded/i })
+    await userEvent.click(selectAll)
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1]!.body))).toEqual({ chunk_ids: ['p1', 'p2'] })
+    })
+    await waitFor(() => {
+      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200, p2: 1200 })
+    })
+  })
+
+  it('warns in Social mode too when the loaded samples exceed the measured budget', async () => {
+    useSearchUiStore.setState({
+      scopes: { [SESSION]: { tokens: {}, usableTokens: 1000, missing: 0 } }
+    })
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_TWO })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+
+    expect(await screen.findByTestId('select-all-over-budget')).toHaveTextContent(/would exceed/i)
+  })
+
+  it('keeps one summary row present across both modes', async () => {
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    expect(screen.getByTestId('search-summary-row')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+
+    expect(await screen.findByTestId('search-summary-row')).toBeInTheDocument()
   })
 })
 

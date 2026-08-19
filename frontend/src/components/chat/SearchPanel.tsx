@@ -3,7 +3,7 @@ import { Banner, Button, Card, DownloadLink, Input, SearchButton, SelectMenu, XI
 import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
-import { aggregateExportHref } from '@/api/search'
+import { searchExportHref } from '@/api/search'
 import type { GroupByField, SearchHit } from '@/api/types'
 import { GROUP_BY_FIELDS } from '@/api/types'
 import { useAggregate, useSearch, useScope } from '@/hooks/useSearch'
@@ -89,20 +89,26 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const estTokens = scopeEstTokens(scope)
   const hits = search.data?.hits ?? []
   const docCount = new Set(hits.map((h) => h.filename ?? '').filter(Boolean)).size
+  // What "everything on screen" means in the active mode: Hits' ranked page,
+  // or every sample the exhaustive Groups/Social query already loaded — not
+  // gated on any one group's disclosure being open, since the data is there
+  // either way. This is what lets mark-all work in Social mode at all.
+  const visibleHits: SearchHit[] =
+    mode === 'hits' ? hits : (grouped.data?.groups.flatMap((g) => g.samples) ?? [])
 
-  // The scope every hit currently loaded would produce: what is already picked
-  // plus every hit on screen. Selecting all is additive — it must not silently
-  // drop chunks picked from an earlier query.
+  // The scope everything currently loaded would produce: what is already
+  // picked plus every hit/sample on screen. Selecting all is additive — it
+  // must not silently drop chunks picked from an earlier query or mode.
   const allLoadedTokens = (): Record<string, number> => {
     const next = { ...scope.tokens }
-    for (const hit of hits) next[hit.id] = hit.est_tokens
+    for (const hit of visibleHits) next[hit.id] = hit.est_tokens
     return next
   }
   // Whether the toggle is currently "on". A live selection with nothing loaded
   // counts as on too: the control's only remaining job there is to clear it.
   const allLoadedSelected =
-    hits.length > 0
-      ? hits.every((hit) => hit.id in scope.tokens)
+    visibleHits.length > 0
+      ? visibleHits.every((hit) => hit.id in scope.tokens)
       : selectedIds.length > 0
   const projectedTokens = Object.values(allLoadedTokens()).reduce((sum, n) => sum + n, 0)
   const projectedOverBudget = scope.usableTokens > 0 && projectedTokens > scope.usableTokens
@@ -231,29 +237,38 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               {activeError()}
             </p>
           )}
-          {/* One line for everything the result set is — hits, documents, what
-              the selection costs — and the two things you can do to all of it
-              at once. Deliberately one line: the meter used to be a row of its
-              own that appeared on the first selection and shoved the whole hit
-              list down, so picking evidence moved the thing you were reading.
-              Content changes, row count does not.
+          {/* One line for everything the result set is — hits or groups,
+              documents, what the selection costs — and the two things you can
+              do to all of it at once, in both modes. Deliberately one line:
+              the meter used to be a row of its own that appeared on the first
+              selection and shoved the whole hit list down, so picking
+              evidence moved the thing you were reading. Content changes, row
+              count does not — and now so does the row itself: Hits and
+              Groups/Social used to keep separate summary rows with different
+              controls and different alignment, which is exactly what let
+              mark-all, export and the token meter drift out of sync between
+              tabs.
 
-              The row follows the *selection* as well as the hits: after picking
-              chunks and then searching for something with no matches, the
-              selection is still live and must stay clearable from here.
+              The row follows the *selection* as well as what's loaded: after
+              picking chunks and then searching for something with no
+              matches, the selection is still live and must stay clearable
+              from here.
 
-              The bulk controls are icons because their labels were the longest
-              text in a 22rem column while saying the least. Their tooltips can
-              afford full sentences, so that is where the promise ("the results
-              loaded so far, not every match") and the projected cost live —
-              the *danger* case keeps its own visible line below. */}
-          {mode === 'hits' && (search.data || selectedIds.length > 0) && (
-            <div className="flex items-center gap-1" data-testid="scope-bulk">
+              The trailing controls are icons because their labels were the
+              longest text in a 22rem column while saying the least. Their
+              tooltips can afford full sentences, so that is where the promise
+              ("the results loaded so far, not every match") and the
+              projected cost live — the *danger* case keeps its own visible
+              line below. Both controls share `h-7 w-7 shrink-0 px-0` so they
+              measure identically in both modes; the summary `<p>`'s `flex-1`
+              pins them upper-right, flush with the column above. */}
+          {(active.data || selectedIds.length > 0) && (
+            <div className="flex items-center gap-1" data-testid="search-summary-row">
               <p
                 className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
                 data-testid="search-summary"
               >
-                {search.data && (
+                {mode === 'hits' && search.data && (
                   <>
                     {search.data.total != null
                       ? t('search.hits', { count: search.data.total })
@@ -264,7 +279,56 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                       : t('search.docs', { count: docCount })}
                   </>
                 )}
+                {mode === 'groups' && grouped.data && (
+                  <>
+                    {t('search.groups_summary', {
+                      groups: grouped.data.groups.length,
+                      total: grouped.data.total
+                    })}
+                    {grouped.data.unassigned > 0 && (
+                      <>
+                        {' · '}
+                        {t('search.groups_unassigned', { count: grouped.data.unassigned })}
+                      </>
+                    )}
+                    {grouped.data.groups.length >= grouped.data.limit && (
+                      <>
+                        {' · '}
+                        {t('search.groups_capped', { limit: grouped.data.limit })}
+                      </>
+                    )}
+                  </>
+                )}
+                {selectedIds.length > 0 && (
+                  <>
+                    {' · '}
+                    <span data-testid="token-meter">
+                      {scope.usableTokens > 0
+                        ? t('search.budget', {
+                            used: formatTokens(estTokens),
+                            total: formatTokens(scope.usableTokens)
+                          })
+                        : t('search.budget_selected', { used: formatTokens(estTokens) })}
+                    </span>
+                  </>
+                )}
               </p>
+              {collection &&
+                (mode === 'hits'
+                  ? hits.length > 0 && query.trim() !== ''
+                  : (grouped.data?.groups.length ?? 0) > 0) && (
+                  <DownloadLink
+                    href={searchExportHref(collection, {
+                      question: query,
+                      groupBy: mode === 'groups' ? groupBy : undefined,
+                      filters,
+                      sessionId,
+                      markedIds: selectedIds
+                    })}
+                    label={t('search.export_results')}
+                    className="h-7 w-7 shrink-0 px-0"
+                  />
+                )}
               {/* One control, both directions: pick everything loaded, press
                   again to let it all go. Two buttons sat side by side where
                   only one was ever live, and a selection is a state you flip,
@@ -279,16 +343,16 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                 type="button"
                 variant="ghost"
                 size="sm"
-                disabled={hits.length === 0 && selectedIds.length === 0}
+                disabled={visibleHits.length === 0 && selectedIds.length === 0}
                 aria-label={
                   allLoadedSelected
                     ? t('search.clear_selection')
-                    : t('search.select_all_loaded', { count: hits.length })
+                    : t('search.select_all_loaded', { count: visibleHits.length })
                 }
                 title={
                   allLoadedSelected
                     ? t('search.clear_selection')
-                    : `${t('search.select_all_loaded_title', { count: hits.length })} ${t(
+                    : `${t('search.select_all_loaded_title', { count: visibleHits.length })} ${t(
                         'search.select_all_cost',
                         { tokens: formatTokens(projectedTokens) }
                       )}`
@@ -305,55 +369,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               </Button>
             </div>
           )}
-          {mode === 'hits' && hits.length > 0 && projectedOverBudget && (
+          {visibleHits.length > 0 && projectedOverBudget && (
             <p className="text-xs text-red-500" data-testid="select-all-over-budget">
               {t('search.select_all_over_budget', { total: formatTokens(scope.usableTokens) })}
-            </p>
-          )}
-          {/* The exhaustive counterpart of the hits-mode summary line above:
-              every matching chunk was counted, not just what is on screen, so
-              there is nothing more to load and no select-all. */}
-          {mode === 'groups' && grouped.data && (
-            <div className="flex items-center gap-1">
-              <p className="text-xs text-muted-foreground" data-testid="search-groups-summary">
-                {t('search.groups_summary', {
-                  groups: grouped.data.groups.length,
-                  total: grouped.data.total
-                })}
-                {grouped.data.unassigned > 0 && (
-                  <>
-                    {' · '}
-                    {t('search.groups_unassigned', { count: grouped.data.unassigned })}
-                  </>
-                )}
-                {grouped.data.groups.length >= grouped.data.limit && (
-                  <>
-                    {' · '}
-                    {t('search.groups_capped', { limit: grouped.data.limit })}
-                  </>
-                )}
-              </p>
-              {grouped.data.groups.length > 0 && collection && (
-                <DownloadLink
-                  href={aggregateExportHref(collection, groupBy, query, filters)}
-                  label={t('search.export_groups')}
-                />
-              )}
-            </div>
-          )}
-          {/* Budget feedback applies to whatever is pinned, hits or groups
-              samples alike — unlike the select-all/clear control above, which
-              only makes sense against a loaded hit list. */}
-          {selectedIds.length > 0 && (
-            <p className="text-xs text-muted-foreground">
-              <span data-testid="token-meter">
-                {scope.usableTokens > 0
-                  ? t('search.budget', {
-                      used: formatTokens(estTokens),
-                      total: formatTokens(scope.usableTokens)
-                    })
-                  : t('search.budget_selected', { used: formatTokens(estTokens) })}
-              </span>
             </p>
           )}
         </>
