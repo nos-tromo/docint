@@ -214,6 +214,7 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
             onChange={(value) => setGroupBy(value as GroupByField)}
             label={t('search.group_by')}
             className="min-w-0"
+            triggerClassName="text-xs"
           />
         )}
       </div>
