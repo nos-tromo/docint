@@ -4831,10 +4831,16 @@ def test_search_aggregate_accepts_a_blank_query(client: TestClient) -> None:
     assert response.status_code == 200
 
 
-def test_search_aggregate_rejects_a_keyword_below_the_index_minimum(client: TestClient) -> None:
-    """An unindexable keyword can never match, so it must be refused."""
+def test_search_aggregate_drops_a_keyword_below_the_index_minimum(client: TestClient) -> None:
+    """A short word like 'a' is unindexable but valid inside a phrase.
+
+    Short words are silently dropped from the keyword list (Qdrant pre-filter)
+    so they don't contribute a condition that can never match. The phrase
+    post-filter still checks the full query text. The request succeeds, searching
+    only for 'election'.
+    """
     response = client.post("/search/aggregate", json={"question": "election a", "group_by": "author"})
-    assert response.status_code == 422
+    assert response.status_code == 200
 
 
 def test_search_aggregate_rejects_an_unknown_group_field(client: TestClient) -> None:
