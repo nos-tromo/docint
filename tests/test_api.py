@@ -18,6 +18,7 @@ from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, R
 from docint.agents.understanding import ContextualUnderstandingAgent
 from docint.core.entities.resolution import ResolutionSummary
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
+from docint.utils.csv_stream import SEARCH_EXPORT_COLUMNS
 
 
 class DummySessionManager:
@@ -284,6 +285,22 @@ class DummyRAG:
             "index_status": {"indexed": True, "total": 2, "with_search_text": 2, "missing": 0, "complete": True},
         }
 
+    def iter_search_matches(
+        self, query: str, *, group_by: str | None = None, base_filter: Any = None
+    ) -> Iterator[dict[str, Any]]:
+        """Record the call and yield the test-configured matches.
+
+        Args:
+            query (str): Raw keywords, possibly blank.
+            group_by (str | None): Grouped-lane field, or ``None`` for the hits lane.
+            base_filter (Any): Compiled metadata filter, if any.
+
+        Yields:
+            dict[str, Any]: Whatever a test pre-loaded onto ``search_export_matches``.
+        """
+        self.search_export_calls.append({"query": query, "group_by": group_by, "base_filter": base_filter})
+        yield from self.search_export_matches
+
     def probe_rerank_endpoint(self) -> None:
         """Satisfy the lifespan rerank probe without touching the network."""
         return None
@@ -311,6 +328,10 @@ class DummyRAG:
         self.summarize_prompt = "Summarize collection"
         self.index = object()
         self.query_engine = object()
+        # Opaque placeholder: the search-export endpoint passes this straight
+        # through to a monkeypatched `search_index_status`, which never
+        # inspects it for real.
+        self.qdrant_client = object()
         self.selected: list[str] = []
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
@@ -341,6 +362,11 @@ class DummyRAG:
         self.ner_graph_merge_modes: list[str] = []
         self.ner_graph_top_ks: list[int] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
+        # Chunks a test pre-loads for `iter_search_matches` to yield, mirroring
+        # `ner_sources`/`hate_speech_rows`; calls are recorded separately so a
+        # test can assert what lane/filters reached the RAG layer.
+        self.search_export_matches: list[dict[str, Any]] = []
+        self.search_export_calls: list[dict[str, Any]] = []
         self.documents: list[dict[str, Any]] = []
         self.cached_summary_calls = 0
         self.build_tree_summary_calls = 0
@@ -4833,57 +4859,194 @@ def test_search_aggregate_forwards_sizing(client: TestClient) -> None:
     assert response.json()["limit"] == 7
 
 
-def test_aggregate_export_csv_streams_value_count_rows(client: TestClient) -> None:
-    """The CSV export streams value/count rows only, with samples_per_group=0."""
-    response = client.get("/search/aggregate/export.csv", params={"question": "election", "group_by": "author"})
+def _indexed_status(client: Any, collection: str) -> dict[str, Any]:
+    """Report a fully search-indexed collection for the export tests."""
+    return {"indexed": True, "total": 3, "with_search_text": 3, "missing": 0, "complete": True}
+
+
+def test_export_search_csv_streams_full_columns_for_the_hits_lane(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hits lane streams every SEARCH_EXPORT_COLUMNS cell, full chunk text included."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {
+            "id": "c1",
+            "chunk_id": "chunk-1",
+            "text": "full first chunk text",
+            "filename": "posts.csv",
+            "page": 1,
+            "row": 2,
+            "group": "",
+            "reference_metadata": {
+                "network": "instant_messenger",
+                "author": "acme_news",
+                "author_id": "u-1",
+                "vanity": "@acme_news",
+                "url": "https://example.invalid/posts/1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "posting_network": "instant_messenger",
+                "posting_author": "acme_news",
+                "posting_author_id": "u-1",
+                "posting_vanity": "@acme_news",
+                "posting_timestamp": "2026-01-01T00:00:00Z",
+                "posting_url": "https://example.invalid/posts/1",
+                "posting_text": "original posting text",
+                "type": "post",
+                "uuid": "uuid-1",
+                "posting_uuid": "posting-uuid-1",
+                "posting_id": "posting-1",
+                "media_id": "media-1",
+                "speaker": "",
+                "language": "en",
+                "detected_language": "en",
+                "source_file": "posts.csv",
+            },
+        }
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
-    disp = response.headers["content-disposition"]
-    assert "alpha-author.csv" in disp
+    assert "alpha-search.csv" in response.headers["content-disposition"]
 
     rows = _parse_csv_body(response.content)
-    assert rows[0] == ["value", "count"]
-    assert rows[1] == ["acme_news", "2"]
+    assert rows[0] == list(SEARCH_EXPORT_COLUMNS)
+    row = dict(zip(rows[0], rows[1], strict=True))
+    assert row["group"] == ""
+    assert row["marked"] == "false"
+    assert row["source"] == "posts.csv"
+    assert row["page"] == "1"
+    assert row["row"] == "2"
+    assert row["chunk_id"] == "chunk-1"
+    assert row["chunk_text"] == "full first chunk text"
+    assert row["network"] == "instant_messenger"
+    assert row["author"] == "acme_news"
+    assert row["url"] == "https://example.invalid/posts/1"
+    assert row["posting_text"] == "original posting text"
+    assert row["type"] == "post"
+    assert row["media_id"] == "media-1"
+    assert row["source_file"] == "posts.csv"
 
-    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
-    assert last_aggregate["samples_per_group"] == 0
-    assert last_aggregate["group_by"] == "author"
 
+def test_export_search_csv_marks_rows_from_marked_ids_param(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A point id passed via marked_ids renders "true" with no session involved."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
+    ]
 
-def test_aggregate_export_csv_accepts_a_blank_question(client: TestClient) -> None:
-    """Grouping the whole collection is a legitimate ask, matching the POST endpoint."""
-    response = client.get("/search/aggregate/export.csv", params={"group_by": "network"})
+    response = client.get("/search/export.csv", params={"question": "election", "marked_ids": "c2"})
+
     assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    header = rows[0]
+    by_chunk_id = {row[header.index("chunk_id")]: row[header.index("marked")] for row in rows[1:]}
+    assert by_chunk_id == {"chunk-1": "false", "chunk-2": "true"}
 
 
-def test_aggregate_export_csv_rejects_an_unknown_group_by(client: TestClient) -> None:
-    """Faceting is a closed whitelist — an unlisted field is refused, not passed through."""
+def test_export_search_csv_marks_rows_from_session_scope(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chunk id pinned to a session's scope renders "true" in the export."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    client.put("/sessions/s1/scope", json={"chunk_ids": ["c1"]})
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election", "session_id": "s1"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    header = rows[0]
+    by_chunk_id = {row[header.index("chunk_id")]: row[header.index("marked")] for row in rows[1:]}
+    assert by_chunk_id == {"chunk-1": "true", "chunk-2": "false"}
+
+
+def test_export_search_csv_rejects_keyword_less_hits_lane(client: TestClient) -> None:
+    """A keyword-less hits-lane export would be an unfiltered dump, so it is refused."""
+    response = client.get("/search/export.csv")
+    assert response.status_code == 422
+
+
+def test_export_search_csv_rejects_an_unknown_group_by(client: TestClient) -> None:
+    """Grouping is a closed whitelist — an unlisted field is refused, not passed through."""
     response = client.get(
-        "/search/aggregate/export.csv",
+        "/search/export.csv",
         params={"question": "election", "group_by": "reference_metadata.author"},
     )
     assert response.status_code == 422
 
 
-def test_aggregate_export_csv_rejects_malformed_metadata_filters(client: TestClient) -> None:
+def test_export_search_csv_rejects_malformed_metadata_filters(client: TestClient) -> None:
     """A metadata_filters query param that is not valid JSON is refused, not silently dropped."""
     response = client.get(
-        "/search/aggregate/export.csv",
-        params={"question": "election", "group_by": "author", "metadata_filters": "not-json"},
+        "/search/export.csv",
+        params={"question": "election", "metadata_filters": "not-json"},
     )
     assert response.status_code == 422
 
 
-def test_aggregate_export_csv_forwards_metadata_filters(client: TestClient) -> None:
-    """A well-formed metadata_filters JSON array reaches search_aggregate as a compiled filter."""
-    filters = json.dumps([{"field": "reference_metadata.network", "operator": "eq", "value": "acme_news"}])
-    response = client.get(
-        "/search/aggregate/export.csv",
-        params={"question": "election", "group_by": "author", "metadata_filters": filters},
+def test_export_search_csv_rejects_a_keyword_search_over_an_unindexed_collection(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty CSV would read as "no matches"; an unindexed collection is refused outright."""
+    monkeypatch.setattr(
+        api_module,
+        "search_index_status",
+        lambda client, collection: {
+            "indexed": False,
+            "total": 3,
+            "with_search_text": 0,
+            "missing": 3,
+            "complete": False,
+        },
     )
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 409
+
+
+def test_export_search_csv_social_lane_fills_group_column(client: TestClient) -> None:
+    """The grouped lane accepts a blank question and each row carries its own group."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": "acme_news"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": "beta_daily"},
+    ]
+
+    response = client.get("/search/export.csv", params={"group_by": "author"})
+
     assert response.status_code == 200
-    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
-    assert last_aggregate["base_filter"] is not None
+    assert "alpha-author.csv" in response.headers["content-disposition"]
+    rows = _parse_csv_body(response.content)
+    header = rows[0]
+    group_col = header.index("group")
+    assert [row[group_col] for row in rows[1:]] == ["acme_news", "beta_daily"]
+    assert rag.search_export_calls[-1]["group_by"] == "author"
+
+
+def test_export_search_csv_forwards_metadata_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A well-formed metadata_filters JSON array reaches iter_search_matches as a compiled filter."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    filters = json.dumps([{"field": "reference_metadata.network", "operator": "eq", "value": "acme_news"}])
+
+    response = client.get(
+        "/search/export.csv",
+        params={"question": "election", "metadata_filters": filters},
+    )
+
+    assert response.status_code == 200
+    last_call = cast(DummyRAG, api_module.rag).search_export_calls[-1]
+    assert last_call["base_filter"] is not None
 
 
 def test_scope_can_be_set_and_read_back(client: TestClient) -> None:

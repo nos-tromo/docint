@@ -86,6 +86,38 @@ HATE_SPEECH_COLUMNS: tuple[str, ...] = (
     "translation",
 )
 
+SEARCH_EXPORT_COLUMNS: tuple[str, ...] = (
+    "group",
+    "marked",
+    "source",
+    "page",
+    "row",
+    "chunk_id",
+    "chunk_text",
+    "network",
+    "author",
+    "author_id",
+    "vanity",
+    "url",
+    "timestamp",
+    "posting_network",
+    "posting_author",
+    "posting_author_id",
+    "posting_vanity",
+    "posting_timestamp",
+    "posting_url",
+    "posting_text",
+    "type",
+    "uuid",
+    "posting_uuid",
+    "posting_id",
+    "media_id",
+    "speaker",
+    "language",
+    "detected_language",
+    "source_file",
+)
+
 DOCUMENT_COLUMNS: tuple[str, ...] = (
     "filename",
     "mimetype",
@@ -240,6 +272,50 @@ def ner_source_row(chunk: dict[str, Any], *, entity_label: str) -> dict[str, Any
         "parent_text": _reference_field(ref, "parent_text"),
         **_posting_reference_cells(ref),
         "translation": (chunk.get("translation") or {}).get("text") or "",
+    }
+
+
+def search_export_row(chunk: dict[str, Any], *, marked: bool) -> dict[str, str]:
+    """Build one CSV row for the exhaustive chunk-level search export.
+
+    Mirrors ``ner_source_row``: reference-metadata cells go through the same
+    ``_reference_field``/``_posting_reference_cells`` helpers so the two stay
+    in lockstep. Unlike a citation card's truncated preview, ``chunk_text``
+    here is always the chunk's full text — the point of this export is
+    finding the original post again, and a preview is not enough for that.
+    ``group`` is the caller's grouping value (blank on the hits lane, where
+    there is no group); ``marked`` records whether the caller had this chunk
+    selected, so a re-export can recover a prior hand-picked set.
+
+    Args:
+        chunk (dict[str, Any]): A ``_source_from_payload``-shaped dict with an
+            added ``group`` key, as yielded by ``RAG.iter_search_matches``.
+        marked (bool): Whether this chunk's id is in the caller's marked set.
+
+    Returns:
+        dict[str, str]: Row keyed by :data:`SEARCH_EXPORT_COLUMNS`.
+    """
+    ref = chunk.get("reference_metadata") or {}
+    return {
+        "group": chunk.get("group") or "",
+        "marked": "true" if marked else "false",
+        "source": _source_label(chunk),
+        "page": chunk.get("page") or "",
+        "row": chunk.get("row") or "",
+        "chunk_id": chunk.get("chunk_id") or "",
+        "chunk_text": chunk.get("chunk_text") or chunk.get("text") or "",
+        "network": _reference_field(ref, "network"),
+        "author": _reference_field(ref, "author"),
+        "author_id": _reference_field(ref, "author_id"),
+        "vanity": _reference_field(ref, "vanity"),
+        "timestamp": _reference_field(ref, "timestamp"),
+        "type": _reference_field(ref, "type"),
+        "uuid": _reference_field(ref, "uuid"),
+        "speaker": _reference_field(ref, "speaker"),
+        "language": _reference_field(ref, "language"),
+        "detected_language": _reference_field(ref, "detected_language"),
+        "source_file": _reference_field(ref, "source_file"),
+        **_posting_reference_cells(ref),
     }
 
 

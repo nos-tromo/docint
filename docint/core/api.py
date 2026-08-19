@@ -64,6 +64,7 @@ from docint.core.search.aggregate import (
     UnknownGroupFieldError,
 )
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
+from docint.core.search.index import search_index_status
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
@@ -1646,80 +1647,136 @@ def search_collection_aggregate(
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
-@app.get("/search/aggregate/export.csv", tags=["Query"])
-def export_aggregate_csv(
+@app.get("/search/export.csv", tags=["Query"])
+def export_search_csv(
     collection: str | None = None,
     question: str = "",
-    group_by: Literal[
-        "author", "author_id", "network", "posting_author", "type", "speaker", "language", "file_name"
-    ] = "author",
+    group_by: Literal["author", "author_id", "network", "posting_author", "type", "speaker", "language", "file_name"]
+    | None = None,
     metadata_filters: str = "",
-    limit_groups: int = Query(default=MAX_GROUP_LIMIT, ge=1, le=MAX_GROUP_LIMIT),
+    session_id: str | None = None,
+    marked_ids: str = "",
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
-    """Stream grouped search counts (no samples) as CSV.
+    """Stream every matching chunk (not just group counts) as CSV.
 
-    The download counterpart to ``POST /search/aggregate``: same keyword and
-    group-by validation, but ``samples_per_group=0`` since a CSV row is just
-    a group's value and count. Filters travel as a JSON-encoded query param
-    (the GET verb has no body), decoded with :func:`json.loads` into the same
-    rule shape ``build_qdrant_filter`` already accepts from the POST payload.
+    The exhaustive, chunk-level counterpart to both ``POST /search`` and
+    ``POST /search/aggregate`` — and the replacement for the old
+    ``GET /search/aggregate/export.csv``, whose ``value``/``count`` rows
+    could not identify a post or its author, let alone show its text. Two
+    lanes, selected the same way as the JSON endpoints: ``group_by`` unset
+    streams the keyword hits lane (keywords required, exactly like
+    ``POST /search``); ``group_by`` set streams the grouped/social lane (a
+    blank question groups the whole collection, exactly like
+    ``POST /search/aggregate``). Unlike the JSON endpoints, a keyword search
+    over an unindexed collection is refused outright (409) rather than
+    degrading to an empty result set — an empty CSV would otherwise read as
+    "no matches" instead of "the index needs a backfill".
 
     Args:
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        question (str): Whitespace-separated keywords; may be blank.
-        group_by (str): A short name from ``GROUP_BY_FIELDS``.
+        question (str): Whitespace-separated keywords; required for the hits
+            lane, optional for the grouped lane.
+        group_by (str | None): A short name from ``GROUP_BY_FIELDS`` for the
+            grouped lane, or ``None`` for the keyword hits lane.
         metadata_filters (str): JSON-encoded list of filter rules, or blank.
-        limit_groups (int): Maximum groups, clamped to ``[1, MAX_GROUP_LIMIT]``.
+        session_id (str | None): Session whose stored chat scope counts as
+            "marked", unioned with ``marked_ids``.
+        marked_ids (str): Comma-separated Qdrant point ids to mark, covering a
+            selection made before a session exists.
         principal (Principal): The resolved request principal.
 
     Returns:
-        StreamingResponse: A ``text/csv`` attachment with ``value``/``count`` rows.
+        StreamingResponse: A ``text/csv`` attachment, one row per matching
+            chunk, with full chunk text and every reference-metadata field.
 
     Raises:
-        HTTPException: 422 for an unusable keyword, unknown group field, or
-            malformed ``metadata_filters``; 400/404 from collection resolution;
-            500 on unexpected failure.
+        HTTPException: 422 for a keyword-less hits-lane query, an unusable
+            keyword, an unknown group field, or malformed ``metadata_filters``;
+            409 when a keyword search runs over an unindexed collection;
+            400/404 from collection resolution; 500 on unexpected failure.
     """
-    if group_by not in GROUP_BY_FIELDS:
+    if group_by is not None and group_by not in GROUP_BY_FIELDS:
         raise HTTPException(status_code=422, detail="Invalid request.")
+
+    keywords: list[str] = []
     try:
         if question.strip():
-            parse_keywords(question)
+            keywords = parse_keywords(question)
     except KeywordTooShortError as e:
         raise HTTPException(status_code=422, detail="Invalid request.") from e
+
+    if group_by is None and not keywords:
+        # Boundary validation, mirroring `POST /search`: an unusable query
+        # must be refused before a collection is even resolved, rather than
+        # degrading into a scan of the whole collection.
+        raise HTTPException(status_code=422, detail="Invalid request.")
 
     try:
         raw_filters = json.loads(metadata_filters) if metadata_filters.strip() else []
     except ValueError as e:
         raise HTTPException(status_code=422, detail="Invalid request.") from e
 
-    from docint.utils.csv_stream import stream_csv
+    from docint.utils.csv_stream import SEARCH_EXPORT_COLUMNS, search_export_row, stream_csv
 
-    columns = ("value", "count")
+    marked_from_param = {entry.strip() for entry in marked_ids.split(",") if entry.strip()}
+
     try:
         with _scoped_collection(collection, principal) as physical:
-            data = rag.search_aggregate(
-                question,
-                group_by=group_by,
-                base_filter=build_qdrant_filter(raw_filters),
-                limit_groups=limit_groups,
-                samples_per_group=0,
+            if keywords:
+                index_status = search_index_status(rag.qdrant_client, physical)
+                if not index_status.get("with_search_text") or not index_status.get("indexed"):
+                    logger.warning(
+                        "Search export refused | collection={!r} — collection needs `make search-index`",
+                        physical,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Collection is not search-indexed. Run `make search-index` first.",
+                    )
+
+            marked_from_scope: list[str] = (
+                rag.ensure_session_manager().get_scope(session_id, principal.effective_owner) if session_id else []
             )
-        rows = [{"value": group["value"], "count": group["count"]} for group in data["groups"]]
-        return StreamingResponse(
-            stream_csv(iter(rows), columns),
-            media_type="text/csv; charset=utf-8",
-            headers=_csv_attachment_headers(f"{physical}-{group_by}"),
-        )
+            marked = set(marked_from_scope) | marked_from_param
+
+            chunks = list(
+                rag.iter_search_matches(
+                    question,
+                    group_by=group_by,
+                    base_filter=build_qdrant_filter(raw_filters),
+                )
+            )
     except HTTPException:
         raise
     except UnknownGroupFieldError as e:
         raise HTTPException(status_code=422, detail="Invalid request.") from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
     except Exception as e:
-        logger.exception("Error exporting grouped collection search")
+        logger.exception("Error exporting search results")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+
+    chunks.sort(
+        key=lambda c: (
+            str(c.get("group") or "").lower(),
+            str(c.get("filename") or ""),
+            c.get("page") or 0,
+            c.get("row") or 0,
+        )
+    )
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for chunk in chunks:
+            yield search_export_row(chunk, marked=str(chunk.get("id") or "") in marked)
+
+    stem = f"{physical}-{group_by}" if group_by else f"{physical}-search"
+    return StreamingResponse(
+        stream_csv(row_iter(), SEARCH_EXPORT_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(stem),
+    )
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])

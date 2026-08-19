@@ -14,11 +14,13 @@ from docint.utils.csv_stream import (
     ENTITY_STATS_COLUMNS,
     HATE_SPEECH_COLUMNS,
     NER_SOURCE_COLUMNS,
+    SEARCH_EXPORT_COLUMNS,
     UTF8_BOM,
     document_row,
     entity_stats_row,
     hate_speech_row,
     ner_source_row,
+    search_export_row,
     stream_csv,
 )
 
@@ -181,8 +183,64 @@ def test_hate_speech_row_full_payload() -> None:
     assert row["ref_type"] == "post"
 
 
+def test_search_export_row_full_payload() -> None:
+    """Search export row full payload."""
+    chunk = {
+        "group": "acme_news",
+        "filename": "doc.pdf",
+        "page": 3,
+        "row": 2,
+        "chunk_id": "c1",
+        "text": "the full chunk text, not a truncated preview",
+        "reference_metadata": {
+            "network": "telegram",
+            "type": "post",
+            "author": "alice",
+            "url": "https://example.invalid/1",
+        },
+    }
+    row = search_export_row(chunk, marked=True)
+    assert row["group"] == "acme_news"
+    assert row["marked"] == "true"
+    assert row["source"] == "doc.pdf"
+    assert row["page"] == 3
+    assert row["row"] == 2
+    assert row["chunk_id"] == "c1"
+    assert row["chunk_text"] == "the full chunk text, not a truncated preview"
+    assert row["network"] == "telegram"
+    assert row["type"] == "post"
+    assert row["author"] == "alice"
+    assert row["url"] == "https://example.invalid/1"
+
+
+def test_search_export_row_prefers_chunk_text_over_text() -> None:
+    """Search export row prefers chunk text over text."""
+    chunk = {"chunk_text": "preferred full text", "text": "fallback"}
+    assert search_export_row(chunk, marked=False)["chunk_text"] == "preferred full text"
+
+
+def test_search_export_row_marked_renders_as_true_false_strings() -> None:
+    """Search export row marked renders as true false strings."""
+    chunk = {"filename": "doc.pdf"}
+    assert search_export_row(chunk, marked=True)["marked"] == "true"
+    assert search_export_row(chunk, marked=False)["marked"] == "false"
+
+
+def test_search_export_row_defaults_missing_fields_to_blank() -> None:
+    """Search export row defaults missing fields to blank."""
+    row = search_export_row({}, marked=False)
+    assert row["group"] == ""
+    assert row["source"] == ""
+    assert row["page"] == ""
+    assert row["row"] == ""
+    assert row["chunk_id"] == ""
+    assert row["chunk_text"] == ""
+    assert row["network"] == ""
+    assert row["posting_text"] == ""
+
+
 def test_findings_rows_carry_posting_reference_columns() -> None:
-    """Posting reference fields flow into both findings exports as dedicated columns."""
+    """Posting reference fields flow into every chunk-level export as dedicated columns."""
     reference_metadata = {
         "network": "nextext",
         "type": "transcript_segment",
@@ -196,7 +254,11 @@ def test_findings_rows_carry_posting_reference_columns() -> None:
         "posting_text": "Original post body",
     }
     chunk = {"filename": "clip.mp4", "chunk_text": "bad", "reference_metadata": reference_metadata}
-    for row in (hate_speech_row(chunk), ner_source_row(chunk, entity_label="X")):
+    for row in (
+        hate_speech_row(chunk),
+        ner_source_row(chunk, entity_label="X"),
+        search_export_row(chunk, marked=False),
+    ):
         assert row["network"] == "nextext"
         assert row["posting_uuid"] == "u1"
         assert row["posting_id"] == "P_1"
@@ -221,6 +283,7 @@ def test_findings_rows_carry_posting_reference_columns() -> None:
     }
     assert posting_columns.issubset(NER_SOURCE_COLUMNS)
     assert posting_columns.issubset(HATE_SPEECH_COLUMNS)
+    assert posting_columns.issubset(SEARCH_EXPORT_COLUMNS)
 
 
 def test_document_row_preserves_entity_types_list() -> None:
@@ -247,3 +310,5 @@ def test_column_constants_match_documented_schemas() -> None:
     assert NER_SOURCE_COLUMNS[:6] == ("entity", "source", "page", "row", "chunk_id", "chunk_text")
     assert HATE_SPEECH_COLUMNS[:7] == ("source", "page", "row", "chunk_id", "category", "confidence", "reason")
     assert DOCUMENT_COLUMNS[:5] == ("filename", "mimetype", "file_hash", "node_count", "page_count")
+    assert SEARCH_EXPORT_COLUMNS[:7] == ("group", "marked", "source", "page", "row", "chunk_id", "chunk_text")
+    assert len(SEARCH_EXPORT_COLUMNS) == len(set(SEARCH_EXPORT_COLUMNS))

@@ -4720,6 +4720,30 @@ class RAG:
         return src
 
     @staticmethod
+    def _group_value_from_payload(payload: dict[str, Any], key: str) -> str:
+        """Read a dotted payload path the way a Qdrant facet would resolve it.
+
+        ``GROUP_BY_FIELDS`` values are Qdrant JSON-path keys (e.g.
+        ``"reference_metadata.author"``); :meth:`iter_search_matches` walks
+        each point's own payload dict by hand instead of asking Qdrant to
+        facet it, since every point is already in hand from the scroll.
+
+        Args:
+            payload (dict[str, Any]): A Qdrant point payload.
+            key (str): A dotted key from :func:`group_payload_key`.
+
+        Returns:
+            str: The stringified value, or ``""`` when any path segment is
+                missing or not a dict.
+        """
+        value: Any = payload
+        for part in key.split("."):
+            if not isinstance(value, dict):
+                return ""
+            value = value.get(part)
+        return "" if value is None else str(value)
+
+    @staticmethod
     def _extract_indexable_text(payload: dict[str, Any]) -> str:
         """Return the text a point should be searchable by.
 
@@ -8732,6 +8756,86 @@ class RAG:
             result["status"],
         )
         return result
+
+    def iter_search_matches(
+        self,
+        query: str,
+        *,
+        group_by: str | None = None,
+        base_filter: qdrant_models.Filter | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield every chunk matching a search, exhaustively, for CSV export.
+
+        The chunk-level counterpart to :meth:`search_aggregate`: the same lane
+        selection and filter compilation, but no facet call and no per-group
+        sampling — every matching point is yielded once, in scroll order,
+        which is what makes this the exhaustive set an export needs rather
+        than the "best few" a chat retrieval or a grouped sample returns.
+        Follows the same shape as :meth:`get_collection_hate_speech`'s scan:
+        one ``iter_scroll`` loop, one :meth:`_source_from_payload` call per
+        point.
+
+        Args:
+            query (str): Whitespace-separated keywords; may be blank only
+                when ``group_by`` is set (mirroring :meth:`search_aggregate`'s
+                keyword-less grouping).
+            group_by (str | None): A short name from ``GROUP_BY_FIELDS`` for
+                the grouped/social lane, or ``None`` for the keyword hits lane.
+            base_filter (qdrant_models.Filter | None): Caller's metadata filter.
+
+        Yields:
+            dict[str, Any]: :meth:`_source_from_payload` dicts, each with an
+                added ``"group"`` key — the stringified payload value at
+                :func:`group_payload_key` (``""`` when ``group_by`` is
+                ``None`` or the point carries no value for the key).
+
+        Raises:
+            KeywordTooShortError: When a keyword cannot be indexed.
+            UnknownGroupFieldError: When ``group_by`` is not whitelisted.
+            ValueError: When ``group_by`` is ``None`` and ``query`` carries
+                no keywords — a keyword-less hits export would be an
+                unfiltered dump of the whole collection, not a search result.
+        """
+        collection = self.qdrant_collection
+        keywords: list[str] = parse_keywords(query) if query.strip() else []
+        key = group_payload_key(group_by) if group_by is not None else None
+
+        if group_by is None:
+            if not keywords:
+                raise ValueError("A hits-lane export requires at least one keyword.")
+            search_filter = build_search_filter(keywords, base_filter=base_filter)
+        else:
+            search_filter = build_group_filter(keywords, base_filter=base_filter)
+
+        matched = 0
+        for page in iter_scroll(
+            self.qdrant_client,
+            collection_name=collection,
+            scroll_filter=search_filter,
+            with_payload=True,
+            with_vectors=False,
+            error_context="search export",
+        ):
+            for point in page:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+                src = self._source_from_payload(
+                    collection=collection,
+                    payload=payload,
+                    node_id=str(point.id),
+                )
+                src["group"] = self._group_value_from_payload(payload, key) if key is not None else ""
+                matched += 1
+                yield src
+
+        logger.info(
+            "Search export scan | collection={!r} group_by={} keywords={} matched={}",
+            collection,
+            group_by,
+            len(keywords),
+            matched,
+        )
 
     def _collection_exists(self, name: str) -> bool:
         """Return whether a collection exists, treating an outage as absent.

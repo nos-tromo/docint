@@ -6420,6 +6420,130 @@ def test_search_aggregate_ensures_group_indexes_once_per_collection(monkeypatch:
     assert len(calls) == first  # second call did not re-create
 
 
+def test_iter_search_matches_hits_lane_yields_every_matching_chunk() -> None:
+    """The hits lane scrolls the keyword filter once and yields every point."""
+    rag = RAG(qdrant_collection="test")
+    payload_a = {
+        "text": "election night coverage",
+        "file_name": "posts.csv",
+        "row": 1,
+        "reference_metadata": {"author": "acme_news", "network": "Instagram"},
+    }
+    payload_b = {
+        "text": "election day turnout",
+        "file_name": "posts.csv",
+        "row": 2,
+        "reference_metadata": {"author": "beta_daily", "network": "Instagram"},
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [
+                    types.SimpleNamespace(id="p1", payload=payload_a),
+                    types.SimpleNamespace(id="p2", payload=payload_b),
+                ],
+                None,
+            )
+        ),
+    )
+
+    matches = list(rag.iter_search_matches("election", group_by=None))
+
+    assert [m["id"] for m in matches] == ["p1", "p2"]
+    assert all(m["group"] == "" for m in matches)
+    assert matches[0]["text"] == "election night coverage"
+    assert matches[0]["reference_metadata"]["author"] == "acme_news"
+
+
+def test_iter_search_matches_hits_lane_requires_keywords() -> None:
+    """A keyword-less hits export would be an unfiltered dump, so it is refused.
+
+    ``iter_search_matches`` is a generator, so the check only runs once the
+    caller starts consuming it.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    with pytest.raises(ValueError):
+        list(rag.iter_search_matches("   ", group_by=None))
+
+
+def test_iter_search_matches_social_lane_fills_group_from_payload() -> None:
+    """The grouped lane stamps each yielded chunk with its own group value.
+
+    A point carrying no value for the group key gets ``""``, not a missing
+    key or a crash.
+    """
+    rag = RAG(qdrant_collection="test")
+    payload_a = {
+        "text": "election night coverage",
+        "file_name": "posts.csv",
+        "reference_metadata": {"author": "acme_news"},
+    }
+    payload_b: dict[str, Any] = {
+        "text": "election day turnout",
+        "file_name": "posts.csv",
+        "reference_metadata": {},
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [
+                    types.SimpleNamespace(id="p1", payload=payload_a),
+                    types.SimpleNamespace(id="p2", payload=payload_b),
+                ],
+                None,
+            )
+        ),
+    )
+
+    matches = list(rag.iter_search_matches("election", group_by="author"))
+
+    assert [m["group"] for m in matches] == ["acme_news", ""]
+
+
+def test_iter_search_matches_social_lane_accepts_a_blank_query() -> None:
+    """Grouping the whole collection is legitimate, matching search_aggregate."""
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"network": "Instagram"}}
+    scroll_calls: list[dict[str, Any]] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scroll_calls.append(kwargs)
+        return [types.SimpleNamespace(id="p1", payload=payload)], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll))
+
+    matches = list(rag.iter_search_matches("   ", group_by="network"))
+
+    assert len(matches) == 1
+    assert matches[0]["group"] == "Instagram"
+    assert len(scroll_calls) == 1
+
+
+def test_iter_search_matches_group_value_for_a_flat_payload_key() -> None:
+    """A non-nested group key (file_name) resolves directly off the payload."""
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "any text", "file_name": "posts.csv"}
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(scroll=lambda **kwargs: ([types.SimpleNamespace(id="p1", payload=payload)], None)),
+    )
+
+    matches = list(rag.iter_search_matches("", group_by="file_name"))
+
+    assert matches[0]["group"] == "posts.csv"
+
+
+def test_iter_search_matches_rejects_unknown_group_field() -> None:
+    """Grouping is a closed whitelist, like search_aggregate."""
+    rag = RAG(qdrant_collection="test")
+
+    with pytest.raises(rag_module.UnknownGroupFieldError):
+        list(rag.iter_search_matches("election", group_by="reference_metadata.author"))
+
+
 def test_scoped_retriever_returns_exactly_the_selected_chunks() -> None:
     """A scope answers from the chosen chunks and nothing else.
 
