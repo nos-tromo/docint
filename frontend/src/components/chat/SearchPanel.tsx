@@ -183,19 +183,21 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
       <div className="flex items-center gap-2" data-testid="search-mode-row">
         <Button
           type="button"
-          variant={mode === 'hits' ? 'secondary' : 'ghost'}
+          variant="ghost"
           size="sm"
           aria-pressed={mode === 'hits'}
           onClick={() => setMode('hits')}
+          className={cn('text-xs', mode === 'hits' && 'font-semibold text-foreground')}
         >
           {t('search.mode_hits')}
         </Button>
         <Button
           type="button"
-          variant={mode === 'groups' ? 'secondary' : 'ghost'}
+          variant="ghost"
           size="sm"
           aria-pressed={mode === 'groups'}
           onClick={() => setMode('groups')}
+          className={cn('text-xs', mode === 'groups' && 'font-semibold text-foreground')}
         >
           {t('search.mode_groups')}
         </Button>
@@ -256,19 +258,6 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                     {search.data.next_cursor
                       ? t('search.docs_more', { count: docCount })
                       : t('search.docs', { count: docCount })}
-                  </>
-                )}
-                {selectedIds.length > 0 && (
-                  <>
-                    {search.data && ' · '}
-                    <span data-testid="token-meter">
-                      {scope.usableTokens > 0
-                        ? t('search.budget', {
-                            used: formatTokens(estTokens),
-                            total: formatTokens(scope.usableTokens)
-                          })
-                        : t('search.budget_selected', { used: formatTokens(estTokens) })}
-                    </span>
                   </>
                 )}
               </p>
@@ -338,6 +327,21 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                   {t('search.groups_capped', { limit: grouped.data.limit })}
                 </>
               )}
+            </p>
+          )}
+          {/* Budget feedback applies to whatever is pinned, hits or groups
+              samples alike — unlike the select-all/clear control above, which
+              only makes sense against a loaded hit list. */}
+          {selectedIds.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              <span data-testid="token-meter">
+                {scope.usableTokens > 0
+                  ? t('search.budget', {
+                      used: formatTokens(estTokens),
+                      total: formatTokens(scope.usableTokens)
+                    })
+                  : t('search.budget_selected', { used: formatTokens(estTokens) })}
+              </span>
             </p>
           )}
         </>

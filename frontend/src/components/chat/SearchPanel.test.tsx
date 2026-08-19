@@ -756,7 +756,7 @@ describe('SearchPanel groups mode', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search/aggregate'))
@@ -771,7 +771,7 @@ describe('SearchPanel groups mode', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search/aggregate'))).toBe(true)
     })
@@ -805,7 +805,7 @@ describe('SearchPanel groups mode', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
     expect(await screen.findByTestId('search-not-indexed')).toBeInTheDocument()
     expect(screen.queryByTestId('search-no-groups')).toBeNull()
@@ -829,10 +829,10 @@ describe('SearchPanel groups mode', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
     const summary = await screen.findByTestId('search-groups-summary')
-    expect(summary.textContent).toMatch(/Showing the 2 largest groups/)
+    expect(summary.textContent).toMatch(/Showing the 2 largest results/)
   })
 
   it('omits the capped notice while the group list is under the effective limit', async () => {
@@ -841,10 +841,10 @@ describe('SearchPanel groups mode', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
     const summary = await screen.findByTestId('search-groups-summary')
-    expect(summary.textContent).not.toMatch(/largest groups/)
+    expect(summary.textContent).not.toMatch(/largest results/)
   })
 
   it("pins one of a group's sample chunks into the scope", async () => {
@@ -853,7 +853,7 @@ describe('SearchPanel groups mode', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Groups' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
     const disclosure = await screen.findByRole('button', { name: /show sample chunks/i })
     await userEvent.click(disclosure)
@@ -870,6 +870,28 @@ describe('SearchPanel groups mode', () => {
     await waitFor(() => {
       expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200 })
     })
+  })
+
+  it('shows the token meter in Social mode once a sample is pinned', async () => {
+    // Groups/Social mode has no select-all row (samples aren't "everything
+    // loaded"), but budget feedback still applies to whatever is pinned.
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+
+    const disclosure = await screen.findByRole('button', { name: /show sample chunks/i })
+    await userEvent.click(disclosure)
+
+    const tile = await screen.findByRole('button', { name: /alpha\.pdf/i })
+    await userEvent.click(tile)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('token-meter')).toHaveTextContent('≈1.2k / 22.0k tokens')
+    })
+    expect(screen.queryByTestId('scope-bulk')).toBeNull()
   })
 })
 
