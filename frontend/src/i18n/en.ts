@@ -198,8 +198,8 @@ export const en = {
   'search.groups_capped': 'Showing the {limit} largest results',
   'search.export_results': 'Export CSV',
   'search.group_count': '{count} chunks',
-  'search.group_expand': 'Show sample chunks',
-  'search.group_collapse': 'Hide sample chunks',
+  'search.group_expand': 'Show sample chunks for {value}',
+  'search.group_collapse': 'Hide sample chunks for {value}',
   'search.no_groups': 'No chunk matches.',
 
   // ingest

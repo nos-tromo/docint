@@ -69,12 +69,26 @@ describe('SearchGroups', () => {
     expect(screen.getByText('2 chunks')).toBeInTheDocument()
   })
 
+  it("names the disclosure by the group's own value, not just its state", () => {
+    // I4 regression guard: role="button" is children-presentational and an
+    // explicit aria-label overrides name-from-content, so a screen reader
+    // must be told *which* group this is via the label itself — the value
+    // text sitting next to it in the DOM is not enough.
+    renderGroups()
+
+    expect(screen.getByRole('button', { name: /acme_news/ })).toHaveAccessibleName(
+      'Show sample chunks for acme_news'
+    )
+    // The samples-less group has no role at all, so it carries no competing name.
+    expect(screen.queryByRole('button', { name: /beta_daily/ })).toBeNull()
+  })
+
   it("reveals a group's sample chunks when its header row is clicked", async () => {
     renderGroups()
 
     expect(screen.queryByText(/alpha\.pdf/)).toBeNull()
 
-    const disclosure = screen.getByRole('button', { name: /show sample chunks/i })
+    const disclosure = screen.getByRole('button', { name: /show sample chunks for acme_news/i })
     expect(disclosure).toHaveAttribute('aria-expanded', 'false')
 
     // Click the value text itself, not just the row's bounding element —
@@ -82,6 +96,7 @@ describe('SearchGroups', () => {
     await userEvent.click(screen.getByText('acme_news'))
 
     expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+    expect(disclosure).toHaveAccessibleName('Hide sample chunks for acme_news')
     expect(screen.getByText(/alpha\.pdf/)).toBeInTheDocument()
     expect(screen.getByText(/beta\.pdf/)).toBeInTheDocument()
   })
@@ -89,7 +104,7 @@ describe('SearchGroups', () => {
   it('toggles the disclosure with Enter and Space on the header row', async () => {
     renderGroups()
 
-    const disclosure = screen.getByRole('button', { name: /show sample chunks/i })
+    const disclosure = screen.getByRole('button', { name: /show sample chunks for acme_news/i })
     disclosure.focus()
 
     await userEvent.keyboard('{Enter}')
@@ -104,8 +119,8 @@ describe('SearchGroups', () => {
   it('calls onToggle with the sample hit when it is clicked, without re-collapsing the group', async () => {
     const { onToggle } = renderGroups()
 
-    await userEvent.click(screen.getByRole('button', { name: /show sample chunks/i }))
-    const disclosure = screen.getByRole('button', { name: /hide sample chunks/i })
+    await userEvent.click(screen.getByRole('button', { name: /show sample chunks for acme_news/i }))
+    const disclosure = screen.getByRole('button', { name: /hide sample chunks for acme_news/i })
     await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
 
     expect(onToggle).toHaveBeenCalledWith(HIT1)

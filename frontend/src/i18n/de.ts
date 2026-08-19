@@ -206,8 +206,8 @@ export const de: Strings = {
   'search.groups_capped': 'Die {limit} größten Ergebnisse',
   'search.export_results': 'CSV exportieren',
   'search.group_count': '{count} Abschnitte',
-  'search.group_expand': 'Beispielabschnitte anzeigen',
-  'search.group_collapse': 'Beispielabschnitte ausblenden',
+  'search.group_expand': 'Beispielabschnitte für {value} anzeigen',
+  'search.group_collapse': 'Beispielabschnitte für {value} ausblenden',
   'search.no_groups': 'Kein Abschnitt passt.',
 
   // ingest

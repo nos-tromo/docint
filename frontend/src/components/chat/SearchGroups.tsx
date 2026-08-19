@@ -45,7 +45,9 @@ export function SearchGroups({ result, keywords, selectedTokens, onToggle }: Sea
               tabIndex={hasSamples ? 0 : undefined}
               aria-expanded={hasSamples ? isOpen : undefined}
               aria-label={
-                hasSamples ? (isOpen ? t('search.group_collapse') : t('search.group_expand')) : undefined
+                hasSamples
+                  ? t(isOpen ? 'search.group_collapse' : 'search.group_expand', { value: g.value })
+                  : undefined
               }
               onClick={hasSamples ? toggle : undefined}
               onKeyDown={
