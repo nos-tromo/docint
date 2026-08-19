@@ -1646,6 +1646,82 @@ def search_collection_aggregate(
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
+@app.get("/search/aggregate/export.csv", tags=["Query"])
+def export_aggregate_csv(
+    collection: str | None = None,
+    question: str = "",
+    group_by: Literal[
+        "author", "author_id", "network", "posting_author", "type", "speaker", "language", "file_name"
+    ] = "author",
+    metadata_filters: str = "",
+    limit_groups: int = Query(default=MAX_GROUP_LIMIT, ge=1, le=MAX_GROUP_LIMIT),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> StreamingResponse:
+    """Stream grouped search counts (no samples) as CSV.
+
+    The download counterpart to ``POST /search/aggregate``: same keyword and
+    group-by validation, but ``samples_per_group=0`` since a CSV row is just
+    a group's value and count. Filters travel as a JSON-encoded query param
+    (the GET verb has no body), decoded with :func:`json.loads` into the same
+    rule shape ``build_qdrant_filter`` already accepts from the POST payload.
+
+    Args:
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        question (str): Whitespace-separated keywords; may be blank.
+        group_by (str): A short name from ``GROUP_BY_FIELDS``.
+        metadata_filters (str): JSON-encoded list of filter rules, or blank.
+        limit_groups (int): Maximum groups, clamped to ``[1, MAX_GROUP_LIMIT]``.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        StreamingResponse: A ``text/csv`` attachment with ``value``/``count`` rows.
+
+    Raises:
+        HTTPException: 422 for an unusable keyword, unknown group field, or
+            malformed ``metadata_filters``; 400/404 from collection resolution;
+            500 on unexpected failure.
+    """
+    if group_by not in GROUP_BY_FIELDS:
+        raise HTTPException(status_code=422, detail="Invalid request.")
+    try:
+        if question.strip():
+            parse_keywords(question)
+    except KeywordTooShortError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+
+    try:
+        raw_filters = json.loads(metadata_filters) if metadata_filters.strip() else []
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+
+    from docint.utils.csv_stream import stream_csv
+
+    columns = ("value", "count")
+    try:
+        with _scoped_collection(collection, principal) as physical:
+            data = rag.search_aggregate(
+                question,
+                group_by=group_by,
+                base_filter=build_qdrant_filter(raw_filters),
+                limit_groups=limit_groups,
+                samples_per_group=0,
+            )
+        rows = [{"value": group["value"], "count": group["count"]} for group in data["groups"]]
+        return StreamingResponse(
+            stream_csv(iter(rows), columns),
+            media_type="text/csv; charset=utf-8",
+            headers=_csv_attachment_headers(f"{physical}-{group_by}"),
+        )
+    except HTTPException:
+        raise
+    except UnknownGroupFieldError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+    except Exception as e:
+        logger.exception("Error exporting grouped collection search")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
 @app.post("/query", response_model=QueryOut, tags=["Query"])
 def query(payload: QueryIn, request: Request) -> dict[str, Any]:
     """Handle a query request.

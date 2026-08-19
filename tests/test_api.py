@@ -4833,6 +4833,59 @@ def test_search_aggregate_forwards_sizing(client: TestClient) -> None:
     assert response.json()["limit"] == 7
 
 
+def test_aggregate_export_csv_streams_value_count_rows(client: TestClient) -> None:
+    """The CSV export streams value/count rows only, with samples_per_group=0."""
+    response = client.get("/search/aggregate/export.csv", params={"question": "election", "group_by": "author"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    disp = response.headers["content-disposition"]
+    assert "alpha-author.csv" in disp
+
+    rows = _parse_csv_body(response.content)
+    assert rows[0] == ["value", "count"]
+    assert rows[1] == ["acme_news", "2"]
+
+    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
+    assert last_aggregate["samples_per_group"] == 0
+    assert last_aggregate["group_by"] == "author"
+
+
+def test_aggregate_export_csv_accepts_a_blank_question(client: TestClient) -> None:
+    """Grouping the whole collection is a legitimate ask, matching the POST endpoint."""
+    response = client.get("/search/aggregate/export.csv", params={"group_by": "network"})
+    assert response.status_code == 200
+
+
+def test_aggregate_export_csv_rejects_an_unknown_group_by(client: TestClient) -> None:
+    """Faceting is a closed whitelist — an unlisted field is refused, not passed through."""
+    response = client.get(
+        "/search/aggregate/export.csv",
+        params={"question": "election", "group_by": "reference_metadata.author"},
+    )
+    assert response.status_code == 422
+
+
+def test_aggregate_export_csv_rejects_malformed_metadata_filters(client: TestClient) -> None:
+    """A metadata_filters query param that is not valid JSON is refused, not silently dropped."""
+    response = client.get(
+        "/search/aggregate/export.csv",
+        params={"question": "election", "group_by": "author", "metadata_filters": "not-json"},
+    )
+    assert response.status_code == 422
+
+
+def test_aggregate_export_csv_forwards_metadata_filters(client: TestClient) -> None:
+    """A well-formed metadata_filters JSON array reaches search_aggregate as a compiled filter."""
+    filters = json.dumps([{"field": "reference_metadata.network", "operator": "eq", "value": "acme_news"}])
+    response = client.get(
+        "/search/aggregate/export.csv",
+        params={"question": "election", "group_by": "author", "metadata_filters": filters},
+    )
+    assert response.status_code == 200
+    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
+    assert last_aggregate["base_filter"] is not None
+
+
 def test_scope_can_be_set_and_read_back(client: TestClient) -> None:
     """A scope survives the round trip so a reload restores it."""
     response = client.put("/sessions/s1/scope", json={"chunk_ids": ["c1", "c2"]})

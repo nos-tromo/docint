@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { Banner, Button, Card, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
+import { Banner, Button, Card, DownloadLink, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
+import { aggregateExportHref } from '@/api/search'
 import type { GroupByField, SearchHit } from '@/api/types'
 import { GROUP_BY_FIELDS } from '@/api/types'
 import { useAggregate, useSearch, useScope } from '@/hooks/useSearch'
@@ -13,6 +14,7 @@ import {
   searchKeyFor,
   useSearchUiStore
 } from '@/stores/searchUi'
+import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 import { SearchGroups } from '@/components/chat/SearchGroups'
 import { SearchHitRow } from '@/components/chat/SearchHit'
@@ -77,6 +79,7 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   // switching modes never re-asks the question.
   const search = useSearch(mode === 'hits' ? query : '')
   const grouped = useAggregate(query, groupBy, mode === 'groups')
+  const filters = useChatFiltersStore().buildPayload()
   const active = mode === 'groups' ? grouped : search
   const { set } = useScope(sessionId)
   const [scopeError, setScopeError] = useState<string | null>(null)
@@ -310,24 +313,32 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               every matching chunk was counted, not just what is on screen, so
               there is nothing more to load and no select-all. */}
           {mode === 'groups' && grouped.data && (
-            <p className="text-xs text-muted-foreground" data-testid="search-groups-summary">
-              {t('search.groups_summary', {
-                groups: grouped.data.groups.length,
-                total: grouped.data.total
-              })}
-              {grouped.data.unassigned > 0 && (
-                <>
-                  {' · '}
-                  {t('search.groups_unassigned', { count: grouped.data.unassigned })}
-                </>
+            <div className="flex items-center gap-1">
+              <p className="text-xs text-muted-foreground" data-testid="search-groups-summary">
+                {t('search.groups_summary', {
+                  groups: grouped.data.groups.length,
+                  total: grouped.data.total
+                })}
+                {grouped.data.unassigned > 0 && (
+                  <>
+                    {' · '}
+                    {t('search.groups_unassigned', { count: grouped.data.unassigned })}
+                  </>
+                )}
+                {grouped.data.groups.length >= grouped.data.limit && (
+                  <>
+                    {' · '}
+                    {t('search.groups_capped', { limit: grouped.data.limit })}
+                  </>
+                )}
+              </p>
+              {grouped.data.groups.length > 0 && collection && (
+                <DownloadLink
+                  href={aggregateExportHref(collection, groupBy, query, filters)}
+                  label={t('search.export_groups')}
+                />
               )}
-              {grouped.data.groups.length >= grouped.data.limit && (
-                <>
-                  {' · '}
-                  {t('search.groups_capped', { limit: grouped.data.limit })}
-                </>
-              )}
-            </p>
+            </div>
           )}
           {/* Budget feedback applies to whatever is pinned, hits or groups
               samples alike — unlike the select-all/clear control above, which

@@ -847,6 +847,36 @@ describe('SearchPanel groups mode', () => {
     expect(summary.textContent).not.toMatch(/largest results/)
   })
 
+  it('shows a CSV export link with the current collection, query and group-by', async () => {
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+
+    const link = await screen.findByRole('link', { name: 'Export CSV' })
+    const href = link.getAttribute('href') ?? ''
+    expect(href).toContain('/search/aggregate/export.csv')
+    expect(href).toContain('collection=docs')
+    expect(href).toContain('group_by=author')
+    expect(href).toContain('question=Partei')
+  })
+
+  it('omits the CSV export link when there are no groups', async () => {
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, {
+      body: { ...AGGREGATE_OK, groups: [] }
+    })
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+
+    await screen.findByTestId('search-groups-summary')
+    expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
+  })
+
   it("pins one of a group's sample chunks into the scope", async () => {
     const fetchMock = mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
 

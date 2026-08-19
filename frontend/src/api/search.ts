@@ -1,5 +1,13 @@
-import { apiGet, apiPost } from './client'
-import type { AggregateRequest, AggregateResult, ChunkText, SearchRequest, SearchResult } from './types'
+import { apiGet, apiPost, getOwnerParam, url } from './client'
+import type {
+  AggregateRequest,
+  AggregateResult,
+  ChunkText,
+  GroupByField,
+  MetadataFilter,
+  SearchRequest,
+  SearchResult,
+} from './types'
 
 /**
  * Run a full-text keyword search over the caller's collection.
@@ -40,3 +48,33 @@ export const fetchChunkText = (id: string, collection?: string) =>
  */
 export const aggregateCollection = (body: AggregateRequest) =>
   apiPost<AggregateResult>('/search/aggregate', body)
+
+/**
+ * Build an absolute URL for the grouped-search CSV download
+ * (`GET /search/aggregate/export.csv`).
+ *
+ * Mirrors `aggregateCollection`'s inputs so the export always reflects
+ * exactly what the panel currently shows. Use this as the `href` of a
+ * download anchor so the browser handles the streaming response natively.
+ *
+ * @param collection - Caller's logical collection.
+ * @param groupBy - The payload field to group by.
+ * @param question - Whitespace-separated keywords; may be blank.
+ * @param filters - Metadata filters currently applied.
+ * @returns An absolute URL to the CSV export endpoint.
+ */
+export function aggregateExportHref(
+  collection: string,
+  groupBy: GroupByField,
+  question: string,
+  filters: MetadataFilter[]
+): string {
+  const owner = getOwnerParam()
+  const params = new URLSearchParams()
+  params.set('collection', collection)
+  params.set('group_by', groupBy)
+  if (question.trim()) params.set('question', question.trim())
+  if (filters.length) params.set('metadata_filters', JSON.stringify(filters))
+  if (owner) params.set('owner', owner)
+  return url(`/search/aggregate/export.csv?${params}`)
+}
