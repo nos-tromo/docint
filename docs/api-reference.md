@@ -320,6 +320,78 @@ Response:
 This lane covers the **text lane only**; the `_images` companion that
 `/search` also covers is not yet grouped.
 
+### `GET /search/export.csv`
+
+Streams **every** matching chunk (not just group counts) as CSV — the
+chunk-level counterpart to both `/search` and `/search/aggregate` above, and
+what an investigator downloads to work with a result set outside the app.
+Query parameters select the same two lanes the JSON endpoints use, and each
+lane is exported exactly as its own JSON endpoint returns it: this export
+must never show more, or fewer, rows than the panel does for the same query.
+
+Query parameters:
+
+- `collection` — caller's logical collection; falls back to the process
+  default when omitted.
+- `question` — whitespace-separated keywords. Required for the hits lane;
+  optional for the grouped lane (a blank question groups the whole
+  collection, exactly like `/search/aggregate`).
+- `group_by` — one of the `/search/aggregate` values, or omitted for the
+  keyword hits lane.
+- `metadata_filters` — JSON-encoded array, same shape as `/query`.
+- `session_id` — a session whose stored chat scope counts as "marked",
+  unioned with `marked_ids`.
+- `marked_ids` — comma-separated Qdrant point ids to mark, for a selection
+  made before a session exists.
+
+Two lanes, selected the same way as the JSON endpoints:
+
+- **Hits lane** (`group_by` omitted) mirrors `/search`: the same
+  AND-of-keywords prefilter, the same phrase post-filter on a multi-word
+  query (a chunk containing both words far apart does not count), and the
+  same `{collection}_images` companion lane — an image hit the panel shows
+  is a row here too, with `kind=image`.
+- **Grouped/social lane** (`group_by` set) mirrors `/search/aggregate`: no
+  phrase filter (a facet counts a keyword match, not a phrase) and no image
+  companion — that lane stays text-only, same as its JSON endpoint. Every
+  row's `group` column carries its own group value.
+
+Columns (`SEARCH_EXPORT_COLUMNS`): `group`, `marked`, `kind`, `source`,
+`page`, `row`, `chunk_id`, `chunk_text`, `network`, `author`, `author_id`,
+`vanity`, `url`, `timestamp`, `posting_network`, `posting_author`,
+`posting_author_id`, `posting_vanity`, `posting_timestamp`, `posting_url`,
+`posting_text`, `type`, `uuid`, `posting_uuid`, `posting_id`, `media_id`,
+`speaker`, `language`, `detected_language`, `source_file`. Unlike a citation
+card's truncated preview, `chunk_text` is always the chunk's **full** text.
+`kind` is `text` or `image`, mirroring `/search` (always `text` on the
+grouped lane). `marked` is `true` when the row's point id is in
+`session_id`'s stored scope or in `marked_ids`, so a prior hand-picked
+selection can be recovered from a re-export.
+
+Rows are sorted by `group`, then `source`, then `page`, then `row`.
+
+Status and errors:
+
+- `200` — a `text/csv; charset=utf-8` streamed attachment (a UTF-8 BOM, then
+  the header row, then one row per matching chunk). An empty collection
+  streams a header-only CSV rather than erroring — there is nothing to
+  index, so it is not a missing backfill.
+- `409` — a keyword search (`question` non-blank) runs over a collection
+  that is unindexed or only **partially** indexed (`make search-index` still
+  running or interrupted). Unlike `/search`, which can carry
+  `status: "partial"` beside a banner, a downloaded CSV has no channel of
+  its own to report incompleteness, so this is refused outright rather than
+  risk a truncated file being filed as the complete evidence. Also `409`
+  when the matching set exceeds the row cap (`MAX_EXPORT_ROWS`, 50,000
+  chunks) — the same reasoning: a silently truncated file is
+  indistinguishable from a complete one once downloaded, so an oversize
+  export is refused rather than cut short. Narrow the query or add metadata
+  filters and try again.
+- `422` — the hits lane's `question` is blank (an unfiltered dump of the
+  whole collection is not a search result), `group_by` is not whitelisted,
+  or `metadata_filters` is not valid JSON.
+- `404` — the collection is not owned by the caller.
+
 ### `POST /summarize`
 
 Serves the collection's cached tree summary, or queues a rebuild. Query

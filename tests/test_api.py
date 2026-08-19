@@ -4832,15 +4832,24 @@ def test_search_aggregate_accepts_a_blank_query(client: TestClient) -> None:
 
 
 def test_search_aggregate_drops_a_keyword_below_the_index_minimum(client: TestClient) -> None:
-    """A short word like 'a' is unindexable but valid inside a phrase.
+    """A short word like 'a' is dropped from the Qdrant prefilter, not rejected.
 
-    Short words are silently dropped from the keyword list (Qdrant pre-filter)
-    so they don't contribute a condition that can never match. The phrase
-    post-filter still checks the full query text. The request succeeds, searching
-    only for 'election'.
+    ``RAG.search_aggregate`` silently drops keywords shorter than the index
+    can tokenize (mirroring ``search_fulltext``) rather than refusing the
+    whole query — the request must not 422 just because one word among
+    several is too short. Unlike the keyword hits lane (``POST /search``),
+    the grouped/social lane never phrase-checks the full query text — a
+    facet counts a keyword match, not a contiguous phrase — so the raw
+    question, "a" included, is exactly what reaches ``RAG.search_aggregate``;
+    it is that method's own ``parse_keywords`` call, not this endpoint, that
+    drops "a" and searches only for "election".
     """
     response = client.post("/search/aggregate", json={"question": "election a", "group_by": "author"})
+
     assert response.status_code == 200
+    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
+    assert last_aggregate["query"] == "election a"
+    assert last_aggregate["group_by"] == "author"
 
 
 def test_search_aggregate_rejects_an_unknown_group_field(client: TestClient) -> None:
@@ -5108,6 +5117,83 @@ def test_export_search_csv_forwards_metadata_filters(client: TestClient, monkeyp
     assert response.status_code == 200
     last_call = cast(DummyRAG, api_module.rag).search_export_calls[-1]
     assert last_call["base_filter"] is not None
+
+
+def test_export_search_csv_labels_and_marks_an_image_companion_hit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image-companion hit renders `kind=image` and honours `marked_ids` like any other row.
+
+    The SPA pins an image hit into scope by its `_images` companion point id
+    (`img-p1` here) — the same id this row must carry as `id` for
+    `marked_ids`/session scope to find it.
+    """
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": "", "kind": "text"},
+        {
+            "id": "img-p1",
+            "chunk_id": "img-1",
+            "filename": "rally.jpg",
+            "text": "a photo of an election night rally",
+            "group": "",
+            "kind": "image",
+        },
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election", "marked_ids": "img-p1"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    header = rows[0]
+    by_chunk_id = {
+        row[header.index("chunk_id")]: (row[header.index("kind")], row[header.index("marked")]) for row in rows[1:]
+    }
+    assert by_chunk_id == {"chunk-1": ("text", "false"), "img-1": ("image", "true")}
+
+
+def test_export_search_csv_refuses_a_result_set_over_the_row_cap(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A result set over the cap is refused outright, not silently cut short.
+
+    The point of this endpoint is that a downloaded CSV can never
+    misrepresent itself as complete; silently truncating at a memory limit
+    would be exactly that — the same reasoning the index-completeness gate
+    above already applies.
+    """
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "MAX_EXPORT_ROWS", 2)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
+        {"id": "c3", "chunk_id": "chunk-3", "filename": "posts.csv", "text": "third", "group": ""},
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 409
+
+
+def test_export_search_csv_allows_a_result_set_exactly_at_the_row_cap(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary itself is not truncation — a match count exactly at the cap still succeeds."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "MAX_EXPORT_ROWS", 2)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    assert len(rows) == 3  # header + 2 rows
 
 
 def test_scope_can_be_set_and_read_back(client: TestClient) -> None:

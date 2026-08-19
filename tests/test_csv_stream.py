@@ -187,6 +187,7 @@ def test_search_export_row_full_payload() -> None:
     """Search export row full payload."""
     chunk = {
         "group": "acme_news",
+        "kind": "image",
         "filename": "doc.pdf",
         "page": 3,
         "row": 2,
@@ -202,6 +203,7 @@ def test_search_export_row_full_payload() -> None:
     row = search_export_row(chunk, marked=True)
     assert row["group"] == "acme_news"
     assert row["marked"] == "true"
+    assert row["kind"] == "image"
     assert row["source"] == "doc.pdf"
     assert row["page"] == 3
     assert row["row"] == 2
@@ -237,6 +239,12 @@ def test_search_export_row_defaults_missing_fields_to_blank() -> None:
     assert row["chunk_text"] == ""
     assert row["network"] == ""
     assert row["posting_text"] == ""
+
+
+def test_search_export_row_kind_defaults_to_text() -> None:
+    """A chunk predating the `kind` column (or a point from the main collection) reads as text."""
+    assert search_export_row({}, marked=False)["kind"] == "text"
+    assert search_export_row({"kind": "image"}, marked=False)["kind"] == "image"
 
 
 def test_findings_rows_carry_posting_reference_columns() -> None:
@@ -310,5 +318,14 @@ def test_column_constants_match_documented_schemas() -> None:
     assert NER_SOURCE_COLUMNS[:6] == ("entity", "source", "page", "row", "chunk_id", "chunk_text")
     assert HATE_SPEECH_COLUMNS[:7] == ("source", "page", "row", "chunk_id", "category", "confidence", "reason")
     assert DOCUMENT_COLUMNS[:5] == ("filename", "mimetype", "file_hash", "node_count", "page_count")
-    assert SEARCH_EXPORT_COLUMNS[:7] == ("group", "marked", "source", "page", "row", "chunk_id", "chunk_text")
+    assert SEARCH_EXPORT_COLUMNS[:8] == (
+        "group",
+        "marked",
+        "kind",
+        "source",
+        "page",
+        "row",
+        "chunk_id",
+        "chunk_text",
+    )
     assert len(SEARCH_EXPORT_COLUMNS) == len(set(SEARCH_EXPORT_COLUMNS))

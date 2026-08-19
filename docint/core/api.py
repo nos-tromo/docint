@@ -1647,6 +1647,18 @@ def search_collection_aggregate(
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
+#: Hard cap on chunk-level search-export rows. `export_search_csv` sorts the
+#: whole matching set before it can stream a single row (see below), so an
+#: unbounded query — most easily a blank-question grouped export, which
+#: legitimately matches the whole collection — would hold every matching
+#: chunk's full text and reference metadata in memory at once. 50,000 rows
+#: comfortably covers any real investigative export while keeping worst-case
+#: memory bounded; crossing it refuses the request (409) rather than
+#: silently shipping a truncated file that has no field of its own to mark
+#: itself incomplete.
+MAX_EXPORT_ROWS = 50_000
+
+
 @app.get("/search/export.csv", tags=["Query"])
 def export_search_csv(
     collection: str | None = None,
@@ -1664,19 +1676,27 @@ def export_search_csv(
     ``POST /search/aggregate`` — and the replacement for the old
     ``GET /search/aggregate/export.csv``, whose ``value``/``count`` rows
     could not identify a post or its author, let alone show its text. Two
-    lanes, selected the same way as the JSON endpoints: ``group_by`` unset
-    streams the keyword hits lane (keywords required, exactly like
-    ``POST /search``); ``group_by`` set streams the grouped/social lane (a
-    blank question groups the whole collection, exactly like
-    ``POST /search/aggregate``). Unlike the JSON endpoints, a keyword search
-    over a collection that is unindexed *or only partially indexed* (a
-    backfill still running or interrupted) is refused outright (409) rather
-    than degrading to an incomplete result set — a CSV has no
-    ``status: "partial"`` field to carry its own incompleteness once
-    downloaded, so a truncated export would otherwise read as the complete
-    one. An empty collection is not a partial index: it streams a
-    header-only CSV rather than 409ing with a remedy that names nothing to
-    fix.
+    lanes, selected the same way as the JSON endpoints, and each faithful to
+    what its own JSON endpoint returns (see :meth:`RAG.iter_search_matches`):
+    ``group_by`` unset streams the keyword hits lane (keywords required,
+    exactly like ``POST /search`` — including its phrase post-filter on a
+    multi-word query, and its second lane over the ``{collection}_images``
+    companion, so a marked image hit is never dropped from the file); ``group_by``
+    set streams the grouped/social lane (a blank question groups the whole
+    collection, exactly like ``POST /search/aggregate`` — no phrase filter,
+    no image companion). Every row carries a ``kind`` column (``text`` or
+    ``image``) so the two lanes stay distinguishable once downloaded. Unlike
+    the JSON endpoints, a keyword search over a collection that is unindexed
+    *or only partially indexed* (a backfill still running or interrupted) is
+    refused outright (409) rather than degrading to an incomplete result set
+    — a CSV has no ``status: "partial"`` field to carry its own
+    incompleteness once downloaded, so a truncated export would otherwise
+    read as the complete one. An empty collection is not a partial index: it
+    streams a header-only CSV rather than 409ing with a remedy that names
+    nothing to fix. The same reasoning caps the row count at
+    ``MAX_EXPORT_ROWS``: the whole matching set is sorted in memory before a
+    single row is streamed, so an oversize match (most easily a
+    blank-question grouped export) is refused rather than silently cut short.
 
     Args:
         collection (str | None): Caller's logical collection; owner-gated and
@@ -1700,8 +1720,9 @@ def export_search_csv(
         HTTPException: 422 for a keyword-less hits-lane query, an unusable
             keyword, an unknown group field, or malformed ``metadata_filters``;
             409 when a keyword search runs over a non-empty collection that is
-            unindexed or only partially indexed; 400/404 from collection
-            resolution; 500 on unexpected failure.
+            unindexed or only partially indexed, or when the matching set
+            exceeds ``MAX_EXPORT_ROWS``; 400/404 from collection resolution;
+            500 on unexpected failure.
     """
     if group_by is not None and group_by not in GROUP_BY_FIELDS:
         raise HTTPException(status_code=422, detail="Invalid request.")
@@ -1770,13 +1791,36 @@ def export_search_csv(
             )
             marked = set(marked_from_scope) | marked_from_param
 
-            chunks = list(
-                rag.iter_search_matches(
-                    question,
-                    group_by=group_by,
-                    base_filter=build_qdrant_filter(raw_filters),
-                )
-            )
+            # Bounded, not streamed straight through: everything below sorts
+            # the whole set before the first row goes out, so it has to be
+            # materialized either way. A blank-question grouped export
+            # legitimately matches the whole collection
+            # (`build_group_filter([])` is match-everything), so nothing
+            # upstream already bounds this. Refusing outright once the cap is
+            # crossed matches the index-completeness gate above: a CSV has no
+            # field of its own to mark itself incomplete, so a silently
+            # truncated file would be indistinguishable from a complete one
+            # once downloaded.
+            chunks: list[dict[str, Any]] = []
+            for chunk in rag.iter_search_matches(
+                question,
+                group_by=group_by,
+                base_filter=build_qdrant_filter(raw_filters),
+            ):
+                if len(chunks) >= MAX_EXPORT_ROWS:
+                    logger.warning(
+                        "Search export refused | collection={!r} reason=over_row_cap cap={}",
+                        physical,
+                        MAX_EXPORT_ROWS,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Search matched more than {MAX_EXPORT_ROWS} chunks, too many to export at "
+                            "once. Narrow the query or add metadata filters and try again."
+                        ),
+                    )
+                chunks.append(chunk)
     except HTTPException:
         raise
     except UnknownGroupFieldError as e:

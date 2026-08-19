@@ -261,7 +261,20 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               projected cost live — the *danger* case keeps its own visible
               line below. Both controls share `h-7 w-7 shrink-0 px-0` so they
               measure identically in both modes; the summary `<p>`'s `flex-1`
-              pins them upper-right, flush with the column above. */}
+              pins them upper-right, flush with the column above.
+
+              The token meter is its own `shrink-0` flex child now, never text
+              inside that `<p>`. The counts prose is unbounded — Groups/Social
+              alone can stack group count, doc/unassigned count and the capped
+              notice into four `·`-joined segments, easily past the ~45
+              characters this column gives it at `text-xs` — so *something*
+              has to give under `truncate`. It must be the counts, not the
+              meter: an ellipsised group count still reads as "more than
+              fits", but an ellipsised token count reads as "the selection
+              fits" when it doesn't, or vanishes right when it matters most —
+              the moment a selection is live. Keeping the meter a sibling
+              rather than trailing content also means it needs no leading
+              separator of its own to worry about running into the counts. */}
           {(active.data || selectedIds.length > 0) && (
             <div className="flex items-center gap-1" data-testid="search-summary-row">
               <p
@@ -299,20 +312,20 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                     )}
                   </>
                 )}
-                {selectedIds.length > 0 && (
-                  <>
-                    {' · '}
-                    <span data-testid="token-meter">
-                      {scope.usableTokens > 0
-                        ? t('search.budget', {
-                            used: formatTokens(estTokens),
-                            total: formatTokens(scope.usableTokens)
-                          })
-                        : t('search.budget_selected', { used: formatTokens(estTokens) })}
-                    </span>
-                  </>
-                )}
               </p>
+              {selectedIds.length > 0 && (
+                <span
+                  className="shrink-0 whitespace-nowrap text-xs text-muted-foreground"
+                  data-testid="token-meter"
+                >
+                  {scope.usableTokens > 0
+                    ? t('search.budget', {
+                        used: formatTokens(estTokens),
+                        total: formatTokens(scope.usableTokens)
+                      })
+                    : t('search.budget_selected', { used: formatTokens(estTokens) })}
+                </span>
+              )}
               {collection &&
                 (mode === 'hits'
                   ? hits.length > 0 && query.trim() !== ''

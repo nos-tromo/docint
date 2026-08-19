@@ -6544,6 +6544,155 @@ def test_iter_search_matches_rejects_unknown_group_field() -> None:
         list(rag.iter_search_matches("election", group_by="reference_metadata.author"))
 
 
+def test_iter_search_matches_hits_lane_applies_the_phrase_post_filter() -> None:
+    """A multi-word hits-lane query only yields chunks matching the contiguous phrase.
+
+    Mirrors `search_fulltext`'s own behaviour: the Qdrant prefilter alone is
+    an AND of keywords, so a chunk containing both words far apart passes it
+    even though `POST /search` would never show it for the same query.
+    Before this fix the export was a strict superset of what the panel
+    displays for a multi-word search.
+    """
+    rag = RAG(qdrant_collection="test")
+    payload_phrase = {
+        "text": "the acme programm launch went well",
+        "search_text": "the acme programm launch went well",
+        "file_name": "posts.csv",
+    }
+    payload_scattered = {
+        "text": "acme released a report; the programm starts later",
+        "search_text": "acme released a report; the programm starts later",
+        "file_name": "posts.csv",
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [
+                    types.SimpleNamespace(id="p1", payload=payload_phrase),
+                    types.SimpleNamespace(id="p2", payload=payload_scattered),
+                ],
+                None,
+            ),
+            collection_exists=lambda **kwargs: False,
+        ),
+    )
+
+    matches = list(rag.iter_search_matches("acme programm", group_by=None))
+
+    assert [m["id"] for m in matches] == ["p1"]
+
+
+def test_iter_search_matches_social_lane_ignores_the_phrase_post_filter() -> None:
+    """The grouped lane counts a scattered keyword match — it never phrase-filters.
+
+    `search_aggregate` never calls `matches_phrase`, so the export's grouped
+    lane must stay faithful to it: the same scattered match the hits-lane
+    phrase filter (above) would reject must still be counted here.
+    """
+    rag = RAG(qdrant_collection="test")
+    payload_scattered = {
+        "text": "acme released a report; the programm starts later",
+        "search_text": "acme released a report; the programm starts later",
+        "file_name": "posts.csv",
+        "reference_metadata": {"author": "acme_news"},
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: ([types.SimpleNamespace(id="p1", payload=payload_scattered)], None),
+        ),
+    )
+
+    matches = list(rag.iter_search_matches("acme programm", group_by="author"))
+
+    assert [m["id"] for m in matches] == ["p1"]
+
+
+def test_iter_search_matches_mid_scroll_failure_raises_rather_than_truncating() -> None:
+    """A scroll error surfaces as an exception, not a short-but-complete export.
+
+    `iter_scroll`'s default ``on_error="warn"`` logs and ends the generator
+    cleanly — exactly the behaviour that let a blip mid-export produce a
+    well-formed, silently truncated CSV with no signal it was cut short.
+    """
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "election night coverage", "file_name": "posts.csv"}
+    calls = {"n": 0}
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [types.SimpleNamespace(id="p1", payload=payload)], "cursor-2"
+        raise RuntimeError("qdrant blip")
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: False))
+
+    with pytest.raises(RuntimeError):
+        list(rag.iter_search_matches("election", group_by=None))
+
+
+def test_iter_search_matches_hits_lane_includes_the_image_companion() -> None:
+    """A hit in the `_images` companion is exported too, tagged `kind=image`.
+
+    Mirrors `search_fulltext`: the companion carries the image hits the panel
+    shows under `kind: "image"`. Before this fix `iter_search_matches` only
+    ever scrolled the main collection, so a marked image hit silently
+    vanished from the export while the 409 index-completeness gate (which
+    counts the companion) stayed blind to that gap.
+    """
+    rag = RAG(qdrant_collection="test")
+    text_payload = {"text": "election night coverage", "file_name": "posts.csv"}
+    image_payload = {
+        "llm_description": "a photo of an election night rally",
+        "image_id": "img-1",
+        "source_path": "rally.jpg",
+    }
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        name = kwargs["collection_name"]
+        if name == "test":
+            return [types.SimpleNamespace(id="p1", payload=text_payload)], None
+        if name == "test_images":
+            return [types.SimpleNamespace(id="img-p1", payload=image_payload)], None
+        raise AssertionError(f"unexpected collection_name {name!r}")
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
+
+    matches = list(rag.iter_search_matches("election", group_by=None))
+
+    assert [(m["id"], m["kind"]) for m in matches] == [("p1", "text"), ("img-p1", "image")]
+    assert matches[1]["chunk_id"] == "img-1"
+
+
+def test_iter_search_matches_social_lane_never_touches_the_image_companion() -> None:
+    """The grouped lane stays text-only, matching `search_aggregate` exactly.
+
+    Unlike the hits lane, the grouped lane must not gain an image scroll —
+    `search_aggregate`'s own facet never queries the `_images` companion, so
+    the export would otherwise show more than its JSON endpoint does.
+    `collection_exists` is stubbed to ``True`` deliberately: if the grouped
+    branch ever started checking for (and scrolling) the companion, this is
+    what would let that regression actually surface as a second `scroll`
+    call instead of being masked by `_collection_exists`'s own fail-soft
+    ``False`` on a stub that lacks the method.
+    """
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"network": "Instagram"}}
+    calls: list[str] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        calls.append(kwargs["collection_name"])
+        return [types.SimpleNamespace(id="p1", payload=payload)], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
+
+    matches = list(rag.iter_search_matches("", group_by="network"))
+
+    assert calls == ["test"]
+    assert matches[0]["kind"] == "text"
+
+
 def test_scoped_retriever_returns_exactly_the_selected_chunks() -> None:
     """A scope answers from the chosen chunks and nothing else.
 

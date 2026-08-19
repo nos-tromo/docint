@@ -338,6 +338,32 @@ describe('SearchPanel scope selection', () => {
     })
   })
 
+  it('renders the token meter outside the truncating summary line even before the active mode has data', async () => {
+    // A selection can go live before the active mode's query has resolved —
+    // right after a mode switch, or on first render with a persisted
+    // selection and no query submitted. The meter is a sibling of the counts
+    // `<p>`, not text inside it, so it must not depend on that `<p>` having
+    // anything to say.
+    useSearchUiStore.setState({
+      queries: {},
+      scopes: { [SESSION]: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
+    })
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    const meter = await screen.findByTestId('token-meter')
+    expect(meter).toHaveTextContent('≈1.2k / 22.0k tokens')
+    expect(screen.getByTestId('search-summary')).toHaveTextContent('')
+    expect(screen.getByTestId('search-summary-row')).toContainElement(meter)
+  })
+
   it('rolls the selection back and explains when the scope exceeds the budget', async () => {
     // 422 is terminal: the selection cannot fit, so keeping it checked would
     // claim an evidence set the next answer will not actually use.
@@ -925,6 +951,49 @@ describe('SearchPanel groups mode', () => {
     expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
   })
 
+  it('omits the CSV export link in Hits mode when the query matches nothing', async () => {
+    // Mirrors the Groups-mode case above: a zero-row result set is not worth
+    // a CSV, in either mode.
+    mockApi({
+      status: 'ok',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await screen.findByTestId('search-no-matches')
+    expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
+  })
+
+  it('omits the CSV export link in Hits mode while the query is unsubmitted', async () => {
+    // Hits with a blank query and hits present can't co-occur (useSearch
+    // stays disabled until the query is non-empty), so this pins the
+    // query.trim() half of the gate via a selection that is already live —
+    // the summary row still renders, but with no query submitted there is
+    // nothing to export.
+    // A keyword-less hits export would 422 the same way a keyword-less
+    // search does, so the link is hidden rather than offered and refused.
+    useSearchUiStore.setState({
+      queries: {},
+      scopes: { [SESSION]: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
+    })
+    mockApi({
+      status: 'ok',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await screen.findByTestId('search-summary-row')
+    expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
+  })
+
   it("pins one of a group's sample chunks into the scope", async () => {
     const fetchMock = mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
 
@@ -953,7 +1022,9 @@ describe('SearchPanel groups mode', () => {
   it('shows the token meter inline in Social mode once a sample is pinned, beside a working mark-all', async () => {
     // The summary row is unified across modes now: Social gets the same
     // mark-all control Hits has, sized over whatever aggregate samples are
-    // loaded, and the token meter renders inline in the same <p> either way.
+    // loaded, and the token meter renders inline in the same row either way
+    // — as its own flex child beside the counts `<p>`, not text inside it
+    // (see the search-summary-row layout comment in SearchPanel.tsx).
     mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
 
     renderPanel()
@@ -970,7 +1041,7 @@ describe('SearchPanel groups mode', () => {
     await waitFor(() => {
       const meter = screen.getByTestId('token-meter')
       expect(meter).toHaveTextContent('≈1.2k / 22.0k tokens')
-      expect(screen.getByTestId('search-summary')).toContainElement(meter)
+      expect(screen.getByTestId('search-summary-row')).toContainElement(meter)
     })
     // The one loaded sample is now selected, so the bulk control flips to
     // "clear" — Social's mark-all behaves exactly like Hits' does.

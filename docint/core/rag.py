@@ -8766,14 +8766,31 @@ class RAG:
     ) -> Iterator[dict[str, Any]]:
         """Yield every chunk matching a search, exhaustively, for CSV export.
 
-        The chunk-level counterpart to :meth:`search_aggregate`: the same lane
-        selection and filter compilation, but no facet call and no per-group
-        sampling — every matching point is yielded once, in scroll order,
-        which is what makes this the exhaustive set an export needs rather
-        than the "best few" a chat retrieval or a grouped sample returns.
-        Follows the same shape as :meth:`get_collection_hate_speech`'s scan:
-        one ``iter_scroll`` loop, one :meth:`_source_from_payload` call per
-        point.
+        The chunk-level counterpart to :meth:`search_aggregate` *and*
+        :meth:`search_fulltext`: the same lane selection and filter
+        compilation as whichever JSON endpoint ``group_by`` selects, but no
+        facet call and no per-group sampling — every matching point is
+        yielded once, in scroll order, which is what makes this the
+        exhaustive set an export needs rather than the "best few" a chat
+        retrieval or a grouped sample returns. Follows the same shape as
+        :meth:`get_collection_hate_speech`'s scan: one ``iter_scroll`` loop,
+        one :meth:`_source_from_payload` call per point.
+
+        Faithfulness to the JSON endpoint each lane mirrors is load-bearing,
+        not cosmetic — this export must never show more, or fewer, rows than
+        a caller who ran the same query through the panel would see. The
+        hits lane (``group_by is None``) therefore mirrors
+        :meth:`search_fulltext` exactly: the same client-side phrase
+        post-filter on a multi-word query (``matches_phrase`` against the raw
+        query words, not just the AND-of-keywords Qdrant prefilter), and the
+        same second scroll over the ``{collection}_images`` companion when it
+        exists, so an image hit the panel shows is a row here too. The
+        grouped/social lane (``group_by`` set) mirrors :meth:`search_aggregate`
+        exactly, which does *neither* of those: no phrase filter (a facet
+        counts a keyword match, not a contiguous phrase) and no image
+        companion (the grouped lane never queries it). Do not "fix" that
+        asymmetry — it is this export staying honest about what each lane's
+        own JSON endpoint actually returns.
 
         Args:
             query (str): Whitespace-separated keywords; may be blank only
@@ -8785,9 +8802,12 @@ class RAG:
 
         Yields:
             dict[str, Any]: :meth:`_source_from_payload` dicts, each with an
-                added ``"group"`` key — the stringified payload value at
-                :func:`group_payload_key` (``""`` when ``group_by`` is
-                ``None`` or the point carries no value for the key).
+                added ``"group"`` key (the stringified payload value at
+                :func:`group_payload_key`; ``""`` when ``group_by`` is
+                ``None`` or the point carries no value for the key) and an
+                added ``"kind"`` key (``"text"`` or ``"image"``, mirroring
+                :meth:`_search_hits`; always ``"text"`` on the grouped lane,
+                which never touches the image companion).
 
         Raises:
             KeywordTooShortError: When a keyword cannot be indexed.
@@ -8800,34 +8820,59 @@ class RAG:
         keywords: list[str] = parse_keywords(query) if query.strip() else []
         key = group_payload_key(group_by) if group_by is not None else None
 
+        lanes = [collection]
+        query_words: list[str] = []
         if group_by is None:
             if not keywords:
                 raise ValueError("A hits-lane export requires at least one keyword.")
             search_filter = build_search_filter(keywords, base_filter=base_filter)
+            # Raw whitespace-split words, not `parse_keywords`'s output — a
+            # short word like "a" is unindexable but still valid inside a
+            # phrase, exactly as `search_fulltext` computes it. Only the hits
+            # lane phrase-checks; see the docstring for why the grouped lane
+            # deliberately does not.
+            query_words = [w for w in str(query or "").split() if w]
+            companion = image_companion_name(collection)
+            if self._collection_exists(companion):
+                lanes.append(companion)
         else:
             search_filter = build_group_filter(keywords, base_filter=base_filter)
 
+        phrase_active = len(query_words) > 1
+
         matched = 0
-        for page in iter_scroll(
-            self.qdrant_client,
-            collection_name=collection,
-            scroll_filter=search_filter,
-            with_payload=True,
-            with_vectors=False,
-            error_context="search export",
-        ):
-            for point in page:
-                payload = getattr(point, "payload", None)
-                if not isinstance(payload, dict):
-                    continue
-                src = self._source_from_payload(
-                    collection=collection,
-                    payload=payload,
-                    node_id=str(point.id),
-                )
-                src["group"] = self._group_value_from_payload(payload, key) if key is not None else ""
-                matched += 1
-                yield src
+        for lane in lanes:
+            kind = "text" if lane == collection else "image"
+            for page in iter_scroll(
+                self.qdrant_client,
+                collection_name=lane,
+                scroll_filter=search_filter,
+                with_payload=True,
+                with_vectors=False,
+                error_context="search export",
+                # A mid-scroll failure must fail the whole export, not
+                # truncate it silently. The default "warn" mode logs and ends
+                # the generator cleanly, which is indistinguishable from a
+                # complete result once it reaches a 200 CSV — the same
+                # failure mode the index-completeness gate in
+                # `export_search_csv` exists to prevent.
+                on_error="raise",
+            ):
+                for point in page:
+                    payload = getattr(point, "payload", None)
+                    if not isinstance(payload, dict):
+                        continue
+                    if phrase_active and not matches_phrase(str(payload.get(SEARCH_TEXT_FIELD) or ""), query_words):
+                        continue
+                    src = self._source_from_payload(
+                        collection=lane,
+                        payload=payload,
+                        node_id=str(point.id),
+                    )
+                    src["group"] = self._group_value_from_payload(payload, key) if key is not None else ""
+                    src["kind"] = kind
+                    matched += 1
+                    yield src
 
         logger.info(
             "Search export scan | collection={!r} group_by={} keywords={} matched={}",
