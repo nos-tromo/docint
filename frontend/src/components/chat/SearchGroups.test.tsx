@@ -69,7 +69,7 @@ describe('SearchGroups', () => {
     expect(screen.getByText('2 chunks')).toBeInTheDocument()
   })
 
-  it("reveals a group's sample chunks only once its disclosure is opened", async () => {
+  it("reveals a group's sample chunks when its header row is clicked", async () => {
     renderGroups()
 
     expect(screen.queryByText(/alpha\.pdf/)).toBeNull()
@@ -77,28 +77,53 @@ describe('SearchGroups', () => {
     const disclosure = screen.getByRole('button', { name: /show sample chunks/i })
     expect(disclosure).toHaveAttribute('aria-expanded', 'false')
 
-    await userEvent.click(disclosure)
+    // Click the value text itself, not just the row's bounding element —
+    // this is the usability bug the whole-row toggle fixes.
+    await userEvent.click(screen.getByText('acme_news'))
 
     expect(disclosure).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText(/alpha\.pdf/)).toBeInTheDocument()
     expect(screen.getByText(/beta\.pdf/)).toBeInTheDocument()
   })
 
-  it('calls onToggle with the sample hit when it is clicked', async () => {
+  it('toggles the disclosure with Enter and Space on the header row', async () => {
+    renderGroups()
+
+    const disclosure = screen.getByRole('button', { name: /show sample chunks/i })
+    disclosure.focus()
+
+    await userEvent.keyboard('{Enter}')
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText(/alpha\.pdf/)).toBeInTheDocument()
+
+    await userEvent.keyboard(' ')
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText(/alpha\.pdf/)).toBeNull()
+  })
+
+  it('calls onToggle with the sample hit when it is clicked, without re-collapsing the group', async () => {
     const { onToggle } = renderGroups()
 
     await userEvent.click(screen.getByRole('button', { name: /show sample chunks/i }))
+    const disclosure = screen.getByRole('button', { name: /hide sample chunks/i })
     await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
 
     expect(onToggle).toHaveBeenCalledWith(HIT1)
+    // The sample tile is a sibling of the header, not nested inside it, so
+    // selecting it must not bubble up into the group's own toggle.
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('renders no disclosure control for a group with no samples', () => {
+  it('renders a non-interactive header for a group with no samples', () => {
     renderGroups()
 
     const row = screen.getByText('beta_daily').closest('li')
     expect(row).not.toBeNull()
     expect(within(row as HTMLElement).queryByRole('button')).toBeNull()
+
+    const header = screen.getByText('beta_daily').closest('div')
+    expect(header).not.toBeNull()
+    expect(header).not.toHaveAttribute('tabindex')
   })
 
   it('shows the empty state when there are no groups', () => {

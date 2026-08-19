@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, ChevronDownIcon } from '@infra/ui'
+import { ChevronDownIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import type { AggregateGroup, AggregateResult, SearchHit } from '@/api/types'
 import { SearchHitRow } from '@/components/chat/SearchHit'
@@ -37,25 +37,45 @@ export function SearchGroups({ result, keywords, selectedTokens, onToggle }: Sea
       {result.groups.map((g: AggregateGroup) => {
         const isOpen = !!open[g.value]
         const hasSamples = g.samples.length > 0
+        const toggle = () => setOpen((s) => ({ ...s, [g.value]: !isOpen }))
         return (
           <li key={g.value} className="rounded-md border border-border">
-            <div className="flex items-center gap-2 px-2 py-1">
+            <div
+              role={hasSamples ? 'button' : undefined}
+              tabIndex={hasSamples ? 0 : undefined}
+              aria-expanded={hasSamples ? isOpen : undefined}
+              aria-label={
+                hasSamples ? (isOpen ? t('search.group_collapse') : t('search.group_expand')) : undefined
+              }
+              onClick={hasSamples ? toggle : undefined}
+              onKeyDown={
+                hasSamples
+                  ? (e) => {
+                      // A div carrying role="button" gets neither for free; Space
+                      // would otherwise scroll the panel instead of toggling.
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        toggle()
+                      }
+                    }
+                  : undefined
+              }
+              className={cn(
+                'flex items-center gap-2 rounded-md px-2 py-1',
+                hasSamples &&
+                  'cursor-pointer outline-none hover:bg-accent/50 focus-visible:ring-1 focus-visible:ring-primary'
+              )}
+            >
               <span className="min-w-0 flex-1 truncate text-sm">{g.value}</span>
               <span className="shrink-0 text-xs text-muted-foreground">
                 {t('search.group_count', { count: g.count })}
               </span>
               {hasSamples && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 w-7 shrink-0 px-0"
-                  aria-expanded={isOpen}
-                  aria-label={isOpen ? t('search.group_collapse') : t('search.group_expand')}
-                  onClick={() => setOpen((s) => ({ ...s, [g.value]: !isOpen }))}
-                >
+                // The row itself is the toggle; a nested button here would double-fire
+                // the same state on click, so the chevron is affordance only.
+                <span className="shrink-0 text-muted-foreground" aria-hidden="true">
                   <ChevronDownIcon className={cn('h-4 w-4 transition-transform', isOpen && 'rotate-180')} />
-                </Button>
+                </span>
               )}
             </div>
             {isOpen && (
