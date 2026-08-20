@@ -336,7 +336,14 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                       groupBy: mode === 'groups' ? groupBy : undefined,
                       filters,
                       sessionId,
-                      markedIds: selectedIds
+                      // Redundant once a session exists — commitScope has
+                      // already written the same selection server-side by
+                      // the time this link can be clicked — and a scope has
+                      // no count cap, only a token budget, so hundreds of
+                      // ids serialized here could blow the URL past the
+                      // gateway's header limit. It only earns its place
+                      // pre-session, under the 'new' key.
+                      markedIds: sessionId ? undefined : selectedIds
                     })}
                     label={t('search.export_results')}
                     className="h-7 w-7 shrink-0 px-0"

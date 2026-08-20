@@ -58,7 +58,12 @@ export const aggregateCollection = (body: AggregateRequest) =>
  * `question` groups the whole collection). `sessionId` and `markedIds` both
  * mark chunks for the export server-side — a stored chat scope and an
  * unsaved local selection respectively — and are unioned there, so passing
- * both is safe. Use this as the `href` of a download anchor so the browser
+ * both is safe. Callers should still omit `markedIds` once `sessionId` is
+ * set, though: the scope it would name is already persisted server-side by
+ * then (see the SearchPanel.tsx call site), and a scope has no count cap —
+ * only a token budget — so a legitimate selection can run to hundreds of
+ * ids, long enough to overflow the gateway's header limits if serialized
+ * here too. Use this as the `href` of a download anchor so the browser
  * handles the streaming response natively.
  *
  * @param collection - Caller's logical collection.

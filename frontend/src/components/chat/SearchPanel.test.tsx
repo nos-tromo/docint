@@ -907,9 +907,11 @@ describe('SearchPanel groups mode', () => {
     expect(href).not.toContain('marked_ids')
   })
 
-  it('shows a CSV export link in Hits mode with no group_by, gaining marked_ids once a hit is selected', async () => {
+  it('shows a CSV export link in Hits mode with no group_by, gaining marked_ids once a hit is selected pre-session', async () => {
     // The same endpoint and href builder serve both lanes now; Hits must
-    // never send group_by, and must pick up marked_ids reactively.
+    // never send group_by, and must pick up marked_ids reactively — but only
+    // pre-session (no sessionId yet), which is the one case marked_ids earns
+    // its place at all (see the with-a-session negative test below).
     mockApi({
       status: 'ok',
       hits: [HIT],
@@ -918,7 +920,7 @@ describe('SearchPanel groups mode', () => {
       index_status: INDEX_STATUS
     })
 
-    renderPanel()
+    renderPanel(null)
 
     await screen.findByText(/alpha\.pdf/)
 
@@ -935,6 +937,33 @@ describe('SearchPanel groups mode', () => {
       const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
       expect(href).toContain('marked_ids=p1')
     })
+  })
+
+  it('omits marked_ids from the CSV export once a session exists, even with a live selection', async () => {
+    // Once a session id exists, commitScope has already written the same
+    // selection server-side by the time this link can be clicked, so
+    // marked_ids is redundant — and a scope has no count cap, only a token
+    // budget, so a large selection serialized into the URL could overflow
+    // the gateway's header limit. The link must fall back to the stored
+    // session scope (session_id alone) instead.
+    const fetchMock = mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel(SESSION)
+
+    await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(true)
+    })
+
+    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(href).toContain('session_id=' + SESSION)
+    expect(href).not.toContain('marked_ids')
   })
 
   it('omits the CSV export link when there are no groups', async () => {
