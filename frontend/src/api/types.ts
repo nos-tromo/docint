@@ -419,6 +419,11 @@ export interface ReportItemInput {
   dedupe_key: string
   snapshot: ReportSnapshot
   note?: string | null
+  // The collection this artifact was taken from. The report is bound to one
+  // collection, but the evidence lives where it was retrieved — the server
+  // resolves the frozen thumbnail against this one, falling back to the
+  // report's.
+  collection?: string | null
 }
 
 export interface ReportItem {

@@ -182,6 +182,37 @@ def _thumbnail_view(container: dict[str, Any]) -> tuple[str, str] | None:
     return data_uri, ui_string(label_key)
 
 
+def _evidence_caption(src: dict[str, Any]) -> str:
+    """Caption tying one figure to its entry in the source list.
+
+    A chat answer can cite several images at once, and side by side they are
+    indistinguishable — the caption carries the same ``[n] filename`` the list
+    entry does, so a reader can tell which figure the answer meant. Findings
+    hold exactly one figure and name their source in the provenance rows, so
+    they pass no caption.
+
+    Args:
+        src (dict[str, Any]): A chat source dict.
+
+    Returns:
+        str: The caption, or ``""`` when the source names nothing.
+    """
+    name = str(src.get("filename") or src.get("source") or "").strip()
+    index = src.get("citation_index")
+    if isinstance(index, int) and not isinstance(index, bool):
+        return f"[{index}] {name}".strip()
+    return name
+
+
+def _numbered_source_oneline(src: dict[str, Any]) -> str:
+    """``_source_oneline`` prefixed with the citation number the generator saw."""
+    line = _source_oneline(src, include_score=False)
+    index = src.get("citation_index")
+    if isinstance(index, int) and not isinstance(index, bool):
+        return f"[{index}] {line}"
+    return line
+
+
 def _md_thumbnail_row(snap: dict[str, Any]) -> list[str]:
     """Markdown finding-table row for an optional frozen thumbnail, or []."""
     view = _thumbnail_view(snap)
@@ -459,10 +490,18 @@ def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     sources = snap.get("sources") or []
     if sources:
         lines += ["", f"**{ui_string('report_label_sources')}:**"]
-        lines += [f"- {_source_oneline(s, include_score=False)}" for s in sources]
-        views = [view for view in (_thumbnail_view(s) for s in sources if isinstance(s, dict)) if view]
-        if views:
-            lines += [""] + [f"![{_md_cell(label)}]({data_uri})" for data_uri, label in views]
+        lines += [f"- {_numbered_source_oneline(s)}" for s in sources]
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            view = _thumbnail_view(src)
+            if view is None:
+                continue
+            data_uri, label = view
+            caption = _evidence_caption(src)
+            lines += ["", f"![{_md_cell(caption or label)}]({data_uri})"]
+            if caption:
+                lines.append(f"*{_md_cell(caption)}*")
     if note:
         lines += ["", f"*{ui_string('report_label_note')}: {note.strip()}*"]
     lines.append("")
@@ -711,9 +750,19 @@ table.finding td.f-val { white-space: pre-wrap; overflow-wrap: anywhere; font-si
 }
 .badge .etype { color: #999; font-size: 7.5pt; }
 ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
-img.thumb { max-width: 55mm; max-height: 40mm; border: 1px solid #ddd; }
-.thumbs { margin: 4pt 0; }
-.thumbs img { margin-right: 4pt; }
+/* Evidence figures. Inline-block, not flex: WeasyPrint's flex support is
+   partial, and a strip of figures on a shared baseline is exactly what
+   inline-block already does. Fixed width so several captions align. */
+.evidence-strip { margin: 4pt 0 0; }
+figure.evidence { display: inline-block; vertical-align: top; width: 55mm; margin: 0 6pt 4pt 0; }
+figure.evidence img { display: block; max-width: 55mm; max-height: 40mm; border: 1px solid #ddd; }
+figure.evidence figcaption {
+  font-size: 7.5pt; color: #555; margin-top: 1.5pt; line-height: 1.25;
+  /* break-word, not anywhere: a filename longer than the figure is wide has to
+     break mid-word or it would overflow into its neighbour. */
+  overflow-wrap: break-word;
+}
+table.finding figure.evidence { margin: 0; }
 .empty { color: #888; font-style: italic; }
 .overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
 table.manifest { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
@@ -771,9 +820,25 @@ def _html_finding_row(label: str, value_html: str) -> str:
     return f'<tr><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
 
 
-def _html_thumbnail_img(data_uri: str, label: str) -> str:
-    """One inline evidence image (data URI already validated by ``_thumbnail_view``)."""
-    return f'<img class="thumb" src="{_esc(data_uri)}" alt="{_esc(label)}">'
+def _html_evidence_figure(data_uri: str, label: str, caption: str = "") -> str:
+    """One captioned evidence figure (data URI already validated by ``_thumbnail_view``).
+
+    A ``figure`` rather than a bare ``img`` so the image and the words naming
+    it move together across a page break, and so several of them line up on a
+    shared baseline in the chat strip instead of hanging off whatever height
+    each happens to have.
+
+    Args:
+        data_uri (str): The validated inline image.
+        label (str): Localized evidence label, used as the alt text.
+        caption (str): Optional visible caption. Empty for findings, which
+            name their source in the provenance rows below.
+
+    Returns:
+        str: The figure markup.
+    """
+    figcaption = f"<figcaption>{_esc(caption)}</figcaption>" if caption else ""
+    return f'<figure class="evidence"><img src="{_esc(data_uri)}" alt="{_esc(label)}">{figcaption}</figure>'
 
 
 def _html_thumbnail_row(snap: dict[str, Any]) -> str:
@@ -782,7 +847,7 @@ def _html_thumbnail_row(snap: dict[str, Any]) -> str:
     if view is None:
         return ""
     data_uri, label = view
-    return _html_finding_row(label, _html_thumbnail_img(data_uri, label))
+    return _html_finding_row(label, _html_evidence_figure(data_uri, label))
 
 
 def _html_translation_row(snap: dict[str, Any]) -> str:
@@ -829,12 +894,15 @@ def _html_chat(snap: dict[str, Any], note: str | None) -> str:
     ]
     sources = snap.get("sources") or []
     if sources:
-        items = "".join(f"<li>{_esc(_source_oneline(s, include_score=False))}</li>" for s in sources)
+        items = "".join(f"<li>{_esc(_numbered_source_oneline(s))}</li>" for s in sources)
         parts.append(f'<div class="label">{ui_string("report_label_sources")}:</div><ul class="sources">{items}</ul>')
-        views = [view for view in (_thumbnail_view(s) for s in sources if isinstance(s, dict)) if view]
-        if views:
-            imgs = "".join(_html_thumbnail_img(data_uri, label) for data_uri, label in views)
-            parts.append(f'<div class="thumbs">{imgs}</div>')
+        figures = [
+            _html_evidence_figure(view[0], view[1], _evidence_caption(s))
+            for s, view in ((s, _thumbnail_view(s)) for s in sources if isinstance(s, dict))
+            if view is not None
+        ]
+        if figures:
+            parts.append(f'<div class="evidence-strip">{"".join(figures)}</div>')
     parts.append(_html_note(note))
     return "".join(parts)
 

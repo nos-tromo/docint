@@ -483,6 +483,19 @@ that workflow:
   are generated at ingestion; collections ingested before this shipped gain
   them on re-ingest of the same files (video keyframes need a fresh transcript
   run — see `docint/core/ingest/media_transcribe.py`).
+  A chat answer's images render as a strip of **captioned figures** beneath
+  its source list, each captioned with the number the answer cites (`[2]`), so
+  a reader can tell which figure the text means; a finding shows its one figure
+  inside the finding table.
+- **A report belongs to one collection.** Switching the active collection
+  releases the active report, so the next "+ Report" click starts one for the
+  collection you are actually working in — a report's document overview and its
+  evidence always describe the same collection.
+- **Findings from pictures show the picture in the Analysis tab too.** An
+  entity or hate-speech finding whose chunk was read out of an image (a
+  screenshot, a photographed page, a video keyframe) renders the source image
+  beside it; clicking it opens the full-size preview. That view is live rather
+  than frozen — nothing is being exported there.
 
 Export a finished report in five formats (also available directly over HTTP):
 

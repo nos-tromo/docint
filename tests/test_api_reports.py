@@ -29,8 +29,9 @@ from docint.core.state.report_manager import ReportManager
 class _ReportRAG:
     """Minimal RAG stand-in exposing only ``ensure_report_manager``.
 
-    Also carries the collection-owner manager and the ``list_documents`` /
-    ``collection_scope`` seams that collection-overview capture needs.
+    Also carries the collection-owner manager, the ``list_documents`` /
+    ``collection_scope`` seams that collection-overview capture needs, and the
+    ``_image_collection_name`` seam add-time thumbnail enrichment uses.
     """
 
     def __init__(self) -> None:
@@ -77,6 +78,10 @@ class _ReportRAG:
     def list_documents(self) -> list[dict[str, Any]]:
         """Default empty document list; individual tests monkeypatch this."""
         return []
+
+    def _image_collection_name(self, collection: str | None = None) -> str:
+        """Name the ``_images`` companion the way the real engine does."""
+        return f"{collection}_images"
 
 
 @pytest.fixture(autouse=True)
@@ -626,3 +631,108 @@ def test_enriched_item_stays_idempotent_on_re_add(client: TestClient, monkeypatc
 
     assert second["id"] == first["id"]
     assert second["snapshot"] == first["snapshot"]
+
+
+def test_add_item_resolves_the_request_collection_not_the_report_one(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artifact's own collection addresses the companion, not the report's.
+
+    An investigator switches collections and keeps adding to the open report:
+    the evidence lives where it was retrieved, so a lookup against the report's
+    companion finds nothing.
+    """
+    fake = _wire_images(
+        monkeypatch,
+        {
+            "p1": {
+                "image_id": "img-1",
+                "thumbnail_b64": "QUJD",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "document",
+            }
+        },
+    )
+    _own_collection("other")
+    rid = _create(client)["id"]
+    payload = _chat_payload_with_image(None)
+    payload["collection"] = "other"
+
+    resp = client.post(f"/reports/{rid}/items", json=payload)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["snapshot"]["sources"][0]["thumbnail"]["data_uri"] == "data:image/jpeg;base64,QUJD"
+    assert fake.scrolled_collections == [f"{_physical('other')}_images"]
+
+
+def test_add_item_falls_back_to_the_report_collection_when_unowned(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request collection the caller does not own never redirects the lookup."""
+    fake = _wire_images(
+        monkeypatch,
+        {
+            "p1": {
+                "image_id": "img-1",
+                "thumbnail_b64": "QUJD",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "document",
+            }
+        },
+    )
+    rid = _create(client)["id"]
+    payload = _chat_payload_with_image(None)
+    payload["collection"] = "someone-elses"
+
+    resp = client.post(f"/reports/{rid}/items", json=payload)
+
+    assert resp.status_code == 200, resp.text
+    assert fake.scrolled_collections == [f"{_physical()}_images"]
+
+
+def test_add_chat_item_freezes_every_image_source(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three cited images freeze three thumbnails in one companion round-trip."""
+    fake = _wire_images(
+        monkeypatch,
+        {
+            f"p{n}": {
+                "image_id": f"img-{n}",
+                "thumbnail_b64": f"QUJ{n}",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "standalone",
+            }
+            for n in (1, 2, 3)
+        },
+    )
+    rid = _create(client)["id"]
+    payload = _chat_payload_with_image(None)
+    payload["snapshot"]["sources"] = [
+        {"filename": f"image-{n}.png", "text": "", "image_id": f"img-{n}"} for n in (1, 2, 3)
+    ]
+
+    resp = client.post(f"/reports/{rid}/items", json=payload)
+
+    assert resp.status_code == 200, resp.text
+    sources = resp.json()["snapshot"]["sources"]
+    assert [s["thumbnail"]["data_uri"] for s in sources] == [f"data:image/jpeg;base64,QUJ{n}" for n in (1, 2, 3)]
+    assert len(fake.scrolled_collections) == 1
+
+
+def test_add_summary_item_is_never_enriched(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Summaries carry no visual evidence — the companion is not consulted."""
+    fake = _wire_images(monkeypatch, {})
+    rid = _create(client)["id"]
+
+    resp = client.post(
+        f"/reports/{rid}/items",
+        json={
+            "artifact_type": "summary",
+            "dedupe_key": "summary:docs",
+            "snapshot": {"collection": "docs", "text": "A summary.", "image_id": "img-1"},
+            "collection": "docs",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "thumbnail" not in resp.json()["snapshot"]
+    assert fake.scrolled_collections == []

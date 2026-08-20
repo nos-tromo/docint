@@ -414,7 +414,7 @@ describe('Report view — frozen thumbnails', () => {
     useReportStore.setState({ activeReportId: null })
   })
 
-  it('renders a finding snapshot thumbnail as an inline image', async () => {
+  it('labels a keyframe as a keyframe, not as an image', async () => {
     const detail = {
       ...reportDetail,
       items: [
@@ -427,8 +427,9 @@ describe('Report view — frozen thumbnails', () => {
     mockFetch(detail)
     renderReport()
 
-    const img = await screen.findByRole('img', { name: /image evidence/i })
+    const img = await screen.findByRole('img', { name: /video keyframe/i })
     expect(img).toHaveAttribute('src', DATA_URI)
+    expect(screen.queryByRole('img', { name: /image evidence/i })).not.toBeInTheDocument()
   })
 
   it('renders one image per chat source that carries a thumbnail', async () => {
@@ -459,6 +460,43 @@ describe('Report view — frozen thumbnails', () => {
     const imgs = await screen.findAllByRole('img', { name: /image evidence/i })
     expect(imgs).toHaveLength(1)
     expect(imgs[0]).toHaveAttribute('src', DATA_URI)
+  })
+
+  it('captions each chat figure with the number the answer cites', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          id: 13,
+          artifact_type: 'chat_answer',
+          dedupe_key: 'chat:s1:0',
+          position: 0,
+          note: null,
+          snapshot: {
+            user_text: 'q',
+            model_response: 'a',
+            sources: [
+              {
+                filename: 'chart.png',
+                citation_index: 1,
+                thumbnail: { data_uri: DATA_URI, kind: 'image' }
+              },
+              {
+                filename: 'photo.jpg',
+                citation_index: 2,
+                thumbnail: { data_uri: DATA_URI, kind: 'image' }
+              }
+            ]
+          },
+          created_at: null
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    expect(await screen.findByText('[1] chart.png')).toBeInTheDocument()
+    expect(screen.getByText('[2] photo.jpg')).toBeInTheDocument()
   })
 
   it('never renders a non-image data URI from a snapshot', async () => {

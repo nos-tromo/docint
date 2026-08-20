@@ -148,13 +148,32 @@ function isRenderableThumbnail(value: unknown): value is SnapshotThumbnail {
   return typeof uri === 'string' && uri.startsWith('data:image/')
 }
 
-function itemThumbnails(item: ReportItem): SnapshotThumbnail[] {
+interface EvidenceFigure {
+  thumb: SnapshotThumbnail
+  caption: string
+}
+
+/**
+ * The frozen figures of one item, each captioned the way the exports caption
+ * it: a chat answer can carry several images at once and side by side they are
+ * indistinguishable, so the caption repeats the citation number the answer
+ * cites. A finding holds one figure and already names its source above it.
+ */
+function itemFigures(item: ReportItem): EvidenceFigure[] {
   const s = item.snapshot
-  const candidates =
-    item.artifact_type === 'chat_answer'
-      ? (Array.isArray(s.sources) ? s.sources : []).map((src) => (src as { thumbnail?: unknown }).thumbnail)
-      : [s.thumbnail]
-  return candidates.filter(isRenderableThumbnail)
+  if (item.artifact_type !== 'chat_answer') {
+    return isRenderableThumbnail(s.thumbnail) ? [{ thumb: s.thumbnail, caption: '' }] : []
+  }
+  const sources = Array.isArray(s.sources) ? s.sources : []
+  const figures: EvidenceFigure[] = []
+  for (const src of sources) {
+    const source = src as { thumbnail?: unknown; filename?: unknown; citation_index?: unknown }
+    if (!isRenderableThumbnail(source.thumbnail)) continue
+    const name = typeof source.filename === 'string' ? source.filename : ''
+    const index = typeof source.citation_index === 'number' ? source.citation_index : null
+    figures.push({ thumb: source.thumbnail, caption: (index != null ? `[${index}] ${name}` : name).trim() })
+  }
+  return figures
 }
 
 function itemSource(item: ReportItem, t: Translate): string {
@@ -166,6 +185,32 @@ function itemSource(item: ReportItem, t: Translate): string {
       ? t('common.loc_row', { row: str(s, 'row') })
       : ''
   return [file, loc].filter(Boolean).join(' · ')
+}
+
+/**
+ * One item's frozen evidence, laid out as a strip of captioned figures.
+ * Fixed-height image boxes so several sit on a shared baseline, and the alt
+ * text follows the frozen `kind` — a keyframe is not an image the way a
+ * screenshot is, and the exports have always labeled the two differently.
+ */
+function EvidenceStrip({ figures, t }: { figures: EvidenceFigure[]; t: Translate }) {
+  if (figures.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-3">
+      {figures.map(({ thumb, caption }, index) => (
+        <figure key={index} className="max-w-[12rem] space-y-1">
+          <img
+            src={thumb.data_uri}
+            alt={thumb.kind === 'video_keyframe' ? t('report.keyframe_alt') : t('report.thumbnail_alt')}
+            className="h-28 w-auto max-w-full rounded border border-border object-contain"
+          />
+          {caption && (
+            <figcaption className="text-xs text-muted-foreground break-words">{caption}</figcaption>
+          )}
+        </figure>
+      ))}
+    </div>
+  )
 }
 
 export function Report() {
@@ -457,18 +502,7 @@ export function Report() {
                               {itemBody(item)}
                             </p>
                           )}
-                          {itemThumbnails(item).length > 0 && (
-                            <div className="flex flex-wrap gap-2">
-                              {itemThumbnails(item).map((thumb, ti) => (
-                                <img
-                                  key={ti}
-                                  src={thumb.data_uri}
-                                  alt={t('report.thumbnail_alt')}
-                                  className="max-h-28 rounded border border-border"
-                                />
-                              ))}
-                            </div>
-                          )}
+                          <EvidenceStrip figures={itemFigures(item)} t={t} />
                           <input
                             key={`note-${item.id}`}
                             defaultValue={item.note ?? ''}

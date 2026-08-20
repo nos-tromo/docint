@@ -822,7 +822,7 @@ def test_html_renders_finding_thumbnail_with_kind_label(monkeypatch: pytest.Monk
     """A finding's thumbnail renders as an inline img row labeled by its kind."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     html = R.render_html(_report_with_thumbnails())
-    assert f'<img class="thumb" src="{_DATA_URI}"' in html
+    assert f'<figure class="evidence"><img src="{_DATA_URI}"' in html
     assert ui_string("report_label_video_keyframe") in html
 
 
@@ -830,7 +830,7 @@ def test_html_renders_chat_source_thumbnails(monkeypatch: pytest.MonkeyPatch) ->
     """A chat answer's image sources render beneath the source list."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     html = R.render_html(_report_with_thumbnails())
-    assert html.count(f'<img class="thumb" src="{_DATA_URI}"') == 2
+    assert html.count(f'<figure class="evidence"><img src="{_DATA_URI}"') == 2
     assert ui_string("report_label_image_evidence") in html
 
 
@@ -852,7 +852,7 @@ def test_non_image_data_uri_is_never_rendered(monkeypatch: pytest.MonkeyPatch) -
     md = R.render_markdown(report)
     assert "javascript:alert(1)" not in html
     assert "evil.example" not in html
-    assert '<img class="thumb"' not in html
+    assert '<figure class="evidence"' not in html
     assert "![" not in md
 
 
@@ -863,3 +863,56 @@ def test_csv_bundle_ignores_thumbnails(monkeypatch: pytest.MonkeyPatch) -> None:
     with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
         for name in bundle.namelist():
             assert _DATA_URI not in bundle.read(name).decode("utf-8")
+
+
+def _report_with_numbered_image_sources() -> dict[str, Any]:
+    """A chat answer citing two images, numbered as the generator saw them."""
+    report = _report()
+    report["items"][0]["snapshot"]["sources"] = [
+        {
+            "filename": "chart.png",
+            "citation_index": 1,
+            "thumbnail": {"data_uri": _DATA_URI, "kind": "image"},
+        },
+        {
+            "filename": "photo.jpg",
+            "citation_index": 2,
+            "thumbnail": {"data_uri": _DATA_URI, "kind": "image"},
+        },
+    ]
+    return report
+
+
+def test_html_chat_figures_carry_the_citation_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Side-by-side figures are captioned with the number the answer cites."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    html = R.render_html(_report_with_numbered_image_sources())
+    assert '<div class="evidence-strip">' in html
+    assert "<figcaption>[1] chart.png</figcaption>" in html
+    assert "<figcaption>[2] photo.jpg</figcaption>" in html
+    assert "<li>[1] chart.png</li>" in html
+
+
+def test_html_finding_figure_has_no_caption(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finding holds one figure and names its source in the provenance rows."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    html = R.render_html(_report_with_thumbnails())
+    finding = html.split(ui_string("report_label_video_keyframe"))[1]
+    assert "<figcaption>" not in finding.split("</table>")[0]
+
+
+def test_markdown_chat_figures_carry_the_citation_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Markdown captions each figure on its own line beneath the image."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_report_with_numbered_image_sources())
+    assert f"![[1] chart.png]({_DATA_URI})" in md
+    assert "*[1] chart.png*" in md
+    assert "- [2] photo.jpg" in md
+
+
+def test_sources_without_citation_index_are_not_renumbered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An older snapshot keeps bare filenames — a made-up number would contradict the answer."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    html = R.render_html(_report_with_thumbnails())
+    assert "<li>a.pdf (Page 2)</li>" in html
+    assert "<figcaption>a.pdf</figcaption>" in html

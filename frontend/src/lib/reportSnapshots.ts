@@ -37,7 +37,13 @@ export function chatAnswerSnapshot(params: {
         // provenance). Conditional like `translation`: absent keys keep old
         // snapshots byte-identical.
         ...(s.image_id ? { image_id: s.image_id, image_collection: s.image_collection ?? null } : {}),
-        ...(s.file_hash ? { file_hash: s.file_hash } : {})
+        ...(s.file_hash ? { file_hash: s.file_hash } : {}),
+        // The number the generator cited this snippet by. Exports print it
+        // beside the source and under its figure, so a reader can tell which
+        // of several images the answer's [2] meant. Absent for sources that
+        // never reached the prompt — a positional number invented here would
+        // contradict the answer's own markers.
+        ...(typeof s.citation_index === 'number' ? { citation_index: s.citation_index } : {})
       }))
     }
   }

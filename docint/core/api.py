@@ -65,7 +65,6 @@ from docint.utils.env_cfg import (
     load_frontend_env,
     load_hate_speech_env,
     load_host_env,
-    load_image_ingestion_config,
     load_language_env,
     load_metrics_env,
     load_ner_env,
@@ -1141,6 +1140,12 @@ class ReportItemIn(BaseModel):
     dedupe_key: str
     snapshot: dict[str, Any]
     note: str | None = None
+    # The logical collection the artifact was taken from. A report is bound to
+    # one collection, but the client's active collection is the authority on
+    # where this artifact's evidence lives -- the two disagree while an item is
+    # added from a collection the report was not created in, and the companion
+    # lookup must follow the artifact, not the report.
+    collection: str | None = None
 
 
 class TranslateIn(BaseModel):
@@ -2638,6 +2643,7 @@ def _enrich_snapshot_thumbnails(
     artifact_type: str,
     report: dict[str, Any],
     principal: Principal,
+    collection: str | None = None,
 ) -> dict[str, Any]:
     """Freeze visual evidence into a report snapshot at add-time.
 
@@ -2647,10 +2653,16 @@ def _enrich_snapshot_thumbnails(
     it with no Qdrant access, and the report survives re-ingestion or
     collection deletion like the rest of the frozen snapshot.
 
-    The companion collection is derived from the *report's own* collection via
-    the caller's ownership mapping — a snapshot's ``image_collection`` is
-    treated as a cross-check, never as an address, so a crafted snapshot
-    cannot make the server read an arbitrary collection.
+    The companion collection is derived from the collection the artifact was
+    taken from — the request's ``collection`` when it names one the caller
+    owns, else the report's own — always through the caller's ownership
+    mapping. A snapshot's ``image_collection`` is treated as a cross-check,
+    never as an address, so a crafted snapshot cannot make the server read an
+    arbitrary collection. The request's collection leads because that is where
+    the evidence actually lives: an artifact added while working in a
+    collection the report was not created in resolves against a companion that
+    never held its pixels, which is how a chat answer citing three images came
+    to freeze one thumbnail.
 
     Fail-soft by contract: any failure (companion missing, Qdrant down, point
     without a thumbnail) returns the snapshot untouched — a text-only item,
@@ -2661,6 +2673,8 @@ def _enrich_snapshot_thumbnails(
         artifact_type (str): The report item's artifact type.
         report (dict[str, Any]): The owned report the item is being added to.
         principal (Principal): The resolved request principal.
+        collection (str | None): Logical collection the artifact was taken
+            from, when the client sent one.
 
     Returns:
         dict[str, Any]: The snapshot, enriched where possible.
@@ -2674,15 +2688,19 @@ def _enrich_snapshot_thumbnails(
         if not containers:
             return snapshot
 
-        logical = str(report.get("collection_name") or "").strip()
-        if not logical:
+        physical: str | None = None
+        for logical in (collection, report.get("collection_name")):
+            name = str(logical or "").strip()
+            if not name:
+                continue
+            try:
+                physical = _require_owned_collection(name, principal)
+            except HTTPException:
+                continue
+            break
+        if physical is None:
             return snapshot
-        try:
-            physical = _require_owned_collection(logical, principal)
-        except HTTPException:
-            return snapshot
-        template = (load_image_ingestion_config().collection_name or "").strip() or "{collection}_images"
-        companion = template.format(collection=physical) if "{collection}" in template else template
+        companion = rag._image_collection_name(physical)
 
         containers = [c for c in containers if not c.get("image_collection") or c.get("image_collection") == companion]
         image_ids = sorted({str(c["image_id"]) for c in containers})
@@ -3298,7 +3316,8 @@ def add_report_item(
 
     Args:
         report_id (int): The report id.
-        payload (ReportItemIn): Artifact type, dedupe key, snapshot, optional note.
+        payload (ReportItemIn): Artifact type, dedupe key, snapshot, optional
+            note, and the collection the artifact was taken from.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -3308,7 +3327,9 @@ def add_report_item(
         HTTPException: 404 when the report is missing or not owned.
     """
     report = _get_owned_report(report_id, principal.effective_owner)
-    snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
+    snapshot = _enrich_snapshot_thumbnails(
+        payload.snapshot, payload.artifact_type, report, principal, payload.collection
+    )
     item = rag.ensure_report_manager().add_item(
         report_id,
         principal.effective_owner,

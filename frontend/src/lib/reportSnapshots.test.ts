@@ -76,6 +76,22 @@ describe('reportSnapshots', () => {
     expect(sources[1]).not.toHaveProperty('image_collection')
   })
 
+  it('chatAnswerSnapshot carries the citation number, and never invents one', () => {
+    const input = chatAnswerSnapshot({
+      sessionId: 's1',
+      turnIdx: 0,
+      userText: 'q',
+      modelResponse: 'a',
+      sources: [
+        { filename: 'fig.png', text: 'caption', citation_index: 2 },
+        { filename: 'late.png', text: 'never reached the prompt' }
+      ]
+    })
+    const sources = input.snapshot.sources as Record<string, unknown>[]
+    expect(sources[0].citation_index).toBe(2)
+    expect(sources[1]).not.toHaveProperty('citation_index')
+  })
+
   it('finding snapshots carry image identity only when the row has one', () => {
     const withImage = entityFindingSnapshot({ chunk_id: 'c1', image_id: 'img-9' }, 'X [ORG]')
     const withoutImage = hateSpeechSnapshot({ chunk_id: 'c2' })
