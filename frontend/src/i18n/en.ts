@@ -355,6 +355,7 @@ export const en = {
   'report.move_down_aria': 'Move down',
   'report.remove_item_aria': 'Remove item',
   'report.note_placeholder': 'Add a note…',
+  'report.thumbnail_alt': 'Image evidence',
   'report.retry': 'Retry',
   'report.in_report': 'In report',
   'report.retry_title': 'Could not reach the server — click to retry',

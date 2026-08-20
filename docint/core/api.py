@@ -65,6 +65,7 @@ from docint.utils.env_cfg import (
     load_frontend_env,
     load_hate_speech_env,
     load_host_env,
+    load_image_ingestion_config,
     load_language_env,
     load_metrics_env,
     load_ner_env,
@@ -2609,6 +2610,110 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
     return report
 
 
+def _thumbnail_from_point(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Shape a companion point's stored thumbnail into the snapshot's frozen form.
+
+    Args:
+        payload (dict[str, Any]): The ``_images`` point payload.
+
+    Returns:
+        dict[str, Any] | None: The ``thumbnail`` object to freeze, or ``None``
+        when the point predates thumbnails.
+    """
+    b64 = payload.get("thumbnail_b64")
+    if not b64 or not isinstance(b64, str):
+        return None
+    mime = str(payload.get("thumbnail_mime") or "image/jpeg")
+    source_type = str(payload.get("source_type") or "")
+    return {
+        "data_uri": f"data:{mime};base64,{b64}",
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "kind": "video_keyframe" if "keyframe" in source_type else "image",
+    }
+
+
+def _enrich_snapshot_thumbnails(
+    snapshot: dict[str, Any],
+    artifact_type: str,
+    report: dict[str, Any],
+    principal: Principal,
+) -> dict[str, Any]:
+    """Freeze visual evidence into a report snapshot at add-time.
+
+    Sources and findings that carry image identity (``image_id`` from the
+    ``_images`` companion) gain a ``thumbnail`` object holding a data URI, so
+    the stored snapshot stays self-contained: the SPA and every export render
+    it with no Qdrant access, and the report survives re-ingestion or
+    collection deletion like the rest of the frozen snapshot.
+
+    The companion collection is derived from the *report's own* collection via
+    the caller's ownership mapping — a snapshot's ``image_collection`` is
+    treated as a cross-check, never as an address, so a crafted snapshot
+    cannot make the server read an arbitrary collection.
+
+    Fail-soft by contract: any failure (companion missing, Qdrant down, point
+    without a thumbnail) returns the snapshot untouched — a text-only item,
+    never a refused add.
+
+    Args:
+        snapshot (dict[str, Any]): The caller-supplied snapshot (mutated copy semantics: edited in place).
+        artifact_type (str): The report item's artifact type.
+        report (dict[str, Any]): The owned report the item is being added to.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The snapshot, enriched where possible.
+    """
+    try:
+        containers: list[dict[str, Any]] = []
+        if artifact_type == "chat_answer":
+            containers = [s for s in (snapshot.get("sources") or []) if isinstance(s, dict) and s.get("image_id")]
+        elif artifact_type in ("entity_finding", "hate_speech_finding") and snapshot.get("image_id"):
+            containers = [snapshot]
+        if not containers:
+            return snapshot
+
+        logical = str(report.get("collection_name") or "").strip()
+        if not logical:
+            return snapshot
+        try:
+            physical = _require_owned_collection(logical, principal)
+        except HTTPException:
+            return snapshot
+        template = (load_image_ingestion_config().collection_name or "").strip() or "{collection}_images"
+        companion = template.format(collection=physical) if "{collection}" in template else template
+
+        containers = [c for c in containers if not c.get("image_collection") or c.get("image_collection") == companion]
+        image_ids = sorted({str(c["image_id"]) for c in containers})
+        client = getattr(rag, "qdrant_client", None)
+        if not image_ids or client is None:
+            return snapshot
+
+        points, _ = client.scroll(
+            collection_name=companion,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="image_id", match=models.MatchAny(any=image_ids))]
+            ),
+            limit=len(image_ids),
+            with_payload=["image_id", "thumbnail_b64", "thumbnail_mime", "width", "height", "source_type"],
+            with_vectors=False,
+        )
+        thumbnails: dict[str, dict[str, Any]] = {}
+        for point in points:
+            payload = getattr(point, "payload", None) or {}
+            thumb = _thumbnail_from_point(payload)
+            if thumb is not None:
+                thumbnails[str(payload.get("image_id"))] = thumb
+        for container in containers:
+            thumb = thumbnails.get(str(container.get("image_id")))
+            if thumb is not None:
+                container["thumbnail"] = thumb
+    except Exception as exc:
+        logger.warning("Snapshot thumbnail enrichment skipped: {}", exc)
+    return snapshot
+
+
 def _capture_collection_overview(report_id: int, collection: str, principal: Principal) -> dict[str, Any] | None:
     """Build and persist a report's frozen document-overview snapshot.
 
@@ -3202,12 +3307,14 @@ def add_report_item(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
+    report = _get_owned_report(report_id, principal.effective_owner)
+    snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
     item = rag.ensure_report_manager().add_item(
         report_id,
         principal.effective_owner,
         artifact_type=payload.artifact_type,
         dedupe_key=payload.dedupe_key,
-        snapshot=payload.snapshot,
+        snapshot=snapshot,
         note=payload.note,
     )
     if item is None:

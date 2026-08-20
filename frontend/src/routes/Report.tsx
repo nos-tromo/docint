@@ -10,7 +10,7 @@ import {
   SelectMenu
 } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
-import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
+import type { ArtifactType, ReportExportFormat, ReportItem, SnapshotThumbnail } from '@/api/types'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import { ReportSection } from '@/components/report/ReportSection'
 import {
@@ -138,6 +138,23 @@ function itemBody(item: ReportItem): string {
     default:
       return truncate(str(s, 'text'))
   }
+}
+
+function isRenderableThumbnail(value: unknown): value is SnapshotThumbnail {
+  // Snapshots are stored JSON: only an actual inline image may reach an
+  // <img src>, mirroring the server renderers' validation.
+  if (typeof value !== 'object' || value === null) return false
+  const uri = (value as { data_uri?: unknown }).data_uri
+  return typeof uri === 'string' && uri.startsWith('data:image/')
+}
+
+function itemThumbnails(item: ReportItem): SnapshotThumbnail[] {
+  const s = item.snapshot
+  const candidates =
+    item.artifact_type === 'chat_answer'
+      ? (Array.isArray(s.sources) ? s.sources : []).map((src) => (src as { thumbnail?: unknown }).thumbnail)
+      : [s.thumbnail]
+  return candidates.filter(isRenderableThumbnail)
 }
 
 function itemSource(item: ReportItem, t: Translate): string {
@@ -439,6 +456,18 @@ export function Report() {
                             <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
                               {itemBody(item)}
                             </p>
+                          )}
+                          {itemThumbnails(item).length > 0 && (
+                            <div className="flex flex-wrap gap-2">
+                              {itemThumbnails(item).map((thumb, ti) => (
+                                <img
+                                  key={ti}
+                                  src={thumb.data_uri}
+                                  alt={t('report.thumbnail_alt')}
+                                  className="max-h-28 rounded border border-border"
+                                />
+                              ))}
+                            </div>
                           )}
                           <input
                             key={`note-${item.id}`}

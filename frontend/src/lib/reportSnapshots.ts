@@ -31,7 +31,13 @@ export function chatAnswerSnapshot(params: {
         row: s.row ?? null,
         score: s.score ?? null,
         text: s.text ?? s.preview_text ?? '',
-        reference_metadata: s.reference_metadata ?? null
+        reference_metadata: s.reference_metadata ?? null,
+        // Image identity rides along so the server can freeze the source's
+        // thumbnail into the snapshot at add-time (and file_hash as cheap
+        // provenance). Conditional like `translation`: absent keys keep old
+        // snapshots byte-identical.
+        ...(s.image_id ? { image_id: s.image_id, image_collection: s.image_collection ?? null } : {}),
+        ...(s.file_hash ? { file_hash: s.file_hash } : {})
       }))
     }
   }
@@ -56,6 +62,7 @@ export function entityFindingSnapshot(
       score: row.score ?? null,
       entities: (row.entities ?? []).map((e) => ({ text: e.text, type: e.type, score: e.score ?? null })),
       reference_metadata: row.reference_metadata ?? null,
+      ...(row.image_id ? { image_id: row.image_id } : {}),
       ...(translation ? { translation } : {})
     }
   }
@@ -84,6 +91,7 @@ export function hateSpeechSnapshot(row: HateSpeechRow, translation?: Translation
       page: row.page ?? null,
       row: row.row ?? null,
       reference_metadata: row.reference_metadata ?? null,
+      ...(row.image_id ? { image_id: row.image_id } : {}),
       ...(translation ? { translation } : {})
     }
   }

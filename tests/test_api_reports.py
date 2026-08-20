@@ -421,3 +421,208 @@ def test_non_admin_owner_param_does_not_rescope_reports(client: TestClient) -> N
 
     assert client.get(f"/reports/{rid}", params={"owner": "alice"}, headers={"X-Auth-User": "bob"}).status_code == 404
     assert client.get("/reports", params={"owner": "alice"}, headers={"X-Auth-User": "bob"}).json()["reports"] == []
+
+
+# ---------------------------------------------------------------------------
+# Add-time thumbnail enrichment — visual evidence frozen into the snapshot
+# ---------------------------------------------------------------------------
+
+
+class _FakeImageQdrant:
+    """Companion-collection double: answers image_id scrolls from a fixed map."""
+
+    def __init__(self, points_by_image_id: dict[str, dict[str, Any]]) -> None:
+        self.points = points_by_image_id
+        self.scrolled_collections: list[str] = []
+
+    def scroll(self, collection_name: str, **kwargs: Any) -> tuple[list[Any], None]:
+        self.scrolled_collections.append(collection_name)
+        scroll_filter = kwargs.get("scroll_filter")
+        wanted: list[str] = []
+        for cond in getattr(scroll_filter, "must", []) or []:
+            match = getattr(cond, "match", None)
+            wanted = list(getattr(match, "any", None) or ([match.value] if getattr(match, "value", None) else []))
+        hits = [SimpleNamespace(id=i, payload=dict(p)) for i, p in self.points.items() if p.get("image_id") in wanted]
+        return hits, None
+
+
+def _physical(name: str = "docs", owner: str = "test-operator") -> str:
+    resolved = api_module.rag.ensure_collection_owner_manager().resolve(owner, name)
+    assert resolved is not None
+    return resolved
+
+
+def _wire_images(monkeypatch: pytest.MonkeyPatch, points: dict[str, dict[str, Any]]) -> _FakeImageQdrant:
+    """Own 'docs' and hang a fake companion-collection client off the RAG stub."""
+    _own_collection("docs")
+    fake = _FakeImageQdrant(points)
+    monkeypatch.setattr(api_module.rag, "qdrant_client", fake, raising=False)
+    return fake
+
+
+def _chat_payload_with_image(image_collection: str | None) -> dict[str, Any]:
+    source: dict[str, Any] = {
+        "filename": "figure.png",
+        "page": None,
+        "row": None,
+        "score": 0.8,
+        "text": "A bar chart.",
+        "reference_metadata": None,
+        "image_id": "img-1",
+    }
+    if image_collection is not None:
+        source["image_collection"] = image_collection
+    return {
+        "artifact_type": "chat_answer",
+        "dedupe_key": "chat:s1:0",
+        "snapshot": {
+            "session_id": "s1",
+            "turn_idx": 0,
+            "user_text": "What does the chart show?",
+            "model_response": "It shows totals.",
+            "sources": [source],
+        },
+    }
+
+
+def test_add_chat_item_freezes_source_thumbnail(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chat source carrying image identity gains a data-URI thumbnail at add-time."""
+    fake = _wire_images(
+        monkeypatch,
+        {
+            "p1": {
+                "image_id": "img-1",
+                "thumbnail_b64": "QUJD",
+                "thumbnail_mime": "image/jpeg",
+                "width": 320,
+                "height": 180,
+                "source_type": "document",
+            }
+        },
+    )
+    rid = _create(client)["id"]
+    companion = f"{_physical()}_images"
+
+    resp = client.post(f"/reports/{rid}/items", json=_chat_payload_with_image(companion))
+
+    assert resp.status_code == 200, resp.text
+    thumb = resp.json()["snapshot"]["sources"][0]["thumbnail"]
+    assert thumb["data_uri"] == "data:image/jpeg;base64,QUJD"
+    assert thumb["kind"] == "image"
+    assert thumb["width"] == 320
+    assert fake.scrolled_collections == [companion]
+    stored = client.get(f"/reports/{rid}").json()["items"][0]
+    assert stored["snapshot"]["sources"][0]["thumbnail"]["data_uri"] == "data:image/jpeg;base64,QUJD"
+
+
+def test_add_finding_item_freezes_keyframe_thumbnail(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finding whose chunk is a keyframe gains a snapshot-level video thumbnail."""
+    _wire_images(
+        monkeypatch,
+        {
+            "p1": {
+                "image_id": "kf-1",
+                "thumbnail_b64": "REVG",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "video_keyframe",
+            }
+        },
+    )
+    rid = _create(client)["id"]
+    payload = _entity_payload()
+    payload["snapshot"]["image_id"] = "kf-1"
+
+    resp = client.post(f"/reports/{rid}/items", json=payload)
+
+    assert resp.status_code == 200, resp.text
+    thumb = resp.json()["snapshot"]["thumbnail"]
+    assert thumb["data_uri"] == "data:image/jpeg;base64,REVG"
+    assert thumb["kind"] == "video_keyframe"
+
+
+def test_add_item_without_thumbnail_payload_stays_text_only(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A point that predates thumbnails adds cleanly with no thumbnail key."""
+    _wire_images(monkeypatch, {"p1": {"image_id": "img-1", "source_type": "document"}})
+    rid = _create(client)["id"]
+
+    resp = client.post(f"/reports/{rid}/items", json=_chat_payload_with_image(f"{_physical()}_images"))
+
+    assert resp.status_code == 200, resp.text
+    assert "thumbnail" not in resp.json()["snapshot"]["sources"][0]
+
+
+def test_add_item_survives_companion_scroll_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Qdrant hiccup degrades to a text-only item, never a 500."""
+    fake = _wire_images(monkeypatch, {})
+
+    def _boom(collection_name: str, **kwargs: Any) -> tuple[list[Any], None]:
+        raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(fake, "scroll", _boom)
+    rid = _create(client)["id"]
+
+    resp = client.post(f"/reports/{rid}/items", json=_chat_payload_with_image(f"{_physical()}_images"))
+
+    assert resp.status_code == 200, resp.text
+    assert "thumbnail" not in resp.json()["snapshot"]["sources"][0]
+
+
+def test_add_item_ignores_foreign_image_collection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller-supplied companion name is a cross-check, never an address."""
+    fake = _wire_images(
+        monkeypatch,
+        {
+            "p1": {
+                "image_id": "img-1",
+                "thumbnail_b64": "QUJD",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "document",
+            }
+        },
+    )
+    rid = _create(client)["id"]
+
+    resp = client.post(f"/reports/{rid}/items", json=_chat_payload_with_image("uDEADBEEF__other_images"))
+
+    assert resp.status_code == 200, resp.text
+    assert "thumbnail" not in resp.json()["snapshot"]["sources"][0]
+    assert fake.scrolled_collections == []
+
+
+def test_add_item_without_report_collection_skips_enrichment(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A report with no collection has no companion to consult — item still adds."""
+    fake = _wire_images(monkeypatch, {})
+    rid = _create(client, collection=None)["id"]
+
+    resp = client.post(f"/reports/{rid}/items", json=_chat_payload_with_image(None))
+
+    assert resp.status_code == 200, resp.text
+    assert "thumbnail" not in resp.json()["snapshot"]["sources"][0]
+    assert fake.scrolled_collections == []
+
+
+def test_enriched_item_stays_idempotent_on_re_add(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-adding the same dedupe key returns the frozen item unchanged."""
+    _wire_images(
+        monkeypatch,
+        {
+            "p1": {
+                "image_id": "img-1",
+                "thumbnail_b64": "QUJD",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "document",
+            }
+        },
+    )
+    rid = _create(client)["id"]
+    payload = _chat_payload_with_image(f"{_physical()}_images")
+
+    first = client.post(f"/reports/{rid}/items", json=payload).json()
+    second = client.post(f"/reports/{rid}/items", json=payload).json()
+
+    assert second["id"] == first["id"]
+    assert second["snapshot"] == first["snapshot"]

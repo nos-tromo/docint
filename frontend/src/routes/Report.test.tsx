@@ -401,3 +401,80 @@ describe('Report view — the header selector', () => {
     expect(screen.getByRole('button', { name: /New/i })).toBeInTheDocument()
   })
 })
+
+describe('Report view — frozen thumbnails', () => {
+  const DATA_URI = 'data:image/jpeg;base64,/9j/4AAQSkZJRg=='
+
+  beforeEach(() => {
+    useReportStore.setState({ activeReportId: 1 })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useReportStore.setState({ activeReportId: null })
+  })
+
+  it('renders a finding snapshot thumbnail as an inline image', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          ...reportDetail.items[0],
+          snapshot: { ...reportDetail.items[0].snapshot, thumbnail: { data_uri: DATA_URI, kind: 'video_keyframe' } }
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    const img = await screen.findByRole('img', { name: /image evidence/i })
+    expect(img).toHaveAttribute('src', DATA_URI)
+  })
+
+  it('renders one image per chat source that carries a thumbnail', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          id: 12,
+          artifact_type: 'chat_answer',
+          dedupe_key: 'chat:s1:0',
+          position: 0,
+          note: null,
+          snapshot: {
+            user_text: 'q',
+            model_response: 'a',
+            sources: [
+              { filename: 'fig.png', text: 'caption', thumbnail: { data_uri: DATA_URI, kind: 'image' } },
+              { filename: 'a.pdf', text: 'prose' }
+            ]
+          },
+          created_at: null
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    const imgs = await screen.findAllByRole('img', { name: /image evidence/i })
+    expect(imgs).toHaveLength(1)
+    expect(imgs[0]).toHaveAttribute('src', DATA_URI)
+  })
+
+  it('never renders a non-image data URI from a snapshot', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          ...reportDetail.items[0],
+          snapshot: { ...reportDetail.items[0].snapshot, thumbnail: { data_uri: 'javascript:alert(1)' } }
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    await screen.findByText('Acme [ORG]')
+    expect(screen.queryByRole('img', { name: /image evidence/i })).not.toBeInTheDocument()
+  })
+})

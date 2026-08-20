@@ -58,4 +58,29 @@ describe('reportSnapshots', () => {
     expect(hate.dedupe_key).toBe('hate:x')
     expect(entity.dedupe_key).not.toBe(hate.dedupe_key)
   })
+
+  it('chatAnswerSnapshot carries image identity so the server can freeze a thumbnail', () => {
+    const input = chatAnswerSnapshot({
+      sessionId: 's1',
+      turnIdx: 0,
+      userText: 'q',
+      modelResponse: 'a',
+      sources: [
+        { filename: 'fig.png', text: 'caption', image_id: 'img-1', image_collection: 'docs_images', file_hash: 'h1' },
+        { filename: 'a.pdf', page: 2, text: 'prose' }
+      ]
+    })
+    const sources = input.snapshot.sources as Record<string, unknown>[]
+    expect(sources[0]).toMatchObject({ image_id: 'img-1', image_collection: 'docs_images', file_hash: 'h1' })
+    expect(sources[1]).not.toHaveProperty('image_id')
+    expect(sources[1]).not.toHaveProperty('image_collection')
+  })
+
+  it('finding snapshots carry image identity only when the row has one', () => {
+    const withImage = entityFindingSnapshot({ chunk_id: 'c1', image_id: 'img-9' }, 'X [ORG]')
+    const withoutImage = hateSpeechSnapshot({ chunk_id: 'c2' })
+    expect(withImage.snapshot.image_id).toBe('img-9')
+    expect(withoutImage.snapshot).not.toHaveProperty('image_id')
+    expect(hateSpeechSnapshot({ chunk_id: 'c3', image_id: 'kf-1' }).snapshot.image_id).toBe('kf-1')
+  })
 })

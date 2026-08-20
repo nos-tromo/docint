@@ -17,7 +17,7 @@ from typing import Any, Protocol, TypeVar, cast
 from llama_index.core.schema import ImageNode
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
-from PIL import Image
+from PIL import Image, ImageOps
 from qdrant_client import QdrantClient, models
 
 from docint.core.ocr import DocumentOcrEngine, build_engine
@@ -41,6 +41,12 @@ T = TypeVar("T")
 # bursts lasting a few seconds, so an immediate retry lands inside the same
 # burst; the previous no-delay retry only survived by luck.
 RETRY_BACKOFF_SECONDS: float = 2.0
+
+# Report thumbnails are evidence, not display copies: 320px keeps a keyframe
+# or figure recognizable in a PDF export at ~30KB. Promote to env_cfg knobs
+# if a deployment ever needs to tune them.
+_THUMBNAIL_MAX_DIM: int = 320
+_THUMBNAIL_JPEG_QUALITY: int = 70
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -632,6 +638,37 @@ class ImageIngestionService:
         except Exception:
             return None, None
 
+    @staticmethod
+    def _make_thumbnail(image_bytes: bytes) -> tuple[str, str] | None:
+        """Build a small base64 JPEG preview of an image, best effort.
+
+        The thumbnail is what a report can show for visual evidence, so it is
+        generated here — the one moment the raw bytes are guaranteed to exist
+        (video keyframes never touch disk). Capped at ``_THUMBNAIL_MAX_DIM`` on
+        the longest side, EXIF-orientation applied, transparency flattened for
+        JPEG.
+
+        Args:
+            image_bytes (bytes): The raw bytes of the source image.
+
+        Returns:
+            tuple[str, str] | None: ``(base64_jpeg, "image/jpeg")``, or ``None``
+            when the bytes cannot be decoded — an image without a thumbnail
+            still ingests.
+        """
+        try:
+            with Image.open(BytesIO(image_bytes)) as img:
+                upright = ImageOps.exif_transpose(img) or img
+                upright.thumbnail((_THUMBNAIL_MAX_DIM, _THUMBNAIL_MAX_DIM))
+                if upright.mode not in ("RGB", "L"):
+                    upright = upright.convert("RGB")
+                buf = BytesIO()
+                upright.save(buf, format="JPEG", quality=_THUMBNAIL_JPEG_QUALITY)
+            return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
+        except Exception as exc:
+            logger.warning("Thumbnail generation failed: {}", exc)
+            return None
+
     def _existing_by_image_id(
         self,
         image_id: str,
@@ -734,6 +771,41 @@ class ImageIngestionService:
                 payload={"occurrences": occurrences},
                 points=[point_id],
             )
+
+    def _backfill_thumbnail(
+        self,
+        *,
+        collection_name: str,
+        point_id: str,
+        payload: dict[str, Any],
+        image_bytes: bytes,
+    ) -> None:
+        """Stamp a thumbnail onto a cached point written before thumbnails shipped.
+
+        The ``cache_by_hash`` early return never touches the bytes again, so a
+        pre-existing collection would otherwise stay thumbnail-less forever;
+        this is the re-ingest upgrade path. Fail-soft: a write failure leaves
+        the point as it was.
+
+        Args:
+            collection_name (str): Companion collection holding the point.
+            point_id (str): The cached point's id.
+            payload (dict[str, Any]): The cached point's existing payload.
+            image_bytes (bytes): The image bytes of the current occurrence.
+        """
+        if self.qdrant_client is None or payload.get("thumbnail_b64"):
+            return
+        thumbnail = self._make_thumbnail(image_bytes)
+        if thumbnail is None:
+            return
+        try:
+            self.qdrant_client.set_payload(
+                collection_name=collection_name,
+                payload={"thumbnail_b64": thumbnail[0], "thumbnail_mime": thumbnail[1]},
+                points=[point_id],
+            )
+        except Exception as exc:
+            logger.warning("Thumbnail backfill skipped for point '{}': {}", point_id, exc)
 
     def _ensure_collection(self, *, collection_name: str, vector_dim: int) -> None:
         """Create or validate the image collection and vector schema.
@@ -931,6 +1003,12 @@ class ImageIngestionService:
                     payload=existing_payload,
                     occurrence=occurrence,
                 )
+                self._backfill_thumbnail(
+                    collection_name=target_collection,
+                    point_id=existing_point_id,
+                    payload=existing_payload,
+                    image_bytes=image_bytes,
+                )
                 description = str(existing_payload.get("llm_description") or "")
                 existing_tags = existing_payload.get("llm_tags")
                 tags_list = [str(tag) for tag in existing_tags] if isinstance(existing_tags, list) else []
@@ -989,6 +1067,7 @@ class ImageIngestionService:
             )
 
         width, height = self._image_size(image_bytes)
+        thumbnail = self._make_thumbnail(image_bytes)
         image_payload: dict[str, Any] = {
             "image_id": image_id,
             "source_type": asset.source_type,
@@ -1010,6 +1089,8 @@ class ImageIngestionService:
             "image_collection": target_collection,
             "occurrences": [occurrence],
         }
+        if thumbnail:
+            image_payload["thumbnail_b64"], image_payload["thumbnail_mime"] = thumbnail
         if asset.image_path:
             image_payload["file_path"] = str(asset.image_path)
             image_payload["file_name"] = asset.image_path.name
@@ -1158,6 +1239,7 @@ class ImageIngestionService:
             if tags:
                 text_parts.append("Tags: " + ", ".join(tags))
             node_text = "\n\n".join(part for part in text_parts if part).strip()
+            width, height = self._image_size(frame_bytes)
             payload: dict[str, Any] = {
                 "image_id": image_id,
                 "source_type": keyframe_source_type,
@@ -1166,12 +1248,17 @@ class ImageIngestionService:
                 "mime_type": "image/jpeg",
                 "mimetype": "image/jpeg",
                 "file_type": "image/jpeg",
+                "width": width,
+                "height": height,
                 "llm_description": description,
                 "llm_tags": tags,
                 "ocr_text": frame_ocr,
                 "vector_name": self.img_ingestion_config.vector_name,
                 "image_collection": target_collection,
             }
+            thumbnail = self._make_thumbnail(frame_bytes)
+            if thumbnail:
+                payload["thumbnail_b64"], payload["thumbnail_mime"] = thumbnail
             if link_field:
                 payload[link_field] = source_doc_id
             if extra_metadata:

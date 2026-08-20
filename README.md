@@ -474,6 +474,15 @@ that workflow:
 - Reports are **owner-scoped** and persisted server-side in the same SQLite
   store as chat sessions; each item is **snapshotted at add-time**, so later
   re-ingestion of the collection never changes a finished report.
+- **Visual evidence travels with the reference.** When an added artifact points
+  at an image — a chat answer citing a figure or photo, a finding on an image
+  document, a video keyframe — the server freezes a small **thumbnail** into
+  the snapshot (as a self-contained data URI, no live collection needed). The
+  Report tab shows it under the item, and the Markdown/HTML/PDF exports render
+  it inline beside the text ("Image evidence" / "Video keyframe"). Thumbnails
+  are generated at ingestion; collections ingested before this shipped gain
+  them on re-ingest of the same files (video keyframes need a fresh transcript
+  run — see `docint/core/ingest/media_transcribe.py`).
 
 Export a finished report in five formats (also available directly over HTTP):
 

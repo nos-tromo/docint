@@ -791,3 +791,75 @@ def test_overview_csv_preserves_zero_counts() -> None:
     data_row = body.strip().splitlines()[-1].split(",")
     assert data_row[2:5] == ["0", "0", "0"]  # pages,rows,nodes are 0, not blank
     assert ",0,0,0," in body
+
+
+# ---------------------------------------------------------------------------
+# Thumbnails — visual evidence carried in the snapshot
+# ---------------------------------------------------------------------------
+
+_DATA_URI = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+
+
+def _report_with_thumbnails() -> dict[str, Any]:
+    """A report whose chat source and hate finding carry frozen thumbnails."""
+    report = _report()
+    report["items"][0]["snapshot"]["sources"][0]["thumbnail"] = {
+        "data_uri": _DATA_URI,
+        "width": 320,
+        "height": 180,
+        "kind": "image",
+    }
+    report["items"][2]["snapshot"]["thumbnail"] = {
+        "data_uri": _DATA_URI,
+        "width": 320,
+        "height": 180,
+        "kind": "video_keyframe",
+    }
+    return report
+
+
+def test_html_renders_finding_thumbnail_with_kind_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finding's thumbnail renders as an inline img row labeled by its kind."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    html = R.render_html(_report_with_thumbnails())
+    assert f'<img class="thumb" src="{_DATA_URI}"' in html
+    assert ui_string("report_label_video_keyframe") in html
+
+
+def test_html_renders_chat_source_thumbnails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chat answer's image sources render beneath the source list."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    html = R.render_html(_report_with_thumbnails())
+    assert html.count(f'<img class="thumb" src="{_DATA_URI}"') == 2
+    assert ui_string("report_label_image_evidence") in html
+
+
+def test_markdown_renders_thumbnails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Markdown embeds the data URI as an inline image for chat and findings."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_report_with_thumbnails())
+    assert md.count(f"]({_DATA_URI})") == 2
+    assert f"![{ui_string('report_label_video_keyframe')}]" in md
+
+
+def test_non_image_data_uri_is_never_rendered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Snapshots are caller-supplied JSON: only data:image/* reaches an img src."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report_with_thumbnails()
+    report["items"][0]["snapshot"]["sources"][0]["thumbnail"]["data_uri"] = "javascript:alert(1)"
+    report["items"][2]["snapshot"]["thumbnail"] = {"data_uri": "https://evil.example/x.jpg"}
+    html = R.render_html(report)
+    md = R.render_markdown(report)
+    assert "javascript:alert(1)" not in html
+    assert "evil.example" not in html
+    assert '<img class="thumb"' not in html
+    assert "![" not in md
+
+
+def test_csv_bundle_ignores_thumbnails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CSV bundle keeps its fixed columns; the base64 never leaks into a cell."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    payload = R.report_csv_bundle(_report_with_thumbnails())
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        for name in bundle.namelist():
+            assert _DATA_URI not in bundle.read(name).decode("utf-8")

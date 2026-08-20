@@ -152,6 +152,45 @@ def _md_cell(value: Any) -> str:
     return "<br>".join(text.replace("|", "\\|").splitlines())
 
 
+def _thumbnail_view(container: dict[str, Any]) -> tuple[str, str] | None:
+    """Validate a container's frozen thumbnail into ``(data_uri, label)``.
+
+    Snapshots are caller-supplied JSON, so the validation is load-bearing:
+    only a string ``data_uri`` that is actually an inline image
+    (``data:image/…``) may ever reach an ``<img src>`` or a Markdown image —
+    anything else (a ``javascript:`` URI, a remote URL) renders nothing.
+    Shared by the Markdown and HTML renderers so the label stays identical
+    across export formats.
+
+    Args:
+        container (dict[str, Any]): A finding snapshot or a chat source dict
+            that may carry a ``thumbnail`` object.
+
+    Returns:
+        tuple[str, str] | None: ``(data_uri, localized label)``, or ``None``
+        when there is no renderable thumbnail.
+    """
+    thumb = container.get("thumbnail")
+    if not isinstance(thumb, dict):
+        return None
+    data_uri = thumb.get("data_uri")
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:image/"):
+        return None
+    label_key = (
+        "report_label_video_keyframe" if thumb.get("kind") == "video_keyframe" else "report_label_image_evidence"
+    )
+    return data_uri, ui_string(label_key)
+
+
+def _md_thumbnail_row(snap: dict[str, Any]) -> list[str]:
+    """Markdown finding-table row for an optional frozen thumbnail, or []."""
+    view = _thumbnail_view(snap)
+    if view is None:
+        return []
+    data_uri, label = view
+    return [f"| {_md_cell(label)} | ![{_md_cell(label)}]({data_uri}) |"]
+
+
 def _md_translation_row(snap: dict[str, Any]) -> list[str]:
     """Markdown finding-table row for an optional machine-translation, or []."""
     tr = snap.get("translation") or {}
@@ -421,6 +460,9 @@ def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     if sources:
         lines += ["", f"**{ui_string('report_label_sources')}:**"]
         lines += [f"- {_source_oneline(s, include_score=False)}" for s in sources]
+        views = [view for view in (_thumbnail_view(s) for s in sources if isinstance(s, dict)) if view]
+        if views:
+            lines += [""] + [f"![{_md_cell(label)}]({data_uri})" for data_uri, label in views]
     if note:
         lines += ["", f"*{ui_string('report_label_note')}: {note.strip()}*"]
     lines.append("")
@@ -441,6 +483,7 @@ def _md_finding_table(snap: dict[str, Any], note: str | None, *, tag: str, body_
         f"| {_md_cell(tag)} | {_md_cell(chunk)} |",
         "| --- | --- |",
     ]
+    lines += _md_thumbnail_row(snap)
     lines += _md_translation_row(snap)
     posting_text = _posting_text(snap)
     if posting_text:
@@ -668,6 +711,9 @@ table.finding td.f-val { white-space: pre-wrap; overflow-wrap: anywhere; font-si
 }
 .badge .etype { color: #999; font-size: 7.5pt; }
 ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
+img.thumb { max-width: 55mm; max-height: 40mm; border: 1px solid #ddd; }
+.thumbs { margin: 4pt 0; }
+.thumbs img { margin-right: 4pt; }
 .empty { color: #888; font-style: italic; }
 .overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
 table.manifest { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
@@ -725,6 +771,20 @@ def _html_finding_row(label: str, value_html: str) -> str:
     return f'<tr><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
 
 
+def _html_thumbnail_img(data_uri: str, label: str) -> str:
+    """One inline evidence image (data URI already validated by ``_thumbnail_view``)."""
+    return f'<img class="thumb" src="{_esc(data_uri)}" alt="{_esc(label)}">'
+
+
+def _html_thumbnail_row(snap: dict[str, Any]) -> str:
+    """Finding-table row for an optional frozen thumbnail, or ''."""
+    view = _thumbnail_view(snap)
+    if view is None:
+        return ""
+    data_uri, label = view
+    return _html_finding_row(label, _html_thumbnail_img(data_uri, label))
+
+
 def _html_translation_row(snap: dict[str, Any]) -> str:
     """Finding-table row for an optional machine-translation, or ''."""
     tr = snap.get("translation") or {}
@@ -749,6 +809,7 @@ def _html_finding_table(snap: dict[str, Any], note: str | None, *, tag_html: str
     rows = [f'<tr class="f-head"><td colspan="2">{tag_html}</td></tr>']
     if chunk:
         rows.append(f'<tr><td colspan="2" class="f-text">{_esc(chunk)}</td></tr>')
+    rows.append(_html_thumbnail_row(snap))
     rows.append(_html_translation_row(snap))
     posting_text = _posting_text(snap)
     if posting_text:
@@ -770,6 +831,10 @@ def _html_chat(snap: dict[str, Any], note: str | None) -> str:
     if sources:
         items = "".join(f"<li>{_esc(_source_oneline(s, include_score=False))}</li>" for s in sources)
         parts.append(f'<div class="label">{ui_string("report_label_sources")}:</div><ul class="sources">{items}</ul>')
+        views = [view for view in (_thumbnail_view(s) for s in sources if isinstance(s, dict)) if view]
+        if views:
+            imgs = "".join(_html_thumbnail_img(data_uri, label) for data_uri, label in views)
+            parts.append(f'<div class="thumbs">{imgs}</div>')
     parts.append(_html_note(note))
     return "".join(parts)
 

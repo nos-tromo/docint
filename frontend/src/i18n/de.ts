@@ -365,6 +365,7 @@ export const de: Strings = {
   'report.move_down_aria': 'Nach unten verschieben',
   'report.remove_item_aria': 'Eintrag entfernen',
   'report.note_placeholder': 'Notiz hinzufügen…',
+  'report.thumbnail_alt': 'Bildbeweis',
   'report.retry': 'Wiederholen',
   'report.in_report': 'Im Bericht',
   'report.retry_title': 'Server nicht erreichbar — zum Wiederholen klicken',
