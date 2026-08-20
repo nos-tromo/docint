@@ -92,11 +92,44 @@ describe('FilterBuilder disclosure', () => {
     render(<FilterBuilder />)
 
     await userEvent.click(screen.getByRole('button', { name: /^rule$/i }))
-    await userEvent.type(screen.getByPlaceholderText('field'), 'mimetype')
+    await userEvent.type(screen.getByPlaceholderText(/field/i), 'mimetype')
 
     expect(useChatFiltersStore.getState().customRules[0].field).toBe('mimetype')
 
     await userEvent.click(screen.getByRole('button', { name: /remove rule/i }))
     expect(useChatFiltersStore.getState().customRules).toHaveLength(0)
+  })
+
+  it('suggests known reference-metadata fields via a datalist, without blocking free text', async () => {
+    // The user's own bug report: an author id lives in payload
+    // (reference_metadata.author_id), not in the indexed body text the
+    // group-by dropdown facets. A bare free-text field gave no hint that
+    // path exists — the datalist is discoverability, not a replacement.
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.getState().setFilterEnabled(true)
+    const { container } = render(<FilterBuilder />)
+
+    await userEvent.click(screen.getByRole('button', { name: /^rule$/i }))
+
+    const datalist = container.querySelector('datalist')
+    expect(datalist).not.toBeNull()
+
+    const authorIdOption = datalist!.querySelector('option[value="reference_metadata.author_id"]')
+    expect(authorIdOption).not.toBeNull()
+    expect(authorIdOption).toHaveAttribute('label', 'Author ID')
+
+    // Body-text fields are not useful equality filters and stay out of the
+    // list, mirroring the pill exclusions in referenceMetadata.ts.
+    expect(datalist!.querySelector('option[value="reference_metadata.text"]')).toBeNull()
+    expect(datalist!.querySelector('option[value="reference_metadata.parent_text"]')).toBeNull()
+    expect(datalist!.querySelector('option[value="reference_metadata.anchor_text"]')).toBeNull()
+
+    // The field input references the shared list and still accepts an
+    // arbitrary typed path — the picker augments, it never replaces.
+    const fieldInput = screen.getByPlaceholderText(/field/i)
+    expect(fieldInput).toHaveAttribute('list', datalist!.id)
+
+    await userEvent.type(fieldInput, 'file_name')
+    expect(useChatFiltersStore.getState().customRules[0].field).toBe('file_name')
   })
 })

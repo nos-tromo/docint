@@ -1,5 +1,15 @@
 import { useState } from 'react'
-import { Banner, Button, Card, DownloadLink, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
+import {
+  Banner,
+  Button,
+  Card,
+  ChevronsUpDownIcon,
+  DownloadLink,
+  Input,
+  SearchButton,
+  SelectMenu,
+  XIcon
+} from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
@@ -211,17 +221,28 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
           {t('search.mode_groups')}
         </Button>
         {mode === 'groups' && (
-          <SelectMenu
-            options={GROUP_BY_FIELDS.map((field) => ({
-              value: field,
-              label: t(`search.group_by.${field}`)
-            }))}
-            value={groupBy}
-            onChange={(value) => setGroupBy(value as GroupByField)}
-            label={t('search.group_by')}
-            className="min-w-0"
-            triggerClassName="text-xs font-medium"
-          />
+          <>
+            {/* Marks the picker beside it as a grouping/sorting axis, not a
+                filter — the seam a user hit when they typed an author id into
+                the search box next to it expecting a match. Both directions
+                at once, since nothing here is "currently sorted". Decorative:
+                the picker's own label already carries the accessible name. */}
+            <ChevronsUpDownIcon
+              aria-hidden="true"
+              className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+            />
+            <SelectMenu
+              options={GROUP_BY_FIELDS.map((field) => ({
+                value: field,
+                label: t(`search.group_by.${field}`)
+              }))}
+              value={groupBy}
+              onChange={(value) => setGroupBy(value as GroupByField)}
+              label={t('search.group_by')}
+              className="min-w-0"
+              triggerClassName="text-xs font-medium"
+            />
+          </>
         )}
       </div>
 

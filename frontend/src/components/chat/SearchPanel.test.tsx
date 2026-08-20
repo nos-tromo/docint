@@ -1112,6 +1112,23 @@ describe('SearchPanel groups mode', () => {
     expect(await screen.findByTestId('select-all-over-budget')).toHaveTextContent(/would exceed/i)
   })
 
+  it('marks the group-by picker with a sort icon, present only beside it', async () => {
+    // The picker groups/sorts what's already loaded; it does not filter or
+    // search. Hits mode has neither the icon nor the picker it marks.
+    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
+
+    const { container } = renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    expect(container.querySelector('[data-testid="search-mode-row"] > svg')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+
+    const icon = container.querySelector('[data-testid="search-mode-row"] > svg')
+    expect(icon).not.toBeNull()
+    expect(icon).toHaveAttribute('aria-hidden', 'true')
+  })
+
   it('keeps one summary row present across both modes', async () => {
     mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
 

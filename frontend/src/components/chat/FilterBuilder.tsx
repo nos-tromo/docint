@@ -4,9 +4,13 @@ import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
 import { cn } from '@/lib/cn'
 import { SlidersIcon } from '@/components/common/icons'
+import { referenceMetadataFieldOptions } from '@/lib/referenceMetadata'
 import { useT } from '@/i18n/LanguageContext'
 
 const OPERATORS = ['eq', 'neq', 'contains', 'gte', 'lte', 'in']
+
+/** One `<datalist>` id, referenced by every custom-rule field input. */
+const FIELD_OPTIONS_ID = 'filter-field-options'
 
 /**
  * The metadata filters, as an icon disclosure beside the Chat heading.
@@ -60,6 +64,19 @@ export function FilterBuilder() {
 
   return (
     <div className="relative" ref={root}>
+      {/* One list, shared by every custom-rule field input below via `list`.
+          Suggests the known reference-metadata filter paths (e.g.
+          `reference_metadata.author_id`) without replacing free text — a
+          picker that *replaced* the input would block an arbitrary payload
+          path like `file_name` or `page_number`. Always mounted: it renders
+          nothing itself, and gating it behind `open` would only complicate
+          this component for no visible gain. */}
+      <datalist id={FIELD_OPTIONS_ID}>
+        {referenceMetadataFieldOptions(t).map((opt) => (
+          <option key={opt.value} value={opt.value} label={opt.label} />
+        ))}
+      </datalist>
+
       {open && (
         // Capped against the viewport so a short window cannot cut the panel
         // off at the bottom.
@@ -130,6 +147,7 @@ export function FilterBuilder() {
                         value={r.field}
                         onChange={(e) => s.updateRule(r.id, { field: e.target.value })}
                         placeholder={t('chat.field_placeholder')}
+                        list={FIELD_OPTIONS_ID}
                       />
                       <Select
                         value={r.operator}

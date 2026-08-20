@@ -121,7 +121,7 @@ export const en = {
   'chat.date_to': 'Date to',
   'chat.custom_rules': 'Custom rules',
   'chat.add_rule': 'Rule',
-  'chat.field_placeholder': 'field',
+  'chat.field_placeholder': 'field (or pick)',
   'chat.value_placeholder': 'value',
   'chat.remove_rule_aria': 'Remove rule',
   'chat.graph_debug': 'Graph debug',
