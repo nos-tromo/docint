@@ -151,6 +151,7 @@ function isRenderableThumbnail(value: unknown): value is SnapshotThumbnail {
 interface EvidenceFigure {
   thumb: SnapshotThumbnail
   caption: string
+  filename: string
 }
 
 /**
@@ -162,7 +163,9 @@ interface EvidenceFigure {
 function itemFigures(item: ReportItem): EvidenceFigure[] {
   const s = item.snapshot
   if (item.artifact_type !== 'chat_answer') {
-    return isRenderableThumbnail(s.thumbnail) ? [{ thumb: s.thumbnail, caption: '' }] : []
+    return isRenderableThumbnail(s.thumbnail)
+      ? [{ thumb: s.thumbnail, caption: '', filename: str(s, 'filename') }]
+      : []
   }
   const sources = Array.isArray(s.sources) ? s.sources : []
   const figures: EvidenceFigure[] = []
@@ -171,7 +174,11 @@ function itemFigures(item: ReportItem): EvidenceFigure[] {
     if (!isRenderableThumbnail(source.thumbnail)) continue
     const name = typeof source.filename === 'string' ? source.filename : ''
     const index = typeof source.citation_index === 'number' ? source.citation_index : null
-    figures.push({ thumb: source.thumbnail, caption: (index != null ? `[${index}] ${name}` : name).trim() })
+    figures.push({
+      thumb: source.thumbnail,
+      caption: (index != null ? `[${index}] ${name}` : name).trim(),
+      filename: name
+    })
   }
   return figures
 }
@@ -194,16 +201,28 @@ function itemSource(item: ReportItem, t: Translate): string {
  * screenshot is, and the exports have always labeled the two differently.
  */
 function EvidenceStrip({ figures, t }: { figures: EvidenceFigure[]; t: Translate }) {
+  const openPreview = useUiStore((s) => s.openPreview)
   if (figures.length === 0) return null
   return (
     <div className="flex flex-wrap gap-3">
-      {figures.map(({ thumb, caption }, index) => (
+      {figures.map(({ thumb, caption, filename }, index) => (
         <figure key={index} className="max-w-[12rem] space-y-1">
-          <img
-            src={thumb.data_uri}
-            alt={thumb.kind === 'video_keyframe' ? t('report.keyframe_alt') : t('report.thumbnail_alt')}
-            className="h-28 w-auto max-w-full rounded border border-border object-contain"
-          />
+          {/* Enlarged from the frozen bytes the snapshot carries, never from
+              the source store: a report is meant to outlive the collection it
+              was drawn from, so its evidence must not need one. */}
+          <button
+            type="button"
+            onClick={() =>
+              openPreview({ filename: filename || t('common.unknown_source'), data_uri: thumb.data_uri })
+            }
+            className="block cursor-pointer rounded border border-border overflow-hidden hover:border-foreground/40 focus-visible:ring-1 focus-visible:ring-primary outline-none"
+          >
+            <img
+              src={thumb.data_uri}
+              alt={thumb.kind === 'video_keyframe' ? t('report.keyframe_alt') : t('report.thumbnail_alt')}
+              className="h-28 w-auto max-w-full object-contain"
+            />
+          </button>
           {caption && (
             <figcaption className="text-xs text-muted-foreground break-words">{caption}</figcaption>
           )}

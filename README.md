@@ -496,6 +496,17 @@ that workflow:
   screenshot, a photographed page, a video keyframe) renders the source image
   beside it; clicking it opens the full-size preview. That view is live rather
   than frozen — nothing is being exported there.
+- **The frozen evidence is zoomable, and it is all inside the file.** Thumbnails
+  are generated at 768px (~355 dpi at the size the exports print a figure), so a
+  reader can zoom into a PDF page and still read what a poster or a slide says.
+  Every export embeds them as data URIs — an exported HTML or PDF references
+  nothing outside itself and keeps working after the collection is deleted — and
+  clicking a figure in the Report tab enlarges it from those same bytes. Roughly
+  26 KB per image inside a report snapshot; a 20-image report gains about half a
+  megabyte.
+  Collections ingested before this gain the larger thumbnails on the next
+  re-ingest of the same files, which also removes a duplicate copy earlier
+  versions stored alongside each point.
 
 Export a finished report in five formats (also available directly over HTTP):
 

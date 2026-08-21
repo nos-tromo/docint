@@ -3,11 +3,16 @@ import { persist } from 'zustand/middleware'
 import { setOwnerParam } from '@/api/client'
 import { useReportStore } from '@/stores/report'
 
-export interface PreviewModal {
-  collection: string
-  file_hash: string
-  filename: string
-}
+/**
+ * What the app-wide preview is showing. Either the stored source file,
+ * addressed by collection and content hash, or frozen evidence carried in a
+ * report snapshot — a self-contained data URI, which is what lets a report be
+ * enlarged after the collection it came from is gone. The two arms are
+ * exclusive: frozen evidence has no collection to resolve against.
+ */
+export type PreviewModal =
+  | { filename: string; collection: string; file_hash: string; data_uri?: never }
+  | { filename: string; data_uri: string; collection?: never; file_hash?: never }
 
 interface UiState {
   selectedCollection: string | null

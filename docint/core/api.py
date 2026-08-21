@@ -2618,6 +2618,12 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
 def _thumbnail_from_point(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Shape a companion point's stored thumbnail into the snapshot's frozen form.
 
+    ``width``/``height`` describe the **source** image, not the thumbnail — they
+    are the point's own dimensions, kept as provenance. Nothing sizes a figure
+    from them (the renderers and the SPA cap by CSS, and the enlarged view uses
+    the image's natural size), and doing so would render a 768px thumbnail at
+    the original's dimensions.
+
     Args:
         payload (dict[str, Any]): The ``_images`` point payload.
 

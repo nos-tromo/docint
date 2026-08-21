@@ -161,3 +161,37 @@ describe('PreviewDialog type-based rendering', () => {
     expect(screen.getByTitle('handbook.pdf')).toBeInTheDocument()
   })
 })
+
+describe('PreviewDialog — frozen evidence', () => {
+  const DATA_URI = 'data:image/jpeg;base64,/9j/4AAQSkZJRg=='
+
+  it('enlarges a snapshot thumbnail with no collection in play', async () => {
+    // A report outlives its collection, so its evidence must enlarge from the
+    // bytes it carries rather than from the source store.
+    render(<PreviewDialog />)
+    useUiStore.getState().openPreview({ filename: 'plakat.png', data_uri: DATA_URI })
+
+    await screen.findByRole('dialog')
+    expect(screen.getByRole('img', { name: 'plakat.png' })).toHaveAttribute('src', DATA_URI)
+  })
+
+  it('offers no new-tab link for frozen evidence', async () => {
+    // Browsers block top-level navigation to a data: URL, so the link would
+    // promise something it cannot do.
+    render(<PreviewDialog />)
+    useUiStore.getState().openPreview({ filename: 'plakat.png', data_uri: DATA_URI })
+
+    await screen.findByRole('dialog')
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+  })
+
+  it('shows frozen evidence whatever the filename suggests', async () => {
+    // The frozen bytes are always a JPEG thumbnail; the name they carry is the
+    // source document's, which may be a PDF or a video.
+    render(<PreviewDialog />)
+    useUiStore.getState().openPreview({ filename: 'clip.mp4', data_uri: DATA_URI })
+
+    await screen.findByRole('dialog')
+    expect(screen.getByRole('img', { name: 'clip.mp4' })).toHaveAttribute('src', DATA_URI)
+  })
+})

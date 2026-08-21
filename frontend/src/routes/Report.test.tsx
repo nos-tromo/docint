@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Report } from './Report'
 import { useReportStore } from '@/stores/report'
+import { useUiStore } from '@/stores/ui'
 
 const overview = {
   collection: 'docs',
@@ -514,5 +515,70 @@ describe('Report view — frozen thumbnails', () => {
 
     await screen.findByText('Acme [ORG]')
     expect(screen.queryByRole('img', { name: /image evidence/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('Report view — enlarging frozen evidence', () => {
+  const DATA_URI = 'data:image/jpeg;base64,/9j/4AAQSkZJRg=='
+
+  beforeEach(() => {
+    useReportStore.setState({ activeReportId: 1 })
+    useUiStore.setState({ previewModal: null })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useReportStore.setState({ activeReportId: null })
+  })
+
+  it('enlarges a chat figure from the frozen bytes, not from the source store', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          id: 14,
+          artifact_type: 'chat_answer',
+          dedupe_key: 'chat:s1:0',
+          position: 0,
+          note: null,
+          snapshot: {
+            user_text: 'q',
+            model_response: 'a',
+            sources: [
+              { filename: 'chart.png', citation_index: 1, thumbnail: { data_uri: DATA_URI, kind: 'image' } }
+            ]
+          },
+          created_at: null
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    await userEvent.click(await screen.findByRole('img', { name: /image evidence/i }))
+
+    expect(useUiStore.getState().previewModal).toEqual({ filename: 'chart.png', data_uri: DATA_URI })
+  })
+
+  it('enlarges a finding figure by its own filename', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          ...reportDetail.items[0],
+          snapshot: {
+            ...reportDetail.items[0].snapshot,
+            filename: 'folie.jpg',
+            thumbnail: { data_uri: DATA_URI, kind: 'video_keyframe' }
+          }
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    await userEvent.click(await screen.findByRole('img', { name: /video keyframe/i }))
+
+    expect(useUiStore.getState().previewModal).toEqual({ filename: 'folie.jpg', data_uri: DATA_URI })
   })
 })
