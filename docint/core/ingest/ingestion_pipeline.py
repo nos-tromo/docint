@@ -956,12 +956,13 @@ class DocumentIngestionPipeline:
         postings table and a media manifest.
         """
         from docint.core.ingest.social_linker import SocialLinker
-        from docint.utils.env_cfg import load_nextext_env
+        from docint.utils.env_cfg import load_ingestion_env, load_nextext_env
         from docint.utils.nextext_client import NextextClient
 
         manifest = self._open_ingest_manifest()
         try:
             nextext_cfg = load_nextext_env()
+            ingestion_cfg = load_ingestion_env()
             result = SocialLinker(
                 image_service=self.image_ingestion_service or ImageIngestionService(),
                 nextext_client=NextextClient(nextext_cfg),
@@ -969,6 +970,8 @@ class DocumentIngestionPipeline:
                 manifest=manifest,
                 keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
                 nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
+                album_link_enabled=ingestion_cfg.social_album_link_enabled,
+                album_tolerance_s=ingestion_cfg.social_album_tolerance_s,
             ).run(self.data_dir)
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)

@@ -554,6 +554,28 @@ no directory of its own, the same basename occurring in two subfolders is
 *ambiguous*: a copy sitting beside the manifest wins, and otherwise the row is
 skipped rather than linked to a guess.
 
+**Albums (multi-item posts).** Some exports carry no media→posting key at all:
+`Media ID` and `Network ID` both hold the media's *own* network message id. A
+Telegram album is then N consecutive messages recorded as N media rows but a
+single posting, filed under the group's **last** message id — so all but one
+row names no posting. Rows the manifest cannot join are attached to the first
+posting in the same channel whose message number is at or above their own,
+**and only when the two timestamps agree** within `SOCIAL_ALBUM_TOLERANCE_S`
+(default 5 s). That corroboration is what keeps the inference honest: when the
+owning posting is missing from the export, the next one along is hours away and
+the row is left unlinked rather than attributed to the wrong post. Exports that
+do carry a key are untouched — the inference runs only after the declared key
+fails, and needs `Posting ID` to start with the row's own `Author ID`, which a
+Meta-style `<postingId>_<accountId>` id does not. Set
+`SOCIAL_ALBUM_LINK_ENABLED=false` to switch it off. The counts land in one
+ingest log line:
+
+```
+Social linker: 352 media linked (94 by manifest key, 258 by album inference), 0 skipped
+(0 with no matching posting, 0 with no local file, 0 with an ambiguous filename)
+across 352 manifest rows.
+```
+
 **Linker.** During ingestion, `posting_uuid` is written into every artifact
 node (image embedding, keyframe, Nextext transcript segment). At retrieval
 time, `_attach_posting_group` reads that UUID from `reference_metadata.uuid`
