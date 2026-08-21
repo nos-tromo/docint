@@ -431,6 +431,8 @@ sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 | `INGEST_QUEUE_MAX_SIZE` | `4` | Documents buffered between the reader and the embedder when overlap is on. |
 | `STREAMING_READERS_ENABLED` | `true` | Readers yield documents as they parse rather than materialising a whole file first, which bounds peak memory on large CSV/JSONL files. |
 | `MEDIA_FILETYPES` | see below | Audio/video extensions the standalone media pre-pass claims, comma-separated; a leading dot is added if omitted and entries are lowercased. These route through Nextext, **not** the generic reader whitelist. Default: `.mp4,.mov,.mkv,.webm,.avi,.m4v,.mpg,.mpeg,.mp3,.m4a,.wav,.flac,.aac,.ogg,.opus,.wma`. |
+| `SOCIAL_ALBUM_LINK_ENABLED` | `true` | Attach a social export's media rows that name no known posting to one by album inference — see [Social media exports](ingestion.md#social-media-exports). Exports that carry a working media→posting key never reach this path. |
+| `SOCIAL_ALBUM_TOLERANCE_S` | `5.0` | Maximum timestamp disagreement, in seconds, allowed when accepting such an inferred link. Clamped to a minimum of `0`. The tight default is deliberate: it is the only guard against silent mis-attribution when the owning posting is missing from a partial export. |
 
 Ingest *jobs* (the server-owned runs behind `POST /ingest/finalize`) take one
 knob of their own, read by `load_ingest_concurrency()`:

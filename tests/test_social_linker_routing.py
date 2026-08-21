@@ -475,3 +475,88 @@ def test_run_skips_absolute_or_traversal_media_reference(tmp_path: Path) -> None
     assert img.images == []
     assert not img.keyframe_calls
     assert not result.transcript_documents
+
+
+def _write_album_export(root: Path) -> None:
+    """Write a keyless album export with media nested in subdirectories.
+
+    Mirrors the default multimedia batch output: the two tables sit at the
+    root while the files live under ``dir/photos`` and ``dir/videos``. Channel
+    ``9900112233`` publishes one three-message album recorded as three media
+    rows but a single posting, filed under the group's last message id — so the
+    manifest names a known posting for only one of the three rows, and the
+    other two can be attached only by album inference.
+
+    Args:
+        root: Temporary directory in which to create the export.
+    """
+    postings_data: dict[str, list[str]] = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
+    postings_data["UUID"] = ["u1", "u2"]
+    postings_data["Posting ID"] = ["990011223303", "990011223309"]
+    postings_data["Author ID"] = ["9900112233", "9900112233"]
+    postings_data["Timestamp"] = ["2026-03-04 21:30:56+00", "2026-03-05 08:00:00+00"]
+    postings_data["Text Content"] = ["album post", "later post"]
+    postings_data["Network"] = ["Telegram", "Telegram"]
+    postings_data["Author"] = ["Jane Poster", "Jane Poster"]
+    pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False)
+    pd.DataFrame(
+        {
+            "Media ID": ["990011223301", "990011223302", "990011223303"],
+            "Network ID": ["990011223301", "990011223302", "990011223303"],
+            "Exported media filename": ["shot.jpg", "clip.mp4", "last.jpg"],
+            "Timestamp": [
+                "2026-03-04 21:30:55+00",
+                "2026-03-04 21:30:56+00",
+                "2026-03-04 21:30:56+00",
+            ],
+        }
+    ).to_csv(root / "media.csv", index=False)
+    photos = root / "dir" / "photos"
+    videos = root / "dir" / "videos"
+    photos.mkdir(parents=True)
+    videos.mkdir(parents=True)
+    (photos / "shot.jpg").write_bytes(b"\xff\xd8\xff")
+    (photos / "last.jpg").write_bytes(b"\xff\xd8\xff")
+    (videos / "clip.mp4").write_bytes(b"video")
+
+
+def test_run_links_nested_media_including_album_members(tmp_path: Path) -> None:
+    """A nested, keyless album export links every media row to its posting.
+
+    Covers both halves of the Telegram failure at once: the files sit in
+    subdirectories rather than beside the manifest, and two of the three rows
+    name no posting of their own.
+    """
+    _write_album_export(tmp_path)
+
+    img = _FakeImageService()
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    assert [asset.source_doc_id for asset in img.images] == ["u1", "u1"]
+    assert img.keyframe_calls[0]["source_doc_id"] == "u1"
+    consumed_names = {path.name for path in result.consumed_paths}
+    assert {"media.csv", "shot.jpg", "last.jpg", "clip.mp4"}.issubset(consumed_names)
+    assert all(segment.metadata["posting_uuid"] == "u1" for segment in result.transcript_documents)
+
+
+def test_run_leaves_album_members_unlinked_when_disabled(tmp_path: Path) -> None:
+    """``album_link_enabled=False`` restores manifest-key-only linking.
+
+    The operator keeps a way back to the declared-key behaviour; only the row
+    whose own ``Media ID`` names a posting survives.
+    """
+    _write_album_export(tmp_path)
+
+    img = _FakeImageService()
+    result = SocialLinker(
+        image_service=img,
+        nextext_client=_FakeNextext(),
+        target_collection="c",
+        album_link_enabled=False,
+    ).run(tmp_path)
+
+    assert [asset.source_doc_id for asset in img.images] == ["u1"]
+    assert not img.keyframe_calls
+    consumed_names = {path.name for path in result.consumed_paths}
+    assert "last.jpg" in consumed_names
+    assert "shot.jpg" not in consumed_names

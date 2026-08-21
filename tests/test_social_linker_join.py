@@ -6,6 +6,7 @@ import pandas as pd
 
 from docint.core.ingest.social_linker import (
     _derive_posting_id,
+    build_posting_album_index,
     build_posting_index,
     resolve_media_rows,
     strip_counter,
@@ -194,3 +195,116 @@ def test_resolve_prefers_the_manifest_directory_on_basename_clash(tmp_path: Path
 
     links = resolve_media_rows(media, build_posting_index(postings), tmp_path, manifest_dir=tmp_path)
     assert [link.path for link in links] == [beside]
+
+
+def _album_export() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return a (postings, media) pair shaped like a keyless album export.
+
+    Channel ``9900112233`` posts one album of three messages (``01``-``03``)
+    recorded as three media rows but a single posting, filed under the group's
+    last message id — so only message ``03`` names a posting outright.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame]: The postings and media tables.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["990011223303"],
+            "Author ID": ["9900112233"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["990011223301", "990011223302", "990011223303"],
+            "Network ID": ["990011223301", "990011223302", "990011223303"],
+            "Exported media filename": ["a.jpg", "b.jpg", "c.jpg"],
+            "Timestamp": ["2026-03-04 21:30:55+00", "2026-03-04 21:30:56+00", "2026-03-04 21:30:56+00"],
+        }
+    )
+    return postings, media
+
+
+def test_album_inference_links_members_that_name_no_posting(tmp_path: Path) -> None:
+    """Album members link to the posting closing their group.
+
+    Only the album's last message is itself a posting; the earlier two carry
+    their own message ids and would otherwise be dropped as orphans.
+    """
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        (tmp_path / name).write_bytes(b"\xff\xd8\xff")
+    postings, media = _album_export()
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        albums=build_posting_album_index(postings),
+    )
+    assert len(links) == 3
+    assert {link.posting_uuid for link in links} == {"uuid-1"}
+
+
+def test_album_inference_is_refused_when_timestamps_disagree(tmp_path: Path) -> None:
+    """The timestamp guard rejects a candidate that is not the media's own post.
+
+    With the owning posting absent from an export, the next one along would be
+    picked purely by message order; requiring the stamps to agree leaves those
+    rows unlinked instead of mis-attributed.
+    """
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        (tmp_path / name).write_bytes(b"\xff\xd8\xff")
+    postings, media = _album_export()
+    postings["Timestamp"] = ["2026-03-04 22:30:56+00"]  # an hour after the media
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        albums=build_posting_album_index(postings),
+    )
+    # Only the row whose own Media ID names the posting survives, via the manifest key.
+    assert [link.media_id for link in links] == ["990011223303"]
+
+
+def test_album_inference_is_off_unless_an_index_is_supplied(tmp_path: Path) -> None:
+    """Omitting the album index leaves the manifest-key-only behaviour intact."""
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        (tmp_path / name).write_bytes(b"\xff\xd8\xff")
+    postings, media = _album_export()
+
+    links = resolve_media_rows(media, build_posting_index(postings), tmp_path)
+    assert [link.media_id for link in links] == ["990011223303"]
+
+
+def test_album_index_is_empty_for_exports_carrying_a_join_key() -> None:
+    """A Meta-style export yields no album index, so the inference cannot fire.
+
+    Its ``Posting ID`` is ``<postingId>_<accountId>``, carrying the ``Author ID``
+    as a suffix rather than a prefix, so no channel decomposes — which is what
+    keeps exports that already join correctly untouched by the fallback.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["3745000000000000001_77503905789"],
+            "Author ID": ["77503905789"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    assert build_posting_album_index(postings) == {}
+
+
+def test_album_index_ignores_postings_with_unparseable_timestamps() -> None:
+    """A malformed stamp costs that row its inference, not the whole index."""
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1", "uuid-2"],
+            "Posting ID": ["990011223303", "990011223309"],
+            "Author ID": ["9900112233", "9900112233"],
+            "Timestamp": ["2026-03-04 21:30:56+00", "not a timestamp"],
+        }
+    )
+    index = build_posting_album_index(postings)
+    assert [entry[1] for entry in index["9900112233"]] == ["990011223303"]
