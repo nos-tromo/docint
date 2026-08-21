@@ -73,7 +73,10 @@ not *whether* transcription happens: media resolved from the manifest is
 **additionally** stamped with its parent posting's `posting_uuid` so it
 groups with that posting at citation time (see "Social Multimodal Media" in
 `README.md`), while any other loose audio/video elsewhere in the batch still
-goes through the standalone path above. Both require `NEXTEXT_API_BASE`;
+goes through the standalone path above. The tables and the media they
+reference may sit anywhere in the batch tree — the default export shape
+(`./postings.csv`, `./media.csv`, `./dir/photos/*`, `./dir/videos/*`) is
+ingested by dropping in the whole directory. Both require `NEXTEXT_API_BASE`;
 when it is unset, audio/video files are skipped with a one-line warning and
 the rest of the batch still ingests normally. A pre-made Nextext `.jsonl`
 transcript still ingests directly as a structured file if you prefer to

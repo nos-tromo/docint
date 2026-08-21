@@ -541,12 +541,18 @@ ID`, else `Media ID`, matched against the postings' `Posting ID`), and routes
 each artifact to the right backend — images go through
 CLIP, video/audio are transcribed by Nextext and keyframe-extracted.
 
-**One flat directory.** Put `postings.csv`, `media.csv`, and every referenced
-media file in a **single directory**, and ingest that directory. Media are
-resolved by filename *within that one directory* — no subfolders, and no
-relative or absolute paths in the manifest (only the basename is used) — so a
-file is linked only when it sits directly beside the manifest. Upload it with
-the SPA's folder picker, or point `DATA_PATH` at that directory.
+**Drop in the whole export directory.** `postings.csv` and `media.csv` may sit
+anywhere in the batch, and the media files anywhere beneath it — the default
+export shape (`./postings.csv`, `./media.csv`, `./dir/photos/*`,
+`./dir/videos/*`) works as-is. Upload the directory with the SPA's folder
+picker, or point `DATA_PATH` at it.
+
+Only the **basename** of `Exported media filename` is ever used, looked up
+within the batch tree, so a manifest carrying an absolute path or a `../`
+traversal cannot reach a file outside the batch. Because the manifest supplies
+no directory of its own, the same basename occurring in two subfolders is
+*ambiguous*: a copy sitting beside the manifest wins, and otherwise the row is
+skipped rather than linked to a guess.
 
 **Linker.** During ingestion, `posting_uuid` is written into every artifact
 node (image embedding, keyframe, Nextext transcript segment). At retrieval

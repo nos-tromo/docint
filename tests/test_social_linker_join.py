@@ -41,12 +41,13 @@ def test_resolve_matches_by_known_posting_id_in_flat_dir(tmp_path: Path) -> None
 
 
 def test_resolve_does_not_find_file_in_different_directory(tmp_path: Path) -> None:
-    """A basename that exists only in a different directory is not resolved.
+    """A basename that exists only outside the batch tree is not resolved.
 
-    Proves the flat model cannot reach outside ``media_dir`` even for a bare
-    basename with no path component: ``x.jpg`` lives in a sibling directory,
-    not in the media directory passed to ``resolve_media_rows``, so the row
-    must be skipped rather than ingested.
+    Resolution recurses, but only ever under the root it is given: ``x.jpg``
+    lives in a sibling of the batch directory passed to ``resolve_media_rows``,
+    so no amount of recursion can reach it and the row must be skipped rather
+    than ingested. Containment comes from looking up basenames inside the batch
+    tree, not from refusing to descend into its subdirectories.
     """
     other_dir = tmp_path / "other"
     other_dir.mkdir()
@@ -133,3 +134,63 @@ def test_resolve_media_rows_links_via_network_id(tmp_path: Path) -> None:
     assert links[0].posting_uuid == "uuid-1"
     assert links[0].posting_id == "3745_779"
     assert links[0].media_id == "18525_3745_779"
+
+
+def test_resolve_finds_media_in_nested_subdirectories(tmp_path: Path) -> None:
+    """Media nested below the manifest resolve; the default batch layout works.
+
+    A multimedia export drops ``postings.csv`` / ``media.csv`` at the root and
+    its files under ``dir/photos`` / ``dir/videos``. Resolution must reach them.
+    """
+    photos = tmp_path / "dir" / "photos"
+    videos = tmp_path / "dir" / "videos"
+    photos.mkdir(parents=True)
+    videos.mkdir(parents=True)
+    (photos / "shot.jpg").write_bytes(b"\xff\xd8\xff")
+    (videos / "clip.mp4").write_bytes(b"video")
+
+    postings = pd.DataFrame({"Posting ID": ["P_1", "P_2"], "UUID": ["uuid-1", "uuid-2"]})
+    media = pd.DataFrame(
+        {
+            "Media ID": ["P_1_0", "P_2_0"],
+            "Exported media filename": ["shot.jpg", "clip.mp4"],
+        }
+    )
+
+    links = resolve_media_rows(media, build_posting_index(postings), tmp_path)
+    assert {link.path for link in links} == {photos / "shot.jpg", videos / "clip.mp4"}
+
+
+def test_resolve_skips_ambiguous_basename_across_subdirectories(tmp_path: Path) -> None:
+    """A basename occurring in two subdirectories is refused, not guessed at.
+
+    The manifest carries a basename and nothing else, so nothing in the data
+    says which of the two files is the evidence. Attaching the wrong picture to
+    a posting is worse than attaching none.
+    """
+    first = tmp_path / "dir" / "photos"
+    second = tmp_path / "dir" / "extra"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "dup.jpg").write_bytes(b"\xff\xd8\xff")
+    (second / "dup.jpg").write_bytes(b"\xff\xd8\xff")
+
+    postings = pd.DataFrame({"Posting ID": ["P_1"], "UUID": ["uuid-1"]})
+    media = pd.DataFrame({"Media ID": ["P_1_0"], "Exported media filename": ["dup.jpg"]})
+
+    assert resolve_media_rows(media, build_posting_index(postings), tmp_path) == []
+
+
+def test_resolve_prefers_the_manifest_directory_on_basename_clash(tmp_path: Path) -> None:
+    """A copy beside the manifest breaks a duplicate-basename tie."""
+    nested = tmp_path / "dir" / "photos"
+    nested.mkdir(parents=True)
+    (nested / "dup.jpg").write_bytes(b"\xff\xd8\xff")
+    beside = tmp_path / "dup.jpg"
+    beside.write_bytes(b"\xff\xd8\xff")
+
+    postings = pd.DataFrame({"Posting ID": ["P_1"], "UUID": ["uuid-1"]})
+    media = pd.DataFrame({"Media ID": ["P_1_0"], "Exported media filename": ["dup.jpg"]})
+
+    links = resolve_media_rows(media, build_posting_index(postings), tmp_path, manifest_dir=tmp_path)
+    assert [link.path for link in links] == [beside]
