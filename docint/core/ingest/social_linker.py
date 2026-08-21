@@ -1,8 +1,9 @@
 """Join a social export's postings table to its media manifest + files.
 
 Pure join logic lives here (counter stripping, set-membership matching,
-flat basename file resolution). Routing of resolved media into the modality
-pipelines (CLIP / Nextext) lives in :class:`SocialLinker` (Task 10).
+basename file resolution across the batch tree). Routing of resolved
+media into the modality pipelines (CLIP / Nextext) lives in
+:class:`SocialLinker` (Task 10).
 """
 
 from __future__ import annotations
@@ -112,32 +113,82 @@ def _derive_posting_id(network_id: str, media_id: str, posting_uuids: dict[str, 
     return None
 
 
+def build_file_index(root: Path) -> dict[str, list[Path]]:
+    """Index every file under ``root`` (recursively) by lowercase basename.
+
+    Args:
+        root (Path): The batch tree root.
+
+    Returns:
+        dict[str, list[Path]]: ``{basename_lower: [paths]}``, sorted per key.
+    """
+    index: dict[str, list[Path]] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            index.setdefault(path.name.lower(), []).append(path)
+    return index
+
+
+def _pick_media_file(matches: list[Path], manifest_dir: Path) -> Path | None:
+    """Return the single file a manifest basename names, or ``None`` if ambiguous.
+
+    A manifest carries a basename and nothing else, so when the same name occurs
+    in two subdirectories nothing in the data says which file is the evidence.
+    A copy sitting directly beside the manifest breaks the tie; otherwise the row
+    is refused rather than guessed at.
+
+    Args:
+        matches (list[Path]): Candidate files sharing the basename.
+        manifest_dir (Path): Directory holding the media manifest.
+
+    Returns:
+        Path | None: The chosen file, or ``None`` when the name is ambiguous.
+    """
+    if len(matches) == 1:
+        return matches[0]
+    local = [path for path in matches if path.parent == manifest_dir]
+    if len(local) == 1:
+        return local[0]
+    return None
+
+
 def resolve_media_rows(
     media_df: pd.DataFrame,
     posting_uuids: dict[str, str],
-    media_dir: Path,
+    root: Path,
+    *,
+    manifest_dir: Path | None = None,
 ) -> list[MediaLink]:
-    """Resolve manifest rows to MediaLinks by basename within a single directory.
+    """Resolve manifest rows to MediaLinks by basename anywhere under ``root``.
 
-    Media files must live directly in ``media_dir`` (the manifest's own folder).
-    Only the basename of ``Exported media filename`` is used, matched
-    case-insensitively against the files in ``media_dir`` — no recursion and no
-    relative/absolute path handling, so resolution can never leave ``media_dir``.
-    Orphan rows (no matching posting) and rows with no local file are counted and
-    reported once, not logged per row (a full manifest may have tens of thousands).
+    Only the **basename** of ``Exported media filename`` is ever used, matched
+    case-insensitively against the files under ``root``. The manifest's own path
+    components are discarded, so an absolute path or a ``../`` traversal collapses
+    to a name that is only ever looked for inside the batch tree — resolution
+    provably cannot leave ``root``. That containment comes from matching basenames
+    rather than from refusing to recurse, which is why subdirectories
+    (``dir/photos/``, ``dir/videos/``) are safe to search.
+
+    Orphan rows, rows with no local file and rows whose basename is ambiguous are
+    counted and reported once, not logged per row (a full manifest may have tens of
+    thousands).
 
     Args:
         media_df (pd.DataFrame): Manifest with ``Media ID`` + ``Exported media filename``.
         posting_uuids (dict[str, str]): ``Posting ID → UUID`` from the postings table.
-        media_dir (Path): The single flat directory holding the media files.
+        root (Path): The batch tree root; every media file is looked up under it.
+        manifest_dir (Path | None): Directory holding the manifest, used to break a
+            duplicate-basename tie. Defaults to ``root``.
 
     Returns:
         list[MediaLink]: One per row whose posting is known and file exists.
     """
-    present = {p.name.lower(): p for p in media_dir.iterdir() if p.is_file()}
+    tie_break_dir = manifest_dir if manifest_dir is not None else root
+    present = build_file_index(root)
     links: list[MediaLink] = []
     orphan_skips = 0
     missing_skips = 0
+    ambiguous_skips = 0
     for _, row in media_df.iterrows():
         media_id = str(row.get("Media ID") or "").strip()
         if not media_id:
@@ -149,22 +200,27 @@ def resolve_media_rows(
             continue
         uuid = posting_uuids[posting_id]
         name = Path(str(row.get("Exported media filename") or "").strip().replace("\\", "/")).name
-        path = present.get(name.lower()) if name else None
-        if path is None:
+        matches: list[Path] = present.get(name.lower(), []) if name else []
+        if not matches:
             missing_skips += 1
             continue
+        path = _pick_media_file(matches, tie_break_dir)
+        if path is None:
+            ambiguous_skips += 1
+            continue
         links.append(MediaLink(posting_uuid=uuid, posting_id=posting_id, media_id=media_id, path=path))
-    if orphan_skips or missing_skips:
+    if len(media_df):
         # Aggregate rather than log per row: a full manifest dropped in with only a few
         # referenced files present would otherwise emit one line per row (tens of
         # thousands). A single summary keeps large drop-ins robust and quiet.
         logger.info(
             "Social linker: {} media linked, {} skipped ({} with no matching posting, "
-            "{} with no local file) across {} manifest rows.",
+            "{} with no local file, {} with an ambiguous filename) across {} manifest rows.",
             len(links),
-            orphan_skips + missing_skips,
+            orphan_skips + missing_skips + ambiguous_skips,
             orphan_skips,
             missing_skips,
+            ambiguous_skips,
             len(media_df),
         )
     return links
@@ -310,7 +366,7 @@ class SocialLinker:
         posting_uuids = build_posting_index(postings_df)
         posting_references = build_posting_reference_index(postings_df)
         media_df = pd.read_csv(media_csv, sep=_sniff_delimiter(media_csv), dtype=str, encoding="utf-8-sig")
-        links = resolve_media_rows(media_df, posting_uuids, media_csv.parent)
+        links = resolve_media_rows(media_df, posting_uuids, data_dir, manifest_dir=media_csv.parent)
 
         result.consumed_paths.add(media_csv)
         context = IngestContext(source_collection=self.target_collection)

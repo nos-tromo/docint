@@ -128,3 +128,30 @@ This does not change the two open items above: the media→posting **join key** 
 Open item (2) is resolved. `_derive_posting_id` now keys media→posting on **`Network ID`** first, then the raw **`Media ID`**, then `strip_counter(Media ID)`, using the first that names a known posting (backward compatible with the `<Posting ID>_<counter>` format). On the real 73,969-row manifest this derives a posting for **138 rows** (was **0** with `strip_counter` alone).
 
 **Only (3) — data consistency — remains for your test to link.** Measured: **0 of your 8 present files** have a parent posting in the 138-row `postings.csv`. To get links, make the subsets consistent — copy the media files that belong to the 138 kept postings, or keep the postings that own the 8 files you copied.
+
+---
+
+## Update — subdirectories re-allowed (2026-08-21)
+
+A Telegram export linked **0 of 352** media rows. Two independent causes; fixing
+either alone still yields 0. The first is below; the second (this export carries
+no media→posting key at all) follows in its own update.
+
+### 1. The flat contract cost the 94 rows that *did* join
+
+The batch shape was `./postings.csv`, `./media.csv`, `./dir/photos/*`,
+`./dir/videos/*` — the default multimedia export output. `media_dir.iterdir()`
+on the manifest's own folder saw only the two CSVs, so every row that found a
+posting was then dropped as "no local file".
+
+**Reverted, without reverting the safety property.** `build_file_index` is back
+(recursive, rooted at the batch tree), but `_resolve_path`'s path branch is
+**not**: the manifest value is still reduced to `Path(name).name`. The
+containment guarantee never came from refusing to recurse — it came from
+matching basenames only, never manifest-supplied path components. Both
+regression tests from the update above place their decoy *outside* the batch
+root and pass unchanged under recursion; only their docstrings were reworded.
+
+Recursion does reintroduce basename ambiguity, which the flat model made
+impossible. A copy beside the manifest breaks the tie; otherwise the row is
+skipped and counted, never guessed at.
