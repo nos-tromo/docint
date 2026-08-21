@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useUiStore } from './ui'
+import { useReportStore } from './report'
 
 beforeEach(() => {
   localStorage.clear()
@@ -22,6 +23,37 @@ describe('useUiStore', () => {
     useUiStore.getState().setSelectedCollection('c1')
     const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
     expect(persisted.selectedCollection).toBe('c1')
+  })
+
+  it('drops the active report when the collection changes', () => {
+    // A report holds one collection's evidence. Keeping the old one active
+    // across a switch is how findings from one collection ended up in a report
+    // scoped to another, with their images looked up in the wrong companion.
+    useUiStore.getState().setSelectedCollection('c1')
+    useReportStore.setState({ activeReportId: 7 })
+
+    useUiStore.getState().setSelectedCollection('c2')
+
+    expect(useReportStore.getState().activeReportId).toBeNull()
+  })
+
+  it('keeps the active report when the same collection is re-selected', () => {
+    useUiStore.getState().setSelectedCollection('c1')
+    useReportStore.setState({ activeReportId: 7 })
+
+    useUiStore.getState().setSelectedCollection('c1')
+
+    expect(useReportStore.getState().activeReportId).toBe(7)
+  })
+
+  it('drops the active report when only the owner changes', () => {
+    // A foreign collection with the same name is a different collection.
+    useUiStore.getState().setSelectedCollection('shared', 'alice')
+    useReportStore.setState({ activeReportId: 7 })
+
+    useUiStore.getState().setSelectedCollection('shared', 'bob')
+
+    expect(useReportStore.getState().activeReportId).toBeNull()
   })
 
   it('clears current session', () => {

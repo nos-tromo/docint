@@ -172,3 +172,75 @@ describe('HateSpeechTable document preview', () => {
     expect(screen.queryByRole('button', { name: /preview/i })).not.toBeInTheDocument()
   })
 })
+
+describe('HateSpeechTable — evidence thumbnail', () => {
+  it('shows the source image when the flagged chunk came from a picture', () => {
+    useUiStore.setState({ selectedCollection: 'alpha', previewModal: null })
+    renderWithClient(
+      <HateSpeechTable
+        rows={[
+          {
+            chunk_id: 'h9',
+            filename: 'poster.png',
+            file_hash: 'ph',
+            image_id: 'ph',
+            category: 'harassment',
+            confidence: 'high',
+            chunk_text: 'Printed slur.'
+          }
+        ]}
+        collection="alpha"
+      />
+    )
+
+    expect(screen.getByRole('button', { name: /poster\.png/ })).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="hate-speech-row"] img')?.getAttribute('src')).toContain(
+      'file_hash=ph'
+    )
+  })
+
+  it('enlarges the picture when the pixels are clicked', async () => {
+    useUiStore.setState({ selectedCollection: 'alpha', previewModal: null })
+    renderWithClient(
+      <HateSpeechTable
+        rows={[
+          {
+            chunk_id: 'h11',
+            filename: 'poster.png',
+            file_hash: 'ph',
+            image_id: 'ph',
+            category: 'harassment',
+            confidence: 'high',
+            chunk_text: 'Printed slur.'
+          }
+        ]}
+        collection="alpha"
+      />
+    )
+
+    await userEvent.click(document.querySelector('[data-testid="hate-speech-row"] img')!)
+
+    expect(useUiStore.getState().previewModal).toMatchObject({ file_hash: 'ph', filename: 'poster.png' })
+  })
+
+  it('shows nothing for a text row', () => {
+    useUiStore.setState({ selectedCollection: 'alpha', previewModal: null })
+    renderWithClient(
+      <HateSpeechTable
+        rows={[
+          {
+            chunk_id: 'h10',
+            filename: 'rant.txt',
+            file_hash: 'th',
+            category: 'harassment',
+            confidence: 'high',
+            chunk_text: 'Body.'
+          }
+        ]}
+        collection="alpha"
+      />
+    )
+
+    expect(document.querySelector('[data-testid="hate-speech-row"] img')).toBeNull()
+  })
+})

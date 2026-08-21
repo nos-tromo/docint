@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import uuid
@@ -930,3 +931,318 @@ def test_keyframes_are_read_when_asked() -> None:
 
     assert records[0].ocr_text == "SLIDE 3: Results"
     assert records[0].payload["ocr_text"] == "SLIDE 3: Results"
+
+
+# ---------------------------------------------------------------------------
+# Thumbnails — the pixels a report can show
+# ---------------------------------------------------------------------------
+
+
+def _decode_thumbnail(payload: dict[str, Any]) -> Image.Image:
+    """Decode a payload's stored thumbnail into a PIL image.
+
+    Args:
+        payload: The stored image point payload.
+
+    Returns:
+        The decoded thumbnail image.
+    """
+    raw = base64.b64decode(payload["thumbnail_b64"])
+    return Image.open(BytesIO(raw))
+
+
+def test_ingest_image_stores_a_capped_thumbnail() -> None:
+    """A stored image carries a JPEG thumbnail capped at the thumbnail bound."""
+    service, _, _ = _build_service()
+    img = Image.new("RGB", (800, 600), color=(30, 60, 90))
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+
+    record = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=buffer.getvalue(), mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    assert record.status == "stored"
+    assert record.payload["thumbnail_mime"] == "image/jpeg"
+    thumb = _decode_thumbnail(record.payload)
+    assert thumb.format == "JPEG"
+    assert max(thumb.width, thumb.height) == 768
+    assert thumb.width / thumb.height == pytest.approx(800 / 600, abs=0.02)
+
+
+def test_thumbnail_never_enters_node_text() -> None:
+    """The base64 blob is payload-only: node text (and thus search_text) stays clean."""
+    service, _, vector_store = _build_service()
+
+    record = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    node = vector_store.add_calls[0][0]
+    assert record.payload["thumbnail_b64"] not in node.text
+    assert "thumbnail" not in node.text
+
+
+def test_keyframe_set_stores_thumbnails_and_dimensions_per_survivor() -> None:
+    """Keyframe points gain a thumbnail plus width/height like document images."""
+    service, _, _ = _build_service()
+
+    records = service.ingest_keyframe_set(
+        [_make_png_bytes((1, 2, 3))],
+        context=IngestContext(source_collection="docs"),
+        source_doc_id="clip-1",
+    )
+
+    assert records
+    payload = records[0].payload
+    assert payload["thumbnail_mime"] == "image/jpeg"
+    thumb = _decode_thumbnail(payload)
+    assert max(thumb.width, thumb.height) <= 768
+    assert payload["width"] == 6
+    assert payload["height"] == 4
+
+
+def test_cache_hit_backfills_missing_thumbnail_via_set_payload() -> None:
+    """Re-ingesting bytes an old collection already holds upgrades the point in place."""
+    service, client, _ = _build_service()
+    img_bytes = _make_png_bytes((7, 7, 7))
+
+    first = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+    point_id = first.point_id or ""
+    # Simulate a pre-thumbnail point written before this feature shipped.
+    client.records[point_id].pop("thumbnail_b64", None)
+    client.records[point_id].pop("thumbnail_mime", None)
+
+    second = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    assert second.status == "cached"
+    stored = client.records[point_id]
+    assert stored["thumbnail_mime"] == "image/jpeg"
+    assert max(_decode_thumbnail(stored).size) <= 768
+
+
+def test_cache_hit_leaves_a_current_size_thumbnail_alone() -> None:
+    """A cached point whose thumbnail was made at today's cap is not regenerated."""
+    service, _, _ = _build_service()
+    img_bytes = _make_png_bytes((9, 9, 9))
+    service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    with patch.object(ImageIngestionService, "_thumbnail_fields", MagicMock()) as make_thumb:
+        second = service.ingest_image(
+            ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+            context=IngestContext(source_collection="att-2"),
+        )
+
+    assert second.status == "cached"
+    make_thumb.assert_not_called()
+
+
+def test_an_image_without_a_thumbnail_still_ingests() -> None:
+    """Thumbnail generation is fail-soft: a refusal costs the field, not the point."""
+    service, _, _ = _build_service()
+
+    with patch.object(ImageIngestionService, "_thumbnail_fields", MagicMock(return_value=None)):
+        record = service.ingest_image(
+            ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+            context=IngestContext(source_collection="att-2"),
+        )
+
+    assert record.status == "stored"
+    assert "thumbnail_b64" not in record.payload
+    assert "thumbnail_mime" not in record.payload
+
+
+def test_make_thumbnail_flattens_rgba_and_respects_exif() -> None:
+    """Transparency is flattened for JPEG and EXIF orientation is applied."""
+    rgba = Image.new("RGBA", (400, 200), color=(10, 20, 30, 128))
+    buffer = BytesIO()
+    rgba.save(buffer, format="PNG")
+    result = ImageIngestionService._thumbnail_fields(buffer.getvalue())
+    assert result is not None
+    assert result["thumbnail_mime"] == "image/jpeg"
+    flat = Image.open(BytesIO(base64.b64decode(result["thumbnail_b64"])))
+    assert flat.mode == "RGB"
+    assert (flat.width, flat.height) == (400, 200)
+
+    exif = Image.Exif()
+    exif[0x0112] = 6  # rotate 90 CW on load
+    rotated_src = Image.new("RGB", (400, 200), color=(1, 2, 3))
+    buffer = BytesIO()
+    rotated_src.save(buffer, format="JPEG", exif=exif)
+    result = ImageIngestionService._thumbnail_fields(buffer.getvalue())
+    assert result is not None
+    upright = Image.open(BytesIO(base64.b64decode(result["thumbnail_b64"])))
+    assert (upright.width, upright.height) == (200, 400)
+
+
+def test_make_thumbnail_returns_none_on_corrupt_bytes() -> None:
+    """Bytes PIL cannot open yield no thumbnail rather than an exception."""
+    assert ImageIngestionService._thumbnail_fields(b"definitely not an image") is None
+
+
+def test_thumbnail_is_written_payload_only_never_as_node_metadata() -> None:
+    """The blob reaches the point through set_payload, not through the node.
+
+    Node metadata is serialized into ``_node_content`` as well as written flat,
+    so a thumbnail carried there is stored twice — measured at 24KB per point
+    for a 320px thumbnail before this was fixed.
+    """
+    service, client, vector_store = _build_service()
+
+    record = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    node = vector_store.add_calls[0][0]
+    assert "thumbnail_b64" not in node.metadata
+    assert "thumbnail_mime" not in node.metadata
+    stored = client.records[record.point_id or ""]
+    assert stored["thumbnail_b64"] == record.payload["thumbnail_b64"]
+
+
+def test_keyframe_thumbnail_is_written_payload_only_never_as_node_metadata() -> None:
+    """Keyframes take the same payload-only route as document images."""
+    service, client, vector_store = _build_service()
+
+    records = service.ingest_keyframe_set(
+        [_make_png_bytes((4, 5, 6))],
+        context=IngestContext(source_collection="docs"),
+        source_doc_id="clip-9",
+    )
+
+    node = vector_store.add_calls[0][0]
+    assert "thumbnail_b64" not in node.metadata
+    assert client.records[records[0].point_id or ""]["thumbnail_b64"] == records[0].payload["thumbnail_b64"]
+
+
+def test_thumbnail_records_the_cap_it_was_made_with() -> None:
+    """The stored cap is what lets a later ingest tell an undersized thumbnail apart."""
+    service, _, _ = _build_service()
+
+    record = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=_make_png_bytes(), mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    assert record.payload["thumbnail_max_dim"] == 768
+
+
+def test_cache_hit_upgrades_a_thumbnail_made_at_a_smaller_cap() -> None:
+    """A collection ingested when the cap was 320px gains today's resolution."""
+    service, client, _ = _build_service()
+    img = Image.new("RGB", (1600, 1200), color=(30, 60, 90))
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    img_bytes = buffer.getvalue()
+
+    first = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+    point_id = first.point_id or ""
+    # Simulate the point as an older, smaller-capped ingest wrote it.
+    small = Image.open(BytesIO(img_bytes))
+    small.thumbnail((320, 320))
+    old = BytesIO()
+    small.convert("RGB").save(old, format="JPEG", quality=70)
+    client.records[point_id]["thumbnail_b64"] = base64.b64encode(old.getvalue()).decode("ascii")
+    client.records[point_id]["thumbnail_max_dim"] = 320
+
+    second = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    assert second.status == "cached"
+    stored = client.records[point_id]
+    assert stored["thumbnail_max_dim"] == 768
+    assert max(_decode_thumbnail(stored).size) == 768
+
+
+def test_cache_hit_upgrades_a_thumbnail_that_predates_the_recorded_cap() -> None:
+    """A point written before the cap was recorded counts as undersized."""
+    service, client, _ = _build_service()
+    img = Image.new("RGB", (1600, 1200), color=(90, 60, 30))
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    img_bytes = buffer.getvalue()
+
+    first = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+    point_id = first.point_id or ""
+    client.records[point_id]["thumbnail_b64"] = "QUJD"
+    client.records[point_id].pop("thumbnail_max_dim", None)
+
+    service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    assert client.records[point_id]["thumbnail_max_dim"] == 768
+    assert max(_decode_thumbnail(client.records[point_id]).size) == 768
+
+
+def test_upgrading_a_point_drops_the_duplicate_blob_from_node_content() -> None:
+    """The stale copy an earlier write left inside the serialized node goes too.
+
+    Otherwise upgrading a collection is a net loss: today's larger thumbnail
+    lands beside the old one instead of replacing it.
+    """
+    service, client, _ = _build_service()
+    img_bytes = _make_png_bytes((2, 4, 6))
+
+    first = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+    point_id = first.point_id or ""
+    client.records[point_id]["thumbnail_max_dim"] = 320
+    client.records[point_id]["_node_content"] = json.dumps(
+        {"id_": point_id, "text": "a caption", "metadata": {"image_id": first.image_id, "thumbnail_b64": "QUJD"}}
+    )
+
+    service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    node_content = json.loads(client.records[point_id]["_node_content"])
+    assert "thumbnail_b64" not in node_content["metadata"]
+    assert node_content["text"] == "a caption"
+    assert node_content["metadata"]["image_id"] == first.image_id
+
+
+def test_a_small_image_is_never_upscaled_and_never_re_stamped() -> None:
+    """A 6x4 source stays 6x4, and its recorded cap keeps re-ingest from looping."""
+    service, client, _ = _build_service()
+    img_bytes = _make_png_bytes((5, 5, 5))
+
+    first = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    assert _decode_thumbnail(first.payload).size == (6, 4)
+
+    with patch.object(ImageIngestionService, "_thumbnail_fields", MagicMock()) as make_thumb:
+        service.ingest_image(
+            ImageAsset(source_type="standalone", image_bytes=img_bytes, mime_type="image/png"),
+            context=IngestContext(source_collection="att-2"),
+        )
+
+    make_thumb.assert_not_called()
+    assert client.records[first.point_id or ""]["thumbnail_max_dim"] == 768

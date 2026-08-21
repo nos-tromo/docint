@@ -17,7 +17,7 @@ from typing import Any, Protocol, TypeVar, cast
 from llama_index.core.schema import ImageNode
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
-from PIL import Image
+from PIL import Image, ImageOps
 from qdrant_client import QdrantClient, models
 
 from docint.core.ocr import DocumentOcrEngine, build_engine
@@ -41,6 +41,15 @@ T = TypeVar("T")
 # bursts lasting a few seconds, so an immediate retry lands inside the same
 # burst; the previous no-delay retry only survived by luck.
 RETRY_BACKOFF_SECONDS: float = 2.0
+
+# Report thumbnails are evidence, not display copies, so they are sized to be
+# read rather than merely recognized: at the 55mm the exports print a figure,
+# 768px is ~355dpi, which survives both a zoom in the PDF viewer and paper.
+# Measured on a photo-like image at quality 70 that is ~20KB (~26KB once
+# base64-encoded into a report snapshot), against ~4KB at the 320px this used
+# to be. Promote to env_cfg knobs if a deployment ever needs to tune them.
+_THUMBNAIL_MAX_DIM: int = 768
+_THUMBNAIL_JPEG_QUALITY: int = 70
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -632,6 +641,117 @@ class ImageIngestionService:
         except Exception:
             return None, None
 
+    @staticmethod
+    def _thumbnail_fields(image_bytes: bytes) -> dict[str, Any] | None:
+        """Build the thumbnail payload fields for an image, best effort.
+
+        The thumbnail is what a report can show for visual evidence, so it is
+        generated here — the one moment the raw bytes are guaranteed to exist
+        (video keyframes never touch disk). Capped at ``_THUMBNAIL_MAX_DIM`` on
+        the longest side, EXIF-orientation applied, transparency flattened for
+        JPEG.
+
+        The fields are returned together, and the cap in force is one of them:
+        it is the only thing that tells a later ingest whether a stored
+        thumbnail is smaller than today's, and recording the *cap* rather than
+        the produced size keeps a source smaller than the cap (never upscaled)
+        from looking undersized on every re-ingest.
+
+        Args:
+            image_bytes (bytes): The raw bytes of the source image.
+
+        Returns:
+            dict[str, Any] | None: The ``thumbnail_*`` payload fields, or
+            ``None`` when the bytes cannot be decoded — an image without a
+            thumbnail still ingests.
+        """
+        try:
+            with Image.open(BytesIO(image_bytes)) as img:
+                upright = ImageOps.exif_transpose(img) or img
+                upright.thumbnail((_THUMBNAIL_MAX_DIM, _THUMBNAIL_MAX_DIM))
+                if upright.mode not in ("RGB", "L"):
+                    upright = upright.convert("RGB")
+                buf = BytesIO()
+                upright.save(buf, format="JPEG", quality=_THUMBNAIL_JPEG_QUALITY)
+            return {
+                "thumbnail_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
+                "thumbnail_mime": "image/jpeg",
+                "thumbnail_max_dim": _THUMBNAIL_MAX_DIM,
+            }
+        except Exception as exc:
+            logger.warning("Thumbnail generation failed: {}", exc)
+            return None
+
+    def _stamp_thumbnail(
+        self,
+        *,
+        collection_name: str,
+        point_id: str,
+        fields: dict[str, Any],
+        node_content: str | None = None,
+    ) -> None:
+        """Write the thumbnail fields onto a stored point, payload-only.
+
+        Deliberately not carried on the node handed to the vector store: node
+        metadata is serialized into ``_node_content`` *as well as* written flat,
+        which stored every thumbnail twice — the same reason ``search_text`` is
+        written through ``set_payload`` (see ``core/search/index.py``). Nothing
+        reads the blob through retrieval; the report freeze scrolls the flat
+        field by name.
+
+        Args:
+            collection_name (str): Companion collection holding the point.
+            point_id (str): The point to stamp.
+            fields (dict[str, Any]): The ``thumbnail_*`` fields to write.
+            node_content (str | None): The point's existing ``_node_content``,
+                when it may still carry a thumbnail an earlier write left
+                inside it; the stale copy is dropped in the same call.
+
+        Raises:
+            Exception: Never — a write failure costs the field, not the point.
+        """
+        if self.qdrant_client is None:
+            return
+        payload = dict(fields)
+        cleaned = self._node_content_without_thumbnail(node_content)
+        if cleaned is not None:
+            payload["_node_content"] = cleaned
+        try:
+            self.qdrant_client.set_payload(
+                collection_name=collection_name,
+                payload=payload,
+                points=[point_id],
+            )
+        except Exception as exc:
+            logger.warning("Thumbnail write skipped for point '{}': {}", point_id, exc)
+
+    @staticmethod
+    def _node_content_without_thumbnail(node_content: str | None) -> str | None:
+        """Strip a thumbnail an earlier write left inside a serialized node.
+
+        Args:
+            node_content (str | None): The point's ``_node_content`` string.
+
+        Returns:
+            str | None: The re-serialized node without the thumbnail fields, or
+            ``None`` when there was nothing to strip (or the string is not the
+            shape this understands — an unreadable one is left untouched rather
+            than replaced with a guess).
+        """
+        if not node_content or "thumbnail_b64" not in node_content:
+            return None
+        try:
+            parsed = json.loads(node_content)
+            metadata = parsed.get("metadata")
+            if not isinstance(metadata, dict):
+                return None
+            for key in ("thumbnail_b64", "thumbnail_mime", "thumbnail_max_dim"):
+                metadata.pop(key, None)
+            return json.dumps(parsed)
+        except Exception as exc:
+            logger.debug("Node-content thumbnail strip skipped: {}", exc)
+            return None
+
     def _existing_by_image_id(
         self,
         image_id: str,
@@ -734,6 +854,44 @@ class ImageIngestionService:
                 payload={"occurrences": occurrences},
                 points=[point_id],
             )
+
+    def _backfill_thumbnail(
+        self,
+        *,
+        collection_name: str,
+        point_id: str,
+        payload: dict[str, Any],
+        image_bytes: bytes,
+    ) -> None:
+        """Bring a cached point's thumbnail up to today's, if it is behind.
+
+        The ``cache_by_hash`` early return never touches the bytes again, so a
+        pre-existing collection would otherwise keep whatever it was given
+        forever; this is the re-ingest upgrade path, for a point that has no
+        thumbnail at all and for one made when the cap was smaller. Fail-soft:
+        a write failure leaves the point as it was.
+
+        Args:
+            collection_name (str): Companion collection holding the point.
+            point_id (str): The cached point's id.
+            payload (dict[str, Any]): The cached point's existing payload.
+            image_bytes (bytes): The image bytes of the current occurrence.
+        """
+        if self.qdrant_client is None:
+            return
+        stored_dim = payload.get("thumbnail_max_dim")
+        current = isinstance(stored_dim, int) and stored_dim >= _THUMBNAIL_MAX_DIM
+        if payload.get("thumbnail_b64") and current:
+            return
+        fields = self._thumbnail_fields(image_bytes)
+        if fields is None:
+            return
+        self._stamp_thumbnail(
+            collection_name=collection_name,
+            point_id=point_id,
+            fields=fields,
+            node_content=payload.get("_node_content"),
+        )
 
     def _ensure_collection(self, *, collection_name: str, vector_dim: int) -> None:
         """Create or validate the image collection and vector schema.
@@ -931,6 +1089,12 @@ class ImageIngestionService:
                     payload=existing_payload,
                     occurrence=occurrence,
                 )
+                self._backfill_thumbnail(
+                    collection_name=target_collection,
+                    point_id=existing_point_id,
+                    payload=existing_payload,
+                    image_bytes=image_bytes,
+                )
                 description = str(existing_payload.get("llm_description") or "")
                 existing_tags = existing_payload.get("llm_tags")
                 tags_list = [str(tag) for tag in existing_tags] if isinstance(existing_tags, list) else []
@@ -989,6 +1153,7 @@ class ImageIngestionService:
             )
 
         width, height = self._image_size(image_bytes)
+        thumbnail = self._thumbnail_fields(image_bytes)
         image_payload: dict[str, Any] = {
             "image_id": image_id,
             "source_type": asset.source_type,
@@ -1044,6 +1209,8 @@ class ImageIngestionService:
             vector_store = self._get_vector_store(target_collection)
             vector_store.add([image_node])
             self._write_image_search_text(target_collection, point_id, node_text)
+            if thumbnail:
+                self._stamp_thumbnail(collection_name=target_collection, point_id=point_id, fields=thumbnail)
         except Exception as exc:
             return StoredImageRecord(
                 point_id=point_id,
@@ -1060,7 +1227,9 @@ class ImageIngestionService:
             point_id=point_id,
             image_id=image_id,
             status="stored",
-            payload=image_payload,
+            # The thumbnail is stamped on separately, so describe the point as
+            # it now stands rather than as the node was built.
+            payload={**image_payload, **(thumbnail or {})},
             llm_description=description,
             llm_tags=tags,
             ocr_text=ocr_text,
@@ -1158,6 +1327,7 @@ class ImageIngestionService:
             if tags:
                 text_parts.append("Tags: " + ", ".join(tags))
             node_text = "\n\n".join(part for part in text_parts if part).strip()
+            width, height = self._image_size(frame_bytes)
             payload: dict[str, Any] = {
                 "image_id": image_id,
                 "source_type": keyframe_source_type,
@@ -1166,12 +1336,15 @@ class ImageIngestionService:
                 "mime_type": "image/jpeg",
                 "mimetype": "image/jpeg",
                 "file_type": "image/jpeg",
+                "width": width,
+                "height": height,
                 "llm_description": description,
                 "llm_tags": tags,
                 "ocr_text": frame_ocr,
                 "vector_name": self.img_ingestion_config.vector_name,
                 "image_collection": target_collection,
             }
+            thumbnail = self._thumbnail_fields(frame_bytes)
             if link_field:
                 payload[link_field] = source_doc_id
             if extra_metadata:
@@ -1190,12 +1363,14 @@ class ImageIngestionService:
             except Exception as exc:
                 logger.warning("Keyframe store failed: {}", exc)
                 continue
+            if thumbnail:
+                self._stamp_thumbnail(collection_name=target_collection, point_id=point_id, fields=thumbnail)
             records.append(
                 StoredImageRecord(
                     point_id=point_id,
                     image_id=image_id,
                     status="stored",
-                    payload=payload,
+                    payload={**payload, **(thumbnail or {})},
                     llm_description=description,
                     llm_tags=tags,
                     ocr_text=frame_ocr,
