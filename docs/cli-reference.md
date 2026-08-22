@@ -184,6 +184,27 @@ the internal `_store_output()` / `_store_text_output()` /
 are serialised as JSON, summary/export results as text or CSV as
 appropriate.
 
+### Collection exports without an HTTP connection
+
+`--entities` and `--hate-speech` write the same CSVs the backend's
+[collection export endpoints](api-reference.md#collection-csv-exports) stream —
+both sides share the schemas in `docint/utils/csv_stream.py`, so the streaming
+endpoint and the CLI produce byte-identical CSVs for the same collection.
+
+For batch jobs that take many minutes (or should not hold an HTTP connection
+open), run the CLI inside the backend container. There is no `--output` flag:
+results land in `RESULTS_PATH`, which compose pins to
+`/var/lib/docint/pipeline/results` on the `pipeline-storage` volume, under a
+per-run `{unix_timestamp}_{collection}` subdirectory. Copy them out with
+`docker compose cp`:
+
+```bash
+docker compose --env-file .env -f docker/compose.yaml \
+  exec backend query --collection my_collection --all
+docker compose --env-file .env -f docker/compose.yaml cp \
+  backend:/var/lib/docint/pipeline/results ./exports
+```
+
 ### Example
 
 ```bash
