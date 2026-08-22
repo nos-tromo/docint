@@ -37,7 +37,7 @@ help:
 	@echo "  make search-index-all  build it for every collection on this host (one-time backport)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
-	@echo "  make test       run the test suite"
+	@echo "  make test       run pytest + vitest (test-backend / test-frontend for one)"
 
 # Dependency status report, printed on the build host's terminal. `up`/`up-dev`
 # are detached, so the backend's own startup probe log never reaches stdout;
