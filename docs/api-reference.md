@@ -166,6 +166,14 @@ Request:
   chunk, in any order.
 - `metadata_filters` — the same `MetadataFilterIn` shape as `/query`, ANDed
   with the keyword conditions so filters constrain the search.
+- `field` — which payload field the keywords match: `text` (default, the
+  chunk body) or one of `author`, `author_id`, `network`, `posting_author`,
+  `type`, `speaker`, `language`, `file_name`. Matching is the same in every
+  field: case-insensitive, prefix-based, all keywords required, a multi-word
+  query as a contiguous phrase. `422` on any other value. A field whose
+  TEXT index is missing answers `status: "not_indexed"` — run
+  `make search-index` once. The `_images` companion is searched only for
+  `text`, `posting_author` and `type`.
 - `limit` — hits per page, `1..500` (default `50`).
 - `cursor` — opaque page cursor from a previous response.
 
@@ -242,133 +250,47 @@ Status and errors:
   matches, silently reducing the whole search to zero hits.
 - `404` — the collection is not owned by the caller.
 
-### `POST /search/aggregate`
-
-Exhaustive, grouped search over chunk payload — the "find all" counterpart to
-`/search` above. `/search` ranks and pages top-k; this returns **every**
-matching chunk, counted per value of one payload field, so "which authors
-mention X" is answered completely rather than by whoever ranked highest. One
-native Qdrant `facet()` call, not a scan — no embedding call and no inference.
-
-Request:
-
-```json
-{
-  "question": "berlin konferenz",
-  "collection": "<logical name>",
-  "metadata_filters": [],
-  "group_by": "author",
-  "limit_groups": 100,
-  "samples_per_group": 2
-}
-```
-
-- `question` — whitespace-separated keywords, same AND semantics as `/search`.
-  **May be blank**: a keyword-less call groups the whole (filtered)
-  collection — a facet is a count, not a scan, so this is a legitimate call
-  and not an unbounded dump.
-- `group_by` — one of `author`, `author_id`, `network`, `posting_author`,
-  `type`, `speaker`, `language`, `file_name` (`422` otherwise). A closed
-  whitelist, not an arbitrary payload path.
-- `limit_groups` — maximum groups returned, `1..500` (default `100`).
-- `samples_per_group` — sample hits fetched per group for preview/pinning,
-  `0..5` (default `2`).
-
-Response:
-
-```json
-{
-  "status": "ok",
-  "group_by": "author",
-  "total": 37,
-  "unassigned": 0,
-  "groups": [
-    {"value": "user_a1b2", "count": 21, "samples": [{"...": "a SearchHit"}]},
-    {"value": "user_c3d4", "count": 16, "samples": [{"...": "a SearchHit"}]}
-  ],
-  "index_status": {
-    "indexed": true,
-    "total": 724,
-    "with_search_text": 724,
-    "missing": 0,
-    "complete": true
-  }
-}
-```
-
-- `total` counts matching **chunks**, not posts or documents — coarse parent
-  chunks are excluded the same way `/search` excludes them, so a hierarchical
-  collection cannot double-count one logical hit through its parent and
-  child.
-- `unassigned` is matches carrying no value for `group_by` (e.g. grouping
-  document chunks by `author`). It is `0` — not a computed remainder — when
-  the group list was capped at `limit_groups`, because the truncated groups'
-  own matches would otherwise be misread as unassigned.
-- `groups` is sorted by count desc, then value asc. Each group's `samples`
-  are ordinary `SearchHit`s (see `/search` above), pinnable into scope the
-  same way.
-- `status`/`index_status` carry the same three meanings as `/search`:
-  `not_indexed` when a keyword call hits an unbackfilled collection (a
-  blank query never returns `not_indexed`, since it needs no `search_text`
-  index — only the group-by field's own index, which is created lazily on
-  first use if `make search-index` has not run yet), `partial` during an
-  incomplete backfill, `ok` otherwise.
-- `422` — `group_by` is not one of the whitelisted fields, or `question` is
-  non-blank but contains a keyword shorter than 2 characters.
-- `404` — the collection is not owned by the caller.
-
-This lane covers the **text lane only**; the `_images` companion that
-`/search` also covers is not yet grouped.
-
 ### `GET /search/export.csv`
 
-Streams **every** matching chunk (not just group counts) as CSV — the
-chunk-level counterpart to both `/search` and `/search/aggregate` above, and
-what an investigator downloads to work with a result set outside the app.
-Query parameters select the same two lanes the JSON endpoints use, and each
-lane is exported exactly as its own JSON endpoint returns it: this export
-must never show more, or fewer, rows than the panel does for the same query.
+Streams **every** matching chunk as CSV — the exhaustive, chunk-level
+counterpart to `/search` above, and what an investigator downloads to work
+with a result set outside the app. One lane, mirroring `/search` and
+exported exactly as it returns: this export must never show more, or fewer,
+rows than the panel does for the same query.
 
 Query parameters:
 
 - `collection` — caller's logical collection; falls back to the process
   default when omitted.
-- `question` — whitespace-separated keywords. Required for the hits lane;
-  optional for the grouped lane (a blank question groups the whole
-  collection, exactly like `/search/aggregate`).
-- `group_by` — one of the `/search/aggregate` values, or omitted for the
-  keyword hits lane.
+- `question` — whitespace-separated keywords. **Optional**: a blank
+  `question` exports the whole filtered collection rather than being
+  refused — the panel itself never issues a blank query, but a full dump is
+  a legitimate export.
+- `field` — as above (default `text`).
 - `metadata_filters` — JSON-encoded array, same shape as `/query`.
 - `session_id` — a session whose stored chat scope counts as "marked",
   unioned with `marked_ids`.
 - `marked_ids` — comma-separated Qdrant point ids to mark, for a selection
   made before a session exists.
 
-Two lanes, selected the same way as the JSON endpoints:
+Mirrors `/search`: the same AND-of-keywords prefilter, the same phrase
+post-filter on a multi-word query (a chunk containing both words far apart
+does not count), and the same `{collection}_images` companion scroll for a
+field an image point can carry — an image hit the panel shows is a row here
+too, with `kind=image`.
 
-- **Hits lane** (`group_by` omitted) mirrors `/search`: the same
-  AND-of-keywords prefilter, the same phrase post-filter on a multi-word
-  query (a chunk containing both words far apart does not count), and the
-  same `{collection}_images` companion lane — an image hit the panel shows
-  is a row here too, with `kind=image`.
-- **Grouped/social lane** (`group_by` set) mirrors `/search/aggregate`: no
-  phrase filter (a facet counts a keyword match, not a phrase) and no image
-  companion — that lane stays text-only, same as its JSON endpoint. Every
-  row's `group` column carries its own group value.
+Columns (`SEARCH_EXPORT_COLUMNS`): `marked`, `kind`, `source`, `page`, `row`,
+`chunk_id`, `chunk_text`, `network`, `author`, `author_id`, `vanity`, `url`,
+`timestamp`, `posting_network`, `posting_author`, `posting_author_id`,
+`posting_vanity`, `posting_timestamp`, `posting_url`, `posting_text`,
+`type`, `uuid`, `posting_uuid`, `posting_id`, `media_id`, `speaker`,
+`language`, `detected_language`, `source_file`. Unlike a citation card's
+truncated preview, `chunk_text` is always the chunk's **full** text. `kind`
+is `text` or `image`, mirroring `/search`. `marked` is `true` when the row's
+point id is in `session_id`'s stored scope or in `marked_ids`, so a prior
+hand-picked selection can be recovered from a re-export.
 
-Columns (`SEARCH_EXPORT_COLUMNS`): `group`, `marked`, `kind`, `source`,
-`page`, `row`, `chunk_id`, `chunk_text`, `network`, `author`, `author_id`,
-`vanity`, `url`, `timestamp`, `posting_network`, `posting_author`,
-`posting_author_id`, `posting_vanity`, `posting_timestamp`, `posting_url`,
-`posting_text`, `type`, `uuid`, `posting_uuid`, `posting_id`, `media_id`,
-`speaker`, `language`, `detected_language`, `source_file`. Unlike a citation
-card's truncated preview, `chunk_text` is always the chunk's **full** text.
-`kind` is `text` or `image`, mirroring `/search` (always `text` on the
-grouped lane). `marked` is `true` when the row's point id is in
-`session_id`'s stored scope or in `marked_ids`, so a prior hand-picked
-selection can be recovered from a re-export.
-
-Rows are sorted by `group`, then `source`, then `page`, then `row`.
+Rows are sorted by `source`, then `page`, then `row`.
 
 Status and errors:
 
@@ -377,19 +299,20 @@ Status and errors:
   streams a header-only CSV rather than erroring — there is nothing to
   index, so it is not a missing backfill.
 - `409` — a keyword search (`question` non-blank) runs over a collection
-  that is unindexed or only **partially** indexed (`make search-index` still
-  running or interrupted). Unlike `/search`, which can carry
-  `status: "partial"` beside a banner, a downloaded CSV has no channel of
-  its own to report incompleteness, so this is refused outright rather than
-  risk a truncated file being filed as the complete evidence. Also `409`
-  when the matching set exceeds the row cap (`MAX_EXPORT_ROWS`, 50,000
-  chunks) — the same reasoning: a silently truncated file is
-  indistinguishable from a complete one once downloaded, so an oversize
-  export is refused rather than cut short. Narrow the query or add metadata
-  filters and try again.
-- `422` — the hits lane's `question` is blank (an unfiltered dump of the
-  whole collection is not a search result), `group_by` is not whitelisted,
-  or `metadata_filters` is not valid JSON.
+  that is unindexed or only **partially** indexed for `search_text`
+  (`make search-index` still running or interrupted), or, when `field` is
+  not `text`, whose field index is missing outright. Unlike `/search`,
+  which can carry `status: "partial"` beside a banner, a downloaded CSV has
+  no channel of its own to report incompleteness, so this is refused
+  outright rather than risk a truncated file being filed as the complete
+  evidence. Also `409` when the matching set exceeds the row cap
+  (`MAX_EXPORT_ROWS`, 50,000 chunks) — the same reasoning: a silently
+  truncated file is indistinguishable from a complete one once downloaded,
+  so an oversize export is refused rather than cut short. Narrow the query
+  or add metadata filters and try again.
+- `422` — `field` is not one of the whitelisted values, a non-blank
+  `question` parses to no usable keyword (every word shorter than the index
+  minimum), or `metadata_filters` is not valid JSON.
 - `404` — the collection is not owned by the caller.
 
 ### `POST /summarize`

@@ -73,13 +73,13 @@ rail is a bare toggle that tints while a scope is live. Icon-only controls draw 
 `src/components/common/icons.tsx`; never a text glyph, whose shape is
 whatever font the viewer's browser happens to pick.
 
-The panel has two modes, toggled without losing the submitted query or scope:
-**Hits** (ranked top-k, the default) and **Groups** (`SearchGroups.tsx`) —
-every matching chunk counted per value of a payload field (author, network,
-file, …), for "which authors mention X" questions a ranked answer cannot
-settle. A blank query in Groups mode groups the whole filtered collection.
-Each group is a row with its count and, on expand, a handful of sample
-chunks pinnable into scope exactly like a Hits tile.
+A **Search in** picker under the query field chooses which payload field the
+keywords match: Text (the chunk body, the default) or a metadata field —
+Author, Author ID, Network, Posting author, Type, Speaker, Language, File.
+The result is always chunks, so "everything this author wrote" is an
+ordinary search whose tiles scope the chat like any other. The CSV export
+beside the counts honours the field, and stays available with a blank
+query, where it exports the whole filtered collection.
 
 ### Ingest (`src/routes/Ingest.tsx`)
 

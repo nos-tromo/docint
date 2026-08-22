@@ -441,14 +441,14 @@ curl -O "http://localhost:8000/collections/my_collection/export/documents.csv"
 curl -O "http://localhost:8000/collections/my_collection/export/entities.csv?entity_merge_mode=resolved"
 
 # The full-text search export is the exhaustive, chunk-level counterpart to
-# the Search panel — every matching chunk's full text, not group counts.
-# `collection` is a query param here rather than a path segment, since it
-# shares the query shape with `POST /search` and `POST /search/aggregate`
-# (see docs/api-reference.md): pass a `question` for the keyword hits lane,
-# or `group_by` for the grouped/social lane (a blank `question` groups the
-# whole collection).
+# the Search panel — every matching chunk's full text. `collection` is a
+# query param here rather than a path segment, since it shares the query
+# shape with `POST /search` (see docs/api-reference.md). `field` chooses the
+# payload field the keywords match (default `text`); a blank `question`
+# exports the whole filtered collection.
 curl -O "http://localhost:8000/search/export.csv?collection=my_collection&question=berlin+konferenz"
-curl -O "http://localhost:8000/search/export.csv?collection=my_collection&group_by=author"
+curl -O "http://localhost:8000/search/export.csv?collection=my_collection&question=acme&field=author"
+curl -O "http://localhost:8000/search/export.csv?collection=my_collection"
 ```
 
 For batch jobs that take many minutes (or shouldn't hold an HTTP
