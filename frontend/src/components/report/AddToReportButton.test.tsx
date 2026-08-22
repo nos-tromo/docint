@@ -33,6 +33,31 @@ afterEach(() => {
 })
 
 describe('AddToReportButton', () => {
+  it('sends the active collection with the add', async () => {
+    // The report may have been created in another collection; the artifact's
+    // evidence lives where it was retrieved, so the server needs to be told.
+    const bodies: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (init?.method === 'POST' && init.body) bodies.push(JSON.parse(String(init.body)))
+        if (url.endsWith('/reports') && init?.method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({ id: 9, dedupe_key: 'entity:c1' }) }
+      })
+    )
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    renderButton(false, qc)
+    await userEvent.click(screen.getByRole('button', { name: /add to report/i }))
+
+    await waitFor(() => {
+      expect(bodies.some((b) => b.dedupe_key === 'entity:c1' && b.collection === 'docs')).toBe(true)
+    })
+  })
+
   it('auto-creates a report then adds the item when none is active', async () => {
     const calls: Array<{ url: string; method: string }> = []
     vi.stubGlobal(

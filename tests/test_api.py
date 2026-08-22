@@ -4841,8 +4841,9 @@ def test_search_aggregate_drops_a_keyword_below_the_index_minimum(client: TestCl
     the grouped/social lane never phrase-checks the full query text — a
     facet counts a keyword match, not a contiguous phrase — so the raw
     question, "a" included, is exactly what reaches ``RAG.search_aggregate``;
-    it is that method's own ``parse_keywords`` call, not this endpoint, that
-    drops "a" and searches only for "election".
+    the endpoint only checks that *something* usable is left, and it is
+    ``search_aggregate``'s own ``parse_keywords`` call that drops "a" and
+    searches only for "election".
     """
     response = client.post("/search/aggregate", json={"question": "election a", "group_by": "author"})
 
@@ -4850,6 +4851,17 @@ def test_search_aggregate_drops_a_keyword_below_the_index_minimum(client: TestCl
     last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
     assert last_aggregate["query"] == "election a"
     assert last_aggregate["group_by"] == "author"
+
+
+def test_search_aggregate_rejects_a_query_of_only_short_keywords(client: TestClient) -> None:
+    """A non-blank query left with no usable keyword must not group everything.
+
+    Blank is a legitimate ask here — it groups the whole filtered collection.
+    Falling through to the same answer for a query that was merely unindexable
+    would silently widen a narrow question.
+    """
+    response = client.post("/search/aggregate", json={"question": "a b", "group_by": "author"})
+    assert response.status_code == 422
 
 
 def test_search_aggregate_rejects_an_unknown_group_field(client: TestClient) -> None:
@@ -4989,6 +5001,24 @@ def test_export_search_csv_rejects_keyword_less_hits_lane(client: TestClient) ->
     """A keyword-less hits-lane export would be an unfiltered dump, so it is refused."""
     response = client.get("/search/export.csv")
     assert response.status_code == 422
+
+
+def test_export_search_csv_rejects_a_grouped_query_of_only_short_keywords(client: TestClient) -> None:
+    """The export refuses exactly what the panel refuses.
+
+    A blank question is a legitimate grouped export (the whole filtered
+    collection). One that merely lost every word to the index minimum is not:
+    it would quietly widen a narrow question into that same full dump, and
+    ``POST /search/aggregate`` already refuses it.
+    """
+    response = client.get("/search/export.csv", params={"question": "a b", "group_by": "author"})
+    assert response.status_code == 422
+
+
+def test_export_search_csv_keeps_a_grouped_query_with_one_usable_keyword(client: TestClient) -> None:
+    """A short word alongside a usable one is dropped, not fatal — as in both lanes."""
+    response = client.get("/search/export.csv", params={"question": "election a", "group_by": "author"})
+    assert response.status_code == 200
 
 
 def test_export_search_csv_rejects_an_unknown_group_by(client: TestClient) -> None:

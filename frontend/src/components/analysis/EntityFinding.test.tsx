@@ -258,3 +258,74 @@ it('breaks unbreakable metadata values instead of overflowing the column', () =>
   const pillValue = screen.getByText(longValue)
   expect(pillValue.className).toContain('break-all')
 })
+
+describe('EntityFinding — evidence thumbnail', () => {
+  function renderFinding(source: NerSourceRow) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={source}
+          highlightTerms={[]}
+          selectedTypeLower=""
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
+    )
+  }
+
+  it('shows the source image when the finding came from a picture', () => {
+    const { container } = renderFinding({
+      chunk_id: 'c1',
+      filename: 'slide.png',
+      file_hash: 'h1',
+      image_id: 'h1',
+      chunk_text: 'Printed words.'
+    })
+
+    // The picture is the control: it carries the accessible name, and the img
+    // inside it is presentational so the two are not announced twice.
+    expect(screen.getByRole('button', { name: /slide\.png/ })).toBeInTheDocument()
+    expect(container.querySelector('img')?.getAttribute('src')).toContain('file_hash=h1')
+  })
+
+  it('shows nothing for a text finding', () => {
+    const { container } = renderFinding({
+      chunk_id: 'c2',
+      filename: 'paper.pdf',
+      file_hash: 'h2',
+      chunk_text: 'Prose.'
+    })
+
+    expect(container.querySelector('img')).toBeNull()
+  })
+
+  it('hides itself when the image cannot be loaded', async () => {
+    const { container } = renderFinding({
+      chunk_id: 'c3',
+      filename: 'gone.png',
+      file_hash: 'h3',
+      image_id: 'h3'
+    })
+
+    container.querySelector('img')!.dispatchEvent(new Event('error'))
+
+    await waitFor(() => expect(container.querySelector('img')).toBeNull())
+  })
+
+  it('opens the full-size preview when the image is clicked', async () => {
+    const { container } = renderFinding({
+      chunk_id: 'c4',
+      filename: 'slide.png',
+      file_hash: 'h4',
+      image_id: 'h4'
+    })
+
+    // Click the pixels, not the surrounding control: that is the target an
+    // investigator aims at.
+    await userEvent.click(container.querySelector('img')!)
+
+    expect(useUiStore.getState().previewModal).toMatchObject({ file_hash: 'h4', filename: 'slide.png' })
+  })
+})

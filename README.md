@@ -484,6 +484,39 @@ that workflow:
 - Reports are **owner-scoped** and persisted server-side in the same SQLite
   store as chat sessions; each item is **snapshotted at add-time**, so later
   re-ingestion of the collection never changes a finished report.
+- **Visual evidence travels with the reference.** When an added artifact points
+  at an image — a chat answer citing a figure or photo, a finding on an image
+  document, a video keyframe — the server freezes a small **thumbnail** into
+  the snapshot (as a self-contained data URI, no live collection needed). The
+  Report tab shows it under the item, and the Markdown/HTML/PDF exports render
+  it inline beside the text ("Image evidence" / "Video keyframe"). Thumbnails
+  are generated at ingestion; collections ingested before this shipped gain
+  them on re-ingest of the same files (video keyframes need a fresh transcript
+  run — see `docint/core/ingest/media_transcribe.py`).
+  A chat answer's images render as a strip of **captioned figures** beneath
+  its source list, each captioned with the number the answer cites (`[2]`), so
+  a reader can tell which figure the text means; a finding shows its one figure
+  inside the finding table.
+- **A report belongs to one collection.** Switching the active collection
+  releases the active report, so the next "+ Report" click starts one for the
+  collection you are actually working in — a report's document overview and its
+  evidence always describe the same collection.
+- **Findings from pictures show the picture in the Analysis tab too.** An
+  entity or hate-speech finding whose chunk was read out of an image (a
+  screenshot, a photographed page, a video keyframe) renders the source image
+  beside it; clicking it opens the full-size preview. That view is live rather
+  than frozen — nothing is being exported there.
+- **The frozen evidence is zoomable, and it is all inside the file.** Thumbnails
+  are generated at 768px (~355 dpi at the size the exports print a figure), so a
+  reader can zoom into a PDF page and still read what a poster or a slide says.
+  Every export embeds them as data URIs — an exported HTML or PDF references
+  nothing outside itself and keeps working after the collection is deleted — and
+  clicking a figure in the Report tab enlarges it from those same bytes. Roughly
+  26 KB per image inside a report snapshot; a 20-image report gains about half a
+  megabyte.
+  Collections ingested before this gain the larger thumbnails on the next
+  re-ingest of the same files, which also removes a duplicate copy earlier
+  versions stored alongside each point.
 
 Export a finished report in five formats (also available directly over HTTP):
 

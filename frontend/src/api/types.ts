@@ -25,6 +25,15 @@ export interface Source {
   entities?: Entity[]
   relations?: Relation[]
   ner?: { entities?: Entity[]; relations?: Relation[] }
+  // Image identity, present when the source is an `_images` companion point
+  // (or a main-collection image document): the content hash, the companion
+  // collection it lives in, and where on the page a PDF figure sat. Carried
+  // into report snapshots so the server can freeze the thumbnail at add-time.
+  image_id?: string
+  image_collection?: string
+  bbox?: Record<string, number>
+  preview_url?: string
+  document_url?: string
 }
 
 export interface Entity {
@@ -348,6 +357,7 @@ export interface NerSourceRow {
   reference_metadata?: ReferenceMetadata
   entities?: NerEntityMention[]
   relations?: Array<{ head?: string; label?: string; tail?: string }>
+  image_id?: string
 }
 
 export interface NerTypeRow {
@@ -431,6 +441,7 @@ export interface HateSpeechRow {
   reason?: string
   source_ref?: string
   reference_metadata?: ReferenceMetadata
+  image_id?: string
 }
 
 // --- Report builder ---
@@ -441,11 +452,28 @@ export type ReportExportFormat = 'md' | 'html' | 'pdf' | 'json' | 'zip'
 /** A frozen artifact snapshot; its shape varies by `artifact_type`. */
 export type ReportSnapshot = Record<string, unknown>
 
+/**
+ * Visual evidence frozen into a snapshot at add-time by the server
+ * (`_enrich_snapshot_thumbnails`): a self-contained data URI, so rendering
+ * it needs no live collection. Sits on a chat source or a finding snapshot.
+ */
+export interface SnapshotThumbnail {
+  data_uri: string
+  width?: number | null
+  height?: number | null
+  kind?: 'image' | 'video_keyframe'
+}
+
 export interface ReportItemInput {
   artifact_type: ArtifactType
   dedupe_key: string
   snapshot: ReportSnapshot
   note?: string | null
+  // The collection this artifact was taken from. The report is bound to one
+  // collection, but the evidence lives where it was retrieved — the server
+  // resolves the frozen thumbnail against this one, falling back to the
+  // report's.
+  collection?: string | null
 }
 
 export interface ReportItem {

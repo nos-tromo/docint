@@ -54,7 +54,10 @@ export function AddToReportButton({ item, inReport, className }: Props) {
         reportId = created.id
         setActiveReportId(reportId)
       }
-      await addItem.mutateAsync({ reportId, item })
+      // The active collection travels with the add: the report may have been
+      // created in another one, and the artifact's evidence lives where it was
+      // retrieved.
+      await addItem.mutateAsync({ reportId, item: { ...item, collection: collection ?? null } })
     } catch (e) {
       console.error('Report action failed', e)
       setFailed(true)

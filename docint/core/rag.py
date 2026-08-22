@@ -3647,11 +3647,19 @@ class RAG:
             image_ingestion_service=self._image_ingestion_service,
         )
 
-    def _image_collection_name(self) -> str:
-        """Return the ``_images`` companion collection name for the active collection."""
+    def _image_collection_name(self, collection: str | None = None) -> str:
+        """Return the ``_images`` companion collection name.
+
+        Args:
+            collection (str | None): Physical collection to resolve the
+                companion for. Defaults to the request's active collection.
+
+        Returns:
+            str: The companion collection name.
+        """
         if self._image_ingestion_service is None:
             self._image_ingestion_service = ImageIngestionService()
-        return self._image_ingestion_service._resolve_collection_name(self.qdrant_collection)
+        return self._image_ingestion_service._resolve_collection_name(collection or self.qdrant_collection)
 
     def _fetch_posting_entity_nodes(self, posting_uuid: str, *, exclude_node_ids: set[str]) -> list[NodeWithScore]:
         """Fetch a posting's sibling artifacts across both collections.
@@ -8693,7 +8701,6 @@ class RAG:
                 assuming the default) and ``index_status``.
 
         Raises:
-            KeywordTooShortError: When a keyword cannot be indexed.
             UnknownGroupFieldError: When ``group_by`` is not whitelisted.
         """
         key = group_payload_key(group_by)

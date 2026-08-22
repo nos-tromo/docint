@@ -1,12 +1,18 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { setOwnerParam } from '@/api/client'
+import { useReportStore } from '@/stores/report'
 
-export interface PreviewModal {
-  collection: string
-  file_hash: string
-  filename: string
-}
+/**
+ * What the app-wide preview is showing. Either the stored source file,
+ * addressed by collection and content hash, or frozen evidence carried in a
+ * report snapshot — a self-contained data URI, which is what lets a report be
+ * enlarged after the collection it came from is gone. The two arms are
+ * exclusive: frozen evidence has no collection to resolve against.
+ */
+export type PreviewModal =
+  | { filename: string; collection: string; file_hash: string; data_uri?: never }
+  | { filename: string; data_uri: string; collection?: never; file_hash?: never }
 
 interface UiState {
   selectedCollection: string | null
@@ -30,7 +36,7 @@ export const useUiStore = create<UiState>()(
       previewModal: null,
       graphTopK: null,
       setSelectedCollection: (name, owner = null) =>
-        set((s) =>
+        set((s) => {
           // Invariant: the open chat always belongs to the active collection,
           // or is null. Enforced here at the single source of truth, so every
           // caller (Sidebar switch/delete/reconcile, Ingest's post-ingest
@@ -39,10 +45,19 @@ export const useUiStore = create<UiState>()(
           // collection is a no-op and keeps the open chat. A foreign collection
           // with the same name is a different collection — the (name, owner)
           // pair is compared as a whole.
-          name === s.selectedCollection && owner === s.selectedOwner
-            ? { selectedCollection: name, selectedOwner: owner }
-            : { selectedCollection: name, selectedOwner: owner, currentSessionId: null }
-        ),
+          if (name === s.selectedCollection && owner === s.selectedOwner) {
+            return { selectedCollection: name, selectedOwner: owner }
+          }
+          // The same invariant holds for the open report: it is scoped to one
+          // collection, so evidence taken from another one has no place in it
+          // — its document overview would describe a collection its findings
+          // never came from, and the server would look for their images in a
+          // companion that never held them. Dropping the active id makes the
+          // next add mint a report for the collection actually in front of the
+          // operator.
+          useReportStore.getState().setActiveReportId(null)
+          return { selectedCollection: name, selectedOwner: owner, currentSessionId: null }
+        }),
       setCurrentSessionId: (id) => set({ currentSessionId: id }),
       setGraphTopK: (n) => set({ graphTopK: n }),
       openPreview: (modal) => set({ previewModal: modal }),

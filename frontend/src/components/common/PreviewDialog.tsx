@@ -82,8 +82,12 @@ export function PreviewDialog() {
   const panelRef = useRef<HTMLDivElement | null>(null)
   const openerRef = useRef<HTMLElement | null>(null)
 
-  const kind = modal ? previewKind(modal.filename) : 'none'
-  const url = modal ? sourcePreviewUrl(modal.collection, modal.file_hash) : null
+  // Frozen evidence is always a JPEG thumbnail, whatever the source document
+  // it was cut from was called — a keyframe's filename ends in .mp4. So the
+  // extension decides the kind only for a live source file.
+  const frozen = modal?.data_uri
+  const kind = frozen ? 'image' : modal ? previewKind(modal.filename) : 'none'
+  const url = frozen ?? (modal?.collection ? sourcePreviewUrl(modal.collection, modal.file_hash ?? '') : null)
   const textPreview = useTextPreview(kind === 'text' ? url : null)
 
   useEffect(() => {
@@ -125,15 +129,20 @@ export function PreviewDialog() {
         <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2">
           <h2 className="truncate text-sm font-medium">{modal.filename}</h2>
           <div className="flex items-center gap-3">
-            <a
-              href={url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
-            >
-              {t('common.preview_new_tab')}
-              <ExternalLinkIcon className="h-3.5 w-3.5" />
-            </a>
+            {/* No new-tab link for frozen evidence: browsers block top-level
+                navigation to a data: URL, so the link would promise something
+                it cannot do. */}
+            {!frozen && (
+              <a
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
+              >
+                {t('common.preview_new_tab')}
+                <ExternalLinkIcon className="h-3.5 w-3.5" />
+              </a>
+            )}
             {/* The base `IconButton` rather than `RemoveButton`: closing a
                 preview takes nothing away, so it must not warn in red. */}
             <IconButton

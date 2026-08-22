@@ -7,6 +7,7 @@ import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatabl
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
+import { EvidenceThumbnail } from '@/components/common/EvidenceThumbnail'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
@@ -121,6 +122,11 @@ export function EntityFinding({
           <div className="text-xs text-muted-foreground">{locParts.join(', ')}</div>
         )}
         <SourcePreviewAction fileHash={source.file_hash} filename={source.filename} />
+        <EvidenceThumbnail
+          imageId={source.image_id}
+          fileHash={source.file_hash}
+          filename={source.filename}
+        />
       </div>
 
       <div className="min-w-0 space-y-1.5">
