@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { Banner, Button, Card, Input, SearchButton, XIcon } from '@infra/ui'
+import { Banner, Button, Card, DownloadLink, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
-import type { SearchHit } from '@/api/types'
+import { searchExportHref } from '@/api/search'
+import type { SearchField, SearchHit } from '@/api/types'
+import { SEARCH_FIELDS } from '@/api/types'
 import { useSearch, useScope } from '@/hooks/useSearch'
 import {
   scopeChunkIds,
@@ -12,6 +14,7 @@ import {
   searchKeyFor,
   useSearchUiStore
 } from '@/stores/searchUi'
+import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 import { SearchHitRow } from '@/components/chat/SearchHit'
 import { CheckAllIcon } from '@/components/common/icons'
@@ -47,6 +50,9 @@ export interface SearchPanelProps {
  * Full-text search over the active collection, with the hits doubling as the
  * chat's evidence picker.
  *
+ * One lane: the `Search in` picker chooses the payload field; hits are
+ * always chunks.
+ *
  * Three response states are kept visually distinct and must stay that way: a
  * collection that was never search-indexed, a backfill that is incomplete
  * (hits *plus* a warning that the list is short), and a genuine zero-match
@@ -65,8 +71,14 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const setScopeTokens = useSearchUiStore((s) => s.setScopeTokens)
   const setScopeMeta = useSearchUiStore((s) => s.setScopeMeta)
   const scope = useSearchUiStore((s) => scopeFor(s, key))
+  const field = useSearchUiStore((s) => s.field)
+  const setField = useSearchUiStore((s) => s.setField)
 
-  const search = useSearch(query)
+  // One lane: the picker decides which payload field the keywords match,
+  // and the result is always chunks. `field` is part of the query key, so
+  // switching it re-runs the submitted query without re-asking it.
+  const search = useSearch(query, field)
+  const filters = useChatFiltersStore().buildPayload()
   const { set } = useScope(sessionId)
   const [scopeError, setScopeError] = useState<string | null>(null)
 
@@ -76,9 +88,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const hits = search.data?.hits ?? []
   const docCount = new Set(hits.map((h) => h.filename ?? '').filter(Boolean)).size
 
-  // The scope every hit currently loaded would produce: what is already picked
-  // plus every hit on screen. Selecting all is additive — it must not silently
-  // drop chunks picked from an earlier query.
+  // The scope everything currently loaded would produce: what is already
+  // picked plus every hit on screen. Selecting all is additive — it must
+  // not silently drop chunks picked under an earlier query.
   const allLoadedTokens = (): Record<string, number> => {
     const next = { ...scope.tokens }
     for (const hit of hits) next[hit.id] = hit.est_tokens
@@ -165,6 +177,37 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         <SearchButton label={t('search.submit')} type="submit" variant="secondary" size="md" />
       </form>
 
+      {/* "Search in": which payload field the keywords match. Always shown —
+          it is a property of the query, not a mode. Text (the chunk body)
+          is the default; the metadata fields answer "everything this
+          author / id / network wrote" as a plain search.
+
+          A visible label precedes the picker: `SelectMenu`'s closed trigger
+          renders only the chosen *value* ("Text", "Author ID", …), which
+          names nothing on its own — the same ambiguity a user hit once
+          before, typing an author id into the query box beside an unlabeled
+          control and expecting it to match (the reason 68e239bc added, then
+          this feature's Task 8 removed, a sort-axis icon here). The label is
+          `aria-hidden` so it does not double up on `SelectMenu`'s own
+          `label` prop, which is what actually names the control for
+          assistive tech — the accessible name is announced exactly once. */}
+      <div className="flex items-center gap-2" data-testid="search-field-row">
+        <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">
+          {t('search.field')}
+        </span>
+        <SelectMenu
+          options={SEARCH_FIELDS.map((name) => ({
+            value: name,
+            label: t(`search.field.${name}`)
+          }))}
+          value={field}
+          onChange={(value) => setField(value as SearchField)}
+          label={t('search.field')}
+          className="min-w-0"
+          triggerClassName="text-xs font-medium"
+        />
+      </div>
+
       {!collection ? (
         <p className="text-xs text-muted-foreground">{t('search.select_collection')}</p>
       ) : (
@@ -177,24 +220,39 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               {searchError()}
             </p>
           )}
-          {/* One line for everything the result set is — hits, documents, what
-              the selection costs — and the two things you can do to all of it
-              at once. Deliberately one line: the meter used to be a row of its
-              own that appeared on the first selection and shoved the whole hit
-              list down, so picking evidence moved the thing you were reading.
-              Content changes, row count does not.
+          {/* One line for everything the result set is — hits, documents,
+              what the selection costs — and the two things you can do to
+              all of it at once. Deliberately one line: the meter used to be
+              a row of its own that appeared on the first selection and
+              shoved the whole hit list down, so picking evidence moved the
+              thing you were reading. Content changes, row count does not.
 
-              The row follows the *selection* as well as the hits: after picking
-              chunks and then searching for something with no matches, the
-              selection is still live and must stay clearable from here.
+              The row follows the *selection* as well as what's loaded: after
+              picking chunks and then searching for something with no
+              matches, the selection is still live and must stay clearable
+              from here.
 
-              The bulk controls are icons because their labels were the longest
-              text in a 22rem column while saying the least. Their tooltips can
-              afford full sentences, so that is where the promise ("the results
-              loaded so far, not every match") and the projected cost live —
-              the *danger* case keeps its own visible line below. */}
-          {(search.data || selectedIds.length > 0) && (
-            <div className="flex items-center gap-1" data-testid="scope-bulk">
+              The trailing controls are icons because their labels were the
+              longest text in a 22rem column while saying the least. Their
+              tooltips can afford full sentences, so that is where the promise
+              ("the results loaded so far, not every match") and the
+              projected cost live — the *danger* case keeps its own visible
+              line below. Both controls share `h-7 w-7 shrink-0 px-0` so they
+              measure identically; the summary `<p>`'s `flex-1` pins them
+              upper-right, flush with the column above.
+
+              The token meter is its own `shrink-0` flex child, never text
+              inside that `<p>`. The counts prose can still run long — many
+              hits across many documents — so *something* has to give under
+              `truncate`. It must be the counts, not the meter: an ellipsised
+              hit count still reads as "there is more", but an ellipsised
+              token count reads as "the selection fits" when it doesn't, or
+              vanishes right when it matters most — the moment a selection is
+              live. Keeping the meter a sibling rather than trailing content
+              also means it needs no leading separator of its own to worry
+              about running into the counts. */}
+          {(search.data || selectedIds.length > 0 || query.trim() === '') && (
+            <div className="flex items-center gap-1" data-testid="search-summary-row">
               <p
                 className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
                 data-testid="search-summary"
@@ -210,20 +268,42 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                       : t('search.docs', { count: docCount })}
                   </>
                 )}
-                {selectedIds.length > 0 && (
-                  <>
-                    {search.data && ' · '}
-                    <span data-testid="token-meter">
-                      {scope.usableTokens > 0
-                        ? t('search.budget', {
-                            used: formatTokens(estTokens),
-                            total: formatTokens(scope.usableTokens)
-                          })
-                        : t('search.budget_selected', { used: formatTokens(estTokens) })}
-                    </span>
-                  </>
-                )}
               </p>
+              {selectedIds.length > 0 && (
+                <span
+                  className="shrink-0 whitespace-nowrap text-xs text-muted-foreground"
+                  data-testid="token-meter"
+                >
+                  {scope.usableTokens > 0
+                    ? t('search.budget', {
+                        used: formatTokens(estTokens),
+                        total: formatTokens(scope.usableTokens)
+                      })
+                    : t('search.budget_selected', { used: formatTokens(estTokens) })}
+                </span>
+              )}
+              {/* A blank query still exports: the whole filtered collection,
+                  the one export the panel cannot show on screen. */}
+              {collection && (query.trim() === '' || hits.length > 0) && (
+                <DownloadLink
+                  href={searchExportHref(collection, {
+                    question: query,
+                    field,
+                    filters,
+                    sessionId,
+                    // Redundant once a session exists — commitScope has
+                    // already written the same selection server-side by
+                    // the time this link can be clicked — and a scope has
+                    // no count cap, only a token budget, so hundreds of
+                    // ids serialized here could blow the URL past the
+                    // gateway's header limit. It only earns its place
+                    // pre-session, under the 'new' key.
+                    markedIds: sessionId ? undefined : selectedIds
+                  })}
+                  label={t('search.export_results')}
+                  className="h-7 w-7 shrink-0 px-0"
+                />
+              )}
               {/* One control, both directions: pick everything loaded, press
                   again to let it all go. Two buttons sat side by side where
                   only one was ever live, and a selection is a state you flip,
@@ -283,7 +363,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         </p>
       )}
 
-      {/* The three states below are deliberately separate branches. */}
+      {/* The three states below are deliberately separate branches: a
+          collection with no search index, or a partial backfill, must never
+          be collapsed into a plain zero-hit result. */}
       {search.data?.status === 'not_indexed' && (
         <Banner variant="info" data-testid="search-not-indexed">
           {t('search.not_indexed')}

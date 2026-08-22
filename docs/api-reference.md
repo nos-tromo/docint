@@ -166,6 +166,31 @@ Request:
   chunk, in any order.
 - `metadata_filters` — the same `MetadataFilterIn` shape as `/query`, ANDed
   with the keyword conditions so filters constrain the search.
+- `field` — which payload field the keywords match: `text` (default, the
+  chunk body), `author`, `network` or `uuid`. `422` on any other value.
+  There is no `file_name` field: filter by filename with `metadata_filters`.
+
+  One option can cover several payload keys, and the query must be satisfied
+  by **one** of them: `author` searches `reference_metadata.author`,
+  `vanity`, `posting_author` and `posting_vanity` (the last two are what an
+  image or transcript inherits from its parent posting), plus the numeric
+  `author_id` / `posting_author_id`.
+
+  Names match case-insensitively on word prefixes, with a multi-word query
+  required to occur as a contiguous phrase in a single key. **Ids match
+  exactly**, tried in both numeric and string form, because they are stored
+  as numbers and a full-text matcher cannot touch a number; a query
+  containing whitespace is never treated as an id.
+
+  `uuid` is exact-match only. It searches the posting's own
+  `reference_metadata.uuid` and the `posting_uuid` every derived image,
+  keyframe and transcript segment carries, so one paste returns the post and
+  all of its artifacts. The pasted form and its dash-normalised twin are both
+  tried (exports store it undashed). A multi-word query matches nothing.
+
+  A field whose keys are not all indexed correctly answers
+  `status: "not_indexed"` — run `make search-index` once. The `_images`
+  companion is searched only for `text`, `author` and `uuid`.
 - `limit` — hits per page, `1..500` (default `50`).
 - `cursor` — opaque page cursor from a previous response.
 
@@ -240,6 +265,71 @@ Status and errors:
 - `422` — the query is blank, or a keyword is shorter than 2 characters. Such a
   keyword cannot be indexed and would contribute a condition that never
   matches, silently reducing the whole search to zero hits.
+- `404` — the collection is not owned by the caller.
+
+### `GET /search/export.csv`
+
+Streams **every** matching chunk as CSV — the exhaustive, chunk-level
+counterpart to `/search` above, and what an investigator downloads to work
+with a result set outside the app. One lane, mirroring `/search` and
+exported exactly as it returns: this export must never show more, or fewer,
+rows than the panel does for the same query.
+
+Query parameters:
+
+- `collection` — caller's logical collection; falls back to the process
+  default when omitted.
+- `question` — whitespace-separated keywords. **Optional**: a blank
+  `question` exports the whole filtered collection rather than being
+  refused — the panel itself never issues a blank query, but a full dump is
+  a legitimate export.
+- `field` — as above (default `text`).
+- `metadata_filters` — JSON-encoded array, same shape as `/query`.
+- `session_id` — a session whose stored chat scope counts as "marked",
+  unioned with `marked_ids`.
+- `marked_ids` — comma-separated Qdrant point ids to mark, for a selection
+  made before a session exists.
+
+Mirrors `/search`: the same AND-of-keywords prefilter, the same phrase
+post-filter on a multi-word query (a chunk containing both words far apart
+does not count), and the same `{collection}_images` companion scroll for a
+field an image point can carry — an image hit the panel shows is a row here
+too, with `kind=image`.
+
+Columns (`SEARCH_EXPORT_COLUMNS`): `marked`, `kind`, `source`, `page`, `row`,
+`chunk_id`, `chunk_text`, `network`, `author`, `author_id`, `vanity`, `url`,
+`timestamp`, `posting_network`, `posting_author`, `posting_author_id`,
+`posting_vanity`, `posting_timestamp`, `posting_url`, `posting_text`,
+`type`, `uuid`, `posting_uuid`, `posting_id`, `media_id`, `speaker`,
+`language`, `detected_language`, `source_file`. Unlike a citation card's
+truncated preview, `chunk_text` is always the chunk's **full** text. `kind`
+is `text` or `image`, mirroring `/search`. `marked` is `true` when the row's
+point id is in `session_id`'s stored scope or in `marked_ids`, so a prior
+hand-picked selection can be recovered from a re-export.
+
+Rows are sorted by `source`, then `page`, then `row`.
+
+Status and errors:
+
+- `200` — a `text/csv; charset=utf-8` streamed attachment (a UTF-8 BOM, then
+  the header row, then one row per matching chunk). An empty collection
+  streams a header-only CSV rather than erroring — there is nothing to
+  index, so it is not a missing backfill.
+- `409` — a keyword search (`question` non-blank) runs over a collection
+  that is unindexed or only **partially** indexed for `search_text`
+  (`make search-index` still running or interrupted), or, when `field` is
+  not `text`, whose field index is missing outright. Unlike `/search`,
+  which can carry `status: "partial"` beside a banner, a downloaded CSV has
+  no channel of its own to report incompleteness, so this is refused
+  outright rather than risk a truncated file being filed as the complete
+  evidence. Also `409` when the matching set exceeds the row cap
+  (`MAX_EXPORT_ROWS`, 50,000 chunks) — the same reasoning: a silently
+  truncated file is indistinguishable from a complete one once downloaded,
+  so an oversize export is refused rather than cut short. Narrow the query
+  or add metadata filters and try again.
+- `422` — `field` is not one of the whitelisted values, a non-blank
+  `question` parses to no usable keyword (every word shorter than the index
+  minimum), or `metadata_filters` is not valid JSON.
 - `404` — the collection is not owned by the caller.
 
 ### `POST /summarize`

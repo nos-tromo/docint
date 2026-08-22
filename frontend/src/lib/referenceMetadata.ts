@@ -172,3 +172,39 @@ export function referenceMetadataValue(
   if (raw === null || raw === undefined) return ''
   return String(raw).trim()
 }
+
+export interface ReferenceMetadataFieldOption {
+  /** The filterable payload path — what `build_qdrant_filter` matches on. */
+  value: string
+  label: string
+}
+
+/**
+ * Every non-body reference-metadata field as a `reference_metadata.<key>`
+ * filter path, for a discoverability picker over the FilterBuilder's custom
+ * rule field (a bare free-text input otherwise gives no hint that
+ * `reference_metadata.author_id` — payload, indexed — is what a social
+ * export's author id actually lives under). That is a different axis from
+ * the search panel's own "Search in" field picker: these filters narrow
+ * what any answer retrieves against, while that picker only chooses which
+ * field the search query itself matches.
+ *
+ * Skips the body-text fields: filtering on a whole post/chunk body as an
+ * equality match is not useful, and they are excluded from the pills for the
+ * same reason.
+ *
+ * @param t - Translator, defaults to the English-only fallback so this stays
+ *   callable outside a `LanguageContext` (existing unit tests included).
+ * @returns One `{ value, label }` option per filterable field, in registry
+ *   order.
+ */
+export function referenceMetadataFieldOptions(
+  t: (key: keyof Strings, vars?: Record<string, string | number>) => string = defaultT
+): ReferenceMetadataFieldOption[] {
+  return REFERENCE_METADATA_FIELDS.filter(({ key }) => !BODY_TEXT_KEYS.has(key as string)).map(
+    ({ key, label }) => {
+      const labelKey = LABEL_KEY[key as string]
+      return { value: `reference_metadata.${key}`, label: labelKey ? t(labelKey) : label }
+    }
+  )
+}

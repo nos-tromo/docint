@@ -149,6 +149,41 @@ describe('useSearch', () => {
     await new Promise((r) => setTimeout(r, 20))
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search'))).toBe(false)
   })
+
+  it('sends the chosen field in the request body', async () => {
+    const fetchMock = mockFetch({
+      status: 'ok',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    const { result } = renderHook(() => useSearch('mar', 'author'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search'))
+    expect(JSON.parse(call![1].body)).toMatchObject({ question: 'mar', field: 'author' })
+  })
+
+  it('defaults to the text field', async () => {
+    const fetchMock = mockFetch({
+      status: 'ok',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    renderHook(() => useSearch('alpha'), { wrapper })
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search'))
+      expect(JSON.parse(call![1].body)).toMatchObject({ field: 'text' })
+    })
+  })
 })
 
 describe('useChunkText', () => {
@@ -220,3 +255,4 @@ describe('useScope', () => {
     expect(call![1].method).toBe('DELETE')
   })
 })
+

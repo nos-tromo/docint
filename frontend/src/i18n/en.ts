@@ -121,7 +121,7 @@ export const en = {
   'chat.date_to': 'Date to',
   'chat.custom_rules': 'Custom rules',
   'chat.add_rule': 'Rule',
-  'chat.field_placeholder': 'field',
+  'chat.field_placeholder': 'field (or pick)',
   'chat.value_placeholder': 'value',
   'chat.remove_rule_aria': 'Remove rule',
   'chat.graph_debug': 'Graph debug',
@@ -150,7 +150,7 @@ export const en = {
   'search.results': 'Results',
   'search.docs': '{count} docs',
   'search.docs_more': '{count}+ docs',
-  'search.no_matches': 'No chunk contains every keyword.',
+  'search.no_matches': 'No chunk matches every keyword in the chosen field.',
   'search.not_indexed':
     'This collection has no search index yet. Run "make search-index" for it, then search again.',
   'search.partial_warning':
@@ -182,6 +182,12 @@ export const en = {
   'search.scope_banner': 'Scoped to {count} chunks',
   'search.scope_missing': '{missing} of {count} chunks no longer exist',
   'search.scope_clear_error': 'The scope could not be cleared.',
+  'search.field': 'Search in',
+  'search.field.text': 'Text',
+  'search.field.author': 'Author',
+  'search.field.network': 'Network',
+  'search.field.uuid': 'UUID',
+  'search.export_results': 'Export CSV',
 
   // ingest
   'ingest.title': 'Ingest',

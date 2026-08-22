@@ -7,7 +7,7 @@ import json
 import types
 from collections.abc import Generator, Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import pytest
 from conftest import run_ingest
@@ -18,6 +18,7 @@ from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, R
 from docint.agents.understanding import ContextualUnderstandingAgent
 from docint.core.entities.resolution import ResolutionSummary
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
+from docint.utils.csv_stream import SEARCH_EXPORT_COLUMNS
 
 
 class DummySessionManager:
@@ -263,6 +264,30 @@ class DummyRAG:
             },
         }
 
+    def iter_search_matches(
+        self, query: str, *, field: str = "text", base_filter: Any = None
+    ) -> Iterator[dict[str, Any]]:
+        """Record the call and yield the test-configured matches.
+
+        Args:
+            query (str): Raw keywords, possibly blank.
+            field (str): The search field name.
+            base_filter (Any): Compiled metadata filter, if any.
+
+        Yields:
+            dict[str, Any]: Whatever a test pre-loaded onto ``search_export_matches``.
+        """
+        self.search_export_calls.append({"query": query, "field": field, "base_filter": base_filter})
+        yield from self.search_export_matches
+
+    def _ensure_field_indexes_once(self, collection: str) -> None:
+        """Satisfy the export path's lazy field-index ensure without touching Qdrant.
+
+        Args:
+            collection (str): Physical collection name (ignored).
+        """
+        return None
+
     def probe_rerank_endpoint(self) -> None:
         """Satisfy the lifespan rerank probe without touching the network."""
         return None
@@ -290,6 +315,10 @@ class DummyRAG:
         self.summarize_prompt = "Summarize collection"
         self.index = object()
         self.query_engine = object()
+        # Opaque placeholder: the search-export endpoint passes this straight
+        # through to a monkeypatched `search_index_status`, which never
+        # inspects it for real.
+        self.qdrant_client = object()
         self.selected: list[str] = []
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
@@ -320,6 +349,11 @@ class DummyRAG:
         self.ner_graph_merge_modes: list[str] = []
         self.ner_graph_top_ks: list[int] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
+        # Chunks a test pre-loads for `iter_search_matches` to yield, mirroring
+        # `ner_sources`/`hate_speech_rows`; calls are recorded separately so a
+        # test can assert what lane/filters reached the RAG layer.
+        self.search_export_matches: list[dict[str, Any]] = []
+        self.search_export_calls: list[dict[str, Any]] = []
         self.documents: list[dict[str, Any]] = []
         self.cached_summary_calls = 0
         self.build_tree_summary_calls = 0
@@ -4765,6 +4799,458 @@ def test_search_requires_a_query(client: TestClient) -> None:
     response = client.post("/search", json={"question": "   "})
 
     assert response.status_code == 422
+
+
+def test_search_defaults_to_the_text_field(client: TestClient) -> None:
+    """An unchanged client keeps searching the chunk text."""
+    response = client.post("/search", json={"question": "election"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_calls[-1]["field"] == "text"
+
+
+def test_search_forwards_the_field(client: TestClient) -> None:
+    """The picker's field reaches the RAG layer unchanged."""
+    response = client.post("/search", json={"question": "mar", "field": "author"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_calls[-1]["field"] == "author"
+
+
+def test_search_rejects_an_unknown_field(client: TestClient) -> None:
+    """The whitelist is closed — a raw payload path is refused, not passed through."""
+    response = client.post("/search", json={"question": "mar", "field": "reference_metadata.author"})
+    assert response.status_code == 422
+
+
+def test_search_field_name_stays_in_sync_with_search_fields() -> None:
+    """The OpenAPI enum restating SEARCH_FIELDS must never silently drift from it.
+
+    ``SearchFieldName`` exists only so the schema is self-documenting;
+    ``SEARCH_FIELDS`` stays the actual whitelist both endpoints check
+    against. A field added to one and not the other would either 422 a
+    legitimate value (schema behind) or accept one the runtime check would
+    have refused anyway (schema ahead) — either way silently, since nothing
+    else would fail.
+    """
+    assert set(get_args(api_module.SearchFieldName)) == set(api_module.SEARCH_FIELDS)
+
+
+def test_search_aggregate_endpoint_is_gone(client: TestClient) -> None:
+    """The facet lane was replaced by the field selector; its route no longer exists."""
+    response = client.post("/search/aggregate", json={"question": "election", "group_by": "author"})
+    assert response.status_code in (404, 405)
+
+
+def _indexed_status(client: Any, collection: str) -> dict[str, Any]:
+    """Report a fully search-indexed collection for the export tests."""
+    return {"indexed": True, "total": 3, "with_search_text": 3, "missing": 0, "complete": True}
+
+
+def test_export_search_csv_streams_full_columns_for_the_hits_lane(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hits lane streams every SEARCH_EXPORT_COLUMNS cell, full chunk text included."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {
+            "id": "c1",
+            "chunk_id": "chunk-1",
+            "text": "full first chunk text",
+            "filename": "posts.csv",
+            "page": 1,
+            "row": 2,
+            "reference_metadata": {
+                "network": "instant_messenger",
+                "author": "acme_news",
+                "author_id": "u-1",
+                "vanity": "@acme_news",
+                "url": "https://example.invalid/posts/1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "posting_network": "instant_messenger",
+                "posting_author": "acme_news",
+                "posting_author_id": "u-1",
+                "posting_vanity": "@acme_news",
+                "posting_timestamp": "2026-01-01T00:00:00Z",
+                "posting_url": "https://example.invalid/posts/1",
+                "posting_text": "original posting text",
+                "type": "post",
+                "uuid": "uuid-1",
+                "posting_uuid": "posting-uuid-1",
+                "posting_id": "posting-1",
+                "media_id": "media-1",
+                "speaker": "",
+                "language": "en",
+                "detected_language": "en",
+                "source_file": "posts.csv",
+            },
+        }
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "alpha-search.csv" in response.headers["content-disposition"]
+
+    rows = _parse_csv_body(response.content)
+    assert rows[0] == list(SEARCH_EXPORT_COLUMNS)
+    row = dict(zip(rows[0], rows[1], strict=True))
+    assert row["marked"] == "false"
+    assert row["source"] == "posts.csv"
+    assert row["page"] == "1"
+    assert row["row"] == "2"
+    assert row["chunk_id"] == "chunk-1"
+    assert row["chunk_text"] == "full first chunk text"
+    assert row["network"] == "instant_messenger"
+    assert row["author"] == "acme_news"
+    assert row["url"] == "https://example.invalid/posts/1"
+    assert row["posting_text"] == "original posting text"
+    assert row["type"] == "post"
+    assert row["media_id"] == "media-1"
+    assert row["source_file"] == "posts.csv"
+
+
+def test_export_search_csv_marks_rows_from_marked_ids_param(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A point id passed via marked_ids renders "true" with no session involved."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election", "marked_ids": "c2"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    header = rows[0]
+    by_chunk_id = {row[header.index("chunk_id")]: row[header.index("marked")] for row in rows[1:]}
+    assert by_chunk_id == {"chunk-1": "false", "chunk-2": "true"}
+
+
+def test_export_search_csv_marks_rows_from_session_scope(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chunk id pinned to a session's scope renders "true" in the export."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    client.put("/sessions/s1/scope", json={"chunk_ids": ["c1"]})
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election", "session_id": "s1"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    header = rows[0]
+    by_chunk_id = {row[header.index("chunk_id")]: row[header.index("marked")] for row in rows[1:]}
+    assert by_chunk_id == {"chunk-1": "true", "chunk-2": "false"}
+
+
+def test_export_search_csv_accepts_a_blank_question(client: TestClient) -> None:
+    """A blank question exports the whole filtered collection."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
+    ]
+
+    response = client.get("/search/export.csv")
+
+    assert response.status_code == 200
+    assert "alpha-search.csv" in response.headers["content-disposition"]
+    assert rag.search_export_calls[-1]["query"] == ""
+    assert rag.search_export_calls[-1]["field"] == "text"
+    assert len(_parse_csv_body(response.content)) == 3
+
+
+def test_export_search_csv_rejects_a_query_of_only_short_keywords(client: TestClient) -> None:
+    """A query that lost every word to the index minimum must not widen into a full dump."""
+    response = client.get("/search/export.csv", params={"question": "a b"})
+    assert response.status_code == 422
+
+
+def test_export_search_csv_keeps_a_query_with_one_usable_keyword(client: TestClient) -> None:
+    """A short word alongside a usable one is dropped, not fatal."""
+    response = client.get("/search/export.csv", params={"question": "election a"})
+    assert response.status_code == 200
+
+
+def test_export_search_csv_forwards_the_field_and_names_the_file_by_it(client: TestClient) -> None:
+    """An author export reaches the RAG layer as such and is named after the field."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
+
+    assert response.status_code == 200
+    assert "alpha-author.csv" in response.headers["content-disposition"]
+    assert rag.search_export_calls[-1]["field"] == "author"
+
+
+def test_export_search_csv_rejects_an_unknown_field(client: TestClient) -> None:
+    """The whitelist is closed — a raw payload path is refused, not passed through."""
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "reference_metadata.author"})
+    assert response.status_code == 422
+
+
+def test_export_search_csv_has_no_group_column(client: TestClient) -> None:
+    """One lane, so no grouping value rides on the rows."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"question": "first"})
+
+    assert "group" not in _parse_csv_body(response.content)[0]
+
+
+def test_export_search_csv_rejects_malformed_metadata_filters(client: TestClient) -> None:
+    """A metadata_filters query param that is not valid JSON is refused, not silently dropped."""
+    response = client.get(
+        "/search/export.csv",
+        params={"question": "election", "metadata_filters": "not-json"},
+    )
+    assert response.status_code == 422
+
+
+def test_export_search_csv_rejects_a_keyword_search_over_an_unindexed_collection(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty CSV would read as "no matches"; an unindexed collection is refused outright."""
+    monkeypatch.setattr(
+        api_module,
+        "search_index_status",
+        lambda client, collection: {
+            "indexed": False,
+            "total": 3,
+            "with_search_text": 0,
+            "missing": 3,
+            "complete": False,
+        },
+    )
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 409
+
+
+def test_export_search_csv_rejects_a_partially_indexed_collection(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backfill still midway must not silently ship a truncated export.
+
+    ``with_search_text=40`` alone reads as "indexed" to the old zero-coverage
+    check; ``complete=False`` (60 chunks still missing) is what must trip the
+    gate — a CSV has no ``status: "partial"`` field to carry its own
+    incompleteness once downloaded.
+    """
+    monkeypatch.setattr(
+        api_module,
+        "search_index_status",
+        lambda client, collection: {
+            "indexed": True,
+            "total": 100,
+            "with_search_text": 40,
+            "missing": 60,
+            "complete": False,
+        },
+    )
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 409
+    assert "60" in response.json()["detail"]
+
+
+def test_export_search_csv_rejects_a_field_search_missing_its_index(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A field search over a collection with no TEXT index for that field is refused outright.
+
+    ``search_text`` itself is fine (``_indexed_status`` reports it complete);
+    it is specifically the ``author`` field's own indexes that are missing.
+    """
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "field_indexes_ready", lambda client, collection, name: False)
+
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
+
+    assert response.status_code == 409
+
+
+def test_export_search_csv_allows_a_field_search_with_its_index_present(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A field whose keys all carry the right index passes the gate and streams."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "field_indexes_ready", lambda client, collection, name: True)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
+
+    assert response.status_code == 200
+
+
+def test_search_rejects_the_retired_field_names(client: TestClient) -> None:
+    """author_id, posting_author, type, speaker and language are no longer options.
+
+    They folded into ``author`` or were dropped outright; accepting them would
+    search a key the picker can no longer offer.
+    """
+    for retired in ("author_id", "posting_author", "type", "speaker", "language", "file_name"):
+        response = client.post("/search", json={"question": "mar", "field": retired})
+        assert response.status_code == 422, retired
+
+
+def test_search_and_export_accept_the_uuid_field(client: TestClient) -> None:
+    """Uuid is a first-class option on both the panel's endpoint and the export."""
+    uid = "2b85f4e978364a15b94120136d651adf"
+    response = client.post("/search", json={"question": uid, "field": "uuid"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_calls[-1]["field"] == "uuid"
+
+    response = client.get("/search/export.csv", params={"question": uid, "field": "uuid"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_export_calls[-1]["field"] == "uuid"
+
+
+def test_export_rejects_the_retired_field_names(client: TestClient) -> None:
+    """The export's whitelist tracks the panel's, so neither can drift."""
+    for retired in ("author_id", "posting_author", "type", "speaker", "language", "file_name"):
+        response = client.get("/search/export.csv", params={"question": "mar", "field": retired})
+        assert response.status_code == 422, retired
+
+
+def test_export_search_csv_names_the_file_by_search_when_the_question_is_blank(client: TestClient) -> None:
+    """A blank question exports the whole collection — never named after a field it did not scope by."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"field": "author"})
+
+    assert response.status_code == 200
+    assert "alpha-search.csv" in response.headers["content-disposition"]
+
+
+def test_export_search_csv_allows_an_empty_collection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty collection has nothing to index, so it streams a header-only CSV, not a 409.
+
+    ``total=0`` also makes ``with_search_text`` falsy, which must not read as
+    "needs a backfill" — there is nothing to back-fill.
+    """
+    monkeypatch.setattr(
+        api_module,
+        "search_index_status",
+        lambda client, collection: {
+            "indexed": False,
+            "total": 0,
+            "with_search_text": 0,
+            "missing": 0,
+            "complete": False,
+        },
+    )
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = []
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    assert rows == [list(SEARCH_EXPORT_COLUMNS)]
+
+
+def test_export_search_csv_forwards_metadata_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A well-formed metadata_filters JSON array reaches iter_search_matches as a compiled filter."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    filters = json.dumps([{"field": "reference_metadata.network", "operator": "eq", "value": "acme_news"}])
+
+    response = client.get(
+        "/search/export.csv",
+        params={"question": "election", "metadata_filters": filters},
+    )
+
+    assert response.status_code == 200
+    last_call = cast(DummyRAG, api_module.rag).search_export_calls[-1]
+    assert last_call["base_filter"] is not None
+
+
+def test_export_search_csv_labels_and_marks_an_image_companion_hit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image-companion hit renders `kind=image` and honours `marked_ids` like any other row.
+
+    The SPA pins an image hit into scope by its `_images` companion point id
+    (`img-p1` here) — the same id this row must carry as `id` for
+    `marked_ids`/session scope to find it.
+    """
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "kind": "text"},
+        {
+            "id": "img-p1",
+            "chunk_id": "img-1",
+            "filename": "rally.jpg",
+            "text": "a photo of an election night rally",
+            "kind": "image",
+        },
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election", "marked_ids": "img-p1"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    header = rows[0]
+    by_chunk_id = {
+        row[header.index("chunk_id")]: (row[header.index("kind")], row[header.index("marked")]) for row in rows[1:]
+    }
+    assert by_chunk_id == {"chunk-1": ("text", "false"), "img-1": ("image", "true")}
+
+
+def test_export_search_csv_refuses_a_result_set_over_the_row_cap(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A result set over the cap is refused outright, not silently cut short.
+
+    The point of this endpoint is that a downloaded CSV can never
+    misrepresent itself as complete; silently truncating at a memory limit
+    would be exactly that — the same reasoning the index-completeness gate
+    above already applies.
+    """
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "MAX_EXPORT_ROWS", 2)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
+        {"id": "c3", "chunk_id": "chunk-3", "filename": "posts.csv", "text": "third"},
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 409
+
+
+def test_export_search_csv_allows_a_result_set_exactly_at_the_row_cap(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary itself is not truncation — a match count exactly at the cap still succeeds."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "MAX_EXPORT_ROWS", 2)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
+    ]
+
+    response = client.get("/search/export.csv", params={"question": "election"})
+
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    assert len(rows) == 3  # header + 2 rows
 
 
 def test_scope_can_be_set_and_read_back(client: TestClient) -> None:

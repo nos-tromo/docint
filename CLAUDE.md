@@ -60,8 +60,9 @@ make bundle-dev # airgap tarball of the current working tree (dev/soak)
 # so it reaches the qdrant/vllm-router aliases — production is Docker-only).
 make resolve                    # prompts for the collection name
 make resolve COLLECTION=mydocs  # non-interactive
-# Build the full-text search index for a collection (payload-only, airgap-safe,
-# idempotent). Needed once per collection ingested before search shipped.
+# Build the full-text search index for a collection — search_text plus the
+# Search in field-picker indexes (payload-only, airgap-safe, idempotent).
+# Needed once per collection ingested before search shipped.
 make search-index                    # prompts for the collection name
 make search-index COLLECTION=mydocs  # non-interactive
 make search-index-all                # every collection (one-time backport)
@@ -180,6 +181,60 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   **replaced the two entity-occurrence chat query modes**, which searched the
   NER aggregate and silently returned whichever entity was most frequent rather
   than the one asked about.
+  **The query matches one chosen field** (`fields.py` → `POST /search`
+  `field`, default `text`). The panel's **Search in** picker
+  (`SearchPanel.tsx`, `SelectMenu`) swaps the payload keys the keywords are
+  compiled against: the chunk text, `author`, `network` or `uuid`
+  (`SEARCH_FIELDS`) — so "everything this author wrote" is an ordinary
+  search whose hits are chunks, pinnable into scope like any other. There is
+  deliberately no `file_name` option: filtering by filename is what the chat
+  metadata filters are for, and they accept a free-text `file_name` rule.
+  **One option covers several keys, because one option is one question.**
+  `author` searches the posting's own `author` and `vanity` *and* the
+  `posting_author`/`posting_vanity` an image or transcript inherits from its
+  parent post, so a picker entry per key is not needed — and was not wanted:
+  making an investigator choose the right synonym before searching is the
+  confusion the picker exists to remove. The query must be satisfied by
+  **one** key (`should` over per-key `must` clauses), never assembled across
+  two — otherwise a first name in `author` and a surname in an unrelated
+  `vanity` would report as one hit.
+  **A field can need two different matchers.** `MatchText` is full-text and
+  works on strings only, but author *ids* are numeric in Qdrant, so a TEXT
+  index over `author_id` indexes zero points and every id search silently
+  returned nothing. Ids therefore match by exact `MatchValue`
+  (`FieldSpec.value_keys`, tried in both numeric and string form via
+  `value_match_forms()` since collections differ), and names by prefix. An
+  id query is a single token by definition, so a multi-word query drops the
+  id keys from the filter entirely. **`uuid` is value-only**: a posting's
+  uuid is the sole identifier of a single posting artifact, stored on the
+  posting's own node at `reference_metadata.uuid` and on every derived
+  image, keyframe and transcript segment as `posting_uuid` — the same key
+  pair `_fetch_posting_entity_nodes` ORs — so one exact match returns the
+  post and everything hanging off it. `uuid_match_forms()` tries the pasted
+  form and its dash-normalised twin, since exports write it undashed and a
+  user may paste either; a value-only field given a multi-word query
+  compiles to no filter, which both `search_fulltext` and
+  `iter_search_matches` answer as "no hits" rather than as a scan.
+  Each key needs the index its own matcher requires — TEXT for a name,
+  KEYWORD for an id: `ensure_field_indexes()` creates them at ingest
+  (`RAG.create_index`), `make search-index` backports them, and a lazy
+  per-process `_ensure_field_indexes_once()` covers the gap. Qdrant holds
+  one index per field, so a wrong-kind index is **replaced** — which covers
+  both the KEYWORD indexes the former facet lane left on name keys and the
+  TEXT indexes an earlier cut of this feature put on the id keys. The chat
+  metadata filters' `MatchValue` conditions on these keys stay correct but
+  are no longer index-accelerated (decided, not an oversight). A field
+  search whose keys are not all indexed correctly reports `not_indexed`
+  (`field_indexes_ready()`), never a silently case-sensitive or silently
+  empty result. The `_images` companion is searched only for fields an image
+  point carries (`IMAGE_LANE_FIELDS`: `text`, `author`, `uuid` — via the
+  parent posting's `posting_*` keys and `posting_uuid` link). The CSV export (`GET /search/export.csv`) takes
+  the same `field`; a blank `question` there exports the whole filtered
+  collection (capped by `MAX_EXPORT_ROWS`), which the panel itself never
+  does. This **replaced the faceted "Social" lane** (`POST
+  /search/aggregate`, `SearchGroups.tsx`): investigators reached for its
+  picker to filter, not to count, and a picker that only grouped left a
+  typed author id matching nothing.
 - `docint/utils/ner_client.py` — Thin HTTP client for the remote GLiNER service hosted by `vllm-service` (full stack: `http://vllm-router:4000/gliner` with Bearer auth; gliner-only shape: `http://gliner-only:8000/gliner` with no auth). Replaces the in-process GLiNER runtime previously shipped here.
 - `docint/utils/clip_client.py` — Thin HTTP client for the remote CLIP image+text embedding service hosted by `vllm-service`. Same dual-shape posture as the NER client (full stack via router with Bearer auth; `clip-only` shape at `http://clip-only:8000` with no auth). `RemoteCLIPBackend` satisfies the `ImageEmbeddingBackend` Protocol so `core/ingest/images_service.py` swaps in place. Probes `/clip/dimension` at construction to size Qdrant `_images` collections without burning an embed call. `IMAGE_EMBED_MODEL` is no longer read by docint — set `CLIP_MODEL` on the vllm-service container instead. Override the endpoint via `CLIP_API_BASE` / `CLIP_API_KEY` / `CLIP_TIMEOUT`.
 - **An image's own words are read, not only described** (`images_service.ingest_image` → `core/ocr`). The caption and tags say what a picture *shows*; `ocr_text` is what it *says* — the text printed inside a screenshot, a photographed letter, a slide. It is stored on the `_images` payload, put **ahead of** the caption in the node text and in `search_text`, and (for a standalone file) in the Document text that `ImageReader` contributes to the main collection, because the printed words are what a reader typed and what the reranker can match exactly rather than approximately. Gated by `IMAGE_OCR_ENABLED`, which **defaults to whether `OCR_MODEL` is set** so an unchanged stack does not start paying a call per image; keyframes need `KEYFRAME_OCR_ENABLED` on top (a clip contributes many frames, and only slides tend to carry text). Reading never raises — an image with no words is the normal case, not a failure. Applies to standalone files, social images and PDF-extracted figures alike (one code path, `ingest_image`). Pre-existing collections need a re-ingest to gain the field (no payload migration), and image points are cached by hash, so a re-run only reads images the `_images` companion has not seen.

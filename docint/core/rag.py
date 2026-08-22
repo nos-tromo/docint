@@ -114,10 +114,12 @@ from qdrant_client import models as qdrant_models
 # so list every test-reachable third-party symbol here.
 __all__ = [
     "RAG",
+    "SEARCH_FIELDS",
     "EmptyIngestionError",
     "QueryBundle",
     "ResponseMode",
     "RetrieverQueryEngine",
+    "UnknownSearchFieldError",
     "VectorStoreQueryMode",
     "logger",
     "qdrant_models",
@@ -150,7 +152,20 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
-from docint.core.search.fulltext import build_search_filter, matches_phrase, parse_keywords
+from docint.core.search.fields import (
+    IMAGE_LANE_FIELDS,
+    SEARCH_FIELDS,
+    UnknownSearchFieldError,
+    ensure_field_indexes,
+    field_indexes_ready,
+    search_field_spec,
+)
+from docint.core.search.fulltext import (
+    build_scan_filter,
+    build_search_filter,
+    matches_any_phrase,
+    parse_keywords,
+)
 from docint.core.search.index import (
     SEARCH_TEXT_FIELD,
     ensure_search_index,
@@ -2700,6 +2715,7 @@ class RAG:
     _query_engine_cache: OrderedDict[str, RetrieverQueryEngine] = field(
         default_factory=OrderedDict, init=False, repr=False
     )
+    _field_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
@@ -4713,6 +4729,30 @@ class RAG:
         return src
 
     @staticmethod
+    def _payload_path_value(payload: dict[str, Any], key: str) -> str:
+        """Read a dotted payload path off a point already in hand.
+
+        ``SEARCH_FIELDS`` values are Qdrant JSON-path keys (e.g.
+        ``"reference_metadata.author"``); the phrase post-filter and the
+        export walk each point's own payload dict rather than asking Qdrant.
+
+        Args:
+            payload (dict[str, Any]): A Qdrant point payload.
+            key (str): A dotted Qdrant JSON-path key, e.g. one produced by
+                :func:`search_payload_key`.
+
+        Returns:
+            str: The stringified value, or ``""`` when any path segment is
+                missing or not a dict.
+        """
+        value: Any = payload
+        for part in key.split("."):
+            if not isinstance(value, dict):
+                return ""
+            value = value.get(part)
+        return "" if value is None else str(value)
+
+    @staticmethod
     def _extract_indexable_text(payload: dict[str, Any]) -> str:
         """Return the text a point should be searchable by.
 
@@ -4924,6 +4964,14 @@ class RAG:
         # Full-text search needs a lowercase prefix index on `search_text`.
         # Idempotent and fail-soft, like the posting_uuid index above.
         ensure_search_index(self.qdrant_client, self.qdrant_collection)
+
+        # Field search matches metadata keys the way it matches the text, so
+        # each needs the same prefix/lowercase index — on the image companion
+        # too, which is why this routes through the one companion-aware,
+        # cache-writing method rather than calling ensure_field_indexes and
+        # the cache update inline: a second writer of _field_indexes_ensured
+        # could mark a collection done before its companion was ever touched.
+        self._ensure_field_indexes_once(self.qdrant_collection)
 
     def create_query_engine(self) -> None:
         """Create the query engine with a retriever and reranker.
@@ -8477,18 +8525,25 @@ class RAG:
         self,
         query: str,
         *,
+        field: str = "text",
         base_filter: qdrant_models.Filter | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        """Return chunks containing every keyword in ``query``.
+        """Return chunks whose chosen field contains every keyword.
 
         Pure local lookup: one native Qdrant scroll, no embedding call and no
         inference. Keywords are ANDed and order-independent; matching is
-        case-insensitive and prefix-based via the ``search_text`` index.
+        case-insensitive and prefix-based via the field's TEXT index — the
+        chunk text (``search_text``) by default, or a whitelisted metadata
+        key (author, author id, network, …) so "everything this author
+        wrote" is one search. A multi-word query must also occur as a
+        contiguous phrase in the field's value. Image companion points are
+        searched only for fields they carry (:data:`IMAGE_LANE_FIELDS`).
 
         Args:
             query (str): Raw query text; whitespace-separated keywords.
+            field (str): A key of :data:`SEARCH_FIELDS`; ``"text"`` by default.
             base_filter (qdrant_models.Filter | None): Caller's metadata filter,
                 ANDed with the keyword conditions.
             limit (int): Hits per page, clamped to ``[1, 500]``.
@@ -8498,13 +8553,14 @@ class RAG:
             dict[str, Any]: ``status`` — ``"ok"`` when every point in the
                 collection is indexed, ``"partial"`` when some are not (a
                 backfill is running or was interrupted, so the result set is
-                incomplete), ``"not_indexed"`` when none are — plus ``hits``,
+                incomplete), ``"not_indexed"`` when none are or when the
+                chosen field has no TEXT index yet — plus ``hits``,
                 ``total``, ``next_cursor`` and ``index_status`` counts.
 
         Raises:
-            Nothing — short words are silently dropped from the keyword
-            list. An all-short query returns an empty result set.
+            UnknownSearchFieldError: When ``field`` is not whitelisted.
         """
+        spec = search_field_spec(field)
         collection = self.qdrant_collection
         status = search_index_status(self.qdrant_client, collection)
         empty: dict[str, Any] = {
@@ -8530,6 +8586,20 @@ class RAG:
                 status.get("indexed"),
             )
             return {**empty, "status": "not_indexed"}
+        if field != "text":
+            self._ensure_field_indexes_once(collection)
+            if not field_indexes_ready(self.qdrant_client, collection, field):
+                # Each key needs the index its own matcher requires: TEXT for a
+                # name (or MatchText case-folds ASCII only and stops
+                # prefix-matching), KEYWORD for an id (a TEXT index over a
+                # number indexes nothing at all). Report the remedy rather
+                # than pretend to search.
+                logger.warning(
+                    "Field index missing | collection={!r} field={} — run `make search-index`",
+                    collection,
+                    field,
+                )
+                return {**empty, "status": "not_indexed"}
         if not status.get("complete"):
             logger.warning(
                 "Search index incomplete | collection={!r} missing={} total={} — results are partial",
@@ -8539,13 +8609,19 @@ class RAG:
             )
 
         keywords = parse_keywords(query)
-        search_filter = build_search_filter(keywords, base_filter=base_filter)
+        search_filter = build_search_filter(
+            keywords,
+            text_keys=spec.text_keys,
+            value_keys=spec.value_keys,
+            value_forms=spec.value_forms(query),
+            base_filter=base_filter,
+        )
         if search_filter is None:
             return empty
 
         page_size = max(1, min(int(limit), 500))
         companion = image_companion_name(collection)
-        has_images = self._collection_exists(companion)
+        has_images = field in IMAGE_LANE_FIELDS and self._collection_exists(companion)
 
         # Phrase matching uses the raw query words (including short ones like
         # "a") so the substring check matches the actual text. The Qdrant
@@ -8567,7 +8643,9 @@ class RAG:
 
         def _scroll(name: str, n: int, off: Any) -> tuple[list[Any], Any]:
             if phrase_active:
-                return self._scroll_search_lane_filtered(name, search_filter, n, off, query_words)
+                return self._scroll_search_lane_filtered(
+                    name, search_filter, n, off, query_words, text_keys=spec.text_keys
+                )
             return self._scroll_search_lane(name, search_filter, n, off)
 
         if lane == "text":
@@ -8603,6 +8681,148 @@ class RAG:
             "next_cursor": next_cursor,
             "index_status": status,
         }
+
+    def _ensure_field_indexes_once(self, collection: str) -> None:
+        """Ensure the field-search payload indexes once per process per collection.
+
+        Collections ingested before field search shipped carry KEYWORD (or
+        no) indexes on these keys; ``make search-index`` backports them, but
+        a first field search must not fail in the meantime.
+        ``ensure_field_indexes`` is idempotent, so this only saves round-trips.
+
+        Also covers the ``_images`` companion when one exists: right after
+        this call, ``search_fulltext`` runs the image lane for any field in
+        ``IMAGE_LANE_FIELDS`` but only checks the *main* collection's index
+        status, so an un-indexed companion would otherwise run ``MatchText``
+        case-sensitively while the response still reported ``status: "ok"``.
+        The two outcomes are ANDed together, so a companion-only failure is
+        not cached as done and the next search retries it.
+
+        Args:
+            collection (str): Physical main collection name — the cache key,
+                regardless of whether a companion was also ensured.
+        """
+        if collection in self._field_indexes_ensured:
+            return
+        ok = ensure_field_indexes(self.qdrant_client, collection)
+        companion = image_companion_name(collection)
+        if self._collection_exists(companion):
+            ok = ensure_field_indexes(self.qdrant_client, companion) and ok
+        if ok:
+            self._field_indexes_ensured.add(collection)
+
+    def iter_search_matches(
+        self,
+        query: str,
+        *,
+        field: str = "text",
+        base_filter: qdrant_models.Filter | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield every chunk matching a search, exhaustively, for CSV export.
+
+        The chunk-level counterpart to :meth:`search_fulltext`: the same
+        field, filter compilation, phrase post-filter and image-lane rule,
+        but no paging — every matching point is yielded once, in scroll
+        order, which is what makes this the exhaustive set an export needs.
+        Faithfulness to the JSON endpoint is load-bearing: this export must
+        never show more, or fewer, rows than a caller who ran the same query
+        through the panel would see. The one addition is a blank query,
+        which scans the whole (filtered) collection — the panel refuses
+        that, but a full dump is a legitimate export. A *non-blank* query
+        that yields no usable keyword (every word below the index minimum)
+        is not given the same treatment: silently falling through to a scan
+        would widen a narrow-but-unindexable query into that same full dump,
+        so it is refused instead.
+
+        Args:
+            query (str): Whitespace-separated keywords; may be blank, which
+                scans the whole (filtered) collection.
+            field (str): A key of :data:`SEARCH_FIELDS`; ``"text"`` by default.
+            base_filter (qdrant_models.Filter | None): Caller's metadata filter.
+
+        Yields:
+            dict[str, Any]: :meth:`_source_from_payload` dicts, each with an
+                added ``"kind"`` key (``"text"`` or ``"image"``, mirroring
+                :meth:`_search_hits`).
+
+        Raises:
+            UnknownSearchFieldError: When ``field`` is not whitelisted.
+            ValueError: When ``query`` is non-blank but every word is below
+                the index minimum, leaving no usable keyword.
+        """
+        spec = search_field_spec(field)
+        collection = self.qdrant_collection
+        keywords: list[str] = parse_keywords(query) if query.strip() else []
+        if query.strip() and not keywords:
+            raise ValueError("A search export requires at least one usable keyword.")
+
+        lanes = [collection]
+        query_words: list[str] = []
+        if keywords:
+            compiled = build_search_filter(
+                keywords,
+                text_keys=spec.text_keys,
+                value_keys=spec.value_keys,
+                value_forms=spec.value_forms(query),
+                base_filter=base_filter,
+            )
+            if compiled is None:
+                # A value-only field (uuid) given a multi-word query has no
+                # legal branch: no exact value to try, no text key to prefix.
+                # That is "no hits", exactly as search_fulltext answers it —
+                # never a scan of everything, and never a crash.
+                return
+            search_filter: qdrant_models.Filter = compiled
+            # Raw whitespace-split words, not `parse_keywords`'s output — a
+            # short word like "a" is unindexable but still valid inside a
+            # phrase, exactly as `search_fulltext` computes it.
+            query_words = [w for w in str(query or "").split() if w]
+            companion = image_companion_name(collection)
+            if field in IMAGE_LANE_FIELDS and self._collection_exists(companion):
+                lanes.append(companion)
+        else:
+            search_filter = build_scan_filter(base_filter)
+
+        phrase_active = len(query_words) > 1
+
+        matched = 0
+        for lane in lanes:
+            kind = "text" if lane == collection else "image"
+            for page in iter_scroll(
+                self.qdrant_client,
+                collection_name=lane,
+                scroll_filter=search_filter,
+                with_payload=True,
+                with_vectors=False,
+                error_context="search export",
+                # A mid-scroll failure must fail the whole export, not
+                # truncate it silently. The default "warn" mode logs and ends
+                # the generator cleanly, which is indistinguishable from a
+                # complete result once it reaches a 200 CSV — the same
+                # failure mode the index-completeness gate in
+                # `export_search_csv` exists to prevent.
+                on_error="raise",
+            ):
+                for point in page:
+                    payload = getattr(point, "payload", None)
+                    if not isinstance(payload, dict):
+                        continue
+                    if phrase_active and not matches_any_phrase(
+                        (self._payload_path_value(payload, key) for key in spec.text_keys), query_words
+                    ):
+                        continue
+                    src = self._source_from_payload(collection=lane, payload=payload, node_id=str(point.id))
+                    src["kind"] = kind
+                    matched += 1
+                    yield src
+
+        logger.info(
+            "Search export scan | collection={!r} field={} keywords={} matched={}",
+            collection,
+            field,
+            len(keywords),
+            matched,
+        )
 
     def _collection_exists(self, name: str) -> bool:
         """Return whether a collection exists, treating an outage as absent.
@@ -8656,6 +8876,8 @@ class RAG:
         limit: int,
         offset: Any,
         keywords: list[str],
+        *,
+        text_keys: Sequence[str] = (SEARCH_TEXT_FIELD,),
     ) -> tuple[list[Any], Any]:
         """Scroll one lane with client-side phrase post-filtering.
 
@@ -8668,7 +8890,9 @@ class RAG:
             limit (int): Maximum phrase-matching points to return.
             offset (Any): Scroll offset from the cursor, or ``None``.
             keywords (list[str]): Keywords whose contiguous occurrence is
-                checked via ``matches_phrase``.
+                checked via ``matches_any_phrase``.
+            text_keys (Sequence[str]): Payload keys whose values the phrase
+                is checked against; one of them holding it is enough.
 
         Returns:
             tuple[list[Any], Any]: Accepted points and the next offset (the
@@ -8685,8 +8909,8 @@ class RAG:
 
             for point in points:
                 payload = getattr(point, "payload", None) or {}
-                text = str(payload.get(SEARCH_TEXT_FIELD) or "")
-                if matches_phrase(text, keywords):
+                values = (self._payload_path_value(payload, key) for key in text_keys)
+                if matches_any_phrase(values, keywords):
                     accepted.append(point)
                     if len(accepted) >= limit:
                         return accepted, getattr(point, "id", qdrant_next)

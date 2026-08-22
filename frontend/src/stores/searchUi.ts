@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { SEARCH_FIELDS } from '@/api/types'
+import type { SearchField } from '@/api/types'
 
 /**
  * Return the per-chat key a search draft, query and scope are stored under.
@@ -37,6 +39,9 @@ export interface SearchUiState {
   scopes: Record<string, ScopeState>
   /** Whether the `Filters (N)` disclosure at the column's foot is open. */
   filtersOpen: boolean
+  /** Which payload field the query matches. Not per-chat: one choice for
+   *  the whole panel, like the filters. */
+  field: SearchField
   setDraft: (key: string, value: string) => void
   setQuery: (key: string, value: string) => void
   setScopeTokens: (key: string, tokens: Record<string, number>) => void
@@ -44,6 +49,7 @@ export interface SearchUiState {
   clearScope: (key: string) => void
   adoptScope: (from: string, to: string) => void
   setFiltersOpen: (open: boolean) => void
+  setField: (field: SearchField) => void
 }
 
 /** Read a chat's scope, falling back to an empty one. */
@@ -64,6 +70,7 @@ export const useSearchUiStore = create<SearchUiState>()(
       queries: {},
       scopes: {},
       filtersOpen: false,
+      field: 'text',
       setDraft: (key, value) => set((s) => ({ drafts: { ...s.drafts, [key]: value } })),
       setQuery: (key, value) => set((s) => ({ queries: { ...s.queries, [key]: value } })),
       setScopeTokens: (key, tokens) =>
@@ -100,14 +107,29 @@ export const useSearchUiStore = create<SearchUiState>()(
           }
           return { scopes, queries }
         }),
-      setFiltersOpen: (filtersOpen) => set({ filtersOpen })
+      setFiltersOpen: (filtersOpen) => set({ filtersOpen }),
+      setField: (field) => set({ field })
     }),
     {
       // The selection is the only client-side record of a session's scope —
       // the API has no GET for it — so persisting is what lets a reload still
       // report honestly what the chat is scoped to.
       name: 'docint-search-ui',
-      version: 1
+      version: 5,
+      // v1 had neither mode nor field; v2 had `mode`/`groupBy` for the facet
+      // lane, which the field picker replaced; v3 offered nine fields, five of
+      // which were folded into `author` or dropped; v4 still offered `file_name`,
+      // since replaced by `uuid`. A persisted field the picker no longer offers
+      // would leave the trigger blank and every search 422ing, so it falls back
+      // to Text rather than being carried forward. The version must bump on
+      // every such removal: zustand only runs this migrate on a mismatch.
+      migrate: (persisted) => {
+        const rest = { ...(persisted as object) } as Record<string, unknown>
+        delete rest.mode
+        delete rest.groupBy
+        if (!SEARCH_FIELDS.includes(rest.field as SearchField)) delete rest.field
+        return { field: 'text', ...rest }
+      }
     }
   )
 )

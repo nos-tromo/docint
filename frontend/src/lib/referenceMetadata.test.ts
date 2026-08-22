@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { REFERENCE_METADATA_FIELDS, referenceMetadataItems, referenceMetadataPills } from './referenceMetadata'
+import {
+  REFERENCE_METADATA_FIELDS,
+  referenceMetadataFieldOptions,
+  referenceMetadataItems,
+  referenceMetadataPills
+} from './referenceMetadata'
 
 describe('referenceMetadata detected_language', () => {
   it('registers a Detected Language field in the map', () => {
@@ -144,5 +149,33 @@ describe('referenceMetadataPills', () => {
   it('falls back to a plain value pill for a malformed URL', () => {
     const pills = referenceMetadataPills({ url: 'not a url' })
     expect(pills).toEqual([{ key: 'url', value: 'not a url' }])
+  })
+})
+
+describe('referenceMetadataFieldOptions', () => {
+  it('emits the filterable payload path, not the bare key', () => {
+    const options = referenceMetadataFieldOptions()
+    expect(options).toContainEqual({ value: 'reference_metadata.author_id', label: 'Author ID' })
+    expect(options).toContainEqual({ value: 'reference_metadata.network', label: 'Network' })
+  })
+
+  it('excludes the body-text fields — not useful as equality filters', () => {
+    const options = referenceMetadataFieldOptions()
+    const values = options.map((o) => o.value)
+    expect(values).not.toContain('reference_metadata.text')
+    expect(values).not.toContain('reference_metadata.parent_text')
+    expect(values).not.toContain('reference_metadata.anchor_text')
+  })
+
+  it('covers every registered field except the body-text three', () => {
+    const options = referenceMetadataFieldOptions()
+    expect(options).toHaveLength(REFERENCE_METADATA_FIELDS.length - 3)
+  })
+
+  it('routes labels through the supplied translator', () => {
+    const shout = (key: string) => key.toUpperCase()
+    const options = referenceMetadataFieldOptions(shout as never)
+    const authorId = options.find((o) => o.value === 'reference_metadata.author_id')
+    expect(authorId?.label).toBe('COMMON.REFMETA_AUTHOR_ID')
   })
 })

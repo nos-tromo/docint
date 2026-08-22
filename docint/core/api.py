@@ -56,7 +56,9 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     normalize_numeric_bound,
 )
-from docint.core.search.fulltext import parse_keywords
+from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, field_indexes_ready
+from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
+from docint.core.search.index import search_index_status
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
@@ -869,12 +871,21 @@ class ScopeOut(BaseModel):
     missing: int = 0
 
 
+#: Restates ``SEARCH_FIELDS`` as a closed enum so the OpenAPI schema is
+#: self-documenting; the endpoints' whitelist check against ``SEARCH_FIELDS``
+#: itself stays in place as defense in depth.
+SearchFieldName = Literal["text", "author", "network", "uuid"]
+
+
 class SearchIn(BaseModel):
     """Request payload for a full-text keyword search."""
 
     question: str
     collection: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
+    #: Which payload field the keywords match: the chunk text, or a
+    #: whitelisted metadata key (author, author id, …).
+    field: SearchFieldName = "text"
     limit: int = Field(default=50, ge=1, le=500)
     cursor: str | None = None
 
@@ -1518,33 +1529,37 @@ def search_collection(
     Pure local lookup — one native Qdrant scroll, no embedding call and no
     inference. Keywords are ANDed and order-independent; matching is
     case-insensitive and prefix-based, so the head of a compound finds the
-    compound.
+    compound. ``field`` chooses which payload field the keywords match
+    (``text`` by default).
 
     A collection that has never been backfilled returns ``status:
     "not_indexed"`` with no hits, so an empty ``hits`` list under ``status:
     "ok"`` means "no matches" and nothing else.
 
     Args:
-        payload (SearchIn): Query, optional collection, filters and paging.
+        payload (SearchIn): Query, optional collection, field, filters and paging.
         principal (Principal): The resolved request principal.
 
     Returns:
         SearchOut: Hits, exact total, next cursor and index state.
 
     Raises:
-        HTTPException: 422 for an unusable query, 400/404 from collection
-            resolution, 500 on unexpected failure.
+        HTTPException: 422 for an unusable query or an unknown field, 400/404
+            from collection resolution, 500 on unexpected failure.
     """
     # Validate at the boundary rather than deep in the RAG layer: an unusable
     # query should be refused before a collection is even resolved. An empty
     # keyword list would otherwise reach the search as "match everything".
     if not parse_keywords(payload.question):
         raise HTTPException(status_code=422, detail="Invalid request.")
+    if payload.field not in SEARCH_FIELDS:
+        raise HTTPException(status_code=422, detail="Invalid request.")
 
     try:
         with _scoped_collection(payload.collection, principal):
             data = rag.search_fulltext(
                 payload.question,
+                field=payload.field,
                 base_filter=build_qdrant_filter(payload.metadata_filters),
                 limit=payload.limit,
                 cursor=payload.cursor,
@@ -1552,9 +1567,226 @@ def search_collection(
         return SearchOut(**data)
     except HTTPException:
         raise
+    except UnknownSearchFieldError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
     except Exception as e:
         logger.opt(exception=e).error("Error running collection search")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+#: Hard cap on chunk-level search-export rows. `export_search_csv` sorts the
+#: whole matching set before it can stream a single row (see below), so an
+#: unbounded query — most easily a blank question, which legitimately
+#: matches the whole (filtered) collection — would hold every matching
+#: chunk's full text and reference metadata in memory at once. 50,000 rows
+#: comfortably covers any real investigative export while keeping worst-case
+#: memory bounded; crossing it refuses the request (409) rather than
+#: silently shipping a truncated file that has no field of its own to mark
+#: itself incomplete.
+MAX_EXPORT_ROWS = 50_000
+
+
+@app.get("/search/export.csv", tags=["Query"])
+def export_search_csv(
+    collection: str | None = None,
+    question: str = "",
+    field: SearchFieldName = "text",
+    metadata_filters: str = "",
+    session_id: str | None = None,
+    marked_ids: str = "",
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> StreamingResponse:
+    """Stream every matching chunk as CSV.
+
+    The exhaustive, chunk-level counterpart to ``POST /search`` — and the
+    replacement for the old ``GET /search/aggregate/export.csv``, whose
+    ``value``/``count`` rows could not identify a post or its author, let
+    alone show its text. One lane, selected the same way as the JSON
+    endpoint and faithful to what it returns (see
+    :meth:`RAG.iter_search_matches`): ``field`` chooses which payload field
+    the keywords match — the chunk text by default, or a whitelisted
+    metadata key — with the same phrase post-filter on a multi-word query
+    and the same second scroll over the ``{collection}_images`` companion
+    for fields an image can carry, so a marked image hit is never dropped
+    from the file. Every row carries a ``kind`` column (``text`` or
+    ``image``) so an image row stays distinguishable once downloaded. A
+    blank ``question`` exports the whole (filtered) collection rather than
+    being refused — the panel never issues a blank query, but a full dump is
+    a legitimate export. A keyword search over a collection that is
+    unindexed *or only partially indexed* for the chosen field (a backfill
+    still running or interrupted) is refused outright (409) rather than
+    degrading to an incomplete result set — a CSV has no ``status:
+    "partial"`` field to carry its own incompleteness once downloaded, so a
+    truncated export would otherwise read as the complete one. An empty
+    collection is not a partial index: it streams a header-only CSV rather
+    than 409ing with a remedy that names nothing to fix. The same reasoning
+    caps the row count at ``MAX_EXPORT_ROWS``: the whole matching set is
+    sorted in memory before a single row is streamed, so an oversize match
+    (most easily a blank-question export) is refused rather than silently
+    cut short.
+
+    Args:
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        question (str): Whitespace-separated keywords; may be blank.
+        field (str): A key of ``SEARCH_FIELDS``; ``"text"`` by default.
+        metadata_filters (str): JSON-encoded list of filter rules, or blank.
+        session_id (str | None): Session whose stored chat scope counts as
+            "marked", unioned with ``marked_ids``.
+        marked_ids (str): Comma-separated Qdrant point ids to mark, covering a
+            selection made before a session exists.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        StreamingResponse: A ``text/csv`` attachment, one row per matching
+            chunk, with full chunk text and every reference-metadata field.
+
+    Raises:
+        HTTPException: 422 for an unknown field, a non-blank question that
+            parses to no usable keyword, or malformed ``metadata_filters``;
+            409 when a keyword search runs over a non-empty collection that
+            is unindexed or only partially indexed for the chosen field, or
+            when the matching set exceeds ``MAX_EXPORT_ROWS``; 400/404 from
+            collection resolution; 500 on unexpected failure.
+    """
+    if field not in SEARCH_FIELDS:
+        raise HTTPException(status_code=422, detail="Invalid request.")
+
+    keywords: list[str] = parse_keywords(question) if question.strip() else []
+
+    # Boundary validation, mirroring `POST /search`: an unusable query must
+    # be refused before a collection is even resolved. A blank question is
+    # always allowed — it exports the whole filtered collection — but a
+    # non-blank one that lost every word to the index minimum would
+    # otherwise silently widen into that same full dump.
+    if question.strip() and not keywords:
+        raise HTTPException(status_code=422, detail="Invalid request.")
+
+    try:
+        raw_filters = json.loads(metadata_filters) if metadata_filters.strip() else []
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+
+    from docint.utils.csv_stream import SEARCH_EXPORT_COLUMNS, search_export_row, stream_csv
+
+    marked_from_param = {entry.strip() for entry in marked_ids.split(",") if entry.strip()}
+
+    try:
+        with _scoped_collection(collection, principal) as physical:
+            if keywords:
+                index_status = search_index_status(rag.qdrant_client, physical)
+                total = int(index_status.get("total") or 0)
+                # An empty collection has nothing to index, so
+                # with_search_text=0 there is the honest state, not a missing
+                # backfill: it streams a header-only CSV below rather than
+                # 409ing with a "run make search-index" remedy that names
+                # nothing to fix. A non-empty collection must be both indexed
+                # AND complete — `complete` catches a backfill still midway
+                # (with_search_text > 0 but missing > 0), which the old
+                # `with_search_text`-only check let straight through. A CSV
+                # outlives the UI that produced it: unlike `/search`, which
+                # can carry `status: "partial"` beside a banner, an export has
+                # no channel of its own to report incompleteness once
+                # downloaded, so a partial index is refused outright rather
+                # than risk an investigator filing a truncated set as the
+                # complete evidence.
+                if total > 0 and (not index_status.get("indexed") or not index_status.get("complete")):
+                    missing = index_status.get("missing")
+                    logger.warning(
+                        "Search export refused | collection={!r} indexed={} total={} with_search_text={} missing={}",
+                        physical,
+                        index_status.get("indexed"),
+                        total,
+                        index_status.get("with_search_text"),
+                        missing,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Collection is not fully search-indexed ({missing} of {total} chunks "
+                            "missing). Run `make search-index` first."
+                        ),
+                    )
+                # A metadata field carries its own index, separate from
+                # `search_text`. Lazily ensured here too, mirroring
+                # `search_fulltext`, so a first-ever field export on a
+                # pre-existing collection builds the index rather than
+                # 409ing where the panel would have quietly succeeded. The
+                # 409 itself stays gated on `total > 0`, like the check
+                # above — an empty collection has nothing to be indexed for
+                # this field either, so there is still no remedy worth
+                # naming.
+                if field != "text":
+                    rag._ensure_field_indexes_once(physical)
+                    if total > 0 and not field_indexes_ready(rag.qdrant_client, physical, field):
+                        logger.warning(
+                            "Field index missing | collection={!r} field={} — run `make search-index`",
+                            physical,
+                            field,
+                        )
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Collection is not indexed for this field. Run `make search-index` first.",
+                        )
+
+            marked_from_scope: list[str] = (
+                rag.ensure_session_manager().get_scope(session_id, principal.effective_owner) if session_id else []
+            )
+            marked = set(marked_from_scope) | marked_from_param
+
+            # Bounded, not streamed straight through: everything below sorts
+            # the whole set before the first row goes out, so it has to be
+            # materialized either way. A blank question legitimately matches
+            # the whole (filtered) collection, so nothing upstream already
+            # bounds this. Refusing outright once the cap is crossed matches
+            # the index-completeness gate above: a CSV has no field of its
+            # own to mark itself incomplete, so a silently truncated file
+            # would be indistinguishable from a complete one once downloaded.
+            chunks: list[dict[str, Any]] = []
+            for chunk in rag.iter_search_matches(
+                question,
+                field=field,
+                base_filter=build_qdrant_filter(raw_filters),
+            ):
+                if len(chunks) >= MAX_EXPORT_ROWS:
+                    logger.warning(
+                        "Search export refused | collection={!r} reason=over_row_cap cap={}",
+                        physical,
+                        MAX_EXPORT_ROWS,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Search matched more than {MAX_EXPORT_ROWS} chunks, too many to export at "
+                            "once. Narrow the query or add metadata filters and try again."
+                        ),
+                    )
+                chunks.append(chunk)
+    except HTTPException:
+        raise
+    except UnknownSearchFieldError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+    except KeywordTooShortError as e:
+        raise HTTPException(status_code=422, detail="Invalid request.") from e
+    except Exception as e:
+        logger.exception("Error exporting search results")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+    chunks.sort(key=lambda c: (str(c.get("filename") or ""), c.get("page") or 0, c.get("row") or 0))
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for chunk in chunks:
+            yield search_export_row(chunk, marked=str(chunk.get("id") or "") in marked)
+
+    # A blank question exports the whole collection regardless of `field` —
+    # naming the file after the field would misrepresent an unscoped dump as
+    # an author-only (or similarly scoped) result set.
+    stem = f"{physical}-{field}" if field != "text" and question.strip() else f"{physical}-search"
+    return StreamingResponse(
+        stream_csv(row_iter(), SEARCH_EXPORT_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(stem),
+    )
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])

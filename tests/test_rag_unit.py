@@ -37,6 +37,8 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     matches_metadata_filters,
 )
+from docint.core.search.fields import UnknownSearchFieldError
+from docint.core.search.fulltext import build_scan_filter
 from docint.utils.embed_chunking import effective_budget, estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
@@ -6275,6 +6277,592 @@ def test_search_fulltext_flags_a_partially_indexed_collection(
 
     assert result["status"] == "partial"
     assert result["index_status"]["missing"] == 936
+
+
+def _field_indexed(monkeypatch: pytest.MonkeyPatch, ready: bool = True) -> None:
+    """Report the field index state every field search checks first."""
+    monkeypatch.setattr(rag_module, "field_indexes_ready", lambda client, collection, name: ready)
+
+
+def test_search_fulltext_field_search_compiles_on_the_field_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Searching in Author targets the author keys, not the chunk text."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch)
+    scroll_calls: list[dict[str, Any]] = []
+    payload = {"text": "election night", "file_name": "posts.csv", "reference_metadata": {"author": "Marco_News"}}
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scroll_calls.append(kwargs)
+        return [types.SimpleNamespace(id="p1", payload=payload)], None
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: False,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("mar", field="author")
+
+    assert result["status"] == "ok"
+    assert [h["id"] for h in result["hits"]] == ["p1"]
+    compiled = repr(scroll_calls[0]["scroll_filter"])
+    assert "reference_metadata.author" in compiled
+    assert "reference_metadata.vanity" in compiled
+    assert "search_text" not in compiled
+
+
+def test_search_fulltext_field_search_phrase_filters_on_the_field_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A two-word author query must occur contiguously in the author value."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch)
+    hit = {"text": "x", "file_name": "a.csv", "reference_metadata": {"author": "Acme News Desk"}}
+    miss = {"text": "acme news", "file_name": "a.csv", "reference_metadata": {"author": "News by Acme"}}
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [types.SimpleNamespace(id="p1", payload=hit), types.SimpleNamespace(id="p2", payload=miss)],
+                None,
+            ),
+            count=lambda **kwargs: types.SimpleNamespace(count=2),
+            collection_exists=lambda collection_name: False,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("acme news", field="author")
+
+    assert [h["id"] for h in result["hits"]] == ["p1"]
+    assert result["total"] is None
+
+
+def test_search_fulltext_reports_not_indexed_when_the_field_index_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A field without its TEXT index would match case-sensitively; say so instead."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch, ready=False)
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: pytest.fail("must not scroll an unindexed field"),
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("mar", field="author")
+
+    assert result["status"] == "not_indexed"
+    assert result["hits"] == []
+
+
+def test_search_fulltext_rejects_an_unknown_field() -> None:
+    """The whitelist is closed at every layer, not only at the API."""
+    rag = RAG(qdrant_collection="test")
+    with pytest.raises(UnknownSearchFieldError):
+        rag.search_fulltext("mar", field="reference_metadata.author")
+
+
+def test_search_fulltext_skips_the_image_lane_for_a_field_images_do_not_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image point carries no network, so a network search skips the companion."""
+    _indexed_status(monkeypatch)
+    _field_indexed(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    scrolled: list[str] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scrolled.append(kwargs["collection_name"])
+        return (
+            [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"network": "Instagram"}})],
+            None,
+        )
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: True,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("instagram", field="network", limit=10)
+
+    assert scrolled == ["test"]
+    assert result["total"] == 1
+
+
+def test_search_fulltext_runs_the_image_lane_for_author(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Social images carry the parent posting's author, which Author now covers."""
+    _indexed_status(monkeypatch)
+    _field_indexed(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    client = _two_lane_client(
+        (
+            [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"posting_author": "acme"}})],
+            None,
+        ),
+        (
+            [
+                types.SimpleNamespace(
+                    id="i1",
+                    payload={"llm_description": "a photo", "reference_metadata": {"posting_author": "acme"}},
+                )
+            ],
+            None,
+        ),
+    )
+    client.create_payload_index = lambda **kwargs: None
+    client.get_collection = lambda **kwargs: types.SimpleNamespace(payload_schema={})
+    rag._qdrant_client = client
+
+    result = rag.search_fulltext("acme", field="author", limit=10)
+
+    assert [(h["id"], h["kind"]) for h in result["hits"]] == [("t1", "text"), ("i1", "image")]
+
+
+def test_search_fulltext_ensures_field_indexes_once_per_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lazy ensure costs one round of index calls per process, not one per search."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch)
+    calls: list[str] = []
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: ([], None),
+            count=lambda **kwargs: types.SimpleNamespace(count=0),
+            collection_exists=lambda collection_name: False,
+            create_payload_index=lambda **kwargs: calls.append(kwargs["field_name"]),
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    rag.search_fulltext("mar", field="author")
+    first = len(calls)
+    rag.search_fulltext("mar", field="network")
+
+    expected_keys = sum(len(spec.indexed_keys()) for name, spec in rag_module.SEARCH_FIELDS.items() if name != "text")
+    assert first == expected_keys
+    assert len(calls) == first
+
+
+def test_ensure_field_indexes_once_also_covers_the_image_companion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A metadata field search must not silently under-match the _images companion.
+
+    ``search_fulltext`` runs the image lane for fields images carry
+    (``IMAGE_LANE_FIELDS``) right after this call, but checks the field
+    index status on the *main* collection only — so the companion has to be
+    ensured here, or a query could run ``MatchText`` against an un-indexed
+    companion while the response still reported ``status: "ok"``.
+    """
+    rag = RAG(qdrant_collection="test")
+    ensured: list[str] = []
+    monkeypatch.setattr(
+        rag_module,
+        "ensure_field_indexes",
+        lambda client, collection: ensured.append(collection) or True,
+    )
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: True))
+
+    rag._ensure_field_indexes_once("test")
+
+    assert ensured == ["test", "test_images"]
+    assert "test" in rag._field_indexes_ensured
+
+
+def test_ensure_field_indexes_once_skips_the_companion_when_it_does_not_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection with no images has no companion; ensuring it is never attempted."""
+    rag = RAG(qdrant_collection="test")
+    ensured: list[str] = []
+    monkeypatch.setattr(
+        rag_module,
+        "ensure_field_indexes",
+        lambda client, collection: ensured.append(collection) or True,
+    )
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: False))
+
+    rag._ensure_field_indexes_once("test")
+
+    assert ensured == ["test"]
+    assert "test" in rag._field_indexes_ensured
+
+
+def test_ensure_field_indexes_once_does_not_cache_a_partial_companion_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A companion-only failure must not be cached as done.
+
+    Caching a partial success would leave the companion silently
+    under-indexed for the rest of the process — exactly the bug this method
+    exists to prevent — so a later call must retry both collections, not
+    trust the earlier partial result.
+    """
+    rag = RAG(qdrant_collection="test")
+    calls: list[str] = []
+
+    def fake_ensure(client: Any, collection: str) -> bool:
+        calls.append(collection)
+        return collection != "test_images"
+
+    monkeypatch.setattr(rag_module, "ensure_field_indexes", fake_ensure)
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: True))
+
+    rag._ensure_field_indexes_once("test")
+    assert "test" not in rag._field_indexes_ensured
+    assert calls == ["test", "test_images"]
+
+    rag._ensure_field_indexes_once("test")
+    assert calls == ["test", "test_images", "test", "test_images"]
+
+
+def test_create_index_routes_field_index_ensuring_through_the_cache_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """create_index must not write _field_indexes_ensured on its own.
+
+    create_index runs on the first chat/query per collection — typically
+    before any metadata field search — so a second writer of
+    _field_indexes_ensured could mark a collection "done" without ever
+    touching its image companion. Once that happens,
+    _ensure_field_indexes_once's early return means the companion is never
+    ensured for the rest of the process. Routing through
+    _ensure_field_indexes_once instead makes it the only writer, so this
+    call covers the companion exactly like a first field search would.
+    """
+    monkeypatch.setattr(RAG, "_vector_store", lambda self: object())
+    monkeypatch.setattr(RAG, "_storage_context", lambda self, vector_store: object())
+    monkeypatch.setattr(rag_module, "VectorStoreIndex", _FakeIndex)
+    ensured: list[str] = []
+    monkeypatch.setattr(
+        rag_module,
+        "ensure_field_indexes",
+        lambda client, collection: ensured.append(collection) or True,
+    )
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            collection_exists=lambda collection_name: True,
+            create_payload_index=lambda **kwargs: None,
+        ),
+    )
+
+    rag.create_index()
+
+    assert ensured == ["test", "test_images"]
+    assert "test" in rag._field_indexes_ensured
+
+
+def _index_ok() -> dict[str, Any]:
+    return {"indexed": True, "total": 3, "with_search_text": 3, "missing": 0, "complete": True}
+
+
+def test_iter_search_matches_yields_every_matching_chunk() -> None:
+    """The export scrolls the keyword filter once and yields every point, no group key."""
+    rag = RAG(qdrant_collection="test")
+    payload_a = {
+        "text": "election night coverage",
+        "file_name": "posts.csv",
+        "row": 1,
+        "reference_metadata": {"author": "acme_news", "network": "Instagram"},
+    }
+    payload_b = {
+        "text": "election day turnout",
+        "file_name": "posts.csv",
+        "row": 2,
+        "reference_metadata": {"author": "beta_daily", "network": "Instagram"},
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [
+                    types.SimpleNamespace(id="p1", payload=payload_a),
+                    types.SimpleNamespace(id="p2", payload=payload_b),
+                ],
+                None,
+            )
+        ),
+    )
+
+    matches = list(rag.iter_search_matches("election"))
+
+    assert [m["id"] for m in matches] == ["p1", "p2"]
+    assert all("group" not in m for m in matches)
+    assert all(m["kind"] == "text" for m in matches)
+    assert matches[0]["reference_metadata"]["author"] == "acme_news"
+
+
+def test_iter_search_matches_blank_query_scans_the_filtered_collection() -> None:
+    """A blank query exports the whole collection — minus coarse parents — in one scroll."""
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"network": "Instagram"}}
+    scroll_calls: list[dict[str, Any]] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scroll_calls.append(kwargs)
+        return [types.SimpleNamespace(id="p1", payload=payload)], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
+
+    matches = list(rag.iter_search_matches("   "))
+
+    assert len(matches) == 1
+    assert len(scroll_calls) == 1
+    assert scroll_calls[0]["collection_name"] == "test"
+    assert scroll_calls[0]["scroll_filter"] == build_scan_filter(None)
+
+
+def test_iter_search_matches_rejects_a_non_blank_query_with_no_usable_keywords() -> None:
+    """A non-blank query that loses every word to the index minimum must not become a full scan.
+
+    Unlike a blank query (above), which legitimately scans the whole
+    collection, a query like "a b" is not empty — it just has nothing
+    Qdrant can match on. Falling through to the same scan as a blank query
+    would silently widen a narrow-but-unindexable question into a full dump.
+    ``iter_search_matches`` is a generator, so the check only runs once the
+    caller starts consuming it.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    with pytest.raises(ValueError):
+        list(rag.iter_search_matches("a b"))
+
+
+def test_iter_search_matches_field_search_targets_the_field_keys() -> None:
+    """An author export compiles its filter on the author keys."""
+    rag = RAG(qdrant_collection="test")
+    scroll_calls: list[dict[str, Any]] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scroll_calls.append(kwargs)
+        return [], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: False))
+
+    list(rag.iter_search_matches("mar", field="author"))
+
+    compiled = repr(scroll_calls[0]["scroll_filter"])
+    assert "reference_metadata.author" in compiled
+    assert "reference_metadata.vanity" in compiled
+
+
+def test_search_fulltext_uuid_matches_the_posting_and_its_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One uuid returns the posting (reference_metadata.uuid) and its media (posting_uuid).
+
+    Both lanes are scrolled, and the compiled filter carries an exact match on
+    each of the two keys — the same pair _fetch_posting_entity_nodes ORs.
+    """
+    _indexed_status(monkeypatch)
+    _field_indexed(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    uid = "2b85f4e978364a15b94120136d651adf"
+    scrolled: list[str] = []
+    filters: list[Any] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scrolled.append(kwargs["collection_name"])
+        filters.append(kwargs["scroll_filter"])
+        if kwargs["collection_name"].endswith("_images"):
+            return [types.SimpleNamespace(id="i1", payload={"llm_description": "x", "posting_uuid": uid})], None
+        return [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"uuid": uid}})], None
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: True,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext(uid, field="uuid", limit=10)
+
+    assert [(h["id"], h["kind"]) for h in result["hits"]] == [("t1", "text"), ("i1", "image")]
+    assert scrolled == ["test", "test_images"]
+    compiled = repr(filters[0])
+    assert "reference_metadata.uuid" in compiled and "posting_uuid" in compiled
+    assert "MatchText" not in compiled
+
+
+def test_iter_search_matches_value_only_field_with_a_phrase_yields_nothing() -> None:
+    """A two-word query against uuid has no legal branch; the export must not crash.
+
+    Regression: this path used to `assert compiled is not None`, which would
+    have turned a pasted "post 1234" into a 500 from the CSV export.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: pytest.fail("must not scroll with no filter"),
+            collection_exists=lambda **kwargs: False,
+        ),
+    )
+
+    assert list(rag.iter_search_matches("post 1234", field="uuid")) == []
+
+
+def test_iter_search_matches_rejects_unknown_field() -> None:
+    """The whitelist is closed here too."""
+    rag = RAG(qdrant_collection="test")
+    with pytest.raises(UnknownSearchFieldError):
+        list(rag.iter_search_matches("x", field="reference_metadata.author"))
+
+
+def test_iter_search_matches_applies_the_phrase_post_filter_to_the_field() -> None:
+    """A two-word author query keeps only points whose author value holds the phrase."""
+    rag = RAG(qdrant_collection="test")
+    hit = {"text": "x", "file_name": "a.csv", "reference_metadata": {"author": "Acme News Desk"}}
+    miss = {"text": "acme news", "file_name": "a.csv", "reference_metadata": {"author": "News by Acme"}}
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [types.SimpleNamespace(id="p1", payload=hit), types.SimpleNamespace(id="p2", payload=miss)],
+                None,
+            ),
+            collection_exists=lambda **kwargs: False,
+        ),
+    )
+
+    matches = list(rag.iter_search_matches("acme news", field="author"))
+
+    assert [m["id"] for m in matches] == ["p1"]
+
+
+def test_iter_search_matches_mid_scroll_failure_raises_rather_than_truncating() -> None:
+    """A scroll error surfaces as an exception, not a short-but-complete export.
+
+    `iter_scroll`'s default ``on_error="warn"`` logs and ends the generator
+    cleanly — exactly the behaviour that let a blip mid-export produce a
+    well-formed, silently truncated CSV with no signal it was cut short.
+    """
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "election night coverage", "file_name": "posts.csv"}
+    calls = {"n": 0}
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [types.SimpleNamespace(id="p1", payload=payload)], "cursor-2"
+        raise RuntimeError("qdrant blip")
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: False))
+
+    with pytest.raises(RuntimeError):
+        list(rag.iter_search_matches("election"))
+
+
+def test_iter_search_matches_includes_the_image_companion_for_text() -> None:
+    """A hit in the `_images` companion is exported too, tagged `kind=image`.
+
+    Mirrors `search_fulltext`: the companion carries the image hits the panel
+    shows under `kind: "image"`. Before this fix `iter_search_matches` only
+    ever scrolled the main collection, so a marked image hit silently
+    vanished from the export while the 409 index-completeness gate (which
+    counts the companion) stayed blind to that gap.
+    """
+    rag = RAG(qdrant_collection="test")
+    text_payload = {"text": "election night coverage", "file_name": "posts.csv"}
+    image_payload = {
+        "llm_description": "a photo of an election night rally",
+        "image_id": "img-1",
+        "source_path": "rally.jpg",
+    }
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        name = kwargs["collection_name"]
+        if name == "test":
+            return [types.SimpleNamespace(id="p1", payload=text_payload)], None
+        if name == "test_images":
+            return [types.SimpleNamespace(id="img-p1", payload=image_payload)], None
+        raise AssertionError(f"unexpected collection_name {name!r}")
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
+
+    matches = list(rag.iter_search_matches("election"))
+
+    assert [(m["id"], m["kind"]) for m in matches] == [("p1", "text"), ("img-p1", "image")]
+    assert matches[1]["chunk_id"] == "img-1"
+
+
+def test_iter_search_matches_skips_the_image_companion_for_a_field_images_lack() -> None:
+    """A network export never scrolls the companion: an image carries no network."""
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"network": "Instagram"}}
+    calls: list[str] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        calls.append(kwargs["collection_name"])
+        return [types.SimpleNamespace(id="p1", payload=payload)], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
+
+    matches = list(rag.iter_search_matches("instagram", field="network"))
+
+    assert calls == ["test"]
+    assert matches[0]["kind"] == "text"
+
+
+def test_iter_search_matches_hits_lane_applies_the_phrase_post_filter() -> None:
+    """A multi-word hits-lane query only yields chunks matching the contiguous phrase.
+
+    Mirrors `search_fulltext`'s own behaviour: the Qdrant prefilter alone is
+    an AND of keywords, so a chunk containing both words far apart passes it
+    even though `POST /search` would never show it for the same query.
+    Before this fix the export was a strict superset of what the panel
+    displays for a multi-word search.
+    """
+    rag = RAG(qdrant_collection="test")
+    payload_phrase = {
+        "text": "the acme programm launch went well",
+        "search_text": "the acme programm launch went well",
+        "file_name": "posts.csv",
+    }
+    payload_scattered = {
+        "text": "acme released a report; the programm starts later",
+        "search_text": "acme released a report; the programm starts later",
+        "file_name": "posts.csv",
+    }
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [
+                    types.SimpleNamespace(id="p1", payload=payload_phrase),
+                    types.SimpleNamespace(id="p2", payload=payload_scattered),
+                ],
+                None,
+            ),
+            collection_exists=lambda **kwargs: False,
+        ),
+    )
+
+    matches = list(rag.iter_search_matches("acme programm"))
+
+    assert [m["id"] for m in matches] == ["p1"]
 
 
 def test_scoped_retriever_returns_exactly_the_selected_chunks() -> None:

@@ -21,6 +21,7 @@ from PIL import Image, ImageOps
 from qdrant_client import QdrantClient, models
 
 from docint.core.ocr import DocumentOcrEngine, build_engine
+from docint.core.search.fields import ensure_field_indexes
 from docint.core.search.index import ensure_search_index, write_search_text
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.utils.clip_client import RemoteCLIPBackend
@@ -965,6 +966,11 @@ class ImageIngestionService:
         path that stamps document chunks. Without it, images would only ever
         become searchable via a manual ``make search-index`` backport.
 
+        Also ensures the companion's metadata field indexes
+        (``ensure_field_indexes``), alongside ``search_text``'s own — the
+        "Search in" field picker needs those too, and a freshly ingested
+        collection with images must need no operator step for either.
+
         Fail-soft: a write failure degrades that image to "needs a backfill",
         it does not fail the ingest.
 
@@ -977,6 +983,7 @@ class ImageIngestionService:
             return
         try:
             ensure_search_index(self.qdrant_client, collection)
+            ensure_field_indexes(self.qdrant_client, collection)
             write_search_text(self.qdrant_client, collection, {point_id: text})
         except Exception as exc:
             logger.warning(

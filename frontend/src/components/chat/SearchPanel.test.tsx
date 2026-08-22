@@ -48,7 +48,8 @@ const SCOPE_OK = { chunk_ids: ['p1'], est_tokens: 1200, usable_tokens: 22000, mi
 
 const CHUNK_OK = { body: { id: 'p1', text: FULL_TEXT } }
 
-/** Route by URL so one mock serves /search, /search/chunk and the scope endpoints. */
+/** Route by URL so one mock serves /search, /search/chunk and the scope
+ *  endpoints. */
 function mockApi(
   search: SearchResult,
   scope: { body: unknown; status?: number } = { body: SCOPE_OK },
@@ -56,7 +57,7 @@ function mockApi(
 ) {
   const fn = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
     const u = typeof req === 'string' ? req : String(req)
-    // Checked before '/scope' *and* before the generic '/search' fallthrough.
+    // Checked before '/scope' and the generic '/search' fallthrough.
     if (u.includes('/search/chunk')) {
       const status = chunk.status ?? 200
       return Promise.resolve({
@@ -105,7 +106,8 @@ beforeEach(() => {
     drafts: {},
     queries: { [SESSION]: 'Partei', new: 'Partei' },
     scopes: {},
-    filtersOpen: false
+    filtersOpen: false,
+    field: 'text'
   })
 })
 
@@ -297,6 +299,31 @@ describe('SearchPanel scope selection', () => {
     await waitFor(() => {
       expect(screen.getByTestId('token-meter')).toHaveTextContent('≈1.2k / 22.0k tokens')
     })
+  })
+
+  it('renders the token meter outside the truncating summary line even before the search has data', async () => {
+    // A selection can go live before the search has resolved — on first
+    // render with a persisted selection and no query submitted, for
+    // instance. The meter is a sibling of the counts `<p>`, not text inside
+    // it, so it must not depend on that `<p>` having anything to say.
+    useSearchUiStore.setState({
+      queries: {},
+      scopes: { [SESSION]: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
+    })
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    const meter = await screen.findByTestId('token-meter')
+    expect(meter).toHaveTextContent('≈1.2k / 22.0k tokens')
+    expect(screen.getByTestId('search-summary')).toHaveTextContent('')
+    expect(screen.getByTestId('search-summary-row')).toContainElement(meter)
   })
 
   it('rolls the selection back and explains when the scope exceeds the budget', async () => {
@@ -714,6 +741,187 @@ describe('SearchPanel scope', () => {
     await screen.findByText(/alpha\.pdf/)
     expect(screen.queryByRole('button', { name: /filters/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /retrieval/i })).toBeNull()
+  })
+})
+
+describe('SearchPanel field picker', () => {
+  const hitsResult: SearchResult = {
+    status: 'ok',
+    hits: [HIT],
+    total: 1,
+    next_cursor: null,
+    index_status: INDEX_STATUS
+  }
+
+  it('shows the picker from the start, defaulting to Text, with no mode buttons', async () => {
+    mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    const trigger = screen.getByRole('combobox', { name: /search in/i })
+    expect(trigger).toHaveTextContent('Text')
+    // The trigger shows only the chosen value ("Text"); a visible "Search in"
+    // label beside it is what actually says what the picker is for.
+    expect(screen.getByTestId('search-field-row')).toHaveTextContent('Search in')
+    expect(screen.queryByRole('button', { name: 'Social' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Hits' })).toBeNull()
+  })
+
+  it('choosing a field re-runs the search against that field', async () => {
+    const fetchMock = mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('combobox', { name: /search in/i }))
+    await userEvent.click(await screen.findByRole('option', { name: 'Author' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.filter(([u]) => String(u).includes('/search')).at(-1)
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ question: 'Partei', field: 'author' })
+    })
+  })
+
+  it('offers exactly the four options the backend still accepts', async () => {
+    // Author ID, Posting author, Type, Speaker, Language and File folded into
+    // Author or were dropped; offering one would send a field the API 422s.
+    mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('combobox', { name: /search in/i }))
+
+    const options = (await screen.findAllByRole('option')).map((o) => o.textContent)
+    expect(options).toEqual(['Text', 'Author', 'Network', 'UUID'])
+  })
+
+  it('shows a CSV export link carrying the field once there are hits', async () => {
+    useSearchUiStore.setState({ field: 'author' })
+    mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(href).toContain('/search/export.csv')
+    expect(href).toContain('collection=docs')
+    expect(href).toContain('question=Partei')
+    expect(href).toContain('field=author')
+    expect(href).not.toContain('group_by')
+  })
+
+  it('omits the field param from the export for the default Text field', async () => {
+    mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(href).not.toContain('field=')
+  })
+
+  it('offers a whole-collection export while no query is submitted', async () => {
+    useSearchUiStore.setState({ queries: {} })
+    mockApi(hitsResult)
+
+    renderPanel()
+
+    const link = await screen.findByRole('link', { name: 'Export CSV' })
+    const href = link.getAttribute('href') ?? ''
+    expect(href).toContain('collection=docs')
+    expect(href).not.toContain('question=')
+  })
+
+  it('keeps the not_indexed banner for a field whose index is missing', async () => {
+    useSearchUiStore.setState({ field: 'author' })
+    mockApi({
+      status: 'not_indexed',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    expect(await screen.findByTestId('search-not-indexed')).toHaveTextContent(/make search-index/i)
+  })
+
+  it('adds marked_ids to the export once a hit is selected pre-session', async () => {
+    // marked_ids is picked up reactively — but only pre-session (no
+    // sessionId yet), which is the one case it earns its place at all (see
+    // the with-a-session negative test below).
+    mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel(null)
+
+    await screen.findByText(/alpha\.pdf/)
+
+    const hrefBefore = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(hrefBefore).toContain('/search/export.csv')
+    expect(hrefBefore).toContain('collection=docs')
+    expect(hrefBefore).toContain('question=Partei')
+    expect(hrefBefore).not.toContain('marked_ids')
+
+    await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
+
+    await waitFor(() => {
+      const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+      expect(href).toContain('marked_ids=p1')
+    })
+  })
+
+  it('omits marked_ids from the CSV export once a session exists, even with a live selection', async () => {
+    // Once a session id exists, commitScope has already written the same
+    // selection server-side by the time this link can be clicked, so
+    // marked_ids is redundant — and a scope has no count cap, only a token
+    // budget, so a large selection serialized into the URL could overflow
+    // the gateway's header limit. The link must fall back to the stored
+    // session scope (session_id alone) instead.
+    const fetchMock = mockApi({
+      status: 'ok',
+      hits: [HIT],
+      total: 1,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel(SESSION)
+
+    await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(true)
+    })
+
+    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(href).toContain('session_id=' + SESSION)
+    expect(href).not.toContain('marked_ids')
+  })
+
+  it('omits the CSV export link when the query matches nothing', async () => {
+    // A submitted query with zero hits is not worth a CSV — only a genuinely
+    // blank query still offers the whole-collection export.
+    mockApi({
+      status: 'ok',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    await screen.findByTestId('search-no-matches')
+    expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
   })
 })
 

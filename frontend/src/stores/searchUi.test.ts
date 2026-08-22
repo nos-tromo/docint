@@ -8,7 +8,13 @@ import {
 } from './searchUi'
 
 beforeEach(() => {
-  useSearchUiStore.setState({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false })
+  useSearchUiStore.setState({
+    drafts: {},
+    queries: {},
+    scopes: {},
+    filtersOpen: false,
+    field: 'text'
+  })
 })
 
 describe('searchKeyFor', () => {
@@ -83,5 +89,77 @@ describe('clearScope', () => {
     useSearchUiStore.getState().clearScope('sess-1')
 
     expect(useSearchUiStore.getState().scopes).toBe(before)
+  })
+})
+
+describe('searchUi field state', () => {
+  it('defaults to searching the text', () => {
+    expect(useSearchUiStore.getState().field).toBe('text')
+  })
+
+  it('switches the search field', () => {
+    useSearchUiStore.getState().setField('author')
+    expect(useSearchUiStore.getState().field).toBe('author')
+  })
+})
+
+describe('searchUi persistence migration', () => {
+  it('drops a v3 field the picker no longer offers', () => {
+    // A user whose last search was "Author ID" would otherwise reload into a
+    // blank trigger sending a field the API now refuses.
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: {}, queries: {}, scopes: {}, filtersOpen: false, field: 'author_id' },
+      3
+    ) as unknown as { field: string }
+
+    expect(migrated.field).toBe('text')
+  })
+
+  it('drops the v4 file_name field, since replaced by uuid', () => {
+    // Requires the version bump to 5: zustand only runs migrate on a
+    // mismatch, so a v4 blob would otherwise load its stale field untouched.
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: {}, queries: {}, scopes: {}, filtersOpen: false, field: 'file_name' },
+      4
+    ) as unknown as { field: string }
+
+    expect(migrated.field).toBe('text')
+  })
+
+  it('declares version 5 so the v4 blob is actually migrated', () => {
+    expect(useSearchUiStore.persist.getOptions().version).toBe(5)
+  })
+
+  it('keeps a v3 field the picker still offers', () => {
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: {}, queries: {}, scopes: {}, filtersOpen: false, field: 'author' },
+      3
+    ) as unknown as { field: string }
+
+    expect(migrated.field).toBe('author')
+  })
+
+  it('migrates a version-1 blob by filling the field default', () => {
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false }, 1) as unknown as {
+      field: string
+    }
+    expect(migrated.field).toBe('text')
+  })
+
+  it('drops a version-2 blob’s mode and group-by, keeping the rest', () => {
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: { new: 'partei' }, queries: {}, scopes: {}, filtersOpen: true, mode: 'groups', groupBy: 'network' },
+      2
+    ) as unknown as Record<string, unknown>
+    expect(migrated.field).toBe('text')
+    expect(migrated.drafts).toEqual({ new: 'partei' })
+    expect(migrated.filtersOpen).toBe(true)
+    expect('mode' in migrated).toBe(false)
+    expect('groupBy' in migrated).toBe(false)
   })
 })

@@ -127,7 +127,7 @@ export const de: Strings = {
   'chat.date_to': 'Datum bis',
   'chat.custom_rules': 'Benutzerdefinierte Regeln',
   'chat.add_rule': 'Regel',
-  'chat.field_placeholder': 'Feld',
+  'chat.field_placeholder': 'Feld (oder wählen)',
   'chat.value_placeholder': 'Wert',
   'chat.remove_rule_aria': 'Regel entfernen',
   'chat.graph_debug': 'Graph-Debug',
@@ -158,7 +158,7 @@ export const de: Strings = {
   'search.results': 'Ergebnisse',
   'search.docs': '{count} Dokumente',
   'search.docs_more': '{count}+ Dokumente',
-  'search.no_matches': 'Kein Abschnitt enthält alle Suchbegriffe.',
+  'search.no_matches': 'Kein Abschnitt enthält alle Suchbegriffe im gewählten Feld.',
   'search.not_indexed':
     'Für diese Sammlung existiert noch kein Suchindex. Führen Sie dafür "make search-index" aus und suchen Sie anschließend erneut.',
   'search.partial_warning':
@@ -190,6 +190,12 @@ export const de: Strings = {
   'search.scope_banner': 'Eingegrenzt auf {count} Abschnitte',
   'search.scope_missing': '{missing} von {count} Abschnitten existieren nicht mehr',
   'search.scope_clear_error': 'Die Eingrenzung konnte nicht aufgehoben werden.',
+  'search.field': 'Suchen in',
+  'search.field.text': 'Text',
+  'search.field.author': 'Autor',
+  'search.field.network': 'Netzwerk',
+  'search.field.uuid': 'UUID',
+  'search.export_results': 'CSV exportieren',
 
   // ingest
   'ingest.title': 'Datenimport',
