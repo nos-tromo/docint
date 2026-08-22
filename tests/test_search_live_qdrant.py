@@ -270,3 +270,41 @@ def test_a_text_only_filter_still_misses_a_numeric_id(collection: tuple[QdrantCl
     text_only = build_search_filter(["100007940942252"], text_keys=("reference_metadata.author_id",))
     points, _ = client.scroll(collection_name=name, scroll_filter=text_only, limit=10)
     assert points == []
+
+
+def test_a_posting_uuid_returns_the_posting_and_its_artifacts(collection: tuple[QdrantClient, str]) -> None:
+    """One uuid, pasted either way, returns the post node and the media linked to it.
+
+    The posting's own node carries the uuid at ``reference_metadata.uuid``;
+    an artifact derived from it carries the same value as top-level
+    ``posting_uuid`` — two different keys, one exact value, ORed. A third
+    point with a different uuid must stay out.
+    """
+    client, name = collection
+    uid = "2b85f4e978364a15b94120136d651adf"
+    dashed = "2b85f4e9-7836-4a15-b941-20136d651adf"
+    client.upsert(
+        name,
+        points=[
+            models.PointStruct(id=1, vector=[0.1, 0.2], payload={"reference_metadata": {"uuid": uid}}),
+            models.PointStruct(id=2, vector=[0.1, 0.2], payload={"posting_uuid": uid, "reference_metadata": {}}),
+            models.PointStruct(id=3, vector=[0.1, 0.2], payload={"reference_metadata": {"uuid": "f" * 32}}),
+        ],
+        wait=True,
+    )
+    write_search_text(client, name, {1: "the post", 2: "its keyframe", 3: "another post"}, wait=True)
+    assert ensure_field_indexes(client, name) is True
+    assert field_index_kind(client, name, "reference_metadata.uuid") == "keyword"
+    assert field_index_kind(client, name, "posting_uuid") == "keyword"
+    time.sleep(1.0)  # let the new payload indexes catch up
+
+    spec = search_field_spec("uuid")
+    for query in (uid, dashed):
+        compiled = build_search_filter(
+            [query],
+            text_keys=spec.text_keys,
+            value_keys=spec.value_keys,
+            value_forms=spec.value_forms(query),
+        )
+        points, _ = client.scroll(collection_name=name, scroll_filter=compiled, limit=10)
+        assert sorted(p.id for p in points) == [1, 2], query

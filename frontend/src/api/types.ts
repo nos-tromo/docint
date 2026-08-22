@@ -151,8 +151,10 @@ export interface SearchResult {
  *  `author` covers a name, a vanity handle and a numeric id, plus the
  *  `posting_*` copies an image or transcript carries from its parent post —
  *  one option per question the investigator actually asks, rather than one
- *  per payload key. */
-export const SEARCH_FIELDS = ['text', 'author', 'network', 'file_name'] as const
+ *  per payload key. `uuid` is exact-match only: it is the sole identifier of
+ *  a single posting artifact, and every image or transcript derived from that
+ *  posting carries it as `posting_uuid`, so one paste returns all of them. */
+export const SEARCH_FIELDS = ['text', 'author', 'network', 'uuid'] as const
 export type SearchField = (typeof SEARCH_FIELDS)[number]
 
 export interface SearchRequest {

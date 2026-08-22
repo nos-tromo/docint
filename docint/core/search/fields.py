@@ -17,7 +17,11 @@ full-text matcher: it works on strings and only on strings. Author *ids* are
 stored as integers (a real collection holds ``author_id`` as ``int``), so a
 TEXT index over that key indexes zero points and every id search returned
 nothing at all. Ids therefore match by exact value while names match by
-prefix — see :data:`FieldSpec.value_keys`.
+prefix — see :data:`FieldSpec.value_keys`. A posting uuid is value-only: it
+is the sole identifier of a single posting artifact, and the same value is
+what every image, keyframe and transcript segment derived from that posting
+carries as its ``posting_uuid`` link, so one exact match returns the post and
+everything hanging off it.
 
 Like ``fulltext.py`` and ``index.py`` this module imports nothing from
 ``core/rag.py``; the client is injected.
@@ -25,12 +29,14 @@ Like ``fulltext.py`` and ``index.py`` this module imports nothing from
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
 from qdrant_client import models
 
+from docint.core.search.fulltext import uuid_match_forms, value_match_forms
 from docint.core.search.index import SEARCH_TEXT_FIELD, search_index_params
 
 #: Payload index a key must carry for ``MatchText`` to work on it.
@@ -49,14 +55,19 @@ class FieldSpec:
             case-insensitive, prefix-based, phrase-checked for a multi-word
             query. These hold prose: a name, a handle, a filename.
         value_keys (tuple[str, ...]): Keys matched with ``MatchValue`` —
-            exact, and tried in both numeric and string form because the
-            same logical id is an ``int`` in some collections and a ``str``
-            in others. These hold identifiers, which are not prose and
-            cannot be full-text indexed.
+            exact, once per form ``value_forms`` derives from the query.
+            These hold identifiers, which are not prose and cannot be
+            full-text indexed.
+        value_forms (Callable[[str], list[Any]]): Turns the raw query into
+            the exact values to try against ``value_keys``. The default
+            covers the int/str duality every numeric id shares; a uuid
+            supplies its own dash handling rather than burdening every other
+            id search with dead branches.
     """
 
     text_keys: tuple[str, ...] = ()
     value_keys: tuple[str, ...] = field(default_factory=tuple)
+    value_forms: Callable[[str], list[Any]] = value_match_forms
 
     def indexed_keys(self) -> tuple[tuple[str, str], ...]:
         """Pair every key with the payload index its matcher requires.
@@ -84,16 +95,23 @@ SEARCH_FIELDS: dict[str, FieldSpec] = {
         ),
     ),
     "network": FieldSpec(text_keys=("reference_metadata.network",)),
-    "file_name": FieldSpec(text_keys=("file_name",)),
+    # A posting's own node carries its uuid only at reference_metadata.uuid;
+    # every artifact derived from it carries the same value as posting_uuid —
+    # the pair _fetch_posting_entity_nodes already ORs for the same reason.
+    "uuid": FieldSpec(
+        value_keys=("reference_metadata.uuid", "posting_uuid"),
+        value_forms=uuid_match_forms,
+    ),
 }
 
 DEFAULT_SEARCH_FIELD = "text"
 
 #: Fields an ``_images`` companion point can answer. Its payload holds a
 #: caption in ``search_text`` and, for social media, the parent posting's
-#: ``posting_*`` fields — which is why ``author`` reaches it. It carries no
-#: ``file_name`` and no ``network``, so those two search the text lane only.
-IMAGE_LANE_FIELDS: frozenset[str] = frozenset({"text", "author"})
+#: ``posting_*`` fields and ``posting_uuid`` link — which is why ``author``
+#: and ``uuid`` reach it. It carries no ``network``, so that one searches the
+#: text lane only.
+IMAGE_LANE_FIELDS: frozenset[str] = frozenset({"text", "author", "uuid"})
 
 
 class UnknownSearchFieldError(ValueError):

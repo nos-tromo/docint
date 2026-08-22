@@ -5100,14 +5100,26 @@ def test_search_rejects_the_retired_field_names(client: TestClient) -> None:
     They folded into ``author`` or were dropped outright; accepting them would
     search a key the picker can no longer offer.
     """
-    for retired in ("author_id", "posting_author", "type", "speaker", "language"):
+    for retired in ("author_id", "posting_author", "type", "speaker", "language", "file_name"):
         response = client.post("/search", json={"question": "mar", "field": retired})
         assert response.status_code == 422, retired
 
 
+def test_search_and_export_accept_the_uuid_field(client: TestClient) -> None:
+    """Uuid is a first-class option on both the panel's endpoint and the export."""
+    uid = "2b85f4e978364a15b94120136d651adf"
+    response = client.post("/search", json={"question": uid, "field": "uuid"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_calls[-1]["field"] == "uuid"
+
+    response = client.get("/search/export.csv", params={"question": uid, "field": "uuid"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_export_calls[-1]["field"] == "uuid"
+
+
 def test_export_rejects_the_retired_field_names(client: TestClient) -> None:
     """The export's whitelist tracks the panel's, so neither can drift."""
-    for retired in ("author_id", "posting_author", "type", "speaker", "language"):
+    for retired in ("author_id", "posting_author", "type", "speaker", "language", "file_name"):
         response = client.get("/search/export.csv", params={"question": "mar", "field": retired})
         assert response.status_code == 422, retired
 

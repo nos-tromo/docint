@@ -115,12 +115,14 @@ export const useSearchUiStore = create<SearchUiState>()(
       // the API has no GET for it — so persisting is what lets a reload still
       // report honestly what the chat is scoped to.
       name: 'docint-search-ui',
-      version: 4,
+      version: 5,
       // v1 had neither mode nor field; v2 had `mode`/`groupBy` for the facet
       // lane, which the field picker replaced; v3 offered nine fields, five of
-      // which were folded into `author` or dropped. A persisted field the
-      // picker no longer offers would leave the trigger blank and every search
-      // 422ing, so it falls back to Text rather than being carried forward.
+      // which were folded into `author` or dropped; v4 still offered `file_name`,
+      // since replaced by `uuid`. A persisted field the picker no longer offers
+      // would leave the trigger blank and every search 422ing, so it falls back
+      // to Text rather than being carried forward. The version must bump on
+      // every such removal: zustand only runs this migrate on a mismatch.
       migrate: (persisted) => {
         const rest = { ...(persisted as object) } as Record<string, unknown>
         delete rest.mode

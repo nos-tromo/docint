@@ -194,7 +194,7 @@ export const de: Strings = {
   'search.field.text': 'Text',
   'search.field.author': 'Autor',
   'search.field.network': 'Netzwerk',
-  'search.field.file_name': 'Datei',
+  'search.field.uuid': 'UUID',
   'search.export_results': 'CSV exportieren',
 
   // ingest

@@ -105,9 +105,10 @@ what makes `POST /search` work there. It also creates, or replaces where one of 
 wrong kind exists, the payload indexes the **Search in** field picker needs
 on the collection and its `_images` companion: prefix/lowercase TEXT on the
 name-ish keys (`reference_metadata.author`, `vanity`, `posting_author`,
-`posting_vanity`, `network` and `file_name`) and KEYWORD on the id keys
-(`author_id`, `posting_author_id`), which are numeric and so can only be
-matched exactly. Run it **once
+`posting_vanity` and `network`) and KEYWORD on the identifier keys
+(`author_id`, `posting_author_id`, the posting's own `uuid` and the
+`posting_uuid` link every derived artifact carries), which are matched
+exactly rather than by prefix. Run it **once
 per collection ingested before full-text search shipped**. It is purely a backport: ingestion writes
 `search_text` *and* creates the payload index, so collections ingested since need
 no operator step at all.

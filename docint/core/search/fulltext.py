@@ -137,6 +137,41 @@ def value_match_forms(raw: str) -> list[Any]:
     return forms
 
 
+_UUID_HEX_LEN = 32
+
+
+def uuid_match_forms(raw: str) -> list[Any]:
+    """Return the exact values a posting-uuid query should be tried as.
+
+    The CSV ``UUID`` column is copied into the payload verbatim, and the
+    exports seen so far write it undashed — but a user may paste either
+    style, and another source may store it dashed. Rather than guess which,
+    try the raw paste and its dash-normalised twin: the stripped form when
+    dashes are present, the canonical 8-4-4-4-12 form when it is 32 hex
+    characters. Anything else is an opaque identifier and is tried as-is.
+
+    A query containing whitespace is never an identifier and yields nothing,
+    so a value-only field compiles to no filter at all for it.
+
+    Args:
+        raw (str): Raw query text as typed.
+
+    Returns:
+        list[Any]: The pasted form first, then its twin when one exists.
+    """
+    text = " ".join(str(raw or "").split())
+    if not text or " " in text:
+        return []
+    forms: list[Any] = [text]
+    if "-" in text:
+        stripped = text.replace("-", "")
+        if stripped and stripped != text:
+            forms.append(stripped)
+    elif len(text) == _UUID_HEX_LEN and all(c in "0123456789abcdefABCDEF" for c in text):
+        forms.append(f"{text[:8]}-{text[8:12]}-{text[12:16]}-{text[16:20]}-{text[20:]}")
+    return forms
+
+
 def matches_any_phrase(values: Iterable[str], keywords: list[str]) -> bool:
     """Check whether *keywords* occur as a phrase in at least one value.
 

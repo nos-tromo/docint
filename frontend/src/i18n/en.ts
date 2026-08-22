@@ -186,7 +186,7 @@ export const en = {
   'search.field.text': 'Text',
   'search.field.author': 'Author',
   'search.field.network': 'Network',
-  'search.field.file_name': 'File',
+  'search.field.uuid': 'UUID',
   'search.export_results': 'Export CSV',
 
   // ingest

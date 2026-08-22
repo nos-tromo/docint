@@ -116,6 +116,22 @@ describe('searchUi persistence migration', () => {
     expect(migrated.field).toBe('text')
   })
 
+  it('drops the v4 file_name field, since replaced by uuid', () => {
+    // Requires the version bump to 5: zustand only runs migrate on a
+    // mismatch, so a v4 blob would otherwise load its stale field untouched.
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: {}, queries: {}, scopes: {}, filtersOpen: false, field: 'file_name' },
+      4
+    ) as unknown as { field: string }
+
+    expect(migrated.field).toBe('text')
+  })
+
+  it('declares version 5 so the v4 blob is actually migrated', () => {
+    expect(useSearchUiStore.persist.getOptions().version).toBe(5)
+  })
+
   it('keeps a v3 field the picker still offers', () => {
     const migrate = useSearchUiStore.persist.getOptions().migrate!
     const migrated = migrate(

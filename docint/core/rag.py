@@ -165,7 +165,6 @@ from docint.core.search.fulltext import (
     build_search_filter,
     matches_any_phrase,
     parse_keywords,
-    value_match_forms,
 )
 from docint.core.search.index import (
     SEARCH_TEXT_FIELD,
@@ -8614,7 +8613,7 @@ class RAG:
             keywords,
             text_keys=spec.text_keys,
             value_keys=spec.value_keys,
-            value_forms=value_match_forms(query),
+            value_forms=spec.value_forms(query),
             base_filter=base_filter,
         )
         if search_filter is None:
@@ -8764,10 +8763,15 @@ class RAG:
                 keywords,
                 text_keys=spec.text_keys,
                 value_keys=spec.value_keys,
-                value_forms=value_match_forms(query),
+                value_forms=spec.value_forms(query),
                 base_filter=base_filter,
             )
-            assert compiled is not None  # keywords is non-empty
+            if compiled is None:
+                # A value-only field (uuid) given a multi-word query has no
+                # legal branch: no exact value to try, no text key to prefix.
+                # That is "no hits", exactly as search_fulltext answers it —
+                # never a scan of everything, and never a crash.
+                return
             search_filter: qdrant_models.Filter = compiled
             # Raw whitespace-split words, not `parse_keywords`'s output — a
             # short word like "a" is unindexable but still valid inside a

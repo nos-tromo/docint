@@ -74,9 +74,10 @@ rail is a bare toggle that tints while a scope is live. Icon-only controls draw 
 whatever font the viewer's browser happens to pick.
 
 A **Search in** picker under the query field chooses what the keywords
-match: Text (the chunk body, the default), Author, Network or File. The
+match: Text (the chunk body, the default), Author, Network or UUID. The
 result is always chunks, so "everything this author wrote" is an ordinary
-search whose tiles scope the chat like any other.
+search whose tiles scope the chat like any other. Filtering by filename is
+not a search — use the chat's metadata filters for that.
 
 **Author** deliberately spans everything that names a person — display name,
 vanity handle, numeric id, and the copies of all three that an image or
@@ -84,6 +85,11 @@ transcript inherits from the posting it came from. An investigator holding
 any one of those identifiers can paste it without first working out which
 kind it is. Names match on prefixes (`krieg` finds `Krieger`); ids match
 exactly, because they are numbers rather than prose.
+
+**UUID** is the sole identifier of a single posting artifact. Paste one and
+the hits are that posting plus every image, keyframe and transcript segment
+derived from it; dashed or undashed both work. It matches exactly — a uuid
+is never a prefix of anything.
 
 The CSV export beside the counts honours the field, and stays available with
 a blank query, where it exports the whole filtered collection.

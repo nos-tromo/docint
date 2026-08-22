@@ -167,7 +167,8 @@ Request:
 - `metadata_filters` — the same `MetadataFilterIn` shape as `/query`, ANDed
   with the keyword conditions so filters constrain the search.
 - `field` — which payload field the keywords match: `text` (default, the
-  chunk body), `author`, `network` or `file_name`. `422` on any other value.
+  chunk body), `author`, `network` or `uuid`. `422` on any other value.
+  There is no `file_name` field: filter by filename with `metadata_filters`.
 
   One option can cover several payload keys, and the query must be satisfied
   by **one** of them: `author` searches `reference_metadata.author`,
@@ -181,9 +182,15 @@ Request:
   as numbers and a full-text matcher cannot touch a number; a query
   containing whitespace is never treated as an id.
 
+  `uuid` is exact-match only. It searches the posting's own
+  `reference_metadata.uuid` and the `posting_uuid` every derived image,
+  keyframe and transcript segment carries, so one paste returns the post and
+  all of its artifacts. The pasted form and its dash-normalised twin are both
+  tried (exports store it undashed). A multi-word query matches nothing.
+
   A field whose keys are not all indexed correctly answers
   `status: "not_indexed"` — run `make search-index` once. The `_images`
-  companion is searched only for `text` and `author`.
+  companion is searched only for `text`, `author` and `uuid`.
 - `limit` — hits per page, `1..500` (default `50`).
 - `cursor` — opaque page cursor from a previous response.
 

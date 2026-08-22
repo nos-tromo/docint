@@ -6666,6 +6666,64 @@ def test_iter_search_matches_field_search_targets_the_field_keys() -> None:
     assert "reference_metadata.vanity" in compiled
 
 
+def test_search_fulltext_uuid_matches_the_posting_and_its_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One uuid returns the posting (reference_metadata.uuid) and its media (posting_uuid).
+
+    Both lanes are scrolled, and the compiled filter carries an exact match on
+    each of the two keys — the same pair _fetch_posting_entity_nodes ORs.
+    """
+    _indexed_status(monkeypatch)
+    _field_indexed(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    uid = "2b85f4e978364a15b94120136d651adf"
+    scrolled: list[str] = []
+    filters: list[Any] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scrolled.append(kwargs["collection_name"])
+        filters.append(kwargs["scroll_filter"])
+        if kwargs["collection_name"].endswith("_images"):
+            return [types.SimpleNamespace(id="i1", payload={"llm_description": "x", "posting_uuid": uid})], None
+        return [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"uuid": uid}})], None
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: True,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext(uid, field="uuid", limit=10)
+
+    assert [(h["id"], h["kind"]) for h in result["hits"]] == [("t1", "text"), ("i1", "image")]
+    assert scrolled == ["test", "test_images"]
+    compiled = repr(filters[0])
+    assert "reference_metadata.uuid" in compiled and "posting_uuid" in compiled
+    assert "MatchText" not in compiled
+
+
+def test_iter_search_matches_value_only_field_with_a_phrase_yields_nothing() -> None:
+    """A two-word query against uuid has no legal branch; the export must not crash.
+
+    Regression: this path used to `assert compiled is not None`, which would
+    have turned a pasted "post 1234" into a 500 from the CSV export.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: pytest.fail("must not scroll with no filter"),
+            collection_exists=lambda **kwargs: False,
+        ),
+    )
+
+    assert list(rag.iter_search_matches("post 1234", field="uuid")) == []
+
+
 def test_iter_search_matches_rejects_unknown_field() -> None:
     """The whitelist is closed here too."""
     rag = RAG(qdrant_collection="test")

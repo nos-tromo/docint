@@ -14,6 +14,7 @@ from docint.core.search.fulltext import (
     matches_phrase,
     not_coarse_condition,
     parse_keywords,
+    uuid_match_forms,
     value_match_forms,
 )
 from docint.core.search.index import SEARCH_TEXT_FIELD
@@ -261,6 +262,42 @@ def test_value_match_forms_rejects_anything_with_a_space() -> None:
     """An identifier is one token; a phrase is a name."""
     assert value_match_forms("wolfgang krieger") == []
     assert value_match_forms("   ") == []
+
+
+# ---------- uuid_match_forms ----------
+
+UNDASHED = "2b85f4e978364a15b94120136d651adf"
+DASHED = "2b85f4e9-7836-4a15-b941-20136d651adf"
+
+
+def test_uuid_match_forms_offers_the_dashed_twin_of_an_undashed_uuid() -> None:
+    """Exports store the uuid undashed; a user may paste it either way."""
+    assert uuid_match_forms(UNDASHED) == [UNDASHED, DASHED]
+
+
+def test_uuid_match_forms_offers_the_stripped_twin_of_a_dashed_uuid() -> None:
+    """A dashed paste still has to find the undashed stored value."""
+    assert uuid_match_forms(DASHED) == [DASHED, UNDASHED]
+
+
+def test_uuid_match_forms_keeps_an_opaque_id_as_is() -> None:
+    """The CSV UUID column is copied verbatim; not every source emits hex."""
+    assert uuid_match_forms("post-7-xyz") == ["post-7-xyz", "post7xyz"]
+    assert uuid_match_forms("uuid1") == ["uuid1"]
+
+
+def test_uuid_match_forms_rejects_anything_with_a_space() -> None:
+    """An identifier is one token."""
+    assert uuid_match_forms("abc def") == []
+    assert uuid_match_forms("  ") == []
+
+
+def test_value_only_field_with_no_forms_compiles_to_nothing() -> None:
+    """A multi-word query against a value-only field has no legal branch at all.
+
+    Callers must treat this as "no hits", never as "match everything".
+    """
+    assert build_search_filter(["abc", "def"], text_keys=(), value_keys=("posting_uuid",), value_forms=[]) is None
 
 
 # ---------- matches_any_phrase ----------

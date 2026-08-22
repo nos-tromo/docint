@@ -874,7 +874,7 @@ class ScopeOut(BaseModel):
 #: Restates ``SEARCH_FIELDS`` as a closed enum so the OpenAPI schema is
 #: self-documenting; the endpoints' whitelist check against ``SEARCH_FIELDS``
 #: itself stays in place as defense in depth.
-SearchFieldName = Literal["text", "author", "network", "file_name"]
+SearchFieldName = Literal["text", "author", "network", "uuid"]
 
 
 class SearchIn(BaseModel):

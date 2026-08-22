@@ -785,7 +785,7 @@ describe('SearchPanel field picker', () => {
   })
 
   it('offers exactly the four options the backend still accepts', async () => {
-    // Author ID, Posting author, Type, Speaker and Language folded into
+    // Author ID, Posting author, Type, Speaker, Language and File folded into
     // Author or were dropped; offering one would send a field the API 422s.
     mockApi(hitsResult)
 
@@ -795,7 +795,7 @@ describe('SearchPanel field picker', () => {
     await userEvent.click(screen.getByRole('combobox', { name: /search in/i }))
 
     const options = (await screen.findAllByRole('option')).map((o) => o.textContent)
-    expect(options).toEqual(['Text', 'Author', 'Network', 'File'])
+    expect(options).toEqual(['Text', 'Author', 'Network', 'UUID'])
   })
 
   it('shows a CSV export link carrying the field once there are hits', async () => {

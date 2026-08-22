@@ -184,9 +184,11 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   **The query matches one chosen field** (`fields.py` → `POST /search`
   `field`, default `text`). The panel's **Search in** picker
   (`SearchPanel.tsx`, `SelectMenu`) swaps the payload keys the keywords are
-  compiled against: the chunk text, `author`, `network` or `file_name`
+  compiled against: the chunk text, `author`, `network` or `uuid`
   (`SEARCH_FIELDS`) — so "everything this author wrote" is an ordinary
-  search whose hits are chunks, pinnable into scope like any other.
+  search whose hits are chunks, pinnable into scope like any other. There is
+  deliberately no `file_name` option: filtering by filename is what the chat
+  metadata filters are for, and they accept a free-text `file_name` rule.
   **One option covers several keys, because one option is one question.**
   `author` searches the posting's own `author` and `vanity` *and* the
   `posting_author`/`posting_vanity` an image or transcript inherits from its
@@ -203,7 +205,16 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   (`FieldSpec.value_keys`, tried in both numeric and string form via
   `value_match_forms()` since collections differ), and names by prefix. An
   id query is a single token by definition, so a multi-word query drops the
-  id keys from the filter entirely.
+  id keys from the filter entirely. **`uuid` is value-only**: a posting's
+  uuid is the sole identifier of a single posting artifact, stored on the
+  posting's own node at `reference_metadata.uuid` and on every derived
+  image, keyframe and transcript segment as `posting_uuid` — the same key
+  pair `_fetch_posting_entity_nodes` ORs — so one exact match returns the
+  post and everything hanging off it. `uuid_match_forms()` tries the pasted
+  form and its dash-normalised twin, since exports write it undashed and a
+  user may paste either; a value-only field given a multi-word query
+  compiles to no filter, which both `search_fulltext` and
+  `iter_search_matches` answer as "no hits" rather than as a scan.
   Each key needs the index its own matcher requires — TEXT for a name,
   KEYWORD for an id: `ensure_field_indexes()` creates them at ingest
   (`RAG.create_index`), `make search-index` backports them, and a lazy
@@ -216,8 +227,8 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   search whose keys are not all indexed correctly reports `not_indexed`
   (`field_indexes_ready()`), never a silently case-sensitive or silently
   empty result. The `_images` companion is searched only for fields an image
-  point carries (`IMAGE_LANE_FIELDS`: `text`, `author` — via the parent
-  posting's `posting_*` keys). The CSV export (`GET /search/export.csv`) takes
+  point carries (`IMAGE_LANE_FIELDS`: `text`, `author`, `uuid` — via the
+  parent posting's `posting_*` keys and `posting_uuid` link). The CSV export (`GET /search/export.csv`) takes
   the same `field`; a blank `question` there exports the whole filtered
   collection (capped by `MAX_EXPORT_ROWS`), which the panel itself never
   does. This **replaced the faceted "Social" lane** (`POST

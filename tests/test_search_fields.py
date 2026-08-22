@@ -19,6 +19,7 @@ from docint.core.search.fields import (
     field_indexes_ready,
     search_field_spec,
 )
+from docint.core.search.fulltext import uuid_match_forms, value_match_forms
 from docint.core.search.index import SEARCH_TEXT_FIELD, search_index_params
 
 
@@ -69,8 +70,30 @@ def test_text_is_the_first_and_default_field() -> None:
 
 
 def test_the_picker_offers_exactly_four_options() -> None:
-    """Type, speaker and language were dropped; author id and posting author folded into author."""
-    assert list(SEARCH_FIELDS) == ["text", "author", "network", "file_name"]
+    """Type, speaker, language and file were dropped; ids folded into author; uuid added.
+
+    File went because filtering by filename is a metadata-filter concern the
+    chat filters already cover; uuid came because it is the sole identifier of
+    a single posting artifact.
+    """
+    assert list(SEARCH_FIELDS) == ["text", "author", "network", "uuid"]
+
+
+def test_uuid_matches_by_value_only() -> None:
+    """A uuid is an identifier, never prose.
+
+    Exact match on the posting's own uuid and on the posting_uuid every
+    derived artifact carries — no prefixing.
+    """
+    spec = search_field_spec("uuid")
+    assert spec.text_keys == ()
+    assert spec.value_keys == ("reference_metadata.uuid", "posting_uuid")
+    assert spec.value_forms is uuid_match_forms
+
+
+def test_author_keeps_the_default_identifier_forms() -> None:
+    """Only uuid needs dash handling; author ids keep the int/str duality."""
+    assert search_field_spec("author").value_forms is value_match_forms
 
 
 def test_author_covers_name_vanity_and_the_posting_equivalents() -> None:
@@ -111,7 +134,7 @@ def test_search_field_spec_rejects_unknown_names() -> None:
 
 def test_retired_field_names_are_no_longer_accepted() -> None:
     """The dropped options must fail closed rather than silently searching nothing."""
-    for retired in ("author_id", "posting_author", "type", "speaker", "language"):
+    for retired in ("author_id", "posting_author", "type", "speaker", "language", "file_name"):
         with pytest.raises(UnknownSearchFieldError):
             search_field_spec(retired)
 
@@ -129,8 +152,8 @@ def test_indexed_keys_pairs_each_key_with_the_index_its_matcher_needs() -> None:
 
 
 def test_image_lane_fields_only_name_fields_an_image_point_carries() -> None:
-    """A companion point has a caption and its parent posting's author, nothing else."""
-    assert IMAGE_LANE_FIELDS == frozenset({"text", "author"})
+    """A companion point has a caption, its parent posting's author and its posting_uuid."""
+    assert IMAGE_LANE_FIELDS == frozenset({"text", "author", "uuid"})
     assert IMAGE_LANE_FIELDS <= set(SEARCH_FIELDS)
 
 
@@ -143,7 +166,7 @@ def test_field_index_kind_reports_the_schema_type_lowercased() -> None:
 
 def test_field_index_kind_is_none_when_qdrant_is_unreachable() -> None:
     """An outage reads as unindexed, never as indexed."""
-    assert field_index_kind(_FakeClient(fail=True), "col", "file_name") is None
+    assert field_index_kind(_FakeClient(fail=True), "col", "reference_metadata.network") is None
 
 
 def test_ensure_field_indexes_creates_the_matcher_specific_index_per_key() -> None:
@@ -171,6 +194,20 @@ def test_ensure_field_indexes_replaces_a_text_index_on_an_id_key() -> None:
     assert [d["field_name"] for d in client.deleted] == ["reference_metadata.author_id"]
     created = {c["field_name"]: c["field_schema"] for c in client.created}
     assert created["reference_metadata.author_id"] == models.PayloadSchemaType.KEYWORD
+
+
+def test_ensure_field_indexes_leaves_the_pre_existing_posting_uuid_index_alone() -> None:
+    """create_index already KEYWORD-indexes posting_uuid; the uuid field must reuse it.
+
+    Only the posting's own ``reference_metadata.uuid`` is new. Deleting and
+    recreating posting_uuid would be a pointless rebuild on every collection.
+    """
+    client = _FakeClient({"posting_uuid": models.PayloadSchemaType.KEYWORD})
+    assert ensure_field_indexes(client, "col") is True
+    assert "posting_uuid" not in {d["field_name"] for d in client.deleted}
+    assert "posting_uuid" not in {c["field_name"] for c in client.created}
+    created = {c["field_name"]: c["field_schema"] for c in client.created}
+    assert created["reference_metadata.uuid"] == models.PayloadSchemaType.KEYWORD
 
 
 def test_ensure_field_indexes_replaces_a_keyword_index_on_a_text_key() -> None:
