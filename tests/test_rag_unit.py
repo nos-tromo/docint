@@ -28,6 +28,7 @@ from llama_index.core.storage.docstore.keyval_docstore import (
     KVDocumentStore as _KVDocumentStore,
 )
 from loguru import logger as _loguru_logger
+from qdrant_client import models as qdrant_models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core import rag as rag_module
@@ -37,6 +38,7 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     matches_metadata_filters,
 )
+from docint.core.search.fields import UnknownSearchFieldError
 from docint.utils.embed_chunking import effective_budget, estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
@@ -6275,6 +6277,182 @@ def test_search_fulltext_flags_a_partially_indexed_collection(
 
     assert result["status"] == "partial"
     assert result["index_status"]["missing"] == 936
+
+
+def _field_indexed(monkeypatch: pytest.MonkeyPatch, kind: str | None = "text") -> None:
+    """Report the field index state every field search checks first."""
+    monkeypatch.setattr(rag_module, "field_index_kind", lambda client, collection, key: kind)
+
+
+def test_search_fulltext_field_search_compiles_on_the_field_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Searching in Author puts the keyword conditions on the author key, not the text."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch)
+    scroll_calls: list[dict[str, Any]] = []
+    payload = {"text": "election night", "file_name": "posts.csv", "reference_metadata": {"author": "Marco_News"}}
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scroll_calls.append(kwargs)
+        return [types.SimpleNamespace(id="p1", payload=payload)], None
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: False,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("mar", field="author")
+
+    assert result["status"] == "ok"
+    assert [h["id"] for h in result["hits"]] == ["p1"]
+    conditions = [c for c in scroll_calls[0]["scroll_filter"].must if isinstance(c, qdrant_models.FieldCondition)]
+    assert [c.key for c in conditions] == ["reference_metadata.author"]
+
+
+def test_search_fulltext_field_search_phrase_filters_on_the_field_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A two-word author query must occur contiguously in the author value."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch)
+    hit = {"text": "x", "file_name": "a.csv", "reference_metadata": {"author": "Acme News Desk"}}
+    miss = {"text": "acme news", "file_name": "a.csv", "reference_metadata": {"author": "News by Acme"}}
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [types.SimpleNamespace(id="p1", payload=hit), types.SimpleNamespace(id="p2", payload=miss)],
+                None,
+            ),
+            count=lambda **kwargs: types.SimpleNamespace(count=2),
+            collection_exists=lambda collection_name: False,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("acme news", field="author")
+
+    assert [h["id"] for h in result["hits"]] == ["p1"]
+    assert result["total"] is None
+
+
+def test_search_fulltext_reports_not_indexed_when_the_field_index_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A field without its TEXT index would match case-sensitively; say so instead."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch, kind="keyword")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: pytest.fail("must not scroll an unindexed field"),
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("mar", field="author")
+
+    assert result["status"] == "not_indexed"
+    assert result["hits"] == []
+
+
+def test_search_fulltext_rejects_an_unknown_field() -> None:
+    """The whitelist is closed at every layer, not only at the API."""
+    rag = RAG(qdrant_collection="test")
+    with pytest.raises(UnknownSearchFieldError):
+        rag.search_fulltext("mar", field="reference_metadata.author")
+
+
+def test_search_fulltext_skips_the_image_lane_for_a_field_images_do_not_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image point has no speaker, so a speaker search never scrolls the companion."""
+    _indexed_status(monkeypatch)
+    _field_indexed(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    scrolled: list[str] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scrolled.append(kwargs["collection_name"])
+        return [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"speaker": "Ann"}})], None
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=scroll,
+            count=lambda **kwargs: types.SimpleNamespace(count=1),
+            collection_exists=lambda collection_name: True,
+            create_payload_index=lambda **kwargs: None,
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    result = rag.search_fulltext("ann", field="speaker", limit=10)
+
+    assert scrolled == ["test"]
+    assert result["total"] == 1
+
+
+def test_search_fulltext_runs_the_image_lane_for_posting_author(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Social images carry the posting author, so that field reaches the companion."""
+    _indexed_status(monkeypatch)
+    _field_indexed(monkeypatch)
+    rag = RAG(qdrant_collection="test")
+    client = _two_lane_client(
+        (
+            [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"posting_author": "acme"}})],
+            None,
+        ),
+        (
+            [
+                types.SimpleNamespace(
+                    id="i1",
+                    payload={"llm_description": "a photo", "reference_metadata": {"posting_author": "acme"}},
+                )
+            ],
+            None,
+        ),
+    )
+    client.create_payload_index = lambda **kwargs: None
+    client.get_collection = lambda **kwargs: types.SimpleNamespace(payload_schema={})
+    rag._qdrant_client = client
+
+    result = rag.search_fulltext("acme", field="posting_author", limit=10)
+
+    assert [(h["id"], h["kind"]) for h in result["hits"]] == [("t1", "text"), ("i1", "image")]
+
+
+def test_search_fulltext_ensures_field_indexes_once_per_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lazy ensure costs one round of index calls per process, not one per search."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
+    _field_indexed(monkeypatch)
+    calls: list[str] = []
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: ([], None),
+            count=lambda **kwargs: types.SimpleNamespace(count=0),
+            collection_exists=lambda collection_name: False,
+            create_payload_index=lambda **kwargs: calls.append(kwargs["field_name"]),
+            get_collection=lambda **kwargs: types.SimpleNamespace(payload_schema={}),
+        ),
+    )
+
+    rag.search_fulltext("mar", field="author")
+    first = len(calls)
+    rag.search_fulltext("mar", field="network")
+
+    assert first == len(rag_module.SEARCH_FIELDS) - 1
+    assert len(calls) == first
 
 
 def _index_ok() -> dict[str, Any]:
