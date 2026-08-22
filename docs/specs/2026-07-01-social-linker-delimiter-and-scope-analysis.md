@@ -128,3 +128,73 @@ This does not change the two open items above: the media→posting **join key** 
 Open item (2) is resolved. `_derive_posting_id` now keys media→posting on **`Network ID`** first, then the raw **`Media ID`**, then `strip_counter(Media ID)`, using the first that names a known posting (backward compatible with the `<Posting ID>_<counter>` format). On the real 73,969-row manifest this derives a posting for **138 rows** (was **0** with `strip_counter` alone).
 
 **Only (3) — data consistency — remains for your test to link.** Measured: **0 of your 8 present files** have a parent posting in the 138-row `postings.csv`. To get links, make the subsets consistent — copy the media files that belong to the 138 kept postings, or keep the postings that own the 8 files you copied.
+
+---
+
+## Update — subdirectories re-allowed, and the album join (2026-08-21)
+
+A Telegram export linked **0 of 352** media rows. Two independent causes; fixing
+either alone still yields 0.
+
+### 1. The flat contract cost the 94 rows that *did* join
+
+The batch shape was `./postings.csv`, `./media.csv`, `./dir/photos/*`,
+`./dir/videos/*` — the default multimedia export output. `media_dir.iterdir()`
+on the manifest's own folder saw only the two CSVs, so every row that found a
+posting was then dropped as "no local file".
+
+**Reverted, without reverting the safety property.** `build_file_index` is back
+(recursive, rooted at the batch tree), but `_resolve_path`'s path branch is
+**not**: the manifest value is still reduced to `Path(name).name`. The
+containment guarantee never came from refusing to recurse — it came from
+matching basenames only, never manifest-supplied path components. Both
+regression tests from the update above place their decoy *outside* the batch
+root and pass unchanged under recursion; only their docstrings were reworded.
+
+Recursion does reintroduce basename ambiguity, which the flat model made
+impossible. A copy beside the manifest breaks the tie; otherwise the row is
+skipped and counted, never guessed at.
+
+### 2. This export carries no media→posting key at all
+
+Open item (2) above was resolved for Meta-style exports by keying on
+`Network ID`. Telegram has no such column: `Network ID == Media ID ==` the
+media's *own* message id for all 352 rows, so all three exact candidates
+collapse to one value that names a posting only by coincidence (94 times).
+
+The 258 others are album members. A Telegram album is N consecutive messages
+recorded as N media rows but **one** posting, filed under the group's **last**
+message id. Attaching each row to the first posting in its channel with a
+message number at or above its own resolves **352/352**, with every hit landing
+**0–1 s** from its posting's timestamp and implied album sizes of **1–10** —
+exactly Telegram's media-group cap. The nearest-*lower* posting was tested and
+rejected: it puts 172 rows on a posting up to **3 days** away.
+
+**The timestamp guard is the load-bearing part, not a refinement.** Message
+order alone will always name *some* candidate; when the owning posting is absent
+from a partial export that candidate is simply wrong. A pruning simulation (drop
+20 postings × 20 trials) measured the trade-off:
+
+| Tolerance | Correct | Silently mis-attributed | Correctly rejected |
+|---|---|---|---|
+| 1 s | 6196 | 24 | 820 |
+| **5 s** | **6196** | **24** | **820** |
+| 30 s | 6196 | 106 | 738 |
+| 60 s | 6196 | 147 | 697 |
+
+Recall is flat across the range while precision degrades, so the default is
+**5 s** (`SOCIAL_ALBUM_TOLERANCE_S`; `SOCIAL_ALBUM_LINK_ENABLED=false` disables
+the path entirely).
+
+Two properties keep key-carrying exports out of this path: it runs only after
+the declared key fails, and it requires `Posting ID` to *start with* the row's
+own `Author ID` — a Meta-style `<postingId>_<accountId>` carries the account as a
+**suffix**, so no channel decomposes and the index is empty. Under the opposite
+crawler convention (album filed under its *first* message) the rule degrades to
+exact hits only: safe, never wrong.
+
+Verified end to end against the reporting export, through the shipped code with
+the real nested layout: `352 media linked (94 by manifest key, 258 by album
+inference), 0 skipped`, 305 resolved from `dir/photos`, 47 from `dir/videos`,
+every resolved path inside the batch tree. Forcing the tolerance to 0 s drops it
+to 328, which is the guard doing its job on the 24 rows that sit 1 s off.
