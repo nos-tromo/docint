@@ -98,8 +98,8 @@ describe('searchUi field state', () => {
   })
 
   it('switches the search field', () => {
-    useSearchUiStore.getState().setField('author_id')
-    expect(useSearchUiStore.getState().field).toBe('author_id')
+    useSearchUiStore.getState().setField('author')
+    expect(useSearchUiStore.getState().field).toBe('author')
   })
 })
 
