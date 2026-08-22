@@ -18,7 +18,7 @@ jobs:
     # Pinned to the moving v3 alias (local pyrefly hook so strict mode sees project deps + the
     # make/common.mk + frontend eslint.config.js drift-checks). Canonical
     # configs at nos-tromo/.github/configs/{python-strict,make-common,frontend-eslint}/.
-    uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@4663f3fce265a177e9ec5d9b190a4897c94b156e # v3.13
+    uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@282dc3492a2805831bcafcea4e45f817306c3283 # v3.14
     with:
       python-versions: '["3.11"]'
       uv-sync-args: '--locked --group dev'
