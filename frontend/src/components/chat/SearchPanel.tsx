@@ -78,7 +78,6 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   // and the result is always chunks. `field` is part of the query key, so
   // switching it re-runs the submitted query without re-asking it.
   const search = useSearch(query, field)
-  const active = search
   const filters = useChatFiltersStore().buildPayload()
   const { set } = useScope(sessionId)
   const [scopeError, setScopeError] = useState<string | null>(null)
@@ -88,23 +87,20 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const estTokens = scopeEstTokens(scope)
   const hits = search.data?.hits ?? []
   const docCount = new Set(hits.map((h) => h.filename ?? '').filter(Boolean)).size
-  // Named apart from `hits` for the mark-all/token-projection code below,
-  // which only cares what is currently on screen — not how it got there.
-  const visibleHits: SearchHit[] = hits
 
   // The scope everything currently loaded would produce: what is already
-  // picked plus every hit/sample on screen. Selecting all is additive — it
-  // must not silently drop chunks picked from an earlier query or mode.
+  // picked plus every hit on screen. Selecting all is additive — it must
+  // not silently drop chunks picked under an earlier query.
   const allLoadedTokens = (): Record<string, number> => {
     const next = { ...scope.tokens }
-    for (const hit of visibleHits) next[hit.id] = hit.est_tokens
+    for (const hit of hits) next[hit.id] = hit.est_tokens
     return next
   }
   // Whether the toggle is currently "on". A live selection with nothing loaded
   // counts as on too: the control's only remaining job there is to clear it.
   const allLoadedSelected =
-    visibleHits.length > 0
-      ? visibleHits.every((hit) => hit.id in scope.tokens)
+    hits.length > 0
+      ? hits.every((hit) => hit.id in scope.tokens)
       : selectedIds.length > 0
   const projectedTokens = Object.values(allLoadedTokens()).reduce((sum, n) => sum + n, 0)
   const projectedOverBudget = scope.usableTokens > 0 && projectedTokens > scope.usableTokens
@@ -149,11 +145,11 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
     return commitScope(next)
   }
 
-  const activeError = (): string => {
-    if (active.error instanceof ApiError && active.error.status === 422) {
+  const searchError = (): string => {
+    if (search.error instanceof ApiError && search.error.status === 422) {
       return t('search.error_query')
     }
-    const described = describeError(active.error)
+    const described = describeError(search.error)
     return t(described.key, described.vars)
   }
 
@@ -184,8 +180,21 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
       {/* "Search in": which payload field the keywords match. Always shown —
           it is a property of the query, not a mode. Text (the chunk body)
           is the default; the metadata fields answer "everything this
-          author / id / network wrote" as a plain search. */}
+          author / id / network wrote" as a plain search.
+
+          A visible label precedes the picker: `SelectMenu`'s closed trigger
+          renders only the chosen *value* ("Text", "Author ID", …), which
+          names nothing on its own — the same ambiguity a user hit once
+          before, typing an author id into the query box beside an unlabeled
+          control and expecting it to match (the reason 68e239bc added, then
+          this feature's Task 8 removed, a sort-axis icon here). The label is
+          `aria-hidden` so it does not double up on `SelectMenu`'s own
+          `label` prop, which is what actually names the control for
+          assistive tech — the accessible name is announced exactly once. */}
       <div className="flex items-center gap-2" data-testid="search-field-row">
+        <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">
+          {t('search.field')}
+        </span>
         <SelectMenu
           options={SEARCH_FIELDS.map((name) => ({
             value: name,
@@ -203,12 +212,12 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         <p className="text-xs text-muted-foreground">{t('search.select_collection')}</p>
       ) : (
         <>
-          {active.isFetching && (
+          {search.isFetching && (
             <p className="text-xs text-muted-foreground">{t('search.searching')}</p>
           )}
-          {active.isError && (
+          {search.isError && (
             <p className="text-xs text-red-500" role="alert">
-              {activeError()}
+              {searchError()}
             </p>
           )}
           {/* One line for everything the result set is — hits, documents,
@@ -242,7 +251,7 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               live. Keeping the meter a sibling rather than trailing content
               also means it needs no leading separator of its own to worry
               about running into the counts. */}
-          {(active.data || selectedIds.length > 0 || query.trim() === '') && (
+          {(search.data || selectedIds.length > 0 || query.trim() === '') && (
             <div className="flex items-center gap-1" data-testid="search-summary-row">
               <p
                 className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
@@ -309,16 +318,16 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                 type="button"
                 variant="ghost"
                 size="sm"
-                disabled={visibleHits.length === 0 && selectedIds.length === 0}
+                disabled={hits.length === 0 && selectedIds.length === 0}
                 aria-label={
                   allLoadedSelected
                     ? t('search.clear_selection')
-                    : t('search.select_all_loaded', { count: visibleHits.length })
+                    : t('search.select_all_loaded', { count: hits.length })
                 }
                 title={
                   allLoadedSelected
                     ? t('search.clear_selection')
-                    : `${t('search.select_all_loaded_title', { count: visibleHits.length })} ${t(
+                    : `${t('search.select_all_loaded_title', { count: hits.length })} ${t(
                         'search.select_all_cost',
                         { tokens: formatTokens(projectedTokens) }
                       )}`
@@ -335,7 +344,7 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               </Button>
             </div>
           )}
-          {visibleHits.length > 0 && projectedOverBudget && (
+          {hits.length > 0 && projectedOverBudget && (
             <p className="text-xs text-red-500" data-testid="select-all-over-budget">
               {t('search.select_all_over_budget', { total: formatTokens(scope.usableTokens) })}
             </p>
@@ -357,17 +366,17 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
       {/* The three states below are deliberately separate branches: a
           collection with no search index, or a partial backfill, must never
           be collapsed into a plain zero-hit result. */}
-      {active.data?.status === 'not_indexed' && (
+      {search.data?.status === 'not_indexed' && (
         <Banner variant="info" data-testid="search-not-indexed">
           {t('search.not_indexed')}
         </Banner>
       )}
-      {active.data?.status === 'partial' && (
+      {search.data?.status === 'partial' && (
         <Banner variant="danger" data-testid="search-partial">
-          {t('search.partial_warning', { count: active.data.index_status?.missing ?? 0 })}
+          {t('search.partial_warning', { count: search.data.index_status?.missing ?? 0 })}
         </Banner>
       )}
-      {active.data?.status === 'ok' && hits.length === 0 && (
+      {search.data?.status === 'ok' && hits.length === 0 && (
         <p className="text-xs text-muted-foreground" data-testid="search-no-matches">
           {t('search.no_matches')}
         </p>

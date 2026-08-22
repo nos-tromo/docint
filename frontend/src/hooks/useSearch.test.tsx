@@ -150,7 +150,7 @@ describe('useSearch', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search'))).toBe(false)
   })
 
-  it('sends the chosen field in the request body and keys the query by it', async () => {
+  it('sends the chosen field in the request body', async () => {
     const fetchMock = mockFetch({
       status: 'ok',
       hits: [],

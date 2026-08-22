@@ -301,12 +301,11 @@ describe('SearchPanel scope selection', () => {
     })
   })
 
-  it('renders the token meter outside the truncating summary line even before the active mode has data', async () => {
-    // A selection can go live before the active mode's query has resolved —
-    // right after a mode switch, or on first render with a persisted
-    // selection and no query submitted. The meter is a sibling of the counts
-    // `<p>`, not text inside it, so it must not depend on that `<p>` having
-    // anything to say.
+  it('renders the token meter outside the truncating summary line even before the search has data', async () => {
+    // A selection can go live before the search has resolved — on first
+    // render with a persisted selection and no query submitted, for
+    // instance. The meter is a sibling of the counts `<p>`, not text inside
+    // it, so it must not depend on that `<p>` having anything to say.
     useSearchUiStore.setState({
       queries: {},
       scopes: { [SESSION]: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
@@ -762,6 +761,9 @@ describe('SearchPanel field picker', () => {
     await screen.findByText(/alpha\.pdf/)
     const trigger = screen.getByRole('combobox', { name: /search in/i })
     expect(trigger).toHaveTextContent('Text')
+    // The trigger shows only the chosen value ("Text"); a visible "Search in"
+    // label beside it is what actually says what the picker is for.
+    expect(screen.getByTestId('search-field-row')).toHaveTextContent('Search in')
     expect(screen.queryByRole('button', { name: 'Social' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Hits' })).toBeNull()
   })
