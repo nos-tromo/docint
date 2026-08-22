@@ -94,8 +94,10 @@ the frontend port is published for local development.
   advertise it via `GET /config` (`max_upload_bytes`); the SPA uses it to split
   large selections into sub-cap batches, so the total upload is not bounded by
   this cap — only an individual file bigger than it would still be rejected.
-- Attaches to `docint-net` only, and `depends_on` the `backend` so Compose
-  starts the backend container first.
+- Attaches to `docint-net` and to `edge-net` with the alias
+  `docint-frontend` (how the `edge-plane` gateway reaches the SPA under its
+  `/docint/` sub-path), and `depends_on` the `backend` so Compose starts the
+  backend container first.
 
 ## Vector store: the `data-plane` project
 
@@ -142,15 +144,20 @@ idempotently before the stack starts.
 - `data-net` — **external** network declared with
   `name: ${DATA_NET:-data-net}`. The backend attaches to it to reach
   the `data-plane` project's Qdrant at `http://qdrant:6333`.
+- `edge-net` — **external** network declared with
+  `name: ${EDGE_NET:-edge-net}`. The *frontend* attaches to it with the alias
+  `docint-frontend`, which is how the `edge-plane` gateway reaches the SPA.
+  The backend never joins it.
 
-Both external networks must exist before starting the stack. `make
-network` creates both idempotently:
+All three external networks must exist before starting the stack. `make
+network` creates them idempotently:
 
 ```bash
 make network
 # equivalent to:
 docker network create inference-net
 docker network create data-net
+docker network create edge-net
 ```
 
 ## Dockerfiles

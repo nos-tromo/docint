@@ -1,6 +1,6 @@
 # CLI reference
 
-Docint ships seven console scripts, all registered in
+Docint ships nine console scripts, all registered in
 `pyproject.toml` `[project.scripts]` and installed automatically when
 you run `uv sync`.
 
@@ -9,6 +9,8 @@ you run `uv sync`.
 | `docint` | `docint.cli.serve:main` | Run the FastAPI backend (uvicorn). |
 | `ingest` | `docint.cli.ingest:main` | Batch ingest documents into a collection. |
 | `resolve` | `docint.cli.resolve:main` | Merge duplicate / semantically-similar entities into durable canonicals. |
+| `search-index` | `docint.cli.search_index:main` | Build the full-text `search_text` payload index for one collection. |
+| `search-index-all` | `docint.cli.search_index:main_all` | Backport that index across every collection on the host. |
 | `query` | `docint.cli.query:main` | Run batch chat queries and collection-level exports. |
 | `query-eval` | `docint.cli.eval:main` | Corpus retrieval evaluation across retrieval modes. |
 | `verify` | `docint.cli.verify:main` | Check Qdrant ↔ docstore consistency (optionally repair). |
