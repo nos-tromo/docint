@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { GroupByField } from '@/api/types'
+import type { SearchField } from '@/api/types'
 
 /**
  * Return the per-chat key a search draft, query and scope are stored under.
@@ -38,11 +38,9 @@ export interface SearchUiState {
   scopes: Record<string, ScopeState>
   /** Whether the `Filters (N)` disclosure at the column's foot is open. */
   filtersOpen: boolean
-  /** Hits (ranked matches) vs Groups (exhaustive, faceted by `groupBy`). */
-  mode: 'hits' | 'groups'
-  /** The payload field Groups mode facets on. Not per-chat: one choice for
-   *  the panel, same as `filtersOpen`. */
-  groupBy: GroupByField
+  /** Which payload field the query matches. Not per-chat: one choice for
+   *  the whole panel, like the filters. */
+  field: SearchField
   setDraft: (key: string, value: string) => void
   setQuery: (key: string, value: string) => void
   setScopeTokens: (key: string, tokens: Record<string, number>) => void
@@ -50,8 +48,7 @@ export interface SearchUiState {
   clearScope: (key: string) => void
   adoptScope: (from: string, to: string) => void
   setFiltersOpen: (open: boolean) => void
-  setMode: (mode: 'hits' | 'groups') => void
-  setGroupBy: (groupBy: GroupByField) => void
+  setField: (field: SearchField) => void
 }
 
 /** Read a chat's scope, falling back to an empty one. */
@@ -72,8 +69,7 @@ export const useSearchUiStore = create<SearchUiState>()(
       queries: {},
       scopes: {},
       filtersOpen: false,
-      mode: 'hits',
-      groupBy: 'author',
+      field: 'text',
       setDraft: (key, value) => set((s) => ({ drafts: { ...s.drafts, [key]: value } })),
       setQuery: (key, value) => set((s) => ({ queries: { ...s.queries, [key]: value } })),
       setScopeTokens: (key, tokens) =>
@@ -111,18 +107,23 @@ export const useSearchUiStore = create<SearchUiState>()(
           return { scopes, queries }
         }),
       setFiltersOpen: (filtersOpen) => set({ filtersOpen }),
-      setMode: (mode) => set({ mode }),
-      setGroupBy: (groupBy) => set({ groupBy })
+      setField: (field) => set({ field })
     }),
     {
       // The selection is the only client-side record of a session's scope —
       // the API has no GET for it — so persisting is what lets a reload still
       // report honestly what the chat is scoped to.
       name: 'docint-search-ui',
-      version: 2,
-      // v1 -> v2 added `mode`/`groupBy`; a persisted v1 blob has neither, so
-      // fill the same defaults the store itself starts with.
-      migrate: (persisted) => ({ mode: 'hits', groupBy: 'author', ...(persisted as object) })
+      version: 3,
+      // v1 had neither mode nor field; v2 had `mode`/`groupBy` for the facet
+      // lane, which the field picker replaced. Drop those keys rather than
+      // carry a value nothing reads.
+      migrate: (persisted) => {
+        const rest = { ...(persisted as object) } as Record<string, unknown>
+        delete rest.mode
+        delete rest.groupBy
+        return { field: 'text', ...rest }
+      }
     }
   )
 )

@@ -13,8 +13,7 @@ beforeEach(() => {
     queries: {},
     scopes: {},
     filtersOpen: false,
-    mode: 'hits',
-    groupBy: 'author'
+    field: 'text'
   })
 })
 
@@ -93,42 +92,36 @@ describe('clearScope', () => {
   })
 })
 
-describe('searchUi mode state', () => {
-  it('defaults to hits mode grouped by author', () => {
-    const s = useSearchUiStore.getState()
-    expect(s.mode).toBe('hits')
-    expect(s.groupBy).toBe('author')
+describe('searchUi field state', () => {
+  it('defaults to searching the text', () => {
+    expect(useSearchUiStore.getState().field).toBe('text')
   })
 
-  it('switches mode and group field', () => {
-    useSearchUiStore.getState().setMode('groups')
-    useSearchUiStore.getState().setGroupBy('network')
-
-    expect(useSearchUiStore.getState().mode).toBe('groups')
-    expect(useSearchUiStore.getState().groupBy).toBe('network')
+  it('switches the search field', () => {
+    useSearchUiStore.getState().setField('author_id')
+    expect(useSearchUiStore.getState().field).toBe('author_id')
   })
 })
 
 describe('searchUi persistence migration', () => {
-  it('migrates a version-1 blob by filling the new defaults', () => {
+  it('migrates a version-1 blob by filling the field default', () => {
     const migrate = useSearchUiStore.persist.getOptions().migrate!
     const migrated = migrate({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false }, 1) as unknown as {
-      mode: string
-      groupBy: string
+      field: string
     }
-
-    expect(migrated.mode).toBe('hits')
-    expect(migrated.groupBy).toBe('author')
+    expect(migrated.field).toBe('text')
   })
 
-  it('keeps the rest of a version-1 blob intact', () => {
+  it('drops a version-2 blob’s mode and group-by, keeping the rest', () => {
     const migrate = useSearchUiStore.persist.getOptions().migrate!
     const migrated = migrate(
-      { drafts: { new: 'partei' }, queries: {}, scopes: {}, filtersOpen: true },
-      1
-    ) as unknown as { drafts: Record<string, string>; filtersOpen: boolean }
-
+      { drafts: { new: 'partei' }, queries: {}, scopes: {}, filtersOpen: true, mode: 'groups', groupBy: 'network' },
+      2
+    ) as unknown as Record<string, unknown>
+    expect(migrated.field).toBe('text')
     expect(migrated.drafts).toEqual({ new: 'partei' })
     expect(migrated.filtersOpen).toBe(true)
+    expect('mode' in migrated).toBe(false)
+    expect('groupBy' in migrated).toBe(false)
   })
 })
