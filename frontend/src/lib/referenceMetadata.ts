@@ -184,8 +184,10 @@ export interface ReferenceMetadataFieldOption {
  * filter path, for a discoverability picker over the FilterBuilder's custom
  * rule field (a bare free-text input otherwise gives no hint that
  * `reference_metadata.author_id` — payload, indexed — is what a social
- * export's author id actually lives under, as opposed to the group-by
- * dropdown next to it, which only ever ranks or facets `search_text`).
+ * export's author id actually lives under). That is a different axis from
+ * the search panel's own "Search in" field picker: these filters narrow
+ * what any answer retrieves against, while that picker only chooses which
+ * field the search query itself matches.
  *
  * Skips the body-text fields: filtering on a whole post/chunk body as an
  * equality match is not useful, and they are excluded from the pills for the

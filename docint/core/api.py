@@ -1578,8 +1578,8 @@ def search_collection(
 
 #: Hard cap on chunk-level search-export rows. `export_search_csv` sorts the
 #: whole matching set before it can stream a single row (see below), so an
-#: unbounded query — most easily a blank-question grouped export, which
-#: legitimately matches the whole collection — would hold every matching
+#: unbounded query — most easily a blank question, which legitimately
+#: matches the whole (filtered) collection — would hold every matching
 #: chunk's full text and reference metadata in memory at once. 50,000 rows
 #: comfortably covers any real investigative export while keeping worst-case
 #: memory bounded; crossing it refuses the request (409) rather than

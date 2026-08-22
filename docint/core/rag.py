@@ -8673,12 +8673,25 @@ class RAG:
         a first field search must not fail in the meantime.
         ``ensure_field_indexes`` is idempotent, so this only saves round-trips.
 
+        Also covers the ``_images`` companion when one exists: right after
+        this call, ``search_fulltext`` runs the image lane for any field in
+        ``IMAGE_LANE_FIELDS`` but only checks the *main* collection's index
+        status, so an un-indexed companion would otherwise run ``MatchText``
+        case-sensitively while the response still reported ``status: "ok"``.
+        The two outcomes are ANDed together, so a companion-only failure is
+        not cached as done and the next search retries it.
+
         Args:
-            collection (str): Physical collection name.
+            collection (str): Physical main collection name — the cache key,
+                regardless of whether a companion was also ensured.
         """
         if collection in self._field_indexes_ensured:
             return
-        if ensure_field_indexes(self.qdrant_client, collection):
+        ok = ensure_field_indexes(self.qdrant_client, collection)
+        companion = image_companion_name(collection)
+        if self._collection_exists(companion):
+            ok = ensure_field_indexes(self.qdrant_client, companion) and ok
+        if ok:
             self._field_indexes_ensured.add(collection)
 
     def iter_search_matches(

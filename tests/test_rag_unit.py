@@ -6456,6 +6456,79 @@ def test_search_fulltext_ensures_field_indexes_once_per_collection(monkeypatch: 
     assert len(calls) == first
 
 
+def test_ensure_field_indexes_once_also_covers_the_image_companion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A metadata field search must not silently under-match the _images companion.
+
+    ``search_fulltext`` runs the image lane for fields images carry
+    (``IMAGE_LANE_FIELDS``) right after this call, but checks the field
+    index status on the *main* collection only — so the companion has to be
+    ensured here, or a query could run ``MatchText`` against an un-indexed
+    companion while the response still reported ``status: "ok"``.
+    """
+    rag = RAG(qdrant_collection="test")
+    ensured: list[str] = []
+    monkeypatch.setattr(
+        rag_module,
+        "ensure_field_indexes",
+        lambda client, collection: ensured.append(collection) or True,
+    )
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: True))
+
+    rag._ensure_field_indexes_once("test")
+
+    assert ensured == ["test", "test_images"]
+    assert "test" in rag._field_indexes_ensured
+
+
+def test_ensure_field_indexes_once_skips_the_companion_when_it_does_not_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection with no images has no companion; ensuring it is never attempted."""
+    rag = RAG(qdrant_collection="test")
+    ensured: list[str] = []
+    monkeypatch.setattr(
+        rag_module,
+        "ensure_field_indexes",
+        lambda client, collection: ensured.append(collection) or True,
+    )
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: False))
+
+    rag._ensure_field_indexes_once("test")
+
+    assert ensured == ["test"]
+    assert "test" in rag._field_indexes_ensured
+
+
+def test_ensure_field_indexes_once_does_not_cache_a_partial_companion_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A companion-only failure must not be cached as done.
+
+    Caching a partial success would leave the companion silently
+    under-indexed for the rest of the process — exactly the bug this method
+    exists to prevent — so a later call must retry both collections, not
+    trust the earlier partial result.
+    """
+    rag = RAG(qdrant_collection="test")
+    calls: list[str] = []
+
+    def fake_ensure(client: Any, collection: str) -> bool:
+        calls.append(collection)
+        return collection != "test_images"
+
+    monkeypatch.setattr(rag_module, "ensure_field_indexes", fake_ensure)
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: True))
+
+    rag._ensure_field_indexes_once("test")
+    assert "test" not in rag._field_indexes_ensured
+    assert calls == ["test", "test_images"]
+
+    rag._ensure_field_indexes_once("test")
+    assert calls == ["test", "test_images", "test", "test_images"]
+
+
 def _index_ok() -> dict[str, Any]:
     return {"indexed": True, "total": 3, "with_search_text": 3, "missing": 0, "complete": True}
 

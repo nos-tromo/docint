@@ -127,3 +127,27 @@ def test_ensure_field_indexes_never_touches_search_text() -> None:
 def test_ensure_field_indexes_is_fail_soft() -> None:
     """A Qdrant outage degrades to False rather than raising."""
     assert ensure_field_indexes(_FakeClient(fail=True), "col") is False
+
+
+def test_ensure_field_indexes_reads_the_schema_once() -> None:
+    """The schema is read once and reused for every key, not once per key.
+
+    Checking each of the eight fields via a fresh ``get_collection`` call
+    would cost eight round-trips per invocation for no benefit — the schema
+    does not change mid-loop.
+    """
+    client = _FakeClient({"reference_metadata.author": models.PayloadSchemaType.KEYWORD})
+    calls: list[str] = []
+    real_get_collection = client.get_collection
+
+    def counting_get_collection(collection_name: str) -> Any:
+        calls.append(collection_name)
+        return real_get_collection(collection_name)
+
+    client.get_collection = counting_get_collection  # type: ignore[method-assign]
+
+    assert ensure_field_indexes(client, "col") is True
+    assert calls == ["col"]
+    # The keyword index found in that one read is still replaced, proving the
+    # cached schema — not a fresh per-key read — drives the decision.
+    assert [d["field_name"] for d in client.deleted] == ["reference_metadata.author"]

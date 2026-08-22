@@ -1246,3 +1246,45 @@ def test_a_small_image_is_never_upscaled_and_never_re_stamped() -> None:
 
     make_thumb.assert_not_called()
     assert client.records[first.point_id or ""]["thumbnail_max_dim"] == 768
+
+
+def test_write_image_search_text_also_ensures_the_companion_field_indexes() -> None:
+    """A freshly ingested collection with images must need no operator step.
+
+    ``ensure_search_index`` alone only covers the default text lane; the
+    "Search in" field picker also needs the companion's metadata TEXT
+    indexes, or a freshly ingested collection would report ``not_indexed``
+    for Author/Network/etc. against its images until a manual
+    `make search-index` backfill ran.
+    """
+    service, client, _ = _build_service()
+
+    with (
+        patch("docint.core.ingest.images_service.ensure_search_index", return_value=True) as ensure_text,
+        patch("docint.core.ingest.images_service.ensure_field_indexes", return_value=True) as ensure_fields,
+        patch("docint.core.ingest.images_service.write_search_text", return_value=1) as write_text,
+    ):
+        service._write_image_search_text("docs_images", "point-1", "a caption")
+
+    ensure_text.assert_called_once_with(client, "docs_images")
+    ensure_fields.assert_called_once_with(client, "docs_images")
+    write_text.assert_called_once_with(client, "docs_images", {"point-1": "a caption"})
+
+
+def test_write_image_search_text_is_fail_soft_when_field_indexing_breaks() -> None:
+    """A field-index failure must degrade the image, not the ingest.
+
+    Mirrors the existing fail-soft posture around ``ensure_search_index`` and
+    ``write_search_text`` in the same method: an outage here costs one image
+    a backfill, never the ingest itself.
+    """
+    service, _, _ = _build_service()
+
+    with (
+        patch("docint.core.ingest.images_service.ensure_search_index", return_value=True),
+        patch(
+            "docint.core.ingest.images_service.ensure_field_indexes",
+            side_effect=RuntimeError("qdrant unreachable"),
+        ),
+    ):
+        service._write_image_search_text("docs_images", "point-1", "a caption")

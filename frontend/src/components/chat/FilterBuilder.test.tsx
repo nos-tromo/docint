@@ -102,9 +102,11 @@ describe('FilterBuilder disclosure', () => {
 
   it('suggests known reference-metadata fields via a datalist, without blocking free text', async () => {
     // The user's own bug report: an author id lives in payload
-    // (reference_metadata.author_id), not in the indexed body text the
-    // group-by dropdown facets. A bare free-text field gave no hint that
-    // path exists — the datalist is discoverability, not a replacement.
+    // (reference_metadata.author_id) — a filter path, distinct from the
+    // "Search in" picker's own field names, which choose what the search
+    // query matches rather than narrow what a filter retrieves against. A
+    // bare free-text field gave no hint the filter path exists — the
+    // datalist is discoverability, not a replacement.
     useSearchUiStore.getState().setFiltersOpen(true)
     useChatFiltersStore.getState().setFilterEnabled(true)
     const { container } = render(<FilterBuilder />)

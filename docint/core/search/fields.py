@@ -69,6 +69,32 @@ def search_payload_key(name: str) -> str:
         raise UnknownSearchFieldError(name) from exc
 
 
+def _index_kind_from_schema(schema: Any, key: str) -> str | None:
+    """Extract one payload key's indexed data type from a schema mapping.
+
+    Factored out of :func:`field_index_kind` so :func:`ensure_field_indexes`
+    can read a collection's schema once and check every key against it,
+    rather than paying a ``get_collection`` round-trip per key.
+
+    Args:
+        schema (Any): The ``payload_schema`` mapping from ``get_collection``,
+            or a falsy value when it could not be read.
+        key (str): Payload key.
+
+    Returns:
+        str | None: The schema's data type lowercased (``"keyword"``,
+            ``"text"``, …), or ``None`` when the key is unindexed or the
+            schema is unavailable — an unknown state must never read as
+            indexed.
+    """
+    entry = (schema or {}).get(key)
+    if entry is None:
+        return None
+    data_type = getattr(entry, "data_type", None)
+    value = getattr(data_type, "value", data_type)
+    return None if value is None else str(value).lower()
+
+
 def field_index_kind(client: Any, collection: str, key: str) -> str | None:
     """Report which payload index, if any, a key carries.
 
@@ -88,12 +114,7 @@ def field_index_kind(client: Any, collection: str, key: str) -> str | None:
         logger.debug("Payload index status unavailable for {} on {}: {}", key, collection, exc)
         return None
     schema = getattr(info, "payload_schema", None) or {}
-    entry = schema.get(key)
-    if entry is None:
-        return None
-    data_type = getattr(entry, "data_type", None)
-    value = getattr(data_type, "value", data_type)
-    return None if value is None else str(value).lower()
+    return _index_kind_from_schema(schema, key)
 
 
 def ensure_field_indexes(client: Any, collection: str) -> bool:
@@ -105,6 +126,12 @@ def ensure_field_indexes(client: Any, collection: str) -> bool:
     after does not race the rebuild. ``search_text`` itself is owned by
     :func:`docint.core.search.index.ensure_search_index` and is not touched.
 
+    The collection's schema is read once, up front, and reused for every
+    key — checking it via :func:`field_index_kind` inside the loop would cost
+    one ``get_collection`` round-trip per key instead of one per call. A
+    schema that cannot be read is treated exactly like an empty one, so every
+    key is still attempted rather than skipped as if already indexed.
+
     Args:
         client (Any): Qdrant client exposing ``get_collection``,
             ``create_payload_index`` and ``delete_payload_index``.
@@ -113,12 +140,19 @@ def ensure_field_indexes(client: Any, collection: str) -> bool:
     Returns:
         bool: ``True`` when every field ends up with a TEXT index.
     """
+    try:
+        info = client.get_collection(collection_name=collection)
+        schema: dict[str, Any] = getattr(info, "payload_schema", None) or {}
+    except Exception as exc:
+        logger.debug("Payload index status unavailable for {}: {}", collection, exc)
+        schema = {}
+
     ok = True
     for name, key in SEARCH_FIELDS.items():
         if name == DEFAULT_SEARCH_FIELD:
             continue
         try:
-            kind = field_index_kind(client, collection, key)
+            kind = _index_kind_from_schema(schema, key)
             if kind == "text":
                 continue
             if kind is not None:

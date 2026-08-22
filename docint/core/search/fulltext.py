@@ -74,8 +74,8 @@ def not_coarse_condition() -> models.Filter:
 
     Expressed as "not coarse" rather than "is fine": a collection ingested
     without hierarchical chunking tags nothing, and requiring ``fine`` would
-    return zero hits there. Shared by keyword search and the grouped lane so
-    both count a logical hit once.
+    return zero hits there. Shared by keyword search and the blank-query scan
+    so both count a logical hit once.
 
     Returns:
         models.Filter: A ``must_not`` filter on the hierarchy tag.
