@@ -8,8 +8,10 @@ from qdrant_client import models
 
 from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.fulltext import (
+    build_scan_filter,
     build_search_filter,
     matches_phrase,
+    not_coarse_condition,
     parse_keywords,
 )
 from docint.core.search.index import SEARCH_TEXT_FIELD
@@ -127,3 +129,42 @@ def test_matches_phrase_empty_keywords_always_matches() -> None:
 def test_matches_phrase_requires_keyword_order() -> None:
     """Reversed keyword order must not match."""
     assert not matches_phrase("learning machine", ["machine", "learning"])
+
+
+# ---------- build_search_filter field_key parameter ----------
+
+
+def test_build_search_filter_targets_the_given_field_key() -> None:
+    """A field search puts the MatchText conditions on that key, not on search_text."""
+    f = build_search_filter(["mar"], field_key="reference_metadata.author")
+    assert f is not None
+    conditions = [c for c in cast(list[Any], f.must or []) if isinstance(c, models.FieldCondition)]
+    assert [c.key for c in conditions] == ["reference_metadata.author"]
+    assert conditions[0].match == models.MatchText(text="mar")
+
+
+def test_build_search_filter_defaults_to_search_text() -> None:
+    """Callers that pass no key keep searching the chunk text."""
+    f = build_search_filter(["election"])
+    assert f is not None
+    conditions = [c for c in cast(list[Any], f.must or []) if isinstance(c, models.FieldCondition)]
+    assert [c.key for c in conditions] == [SEARCH_TEXT_FIELD]
+
+
+# ---------- build_scan_filter ----------
+
+
+def test_build_scan_filter_excludes_coarse_parents_without_keywords() -> None:
+    """A blank-query export scans the collection, minus the coarse parents."""
+    f = build_scan_filter(None)
+    assert f.must == [not_coarse_condition()]
+
+
+def test_build_scan_filter_keeps_the_callers_metadata_filter() -> None:
+    """The metadata filter still narrows a keyword-less scan."""
+    base = models.Filter(
+        must=[models.FieldCondition(key="reference_metadata.network", match=models.MatchValue(value="Instagram"))]
+    )
+    f = build_scan_filter(base)
+    assert cast(list[Any], f.must)[0] == cast(list[Any], base.must)[0]
+    assert not_coarse_condition() in cast(list[Any], f.must)

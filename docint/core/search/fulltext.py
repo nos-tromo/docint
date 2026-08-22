@@ -90,22 +90,45 @@ def not_coarse_condition() -> models.Filter:
     )
 
 
+def build_scan_filter(base_filter: models.Filter | None) -> models.Filter:
+    """Compile the filter a keyword-less scan runs under.
+
+    The caller's metadata filter plus the coarse-parent exclusion, never
+    ``None``: a blank-query export legitimately covers the whole (filtered)
+    collection, but a hierarchical collection would otherwise yield each
+    logical chunk twice, through its parent and its child.
+
+    Args:
+        base_filter (models.Filter | None): The caller's metadata filter.
+
+    Returns:
+        models.Filter: The compiled filter.
+    """
+    merged = merge_qdrant_filters(base_filter, [not_coarse_condition()])
+    return merged if merged is not None else models.Filter(must=[not_coarse_condition()])
+
+
 def build_search_filter(
     keywords: Sequence[str],
     *,
+    field_key: str = SEARCH_TEXT_FIELD,
     base_filter: models.Filter | None = None,
 ) -> models.Filter | None:
-    """Compile keywords into a native Qdrant filter.
+    """Compile keywords into a native Qdrant filter on one payload key.
 
-    One ``MatchText`` condition per keyword, all in ``must`` — so a chunk has
-    to contain every keyword, in any order. Coarse parent chunks are excluded
-    so a hierarchical collection does not return both a parent and its child
-    for one logical hit; the exclusion is expressed as "not coarse" rather than
-    "is fine" because a collection ingested without hierarchical chunking tags
-    nothing at all, and requiring ``fine`` would return nothing there.
+    One ``MatchText`` condition per keyword, all in ``must`` — so the field
+    has to contain every keyword, in any order. Coarse parent chunks are
+    excluded so a hierarchical collection does not return both a parent and
+    its child for one logical hit; the exclusion is expressed as "not coarse"
+    rather than "is fine" because a collection ingested without hierarchical
+    chunking tags nothing at all, and requiring ``fine`` would return nothing
+    there.
 
     Args:
         keywords (Sequence[str]): Keywords that must all match.
+        field_key (str): Payload key to match on — ``search_text`` for the
+            chunk text, or a metadata key from
+            :data:`docint.core.search.fields.SEARCH_FIELDS`.
         base_filter (models.Filter | None): The caller's metadata filter, ANDed
             with the keyword conditions so panel filters constrain the search.
 
@@ -118,7 +141,7 @@ def build_search_filter(
         return None
 
     conditions: list[Any] = [
-        models.FieldCondition(key=SEARCH_TEXT_FIELD, match=models.MatchText(text=keyword)) for keyword in keywords
+        models.FieldCondition(key=field_key, match=models.MatchText(text=keyword)) for keyword in keywords
     ]
     conditions.append(not_coarse_condition())
     return merge_qdrant_filters(base_filter, conditions)
