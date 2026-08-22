@@ -264,41 +264,20 @@ class DummyRAG:
             },
         }
 
-    def search_aggregate(self, query: str, **kwargs: Any) -> dict[str, Any]:
-        """Record the call and return one synthetic group.
-
-        Args:
-            query (str): Raw keywords, possibly blank.
-            **kwargs (Any): ``group_by``, filter and sizing arguments.
-
-        Returns:
-            dict[str, Any]: A well-formed grouped result.
-        """
-        self.last_aggregate = {"query": query, **kwargs}
-        return {
-            "status": "ok",
-            "group_by": kwargs["group_by"],
-            "total": 2,
-            "unassigned": 0,
-            "groups": [{"value": "acme_news", "count": 2, "samples": []}],
-            "limit": kwargs.get("limit_groups", 100),
-            "index_status": {"indexed": True, "total": 2, "with_search_text": 2, "missing": 0, "complete": True},
-        }
-
     def iter_search_matches(
-        self, query: str, *, group_by: str | None = None, base_filter: Any = None
+        self, query: str, *, field: str = "text", base_filter: Any = None
     ) -> Iterator[dict[str, Any]]:
         """Record the call and yield the test-configured matches.
 
         Args:
             query (str): Raw keywords, possibly blank.
-            group_by (str | None): Grouped-lane field, or ``None`` for the hits lane.
+            field (str): The search field name.
             base_filter (Any): Compiled metadata filter, if any.
 
         Yields:
             dict[str, Any]: Whatever a test pre-loaded onto ``search_export_matches``.
         """
-        self.search_export_calls.append({"query": query, "group_by": group_by, "base_filter": base_filter})
+        self.search_export_calls.append({"query": query, "field": field, "base_filter": base_filter})
         yield from self.search_export_matches
 
     def probe_rerank_endpoint(self) -> None:
@@ -4814,76 +4793,30 @@ def test_search_requires_a_query(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-def test_search_aggregate_returns_groups_for_the_scoped_collection(client: TestClient) -> None:
-    """The endpoint returns the RAG layer's groups under the owner's collection."""
+def test_search_defaults_to_the_text_field(client: TestClient) -> None:
+    """An unchanged client keeps searching the chunk text."""
+    response = client.post("/search", json={"question": "election"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_calls[-1]["field"] == "text"
+
+
+def test_search_forwards_the_field(client: TestClient) -> None:
+    """The picker's field reaches the RAG layer unchanged."""
+    response = client.post("/search", json={"question": "mar", "field": "author"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).search_calls[-1]["field"] == "author"
+
+
+def test_search_rejects_an_unknown_field(client: TestClient) -> None:
+    """The whitelist is closed — a raw payload path is refused, not passed through."""
+    response = client.post("/search", json={"question": "mar", "field": "reference_metadata.author"})
+    assert response.status_code == 422
+
+
+def test_search_aggregate_endpoint_is_gone(client: TestClient) -> None:
+    """The facet lane was replaced by the field selector; its route no longer exists."""
     response = client.post("/search/aggregate", json={"question": "election", "group_by": "author"})
-    assert response.status_code == 200
-    body = response.json()
-    assert body["group_by"] == "author"
-    assert body["groups"][0] == {"value": "acme_news", "count": 2, "samples": []}
-    assert body["unassigned"] == 0
-    assert body["limit"] == 100
-
-
-def test_search_aggregate_accepts_a_blank_query(client: TestClient) -> None:
-    """Grouping the whole collection is a legitimate ask (a facet, not a scan)."""
-    response = client.post("/search/aggregate", json={"question": "  ", "group_by": "network"})
-    assert response.status_code == 200
-
-
-def test_search_aggregate_drops_a_keyword_below_the_index_minimum(client: TestClient) -> None:
-    """A short word like 'a' is dropped from the Qdrant prefilter, not rejected.
-
-    ``RAG.search_aggregate`` silently drops keywords shorter than the index
-    can tokenize (mirroring ``search_fulltext``) rather than refusing the
-    whole query — the request must not 422 just because one word among
-    several is too short. Unlike the keyword hits lane (``POST /search``),
-    the grouped/social lane never phrase-checks the full query text — a
-    facet counts a keyword match, not a contiguous phrase — so the raw
-    question, "a" included, is exactly what reaches ``RAG.search_aggregate``;
-    the endpoint only checks that *something* usable is left, and it is
-    ``search_aggregate``'s own ``parse_keywords`` call that drops "a" and
-    searches only for "election".
-    """
-    response = client.post("/search/aggregate", json={"question": "election a", "group_by": "author"})
-
-    assert response.status_code == 200
-    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
-    assert last_aggregate["query"] == "election a"
-    assert last_aggregate["group_by"] == "author"
-
-
-def test_search_aggregate_rejects_a_query_of_only_short_keywords(client: TestClient) -> None:
-    """A non-blank query left with no usable keyword must not group everything.
-
-    Blank is a legitimate ask here — it groups the whole filtered collection.
-    Falling through to the same answer for a query that was merely unindexable
-    would silently widen a narrow question.
-    """
-    response = client.post("/search/aggregate", json={"question": "a b", "group_by": "author"})
-    assert response.status_code == 422
-
-
-def test_search_aggregate_rejects_an_unknown_group_field(client: TestClient) -> None:
-    """Faceting is a closed whitelist — an unlisted field is refused, not passed through."""
-    response = client.post("/search/aggregate", json={"question": "election", "group_by": "reference_metadata.author"})
-    assert response.status_code == 422
-
-
-def test_search_aggregate_forwards_sizing(client: TestClient) -> None:
-    """The group and sample limits reach the RAG layer unchanged.
-
-    The effective ``limit`` also comes back in the response, so the frontend
-    can compare it against ``groups.length`` instead of assuming the default.
-    """
-    response = client.post(
-        "/search/aggregate",
-        json={"question": "election", "group_by": "author", "limit_groups": 7, "samples_per_group": 3},
-    )
-    last_aggregate = cast(DummyRAG, api_module.rag).last_aggregate
-    assert last_aggregate["limit_groups"] == 7
-    assert last_aggregate["samples_per_group"] == 3
-    assert response.json()["limit"] == 7
+    assert response.status_code in (404, 405)
 
 
 def _indexed_status(client: Any, collection: str) -> dict[str, Any]:
@@ -4905,7 +4838,6 @@ def test_export_search_csv_streams_full_columns_for_the_hits_lane(
             "filename": "posts.csv",
             "page": 1,
             "row": 2,
-            "group": "",
             "reference_metadata": {
                 "network": "instant_messenger",
                 "author": "acme_news",
@@ -4942,7 +4874,6 @@ def test_export_search_csv_streams_full_columns_for_the_hits_lane(
     rows = _parse_csv_body(response.content)
     assert rows[0] == list(SEARCH_EXPORT_COLUMNS)
     row = dict(zip(rows[0], rows[1], strict=True))
-    assert row["group"] == ""
     assert row["marked"] == "false"
     assert row["source"] == "posts.csv"
     assert row["page"] == "1"
@@ -4965,8 +4896,8 @@ def test_export_search_csv_marks_rows_from_marked_ids_param(
     monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
     rag = cast(DummyRAG, api_module.rag)
     rag.search_export_matches = [
-        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
-        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
     ]
 
     response = client.get("/search/export.csv", params={"question": "election", "marked_ids": "c2"})
@@ -4984,8 +4915,8 @@ def test_export_search_csv_marks_rows_from_session_scope(client: TestClient, mon
     client.put("/sessions/s1/scope", json={"chunk_ids": ["c1"]})
     rag = cast(DummyRAG, api_module.rag)
     rag.search_export_matches = [
-        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
-        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
     ]
 
     response = client.get("/search/export.csv", params={"question": "election", "session_id": "s1"})
@@ -4997,37 +4928,61 @@ def test_export_search_csv_marks_rows_from_session_scope(client: TestClient, mon
     assert by_chunk_id == {"chunk-1": "true", "chunk-2": "false"}
 
 
-def test_export_search_csv_rejects_keyword_less_hits_lane(client: TestClient) -> None:
-    """A keyword-less hits-lane export would be an unfiltered dump, so it is refused."""
+def test_export_search_csv_accepts_a_blank_question(client: TestClient) -> None:
+    """A blank question exports the whole filtered collection."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
+    ]
+
     response = client.get("/search/export.csv")
+
+    assert response.status_code == 200
+    assert "alpha-search.csv" in response.headers["content-disposition"]
+    assert rag.search_export_calls[-1]["query"] == ""
+    assert rag.search_export_calls[-1]["field"] == "text"
+    assert len(_parse_csv_body(response.content)) == 3
+
+
+def test_export_search_csv_rejects_a_query_of_only_short_keywords(client: TestClient) -> None:
+    """A query that lost every word to the index minimum must not widen into a full dump."""
+    response = client.get("/search/export.csv", params={"question": "a b"})
     assert response.status_code == 422
 
 
-def test_export_search_csv_rejects_a_grouped_query_of_only_short_keywords(client: TestClient) -> None:
-    """The export refuses exactly what the panel refuses.
-
-    A blank question is a legitimate grouped export (the whole filtered
-    collection). One that merely lost every word to the index minimum is not:
-    it would quietly widen a narrow question into that same full dump, and
-    ``POST /search/aggregate`` already refuses it.
-    """
-    response = client.get("/search/export.csv", params={"question": "a b", "group_by": "author"})
-    assert response.status_code == 422
-
-
-def test_export_search_csv_keeps_a_grouped_query_with_one_usable_keyword(client: TestClient) -> None:
-    """A short word alongside a usable one is dropped, not fatal — as in both lanes."""
-    response = client.get("/search/export.csv", params={"question": "election a", "group_by": "author"})
+def test_export_search_csv_keeps_a_query_with_one_usable_keyword(client: TestClient) -> None:
+    """A short word alongside a usable one is dropped, not fatal."""
+    response = client.get("/search/export.csv", params={"question": "election a"})
     assert response.status_code == 200
 
 
-def test_export_search_csv_rejects_an_unknown_group_by(client: TestClient) -> None:
-    """Grouping is a closed whitelist — an unlisted field is refused, not passed through."""
-    response = client.get(
-        "/search/export.csv",
-        params={"question": "election", "group_by": "reference_metadata.author"},
-    )
+def test_export_search_csv_forwards_the_field_and_names_the_file_by_it(client: TestClient) -> None:
+    """An author export reaches the RAG layer as such and is named after the field."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
+
+    assert response.status_code == 200
+    assert "alpha-author.csv" in response.headers["content-disposition"]
+    assert rag.search_export_calls[-1]["field"] == "author"
+
+
+def test_export_search_csv_rejects_an_unknown_field(client: TestClient) -> None:
+    """The whitelist is closed — a raw payload path is refused, not passed through."""
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "reference_metadata.author"})
     assert response.status_code == 422
+
+
+def test_export_search_csv_has_no_group_column(client: TestClient) -> None:
+    """One lane, so no grouping value rides on the rows."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"question": "first"})
+
+    assert "group" not in _parse_csv_body(response.content)[0]
 
 
 def test_export_search_csv_rejects_malformed_metadata_filters(client: TestClient) -> None:
@@ -5115,25 +5070,6 @@ def test_export_search_csv_allows_an_empty_collection(client: TestClient, monkey
     assert rows == [list(SEARCH_EXPORT_COLUMNS)]
 
 
-def test_export_search_csv_social_lane_fills_group_column(client: TestClient) -> None:
-    """The grouped lane accepts a blank question and each row carries its own group."""
-    rag = cast(DummyRAG, api_module.rag)
-    rag.search_export_matches = [
-        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": "acme_news"},
-        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": "beta_daily"},
-    ]
-
-    response = client.get("/search/export.csv", params={"group_by": "author"})
-
-    assert response.status_code == 200
-    assert "alpha-author.csv" in response.headers["content-disposition"]
-    rows = _parse_csv_body(response.content)
-    header = rows[0]
-    group_col = header.index("group")
-    assert [row[group_col] for row in rows[1:]] == ["acme_news", "beta_daily"]
-    assert rag.search_export_calls[-1]["group_by"] == "author"
-
-
 def test_export_search_csv_forwards_metadata_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """A well-formed metadata_filters JSON array reaches iter_search_matches as a compiled filter."""
     monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
@@ -5161,13 +5097,12 @@ def test_export_search_csv_labels_and_marks_an_image_companion_hit(
     monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
     rag = cast(DummyRAG, api_module.rag)
     rag.search_export_matches = [
-        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": "", "kind": "text"},
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "kind": "text"},
         {
             "id": "img-p1",
             "chunk_id": "img-1",
             "filename": "rally.jpg",
             "text": "a photo of an election night rally",
-            "group": "",
             "kind": "image",
         },
     ]
@@ -5197,9 +5132,9 @@ def test_export_search_csv_refuses_a_result_set_over_the_row_cap(
     monkeypatch.setattr(api_module, "MAX_EXPORT_ROWS", 2)
     rag = cast(DummyRAG, api_module.rag)
     rag.search_export_matches = [
-        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
-        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
-        {"id": "c3", "chunk_id": "chunk-3", "filename": "posts.csv", "text": "third", "group": ""},
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
+        {"id": "c3", "chunk_id": "chunk-3", "filename": "posts.csv", "text": "third"},
     ]
 
     response = client.get("/search/export.csv", params={"question": "election"})
@@ -5215,8 +5150,8 @@ def test_export_search_csv_allows_a_result_set_exactly_at_the_row_cap(
     monkeypatch.setattr(api_module, "MAX_EXPORT_ROWS", 2)
     rag = cast(DummyRAG, api_module.rag)
     rag.search_export_matches = [
-        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first", "group": ""},
-        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second", "group": ""},
+        {"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"},
+        {"id": "c2", "chunk_id": "chunk-2", "filename": "posts.csv", "text": "second"},
     ]
 
     response = client.get("/search/export.csv", params={"question": "election"})
