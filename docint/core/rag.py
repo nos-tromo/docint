@@ -113,14 +113,12 @@ from qdrant_client import models as qdrant_models
 # private re-exports without an explicit ``__all__``,
 # so list every test-reachable third-party symbol here.
 __all__ = [
-    "GROUP_BY_FIELDS",
     "RAG",
     "SEARCH_FIELDS",
     "EmptyIngestionError",
     "QueryBundle",
     "ResponseMode",
     "RetrieverQueryEngine",
-    "UnknownGroupFieldError",
     "UnknownSearchFieldError",
     "VectorStoreQueryMode",
     "logger",
@@ -154,18 +152,6 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
-from docint.core.search.aggregate import (
-    DEFAULT_GROUP_LIMIT,
-    GROUP_BY_FIELDS,
-    MAX_GROUP_LIMIT,
-    MAX_SAMPLES_PER_GROUP,
-    UnknownGroupFieldError,
-    build_group_filter,
-    ensure_group_indexes,
-    facet_groups,
-    group_payload_key,
-    member_filter,
-)
 from docint.core.search.fields import (
     IMAGE_LANE_FIELDS,
     SEARCH_FIELDS,
@@ -174,7 +160,7 @@ from docint.core.search.fields import (
     field_index_kind,
     search_payload_key,
 )
-from docint.core.search.fulltext import build_search_filter, matches_phrase, parse_keywords
+from docint.core.search.fulltext import build_scan_filter, build_search_filter, matches_phrase, parse_keywords
 from docint.core.search.index import (
     SEARCH_TEXT_FIELD,
     ensure_search_index,
@@ -2724,7 +2710,6 @@ class RAG:
     _query_engine_cache: OrderedDict[str, RetrieverQueryEngine] = field(
         default_factory=OrderedDict, init=False, repr=False
     )
-    _group_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _field_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
@@ -4749,7 +4734,7 @@ class RAG:
         Args:
             payload (dict[str, Any]): A Qdrant point payload.
             key (str): A dotted Qdrant JSON-path key, e.g. one produced by
-                :func:`search_payload_key` or :func:`group_payload_key`.
+                :func:`search_payload_key`.
 
         Returns:
             str: The stringified value, or ``""`` when any path segment is
@@ -4977,13 +4962,7 @@ class RAG:
 
         # Field search matches metadata keys the way it matches the text, so
         # each needs the same prefix/lowercase index. Same idempotent,
-        # fail-soft posture as the two indexes above. NOT paired with an
-        # `ensure_group_indexes` call here: the grouped/facet lane's KEYWORD
-        # indexes on these same keys would immediately be replaced by the
-        # TEXT indexes below (Qdrant holds one index per field), so building
-        # them here would be dead work undone by the next statement. The
-        # grouped lane still ensures its own indexes lazily on first use —
-        # see `_ensure_group_indexes_once` — and is removed in a later task.
+        # fail-soft posture as the two indexes above.
         if ensure_field_indexes(self.qdrant_client, self.qdrant_collection):
             self._field_indexes_ensured.add(self.qdrant_collection)
 
@@ -8686,22 +8665,6 @@ class RAG:
             "index_status": status,
         }
 
-    def _ensure_group_indexes_once(self, collection: str) -> None:
-        """Ensure the grouped lane's payload indexes once per process per collection.
-
-        Collections ingested before the grouped lane shipped have no such
-        indexes; ``make search-index`` backports them, but a first grouped
-        call must not fail in the meantime. ``create_payload_index`` is
-        idempotent, so this only saves round-trips.
-
-        Args:
-            collection (str): Physical collection name.
-        """
-        if collection in self._group_indexes_ensured:
-            return
-        if ensure_group_indexes(self.qdrant_client, collection):
-            self._group_indexes_ensured.add(collection)
-
     def _ensure_field_indexes_once(self, collection: str) -> None:
         """Ensure the field-search payload indexes once per process per collection.
 
@@ -8718,186 +8681,57 @@ class RAG:
         if ensure_field_indexes(self.qdrant_client, collection):
             self._field_indexes_ensured.add(collection)
 
-    def search_aggregate(
-        self,
-        query: str,
-        *,
-        group_by: str,
-        base_filter: qdrant_models.Filter | None = None,
-        limit_groups: int = DEFAULT_GROUP_LIMIT,
-        samples_per_group: int = 2,
-    ) -> dict[str, Any]:
-        """Count every matching chunk per value of a payload field.
-
-        The exhaustive counterpart to :meth:`search_fulltext`: no top-k, no
-        ranking, no inference — one native facet for the counts, one filtered
-        scroll per group for its sample hits. Keywords are optional; without
-        them the (filtered) whole collection is grouped.
-
-        Args:
-            query (str): Whitespace-separated keywords; may be blank.
-            group_by (str): A short name from ``GROUP_BY_FIELDS``.
-            base_filter (qdrant_models.Filter | None): Caller's metadata filter.
-            limit_groups (int): Maximum groups, clamped to ``[1, MAX_GROUP_LIMIT]``.
-            samples_per_group (int): Sample hits per group, clamped to
-                ``[0, MAX_SAMPLES_PER_GROUP]``.
-
-        Returns:
-            dict[str, Any]: ``status`` (as for keyword search; always ``"ok"``
-                for a keyword-less call), ``group_by``, ``total`` matching
-                chunks, ``unassigned`` (matches carrying no value for the
-                key — reported as ``0`` rather than a misleading number when
-                the group list was truncated at ``limit_groups``, since the
-                truncated groups' own matches would otherwise be counted as
-                unassigned), ``groups`` (``value``/``count``/``samples``),
-                ``limit`` (the clamped ``limit_groups`` actually applied, so a
-                caller can tell a full group list from a truncated one without
-                assuming the default) and ``index_status``.
-
-        Raises:
-            UnknownGroupFieldError: When ``group_by`` is not whitelisted.
-        """
-        key = group_payload_key(group_by)
-        collection = self.qdrant_collection
-        keywords: list[str] = parse_keywords(query) if query.strip() else []
-        status = search_index_status(self.qdrant_client, collection)
-        limit = max(1, min(int(limit_groups), MAX_GROUP_LIMIT))
-        result: dict[str, Any] = {
-            "status": "ok",
-            "group_by": group_by,
-            "total": 0,
-            "unassigned": 0,
-            "groups": [],
-            "index_status": status,
-            "limit": limit,
-        }
-        if keywords:
-            if not status.get("with_search_text") or not status.get("indexed"):
-                logger.warning(
-                    "Search index missing | collection={!r} — grouped search over keywords needs `make search-index`",
-                    collection,
-                )
-                return {**result, "status": "not_indexed"}
-            if not status.get("complete"):
-                result["status"] = "partial"
-
-        self._ensure_group_indexes_once(collection)
-        group_filter = build_group_filter(keywords, base_filter=base_filter)
-        samples = max(0, min(int(samples_per_group), MAX_SAMPLES_PER_GROUP))
-
-        groups = facet_groups(self.qdrant_client, collection, key, group_filter=group_filter, limit=limit)
-        total = self._search_total(collection, group_filter)
-        assigned = sum(g.count for g in groups)
-
-        out_groups: list[dict[str, Any]] = []
-        for group in groups:
-            sample_hits: list[dict[str, Any]] = []
-            if samples > 0:
-                points, _ = self.qdrant_client.scroll(
-                    collection_name=collection,
-                    scroll_filter=member_filter(key, group.value, group_filter),
-                    limit=samples,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-                sample_hits = self._search_hits(collection, list(points), kind="text")
-            out_groups.append({"value": group.value, "count": group.count, "samples": sample_hits})
-
-        result.update(
-            total=total,
-            unassigned=max(0, total - assigned) if len(groups) < limit else 0,
-            groups=out_groups,
-        )
-        logger.info(
-            "Grouped search | collection={!r} group_by={} groups={} total={} status={}",
-            collection,
-            group_by,
-            len(out_groups),
-            total,
-            result["status"],
-        )
-        return result
-
     def iter_search_matches(
         self,
         query: str,
         *,
-        group_by: str | None = None,
+        field: str = "text",
         base_filter: qdrant_models.Filter | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield every chunk matching a search, exhaustively, for CSV export.
 
-        The chunk-level counterpart to :meth:`search_aggregate` *and*
-        :meth:`search_fulltext`: the same lane selection and filter
-        compilation as whichever JSON endpoint ``group_by`` selects, but no
-        facet call and no per-group sampling — every matching point is
-        yielded once, in scroll order, which is what makes this the
-        exhaustive set an export needs rather than the "best few" a chat
-        retrieval or a grouped sample returns. Follows the same shape as
-        :meth:`get_collection_hate_speech`'s scan: one ``iter_scroll`` loop,
-        one :meth:`_source_from_payload` call per point.
-
-        Faithfulness to the JSON endpoint each lane mirrors is load-bearing,
-        not cosmetic — this export must never show more, or fewer, rows than
-        a caller who ran the same query through the panel would see. The
-        hits lane (``group_by is None``) therefore mirrors
-        :meth:`search_fulltext` exactly: the same client-side phrase
-        post-filter on a multi-word query (``matches_phrase`` against the raw
-        query words, not just the AND-of-keywords Qdrant prefilter), and the
-        same second scroll over the ``{collection}_images`` companion when it
-        exists, so an image hit the panel shows is a row here too. The
-        grouped/social lane (``group_by`` set) mirrors :meth:`search_aggregate`
-        exactly, which does *neither* of those: no phrase filter (a facet
-        counts a keyword match, not a contiguous phrase) and no image
-        companion (the grouped lane never queries it). Do not "fix" that
-        asymmetry — it is this export staying honest about what each lane's
-        own JSON endpoint actually returns.
+        The chunk-level counterpart to :meth:`search_fulltext`: the same
+        field, filter compilation, phrase post-filter and image-lane rule,
+        but no paging — every matching point is yielded once, in scroll
+        order, which is what makes this the exhaustive set an export needs.
+        Faithfulness to the JSON endpoint is load-bearing: this export must
+        never show more, or fewer, rows than a caller who ran the same query
+        through the panel would see. The one addition is a blank query,
+        which scans the whole (filtered) collection — the panel refuses
+        that, but a full dump is a legitimate export.
 
         Args:
-            query (str): Whitespace-separated keywords; may be blank only
-                when ``group_by`` is set (mirroring :meth:`search_aggregate`'s
-                keyword-less grouping).
-            group_by (str | None): A short name from ``GROUP_BY_FIELDS`` for
-                the grouped/social lane, or ``None`` for the keyword hits lane.
+            query (str): Whitespace-separated keywords; may be blank.
+            field (str): A key of :data:`SEARCH_FIELDS`; ``"text"`` by default.
             base_filter (qdrant_models.Filter | None): Caller's metadata filter.
 
         Yields:
             dict[str, Any]: :meth:`_source_from_payload` dicts, each with an
-                added ``"group"`` key (the stringified payload value at
-                :func:`group_payload_key`; ``""`` when ``group_by`` is
-                ``None`` or the point carries no value for the key) and an
                 added ``"kind"`` key (``"text"`` or ``"image"``, mirroring
-                :meth:`_search_hits`; always ``"text"`` on the grouped lane,
-                which never touches the image companion).
+                :meth:`_search_hits`).
 
         Raises:
-            KeywordTooShortError: When a keyword cannot be indexed.
-            UnknownGroupFieldError: When ``group_by`` is not whitelisted.
-            ValueError: When ``group_by`` is ``None`` and ``query`` carries
-                no keywords — a keyword-less hits export would be an
-                unfiltered dump of the whole collection, not a search result.
+            UnknownSearchFieldError: When ``field`` is not whitelisted.
         """
+        field_key = search_payload_key(field)
         collection = self.qdrant_collection
         keywords: list[str] = parse_keywords(query) if query.strip() else []
-        key = group_payload_key(group_by) if group_by is not None else None
 
         lanes = [collection]
         query_words: list[str] = []
-        if group_by is None:
-            if not keywords:
-                raise ValueError("A hits-lane export requires at least one keyword.")
-            search_filter = build_search_filter(keywords, base_filter=base_filter)
+        if keywords:
+            compiled = build_search_filter(keywords, field_key=field_key, base_filter=base_filter)
+            assert compiled is not None  # keywords is non-empty
+            search_filter: qdrant_models.Filter = compiled
             # Raw whitespace-split words, not `parse_keywords`'s output — a
             # short word like "a" is unindexable but still valid inside a
-            # phrase, exactly as `search_fulltext` computes it. Only the hits
-            # lane phrase-checks; see the docstring for why the grouped lane
-            # deliberately does not.
+            # phrase, exactly as `search_fulltext` computes it.
             query_words = [w for w in str(query or "").split() if w]
             companion = image_companion_name(collection)
-            if self._collection_exists(companion):
+            if field in IMAGE_LANE_FIELDS and self._collection_exists(companion):
                 lanes.append(companion)
         else:
-            search_filter = build_group_filter(keywords, base_filter=base_filter)
+            search_filter = build_scan_filter(base_filter)
 
         phrase_active = len(query_words) > 1
 
@@ -8923,22 +8757,17 @@ class RAG:
                     payload = getattr(point, "payload", None)
                     if not isinstance(payload, dict):
                         continue
-                    if phrase_active and not matches_phrase(str(payload.get(SEARCH_TEXT_FIELD) or ""), query_words):
+                    if phrase_active and not matches_phrase(self._payload_path_value(payload, field_key), query_words):
                         continue
-                    src = self._source_from_payload(
-                        collection=lane,
-                        payload=payload,
-                        node_id=str(point.id),
-                    )
-                    src["group"] = self._payload_path_value(payload, key) if key is not None else ""
+                    src = self._source_from_payload(collection=lane, payload=payload, node_id=str(point.id))
                     src["kind"] = kind
                     matched += 1
                     yield src
 
         logger.info(
-            "Search export scan | collection={!r} group_by={} keywords={} matched={}",
+            "Search export scan | collection={!r} field={} keywords={} matched={}",
             collection,
-            group_by,
+            field,
             len(keywords),
             matched,
         )

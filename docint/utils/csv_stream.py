@@ -87,7 +87,6 @@ HATE_SPEECH_COLUMNS: tuple[str, ...] = (
 )
 
 SEARCH_EXPORT_COLUMNS: tuple[str, ...] = (
-    "group",
     "marked",
     "kind",
     "source",
@@ -284,14 +283,12 @@ def search_export_row(chunk: dict[str, Any], *, marked: bool) -> dict[str, str]:
     in lockstep. Unlike a citation card's truncated preview, ``chunk_text``
     here is always the chunk's full text — the point of this export is
     finding the original post again, and a preview is not enough for that.
-    ``group`` is the caller's grouping value (blank on the hits lane, where
-    there is no group); ``marked`` records whether the caller had this chunk
-    selected, so a re-export can recover a prior hand-picked set.
+    ``marked`` records whether the caller had this chunk selected, so a
+    re-export can recover a prior hand-picked set.
 
     Args:
-        chunk (dict[str, Any]): A ``_source_from_payload``-shaped dict with added
-            ``group`` and ``kind`` keys, as yielded by
-            ``RAG.iter_search_matches``.
+        chunk (dict[str, Any]): A ``_source_from_payload``-shaped dict with an
+            added ``kind`` key, as yielded by ``RAG.iter_search_matches``.
         marked (bool): Whether this chunk's id is in the caller's marked set.
 
     Returns:
@@ -299,7 +296,6 @@ def search_export_row(chunk: dict[str, Any], *, marked: bool) -> dict[str, str]:
     """
     ref = chunk.get("reference_metadata") or {}
     return {
-        "group": chunk.get("group") or "",
         "marked": "true" if marked else "false",
         # Defaults to "text" for a caller that predates this column (or a
         # test fixture that omits it) — every point yielded before the image

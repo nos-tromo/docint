@@ -39,6 +39,7 @@ from docint.core.retrieval_filters import (
     matches_metadata_filters,
 )
 from docint.core.search.fields import UnknownSearchFieldError
+from docint.core.search.fulltext import build_scan_filter
 from docint.utils.embed_chunking import effective_budget, estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
@@ -6459,147 +6460,8 @@ def _index_ok() -> dict[str, Any]:
     return {"indexed": True, "total": 3, "with_search_text": 3, "missing": 0, "complete": True}
 
 
-def test_search_aggregate_groups_matching_chunks_with_samples(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every author with a match is returned, with counts and sample hits."""
-    rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
-    payload_a = {
-        "text": "election night",
-        "file_name": "posts.csv",
-        "row": 1,
-        "reference_metadata": {"author": "acme_news", "network": "Instagram"},
-    }
-    payload_b = {
-        "text": "election day",
-        "file_name": "posts.csv",
-        "row": 2,
-        "reference_metadata": {"author": "beta_daily", "network": "Instagram"},
-    }
-    scroll_calls: list[dict[str, Any]] = []
-
-    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
-        scroll_calls.append(kwargs)
-        value = kwargs["scroll_filter"].must[-1].match.value
-        payload = payload_a if value == "acme_news" else payload_b
-        return [types.SimpleNamespace(id=f"p-{value}", payload=payload)], None
-
-    facet_calls: list[dict[str, Any]] = []
-
-    def facet(**kwargs: Any) -> Any:
-        facet_calls.append(kwargs)
-        return types.SimpleNamespace(
-            hits=[types.SimpleNamespace(value="acme_news", count=2), types.SimpleNamespace(value="beta_daily", count=1)]
-        )
-
-    rag._qdrant_client = cast(
-        Any,
-        types.SimpleNamespace(
-            scroll=scroll,
-            facet=facet,
-            count=lambda **kwargs: types.SimpleNamespace(count=4),
-            create_payload_index=lambda **kwargs: None,
-        ),
-    )
-
-    result = rag.search_aggregate("election", group_by="author", samples_per_group=1)
-
-    assert result["status"] == "ok"
-    assert result["group_by"] == "author"
-    assert result["total"] == 4
-    assert result["unassigned"] == 1  # 4 matches, 3 carry an author
-    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
-    assert [g["value"] for g in result["groups"]] == ["acme_news", "beta_daily"]
-    assert result["groups"][0]["count"] == 2
-    assert result["groups"][0]["samples"][0]["id"] == "p-acme_news"
-    assert result["groups"][0]["samples"][0]["filename"] == "posts.csv"
-    assert facet_calls[0]["key"] == "reference_metadata.author"
-    assert all(c["limit"] == 1 for c in scroll_calls)
-
-
-def test_search_aggregate_with_no_keywords_facets_the_whole_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """'List every author' needs no keyword and no search index."""
-    rag = RAG(qdrant_collection="test")
-    status_calls: list[str] = []
-    monkeypatch.setattr(
-        rag_module,
-        "search_index_status",
-        lambda client, collection, **kw: (
-            status_calls.append(collection)
-            or {"indexed": False, "total": 3, "with_search_text": 0, "missing": 3, "complete": False}
-        ),
-    )
-    rag._qdrant_client = cast(
-        Any,
-        types.SimpleNamespace(
-            facet=lambda **kwargs: types.SimpleNamespace(hits=[types.SimpleNamespace(value="Instagram", count=3)]),
-            count=lambda **kwargs: types.SimpleNamespace(count=3),
-            create_payload_index=lambda **kwargs: None,
-        ),
-    )
-
-    result = rag.search_aggregate("", group_by="network", samples_per_group=0)
-
-    assert result["status"] == "ok"
-    assert result["groups"] == [{"value": "Instagram", "count": 3, "samples": []}]
-    assert result["unassigned"] == 0
-    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
-
-
-def test_search_aggregate_with_keywords_reports_not_indexed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A keyword facet over an unindexed collection would silently under-count."""
-    rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        rag_module,
-        "search_index_status",
-        lambda client, collection, **kw: {
-            "indexed": False,
-            "total": 3,
-            "with_search_text": 0,
-            "missing": 3,
-            "complete": False,
-        },
-    )
-    rag._qdrant_client = cast(Any, types.SimpleNamespace(create_payload_index=lambda **kwargs: None))
-
-    result = rag.search_aggregate("election", group_by="author")
-
-    assert result["status"] == "not_indexed"
-    assert result["groups"] == []
-    # The clamped limit must still be the real one here, not a zero-ish
-    # default — otherwise an empty `groups` list on an unindexed collection
-    # would satisfy `len(groups) >= limit` and read as "capped" to a caller.
-    assert result["limit"] == rag_module.DEFAULT_GROUP_LIMIT
-
-
-def test_search_aggregate_rejects_unknown_group_field() -> None:
-    """A payload path outside the whitelist must never reach the facet call."""
-    rag = RAG(qdrant_collection="test")
-    with pytest.raises(rag_module.UnknownGroupFieldError):
-        rag.search_aggregate("election", group_by="reference_metadata.author")
-
-
-def test_search_aggregate_ensures_group_indexes_once_per_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The per-process index-ensure cache saves round-trips on repeat calls."""
-    rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
-    calls: list[str] = []
-    rag._qdrant_client = cast(
-        Any,
-        types.SimpleNamespace(
-            facet=lambda **kwargs: types.SimpleNamespace(hits=[]),
-            count=lambda **kwargs: types.SimpleNamespace(count=0),
-            create_payload_index=lambda **kwargs: calls.append(kwargs["field_name"]),
-        ),
-    )
-    rag.search_aggregate("", group_by="author", samples_per_group=0)
-    first = len(calls)
-    rag.search_aggregate("", group_by="network", samples_per_group=0)
-    assert first == len(rag_module.GROUP_BY_FIELDS)
-    assert len(calls) == first  # second call did not re-create
-
-
-def test_iter_search_matches_hits_lane_yields_every_matching_chunk() -> None:
-    """The hits lane scrolls the keyword filter once and yields every point."""
+def test_iter_search_matches_yields_every_matching_chunk() -> None:
+    """The export scrolls the keyword filter once and yields every point, no group key."""
     rag = RAG(qdrant_collection="test")
     payload_a = {
         "text": "election night coverage",
@@ -6626,63 +6488,16 @@ def test_iter_search_matches_hits_lane_yields_every_matching_chunk() -> None:
         ),
     )
 
-    matches = list(rag.iter_search_matches("election", group_by=None))
+    matches = list(rag.iter_search_matches("election"))
 
     assert [m["id"] for m in matches] == ["p1", "p2"]
-    assert all(m["group"] == "" for m in matches)
-    assert matches[0]["text"] == "election night coverage"
+    assert all("group" not in m for m in matches)
+    assert all(m["kind"] == "text" for m in matches)
     assert matches[0]["reference_metadata"]["author"] == "acme_news"
 
 
-def test_iter_search_matches_hits_lane_requires_keywords() -> None:
-    """A keyword-less hits export would be an unfiltered dump, so it is refused.
-
-    ``iter_search_matches`` is a generator, so the check only runs once the
-    caller starts consuming it.
-    """
-    rag = RAG(qdrant_collection="test")
-
-    with pytest.raises(ValueError):
-        list(rag.iter_search_matches("   ", group_by=None))
-
-
-def test_iter_search_matches_social_lane_fills_group_from_payload() -> None:
-    """The grouped lane stamps each yielded chunk with its own group value.
-
-    A point carrying no value for the group key gets ``""``, not a missing
-    key or a crash.
-    """
-    rag = RAG(qdrant_collection="test")
-    payload_a = {
-        "text": "election night coverage",
-        "file_name": "posts.csv",
-        "reference_metadata": {"author": "acme_news"},
-    }
-    payload_b: dict[str, Any] = {
-        "text": "election day turnout",
-        "file_name": "posts.csv",
-        "reference_metadata": {},
-    }
-    rag._qdrant_client = cast(
-        Any,
-        types.SimpleNamespace(
-            scroll=lambda **kwargs: (
-                [
-                    types.SimpleNamespace(id="p1", payload=payload_a),
-                    types.SimpleNamespace(id="p2", payload=payload_b),
-                ],
-                None,
-            )
-        ),
-    )
-
-    matches = list(rag.iter_search_matches("election", group_by="author"))
-
-    assert [m["group"] for m in matches] == ["acme_news", ""]
-
-
-def test_iter_search_matches_social_lane_accepts_a_blank_query() -> None:
-    """Grouping the whole collection is legitimate, matching search_aggregate."""
+def test_iter_search_matches_blank_query_scans_the_filtered_collection() -> None:
+    """A blank query exports the whole collection — minus coarse parents — in one scroll."""
     rag = RAG(qdrant_collection="test")
     payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"network": "Instagram"}}
     scroll_calls: list[dict[str, Any]] = []
@@ -6691,35 +6506,133 @@ def test_iter_search_matches_social_lane_accepts_a_blank_query() -> None:
         scroll_calls.append(kwargs)
         return [types.SimpleNamespace(id="p1", payload=payload)], None
 
-    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll))
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
 
-    matches = list(rag.iter_search_matches("   ", group_by="network"))
+    matches = list(rag.iter_search_matches("   "))
 
     assert len(matches) == 1
-    assert matches[0]["group"] == "Instagram"
     assert len(scroll_calls) == 1
+    assert scroll_calls[0]["collection_name"] == "test"
+    assert scroll_calls[0]["scroll_filter"] == build_scan_filter(None)
 
 
-def test_iter_search_matches_group_value_for_a_flat_payload_key() -> None:
-    """A non-nested group key (file_name) resolves directly off the payload."""
+def test_iter_search_matches_field_search_targets_the_field_key() -> None:
+    """An author export compiles its filter on the author key."""
     rag = RAG(qdrant_collection="test")
-    payload = {"text": "any text", "file_name": "posts.csv"}
+    scroll_calls: list[dict[str, Any]] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        scroll_calls.append(kwargs)
+        return [], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: False))
+
+    list(rag.iter_search_matches("mar", field="author"))
+
+    conditions = [c for c in scroll_calls[0]["scroll_filter"].must if isinstance(c, qdrant_models.FieldCondition)]
+    assert [c.key for c in conditions] == ["reference_metadata.author"]
+
+
+def test_iter_search_matches_rejects_unknown_field() -> None:
+    """The whitelist is closed here too."""
+    rag = RAG(qdrant_collection="test")
+    with pytest.raises(UnknownSearchFieldError):
+        list(rag.iter_search_matches("x", field="reference_metadata.author"))
+
+
+def test_iter_search_matches_applies_the_phrase_post_filter_to_the_field() -> None:
+    """A two-word author query keeps only points whose author value holds the phrase."""
+    rag = RAG(qdrant_collection="test")
+    hit = {"text": "x", "file_name": "a.csv", "reference_metadata": {"author": "Acme News Desk"}}
+    miss = {"text": "acme news", "file_name": "a.csv", "reference_metadata": {"author": "News by Acme"}}
     rag._qdrant_client = cast(
         Any,
-        types.SimpleNamespace(scroll=lambda **kwargs: ([types.SimpleNamespace(id="p1", payload=payload)], None)),
+        types.SimpleNamespace(
+            scroll=lambda **kwargs: (
+                [types.SimpleNamespace(id="p1", payload=hit), types.SimpleNamespace(id="p2", payload=miss)],
+                None,
+            ),
+            collection_exists=lambda **kwargs: False,
+        ),
     )
 
-    matches = list(rag.iter_search_matches("", group_by="file_name"))
+    matches = list(rag.iter_search_matches("acme news", field="author"))
 
-    assert matches[0]["group"] == "posts.csv"
+    assert [m["id"] for m in matches] == ["p1"]
 
 
-def test_iter_search_matches_rejects_unknown_group_field() -> None:
-    """Grouping is a closed whitelist, like search_aggregate."""
+def test_iter_search_matches_mid_scroll_failure_raises_rather_than_truncating() -> None:
+    """A scroll error surfaces as an exception, not a short-but-complete export.
+
+    `iter_scroll`'s default ``on_error="warn"`` logs and ends the generator
+    cleanly — exactly the behaviour that let a blip mid-export produce a
+    well-formed, silently truncated CSV with no signal it was cut short.
+    """
     rag = RAG(qdrant_collection="test")
+    payload = {"text": "election night coverage", "file_name": "posts.csv"}
+    calls = {"n": 0}
 
-    with pytest.raises(rag_module.UnknownGroupFieldError):
-        list(rag.iter_search_matches("election", group_by="reference_metadata.author"))
+    def scroll(**kwargs: Any) -> tuple[list[Any], Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [types.SimpleNamespace(id="p1", payload=payload)], "cursor-2"
+        raise RuntimeError("qdrant blip")
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: False))
+
+    with pytest.raises(RuntimeError):
+        list(rag.iter_search_matches("election"))
+
+
+def test_iter_search_matches_includes_the_image_companion_for_text() -> None:
+    """A hit in the `_images` companion is exported too, tagged `kind=image`.
+
+    Mirrors `search_fulltext`: the companion carries the image hits the panel
+    shows under `kind: "image"`. Before this fix `iter_search_matches` only
+    ever scrolled the main collection, so a marked image hit silently
+    vanished from the export while the 409 index-completeness gate (which
+    counts the companion) stayed blind to that gap.
+    """
+    rag = RAG(qdrant_collection="test")
+    text_payload = {"text": "election night coverage", "file_name": "posts.csv"}
+    image_payload = {
+        "llm_description": "a photo of an election night rally",
+        "image_id": "img-1",
+        "source_path": "rally.jpg",
+    }
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        name = kwargs["collection_name"]
+        if name == "test":
+            return [types.SimpleNamespace(id="p1", payload=text_payload)], None
+        if name == "test_images":
+            return [types.SimpleNamespace(id="img-p1", payload=image_payload)], None
+        raise AssertionError(f"unexpected collection_name {name!r}")
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
+
+    matches = list(rag.iter_search_matches("election"))
+
+    assert [(m["id"], m["kind"]) for m in matches] == [("p1", "text"), ("img-p1", "image")]
+    assert matches[1]["chunk_id"] == "img-1"
+
+
+def test_iter_search_matches_skips_the_image_companion_for_a_field_images_lack() -> None:
+    """A speaker export never scrolls the companion: an image has no speaker."""
+    rag = RAG(qdrant_collection="test")
+    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"speaker": "Ann"}}
+    calls: list[str] = []
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        calls.append(kwargs["collection_name"])
+        return [types.SimpleNamespace(id="p1", payload=payload)], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
+
+    matches = list(rag.iter_search_matches("ann", field="speaker"))
+
+    assert calls == ["test"]
+    assert matches[0]["kind"] == "text"
 
 
 def test_iter_search_matches_hits_lane_applies_the_phrase_post_filter() -> None:
@@ -6756,119 +6669,9 @@ def test_iter_search_matches_hits_lane_applies_the_phrase_post_filter() -> None:
         ),
     )
 
-    matches = list(rag.iter_search_matches("acme programm", group_by=None))
+    matches = list(rag.iter_search_matches("acme programm"))
 
     assert [m["id"] for m in matches] == ["p1"]
-
-
-def test_iter_search_matches_social_lane_ignores_the_phrase_post_filter() -> None:
-    """The grouped lane counts a scattered keyword match — it never phrase-filters.
-
-    `search_aggregate` never calls `matches_phrase`, so the export's grouped
-    lane must stay faithful to it: the same scattered match the hits-lane
-    phrase filter (above) would reject must still be counted here.
-    """
-    rag = RAG(qdrant_collection="test")
-    payload_scattered = {
-        "text": "acme released a report; the programm starts later",
-        "search_text": "acme released a report; the programm starts later",
-        "file_name": "posts.csv",
-        "reference_metadata": {"author": "acme_news"},
-    }
-    rag._qdrant_client = cast(
-        Any,
-        types.SimpleNamespace(
-            scroll=lambda **kwargs: ([types.SimpleNamespace(id="p1", payload=payload_scattered)], None),
-        ),
-    )
-
-    matches = list(rag.iter_search_matches("acme programm", group_by="author"))
-
-    assert [m["id"] for m in matches] == ["p1"]
-
-
-def test_iter_search_matches_mid_scroll_failure_raises_rather_than_truncating() -> None:
-    """A scroll error surfaces as an exception, not a short-but-complete export.
-
-    `iter_scroll`'s default ``on_error="warn"`` logs and ends the generator
-    cleanly — exactly the behaviour that let a blip mid-export produce a
-    well-formed, silently truncated CSV with no signal it was cut short.
-    """
-    rag = RAG(qdrant_collection="test")
-    payload = {"text": "election night coverage", "file_name": "posts.csv"}
-    calls = {"n": 0}
-
-    def scroll(**kwargs: Any) -> tuple[list[Any], Any]:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return [types.SimpleNamespace(id="p1", payload=payload)], "cursor-2"
-        raise RuntimeError("qdrant blip")
-
-    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: False))
-
-    with pytest.raises(RuntimeError):
-        list(rag.iter_search_matches("election", group_by=None))
-
-
-def test_iter_search_matches_hits_lane_includes_the_image_companion() -> None:
-    """A hit in the `_images` companion is exported too, tagged `kind=image`.
-
-    Mirrors `search_fulltext`: the companion carries the image hits the panel
-    shows under `kind: "image"`. Before this fix `iter_search_matches` only
-    ever scrolled the main collection, so a marked image hit silently
-    vanished from the export while the 409 index-completeness gate (which
-    counts the companion) stayed blind to that gap.
-    """
-    rag = RAG(qdrant_collection="test")
-    text_payload = {"text": "election night coverage", "file_name": "posts.csv"}
-    image_payload = {
-        "llm_description": "a photo of an election night rally",
-        "image_id": "img-1",
-        "source_path": "rally.jpg",
-    }
-
-    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
-        name = kwargs["collection_name"]
-        if name == "test":
-            return [types.SimpleNamespace(id="p1", payload=text_payload)], None
-        if name == "test_images":
-            return [types.SimpleNamespace(id="img-p1", payload=image_payload)], None
-        raise AssertionError(f"unexpected collection_name {name!r}")
-
-    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
-
-    matches = list(rag.iter_search_matches("election", group_by=None))
-
-    assert [(m["id"], m["kind"]) for m in matches] == [("p1", "text"), ("img-p1", "image")]
-    assert matches[1]["chunk_id"] == "img-1"
-
-
-def test_iter_search_matches_social_lane_never_touches_the_image_companion() -> None:
-    """The grouped lane stays text-only, matching `search_aggregate` exactly.
-
-    Unlike the hits lane, the grouped lane must not gain an image scroll —
-    `search_aggregate`'s own facet never queries the `_images` companion, so
-    the export would otherwise show more than its JSON endpoint does.
-    `collection_exists` is stubbed to ``True`` deliberately: if the grouped
-    branch ever started checking for (and scrolling) the companion, this is
-    what would let that regression actually surface as a second `scroll`
-    call instead of being masked by `_collection_exists`'s own fail-soft
-    ``False`` on a stub that lacks the method.
-    """
-    rag = RAG(qdrant_collection="test")
-    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"network": "Instagram"}}
-    calls: list[str] = []
-
-    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
-        calls.append(kwargs["collection_name"])
-        return [types.SimpleNamespace(id="p1", payload=payload)], None
-
-    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
-
-    matches = list(rag.iter_search_matches("", group_by="network"))
-
-    assert calls == ["test"]
-    assert matches[0]["kind"] == "text"
 
 
 def test_scoped_retriever_returns_exactly_the_selected_chunks() -> None:

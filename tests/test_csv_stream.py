@@ -186,7 +186,6 @@ def test_hate_speech_row_full_payload() -> None:
 def test_search_export_row_full_payload() -> None:
     """Search export row full payload."""
     chunk = {
-        "group": "acme_news",
         "kind": "image",
         "filename": "doc.pdf",
         "page": 3,
@@ -201,7 +200,6 @@ def test_search_export_row_full_payload() -> None:
         },
     }
     row = search_export_row(chunk, marked=True)
-    assert row["group"] == "acme_news"
     assert row["marked"] == "true"
     assert row["kind"] == "image"
     assert row["source"] == "doc.pdf"
@@ -231,7 +229,6 @@ def test_search_export_row_marked_renders_as_true_false_strings() -> None:
 def test_search_export_row_defaults_missing_fields_to_blank() -> None:
     """Search export row defaults missing fields to blank."""
     row = search_export_row({}, marked=False)
-    assert row["group"] == ""
     assert row["source"] == ""
     assert row["page"] == ""
     assert row["row"] == ""
@@ -245,6 +242,13 @@ def test_search_export_row_kind_defaults_to_text() -> None:
     """A chunk predating the `kind` column (or a point from the main collection) reads as text."""
     assert search_export_row({}, marked=False)["kind"] == "text"
     assert search_export_row({"kind": "image"}, marked=False)["kind"] == "image"
+
+
+def test_search_export_row_has_no_group_column() -> None:
+    """The export is one lane now; there is no grouping value to carry."""
+    assert "group" not in SEARCH_EXPORT_COLUMNS
+    row = search_export_row({"id": "p1", "text": "t", "kind": "text"}, marked=False)
+    assert set(row) == set(SEARCH_EXPORT_COLUMNS)
 
 
 def test_findings_rows_carry_posting_reference_columns() -> None:
@@ -318,8 +322,7 @@ def test_column_constants_match_documented_schemas() -> None:
     assert NER_SOURCE_COLUMNS[:6] == ("entity", "source", "page", "row", "chunk_id", "chunk_text")
     assert HATE_SPEECH_COLUMNS[:7] == ("source", "page", "row", "chunk_id", "category", "confidence", "reason")
     assert DOCUMENT_COLUMNS[:5] == ("filename", "mimetype", "file_hash", "node_count", "page_count")
-    assert SEARCH_EXPORT_COLUMNS[:8] == (
-        "group",
+    assert SEARCH_EXPORT_COLUMNS[:7] == (
         "marked",
         "kind",
         "source",
