@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { SEARCH_FIELDS } from '@/api/types'
 import type { SearchField } from '@/api/types'
 
 /**
@@ -114,14 +115,17 @@ export const useSearchUiStore = create<SearchUiState>()(
       // the API has no GET for it — so persisting is what lets a reload still
       // report honestly what the chat is scoped to.
       name: 'docint-search-ui',
-      version: 3,
+      version: 4,
       // v1 had neither mode nor field; v2 had `mode`/`groupBy` for the facet
-      // lane, which the field picker replaced. Drop those keys rather than
-      // carry a value nothing reads.
+      // lane, which the field picker replaced; v3 offered nine fields, five of
+      // which were folded into `author` or dropped. A persisted field the
+      // picker no longer offers would leave the trigger blank and every search
+      // 422ing, so it falls back to Text rather than being carried forward.
       migrate: (persisted) => {
         const rest = { ...(persisted as object) } as Record<string, unknown>
         delete rest.mode
         delete rest.groupBy
+        if (!SEARCH_FIELDS.includes(rest.field as SearchField)) delete rest.field
         return { field: 'text', ...rest }
       }
     }

@@ -5070,10 +5070,10 @@ def test_export_search_csv_rejects_a_field_search_missing_its_index(
     """A field search over a collection with no TEXT index for that field is refused outright.
 
     ``search_text`` itself is fine (``_indexed_status`` reports it complete);
-    it is specifically the ``author`` field's own index that is missing.
+    it is specifically the ``author`` field's own indexes that are missing.
     """
     monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
-    monkeypatch.setattr(api_module, "field_index_kind", lambda client, collection, key: None)
+    monkeypatch.setattr(api_module, "field_indexes_ready", lambda client, collection, name: False)
 
     response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
 
@@ -5083,15 +5083,33 @@ def test_export_search_csv_rejects_a_field_search_missing_its_index(
 def test_export_search_csv_allows_a_field_search_with_its_index_present(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A field carrying its own TEXT index passes the gate and streams normally."""
+    """A field whose keys all carry the right index passes the gate and streams."""
     monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
-    monkeypatch.setattr(api_module, "field_index_kind", lambda client, collection, key: "text")
+    monkeypatch.setattr(api_module, "field_indexes_ready", lambda client, collection, name: True)
     rag = cast(DummyRAG, api_module.rag)
     rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
 
     response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
 
     assert response.status_code == 200
+
+
+def test_search_rejects_the_retired_field_names(client: TestClient) -> None:
+    """author_id, posting_author, type, speaker and language are no longer options.
+
+    They folded into ``author`` or were dropped outright; accepting them would
+    search a key the picker can no longer offer.
+    """
+    for retired in ("author_id", "posting_author", "type", "speaker", "language"):
+        response = client.post("/search", json={"question": "mar", "field": retired})
+        assert response.status_code == 422, retired
+
+
+def test_export_rejects_the_retired_field_names(client: TestClient) -> None:
+    """The export's whitelist tracks the panel's, so neither can drift."""
+    for retired in ("author_id", "posting_author", "type", "speaker", "language"):
+        response = client.get("/search/export.csv", params={"question": "mar", "field": retired})
+        assert response.status_code == 422, retired
 
 
 def test_export_search_csv_names_the_file_by_search_when_the_question_is_blank(client: TestClient) -> None:

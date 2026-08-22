@@ -101,11 +101,13 @@ backfill's scroll is fail-soft, so a missing collection would otherwise yield
 
 Source: `docint/cli/search_index.py`. Creates the `search_text` payload index
 on a collection and backfills the field across its existing points, which is
-what makes `POST /search` work there. It also creates (or, where a
-pre-2026-08 KEYWORD index exists, replaces) the prefix/lowercase TEXT
-indexes the **Search in** field picker needs on `reference_metadata.author`,
-`author_id`, `network`, `posting_author`, `type`, `speaker`, `language` and
-`file_name`, on the collection and its `_images` companion. Run it **once
+what makes `POST /search` work there. It also creates, or replaces where one of the
+wrong kind exists, the payload indexes the **Search in** field picker needs
+on the collection and its `_images` companion: prefix/lowercase TEXT on the
+name-ish keys (`reference_metadata.author`, `vanity`, `posting_author`,
+`posting_vanity`, `network` and `file_name`) and KEYWORD on the id keys
+(`author_id`, `posting_author_id`), which are numeric and so can only be
+matched exactly. Run it **once
 per collection ingested before full-text search shipped**. It is purely a backport: ingestion writes
 `search_text` *and* creates the payload index, so collections ingested since need
 no operator step at all.

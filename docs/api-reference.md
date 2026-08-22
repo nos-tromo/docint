@@ -167,13 +167,23 @@ Request:
 - `metadata_filters` — the same `MetadataFilterIn` shape as `/query`, ANDed
   with the keyword conditions so filters constrain the search.
 - `field` — which payload field the keywords match: `text` (default, the
-  chunk body) or one of `author`, `author_id`, `network`, `posting_author`,
-  `type`, `speaker`, `language`, `file_name`. Matching is the same in every
-  field: case-insensitive, prefix-based, all keywords required, a multi-word
-  query as a contiguous phrase. `422` on any other value. A field whose
-  TEXT index is missing answers `status: "not_indexed"` — run
-  `make search-index` once. The `_images` companion is searched only for
-  `text`, `posting_author` and `type`.
+  chunk body), `author`, `network` or `file_name`. `422` on any other value.
+
+  One option can cover several payload keys, and the query must be satisfied
+  by **one** of them: `author` searches `reference_metadata.author`,
+  `vanity`, `posting_author` and `posting_vanity` (the last two are what an
+  image or transcript inherits from its parent posting), plus the numeric
+  `author_id` / `posting_author_id`.
+
+  Names match case-insensitively on word prefixes, with a multi-word query
+  required to occur as a contiguous phrase in a single key. **Ids match
+  exactly**, tried in both numeric and string form, because they are stored
+  as numbers and a full-text matcher cannot touch a number; a query
+  containing whitespace is never treated as an id.
+
+  A field whose keys are not all indexed correctly answers
+  `status: "not_indexed"` — run `make search-index` once. The `_images`
+  companion is searched only for `text` and `author`.
 - `limit` — hits per page, `1..500` (default `50`).
 - `cursor` — opaque page cursor from a previous response.
 

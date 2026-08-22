@@ -73,13 +73,20 @@ rail is a bare toggle that tints while a scope is live. Icon-only controls draw 
 `src/components/common/icons.tsx`; never a text glyph, whose shape is
 whatever font the viewer's browser happens to pick.
 
-A **Search in** picker under the query field chooses which payload field the
-keywords match: Text (the chunk body, the default) or a metadata field —
-Author, Author ID, Network, Posting author, Type, Speaker, Language, File.
-The result is always chunks, so "everything this author wrote" is an
-ordinary search whose tiles scope the chat like any other. The CSV export
-beside the counts honours the field, and stays available with a blank
-query, where it exports the whole filtered collection.
+A **Search in** picker under the query field chooses what the keywords
+match: Text (the chunk body, the default), Author, Network or File. The
+result is always chunks, so "everything this author wrote" is an ordinary
+search whose tiles scope the chat like any other.
+
+**Author** deliberately spans everything that names a person — display name,
+vanity handle, numeric id, and the copies of all three that an image or
+transcript inherits from the posting it came from. An investigator holding
+any one of those identifiers can paste it without first working out which
+kind it is. Names match on prefixes (`krieg` finds `Krieger`); ids match
+exactly, because they are numbers rather than prose.
+
+The CSV export beside the counts honours the field, and stays available with
+a blank query, where it exports the whole filtered collection.
 
 ### Ingest (`src/routes/Ingest.tsx`)
 

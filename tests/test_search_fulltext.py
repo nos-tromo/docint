@@ -10,9 +10,11 @@ from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.fulltext import (
     build_scan_filter,
     build_search_filter,
+    matches_any_phrase,
     matches_phrase,
     not_coarse_condition,
     parse_keywords,
+    value_match_forms,
 )
 from docint.core.search.index import SEARCH_TEXT_FIELD
 
@@ -134,9 +136,9 @@ def test_matches_phrase_requires_keyword_order() -> None:
 # ---------- build_search_filter field_key parameter ----------
 
 
-def test_build_search_filter_targets_the_given_field_key() -> None:
+def test_build_search_filter_targets_the_given_text_keys() -> None:
     """A field search puts the MatchText conditions on that key, not on search_text."""
-    f = build_search_filter(["mar"], field_key="reference_metadata.author")
+    f = build_search_filter(["mar"], text_keys=("reference_metadata.author",))
     assert f is not None
     conditions = [c for c in cast(list[Any], f.must or []) if isinstance(c, models.FieldCondition)]
     assert [c.key for c in conditions] == ["reference_metadata.author"]
@@ -144,11 +146,139 @@ def test_build_search_filter_targets_the_given_field_key() -> None:
 
 
 def test_build_search_filter_defaults_to_search_text() -> None:
-    """Callers that pass no key keep searching the chunk text."""
+    """Callers that pass no keys keep searching the chunk text."""
     f = build_search_filter(["election"])
     assert f is not None
     conditions = [c for c in cast(list[Any], f.must or []) if isinstance(c, models.FieldCondition)]
     assert [c.key for c in conditions] == [SEARCH_TEXT_FIELD]
+
+
+# ---------- several keys behind one picker option ----------
+
+
+def _alternatives(compiled: models.Filter) -> list[Any]:
+    """Return the OR-branches of a multi-key filter."""
+    nested = [c for c in cast(list[Any], compiled.must or []) if isinstance(c, models.Filter) and c.should]
+    assert len(nested) == 1, "expected exactly one should-clause"
+    return cast(list[Any], nested[0].should)
+
+
+def _first_condition(branch: Any) -> Any:
+    """Return a branch's first ``must`` condition, narrowed for the type checker."""
+    return cast(list[Any], branch.must)[0]
+
+
+def test_several_text_keys_become_alternatives_not_requirements() -> None:
+    """A hit needs the query in ONE of the keys, not in all of them."""
+    compiled = build_search_filter(
+        ["krieger"],
+        text_keys=("reference_metadata.author", "reference_metadata.vanity"),
+    )
+    assert compiled is not None
+    branches = _alternatives(compiled)
+    assert [_first_condition(b).key for b in branches] == [
+        "reference_metadata.author",
+        "reference_metadata.vanity",
+    ]
+
+
+def test_every_keyword_stays_bound_to_a_single_key() -> None:
+    """The whole query must land in one key, or a name splits across two fields.
+
+    Otherwise "Wolfgang Krieger" could match a chunk whose author is Wolfgang
+    and whose vanity handle happens to contain Krieger — two different people
+    reported as one hit.
+    """
+    compiled = build_search_filter(
+        ["wolfgang", "krieger"],
+        text_keys=("reference_metadata.author", "reference_metadata.vanity"),
+    )
+    assert compiled is not None
+    for branch in _alternatives(compiled):
+        conditions = cast(list[Any], branch.must)
+        assert len(conditions) == 2
+        assert len({c.key for c in conditions}) == 1
+
+
+def test_value_keys_match_exactly_in_both_number_and_string_form() -> None:
+    """Author ids are ints in Qdrant but strings in other collections; try both."""
+    compiled = build_search_filter(
+        ["100007940942252"],
+        text_keys=("reference_metadata.author",),
+        value_keys=("reference_metadata.author_id",),
+        value_forms=value_match_forms("100007940942252"),
+    )
+    assert compiled is not None
+    matches = [
+        _first_condition(b).match for b in _alternatives(compiled) if _first_condition(b).key.endswith("author_id")
+    ]
+    assert models.MatchValue(value=100007940942252) in matches
+    assert models.MatchValue(value="100007940942252") in matches
+
+
+def test_value_keys_are_skipped_when_the_query_cannot_be_an_id() -> None:
+    """A multi-word query is a name, never an identifier."""
+    compiled = build_search_filter(
+        ["wolfgang", "krieger"],
+        text_keys=("reference_metadata.author",),
+        value_keys=("reference_metadata.author_id",),
+        value_forms=value_match_forms("wolfgang krieger"),
+    )
+    assert compiled is not None
+    # With the id keys gone there is only one alternative left, so the filter
+    # compiles flat — assert on what it targets, not on its shape.
+    assert "author_id" not in repr(compiled)
+
+
+def test_multi_key_filter_still_excludes_coarse_parents_and_keeps_base_filter() -> None:
+    """The OR-clause narrows what matches; it must not drop the other guards."""
+    base = build_qdrant_filter([{"field": "mimetype", "operator": "eq", "value": "text/plain"}])
+    compiled = build_search_filter(
+        ["krieger"],
+        text_keys=("reference_metadata.author", "reference_metadata.vanity"),
+        base_filter=base,
+    )
+    assert compiled is not None
+    must = cast(list[Any], compiled.must)
+    assert any(isinstance(c, models.Filter) and c.must_not for c in must)
+    assert "mimetype" in [c.key for c in must if isinstance(c, models.FieldCondition)]
+
+
+# ---------- value_match_forms ----------
+
+
+def test_value_match_forms_offers_the_numeric_and_string_reading() -> None:
+    """A digit-only query could be stored either way."""
+    assert value_match_forms("100007940942252") == ["100007940942252", 100007940942252]
+
+
+def test_value_match_forms_keeps_a_non_numeric_handle_as_a_string() -> None:
+    """Not every network numbers its accounts."""
+    assert value_match_forms("krieger.advokat") == ["krieger.advokat"]
+
+
+def test_value_match_forms_rejects_anything_with_a_space() -> None:
+    """An identifier is one token; a phrase is a name."""
+    assert value_match_forms("wolfgang krieger") == []
+    assert value_match_forms("   ") == []
+
+
+# ---------- matches_any_phrase ----------
+
+
+def test_matches_any_phrase_passes_when_one_value_holds_the_phrase() -> None:
+    """The phrase has to be contiguous in a single field's value."""
+    assert matches_any_phrase(["Wolfgang Krieger", "krieger.advokat"], ["wolfgang", "krieger"]) is True
+
+
+def test_matches_any_phrase_rejects_a_phrase_split_across_values() -> None:
+    """Half the name in one field and half in another is not a match."""
+    assert matches_any_phrase(["Wolfgang Berger", "krieger.advokat"], ["wolfgang", "krieger"]) is False
+
+
+def test_matches_any_phrase_ignores_missing_values() -> None:
+    """Most points carry only some of a field's keys."""
+    assert matches_any_phrase(["", "Wolfgang Krieger"], ["wolfgang", "krieger"]) is True
 
 
 # ---------- build_scan_filter ----------

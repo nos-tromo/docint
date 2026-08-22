@@ -157,10 +157,16 @@ from docint.core.search.fields import (
     SEARCH_FIELDS,
     UnknownSearchFieldError,
     ensure_field_indexes,
-    field_index_kind,
-    search_payload_key,
+    field_indexes_ready,
+    search_field_spec,
 )
-from docint.core.search.fulltext import build_scan_filter, build_search_filter, matches_phrase, parse_keywords
+from docint.core.search.fulltext import (
+    build_scan_filter,
+    build_search_filter,
+    matches_any_phrase,
+    parse_keywords,
+    value_match_forms,
+)
 from docint.core.search.index import (
     SEARCH_TEXT_FIELD,
     ensure_search_index,
@@ -8555,7 +8561,7 @@ class RAG:
         Raises:
             UnknownSearchFieldError: When ``field`` is not whitelisted.
         """
-        field_key = search_payload_key(field)
+        spec = search_field_spec(field)
         collection = self.qdrant_collection
         status = search_index_status(self.qdrant_client, collection)
         empty: dict[str, Any] = {
@@ -8583,10 +8589,12 @@ class RAG:
             return {**empty, "status": "not_indexed"}
         if field != "text":
             self._ensure_field_indexes_once(collection)
-            if field_index_kind(self.qdrant_client, collection, field_key) != "text":
-                # Without the TEXT index, MatchText on this key would be
-                # case-sensitive on non-ASCII text and would not prefix-match.
-                # Report the remedy rather than pretend to search.
+            if not field_indexes_ready(self.qdrant_client, collection, field):
+                # Each key needs the index its own matcher requires: TEXT for a
+                # name (or MatchText case-folds ASCII only and stops
+                # prefix-matching), KEYWORD for an id (a TEXT index over a
+                # number indexes nothing at all). Report the remedy rather
+                # than pretend to search.
                 logger.warning(
                     "Field index missing | collection={!r} field={} — run `make search-index`",
                     collection,
@@ -8602,7 +8610,13 @@ class RAG:
             )
 
         keywords = parse_keywords(query)
-        search_filter = build_search_filter(keywords, field_key=field_key, base_filter=base_filter)
+        search_filter = build_search_filter(
+            keywords,
+            text_keys=spec.text_keys,
+            value_keys=spec.value_keys,
+            value_forms=value_match_forms(query),
+            base_filter=base_filter,
+        )
         if search_filter is None:
             return empty
 
@@ -8630,7 +8644,9 @@ class RAG:
 
         def _scroll(name: str, n: int, off: Any) -> tuple[list[Any], Any]:
             if phrase_active:
-                return self._scroll_search_lane_filtered(name, search_filter, n, off, query_words, field_key=field_key)
+                return self._scroll_search_lane_filtered(
+                    name, search_filter, n, off, query_words, text_keys=spec.text_keys
+                )
             return self._scroll_search_lane(name, search_filter, n, off)
 
         if lane == "text":
@@ -8735,7 +8751,7 @@ class RAG:
             ValueError: When ``query`` is non-blank but every word is below
                 the index minimum, leaving no usable keyword.
         """
-        field_key = search_payload_key(field)
+        spec = search_field_spec(field)
         collection = self.qdrant_collection
         keywords: list[str] = parse_keywords(query) if query.strip() else []
         if query.strip() and not keywords:
@@ -8744,7 +8760,13 @@ class RAG:
         lanes = [collection]
         query_words: list[str] = []
         if keywords:
-            compiled = build_search_filter(keywords, field_key=field_key, base_filter=base_filter)
+            compiled = build_search_filter(
+                keywords,
+                text_keys=spec.text_keys,
+                value_keys=spec.value_keys,
+                value_forms=value_match_forms(query),
+                base_filter=base_filter,
+            )
             assert compiled is not None  # keywords is non-empty
             search_filter: qdrant_models.Filter = compiled
             # Raw whitespace-split words, not `parse_keywords`'s output — a
@@ -8781,7 +8803,9 @@ class RAG:
                     payload = getattr(point, "payload", None)
                     if not isinstance(payload, dict):
                         continue
-                    if phrase_active and not matches_phrase(self._payload_path_value(payload, field_key), query_words):
+                    if phrase_active and not matches_any_phrase(
+                        (self._payload_path_value(payload, key) for key in spec.text_keys), query_words
+                    ):
                         continue
                     src = self._source_from_payload(collection=lane, payload=payload, node_id=str(point.id))
                     src["kind"] = kind
@@ -8849,7 +8873,7 @@ class RAG:
         offset: Any,
         keywords: list[str],
         *,
-        field_key: str = SEARCH_TEXT_FIELD,
+        text_keys: Sequence[str] = (SEARCH_TEXT_FIELD,),
     ) -> tuple[list[Any], Any]:
         """Scroll one lane with client-side phrase post-filtering.
 
@@ -8862,9 +8886,9 @@ class RAG:
             limit (int): Maximum phrase-matching points to return.
             offset (Any): Scroll offset from the cursor, or ``None``.
             keywords (list[str]): Keywords whose contiguous occurrence is
-                checked via ``matches_phrase``.
-            field_key (str): Payload key whose value the phrase is checked
-                against.
+                checked via ``matches_any_phrase``.
+            text_keys (Sequence[str]): Payload keys whose values the phrase
+                is checked against; one of them holding it is enough.
 
         Returns:
             tuple[list[Any], Any]: Accepted points and the next offset (the
@@ -8881,8 +8905,8 @@ class RAG:
 
             for point in points:
                 payload = getattr(point, "payload", None) or {}
-                text = self._payload_path_value(payload, field_key)
-                if matches_phrase(text, keywords):
+                values = (self._payload_path_value(payload, key) for key in text_keys)
+                if matches_any_phrase(values, keywords):
                     accepted.append(point)
                     if len(accepted) >= limit:
                         return accepted, getattr(point, "id", qdrant_next)

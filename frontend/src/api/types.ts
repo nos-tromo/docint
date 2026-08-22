@@ -146,18 +146,13 @@ export interface SearchResult {
 }
 
 /** Search fields the backend whitelists (mirrors SEARCH_FIELDS in
- *  docint/core/search/fields.py, same order — `text` first is the default). */
-export const SEARCH_FIELDS = [
-  'text',
-  'author',
-  'author_id',
-  'network',
-  'posting_author',
-  'type',
-  'speaker',
-  'language',
-  'file_name'
-] as const
+ *  docint/core/search/fields.py, same order — `text` first is the default).
+ *
+ *  `author` covers a name, a vanity handle and a numeric id, plus the
+ *  `posting_*` copies an image or transcript carries from its parent post —
+ *  one option per question the investigator actually asks, rather than one
+ *  per payload key. */
+export const SEARCH_FIELDS = ['text', 'author', 'network', 'file_name'] as const
 export type SearchField = (typeof SEARCH_FIELDS)[number]
 
 export interface SearchRequest {

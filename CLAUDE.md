@@ -183,24 +183,41 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   than the one asked about.
   **The query matches one chosen field** (`fields.py` → `POST /search`
   `field`, default `text`). The panel's **Search in** picker
-  (`SearchPanel.tsx`, `SelectMenu`) swaps the payload key the keywords are
-  compiled against: the chunk text, or a whitelisted reference-metadata key
-  (`SEARCH_FIELDS`: `author`, `author_id`, `network`, `posting_author`,
-  `type`, `speaker`, `language`, `file_name`) — so "everything this author
-  wrote" is an ordinary search whose hits are chunks, pinnable into scope
-  like any other. Matching is identical in every field (prefix,
-  case-insensitive, phrase for multi-word), which needs the same
-  prefix/lowercase **TEXT index** on each key: `ensure_field_indexes()`
-  creates them at ingest (`RAG.create_index`), `make search-index` backports
-  them, and a lazy per-process `_ensure_field_indexes_once()` covers the
-  gap. Qdrant holds one index per field, so the KEYWORD indexes the former
-  facet lane put on these keys are **replaced** — the chat metadata filters'
-  `MatchValue` conditions on them stay correct but are no longer
-  index-accelerated (decided, not an oversight). A field search on a
-  collection whose field index is missing reports `not_indexed`, never a
-  silently case-sensitive result. The `_images` companion is searched only
-  for fields an image point carries (`IMAGE_LANE_FIELDS`: `text`,
-  `posting_author`, `type`). The CSV export (`GET /search/export.csv`) takes
+  (`SearchPanel.tsx`, `SelectMenu`) swaps the payload keys the keywords are
+  compiled against: the chunk text, `author`, `network` or `file_name`
+  (`SEARCH_FIELDS`) — so "everything this author wrote" is an ordinary
+  search whose hits are chunks, pinnable into scope like any other.
+  **One option covers several keys, because one option is one question.**
+  `author` searches the posting's own `author` and `vanity` *and* the
+  `posting_author`/`posting_vanity` an image or transcript inherits from its
+  parent post, so a picker entry per key is not needed — and was not wanted:
+  making an investigator choose the right synonym before searching is the
+  confusion the picker exists to remove. The query must be satisfied by
+  **one** key (`should` over per-key `must` clauses), never assembled across
+  two — otherwise a first name in `author` and a surname in an unrelated
+  `vanity` would report as one hit.
+  **A field can need two different matchers.** `MatchText` is full-text and
+  works on strings only, but author *ids* are numeric in Qdrant, so a TEXT
+  index over `author_id` indexes zero points and every id search silently
+  returned nothing. Ids therefore match by exact `MatchValue`
+  (`FieldSpec.value_keys`, tried in both numeric and string form via
+  `value_match_forms()` since collections differ), and names by prefix. An
+  id query is a single token by definition, so a multi-word query drops the
+  id keys from the filter entirely.
+  Each key needs the index its own matcher requires — TEXT for a name,
+  KEYWORD for an id: `ensure_field_indexes()` creates them at ingest
+  (`RAG.create_index`), `make search-index` backports them, and a lazy
+  per-process `_ensure_field_indexes_once()` covers the gap. Qdrant holds
+  one index per field, so a wrong-kind index is **replaced** — which covers
+  both the KEYWORD indexes the former facet lane left on name keys and the
+  TEXT indexes an earlier cut of this feature put on the id keys. The chat
+  metadata filters' `MatchValue` conditions on these keys stay correct but
+  are no longer index-accelerated (decided, not an oversight). A field
+  search whose keys are not all indexed correctly reports `not_indexed`
+  (`field_indexes_ready()`), never a silently case-sensitive or silently
+  empty result. The `_images` companion is searched only for fields an image
+  point carries (`IMAGE_LANE_FIELDS`: `text`, `author` — via the parent
+  posting's `posting_*` keys). The CSV export (`GET /search/export.csv`) takes
   the same `field`; a blank `question` there exports the whole filtered
   collection (capped by `MAX_EXPORT_ROWS`), which the panel itself never
   does. This **replaced the faceted "Social" lane** (`POST

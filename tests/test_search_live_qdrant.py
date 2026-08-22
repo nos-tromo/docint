@@ -21,8 +21,8 @@ from collections.abc import Iterator
 import pytest
 from qdrant_client import QdrantClient, models
 
-from docint.core.search.fields import ensure_field_indexes, field_index_kind
-from docint.core.search.fulltext import build_search_filter
+from docint.core.search.fields import ensure_field_indexes, field_index_kind, search_field_spec
+from docint.core.search.fulltext import build_search_filter, value_match_forms
 from docint.core.search.index import SEARCH_TEXT_FIELD, search_index_params, write_search_text
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -198,6 +198,75 @@ def test_field_search_matches_an_author_prefix_case_insensitively(collection: tu
     assert field_index_kind(client, name, "reference_metadata.author") == "text"
     time.sleep(1.0)  # let the rebuilt payload index catch up
 
-    f = build_search_filter(["mar"], field_key="reference_metadata.author")
+    f = build_search_filter(["mar"], text_keys=("reference_metadata.author",))
     points, _ = client.scroll(collection_name=name, scroll_filter=f, limit=10)
     assert sorted(p.id for p in points) == [1, 2]
+
+
+def test_a_numeric_author_id_is_found_by_value_not_by_text(collection: tuple[QdrantClient, str]) -> None:
+    """The bug this lane was built to fix: an id search returned nothing at all.
+
+    Author ids arrive numeric (a real collection stores ``author_id`` as an
+    ``int``), and ``MatchText`` is a full-text matcher over *strings* — so a
+    TEXT index on that key indexes zero points and every id query came back
+    empty while the response still said ``ok``. Pinned against a real server
+    because no mock reproduces Qdrant's type-strictness here.
+    """
+    client, name = collection
+    rows = {1: "first post", 2: "second post", 3: "unrelated"}
+    ids = {1: 100007940942252, 2: 100007940942252, 3: 2845548724}
+    client.upsert(
+        name,
+        points=[
+            models.PointStruct(
+                id=pid,
+                vector=[0.1, 0.2],
+                payload={"reference_metadata": {"author": f"Person {pid}", "author_id": ids[pid]}},
+            )
+            for pid in rows
+        ],
+        wait=True,
+    )
+    write_search_text(client, name, rows, wait=True)
+    assert ensure_field_indexes(client, name) is True
+    assert field_index_kind(client, name, "reference_metadata.author_id") == "keyword"
+    time.sleep(1.0)  # let the new payload indexes catch up
+
+    spec = search_field_spec("author")
+    query = "100007940942252"
+    compiled = build_search_filter(
+        [query],
+        text_keys=spec.text_keys,
+        value_keys=spec.value_keys,
+        value_forms=value_match_forms(query),
+    )
+    points, _ = client.scroll(collection_name=name, scroll_filter=compiled, limit=10)
+    assert sorted(p.id for p in points) == [1, 2]
+
+
+def test_a_text_only_filter_still_misses_a_numeric_id(collection: tuple[QdrantClient, str]) -> None:
+    """Pins *why* the value matcher is required, so nobody 'simplifies' it away.
+
+    Matching the same id through ``MatchText`` alone — what the field lane did
+    before — finds nothing, even with the key indexed.
+    """
+    client, name = collection
+    client.upsert(
+        name,
+        points=[
+            models.PointStruct(id=1, vector=[0.1, 0.2], payload={"reference_metadata": {"author_id": 100007940942252}})
+        ],
+        wait=True,
+    )
+    write_search_text(client, name, {1: "first post"}, wait=True)
+    client.create_payload_index(
+        collection_name=name,
+        field_name="reference_metadata.author_id",
+        field_schema=search_index_params(),
+        wait=True,
+    )
+    time.sleep(1.0)
+
+    text_only = build_search_filter(["100007940942252"], text_keys=("reference_metadata.author_id",))
+    points, _ = client.scroll(collection_name=name, scroll_filter=text_only, limit=10)
+    assert points == []

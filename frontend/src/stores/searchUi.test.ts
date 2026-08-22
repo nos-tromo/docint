@@ -104,6 +104,28 @@ describe('searchUi field state', () => {
 })
 
 describe('searchUi persistence migration', () => {
+  it('drops a v3 field the picker no longer offers', () => {
+    // A user whose last search was "Author ID" would otherwise reload into a
+    // blank trigger sending a field the API now refuses.
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: {}, queries: {}, scopes: {}, filtersOpen: false, field: 'author_id' },
+      3
+    ) as unknown as { field: string }
+
+    expect(migrated.field).toBe('text')
+  })
+
+  it('keeps a v3 field the picker still offers', () => {
+    const migrate = useSearchUiStore.persist.getOptions().migrate!
+    const migrated = migrate(
+      { drafts: {}, queries: {}, scopes: {}, filtersOpen: false, field: 'author' },
+      3
+    ) as unknown as { field: string }
+
+    expect(migrated.field).toBe('author')
+  })
+
   it('migrates a version-1 blob by filling the field default', () => {
     const migrate = useSearchUiStore.persist.getOptions().migrate!
     const migrated = migrate({ drafts: {}, queries: {}, scopes: {}, filtersOpen: false }, 1) as unknown as {

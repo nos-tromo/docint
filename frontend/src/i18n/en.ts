@@ -185,12 +185,7 @@ export const en = {
   'search.field': 'Search in',
   'search.field.text': 'Text',
   'search.field.author': 'Author',
-  'search.field.author_id': 'Author ID',
   'search.field.network': 'Network',
-  'search.field.posting_author': 'Posting author',
-  'search.field.type': 'Type',
-  'search.field.speaker': 'Speaker',
-  'search.field.language': 'Language',
   'search.field.file_name': 'File',
   'search.export_results': 'Export CSV',
 

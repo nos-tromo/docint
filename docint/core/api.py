@@ -56,7 +56,7 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     normalize_numeric_bound,
 )
-from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, field_index_kind
+from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, field_indexes_ready
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.search.index import search_index_status
 from docint.core.state.session_manager import SessionCollectionMismatchError
@@ -874,9 +874,7 @@ class ScopeOut(BaseModel):
 #: Restates ``SEARCH_FIELDS`` as a closed enum so the OpenAPI schema is
 #: self-documenting; the endpoints' whitelist check against ``SEARCH_FIELDS``
 #: itself stays in place as defense in depth.
-SearchFieldName = Literal[
-    "text", "author", "author_id", "network", "posting_author", "type", "speaker", "language", "file_name"
-]
+SearchFieldName = Literal["text", "author", "network", "file_name"]
 
 
 class SearchIn(BaseModel):
@@ -1720,7 +1718,7 @@ def export_search_csv(
                 # naming.
                 if field != "text":
                     rag._ensure_field_indexes_once(physical)
-                    if total > 0 and field_index_kind(rag.qdrant_client, physical, SEARCH_FIELDS[field]) != "text":
+                    if total > 0 and not field_indexes_ready(rag.qdrant_client, physical, field):
                         logger.warning(
                             "Field index missing | collection={!r} field={} — run `make search-index`",
                             physical,

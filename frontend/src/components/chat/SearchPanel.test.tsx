@@ -775,13 +775,27 @@ describe('SearchPanel field picker', () => {
 
     await screen.findByText(/alpha\.pdf/)
     await userEvent.click(screen.getByRole('combobox', { name: /search in/i }))
-    await userEvent.click(await screen.findByRole('option', { name: 'Author ID' }))
+    await userEvent.click(await screen.findByRole('option', { name: 'Author' }))
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.filter(([u]) => String(u).includes('/search')).at(-1)
       expect(call).toBeDefined()
-      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ question: 'Partei', field: 'author_id' })
+      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ question: 'Partei', field: 'author' })
     })
+  })
+
+  it('offers exactly the four options the backend still accepts', async () => {
+    // Author ID, Posting author, Type, Speaker and Language folded into
+    // Author or were dropped; offering one would send a field the API 422s.
+    mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    await userEvent.click(screen.getByRole('combobox', { name: /search in/i }))
+
+    const options = (await screen.findAllByRole('option')).map((o) => o.textContent)
+    expect(options).toEqual(['Text', 'Author', 'Network', 'File'])
   })
 
   it('shows a CSV export link carrying the field once there are hits', async () => {

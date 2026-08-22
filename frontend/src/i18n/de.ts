@@ -193,12 +193,7 @@ export const de: Strings = {
   'search.field': 'Suchen in',
   'search.field.text': 'Text',
   'search.field.author': 'Autor',
-  'search.field.author_id': 'Autor-ID',
   'search.field.network': 'Netzwerk',
-  'search.field.posting_author': 'Beitragsautor',
-  'search.field.type': 'Typ',
-  'search.field.speaker': 'Sprecher',
-  'search.field.language': 'Sprache',
   'search.field.file_name': 'Datei',
   'search.export_results': 'CSV exportieren',
 

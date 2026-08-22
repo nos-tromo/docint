@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from qdrant_client import models
@@ -108,27 +108,88 @@ def build_scan_filter(base_filter: models.Filter | None) -> models.Filter:
     return merged if merged is not None else models.Filter(must=[not_coarse_condition()])
 
 
+def value_match_forms(raw: str) -> list[Any]:
+    """Return the exact values an identifier query should be tried as.
+
+    Identifiers are not prose. The same logical author id is stored as an
+    ``int`` in one collection and a ``str`` in another — a Facebook profile
+    id arrives numeric, a handle-style id does not — and Qdrant's
+    ``MatchValue`` is type-strict, so ``"123"`` will not match ``123``.
+    Offering both readings is what lets one query work against either.
+
+    A query containing whitespace is never an identifier, so it yields no
+    forms at all and the id keys drop out of the compiled filter entirely.
+
+    Args:
+        raw (str): Raw query text as typed.
+
+    Returns:
+        list[Any]: The string form first, plus the integer form when the
+            query is all digits; empty when the query is blank or is a
+            multi-word phrase.
+    """
+    text = " ".join(str(raw or "").split())
+    if not text or " " in text:
+        return []
+    forms: list[Any] = [text]
+    if text.isdigit():
+        forms.append(int(text))
+    return forms
+
+
+def matches_any_phrase(values: Iterable[str], keywords: list[str]) -> bool:
+    """Check whether *keywords* occur as a phrase in at least one value.
+
+    The counterpart of the compiled filter's OR over a field's keys: a hit is
+    legitimate when one key holds the whole phrase, and a phrase split across
+    two keys — half a name in ``author``, half in ``vanity`` — is not a hit at
+    all.
+
+    Args:
+        values (Iterable[str]): The point's value for each of the field's
+            text keys; missing keys pass through as empty strings.
+        keywords (list[str]): Keywords in query order.
+
+    Returns:
+        bool: ``True`` when any value contains the contiguous phrase.
+    """
+    return any(matches_phrase(value, keywords) for value in values)
+
+
 def build_search_filter(
     keywords: Sequence[str],
     *,
-    field_key: str = SEARCH_TEXT_FIELD,
+    text_keys: Sequence[str] = (SEARCH_TEXT_FIELD,),
+    value_keys: Sequence[str] = (),
+    value_forms: Sequence[Any] = (),
     base_filter: models.Filter | None = None,
 ) -> models.Filter | None:
-    """Compile keywords into a native Qdrant filter on one payload key.
+    """Compile keywords into a native Qdrant filter over one field's keys.
 
-    One ``MatchText`` condition per keyword, all in ``must`` — so the field
-    has to contain every keyword, in any order. Coarse parent chunks are
-    excluded so a hierarchical collection does not return both a parent and
-    its child for one logical hit; the exclusion is expressed as "not coarse"
-    rather than "is fine" because a collection ingested without hierarchical
-    chunking tags nothing at all, and requiring ``fine`` would return nothing
-    there.
+    A picker option can cover several payload keys, and the query has to be
+    satisfied by **one** of them: every keyword ANDed within a key, the keys
+    ORed against each other. Binding the whole query to a single key is what
+    stops "Wolfgang Krieger" matching a chunk whose ``author`` is Wolfgang
+    and whose unrelated ``vanity`` contains Krieger.
+
+    ``text_keys`` are matched with ``MatchText`` (prefix, case-insensitive);
+    ``value_keys`` hold identifiers and are matched exactly, once per form in
+    ``value_forms`` — a text matcher cannot touch them, because they are
+    numbers in Qdrant and a text index over a number indexes nothing.
+
+    Coarse parent chunks are excluded so a hierarchical collection does not
+    return both a parent and its child for one logical hit; the exclusion is
+    expressed as "not coarse" rather than "is fine" because a collection
+    ingested without hierarchical chunking tags nothing at all, and requiring
+    ``fine`` would return nothing there.
 
     Args:
         keywords (Sequence[str]): Keywords that must all match.
-        field_key (str): Payload key to match on — ``search_text`` for the
-            chunk text, or a metadata key from
-            :data:`docint.core.search.fields.SEARCH_FIELDS`.
+        text_keys (Sequence[str]): Payload keys matched with ``MatchText``.
+        value_keys (Sequence[str]): Payload keys matched exactly.
+        value_forms (Sequence[Any]): Values to try against ``value_keys``,
+            from :func:`value_match_forms`. Empty means the query cannot be
+            an identifier, so those keys contribute nothing.
         base_filter (models.Filter | None): The caller's metadata filter, ANDed
             with the keyword conditions so panel filters constrain the search.
 
@@ -140,8 +201,25 @@ def build_search_filter(
     if not keywords:
         return None
 
-    conditions: list[Any] = [
-        models.FieldCondition(key=field_key, match=models.MatchText(text=keyword)) for keyword in keywords
+    alternatives: list[models.Filter] = [
+        models.Filter(
+            must=[models.FieldCondition(key=key, match=models.MatchText(text=keyword)) for keyword in keywords]
+        )
+        for key in text_keys
     ]
+    alternatives.extend(
+        models.Filter(must=[models.FieldCondition(key=key, match=models.MatchValue(value=form))])
+        for key in value_keys
+        for form in value_forms
+    )
+    if not alternatives:
+        return None
+
+    # One alternative needs no OR around it. Splicing its conditions in flat
+    # keeps the common single-key search — every Text query — compiling to
+    # exactly the filter it did before this field could span several keys.
+    conditions: list[Any] = (
+        list(alternatives[0].must or []) if len(alternatives) == 1 else [models.Filter(should=alternatives)]
+    )
     conditions.append(not_coarse_condition())
     return merge_qdrant_filters(base_filter, conditions)

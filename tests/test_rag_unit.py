@@ -28,7 +28,6 @@ from llama_index.core.storage.docstore.keyval_docstore import (
     KVDocumentStore as _KVDocumentStore,
 )
 from loguru import logger as _loguru_logger
-from qdrant_client import models as qdrant_models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core import rag as rag_module
@@ -6280,13 +6279,13 @@ def test_search_fulltext_flags_a_partially_indexed_collection(
     assert result["index_status"]["missing"] == 936
 
 
-def _field_indexed(monkeypatch: pytest.MonkeyPatch, kind: str | None = "text") -> None:
+def _field_indexed(monkeypatch: pytest.MonkeyPatch, ready: bool = True) -> None:
     """Report the field index state every field search checks first."""
-    monkeypatch.setattr(rag_module, "field_index_kind", lambda client, collection, key: kind)
+    monkeypatch.setattr(rag_module, "field_indexes_ready", lambda client, collection, name: ready)
 
 
-def test_search_fulltext_field_search_compiles_on_the_field_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Searching in Author puts the keyword conditions on the author key, not the text."""
+def test_search_fulltext_field_search_compiles_on_the_field_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Searching in Author targets the author keys, not the chunk text."""
     rag = RAG(qdrant_collection="test")
     monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
     _field_indexed(monkeypatch)
@@ -6312,8 +6311,10 @@ def test_search_fulltext_field_search_compiles_on_the_field_key(monkeypatch: pyt
 
     assert result["status"] == "ok"
     assert [h["id"] for h in result["hits"]] == ["p1"]
-    conditions = [c for c in scroll_calls[0]["scroll_filter"].must if isinstance(c, qdrant_models.FieldCondition)]
-    assert [c.key for c in conditions] == ["reference_metadata.author"]
+    compiled = repr(scroll_calls[0]["scroll_filter"])
+    assert "reference_metadata.author" in compiled
+    assert "reference_metadata.vanity" in compiled
+    assert "search_text" not in compiled
 
 
 def test_search_fulltext_field_search_phrase_filters_on_the_field_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6349,7 +6350,7 @@ def test_search_fulltext_reports_not_indexed_when_the_field_index_is_missing(
     """A field without its TEXT index would match case-sensitively; say so instead."""
     rag = RAG(qdrant_collection="test")
     monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kw: _index_ok())
-    _field_indexed(monkeypatch, kind="keyword")
+    _field_indexed(monkeypatch, ready=False)
     rag._qdrant_client = cast(
         Any,
         types.SimpleNamespace(
@@ -6375,7 +6376,7 @@ def test_search_fulltext_rejects_an_unknown_field() -> None:
 def test_search_fulltext_skips_the_image_lane_for_a_field_images_do_not_carry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An image point has no speaker, so a speaker search never scrolls the companion."""
+    """An image point carries no network, so a network search skips the companion."""
     _indexed_status(monkeypatch)
     _field_indexed(monkeypatch)
     rag = RAG(qdrant_collection="test")
@@ -6383,7 +6384,10 @@ def test_search_fulltext_skips_the_image_lane_for_a_field_images_do_not_carry(
 
     def scroll(**kwargs: Any) -> tuple[list[Any], None]:
         scrolled.append(kwargs["collection_name"])
-        return [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"speaker": "Ann"}})], None
+        return (
+            [types.SimpleNamespace(id="t1", payload={"text": "x", "reference_metadata": {"network": "Instagram"}})],
+            None,
+        )
 
     rag._qdrant_client = cast(
         Any,
@@ -6396,14 +6400,14 @@ def test_search_fulltext_skips_the_image_lane_for_a_field_images_do_not_carry(
         ),
     )
 
-    result = rag.search_fulltext("ann", field="speaker", limit=10)
+    result = rag.search_fulltext("instagram", field="network", limit=10)
 
     assert scrolled == ["test"]
     assert result["total"] == 1
 
 
-def test_search_fulltext_runs_the_image_lane_for_posting_author(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Social images carry the posting author, so that field reaches the companion."""
+def test_search_fulltext_runs_the_image_lane_for_author(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Social images carry the parent posting's author, which Author now covers."""
     _indexed_status(monkeypatch)
     _field_indexed(monkeypatch)
     rag = RAG(qdrant_collection="test")
@@ -6426,7 +6430,7 @@ def test_search_fulltext_runs_the_image_lane_for_posting_author(monkeypatch: pyt
     client.get_collection = lambda **kwargs: types.SimpleNamespace(payload_schema={})
     rag._qdrant_client = client
 
-    result = rag.search_fulltext("acme", field="posting_author", limit=10)
+    result = rag.search_fulltext("acme", field="author", limit=10)
 
     assert [(h["id"], h["kind"]) for h in result["hits"]] == [("t1", "text"), ("i1", "image")]
 
@@ -6452,7 +6456,8 @@ def test_search_fulltext_ensures_field_indexes_once_per_collection(monkeypatch: 
     first = len(calls)
     rag.search_fulltext("mar", field="network")
 
-    assert first == len(rag_module.SEARCH_FIELDS) - 1
+    expected_keys = sum(len(spec.indexed_keys()) for name, spec in rag_module.SEARCH_FIELDS.items() if name != "text")
+    assert first == expected_keys
     assert len(calls) == first
 
 
@@ -6643,8 +6648,8 @@ def test_iter_search_matches_rejects_a_non_blank_query_with_no_usable_keywords()
         list(rag.iter_search_matches("a b"))
 
 
-def test_iter_search_matches_field_search_targets_the_field_key() -> None:
-    """An author export compiles its filter on the author key."""
+def test_iter_search_matches_field_search_targets_the_field_keys() -> None:
+    """An author export compiles its filter on the author keys."""
     rag = RAG(qdrant_collection="test")
     scroll_calls: list[dict[str, Any]] = []
 
@@ -6656,8 +6661,9 @@ def test_iter_search_matches_field_search_targets_the_field_key() -> None:
 
     list(rag.iter_search_matches("mar", field="author"))
 
-    conditions = [c for c in scroll_calls[0]["scroll_filter"].must if isinstance(c, qdrant_models.FieldCondition)]
-    assert [c.key for c in conditions] == ["reference_metadata.author"]
+    compiled = repr(scroll_calls[0]["scroll_filter"])
+    assert "reference_metadata.author" in compiled
+    assert "reference_metadata.vanity" in compiled
 
 
 def test_iter_search_matches_rejects_unknown_field() -> None:
@@ -6745,9 +6751,9 @@ def test_iter_search_matches_includes_the_image_companion_for_text() -> None:
 
 
 def test_iter_search_matches_skips_the_image_companion_for_a_field_images_lack() -> None:
-    """A speaker export never scrolls the companion: an image has no speaker."""
+    """A network export never scrolls the companion: an image carries no network."""
     rag = RAG(qdrant_collection="test")
-    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"speaker": "Ann"}}
+    payload = {"text": "any text", "file_name": "posts.csv", "reference_metadata": {"network": "Instagram"}}
     calls: list[str] = []
 
     def scroll(**kwargs: Any) -> tuple[list[Any], None]:
@@ -6756,7 +6762,7 @@ def test_iter_search_matches_skips_the_image_companion_for_a_field_images_lack()
 
     rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll, collection_exists=lambda **kwargs: True))
 
-    matches = list(rag.iter_search_matches("ann", field="speaker"))
+    matches = list(rag.iter_search_matches("instagram", field="network"))
 
     assert calls == ["test"]
     assert matches[0]["kind"] == "text"
