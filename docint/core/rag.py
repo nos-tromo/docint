@@ -8698,10 +8698,15 @@ class RAG:
         never show more, or fewer, rows than a caller who ran the same query
         through the panel would see. The one addition is a blank query,
         which scans the whole (filtered) collection — the panel refuses
-        that, but a full dump is a legitimate export.
+        that, but a full dump is a legitimate export. A *non-blank* query
+        that yields no usable keyword (every word below the index minimum)
+        is not given the same treatment: silently falling through to a scan
+        would widen a narrow-but-unindexable query into that same full dump,
+        so it is refused instead.
 
         Args:
-            query (str): Whitespace-separated keywords; may be blank.
+            query (str): Whitespace-separated keywords; may be blank, which
+                scans the whole (filtered) collection.
             field (str): A key of :data:`SEARCH_FIELDS`; ``"text"`` by default.
             base_filter (qdrant_models.Filter | None): Caller's metadata filter.
 
@@ -8712,10 +8717,14 @@ class RAG:
 
         Raises:
             UnknownSearchFieldError: When ``field`` is not whitelisted.
+            ValueError: When ``query`` is non-blank but every word is below
+                the index minimum, leaving no usable keyword.
         """
         field_key = search_payload_key(field)
         collection = self.qdrant_collection
         keywords: list[str] = parse_keywords(query) if query.strip() else []
+        if query.strip() and not keywords:
+            raise ValueError("A search export requires at least one usable keyword.")
 
         lanes = [collection]
         query_words: list[str] = []

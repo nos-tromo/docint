@@ -6516,6 +6516,22 @@ def test_iter_search_matches_blank_query_scans_the_filtered_collection() -> None
     assert scroll_calls[0]["scroll_filter"] == build_scan_filter(None)
 
 
+def test_iter_search_matches_rejects_a_non_blank_query_with_no_usable_keywords() -> None:
+    """A non-blank query that loses every word to the index minimum must not become a full scan.
+
+    Unlike a blank query (above), which legitimately scans the whole
+    collection, a query like "a b" is not empty — it just has nothing
+    Qdrant can match on. Falling through to the same scan as a blank query
+    would silently widen a narrow-but-unindexable question into a full dump.
+    ``iter_search_matches`` is a generator, so the check only runs once the
+    caller starts consuming it.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    with pytest.raises(ValueError):
+        list(rag.iter_search_matches("a b"))
+
+
 def test_iter_search_matches_field_search_targets_the_field_key() -> None:
     """An author export compiles its filter on the author key."""
     rag = RAG(qdrant_collection="test")

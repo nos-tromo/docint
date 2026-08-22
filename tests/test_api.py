@@ -7,7 +7,7 @@ import json
 import types
 from collections.abc import Generator, Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import pytest
 from conftest import run_ingest
@@ -279,6 +279,14 @@ class DummyRAG:
         """
         self.search_export_calls.append({"query": query, "field": field, "base_filter": base_filter})
         yield from self.search_export_matches
+
+    def _ensure_field_indexes_once(self, collection: str) -> None:
+        """Satisfy the export path's lazy field-index ensure without touching Qdrant.
+
+        Args:
+            collection (str): Physical collection name (ignored).
+        """
+        return None
 
     def probe_rerank_endpoint(self) -> None:
         """Satisfy the lifespan rerank probe without touching the network."""
@@ -4813,6 +4821,19 @@ def test_search_rejects_an_unknown_field(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_search_field_name_stays_in_sync_with_search_fields() -> None:
+    """The OpenAPI enum restating SEARCH_FIELDS must never silently drift from it.
+
+    ``SearchFieldName`` exists only so the schema is self-documenting;
+    ``SEARCH_FIELDS`` stays the actual whitelist both endpoints check
+    against. A field added to one and not the other would either 422 a
+    legitimate value (schema behind) or accept one the runtime check would
+    have refused anyway (schema ahead) — either way silently, since nothing
+    else would fail.
+    """
+    assert set(get_args(api_module.SearchFieldName)) == set(api_module.SEARCH_FIELDS)
+
+
 def test_search_aggregate_endpoint_is_gone(client: TestClient) -> None:
     """The facet lane was replaced by the field selector; its route no longer exists."""
     response = client.post("/search/aggregate", json={"question": "election", "group_by": "author"})
@@ -5041,6 +5062,47 @@ def test_export_search_csv_rejects_a_partially_indexed_collection(
 
     assert response.status_code == 409
     assert "60" in response.json()["detail"]
+
+
+def test_export_search_csv_rejects_a_field_search_missing_its_index(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A field search over a collection with no TEXT index for that field is refused outright.
+
+    ``search_text`` itself is fine (``_indexed_status`` reports it complete);
+    it is specifically the ``author`` field's own index that is missing.
+    """
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "field_index_kind", lambda client, collection, key: None)
+
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
+
+    assert response.status_code == 409
+
+
+def test_export_search_csv_allows_a_field_search_with_its_index_present(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A field carrying its own TEXT index passes the gate and streams normally."""
+    monkeypatch.setattr(api_module, "search_index_status", _indexed_status)
+    monkeypatch.setattr(api_module, "field_index_kind", lambda client, collection, key: "text")
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"question": "mar", "field": "author"})
+
+    assert response.status_code == 200
+
+
+def test_export_search_csv_names_the_file_by_search_when_the_question_is_blank(client: TestClient) -> None:
+    """A blank question exports the whole collection — never named after a field it did not scope by."""
+    rag = cast(DummyRAG, api_module.rag)
+    rag.search_export_matches = [{"id": "c1", "chunk_id": "chunk-1", "filename": "posts.csv", "text": "first"}]
+
+    response = client.get("/search/export.csv", params={"field": "author"})
+
+    assert response.status_code == 200
+    assert "alpha-search.csv" in response.headers["content-disposition"]
 
 
 def test_export_search_csv_allows_an_empty_collection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

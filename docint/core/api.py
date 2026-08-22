@@ -1710,23 +1710,26 @@ def export_search_csv(
                         ),
                     )
                 # A metadata field carries its own index, separate from
-                # `search_text`. Gated the same way as the check above — an
-                # empty collection has nothing to be indexed for this field
-                # either, so there is still no remedy worth naming.
-                if (
-                    total > 0
-                    and field != "text"
-                    and field_index_kind(rag.qdrant_client, physical, SEARCH_FIELDS[field]) != "text"
-                ):
-                    logger.warning(
-                        "Field index missing | collection={!r} field={} — run `make search-index`",
-                        physical,
-                        field,
-                    )
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Collection is not indexed for this field. Run `make search-index` first.",
-                    )
+                # `search_text`. Lazily ensured here too, mirroring
+                # `search_fulltext`, so a first-ever field export on a
+                # pre-existing collection builds the index rather than
+                # 409ing where the panel would have quietly succeeded. The
+                # 409 itself stays gated on `total > 0`, like the check
+                # above — an empty collection has nothing to be indexed for
+                # this field either, so there is still no remedy worth
+                # naming.
+                if field != "text":
+                    rag._ensure_field_indexes_once(physical)
+                    if total > 0 and field_index_kind(rag.qdrant_client, physical, SEARCH_FIELDS[field]) != "text":
+                        logger.warning(
+                            "Field index missing | collection={!r} field={} — run `make search-index`",
+                            physical,
+                            field,
+                        )
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Collection is not indexed for this field. Run `make search-index` first.",
+                        )
 
             marked_from_scope: list[str] = (
                 rag.ensure_session_manager().get_scope(session_id, principal.effective_owner) if session_id else []
@@ -1777,7 +1780,10 @@ def export_search_csv(
         for chunk in chunks:
             yield search_export_row(chunk, marked=str(chunk.get("id") or "") in marked)
 
-    stem = f"{physical}-{field}" if field != "text" else f"{physical}-search"
+    # A blank question exports the whole collection regardless of `field` —
+    # naming the file after the field would misrepresent an unscoped dump as
+    # an author-only (or similarly scoped) result set.
+    stem = f"{physical}-{field}" if field != "text" and question.strip() else f"{physical}-search"
     return StreamingResponse(
         stream_csv(row_iter(), SEARCH_EXPORT_COLUMNS),
         media_type="text/csv; charset=utf-8",
