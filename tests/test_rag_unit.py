@@ -6529,6 +6529,44 @@ def test_ensure_field_indexes_once_does_not_cache_a_partial_companion_failure(
     assert calls == ["test", "test_images", "test", "test_images"]
 
 
+def test_create_index_routes_field_index_ensuring_through_the_cache_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """create_index must not write _field_indexes_ensured on its own.
+
+    create_index runs on the first chat/query per collection — typically
+    before any metadata field search — so a second writer of
+    _field_indexes_ensured could mark a collection "done" without ever
+    touching its image companion. Once that happens,
+    _ensure_field_indexes_once's early return means the companion is never
+    ensured for the rest of the process. Routing through
+    _ensure_field_indexes_once instead makes it the only writer, so this
+    call covers the companion exactly like a first field search would.
+    """
+    monkeypatch.setattr(RAG, "_vector_store", lambda self: object())
+    monkeypatch.setattr(RAG, "_storage_context", lambda self, vector_store: object())
+    monkeypatch.setattr(rag_module, "VectorStoreIndex", _FakeIndex)
+    ensured: list[str] = []
+    monkeypatch.setattr(
+        rag_module,
+        "ensure_field_indexes",
+        lambda client, collection: ensured.append(collection) or True,
+    )
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            collection_exists=lambda collection_name: True,
+            create_payload_index=lambda **kwargs: None,
+        ),
+    )
+
+    rag.create_index()
+
+    assert ensured == ["test", "test_images"]
+    assert "test" in rag._field_indexes_ensured
+
+
 def _index_ok() -> dict[str, Any]:
     return {"indexed": True, "total": 3, "with_search_text": 3, "missing": 0, "complete": True}
 

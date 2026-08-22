@@ -4961,10 +4961,12 @@ class RAG:
         ensure_search_index(self.qdrant_client, self.qdrant_collection)
 
         # Field search matches metadata keys the way it matches the text, so
-        # each needs the same prefix/lowercase index. Same idempotent,
-        # fail-soft posture as the two indexes above.
-        if ensure_field_indexes(self.qdrant_client, self.qdrant_collection):
-            self._field_indexes_ensured.add(self.qdrant_collection)
+        # each needs the same prefix/lowercase index — on the image companion
+        # too, which is why this routes through the one companion-aware,
+        # cache-writing method rather than calling ensure_field_indexes and
+        # the cache update inline: a second writer of _field_indexes_ensured
+        # could mark a collection done before its companion was ever touched.
+        self._ensure_field_indexes_once(self.qdrant_collection)
 
     def create_query_engine(self) -> None:
         """Create the query engine with a retriever and reranker.
