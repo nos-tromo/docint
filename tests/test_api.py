@@ -4763,13 +4763,20 @@ def test_search_returns_hits_for_the_scoped_collection(client: TestClient) -> No
     assert isinstance(body["hits"], list)
 
 
-def test_search_rejects_a_keyword_below_the_index_minimum(client: TestClient) -> None:
-    """An unindexable keyword can never match, so it must be refused.
+def test_search_silently_drops_a_short_keyword_when_others_remain(client: TestClient) -> None:
+    """A short word like 'a' is unindexable but valid inside a phrase.
 
-    Accepting it would add a condition matching nothing, silently reducing the
-    whole search to zero hits.
+    It is dropped from the Qdrant pre-filter; the phrase post-filter still
+    checks the full query text. The request must not be rejected.
     """
     response = client.post("/search", json={"question": "berlin a"})
+
+    assert response.status_code != 422
+
+
+def test_search_rejects_a_query_of_only_short_keywords(client: TestClient) -> None:
+    """When every keyword is too short for the index, the result is empty."""
+    response = client.post("/search", json={"question": "a b"})
 
     assert response.status_code == 422
 
@@ -4798,9 +4805,24 @@ def test_search_aggregate_accepts_a_blank_query(client: TestClient) -> None:
     assert response.status_code == 200
 
 
-def test_search_aggregate_rejects_a_keyword_below_the_index_minimum(client: TestClient) -> None:
-    """An unindexable keyword can never match, so it must be refused."""
+def test_search_aggregate_silently_drops_a_short_keyword_when_others_remain(client: TestClient) -> None:
+    """A short word is dropped from the pre-filter, exactly as in the hits lane.
+
+    Both modes share one query box in the panel, so a query the hits lane
+    accepts must not be refused here.
+    """
     response = client.post("/search/aggregate", json={"question": "election a", "group_by": "author"})
+    assert response.status_code == 200
+
+
+def test_search_aggregate_rejects_a_query_of_only_short_keywords(client: TestClient) -> None:
+    """A non-blank query left with no usable keyword must not group everything.
+
+    Blank is a legitimate ask here — it groups the whole filtered collection.
+    Falling through to the same answer for a query that was merely unindexable
+    would silently widen a narrow question.
+    """
+    response = client.post("/search/aggregate", json={"question": "a b", "group_by": "author"})
     assert response.status_code == 422
 
 

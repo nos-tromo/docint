@@ -63,7 +63,7 @@ from docint.core.search.aggregate import (
     MAX_SAMPLES_PER_GROUP,
     UnknownGroupFieldError,
 )
-from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
+from docint.core.search.fulltext import parse_keywords
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
@@ -895,7 +895,7 @@ class SearchOut(BaseModel):
     #: none are, so ``make search-index`` has never run here.
     status: Literal["ok", "partial", "not_indexed"]
     hits: list[dict[str, Any]] = []
-    total: int = 0
+    total: int | None = 0
     next_cursor: str | None = None
     index_status: dict[str, Any] = {}
 
@@ -1186,6 +1186,12 @@ class ReportItemIn(BaseModel):
     dedupe_key: str
     snapshot: dict[str, Any]
     note: str | None = None
+    # The logical collection the artifact was taken from. A report is bound to
+    # one collection, but the client's active collection is the authority on
+    # where this artifact's evidence lives -- the two disagree while an item is
+    # added from a collection the report was not created in, and the companion
+    # lookup must follow the artifact, not the report.
+    collection: str | None = None
 
 
 class TranslateIn(BaseModel):
@@ -1578,11 +1584,8 @@ def search_collection(
     # Validate at the boundary rather than deep in the RAG layer: an unusable
     # query should be refused before a collection is even resolved. An empty
     # keyword list would otherwise reach the search as "match everything".
-    try:
-        if not parse_keywords(payload.question):
-            raise HTTPException(status_code=422, detail="Invalid request.")
-    except KeywordTooShortError as e:
-        raise HTTPException(status_code=422, detail="Invalid request.") from e
+    if not parse_keywords(payload.question):
+        raise HTTPException(status_code=422, detail="Invalid request.")
 
     try:
         with _scoped_collection(payload.collection, principal):
@@ -1624,11 +1627,12 @@ def search_collection_aggregate(
     """
     if payload.group_by not in GROUP_BY_FIELDS:
         raise HTTPException(status_code=422, detail="Invalid request.")
-    try:
-        if payload.question.strip():
-            parse_keywords(payload.question)
-    except KeywordTooShortError as e:
-        raise HTTPException(status_code=422, detail="Invalid request.") from e
+    # Blank is legitimate here — it groups the whole filtered collection. A
+    # query that is *not* blank but yields no usable keyword is not: short
+    # words are dropped, so grouping on what is left would silently widen a
+    # narrow question into "everything".
+    if payload.question.strip() and not parse_keywords(payload.question):
+        raise HTTPException(status_code=422, detail="Invalid request.")
 
     try:
         with _scoped_collection(payload.collection, principal):
@@ -2707,6 +2711,129 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
     return report
 
 
+def _thumbnail_from_point(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Shape a companion point's stored thumbnail into the snapshot's frozen form.
+
+    ``width``/``height`` describe the **source** image, not the thumbnail — they
+    are the point's own dimensions, kept as provenance. Nothing sizes a figure
+    from them (the renderers and the SPA cap by CSS, and the enlarged view uses
+    the image's natural size), and doing so would render a 768px thumbnail at
+    the original's dimensions.
+
+    Args:
+        payload (dict[str, Any]): The ``_images`` point payload.
+
+    Returns:
+        dict[str, Any] | None: The ``thumbnail`` object to freeze, or ``None``
+        when the point predates thumbnails.
+    """
+    b64 = payload.get("thumbnail_b64")
+    if not b64 or not isinstance(b64, str):
+        return None
+    mime = str(payload.get("thumbnail_mime") or "image/jpeg")
+    source_type = str(payload.get("source_type") or "")
+    return {
+        "data_uri": f"data:{mime};base64,{b64}",
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "kind": "video_keyframe" if "keyframe" in source_type else "image",
+    }
+
+
+def _enrich_snapshot_thumbnails(
+    snapshot: dict[str, Any],
+    artifact_type: str,
+    report: dict[str, Any],
+    principal: Principal,
+    collection: str | None = None,
+) -> dict[str, Any]:
+    """Freeze visual evidence into a report snapshot at add-time.
+
+    Sources and findings that carry image identity (``image_id`` from the
+    ``_images`` companion) gain a ``thumbnail`` object holding a data URI, so
+    the stored snapshot stays self-contained: the SPA and every export render
+    it with no Qdrant access, and the report survives re-ingestion or
+    collection deletion like the rest of the frozen snapshot.
+
+    The companion collection is derived from the collection the artifact was
+    taken from — the request's ``collection`` when it names one the caller
+    owns, else the report's own — always through the caller's ownership
+    mapping. A snapshot's ``image_collection`` is treated as a cross-check,
+    never as an address, so a crafted snapshot cannot make the server read an
+    arbitrary collection. The request's collection leads because that is where
+    the evidence actually lives: an artifact added while working in a
+    collection the report was not created in resolves against a companion that
+    never held its pixels, which is how a chat answer citing three images came
+    to freeze one thumbnail.
+
+    Fail-soft by contract: any failure (companion missing, Qdrant down, point
+    without a thumbnail) returns the snapshot untouched — a text-only item,
+    never a refused add.
+
+    Args:
+        snapshot (dict[str, Any]): The caller-supplied snapshot (mutated copy semantics: edited in place).
+        artifact_type (str): The report item's artifact type.
+        report (dict[str, Any]): The owned report the item is being added to.
+        principal (Principal): The resolved request principal.
+        collection (str | None): Logical collection the artifact was taken
+            from, when the client sent one.
+
+    Returns:
+        dict[str, Any]: The snapshot, enriched where possible.
+    """
+    try:
+        containers: list[dict[str, Any]] = []
+        if artifact_type == "chat_answer":
+            containers = [s for s in (snapshot.get("sources") or []) if isinstance(s, dict) and s.get("image_id")]
+        elif artifact_type in ("entity_finding", "hate_speech_finding") and snapshot.get("image_id"):
+            containers = [snapshot]
+        if not containers:
+            return snapshot
+
+        physical: str | None = None
+        for logical in (collection, report.get("collection_name")):
+            name = str(logical or "").strip()
+            if not name:
+                continue
+            try:
+                physical = _require_owned_collection(name, principal)
+            except HTTPException:
+                continue
+            break
+        if physical is None:
+            return snapshot
+        companion = rag._image_collection_name(physical)
+
+        containers = [c for c in containers if not c.get("image_collection") or c.get("image_collection") == companion]
+        image_ids = sorted({str(c["image_id"]) for c in containers})
+        client = getattr(rag, "qdrant_client", None)
+        if not image_ids or client is None:
+            return snapshot
+
+        points, _ = client.scroll(
+            collection_name=companion,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="image_id", match=models.MatchAny(any=image_ids))]
+            ),
+            limit=len(image_ids),
+            with_payload=["image_id", "thumbnail_b64", "thumbnail_mime", "width", "height", "source_type"],
+            with_vectors=False,
+        )
+        thumbnails: dict[str, dict[str, Any]] = {}
+        for point in points:
+            payload = getattr(point, "payload", None) or {}
+            thumb = _thumbnail_from_point(payload)
+            if thumb is not None:
+                thumbnails[str(payload.get("image_id"))] = thumb
+        for container in containers:
+            thumb = thumbnails.get(str(container.get("image_id")))
+            if thumb is not None:
+                container["thumbnail"] = thumb
+    except Exception as exc:
+        logger.warning("Snapshot thumbnail enrichment skipped: {}", exc)
+    return snapshot
+
+
 def _capture_collection_overview(report_id: int, collection: str, principal: Principal) -> dict[str, Any] | None:
     """Build and persist a report's frozen document-overview snapshot.
 
@@ -3291,7 +3418,8 @@ def add_report_item(
 
     Args:
         report_id (int): The report id.
-        payload (ReportItemIn): Artifact type, dedupe key, snapshot, optional note.
+        payload (ReportItemIn): Artifact type, dedupe key, snapshot, optional
+            note, and the collection the artifact was taken from.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -3300,12 +3428,16 @@ def add_report_item(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
+    report = _get_owned_report(report_id, principal.effective_owner)
+    snapshot = _enrich_snapshot_thumbnails(
+        payload.snapshot, payload.artifact_type, report, principal, payload.collection
+    )
     item = rag.ensure_report_manager().add_item(
         report_id,
         principal.effective_owner,
         artifact_type=payload.artifact_type,
         dedupe_key=payload.dedupe_key,
-        snapshot=payload.snapshot,
+        snapshot=snapshot,
         note=payload.note,
     )
     if item is None:

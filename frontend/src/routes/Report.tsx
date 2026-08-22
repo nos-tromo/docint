@@ -10,7 +10,7 @@ import {
   SelectMenu
 } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
-import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
+import type { ArtifactType, ReportExportFormat, ReportItem, SnapshotThumbnail } from '@/api/types'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import { ReportSection } from '@/components/report/ReportSection'
 import {
@@ -140,6 +140,49 @@ function itemBody(item: ReportItem): string {
   }
 }
 
+function isRenderableThumbnail(value: unknown): value is SnapshotThumbnail {
+  // Snapshots are stored JSON: only an actual inline image may reach an
+  // <img src>, mirroring the server renderers' validation.
+  if (typeof value !== 'object' || value === null) return false
+  const uri = (value as { data_uri?: unknown }).data_uri
+  return typeof uri === 'string' && uri.startsWith('data:image/')
+}
+
+interface EvidenceFigure {
+  thumb: SnapshotThumbnail
+  caption: string
+  filename: string
+}
+
+/**
+ * The frozen figures of one item, each captioned the way the exports caption
+ * it: a chat answer can carry several images at once and side by side they are
+ * indistinguishable, so the caption repeats the citation number the answer
+ * cites. A finding holds one figure and already names its source above it.
+ */
+function itemFigures(item: ReportItem): EvidenceFigure[] {
+  const s = item.snapshot
+  if (item.artifact_type !== 'chat_answer') {
+    return isRenderableThumbnail(s.thumbnail)
+      ? [{ thumb: s.thumbnail, caption: '', filename: str(s, 'filename') }]
+      : []
+  }
+  const sources = Array.isArray(s.sources) ? s.sources : []
+  const figures: EvidenceFigure[] = []
+  for (const src of sources) {
+    const source = src as { thumbnail?: unknown; filename?: unknown; citation_index?: unknown }
+    if (!isRenderableThumbnail(source.thumbnail)) continue
+    const name = typeof source.filename === 'string' ? source.filename : ''
+    const index = typeof source.citation_index === 'number' ? source.citation_index : null
+    figures.push({
+      thumb: source.thumbnail,
+      caption: (index != null ? `[${index}] ${name}` : name).trim(),
+      filename: name
+    })
+  }
+  return figures
+}
+
 function itemSource(item: ReportItem, t: Translate): string {
   const s = item.snapshot
   const file = str(s, 'filename')
@@ -149,6 +192,44 @@ function itemSource(item: ReportItem, t: Translate): string {
       ? t('common.loc_row', { row: str(s, 'row') })
       : ''
   return [file, loc].filter(Boolean).join(' · ')
+}
+
+/**
+ * One item's frozen evidence, laid out as a strip of captioned figures.
+ * Fixed-height image boxes so several sit on a shared baseline, and the alt
+ * text follows the frozen `kind` — a keyframe is not an image the way a
+ * screenshot is, and the exports have always labeled the two differently.
+ */
+function EvidenceStrip({ figures, t }: { figures: EvidenceFigure[]; t: Translate }) {
+  const openPreview = useUiStore((s) => s.openPreview)
+  if (figures.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-3">
+      {figures.map(({ thumb, caption, filename }, index) => (
+        <figure key={index} className="max-w-[12rem] space-y-1">
+          {/* Enlarged from the frozen bytes the snapshot carries, never from
+              the source store: a report is meant to outlive the collection it
+              was drawn from, so its evidence must not need one. */}
+          <button
+            type="button"
+            onClick={() =>
+              openPreview({ filename: filename || t('common.unknown_source'), data_uri: thumb.data_uri })
+            }
+            className="block cursor-pointer rounded border border-border overflow-hidden hover:border-foreground/40 focus-visible:ring-1 focus-visible:ring-primary outline-none"
+          >
+            <img
+              src={thumb.data_uri}
+              alt={thumb.kind === 'video_keyframe' ? t('report.keyframe_alt') : t('report.thumbnail_alt')}
+              className="h-28 w-auto max-w-full object-contain"
+            />
+          </button>
+          {caption && (
+            <figcaption className="text-xs text-muted-foreground break-words">{caption}</figcaption>
+          )}
+        </figure>
+      ))}
+    </div>
+  )
 }
 
 export function Report() {
@@ -440,6 +521,7 @@ export function Report() {
                               {itemBody(item)}
                             </p>
                           )}
+                          <EvidenceStrip figures={itemFigures(item)} t={t} />
                           <input
                             key={`note-${item.id}`}
                             defaultValue={item.note ?? ''}

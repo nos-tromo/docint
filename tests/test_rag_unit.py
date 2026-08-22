@@ -6190,7 +6190,8 @@ def test_search_fulltext_returns_normalized_hits(monkeypatch: pytest.MonkeyPatch
         },
     )
     payload = {
-        "text": "die Konferenz in Berlin",
+        "text": "die Berlin Konferenz",
+        "search_text": "die Berlin Konferenz",
         "file_name": "report.pdf",
         "page": 3,
         "entities": [{"text": "Berlin", "type": "LOC"}],
@@ -6206,7 +6207,7 @@ def test_search_fulltext_returns_normalized_hits(monkeypatch: pytest.MonkeyPatch
     result = rag.search_fulltext("berlin konferenz")
 
     assert result["status"] == "ok"
-    assert result["total"] == 1
+    assert result["total"] is None
     hit = result["hits"][0]
     assert hit["id"] == "p1"
     assert hit["filename"] == "report.pdf"

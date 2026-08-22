@@ -9,6 +9,7 @@ import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatabl
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
+import { EvidenceThumbnail } from '@/components/common/EvidenceThumbnail'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
@@ -81,6 +82,7 @@ function HateSpeechTableRow({
           <SourcePreviewAction fileHash={row.file_hash} filename={row.filename} />
         </div>
         {location && <div className="text-xs text-muted-foreground">{location}</div>}
+        <EvidenceThumbnail imageId={row.image_id} fileHash={row.file_hash} filename={row.filename} />
       </div>
       <div className="min-w-0 space-y-1.5">
         {reason && (

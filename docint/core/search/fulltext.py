@@ -32,25 +32,41 @@ def parse_keywords(raw: str) -> list[str]:
             because the index lowercases anyway.
 
     Raises:
-        KeywordTooShortError: When a keyword is shorter than
-            ``SEARCH_MIN_TOKEN_LEN``. Such a keyword is unindexable and would
-            contribute a condition that can never match, silently reducing the
-            whole search to zero hits.
+        KeywordTooShortError: Legacy — no longer raised since short words are
+            silently dropped (they are valid inside a phrase even when the
+            index cannot tokenize them on their own).
     """
     keywords: list[str] = []
     seen: set[str] = set()
     for token in str(raw or "").split():
         keyword = token.strip()
-        if not keyword:
+        if not keyword or len(keyword) < SEARCH_MIN_TOKEN_LEN:
             continue
-        if len(keyword) < SEARCH_MIN_TOKEN_LEN:
-            raise KeywordTooShortError(f"keyword {keyword!r} is shorter than {SEARCH_MIN_TOKEN_LEN} characters")
         folded = keyword.lower()
         if folded in seen:
             continue
         seen.add(folded)
         keywords.append(keyword)
     return keywords
+
+
+def matches_phrase(text: str, keywords: list[str]) -> bool:
+    """Check whether *keywords* appear as a contiguous phrase in *text*.
+
+    Args:
+        text (str): Haystack — typically the ``search_text`` payload.
+        keywords (list[str]): Keywords in query order.
+
+    Returns:
+        bool: ``True`` when the phrase occurs (case-insensitive,
+            whitespace-normalized) or when there are fewer than two keywords
+            (no phrase to check).
+    """
+    if len(keywords) <= 1:
+        return True
+    phrase = " ".join(keywords).lower()
+    normalized = " ".join(text.lower().split())
+    return phrase in normalized
 
 
 def not_coarse_condition() -> models.Filter:
