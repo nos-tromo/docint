@@ -4748,7 +4748,8 @@ class RAG:
 
         Args:
             payload (dict[str, Any]): A Qdrant point payload.
-            key (str): A dotted key from :func:`group_payload_key`.
+            key (str): A dotted Qdrant JSON-path key, e.g. one produced by
+                :func:`search_payload_key` or :func:`group_payload_key`.
 
         Returns:
             str: The stringified value, or ``""`` when any path segment is
@@ -4974,14 +4975,15 @@ class RAG:
         # Idempotent and fail-soft, like the posting_uuid index above.
         ensure_search_index(self.qdrant_client, self.qdrant_collection)
 
-        # Grouped search facets on payload keys, which need KEYWORD indexes.
-        # Same idempotent, fail-soft posture as the two indexes above.
-        if ensure_group_indexes(self.qdrant_client, self.qdrant_collection):
-            self._group_indexes_ensured.add(self.qdrant_collection)
-
         # Field search matches metadata keys the way it matches the text, so
         # each needs the same prefix/lowercase index. Same idempotent,
-        # fail-soft posture as the two indexes above.
+        # fail-soft posture as the two indexes above. NOT paired with an
+        # `ensure_group_indexes` call here: the grouped/facet lane's KEYWORD
+        # indexes on these same keys would immediately be replaced by the
+        # TEXT indexes below (Qdrant holds one index per field), so building
+        # them here would be dead work undone by the next statement. The
+        # grouped lane still ensures its own indexes lazily on first use —
+        # see `_ensure_group_indexes_once` — and is removed in a later task.
         if ensure_field_indexes(self.qdrant_client, self.qdrant_collection):
             self._field_indexes_ensured.add(self.qdrant_collection)
 
