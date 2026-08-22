@@ -205,6 +205,14 @@ of network, proxy, and runtime overrides are Compose-specific:
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | Per-request upload cap nginx enforces on the frontend (default `1g`); the backend reads the same value to advertise it to the SPA (which batches large uploads under it). Raise only for single files larger than the default. |
 | `PRELOAD_MODELS` | When `true`, the backend runs `load-models` at startup before `uvicorn`. |
 
+If you use an outbound proxy, put the proxy variables in `.env` too, so
+Compose, image builds, and containers all use the same values.
+
+First startup may take a while because model assets are downloaded into the
+shared cache volumes. Pre-warm them with `make volumes` plus
+`PRELOAD_MODELS=true` (or `uv run load-models` on the host) to move that cost
+off the first request.
+
 ## Session persistence
 
 The backend defaults `SESSIONS_DB_PATH` to
@@ -247,6 +255,11 @@ To run both on a single host with a shared network:
    make build
    make up
    ```
+
+Deploy the vLLM stack **before** Docint. Docint expects the router to expose
+one OpenAI-compatible base URL ending in `/v1`, plus the vLLM sparse routes at
+`/pooling` and `/tokenize` (see
+[configuration.md](configuration.md#sparse-encoder--hybrid-retrieval--sparseclientconfig)).
 
 For a remote vLLM router, drop `INFERENCE_NET` and point
 `OPENAI_API_BASE` at the external URL.
