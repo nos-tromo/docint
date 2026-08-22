@@ -1,6 +1,6 @@
 # CLI reference
 
-Docint ships seven console scripts, all registered in
+Docint ships nine console scripts, all registered in
 `pyproject.toml` `[project.scripts]` and installed automatically when
 you run `uv sync`.
 
@@ -9,6 +9,8 @@ you run `uv sync`.
 | `docint` | `docint.cli.serve:main` | Run the FastAPI backend (uvicorn). |
 | `ingest` | `docint.cli.ingest:main` | Batch ingest documents into a collection. |
 | `resolve` | `docint.cli.resolve:main` | Merge duplicate / semantically-similar entities into durable canonicals. |
+| `search-index` | `docint.cli.search_index:main` | Build the full-text `search_text` payload index for one collection. |
+| `search-index-all` | `docint.cli.search_index:main_all` | Backport that index across every collection on the host. |
 | `query` | `docint.cli.query:main` | Run batch chat queries and collection-level exports. |
 | `query-eval` | `docint.cli.eval:main` | Corpus retrieval evaluation across retrieval modes. |
 | `verify` | `docint.cli.verify:main` | Check Qdrant ↔ docstore consistency (optionally repair). |
@@ -183,6 +185,27 @@ the internal `_store_output()` / `_store_text_output()` /
 `_store_csv_output()` helpers (`query.py:167`, `197`, `211`). Chat results
 are serialised as JSON, summary/export results as text or CSV as
 appropriate.
+
+### Collection exports without an HTTP connection
+
+`--entities` and `--hate-speech` write the same CSVs the backend's
+[collection export endpoints](api-reference.md#collection-csv-exports) stream —
+both sides share the schemas in `docint/utils/csv_stream.py`, so the streaming
+endpoint and the CLI produce byte-identical CSVs for the same collection.
+
+For batch jobs that take many minutes (or should not hold an HTTP connection
+open), run the CLI inside the backend container. There is no `--output` flag:
+results land in `RESULTS_PATH`, which compose pins to
+`/var/lib/docint/pipeline/results` on the `pipeline-storage` volume, under a
+per-run `{unix_timestamp}_{collection}` subdirectory. Copy them out with
+`docker compose cp`:
+
+```bash
+docker compose --env-file .env -f docker/compose.yaml \
+  exec backend query --collection my_collection --all
+docker compose --env-file .env -f docker/compose.yaml cp \
+  backend:/var/lib/docint/pipeline/results ./exports
+```
 
 ### Example
 

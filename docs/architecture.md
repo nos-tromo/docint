@@ -152,6 +152,26 @@ The diagram below expands what happens when the UI calls `POST /query` or
      Qdrant failures.
    - A file-hash ledger skips re-ingesting unchanged files.
 
+## Multi-tenancy and data isolation
+
+Collections, chat sessions, and reports are owner-scoped: each user sees and
+operates only on the collections they ingested and the reports they created.
+Collection names are per-user — two users can each have a `my_collection`
+without collision (the physical Qdrant collection is namespaced per owner; the
+bare name is shown in the UI). Every collection-scoped request carries its
+collection explicitly and is owner-gated (cross-owner access is a 404), and the
+active collection is resolved per-request, so concurrent users on different
+collections never interfere. Chat sessions are further scoped to the collection
+they were created in: the sidebar lists only the active collection's chats,
+resuming a chat requires its collection to be active, and **deleting a
+collection also deletes its chat sessions** (along with the collection's
+documents and companion data).
+
+The principal itself comes from a trusted header — see
+[configuration.md](configuration.md#identity-and-authentication--principalconfig)
+for `DOCINT_AUTH_HEADER`, `DOCINT_DEFAULT_IDENTITY`, and the admin-group
+override.
+
 ## Stateless vs. session-aware retrieval
 
 - **Stateless** — `retrieval_mode="stateless"` on `/query`. No session is

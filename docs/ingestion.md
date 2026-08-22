@@ -71,8 +71,9 @@ and cite as independent, normally-ranked sources naming the source clip.
 A social export's `postings.csv` / `media.csv` manifest changes *linking*,
 not *whether* transcription happens: media resolved from the manifest is
 **additionally** stamped with its parent posting's `posting_uuid` so it
-groups with that posting at citation time (see "Social Multimodal Media" in
-`README.md`), while any other loose audio/video elsewhere in the batch still
+groups with that posting at citation time (see
+[Social media exports](#social-media-exports) below), while any other loose
+audio/video elsewhere in the batch still
 goes through the standalone path above. Both require `NEXTEXT_API_BASE`;
 when it is unset, audio/video files are skipped with a one-line warning and
 the rest of the batch still ingests normally. A pre-made Nextext `.jsonl`
@@ -81,6 +82,72 @@ transcribe out of band.
 
 Every other extension is dispatched to the reader that knows how to parse it
 (see the next section).
+
+## Social media exports
+
+Docint can ingest social-media exports that pair text **postings** with linked
+**media files** (images, video, audio). The ingestion pipeline reads a
+`media.csv` manifest, joins each media file to its parent posting (by `Network
+ID`, else `Media ID`, matched against the postings' `Posting ID`), and routes
+each artifact to the right backend — images go through
+CLIP, video/audio are transcribed by Nextext and keyframe-extracted.
+
+**One flat directory.** Put `postings.csv`, `media.csv`, and every referenced
+media file in a **single directory**, and ingest that directory. Media are
+resolved by filename *within that one directory* — no subfolders, and no
+relative or absolute paths in the manifest (only the basename is used) — so a
+file is linked only when it sits directly beside the manifest. Upload it with
+the SPA's folder picker, or point `DATA_PATH` at that directory.
+
+**Linker.** During ingestion, `posting_uuid` is written into every artifact
+node (image embedding, keyframe, Nextext transcript segment). At retrieval
+time, `_attach_posting_group` reads that UUID from `reference_metadata.uuid`
+or the top-level `posting_uuid` field and tags each source dict with a
+`posting_group` key so the UI can render a post alongside all its media as a
+single entity.
+
+**Posting reference metadata.** Every linked artifact also carries the parent
+posting's reference fields — `posting_network`, `posting_author`,
+`posting_author_id`, `posting_vanity`, `posting_timestamp`, `posting_url`, and
+the full `posting_text` — merged *additively* into its `reference_metadata`
+(a transcript segment keeps its `network: nextext` / `type: transcript_segment`
+identity). These fields are stored in the Qdrant payload at ingest time and
+surface everywhere reference metadata renders: chat citations, entity and
+hate-speech findings, report exports (MD/HTML/PDF), and the findings CSVs.
+Collections ingested before this feature must be **re-ingested** to pick the
+fields up — there is no payload migration (cached Nextext transcripts make
+this cheap: only embedding is redone, not transcription). See
+[migrations.md](migrations.md#payload-fields-added-after-a-collection-was-ingested).
+
+**Nextext transcription.** Video/audio transcription is delegated to an
+external Nextext service. `NEXTEXT_API_BASE` is required to enable
+social-media ingestion, and **must include Nextext's `/api/v1` prefix**:
+docint's client calls `{NEXTEXT_API_BASE}/jobs`, and Nextext mounts its jobs
+router under `/api/v1`, so a base URL without that suffix 404s on every
+request.
+
+Nextext resolves each request's identity from a trusted header (its
+`NEXTEXT_AUTH_HEADER`, default `X-Auth-User`) and rejects header-less callers
+with 401 unless its own default-identity fallback is configured. docint sends
+`NEXTEXT_IDENTITY` (default `docint`) under `NEXTEXT_AUTH_HEADER` (default
+`X-Auth-User`) on every request; set `NEXTEXT_IDENTITY` to empty to suppress
+the header, e.g. when a gateway in between injects it instead.
+
+When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
+video/audio files are skipped gracefully — collections with no audio/video are
+unaffected (loose audio/video in any batch is transcribed when
+`NEXTEXT_API_BASE` is set — see the standalone path under
+[Supported file types](#supported-file-types) above).
+
+**Keyframe sampling.** Keyframes are extracted at a configurable rate
+(`KEYFRAMES_PER_MINUTE`), capped (`KEYFRAMES_MAX`), pruned by cosine
+similarity (`KEYFRAME_DEDUP_COSINE`) before captioning, and ingested alongside
+the transcript. Transcripts are cached in the per-collection `IngestManifest`
+by media-file hash so re-ingestion of unchanged files skips the Nextext
+round-trip entirely.
+
+Every `NEXTEXT_*` and `KEYFRAME*` variable, with its default, is documented in
+[configuration.md](configuration.md#nextext-media-processing--nextextconfig).
 
 ## Readers
 
@@ -147,6 +214,8 @@ ingestion path:
 - When `IMAGE_OCR_ENABLED` is on, the OCR engine reads the text printed
   inside the image and stores it as `ocr_text` — ahead of the caption in
   the node text and in the search index, since it is what a reader typed.
+  A caption says what a picture *shows*; OCR says what it *says*, which is
+  what someone searching for a screenshot's wording actually typed.
 - When `IMAGE_TAGGING_ENABLED=true`, the vision LLM is called to produce
   tags / captions. Images exceeding `IMAGE_TAGGING_MAX_IMAGE_DIM` are
   down-scaled first.
@@ -357,6 +426,23 @@ A batch of more than 50 files lists the first 50 and then prints
 The summary reports `duration` and `duration_ms` both — the second is the
 exact integer the SPA's ingest card renders, so the two provably agree
 rather than nearly agreeing.
+
+### A run has exactly one duration
+
+The server measures it once — from the moment the user started, upload leg
+included, through the queue wait and every stage of the job — and both the
+backend log's run summary (`Ingest job completed | … duration=00:19
+duration_ms=19004 …`) and the ingest card's timer show that same value. The
+card gets it from `duration_ms` on the terminal SSE frame, and a reattached
+client from the job snapshot's `duration_ms` / `run_started_at`
+(`started_at` still means "a worker slot was acquired"). The log prints
+both forms for the same reason — a readable one and the exact integer the
+card renders, so the two can be compared rather than trusted. Because the
+upload happens before the job exists, the SPA reports how long it took as
+`upload_elapsed_ms` on `POST /ingest/finalize` — an elapsed duration, never
+a timestamp, so no client clock is trusted, and it is clamped server-side.
+Deriving a second duration on the client is what previously let one run
+report two numbers a second apart.
 
 ### Progress and the throttle
 

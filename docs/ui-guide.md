@@ -168,6 +168,59 @@ over the active collection, plus a per-session ZIP export
 file-type / entity-type breakdown stay accurate regardless of how many pages
 the table has lazily loaded (the counts are not derived from the loaded rows).
 
+### Report (`src/routes/Report.tsx`)
+
+The Report Builder surface. Lists the caller's reports and, for the active one,
+shows the picked artifacts grouped by type with per-item notes, reordering, and
+removal, plus the five export formats. Artifacts are added from elsewhere in
+the app: an **"+ Report"** control sits on every chat answer, entity finding,
+and hate-speech finding. Switching the active collection releases the active
+report, so a report and its evidence always describe the same collection.
+
+The full workflow — snapshot semantics, frozen image evidence, and what each
+export contains — is in [reports.md](reports.md).
+
+## Localization
+
+The single env var `RESPONSE_LANGUAGE` (values `en` | `de`, default `en`)
+controls the *entire* app — both backend and SPA chrome — with one knob:
+
+- **Backend**: prompts, `ui_strings` in reports, and export captions (PDF
+  headers, CSV column names). Unknown values silently fall back to `en`.
+- **SPA**: The React interface — buttons, labels, navigation, form hints, and
+  error messages — flows from a typed locale catalog (`frontend/src/i18n/`)
+  with `en` and `de` as canonical languages, maintained in parity with each new
+  feature. The `useT()` hook and `LanguageProvider` read `RESPONSE_LANGUAGE`
+  from `GET /config`.
+
+Keys are dot-namespaced by screen (`common.*`, `chat.*`, `ingest.*`, …) and
+interpolate via `{name}` placeholders. JSON output schemas, intent labels,
+enum values, and API field names stay English in every locale — they are
+protocol, not prose. See
+[configuration.md](configuration.md#response-language--languageconfig).
+
+### On-demand translation of source content
+
+Chat source citations, entity findings, and hate-speech findings each show a
+hover/focus-revealed **Translate** control. Clicking it fetches an on-demand
+machine translation into the operator's active locale (`RESPONSE_LANGUAGE`)
+and swaps it in for the original in place — a "Translation" label marks the
+swapped view, and a second click ("Show original") brings the original back;
+the original is always one click away, never discarded. Long chunks stay
+clamped to four lines behind a "Show more" toggle in either view. This is a
+display-time overlay only: nothing ingested or stored is ever translated.
+
+Translating a finding before adding it to a report carries that translation
+into the report's snapshot — see [reports.md](reports.md).
+
+Translation reuses the same chat model as the rest of docint over the same
+router endpoint — there is no dedicated translation runtime and no
+`TRANSLATE_API_BASE` to configure. Set `TRANSLATE_MODEL` in `.env` to use a
+different model than chat's `TEXT_MODEL`; it defaults to `TEXT_MODEL`.
+Airgap-safe: no new container and no new network egress target. A
+target-language override (translating into a language other than the active
+locale) is not yet supported.
+
 ## State
 
 - **`src/stores/ui.ts`** (`useUiStore`, Zustand) — selected collection,

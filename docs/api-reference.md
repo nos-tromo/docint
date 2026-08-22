@@ -34,13 +34,32 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `GET`  | `/collections/ner/search` | `Query` | Search for entities by name/pattern. |
 | `GET`  | `/collections/ner/graph` | `Query` | Derived entity graph (nodes + edges) for the active collection. |
 | `GET`  | `/collections/hate-speech` | `Query` | Hate-speech findings for the active collection. |
+| `POST` | `/collections/entities/resolve` | `Query` | Merge duplicate / semantically-similar entities into durable canonicals. |
 | `GET`  | `/collections/documents` | `Query` | List documents in a collection. |
 | `GET`  | `/collections/documents/summary` | `Query` | Collection-wide document aggregates (document/node totals + file-type / entity-type breakdown) for the Inspector KPI strip. |
+| `GET`  | `/collections/{name}/export/documents.csv` | `Query` | Stream the documents table as CSV. |
+| `GET`  | `/collections/{name}/export/entities.csv` | `Query` | Stream the top entities by mention frequency as CSV. |
+| `GET`  | `/collections/{name}/export/hate-speech.csv` | `Query` | Stream the hate-speech findings table as CSV. |
 | `GET`  | `/sessions/list` | `Sessions` | List stored sessions. |
 | `GET`  | `/sessions/{session_id}` | `Sessions` | Return conversation history for a session. |
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |
 | `PUT` | `/sessions/{session_id}/scope` | `Sessions` | Restrict the session's answers to hand-picked chunks. |
 | `DELETE` | `/sessions/{session_id}/scope` | `Sessions` | Return the session to normal retrieval. |
+| `POST` | `/reports` | `Reports` | Create an empty report owned by the caller. |
+| `GET`  | `/reports` | `Reports` | List the caller's reports, optionally filtered by collection. |
+| `GET`  | `/reports/{report_id}` | `Reports` | Return one owned report with its ordered items. |
+| `PATCH` | `/reports/{report_id}` | `Reports` | Update title, case metadata, or the contents toggle. |
+| `DELETE` | `/reports/{report_id}` | `Reports` | Delete a report and its items. |
+| `POST` | `/reports/{report_id}/collection-overview/refresh` | `Reports` | Recapture the frozen document-overview snapshot. |
+| `POST` | `/reports/{report_id}/items` | `Reports` | Add a snapshotted artifact (idempotent by dedupe key). |
+| `PATCH` | `/reports/{report_id}/items/{item_id}` | `Reports` | Set or clear an item's note. |
+| `DELETE` | `/reports/{report_id}/items/{item_id}` | `Reports` | Remove one item from a report. |
+| `POST` | `/reports/{report_id}/items/reorder` | `Reports` | Reorder a report's items. |
+| `GET`  | `/reports/{report_id}/export.md` | `Reports` | Combined Markdown export. |
+| `GET`  | `/reports/{report_id}/export.html` | `Reports` | Self-contained HTML export (also the PDF source). |
+| `GET`  | `/reports/{report_id}/export.pdf` | `Reports` | Paginated case-file PDF (WeasyPrint); `503` when unavailable. |
+| `GET`  | `/reports/{report_id}/export.json` | `Reports` | Structured selection with snapshots. |
+| `GET`  | `/reports/{report_id}/export.zip` | `Reports` | Per-type CSV bundle. |
 | `POST` | `/agent/chat` | `Agent` | Run the agent orchestrator for one turn (non-streaming). |
 | `POST` | `/agent/chat/stream` | `Agent` | Streaming orchestrator variant (SSE tokens). |
 | `POST` | `/ingest/upload` | `Ingestion` | Stage files into a collection's batch directory (upload only, no ingestion). |
@@ -471,6 +490,126 @@ Returns the list of chunks flagged by hate-speech detection as
 
 Lists the documents currently stored in the active collection.
 
+### Collection CSV exports
+
+The React UI streams collection-wide CSVs from the backend so the browser never
+accumulates the whole result set in memory. Export endpoints are **owner-gated
+by the collection name in the path** — there is no "select" step, so they are
+stateless and usable from any client with HTTP access to the backend. Behind a
+trusted proxy, pass the user header (e.g. `-H 'X-Auth-User: alice'`); with
+`DOCINT_DEFAULT_IDENTITY` set the header is optional. `404` when the collection
+is not owned by the caller.
+
+| Route | Contents | Schema |
+|---|---|---|
+| `GET /collections/{name}/export/documents.csv` | One row per document, read from `RAG.list_documents()`. | `DOCUMENT_COLUMNS` |
+| `GET /collections/{name}/export/entities.csv` | Top entities by mention frequency (`rank,entity,type,mentions`), mirroring the CLI's `query --entities`. Query params: `top_k` (default `50`), `min_mentions` (default `1`), `entity_type`, `entity_merge_mode`. | `ENTITY_STATS_COLUMNS` |
+| `GET /collections/{name}/export/hate-speech.csv` | The hate-speech findings table, filtered by the same logic as `GET /collections/hate-speech`. Query params: `category`, `min_confidence`. | `HATE_SPEECH_COLUMNS` |
+
+The examples below assume the API is reachable on port 8000; under Docker the
+backend publishes no host port, so run them from inside the network or through
+the gateway.
+
+```bash
+curl -O "http://localhost:8000/collections/my_collection/export/entities.csv"
+curl -O "http://localhost:8000/collections/my_collection/export/hate-speech.csv"
+curl -O "http://localhost:8000/collections/my_collection/export/documents.csv"
+
+# The entities export honours the same merge modes as the Analysis view --
+# pass entity_merge_mode=resolved to stream the durable canonical entities
+# (run `make resolve` first; falls back to orthographic if not resolved).
+curl -O "http://localhost:8000/collections/my_collection/export/entities.csv?entity_merge_mode=resolved"
+```
+
+All CSV schemas are defined in `docint/utils/csv_stream.py`, which the
+streaming endpoints and the `query` CLI share — so both produce byte-identical
+CSVs for the same collection. For batch jobs that take many minutes (or should
+not hold an HTTP connection open), run the CLI inside the backend container
+instead; see [cli-reference.md](cli-reference.md#query--batch-chat-summaries-exports).
+
+A fourth route, `GET /collections/{name}/export/ner-sources.csv`, streams
+per-source entity findings (the rows the SPA's entity inspector shows) using
+the same filters as `GET /collections/ner/sources`.
+
+## Reports
+
+Reports are the Report Builder's persistence layer: an owner-scoped, curated
+selection of chat answers and findings, each **snapshotted at add-time** so a
+later re-ingestion never changes a finished report. See
+[reports.md](reports.md) for the workflow and the export formats.
+
+Every route resolves the caller's principal and answers `404` when the report
+(or item) is missing **or** owned by another principal — existence never leaks.
+
+### `POST /reports`
+
+Creates an empty report (`ReportCreateIn`: `title`, plus optional
+`collection_name`, `operator`, `reference_number`, `session_id`). When
+`collection_name` is given, the document overview is captured once at create
+time; that capture is fail-soft — a Qdrant hiccup leaves the snapshot null
+rather than failing creation.
+
+### `GET /reports`
+
+Lists the caller's reports (`ReportListOut` — `{"reports": [...]}`). Optional
+`collection` query parameter filters to one collection.
+
+### `GET /reports/{report_id}`
+
+Returns one owned report together with its ordered items.
+
+### `PATCH /reports/{report_id}`
+
+Updates a report (`ReportUpdateIn`) — title, case metadata, or the contents
+toggle. Only non-null fields apply.
+
+### `DELETE /reports/{report_id}`
+
+Deletes the report and its items. Returns `{"ok": true}`.
+
+### `POST /reports/{report_id}/collection-overview/refresh`
+
+Recaptures the frozen document-overview snapshot from the collection's
+*current* documents. `400` when the report has no collection; `502` when the
+manifest build fails.
+
+### `POST /reports/{report_id}/items`
+
+Adds a snapshotted artifact (`ReportItemIn`: `artifact_type`, `dedupe_key`,
+`snapshot`, optional `note`, and the `collection` the artifact came from).
+Idempotent by `dedupe_key`, so re-adding the same chunk returns the existing
+item. Image-bearing snapshots are enriched with a frozen thumbnail on the way
+in.
+
+### `PATCH /reports/{report_id}/items/{item_id}`
+
+Sets or clears an item's note (`ReportItemNoteIn`; `null` clears).
+
+### `DELETE /reports/{report_id}/items/{item_id}`
+
+Removes one item. Returns `{"ok": true}`.
+
+### `POST /reports/{report_id}/items/reorder`
+
+Reorders the report's items to the supplied id order (`ReportReorderIn`:
+`item_ids`). Returns the reordered report.
+
+### `GET /reports/{report_id}/export.{md,html,json,zip,pdf}`
+
+Renders a finished report. All five share one owner check and one filename
+stem derived from the report:
+
+| Route | Media type | Disposition |
+|---|---|---|
+| `export.md` | `text/markdown; charset=utf-8` | attachment |
+| `export.html` | `text/html; charset=utf-8` | inline (also the PDF source) |
+| `export.json` | `application/json` | attachment |
+| `export.zip` | `application/zip` | attachment — per-type CSVs, reusing the `csv_stream.py` schemas |
+| `export.pdf` | `application/pdf` | attachment — paginated, rendered by WeasyPrint |
+
+`export.pdf` answers `503` when the PDF engine (WeasyPrint plus its native
+libraries) is unavailable; the other four formats are unaffected.
+
 ## Sessions
 
 ### `GET /sessions/list`
@@ -581,6 +720,13 @@ Splitting a large selection across several upload batches means ingestion
 happens once over the whole staged directory, instead of once per batch
 (which would re-initialise the pipeline's models per batch and hard-fail on
 any batch that happened to hold only reader-unsupported files).
+
+A failed batch is reported without blocking the rest: `/ingest/finalize` still
+runs over whatever was staged, and already-saved files are skipped on retry
+since ingestion is idempotent by file hash. The batch size the SPA picks comes
+from `max_upload_bytes` on `GET /config`, which mirrors
+`DOCINT_CLIENT_MAX_BODY_SIZE` — the nginx per-request cap. The total upload is
+therefore not bounded by that cap; only a *single* file larger than it is.
 
 ### `POST /ingest/finalize`
 
