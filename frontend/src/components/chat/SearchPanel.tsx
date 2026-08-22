@@ -1,22 +1,12 @@
 import { useState } from 'react'
-import {
-  Banner,
-  Button,
-  Card,
-  ChevronsUpDownIcon,
-  DownloadLink,
-  Input,
-  SearchButton,
-  SelectMenu,
-  XIcon
-} from '@infra/ui'
+import { Banner, Button, Card, DownloadLink, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import { searchExportHref } from '@/api/search'
-import type { GroupByField, SearchHit } from '@/api/types'
-import { GROUP_BY_FIELDS } from '@/api/types'
-import { useAggregate, useSearch, useScope } from '@/hooks/useSearch'
+import type { SearchField, SearchHit } from '@/api/types'
+import { SEARCH_FIELDS } from '@/api/types'
+import { useSearch, useScope } from '@/hooks/useSearch'
 import {
   scopeChunkIds,
   scopeEstTokens,
@@ -26,7 +16,6 @@ import {
 } from '@/stores/searchUi'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
-import { SearchGroups } from '@/components/chat/SearchGroups'
 import { SearchHitRow } from '@/components/chat/SearchHit'
 import { CheckAllIcon } from '@/components/common/icons'
 import { useT } from '@/i18n/LanguageContext'
@@ -61,6 +50,9 @@ export interface SearchPanelProps {
  * Full-text search over the active collection, with the hits doubling as the
  * chat's evidence picker.
  *
+ * One lane: the `Search in` picker chooses the payload field; hits are
+ * always chunks.
+ *
  * Three response states are kept visually distinct and must stay that way: a
  * collection that was never search-indexed, a backfill that is incomplete
  * (hits *plus* a warning that the list is short), and a genuine zero-match
@@ -79,18 +71,15 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const setScopeTokens = useSearchUiStore((s) => s.setScopeTokens)
   const setScopeMeta = useSearchUiStore((s) => s.setScopeMeta)
   const scope = useSearchUiStore((s) => scopeFor(s, key))
-  const mode = useSearchUiStore((s) => s.mode)
-  const groupBy = useSearchUiStore((s) => s.groupBy)
-  const setMode = useSearchUiStore((s) => s.setMode)
-  const setGroupBy = useSearchUiStore((s) => s.setGroupBy)
+  const field = useSearchUiStore((s) => s.field)
+  const setField = useSearchUiStore((s) => s.setField)
 
-  // Hits mode keeps the ranked top-k query; Groups mode runs the exhaustive
-  // facet query instead. Both read the same submitted `query` and filters, so
-  // switching modes never re-asks the question.
-  const search = useSearch(mode === 'hits' ? query : '')
-  const grouped = useAggregate(query, groupBy, mode === 'groups')
+  // One lane: the picker decides which payload field the keywords match,
+  // and the result is always chunks. `field` is part of the query key, so
+  // switching it re-runs the submitted query without re-asking it.
+  const search = useSearch(query, field)
+  const active = search
   const filters = useChatFiltersStore().buildPayload()
-  const active = mode === 'groups' ? grouped : search
   const { set } = useScope(sessionId)
   const [scopeError, setScopeError] = useState<string | null>(null)
 
@@ -99,12 +88,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   const estTokens = scopeEstTokens(scope)
   const hits = search.data?.hits ?? []
   const docCount = new Set(hits.map((h) => h.filename ?? '').filter(Boolean)).size
-  // What "everything on screen" means in the active mode: Hits' ranked page,
-  // or every sample the exhaustive Groups/Social query already loaded — not
-  // gated on any one group's disclosure being open, since the data is there
-  // either way. This is what lets mark-all work in Social mode at all.
-  const visibleHits: SearchHit[] =
-    mode === 'hits' ? hits : (grouped.data?.groups.flatMap((g) => g.samples) ?? [])
+  // Named apart from `hits` for the mark-all/token-projection code below,
+  // which only cares what is currently on screen — not how it got there.
+  const visibleHits: SearchHit[] = hits
 
   // The scope everything currently loaded would produce: what is already
   // picked plus every hit/sample on screen. Selecting all is additive — it
@@ -195,55 +181,22 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         <SearchButton label={t('search.submit')} type="submit" variant="secondary" size="md" />
       </form>
 
-      {/* Hits (ranked top-k) vs Groups (exhaustive, faceted by a payload
-          field) — a toggle rather than two panels, so the query and the
-          scope stay put across the switch. The group-by picker only makes
-          sense once Groups is chosen. */}
-      <div className="flex items-center gap-2" data-testid="search-mode-row">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-pressed={mode === 'hits'}
-          onClick={() => setMode('hits')}
-          className={cn('text-xs', mode === 'hits' && 'font-semibold text-foreground')}
-        >
-          {t('search.mode_hits')}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-pressed={mode === 'groups'}
-          onClick={() => setMode('groups')}
-          className={cn('text-xs', mode === 'groups' && 'font-semibold text-foreground')}
-        >
-          {t('search.mode_groups')}
-        </Button>
-        {mode === 'groups' && (
-          <>
-            {/* Marks the picker beside it as a grouping/sorting axis, not a
-                filter — the seam a user hit when they typed an author id into
-                the search box next to it expecting a match. Both directions
-                at once, since nothing here is "currently sorted". Decorative:
-                the picker's own label already carries the accessible name. */}
-            <ChevronsUpDownIcon
-              aria-hidden="true"
-              className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-            />
-            <SelectMenu
-              options={GROUP_BY_FIELDS.map((field) => ({
-                value: field,
-                label: t(`search.group_by.${field}`)
-              }))}
-              value={groupBy}
-              onChange={(value) => setGroupBy(value as GroupByField)}
-              label={t('search.group_by')}
-              className="min-w-0"
-              triggerClassName="text-xs font-medium"
-            />
-          </>
-        )}
+      {/* "Search in": which payload field the keywords match. Always shown —
+          it is a property of the query, not a mode. Text (the chunk body)
+          is the default; the metadata fields answer "everything this
+          author / id / network wrote" as a plain search. */}
+      <div className="flex items-center gap-2" data-testid="search-field-row">
+        <SelectMenu
+          options={SEARCH_FIELDS.map((name) => ({
+            value: name,
+            label: t(`search.field.${name}`)
+          }))}
+          value={field}
+          onChange={(value) => setField(value as SearchField)}
+          label={t('search.field')}
+          className="min-w-0"
+          triggerClassName="text-xs font-medium"
+        />
       </div>
 
       {!collection ? (
@@ -258,17 +211,12 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               {activeError()}
             </p>
           )}
-          {/* One line for everything the result set is — hits or groups,
-              documents, what the selection costs — and the two things you can
-              do to all of it at once, in both modes. Deliberately one line:
-              the meter used to be a row of its own that appeared on the first
-              selection and shoved the whole hit list down, so picking
-              evidence moved the thing you were reading. Content changes, row
-              count does not — and now so does the row itself: Hits and
-              Groups/Social used to keep separate summary rows with different
-              controls and different alignment, which is exactly what let
-              mark-all, export and the token meter drift out of sync between
-              tabs.
+          {/* One line for everything the result set is — hits, documents,
+              what the selection costs — and the two things you can do to
+              all of it at once. Deliberately one line: the meter used to be
+              a row of its own that appeared on the first selection and
+              shoved the whole hit list down, so picking evidence moved the
+              thing you were reading. Content changes, row count does not.
 
               The row follows the *selection* as well as what's loaded: after
               picking chunks and then searching for something with no
@@ -281,28 +229,26 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               ("the results loaded so far, not every match") and the
               projected cost live — the *danger* case keeps its own visible
               line below. Both controls share `h-7 w-7 shrink-0 px-0` so they
-              measure identically in both modes; the summary `<p>`'s `flex-1`
-              pins them upper-right, flush with the column above.
+              measure identically; the summary `<p>`'s `flex-1` pins them
+              upper-right, flush with the column above.
 
-              The token meter is its own `shrink-0` flex child now, never text
-              inside that `<p>`. The counts prose is unbounded — Groups/Social
-              alone can stack group count, doc/unassigned count and the capped
-              notice into four `·`-joined segments, easily past the ~45
-              characters this column gives it at `text-xs` — so *something*
-              has to give under `truncate`. It must be the counts, not the
-              meter: an ellipsised group count still reads as "more than
-              fits", but an ellipsised token count reads as "the selection
-              fits" when it doesn't, or vanishes right when it matters most —
-              the moment a selection is live. Keeping the meter a sibling
-              rather than trailing content also means it needs no leading
-              separator of its own to worry about running into the counts. */}
-          {(active.data || selectedIds.length > 0) && (
+              The token meter is its own `shrink-0` flex child, never text
+              inside that `<p>`. The counts prose can still run long — many
+              hits across many documents — so *something* has to give under
+              `truncate`. It must be the counts, not the meter: an ellipsised
+              hit count still reads as "there is more", but an ellipsised
+              token count reads as "the selection fits" when it doesn't, or
+              vanishes right when it matters most — the moment a selection is
+              live. Keeping the meter a sibling rather than trailing content
+              also means it needs no leading separator of its own to worry
+              about running into the counts. */}
+          {(active.data || selectedIds.length > 0 || query.trim() === '') && (
             <div className="flex items-center gap-1" data-testid="search-summary-row">
               <p
                 className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
                 data-testid="search-summary"
               >
-                {mode === 'hits' && search.data && (
+                {search.data && (
                   <>
                     {search.data.total != null
                       ? t('search.hits', { count: search.data.total })
@@ -311,26 +257,6 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                     {search.data.next_cursor
                       ? t('search.docs_more', { count: docCount })
                       : t('search.docs', { count: docCount })}
-                  </>
-                )}
-                {mode === 'groups' && grouped.data && (
-                  <>
-                    {t('search.groups_summary', {
-                      groups: grouped.data.groups.length,
-                      total: grouped.data.total
-                    })}
-                    {grouped.data.unassigned > 0 && (
-                      <>
-                        {' · '}
-                        {t('search.groups_unassigned', { count: grouped.data.unassigned })}
-                      </>
-                    )}
-                    {grouped.data.groups.length >= grouped.data.limit && (
-                      <>
-                        {' · '}
-                        {t('search.groups_capped', { limit: grouped.data.limit })}
-                      </>
-                    )}
                   </>
                 )}
               </p>
@@ -347,29 +273,28 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
                     : t('search.budget_selected', { used: formatTokens(estTokens) })}
                 </span>
               )}
-              {collection &&
-                (mode === 'hits'
-                  ? hits.length > 0 && query.trim() !== ''
-                  : (grouped.data?.groups.length ?? 0) > 0) && (
-                  <DownloadLink
-                    href={searchExportHref(collection, {
-                      question: query,
-                      groupBy: mode === 'groups' ? groupBy : undefined,
-                      filters,
-                      sessionId,
-                      // Redundant once a session exists — commitScope has
-                      // already written the same selection server-side by
-                      // the time this link can be clicked — and a scope has
-                      // no count cap, only a token budget, so hundreds of
-                      // ids serialized here could blow the URL past the
-                      // gateway's header limit. It only earns its place
-                      // pre-session, under the 'new' key.
-                      markedIds: sessionId ? undefined : selectedIds
-                    })}
-                    label={t('search.export_results')}
-                    className="h-7 w-7 shrink-0 px-0"
-                  />
-                )}
+              {/* A blank query still exports: the whole filtered collection,
+                  the one export the panel cannot show on screen. */}
+              {collection && (query.trim() === '' || hits.length > 0) && (
+                <DownloadLink
+                  href={searchExportHref(collection, {
+                    question: query,
+                    field,
+                    filters,
+                    sessionId,
+                    // Redundant once a session exists — commitScope has
+                    // already written the same selection server-side by
+                    // the time this link can be clicked — and a scope has
+                    // no count cap, only a token budget, so hundreds of
+                    // ids serialized here could blow the URL past the
+                    // gateway's header limit. It only earns its place
+                    // pre-session, under the 'new' key.
+                    markedIds: sessionId ? undefined : selectedIds
+                  })}
+                  label={t('search.export_results')}
+                  className="h-7 w-7 shrink-0 px-0"
+                />
+              )}
               {/* One control, both directions: pick everything loaded, press
                   again to let it all go. Two buttons sat side by side where
                   only one was ever live, and a selection is a state you flip,
@@ -429,9 +354,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
         </p>
       )}
 
-      {/* The three states below are deliberately separate branches. Hits and
-          Groups share them — a collection with no search index, or a partial
-          backfill, means the same thing for either query. */}
+      {/* The three states below are deliberately separate branches: a
+          collection with no search index, or a partial backfill, must never
+          be collapsed into a plain zero-hit result. */}
       {active.data?.status === 'not_indexed' && (
         <Banner variant="info" data-testid="search-not-indexed">
           {t('search.not_indexed')}
@@ -442,33 +367,23 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
           {t('search.partial_warning', { count: active.data.index_status?.missing ?? 0 })}
         </Banner>
       )}
-      {mode === 'hits' && active.data?.status === 'ok' && hits.length === 0 && (
+      {active.data?.status === 'ok' && hits.length === 0 && (
         <p className="text-xs text-muted-foreground" data-testid="search-no-matches">
           {t('search.no_matches')}
         </p>
       )}
 
-      {mode === 'hits' && (
-        <ul className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
-          {hits.map((hit) => (
-            <SearchHitRow
-              key={hit.id}
-              hit={hit}
-              keywords={keywords}
-              selected={hit.id in scope.tokens}
-              onToggle={toggle}
-            />
-          ))}
-        </ul>
-      )}
-      {mode === 'groups' && grouped.data && (
-        <SearchGroups
-          result={grouped.data}
-          keywords={keywords}
-          selectedTokens={scope.tokens}
-          onToggle={toggle}
-        />
-      )}
+      <ul className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
+        {hits.map((hit) => (
+          <SearchHitRow
+            key={hit.id}
+            hit={hit}
+            keywords={keywords}
+            selected={hit.id in scope.tokens}
+            onToggle={toggle}
+          />
+        ))}
+      </ul>
     </Card>
   )
 }

@@ -7,7 +7,7 @@ import { SearchPanel, formatTokens, queryKeywords } from './SearchPanel'
 import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
-import type { AggregateResult, SearchResult } from '@/api/types'
+import type { SearchResult } from '@/api/types'
 
 const SESSION = 'sess-1'
 
@@ -48,52 +48,16 @@ const SCOPE_OK = { chunk_ids: ['p1'], est_tokens: 1200, usable_tokens: 22000, mi
 
 const CHUNK_OK = { body: { id: 'p1', text: FULL_TEXT } }
 
-const AGGREGATE_OK: AggregateResult = {
-  status: 'ok',
-  group_by: 'author',
-  total: 5,
-  unassigned: 0,
-  groups: [{ value: 'acme_news', count: 5, samples: [HIT] }],
-  limit: 100,
-  index_status: INDEX_STATUS
-}
-
-/** Two groups, each with a distinct sample — enough to prove mark-all in
- *  Social mode collects samples across every group, not just the first. */
-const AGGREGATE_TWO: AggregateResult = {
-  status: 'ok',
-  group_by: 'author',
-  total: 2,
-  unassigned: 0,
-  groups: [
-    { value: 'acme_news', count: 1, samples: [HIT] },
-    { value: 'beta_daily', count: 1, samples: [HIT2] }
-  ],
-  limit: 100,
-  index_status: INDEX_STATUS
-}
-
-/** Route by URL so one mock serves /search, /search/aggregate, /search/chunk
- *  and the scope endpoints. */
+/** Route by URL so one mock serves /search, /search/chunk and the scope
+ *  endpoints. */
 function mockApi(
   search: SearchResult,
   scope: { body: unknown; status?: number } = { body: SCOPE_OK },
-  chunk: { body: unknown; status?: number } = CHUNK_OK,
-  aggregate: { body: unknown; status?: number } = { body: AGGREGATE_OK }
+  chunk: { body: unknown; status?: number } = CHUNK_OK
 ) {
   const fn = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
     const u = typeof req === 'string' ? req : String(req)
-    // Checked before '/scope' and the generic '/search' fallthrough — and
-    // before '/search/chunk' would matter too, though the two never collide.
-    if (u.includes('/search/aggregate')) {
-      const status = aggregate.status ?? 200
-      return Promise.resolve({
-        ok: status < 400,
-        status,
-        json: async () => aggregate.body,
-        text: async () => JSON.stringify(aggregate.body)
-      })
-    }
+    // Checked before '/scope' and the generic '/search' fallthrough.
     if (u.includes('/search/chunk')) {
       const status = chunk.status ?? 200
       return Promise.resolve({
@@ -143,8 +107,7 @@ beforeEach(() => {
     queries: { [SESSION]: 'Partei', new: 'Partei' },
     scopes: {},
     filtersOpen: false,
-    mode: 'hits',
-    groupBy: 'author'
+    field: 'text'
   })
 })
 
@@ -782,7 +745,7 @@ describe('SearchPanel scope', () => {
   })
 })
 
-describe('SearchPanel groups mode', () => {
+describe('SearchPanel field picker', () => {
   const hitsResult: SearchResult = {
     status: 'ok',
     hits: [HIT],
@@ -791,127 +754,90 @@ describe('SearchPanel groups mode', () => {
     index_status: INDEX_STATUS
   }
 
-  it('switching to Groups fetches the aggregate with the default group-by', async () => {
+  it('shows the picker from the start, defaulting to Text, with no mode buttons', async () => {
+    mockApi(hitsResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    const trigger = screen.getByRole('combobox', { name: /search in/i })
+    expect(trigger).toHaveTextContent('Text')
+    expect(screen.queryByRole('button', { name: 'Social' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Hits' })).toBeNull()
+  })
+
+  it('choosing a field re-runs the search against that field', async () => {
     const fetchMock = mockApi(hitsResult)
 
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
+    await userEvent.click(screen.getByRole('combobox', { name: /search in/i }))
+    await userEvent.click(await screen.findByRole('option', { name: 'Author ID' }))
 
     await waitFor(() => {
-      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search/aggregate'))
+      const call = fetchMock.mock.calls.filter(([u]) => String(u).includes('/search')).at(-1)
       expect(call).toBeDefined()
-      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ group_by: 'author' })
+      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ question: 'Partei', field: 'author_id' })
     })
   })
 
-  it('choosing a different group-by field re-fetches the aggregate', async () => {
-    const fetchMock = mockApi(hitsResult)
+  it('shows a CSV export link carrying the field once there are hits', async () => {
+    useSearchUiStore.setState({ field: 'author' })
+    mockApi(hitsResult)
 
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/search/aggregate'))).toBe(true)
-    })
-
-    const trigger = await screen.findByRole('combobox', { name: /group by/i })
-    await userEvent.click(trigger)
-    await userEvent.click(await screen.findByRole('option', { name: 'Network' }))
-
-    await waitFor(() => {
-      const call = fetchMock.mock.calls
-        .filter(([u]) => String(u).includes('/search/aggregate'))
-        .at(-1)
-      expect(call).toBeDefined()
-      expect(JSON.parse(String(call![1]!.body))).toMatchObject({ group_by: 'network' })
-    })
+    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(href).toContain('/search/export.csv')
+    expect(href).toContain('collection=docs')
+    expect(href).toContain('question=Partei')
+    expect(href).toContain('field=author')
+    expect(href).not.toContain('group_by')
   })
 
-  it('shows the not_indexed banner in Groups mode too', async () => {
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, {
-      body: {
-        status: 'not_indexed',
-        group_by: 'author',
-        total: 0,
-        unassigned: 0,
-        groups: [],
-        limit: 100,
-        index_status: { ...INDEX_STATUS, with_search_text: 0, complete: false }
-      }
-    })
+  it('omits the field param from the export for the default Text field', async () => {
+    mockApi(hitsResult)
 
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    expect(await screen.findByTestId('search-not-indexed')).toBeInTheDocument()
-    expect(screen.queryByTestId('search-no-groups')).toBeNull()
+    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    expect(href).not.toContain('field=')
   })
 
-  it('shows the capped notice once the group list reaches the effective limit', async () => {
-    const capped: AggregateResult = {
-      status: 'ok',
-      group_by: 'author',
-      total: 2,
-      unassigned: 0,
-      groups: [
-        { value: 'acme_news', count: 1, samples: [] },
-        { value: 'beta_daily', count: 1, samples: [] }
-      ],
-      limit: 2,
-      index_status: INDEX_STATUS
-    }
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: capped })
+  it('offers a whole-collection export while no query is submitted', async () => {
+    useSearchUiStore.setState({ queries: {} })
+    mockApi(hitsResult)
 
     renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    const summary = await screen.findByTestId('search-summary')
-    expect(summary.textContent).toMatch(/Showing the 2 largest results/)
-  })
-
-  it('omits the capped notice while the group list is under the effective limit', async () => {
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    const summary = await screen.findByTestId('search-summary')
-    expect(summary.textContent).not.toMatch(/largest results/)
-  })
-
-  it('shows a CSV export link with the current collection, query and group-by', async () => {
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
 
     const link = await screen.findByRole('link', { name: 'Export CSV' })
     const href = link.getAttribute('href') ?? ''
-    expect(href).toContain('/search/export.csv')
     expect(href).toContain('collection=docs')
-    expect(href).toContain('group_by=author')
-    expect(href).toContain('question=Partei')
-    // Nothing pinned yet, so the export is unmarked — only a live selection
-    // adds marked_ids (see the Hits-mode export test below).
-    expect(href).not.toContain('marked_ids')
+    expect(href).not.toContain('question=')
   })
 
-  it('shows a CSV export link in Hits mode with no group_by, gaining marked_ids once a hit is selected pre-session', async () => {
-    // The same endpoint and href builder serve both lanes now; Hits must
-    // never send group_by, and must pick up marked_ids reactively — but only
-    // pre-session (no sessionId yet), which is the one case marked_ids earns
-    // its place at all (see the with-a-session negative test below).
+  it('keeps the not_indexed banner for a field whose index is missing', async () => {
+    useSearchUiStore.setState({ field: 'author' })
+    mockApi({
+      status: 'not_indexed',
+      hits: [],
+      total: 0,
+      next_cursor: null,
+      index_status: INDEX_STATUS
+    })
+
+    renderPanel()
+
+    expect(await screen.findByTestId('search-not-indexed')).toHaveTextContent(/make search-index/i)
+  })
+
+  it('adds marked_ids to the export once a hit is selected pre-session', async () => {
+    // marked_ids is picked up reactively — but only pre-session (no
+    // sessionId yet), which is the one case it earns its place at all (see
+    // the with-a-session negative test below).
     mockApi({
       status: 'ok',
       hits: [HIT],
@@ -928,7 +854,6 @@ describe('SearchPanel groups mode', () => {
     expect(hrefBefore).toContain('/search/export.csv')
     expect(hrefBefore).toContain('collection=docs')
     expect(hrefBefore).toContain('question=Partei')
-    expect(hrefBefore).not.toContain('group_by')
     expect(hrefBefore).not.toContain('marked_ids')
 
     await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
@@ -966,23 +891,9 @@ describe('SearchPanel groups mode', () => {
     expect(href).not.toContain('marked_ids')
   })
 
-  it('omits the CSV export link when there are no groups', async () => {
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, {
-      body: { ...AGGREGATE_OK, groups: [] }
-    })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    await screen.findByTestId('search-summary')
-    expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
-  })
-
-  it('omits the CSV export link in Hits mode when the query matches nothing', async () => {
-    // Mirrors the Groups-mode case above: a zero-row result set is not worth
-    // a CSV, in either mode.
+  it('omits the CSV export link when the query matches nothing', async () => {
+    // A submitted query with zero hits is not worth a CSV — only a genuinely
+    // blank query still offers the whole-collection export.
     mockApi({
       status: 'ok',
       hits: [],
@@ -995,151 +906,6 @@ describe('SearchPanel groups mode', () => {
 
     await screen.findByTestId('search-no-matches')
     expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
-  })
-
-  it('omits the CSV export link in Hits mode while the query is unsubmitted', async () => {
-    // Hits with a blank query and hits present can't co-occur (useSearch
-    // stays disabled until the query is non-empty), so this pins the
-    // query.trim() half of the gate via a selection that is already live —
-    // the summary row still renders, but with no query submitted there is
-    // nothing to export.
-    // A keyword-less hits export would 422 the same way a keyword-less
-    // search does, so the link is hidden rather than offered and refused.
-    useSearchUiStore.setState({
-      queries: {},
-      scopes: { [SESSION]: { tokens: { p1: 1200 }, usableTokens: 22000, missing: 0 } }
-    })
-    mockApi({
-      status: 'ok',
-      hits: [],
-      total: 0,
-      next_cursor: null,
-      index_status: INDEX_STATUS
-    })
-
-    renderPanel()
-
-    await screen.findByTestId('search-summary-row')
-    expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
-  })
-
-  it("pins one of a group's sample chunks into the scope", async () => {
-    const fetchMock = mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    const disclosure = await screen.findByRole('button', { name: /show sample chunks/i })
-    await userEvent.click(disclosure)
-
-    const tile = await screen.findByRole('button', { name: /alpha\.pdf/i })
-    await userEvent.click(tile)
-
-    await waitFor(() => {
-      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
-      expect(call).toBeDefined()
-      expect(call![1]!.method).toBe('PUT')
-      expect(JSON.parse(String(call![1]!.body))).toEqual({ chunk_ids: ['p1'] })
-    })
-    await waitFor(() => {
-      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200 })
-    })
-  })
-
-  it('shows the token meter inline in Social mode once a sample is pinned, beside a working mark-all', async () => {
-    // The summary row is unified across modes now: Social gets the same
-    // mark-all control Hits has, sized over whatever aggregate samples are
-    // loaded, and the token meter renders inline in the same row either way
-    // — as its own flex child beside the counts `<p>`, not text inside it
-    // (see the search-summary-row layout comment in SearchPanel.tsx).
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    const disclosure = await screen.findByRole('button', { name: /show sample chunks/i })
-    await userEvent.click(disclosure)
-
-    const tile = await screen.findByRole('button', { name: /alpha\.pdf/i })
-    await userEvent.click(tile)
-
-    await waitFor(() => {
-      const meter = screen.getByTestId('token-meter')
-      expect(meter).toHaveTextContent('≈1.2k / 22.0k tokens')
-      expect(screen.getByTestId('search-summary-row')).toContainElement(meter)
-    })
-    // The one loaded sample is now selected, so the bulk control flips to
-    // "clear" — Social's mark-all behaves exactly like Hits' does.
-    expect(screen.getByRole('button', { name: /clear selection/i })).toBeInTheDocument()
-  })
-
-  it('mark-all in Social pins every loaded sample across groups, not just the first', async () => {
-    const fetchMock = mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_TWO })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    const selectAll = await screen.findByRole('button', { name: /select all 2 loaded/i })
-    await userEvent.click(selectAll)
-
-    await waitFor(() => {
-      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/scope'))
-      expect(call).toBeDefined()
-      expect(JSON.parse(String(call![1]!.body))).toEqual({ chunk_ids: ['p1', 'p2'] })
-    })
-    await waitFor(() => {
-      expect(useSearchUiStore.getState().scopes[SESSION]?.tokens).toEqual({ p1: 1200, p2: 1200 })
-    })
-  })
-
-  it('warns in Social mode too when the loaded samples exceed the measured budget', async () => {
-    useSearchUiStore.setState({
-      scopes: { [SESSION]: { tokens: {}, usableTokens: 1000, missing: 0 } }
-    })
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_TWO })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    expect(await screen.findByTestId('select-all-over-budget')).toHaveTextContent(/would exceed/i)
-  })
-
-  it('marks the group-by picker with a sort icon, present only beside it', async () => {
-    // The picker groups/sorts what's already loaded; it does not filter or
-    // search. Hits mode has neither the icon nor the picker it marks.
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
-
-    const { container } = renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    expect(container.querySelector('[data-testid="search-mode-row"] > svg')).toBeNull()
-
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    const icon = container.querySelector('[data-testid="search-mode-row"] > svg')
-    expect(icon).not.toBeNull()
-    expect(icon).toHaveAttribute('aria-hidden', 'true')
-  })
-
-  it('keeps one summary row present across both modes', async () => {
-    mockApi(hitsResult, { body: SCOPE_OK }, CHUNK_OK, { body: AGGREGATE_OK })
-
-    renderPanel()
-
-    await screen.findByText(/alpha\.pdf/)
-    expect(screen.getByTestId('search-summary-row')).toBeInTheDocument()
-
-    await userEvent.click(screen.getByRole('button', { name: 'Social' }))
-
-    expect(await screen.findByTestId('search-summary-row')).toBeInTheDocument()
   })
 })
 
