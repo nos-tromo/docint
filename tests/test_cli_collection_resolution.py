@@ -263,12 +263,12 @@ def test_search_index_skips_a_missing_image_companion(monkeypatch: pytest.Monkey
     assert indexed == ["u0__docs"]
 
 
-def test_search_index_cli_ensures_group_indexes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The backport must also create the grouped lane's payload indexes.
+def test_search_index_cli_ensures_field_indexes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The backport must also create the field-search lane's payload indexes.
 
-    Otherwise a pre-existing collection answers grouped calls only after a
-    lazily-ensured first request, rather than being ready immediately after
-    an operator runs the backport.
+    Otherwise a pre-existing collection answers field-scoped searches only
+    after a lazily-ensured first request, rather than being ready immediately
+    after an operator runs the backport.
     """
     from docint.cli import search_index as cli
 
@@ -282,21 +282,21 @@ def test_search_index_cli_ensures_group_indexes(monkeypatch: pytest.MonkeyPatch)
         lambda c, name, **kwargs: BackfillSummary(scanned=1, written=1, skipped=0, empty=0),
     )
     ensured: list[str] = []
-    monkeypatch.setattr(cli, "ensure_group_indexes", lambda client, collection: ensured.append(collection) or True)
+    monkeypatch.setattr(cli, "ensure_field_indexes", lambda client, collection: ensured.append(collection) or True)
 
     cli.build_search_index("docs")
 
     assert ensured == ["u0__docs"]
 
 
-def test_search_index_cli_warns_but_does_not_fail_when_group_indexes_cannot_be_created(
+def test_search_index_cli_warns_but_does_not_fail_when_field_indexes_cannot_be_created(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing group index degrades one feature, not the whole migration.
+    """A missing field index degrades one feature, not the whole migration.
 
-    Unlike the ``search_text`` index, a failed group index must not abort the
-    run — grouped search is a secondary lane, and the primary keyword search
-    this command exists for still works without it.
+    Unlike the ``search_text`` index, a failed field index must not abort the
+    run — field search is a secondary use of this command; keyword search
+    still works without those indexes.
     """
     from docint.cli import search_index as cli
 
@@ -309,6 +309,29 @@ def test_search_index_cli_warns_but_does_not_fail_when_group_indexes_cannot_be_c
         "backfill_search_text",
         lambda c, name, **kwargs: BackfillSummary(scanned=1, written=1, skipped=0, empty=0),
     )
-    monkeypatch.setattr(cli, "ensure_group_indexes", lambda client, collection: False)
+    monkeypatch.setattr(cli, "ensure_field_indexes", lambda client, collection: False)
 
     cli.build_search_index("docs")  # must not raise
+
+
+def test_search_index_cli_ensures_field_indexes_on_the_image_companion_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Posting-author searches reach the companion, so it needs the indexes as well."""
+    from docint.cli import search_index as cli
+
+    client = types.SimpleNamespace(collection_exists=lambda collection_name: True)
+    monkeypatch.setattr(cli, "RAG", _fake_rag_class(client))
+    monkeypatch.setattr(cli, "resolve_collection_name", lambda rag, typed: "u0__docs")
+    monkeypatch.setattr(cli, "ensure_search_index", lambda c, name: True)
+    monkeypatch.setattr(
+        cli,
+        "backfill_search_text",
+        lambda c, name, **kwargs: BackfillSummary(scanned=1, written=1, skipped=0, empty=0),
+    )
+    ensured: list[str] = []
+    monkeypatch.setattr(cli, "ensure_field_indexes", lambda client, collection: ensured.append(collection) or True)
+
+    cli.build_search_index("docs")
+
+    assert ensured == ["u0__docs", "u0__docs_images"]

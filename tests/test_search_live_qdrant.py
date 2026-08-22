@@ -21,7 +21,7 @@ from collections.abc import Iterator
 import pytest
 from qdrant_client import QdrantClient, models
 
-from docint.core.search.aggregate import FacetGroup, build_group_filter, ensure_group_indexes, facet_groups
+from docint.core.search.fields import ensure_field_indexes, field_index_kind
 from docint.core.search.fulltext import build_search_filter
 from docint.core.search.index import SEARCH_TEXT_FIELD, search_index_params, write_search_text
 
@@ -168,41 +168,36 @@ def test_coarse_parent_chunks_are_excluded_but_untagged_ones_are_not(
     assert _ids(client, name, ["Parteitag"]) == [1, 3]
 
 
-def test_facet_groups_counts_every_matching_chunk(collection: tuple[QdrantClient, str]) -> None:
-    """The grouped lane counts every matching chunk per author, exhaustively.
+def test_field_search_matches_an_author_prefix_case_insensitively(collection: tuple[QdrantClient, str]) -> None:
+    """'mar' finds 'Marco_News' and 'marie_k' once the author key carries a TEXT index.
 
-    Distinguishes the "find all" lane from ranked retrieval: two chunks match
-    "election" and share ``author=a1`` — a top-k answer could still undercount
-    by surfacing only one of them.
+    Starts from the KEYWORD index the old facet lane left behind, so the
+    keyword→text replacement is exercised against a real server.
     """
     client, name = collection
     rows = {1: "election night", 2: "election day", 3: "weather"}
-    authors = {1: "a1", 2: "a1", 3: "a2"}
+    authors = {1: "Marco_News", 2: "marie_k", 3: "other_desk"}
     client.upsert(
         name,
         points=[
-            models.PointStruct(
-                id=pid,
-                vector=[0.1, 0.2],
-                payload={"reference_metadata": {"author": authors[pid]}},
-            )
+            models.PointStruct(id=pid, vector=[0.1, 0.2], payload={"reference_metadata": {"author": authors[pid]}})
             for pid in rows
         ],
         wait=True,
     )
     write_search_text(client, name, rows, wait=True)
-    assert ensure_group_indexes(client, name) is True
-    time.sleep(1.0)  # let the new payload indexes catch up
-
-    f = build_group_filter(["election"], base_filter=None)
-    groups = facet_groups(client, name, "reference_metadata.author", group_filter=f, limit=10)
-    assert groups == [FacetGroup("a1", 2)]
-
-    groups_all = facet_groups(
-        client,
-        name,
-        "reference_metadata.author",
-        group_filter=build_group_filter([], base_filter=None),
-        limit=10,
+    client.create_payload_index(
+        collection_name=name,
+        field_name="reference_metadata.author",
+        field_schema=models.PayloadSchemaType.KEYWORD,
+        wait=True,
     )
-    assert groups_all == [FacetGroup("a1", 2), FacetGroup("a2", 1)]
+    assert field_index_kind(client, name, "reference_metadata.author") == "keyword"
+
+    assert ensure_field_indexes(client, name) is True
+    assert field_index_kind(client, name, "reference_metadata.author") == "text"
+    time.sleep(1.0)  # let the rebuilt payload index catch up
+
+    f = build_search_filter(["mar"], field_key="reference_metadata.author")
+    points, _ = client.scroll(collection_name=name, scroll_filter=f, limit=10)
+    assert sorted(p.id for p in points) == [1, 2]

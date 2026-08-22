@@ -1,10 +1,11 @@
 """CLI entry point for backfilling the full-text search field.
 
 Mirrors ``docint.cli.resolve``: a thin terminal wrapper that populates the
-``search_text`` payload field across an already-ingested collection and creates
-its index. Payload-only — no re-embedding, no inference, no model downloads —
-so it is safe on an airgapped host, and re-running it is cheap because
-populated points are skipped.
+``search_text`` payload field across an already-ingested collection and
+creates its index and the field-search indexes. Payload-only — no
+re-embedding, no inference, no model downloads — so it is safe on an
+airgapped host, and re-running it is cheap because populated points are
+skipped.
 
 Takes the *logical* collection name shown in the app; the physical Qdrant name
 is owner-namespaced and resolved here.
@@ -18,7 +19,7 @@ from loguru import logger
 
 from docint.cli._collection import CollectionNotFoundError, resolve_collection_name
 from docint.core.rag import RAG
-from docint.core.search.aggregate import ensure_group_indexes
+from docint.core.search.fields import ensure_field_indexes
 from docint.core.search.index import backfill_search_text, ensure_search_index, image_companion_name
 from docint.utils.env_cfg import set_offline_env
 from docint.utils.logger_cfg import init_logger
@@ -68,10 +69,10 @@ def build_search_index(collection: str) -> None:
             )
             raise SystemExit(1)
 
-        if not ensure_group_indexes(rag.qdrant_client, physical):
+        if not ensure_field_indexes(rag.qdrant_client, physical):
             logger.warning(
-                "Could not create every grouped-search index on '{}' — grouped search may fail until "
-                "Qdrant is reachable.",
+                "Could not create every field-search index on '{}' — searching in Author, Network, … "
+                "may report not_indexed until Qdrant is reachable.",
                 physical,
             )
 
@@ -91,6 +92,8 @@ def build_search_index(collection: str) -> None:
             if not ensure_search_index(rag.qdrant_client, companion):
                 logger.error("Could not create the search index on '{}'.", companion)
                 raise SystemExit(1)
+            if not ensure_field_indexes(rag.qdrant_client, companion):
+                logger.warning("Could not create every field-search index on '{}'.", companion)
             image_summary = backfill_search_text(
                 rag.qdrant_client,
                 companion,
