@@ -325,6 +325,8 @@ def test_build_query_engine_uses_post_retrieval_text_model(
     Args:
         monkeypatch: The monkeypatch fixture.
     """
+    from llama_index.core.llms import MockLLM
+
     rag = RAG(qdrant_collection="test")
     rag.openai_config = OpenAIConfig(
         api_base="https://api.openai.com/v1",
@@ -342,7 +344,12 @@ def test_build_query_engine_uses_post_retrieval_text_model(
         timeout=300.0,
         top_p=0.0,
     )
-    rag._post_retrieval_text_model = cast(Any, object())
+    # A real (mock) LLM, not a bare sentinel: llama-index 0.14.24's
+    # BaseSynthesizer reads the raw Settings._prompt_helper field instead of
+    # the lazily-populating Settings.prompt_helper property, so it now derives
+    # the prompt helper from this model's own metadata — which is what
+    # _build_response_synthesizer's docstring says it should have done all along.
+    rag._post_retrieval_text_model = cast(Any, MockLLM(max_tokens=8))
     rag._reranker = cast(Any, object())
     rag.index = cast(
         Any,
@@ -465,6 +472,8 @@ def test_build_query_engine_does_not_materialize_reranker(
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
+    from llama_index.core.llms import MockLLM
+
     rag = RAG(qdrant_collection="test")
     rag.openai_config = OpenAIConfig(
         api_base="https://api.openai.com/v1",
@@ -482,7 +491,12 @@ def test_build_query_engine_does_not_materialize_reranker(
         timeout=300.0,
         top_p=0.0,
     )
-    rag._post_retrieval_text_model = cast(Any, object())
+    # A real (mock) LLM, not a bare sentinel: llama-index 0.14.24's
+    # BaseSynthesizer reads the raw Settings._prompt_helper field instead of
+    # the lazily-populating Settings.prompt_helper property, so it now derives
+    # the prompt helper from this model's own metadata — which is what
+    # _build_response_synthesizer's docstring says it should have done all along.
+    rag._post_retrieval_text_model = cast(Any, MockLLM(max_tokens=8))
     # Intentionally leave rag._reranker unset — if build_query_engine reads
     # the property, the tripwire below fires.
     rag.index = cast(
