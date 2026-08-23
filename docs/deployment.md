@@ -94,8 +94,10 @@ the frontend port is published for local development.
   advertise it via `GET /config` (`max_upload_bytes`); the SPA uses it to split
   large selections into sub-cap batches, so the total upload is not bounded by
   this cap — only an individual file bigger than it would still be rejected.
-- Attaches to `docint-net` only, and `depends_on` the `backend` so Compose
-  starts the backend container first.
+- Attaches to `docint-net` and to `edge-net` with the alias
+  `docint-frontend` (how the `edge-plane` gateway reaches the SPA under its
+  `/docint/` sub-path), and `depends_on` the `backend` so Compose starts the
+  backend container first.
 
 ## Vector store: the `data-plane` project
 
@@ -142,15 +144,20 @@ idempotently before the stack starts.
 - `data-net` — **external** network declared with
   `name: ${DATA_NET:-data-net}`. The backend attaches to it to reach
   the `data-plane` project's Qdrant at `http://qdrant:6333`.
+- `edge-net` — **external** network declared with
+  `name: ${EDGE_NET:-edge-net}`. The *frontend* attaches to it with the alias
+  `docint-frontend`, which is how the `edge-plane` gateway reaches the SPA.
+  The backend never joins it.
 
-Both external networks must exist before starting the stack. `make
-network` creates both idempotently:
+All three external networks must exist before starting the stack. `make
+network` creates them idempotently:
 
 ```bash
 make network
 # equivalent to:
 docker network create inference-net
 docker network create data-net
+docker network create edge-net
 ```
 
 ## Dockerfiles
@@ -205,6 +212,14 @@ of network, proxy, and runtime overrides are Compose-specific:
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | Per-request upload cap nginx enforces on the frontend (default `1g`); the backend reads the same value to advertise it to the SPA (which batches large uploads under it). Raise only for single files larger than the default. |
 | `PRELOAD_MODELS` | When `true`, the backend runs `load-models` at startup before `uvicorn`. |
 
+If you use an outbound proxy, put the proxy variables in `.env` too, so
+Compose, image builds, and containers all use the same values.
+
+First startup may take a while because model assets are downloaded into the
+shared cache volumes. Pre-warm them with `make volumes` plus
+`PRELOAD_MODELS=true` (or `uv run load-models` on the host) to move that cost
+off the first request.
+
 ## Session persistence
 
 The backend defaults `SESSIONS_DB_PATH` to
@@ -247,6 +262,11 @@ To run both on a single host with a shared network:
    make build
    make up
    ```
+
+Deploy the vLLM stack **before** Docint. Docint expects the router to expose
+one OpenAI-compatible base URL ending in `/v1`, plus the vLLM sparse routes at
+`/pooling` and `/tokenize` (see
+[configuration.md](configuration.md#sparse-encoder--hybrid-retrieval--sparseclientconfig)).
 
 For a remote vLLM router, drop `INFERENCE_NET` and point
 `OPENAI_API_BASE` at the external URL.

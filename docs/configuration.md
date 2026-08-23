@@ -641,6 +641,12 @@ Loaded by `load_logging_env()` (`docint/utils/env_cfg.py`), applied by
 | `LOG_LEVEL` | `INFO` | Minimum level for the single stderr sink. There is no file sink; under Docker the compose `local` driver owns retention (50 MB × 5, compressed). |
 | `LOG_PROGRESS_INTERVAL_S` | `30` | Seconds between heartbeat lines while one long job stage repeats the same progress message. Stage changes and a stage's final count always log regardless. `0` disables throttling and logs every progress message — the debug setting; on a large ingest it is thousands of lines. |
 
+**Queries, answers and document text are never logged** — only their shapes
+(retrieval mode, source and image counts, rerank state, duration). One
+`Turn complete | …` line is emitted per chat turn on that basis, and the
+ingest run summary counts files and nodes rather than naming content. This is
+not a switch; there is no level at which document text reaches the log.
+
 Two behaviours are wired here rather than being configurable, because
 neither has a defensible "off":
 

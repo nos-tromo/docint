@@ -198,6 +198,39 @@ the chat/retrieval path.
 matches when the active collection carries an image sibling
 (`{collection}_images`).
 
+## Image retrieval lane
+
+Images are ordinary sources. A stored image — a standalone file, a figure
+embedded in a PDF, a video keyframe — is retrieved by CLIP, ranked against the
+text chunks by the same reranker on the same scale, shown to the model as part
+of the evidence, numbered like any other citation, and quotable in the
+collection summary alongside its document's text.
+
+What the model sees of an image is what was stored for it at ingest time: its
+caption and tags, and — where a document OCR model is configured — the text
+printed *inside* it (see
+[ingestion.md](ingestion.md#images--imagespy)). No pixels are sent at query
+time, and no vision call happens on the chat path.
+
+Settings that shape the lane:
+
+- `IMAGE_RETRIEVE_TOP_K` (default `5`) — how many CLIP candidates enter the
+  ranking. They then compete with text chunks for the answer's source slots;
+  a query with no relevant imagery spends none of them.
+- `IMAGE_OCR_ENABLED` (on when `OCR_MODEL` is set) — read the text inside
+  images. `KEYFRAME_OCR_ENABLED` (default off) extends that to video
+  keyframes, where usually only slides carry text.
+- `IMAGE_RERANK_MIN_SCORE` (default `0.05`) — the reranker score an image
+  caption must reach. The floor sits on the reranker, never on raw CLIP
+  similarity, which is not comparable across queries: an unrelated query and a
+  matching one both land in the same narrow CLIP band. Raise it if unrelated
+  images still appear; lower it if relevant ones are missing.
+
+If the rerank endpoint is down, images surface ungated rather than vanishing —
+a degraded ranking is more useful than a silently emptied lane. Full defaults
+and rationale:
+[configuration.md](configuration.md#image-ingestion--imageingestionconfig).
+
 ## Graph-assisted retrieval
 
 When `GRAPHRAG_ENABLED=true`, `RAG` builds an entity graph from the
@@ -283,6 +316,22 @@ a retry never turns a delivered answer into an error.
 The cost is up to three extra LLM round-trips (reformulate, regenerate,
 re-validate) inside the one request, so a turn that triggers a retry is
 noticeably slower than one that does not.
+
+## Citation numbering
+
+Answers refer to their evidence by number ("source 3"), and the chat window's
+source cards carry the matching number. The number is assigned server-side
+before generation: the last node postprocessor stamps `citation_index` onto
+the snippet set the synthesizer renders, so the model reads its number instead
+of counting, and the same value rides the source payload out to the SPA.
+
+The list can have gaps: the SPA drops broken-preview duplicates from the card
+list, and the surviving cards keep their original numbers rather than closing
+the gap, because renumbering would break the link to the answer.
+
+Conversations replayed from the session DB take their numbers from citation
+row order, which is the order the generator saw. Answers written before this
+feature still contain hand-counted ordinals that may not line up.
 
 ## Sessions and citations
 
