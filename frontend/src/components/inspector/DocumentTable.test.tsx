@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { DocumentTable } from './DocumentTable'
 import type { DocumentRecord } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
@@ -105,5 +105,77 @@ describe('DocumentTable document preview', () => {
 
     const action = screen.getByRole('button', { name: /preview/i })
     expect(action.closest('.group')).not.toBeNull()
+  })
+})
+
+describe('DocumentTable sorting', () => {
+  // Natural ordering (appendix, 9, 10) differs from lexicographic ordering
+  // (10 before 9) and the node counts order differently as text than as
+  // numbers, so these rows tell the built-in comparators apart.
+  const SORT_DOCS: DocumentRecord[] = [
+    {
+      filename: 'report_10.pdf',
+      file_hash: '1111111111111111111111111111111111111111',
+      mimetype: 'application/pdf',
+      page_count: 4,
+      row_count: 0,
+      node_count: 138,
+      entity_types: []
+    },
+    {
+      filename: 'report_9.pdf',
+      file_hash: '2222222222222222222222222222222222222222',
+      mimetype: 'application/pdf',
+      page_count: 2,
+      row_count: 0,
+      node_count: 9,
+      entity_types: []
+    },
+    {
+      filename: 'appendix_2.pdf',
+      file_hash: '3333333333333333333333333333333333333333',
+      mimetype: 'application/pdf',
+      page_count: 1,
+      row_count: 0,
+      node_count: 42,
+      entity_types: []
+    }
+  ]
+
+  /** Text of the nth cell of every body row, in rendered order. */
+  function columnOrder(index: number): string[] {
+    return screen
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => within(row).getAllByRole('cell')[index].textContent?.trim() ?? '')
+  }
+
+  it('sorts filenames naturally, not lexicographically, and reverses on a second click', async () => {
+    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Filename' }))
+    // Lexicographic order would put report_10 before report_9.
+    expect(columnOrder(0)).toEqual(['appendix_2.pdf', 'report_9.pdf', 'report_10.pdf'])
+
+    await userEvent.click(screen.getByRole('button', { name: 'Filename' }))
+    expect(columnOrder(0)).toEqual(['report_10.pdf', 'report_9.pdf', 'appendix_2.pdf'])
+  })
+
+  it('sorts the node count numerically, largest first', async () => {
+    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />)
+
+    // A numeric column sorts descending on the first click; as text that same
+    // descending pass would read 9, 42, 138.
+    await userEvent.click(screen.getByRole('button', { name: 'Nodes' }))
+    expect(columnOrder(3)).toEqual(['138', '42', '9'])
+
+    await userEvent.click(screen.getByRole('button', { name: 'Nodes' }))
+    expect(columnOrder(3)).toEqual(['9', '42', '138'])
+  })
+
+  it('leaves the columns that opt out of sorting unsortable', () => {
+    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />)
+    expect(screen.queryByRole('button', { name: 'Entities' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Hash' })).not.toBeInTheDocument()
   })
 })

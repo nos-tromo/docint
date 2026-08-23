@@ -1,10 +1,12 @@
 import {
+  createSortedRowModel,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
+  rowSortingFeature,
+  sortFn_alphanumeric,
+  sortFn_text,
+  tableFeatures,
+  useTable,
   type Column,
-  type RowData,
   type SortDirection,
   type SortingState,
   type ColumnDef
@@ -26,14 +28,25 @@ import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 
-// Per-column layout hints consumed by the shared grid renderer below.
-declare module '@tanstack/react-table' {
-  /* eslint-disable @typescript-eslint/no-unused-vars */
-  interface ColumnMeta<TData extends RowData, TValue> {
-    align?: 'right'
-  }
-  /* eslint-enable @typescript-eslint/no-unused-vars */
-}
+/**
+ * The table's feature set, stitched statically so only what this grid uses is
+ * bundled: sorting plus its row model. `columnMeta` is the per-column layout
+ * hint the grid renderer reads — a typed slot on this table rather than a
+ * global `declare module`, so it cannot leak into another table's meta.
+ *
+ * `sortFns` registers the two built-ins the automatic per-column detection
+ * picks for this data (filenames sort alphanumerically, labels as text);
+ * numeric columns fall through to the always-present basic comparator. An
+ * unregistered name would silently downgrade to that comparator too.
+ */
+const FEATURES = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+  sortFns: { alphanumeric: sortFn_alphanumeric, text: sortFn_text },
+  columnMeta: {} as { align?: 'right' }
+})
+
+type Features = typeof FEATURES
 
 /**
  * One grid template drives both the header row and every body row, so columns
@@ -42,7 +55,7 @@ declare module '@tanstack/react-table' {
 const GRID_COLUMNS = 'minmax(0,2.4fr) 72px 92px 72px minmax(0,1.8fr) 96px'
 
 /** Column defs depend on the active locale (header labels, copy-button label), so they're built per-render rather than module-level. */
-function buildColumns(t: ReturnType<typeof useT>): ColumnDef<DocumentRecord>[] {
+function buildColumns(t: ReturnType<typeof useT>): ColumnDef<Features, DocumentRecord>[] {
   return [
     {
       accessorKey: 'filename',
@@ -157,7 +170,13 @@ function SortIndicator({ dir }: { dir: false | SortDirection }) {
   )
 }
 
-function HeaderCell({ column, children }: { column: Column<DocumentRecord>; children: ReactNode }) {
+function HeaderCell({
+  column,
+  children
+}: {
+  column: Column<Features, DocumentRecord>
+  children: ReactNode
+}) {
   const align = column.columnDef.meta?.align
   if (!column.getCanSort()) {
     return <div className={cn('min-w-0', align === 'right' && 'text-right')}>{children}</div>
@@ -185,13 +204,12 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
   const [sorting, setSorting] = useState<SortingState>([])
   const data = useMemo(() => docs, [docs])
   const columns = useMemo(() => buildColumns(t), [t])
-  const table = useReactTable({
+  const table = useTable({
+    features: FEATURES,
     data,
     columns,
     state: { sorting },
-    onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel()
+    onSortingChange: setSorting
   })
 
   const rows = table.getRowModel().rows
@@ -263,7 +281,10 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
                     className="group absolute left-0 right-0 grid items-center gap-x-4 border-b border-border/60 px-4 py-2 text-sm hover:bg-white/5"
                     style={{ gridTemplateColumns: GRID_COLUMNS, transform: `translateY(${vRow.start}px)` }}
                   >
-                    {row.getVisibleCells().map((cell) => (
+                    {/* Every column is always shown here, so these are the
+                        visible cells; `getVisibleCells` belongs to the column
+                        visibility feature this table does not register. */}
+                    {row.getAllCells().map((cell) => (
                       <div
                         key={cell.id}
                         role="cell"
