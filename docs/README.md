@@ -42,7 +42,7 @@ it, and what it can do) with topic-by-topic deep dives.
 ## Conventions used in these docs
 
 - **Source references** use the `path:line` format (for example
-  `docint/core/api.py:427`) so editors can jump directly to the symbol.
+  `docint/core/api.py:1792`) so editors can jump directly to the symbol.
 - **Environment-variable tables** always show the variable name, the
   dataclass it lives in, and the default value baked into the
   `load_*_env()` factory.

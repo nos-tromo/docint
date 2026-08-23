@@ -5,7 +5,7 @@ The FastAPI app exposes a REST + SSE surface defined in
 tag used in the app, and documents the request and response models.
 
 All request and response bodies are JSON. Pydantic models referenced in
-this doc are declared at the top of `docint/core/api.py:208` and onward.
+this doc are declared at the top of `docint/core/api.py:745` and onward.
 
 ## Base URL & CORS
 
@@ -20,28 +20,40 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 
 | Method | Path | Tag | Purpose |
 |---|---|---|---|
-| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout). |
+| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale). |
+| `GET`  | `/config/ingest-defaults` | `Meta` | Deployment defaults for the ingest UI's enrichment toggles. |
+| `GET`  | `/version` | `Meta` | Running app version. Unauthenticated; the Docker healthcheck's liveness probe. |
+| `GET`  | `/health` | `Meta` | Dependency status (Qdrant reachability). Unauthenticated, always `200`. |
+| `GET`  | `/whoami` | `Meta` | The resolved calling identity, for the SPA header. Principal-gated. |
+| `GET`  | `/metrics` | — | Prometheus counters/histograms for the obs-plane scrape. Added by `Instrumentator` (`api.py:166`), not an `@app` route, and excluded from the OpenAPI schema. |
 | `GET`  | `/collections/list` | `Collections` | List all Qdrant collections. |
 | `POST` | `/collections/select` | `Collections` | Activate a collection, pre-warms the NER cache. |
 | `DELETE` | `/collections/{name}` | `Collections` | Delete a collection. |
 | `POST` | `/query` | `Query` | Stateless or session-aware query, non-streaming. |
 | `POST` | `/stream_query` | `Query` | Streaming variant of `/query` (SSE tokens). |
 | `POST` | `/search` | `Query` | Full-text keyword search over chunk text (no embeddings, no inference). |
+| `GET`  | `/search/chunk` | `Query` | One chunk's full text, for expanding a search hit past its capped preview. |
+| `GET`  | `/search/export.csv` | `Query` | Stream the search result set as CSV (blank question exports the filtered collection). |
 | `POST` | `/summarize` | `Query` | Collection-level (tree/map-reduce) summary: `200` from cache, `202` queues a job. |
 | `GET`  | `/summarize` | `Query` | Read-only: the cached summary (`200`) or `204` when there is none. Never queues. |
 | `GET`  | `/collections/ner` | `Query` | Full NER dump for the active collection. |
 | `GET`  | `/collections/ner/stats` | `Query` | Aggregated NER statistics. |
 | `GET`  | `/collections/ner/search` | `Query` | Search for entities by name/pattern. |
 | `GET`  | `/collections/ner/graph` | `Query` | Derived entity graph (nodes + edges) for the active collection. |
+| `GET`  | `/collections/ner/sources` | `Query` | One page of NER-bearing source rows; always paginated, optionally entity-filtered. |
+| `POST` | `/collections/ner/warm` | `Query` | Pre-warm the NER aggregate cache after a collection switch. |
 | `GET`  | `/collections/hate-speech` | `Query` | Hate-speech findings for the active collection. |
 | `POST` | `/collections/entities/resolve` | `Query` | Merge duplicate / semantically-similar entities into durable canonicals. |
 | `GET`  | `/collections/documents` | `Query` | List documents in a collection. |
+| `GET`  | `/collections/documents/count` | `Query` | Number of unique documents in the collection (dashboard KPI). |
 | `GET`  | `/collections/documents/summary` | `Query` | Collection-wide document aggregates (document/node totals + file-type / entity-type breakdown) for the Inspector KPI strip. |
 | `GET`  | `/collections/{name}/export/documents.csv` | `Query` | Stream the documents table as CSV. |
 | `GET`  | `/collections/{name}/export/entities.csv` | `Query` | Stream the top entities by mention frequency as CSV. |
+| `GET`  | `/collections/{name}/export/ner-sources.csv` | `Query` | Stream the NER source rows as CSV, with the same entity filters as the paged route. |
 | `GET`  | `/collections/{name}/export/hate-speech.csv` | `Query` | Stream the hate-speech findings table as CSV. |
 | `GET`  | `/sessions/list` | `Sessions` | List stored sessions. |
-| `GET`  | `/sessions/{session_id}` | `Sessions` | Return conversation history for a session. |
+| `GET`  | `/sessions/{session_id}/history` | `Sessions` | Return conversation history for a session. |
+| `GET`  | `/sessions/{session_id}/sources.zip` | `Sessions` | Stream a ZIP of every source file cited in the session. |
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |
 | `PUT` | `/sessions/{session_id}/scope` | `Sessions` | Restrict the session's answers to hand-picked chunks. |
 | `DELETE` | `/sessions/{session_id}/scope` | `Sessions` | Return the session to normal retrieval. |
@@ -70,15 +82,48 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `DELETE` | `/ingest/jobs/{job_id}` | `Ingestion` | Dismiss a finished job (409 while running). |
 | `POST` | `/ingest` | `Ingestion` | Ingest the configured `DATA_PATH` directly (CLI/batch path). |
 | `GET`  | `/sources/preview` | `Sources` | Return a preview of a source file staged under `QDRANT_SRC_DIR`. |
+| `POST` | `/translate` | `Translate` | Translate a caller-supplied snippet into the operator's locale. Fail-soft. |
 
 ## Meta
 
 ### `GET /config`
 
 Deploy-time frontend configuration for the SPA, read once on load and served
-without a principal. Returns `graph_top_k`, `graph_max_top_k`, and
-`collection_timeout` (`FrontendConfigOut`); the first two come from
-`NER_GRAPH_TOP_K` / `NER_GRAPH_MAX_TOP_K` (see Configuration).
+without a principal. Returns five fields (`FrontendConfigOut`):
+`graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`
+and `language`. They come from `NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`,
+`FRONTEND_COLLECTION_TIMEOUT`, `DOCINT_CLIENT_MAX_BODY_SIZE` and
+`RESPONSE_LANGUAGE` respectively (see
+[configuration.md](configuration.md#frontend--frontendconfig)).
+
+### `GET /config/ingest-defaults`
+
+The deployment's default enrichment toggles, so the ingest screen can seed
+its checkboxes. Unauthenticated like `/config`. Returns
+`IngestDefaultsOut` — `{"ner": bool, "hate_speech": bool}`, mirroring
+`NER_ENABLED` and `ENABLE_HATE_SPEECH_DETECTION`.
+
+### `GET /version`
+
+Returns `VersionOut` — `{"version": "<release>"}`. Unauthenticated (no
+principal), and what the container healthcheck polls for backend liveness.
+
+### `GET /health`
+
+Re-runs the Qdrant readiness probe on demand and returns `HealthOut` —
+`{"status": "ok"|"degraded", "qdrant": bool}`. Unauthenticated, and
+**always HTTP 200**: the status lives in the body, so a degraded vector
+store does not read as a dead backend. `/version` is liveness; this is
+readiness right now, not at the startup probe.
+
+### `GET /whoami`
+
+Returns `WhoamiOut` — `{"username": str, "display_name": str | None}`.
+Unlike `/config` and `/version` this **is** principal-gated (401 without a
+trusted header or a configured dev default identity). `display_name` is
+read straight off the `X-Auth-Name` header the gateway injects and is
+decorative only — it plays no part in identity resolution, and is `None`
+when the gateway is not in front.
 
 ## Collections
 
@@ -112,7 +157,7 @@ Deletes the named Qdrant collection. Returns `{ "ok": true }` on success.
 ### `POST /query`
 
 Runs a single question against the active collection. Source:
-`docint/core/api.py:427`.
+`docint/core/api.py:1792`.
 
 Request (`QueryIn`):
 
@@ -285,6 +330,14 @@ Status and errors:
   keyword cannot be indexed and would contribute a condition that never
   matches, silently reducing the whole search to zero hits.
 - `404` — the collection is not owned by the caller.
+
+### `GET /search/chunk`
+
+Returns one chunk's full text as `ChunkOut` — `{"id": str, "text": str}`.
+Query params: `id` (the Qdrant point id carried on a search hit) and the
+usual owner-gated `collection`. Search hits carry a capped preview; this
+backs expanding a single hit without inflating every search response with
+text most hits never need.
 
 ### `GET /search/export.csv`
 
@@ -481,6 +534,23 @@ back to an entity for drill-down via its `text`/`type` fields.
 }
 ```
 
+### `GET /collections/ner/sources`
+
+One page of NER-bearing source rows. **Always paginated** — there is no
+full-list mode. Query params: `cursor`, `limit` (1–500, default `50`),
+`entity_key` / `entity_text` / `entity_type` filters, `entity_merge_mode`
+(`orthographic` | `exact` | `resolved`, default `orthographic`) and
+`collection`. With `entity_merge_mode="resolved"` the filter expands to the
+canonical entity's sibling aliases, so the drill-down matches the merged
+mention count.
+
+### `POST /collections/ner/warm`
+
+Pre-warms the NER aggregate cache for the caller's collection on a worker
+thread, so the first `/collections/ner/stats` after a collection switch does
+not pay the full Qdrant scroll on a user interaction. Safe to call
+concurrently — the cache is keyed per collection and tolerates repeat loads.
+
 ### `GET /collections/hate-speech`
 
 Returns the list of chunks flagged by hate-speech detection as
@@ -489,6 +559,13 @@ Returns the list of chunks flagged by hate-speech detection as
 ### `GET /collections/documents`
 
 Lists the documents currently stored in the active collection.
+
+### `GET /collections/documents/count`
+
+Returns `{"count": int}` — the number of unique documents in the caller's
+collection. Backed by the same per-collection cache as
+`/collections/documents` pagination, so the first call after a collection
+switch pays the scroll once and the dashboard KPI then reads from cache.
 
 ### Collection CSV exports
 
@@ -505,6 +582,7 @@ is not owned by the caller.
 | `GET /collections/{name}/export/documents.csv` | One row per document, read from `RAG.list_documents()`. | `DOCUMENT_COLUMNS` |
 | `GET /collections/{name}/export/entities.csv` | Top entities by mention frequency (`rank,entity,type,mentions`), mirroring the CLI's `query --entities`. Query params: `top_k` (default `50`), `min_mentions` (default `1`), `entity_type`, `entity_merge_mode`. | `ENTITY_STATS_COLUMNS` |
 | `GET /collections/{name}/export/hate-speech.csv` | The hate-speech findings table, filtered by the same logic as `GET /collections/hate-speech`. Query params: `category`, `min_confidence`. | `HATE_SPEECH_COLUMNS` |
+| `GET /collections/{name}/export/ner-sources.csv` | Per-source entity findings — the rows the SPA's entity inspector shows. Query params: the same `entity_key`, `entity_text`, `entity_type` and `entity_merge_mode` as `GET /collections/ner/sources`. | `NER_SOURCE_COLUMNS` |
 
 The examples below assume the API is reachable on port 8000; under Docker the
 backend publishes no host port, so run them from inside the network or through
@@ -526,10 +604,6 @@ streaming endpoints and the `query` CLI share — so both produce byte-identical
 CSVs for the same collection. For batch jobs that take many minutes (or should
 not hold an HTTP connection open), run the CLI inside the backend container
 instead; see [cli-reference.md](cli-reference.md#query--batch-chat-summaries-exports).
-
-A fourth route, `GET /collections/{name}/export/ner-sources.csv`, streams
-per-source entity findings (the rows the SPA's entity inspector shows) using
-the same filters as `GET /collections/ner/sources`.
 
 ## Reports
 
@@ -617,10 +691,19 @@ libraries) is unavailable; the other four formats are unaffected.
 Returns `SessionListOut` — `{"sessions": [...]}`. Each entry is a row
 from `conversations` via `SessionManager.list_sessions()`.
 
-### `GET /sessions/{session_id}`
+### `GET /sessions/{session_id}/history`
 
 Returns `SessionHistoryOut` — `{"messages": [...]}` where each message
 comes from `Turn` / `Citation`.
+
+### `GET /sessions/{session_id}/sources.zip`
+
+Streams an `application/zip` bundle of every source file cited in the
+session, with an `attachment; filename="session-<id>-sources.zip"` header.
+Citations are resolved to files by `file_hash` through the same lookup chain
+as `/sources/preview` and deduplicated by hash. A source whose file cannot
+be found is skipped rather than failing the download. A session owned by
+another principal collapses to 404 — indistinguishable from "no sources".
 
 ### `DELETE /sessions/{session_id}`
 
@@ -657,7 +740,7 @@ session is missing or not owned.
 
 ### `POST /agent/chat`
 
-Runs the orchestrator for one turn. Source: `docint/core/api.py:1070`.
+Runs the orchestrator for one turn. Source: `docint/core/api.py:3734`.
 
 Request (`AgentChatIn`):
 
@@ -824,32 +907,50 @@ Returns a preview (or download) of a source file staged under
 `QDRANT_SRC_DIR`. Takes query parameters for the source identifier /
 path. Used by the UI Inspector page to render citations.
 
+## Translate
+
+### `POST /translate`
+
+Translates a caller-supplied snippet into the operator's locale
+(`RESPONSE_LANGUAGE`). Request `TranslateIn` — `{"text": str}`; response
+`{ok, translation, model, target_lang, error}`.
+
+Principal-authenticated but deliberately **not** collection-scoped: it
+translates text the caller already holds, so there is nothing to leak and no
+store re-fetch. Fail-soft — a transport or model failure returns `ok: false`
+with the same shape rather than an error status, so the client keeps showing
+the original. Nothing ingested or stored is ever translated.
+
 ## Request-model reference
 
 All Pydantic models used by the routes live at the top of
 `docint/core/api.py`:
 
-- `SelectCollectionIn` / `SelectCollectionOut` (`api.py:208`)
-- `MetadataFilterIn` (`api.py:217`)
-- `QueryIn` / `QueryOut` (`api.py:238`, `248`)
-- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:692`, `706`)
-- `IngestIn` / `IngestOut` (`api.py:284`, `289`)
-- `SessionListOut` / `SessionHistoryOut` (`api.py:296`, `300`)
-- `NERStatsOut` / `NERSearchOut` / `HateSpeechOut` (`api.py:304`, `312`, `316`)
-- `AgentChatIn` / `AgentChatOut` (`api.py:320`, `325`)
+- `SelectCollectionIn` / `SelectCollectionOut` (`api.py:745`, `751`)
+- `MetadataFilterIn` (`api.py:772`)
+- `QueryIn` / `QueryOut` (`api.py:837`, `907`)
+- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:931`, `950`)
+- `IngestIn` / `IngestOut` (`api.py:977`, `1001`)
+- `SessionListOut` / `SessionHistoryOut` (`api.py:1011`, `1017`)
+- `NERStatsOut` / `NERSearchOut` (`api.py:1023`, `1033`)
+- `AgentChatIn` / `AgentChatOut` (`api.py:1096`, `1107`)
 
 ## Streaming semantics
 
-`_stream_simulated_text()` at `docint/core/api.py:189` is the shared
-helper behind all token-level streaming. It:
+Both streaming endpoints end the same way — a final SSE event carrying the
+complete `QueryOut` / `AgentChatOut` payload, so the client updates
+citations and metadata in one atomic step after the tokens stop. How the
+tokens are produced differs by path:
 
-1. Runs the non-streaming handler.
-2. Splits the final answer into tokens.
-3. Yields each token as an SSE event with a fixed delay
-   (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`, `0.03` s).
-4. Yields a final event with the complete `QueryOut` / `AgentChatOut`
-   payload, so the client can update citations and metadata in one atomic
-   step after the token stream ends.
+- **Replayed** — `_stream_simulated_text()` (`docint/core/api.py:659`)
+  runs the non-streaming handler, splits the finished answer into tokens
+  and yields each with a fixed delay
+  (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`, `0.03` s). This is used on one
+  path only: `POST /stream_query` with `retrieval_mode="stateless"`.
+- **Live** — every session path (`POST /stream_query` in the default mode
+  and `POST /agent/chat/stream`) yields from `RAG.stream_chat()` through
+  `_aiter_sync_gen()` (`docint/core/api.py:673`), so tokens arrive as the
+  model produces them and no artificial delay applies.
 
 The ingestion endpoints use a different pattern: they carry **progress
 events** rather than generated tokens. `POST /ingest/upload` streams the

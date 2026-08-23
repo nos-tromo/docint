@@ -7,7 +7,7 @@ engine, and the postprocessing stages that shape the final result.
 ## Agent orchestration
 
 All agent code lives under `docint/agents/`. The entry point is
-`AgentOrchestrator` (`docint/agents/orchestrator.py:18`), which wires up
+`AgentOrchestrator` (`docint/agents/orchestrator.py:70`), which wires up
 four optional agents behind a single `handle_turn()` method.
 
 ### Stages
@@ -20,7 +20,7 @@ four optional agents behind a single `handle_turn()` method.
      text model to produce an `IntentAnalysis` with a rewritten query
      and extracted entities. Falls back to `qa` if the LLM errors.
    - The FastAPI app automatically upgrades to the contextual agent
-     when a text model is available (`docint/core/api.py:74`).
+     when a text model is available (`docint/core/api.py:181`).
 
 2. **Clarification policy** — `docint/agents/policies.py`
    - `ClarificationPolicy.evaluate()` reads the intent analysis and
@@ -45,7 +45,7 @@ four optional agents behind a single `handle_turn()` method.
 5. **Response agent (optional)** — `docint/agents/generation.py`
    - `PassthroughResponseAgent` is the default no-op.
    - `ResultValidationResponseAgent`
-     (`docint/agents/generation.py:50`) re-checks the generated answer
+     (`docint/agents/generation.py:75`) re-checks the generated answer
      against the returned sources using the configured LLM. When the
      LLM disagrees, it sets `validation_mismatch=true` and attaches a
      `validation_reason`. Gated by
@@ -80,8 +80,8 @@ the contextual understanding agent.
 - **Qdrant client management** — `list_collections()`,
   `select_collection()`, `delete_collection()`.
 - **Index construction** — `create_index()` builds a
-  `VectorStoreIndex` backed by the `QdrantKVStore` docstore
-  (`docint/core/storage/docstore.py`).
+  `VectorStoreIndex` backed by the `SQLiteKVStore` docstore
+  (`docint/core/storage/sqlite_kvstore.py`).
 - **Query engine construction** — `create_query_engine()` attaches the
   reranker, postprocessors, and response synthesiser.
 - **Stateless query** — `run_query(prompt, metadata_filters=...,
@@ -168,15 +168,28 @@ API enforces and the budget retrieval assumes cannot drift apart.
 
 ## Reranking
 
-Candidates retrieved from Qdrant are reranked with
-`FlagEmbeddingReranker` (BGE cross-encoder). Gates:
+Candidates retrieved from Qdrant are reranked by
+`VLLMRerankPostprocessor` (`rag.py`). Reranking is **always a remote
+call** on every provider — there is no local fallback model. The
+postprocessor POSTs to `{RERANK_API_BASE}/rerank` in the Jina shape
+(`{model, query, documents, top_n}`) and maps the returned order back
+onto the nodes. Gates:
 
 - `RERANK_MODEL` — model identifier (default
-  `BAAI/bge-reranker-v2-m3`).
-- `RERANK_USE_FP16` — flip to `true` to use FP16 weights.
+  `BAAI/bge-reranker-v2-m3`, `env_cfg.py:1108`).
+- `RERANK_API_BASE` / `RERANK_API_KEY` / `RERANK_TIMEOUT` — endpoint,
+  Bearer token and per-request timeout; each inherits the matching
+  `OPENAI_*` setting when unset. See
+  [configuration.md](configuration.md) for the full table.
 
-For LLM-backed rerankers, an alternative `LLMRerank` variant can be
-swapped in via the query engine construction path.
+Reranking is **fail-soft**: a transport failure degrades to the
+original retrieval order rather than failing the query, and the outcome
+is stamped on each returned node (`docint_rerank_applied`,
+`docint_rerank_error`) so `/query` responses report whether the rerank
+actually ran. The reranker is wrapped in `LazyRerankerPostprocessor`,
+which defers client construction and its healthcheck to the first
+query — building a query engine for warmup or introspection does not
+pay that cost.
 
 ## Parent-context expansion
 
@@ -353,9 +366,9 @@ The session store URL is resolved by
 
 A typical `/agent/chat` request touches, in order:
 
-1. `docint/core/api.py:1070` — validates the `AgentChatIn` payload.
+1. `docint/core/api.py:3734` — validates the `AgentChatIn` payload.
 2. `AgentOrchestrator.handle_turn()`
-   (`docint/agents/orchestrator.py:47`).
+   (`docint/agents/orchestrator.py:106`).
 3. `ContextualUnderstandingAgent.analyze()`
    (`docint/agents/understanding.py`) — produces an
    `IntentAnalysis`.

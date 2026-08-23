@@ -151,7 +151,7 @@ skipped cheaply, so re-running after a partial failure is safe.
 ## `query` — batch chat, summaries, exports
 
 Source: `docint/cli/query.py`. The parser (`build_parser()` at
-`query.py:40`) accepts:
+`query.py:42`) accepts:
 
 | Flag | Description |
 |---|---|
@@ -182,7 +182,7 @@ Source: `docint/cli/query.py`. The parser (`build_parser()` at
 
 Results are written to `RESULTS_PATH` (default `~/docint/results`) via
 the internal `_store_output()` / `_store_text_output()` /
-`_store_csv_output()` helpers (`query.py:167`, `197`, `211`). Chat results
+`_store_csv_output()` helpers (`query.py:169`, `195`, `209`). Chat results
 are serialised as JSON, summary/export results as text or CSV as
 appropriate.
 
@@ -240,7 +240,8 @@ uv run query-eval
 ```
 
 The default query (if no file exists) falls back to the summarisation
-prompt at `docint/utils/prompts/summarize.txt`.
+prompt. The prompt files live per locale, at
+`docint/utils/prompts/{en,de}/summarize.txt`.
 
 ## `verify` — docstore consistency
 

@@ -17,11 +17,11 @@ environment variables they read, and the defaults baked into each factory.
   as true; anything else is false.
 - **Offline mode** — if `DOCINT_OFFLINE=1` (the default), Docint enables
   HF / Transformers offline mode so models are loaded from the local
-  cache only. See `set_offline_env()` in `env_cfg.py:12`.
+  cache only. See `set_offline_env()` in `env_cfg.py:37`.
 
 ## Inference endpoint — `OpenAIConfig`
 
-Loaded by `load_openai_env()` (`env_cfg.py:631`). Controls the
+Loaded by `load_openai_env()` (`env_cfg.py:1771`). Controls the
 OpenAI-compatible client used for chat, embeddings, and vision.
 
 | Variable | Default | Description |
@@ -71,7 +71,7 @@ When the snapshot is missing or `EMBED_TOKENIZER_REPO` is empty (e.g. OpenAI pro
 
 ## Models — `ModelConfig`
 
-Loaded by `load_model_env()` (`env_cfg.py:512`). Resolves model
+Loaded by `load_model_env()` (`env_cfg.py:1105`). Resolves model
 identifiers, with provider-specific fallbacks.
 
 | Variable | Default (by provider) | Description |
@@ -83,7 +83,7 @@ identifiers, with provider-specific fallbacks.
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
 | `NER_MODEL` | `gliner-community/gliner_large-v2.5` | GLiNER NER model. |
-| `IMAGE_EMBED_MODEL` | `openai/clip-vit-base-patch32` | Image embedding model (CLIP). |
+| `TRANSLATE_MODEL` | inherits `TEXT_MODEL` | Model used for on-demand, display-time snippet translation (`POST /translate`). Reuses the shared chat endpoint — there is no separate translation runtime and no `TRANSLATE_API_BASE`. |
 
 ## Document OCR — `OcrClientConfig`
 
@@ -107,7 +107,7 @@ engine, against the same endpoint, under the same budget.
 
 ## Host endpoints — `HostConfig`
 
-Loaded by `load_host_env()` (`env_cfg.py:220`).
+Loaded by `load_host_env()` (`env_cfg.py:522`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -130,7 +130,7 @@ Requires Qdrant server ≥ 1.18 (the data-plane stack ships v1.18.3).
 
 ## Identity and authentication — `PrincipalConfig`
 
-Loaded by `load_principal_env()` (`env_cfg.py:574`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.
+Loaded by `load_principal_env()` (`env_cfg.py:678`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -142,7 +142,7 @@ Loaded by `load_principal_env()` (`env_cfg.py:574`). Configures request-principa
 
 ## Retrieval — `RetrievalConfig`
 
-Loaded by `load_retrieval_env()` (`env_cfg.py:967`).
+Loaded by `load_retrieval_env()` (`env_cfg.py:2177`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -152,7 +152,6 @@ Loaded by `load_retrieval_env()` (`env_cfg.py:967`).
 | `RETRIEVAL_HYBRID_ALPHA` | `0.5` | Dense-vs-sparse fusion weight `[0.0, 1.0]`. |
 | `RETRIEVAL_VECTOR_QUERY_MODE` | `auto` | One of `auto`, `default`, `sparse`, `hybrid`, `mmr`. |
 | `CHAT_RESPONSE_MODE` | `auto` | Response-synthesiser mode: `auto`, `compact`, `refine`. |
-| `RERANK_USE_FP16` | `false` | Use FP16 for the reranker. |
 | `PARENT_CONTEXT_RETRIEVAL_ENABLED` | `true` | Expand fine chunks to their hierarchical parent context when available. |
 | `PARENT_CONTEXT_SAFETY_MARGIN` | `0.95` | Fraction of `OPENAI_CTX_WINDOW` the parent-context packer may consume before windowing. Clamped to `(0, 1]`; values outside that range fall back to `0.95` with a warning. |
 | `SOCIAL_SOURCE_DIVERSITY_LIMIT` | `2` | Cap on retrieved chunks per author/hour bucket on social/table collections, enforced by `SocialSourceDiversityPostprocessor` on the chat/query path. Clamped to a minimum of `1`. |
@@ -184,8 +183,9 @@ FROM gemma4:31b-cloud
 PARAMETER num_ctx 32768
 ```
 
-`ollama create docint-gemma4 -f deploy/Modelfile.gemma4.example`, set
-`OPENAI_MODEL=docint-gemma4` and `OPENAI_CTX_WINDOW=32768`, and the
+Save that as `deploy/Modelfile.gemma4`, run
+`ollama create docint-gemma4 -f deploy/Modelfile.gemma4`, set
+`TEXT_MODEL=docint-gemma4` and `OPENAI_CTX_WINDOW=32768`, and the
 packer automatically scales up.
 
 #### What metadata reaches the chat LLM
@@ -227,7 +227,7 @@ sources you do not control.
 
 ## Dense embedding client — `EmbedClientConfig`
 
-Loaded by `load_embed_client_env()` (`env_cfg.py:1495`). Dense embeddings
+Loaded by `load_embed_client_env()` (`env_cfg.py:1705`). Dense embeddings
 go through an OpenAI-compatible endpoint on every provider; these knobs
 only need to change on a CPU dev host that wants dense embeddings routed
 to a dedicated container instead of the default OpenAI-style base.
@@ -243,8 +243,8 @@ request timeout is `EMBED_TIMEOUT_SECONDS`, documented under
 
 ## Sparse encoder & hybrid retrieval — `SparseClientConfig`
 
-Loaded by `load_sparse_client_env()` (`env_cfg.py:1440`) and
-`resolve_enable_hybrid()` (`env_cfg.py:1025`). Sparse embedding is a
+Loaded by `load_sparse_client_env()` (`env_cfg.py:1650`) and
+`resolve_enable_hybrid()` (`env_cfg.py:1169`). Sparse embedding is a
 remote HTTP call on every provider — `RemoteSparseEncoder` POSTs to
 `{SPARSE_API_BASE}/pooling` (`task: token_classify`) and
 `{SPARSE_API_BASE}/tokenize`. Its wire format is frozen: production
@@ -363,7 +363,7 @@ image sets its own bind in the container CMD.
 
 ## Pipeline — `PipelineConfig`
 
-Loaded by `load_pipeline_config()` (`env_cfg.py:850`). Controls the
+Loaded by `load_pipeline_config()` (`env_cfg.py:2001`). Controls the
 page-level PDF pipeline in `docint/core/readers/documents/`.
 
 | Variable | Default | Description |
@@ -407,7 +407,7 @@ document was fully read.
 
 ## Ingestion — `IngestionConfig`
 
-Loaded by `load_ingestion_env()` (`env_cfg.py:365`). Controls chunking
+Loaded by `load_ingestion_env()` (`env_cfg.py:919`). Controls chunking
 sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 
 | Variable | Default | Description |
@@ -447,7 +447,7 @@ The default supported file extensions (hard-coded in
 
 ## Image ingestion — `ImageIngestionConfig`
 
-Loaded by `load_image_ingestion_config()` (`env_cfg.py:264`).
+Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -506,7 +506,7 @@ German query in an English-locale deployment is not translated.
 
 ## NER — `NERConfig`
 
-Loaded by `load_ner_env()` (`env_cfg.py:582`).
+Loaded by `load_ner_env()` (`env_cfg.py:1219`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -530,7 +530,7 @@ sparse, rerank and OCR clients, these do **not** inherit `OPENAI_API_BASE` /
 
 ## Hate-speech detection — `HateSpeechConfig`
 
-Loaded by `load_hate_speech_env()` (`env_cfg.py:185`).
+Loaded by `load_hate_speech_env()` (`env_cfg.py:438`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -540,7 +540,7 @@ Loaded by `load_hate_speech_env()` (`env_cfg.py:185`).
 
 ## Graph-RAG — `GraphRAGConfig`
 
-Loaded by `load_graphrag_env()` (`env_cfg.py:141`).
+Loaded by `load_graphrag_env()` (`env_cfg.py:401`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -552,7 +552,7 @@ Loaded by `load_graphrag_env()` (`env_cfg.py:141`).
 
 ## Summarisation — `SummaryConfig`
 
-Loaded by `load_summary_env()` (`env_cfg.py:2145`).
+Loaded by `load_summary_env()` (`env_cfg.py:2377`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -602,7 +602,7 @@ concurrency semaphore, read by `load_summary_concurrency()`:
 
 ## Sessions — `SessionConfig`
 
-Loaded by `load_session_env()` (`env_cfg.py:1105`).
+Loaded by `load_session_env()` (`env_cfg.py:2338`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -611,7 +611,7 @@ Loaded by `load_session_env()` (`env_cfg.py:1105`).
 
 ## Frontend — `FrontendConfig`
 
-Loaded by `load_frontend_env()` (`env_cfg.py:111`).
+Loaded by `load_frontend_env()` (`env_cfg.py:346`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -620,16 +620,8 @@ Loaded by `load_frontend_env()` (`env_cfg.py:111`).
 | `NER_GRAPH_MAX_TOP_K` | `500` | Ceiling for the graph node count (API clamp + UI control max). Raise for large corpora. |
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | `1g` | Maximum upload size, in nginx size syntax. Read **twice**: the backend advertises it via `GET /config` so the SPA can size upload batches, and the frontend nginx image reads the same variable to enforce `client_max_body_size`. The two must stay in sync — a backend-only change lets the SPA send batches nginx then rejects. |
 
-All five values above are served to the SPA by `GET /config`, alongside
-`RESPONSE_LANGUAGE`.
-
-## Runtime device — `RuntimeConfig`
-
-Loaded by `load_runtime_env()` (`env_cfg.py:1070`).
-
-| Variable | Default | Description |
-|---|---|---|
-| `USE_DEVICE` | `auto` | Preferred device for local auxiliary models: `auto`, `cpu`, `mps`, `cuda`, or `cuda:<index>`. When set to `cpu`, `CUDA_VISIBLE_DEVICES=""` is forced at import time to prevent accidental GPU context init. |
+All four values above are served to the SPA by `GET /config`, alongside
+`RESPONSE_LANGUAGE` — five fields in all (`FrontendConfigOut`).
 
 ## Logging — `LoggingConfig`
 
@@ -697,7 +689,7 @@ languages.
 
 ## Response validation — `ResponseValidationConfig`
 
-Loaded by `load_response_validation_env()` (`env_cfg.py:935`).
+Loaded by `load_response_validation_env()` (`env_cfg.py:2109`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -717,4 +709,4 @@ Loaded by `load_corrective_retry_env()`.
 - `DOCINT_OFFLINE` — default `1`. When truthy, Docint sets
   `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`,
   `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_DISABLE_SYMLINKS_WARNING=1`, and
-  `KMP_DUPLICATE_LIB_OK=TRUE`. See `set_offline_env()` in `env_cfg.py:12`.
+  `KMP_DUPLICATE_LIB_OK=TRUE`. See `set_offline_env()` in `env_cfg.py:37`.
