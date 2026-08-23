@@ -1,8 +1,8 @@
 # Document Intelligence
 
 Document Intelligence (docint) is a document RAG stack for ingestion,
-retrieval, and chat. It exists for investigative work: point it at a pile of
-documents and social-media exports, and it will read them — text, tables,
+retrieval, and chat. It exists for analysis and investigative work: point it at a
+pile of documents and social-media exports, and it will read them — text, tables,
 scanned pages, images, audio and video — so you can ask questions of the whole
 corpus, follow the entities through it, and export what you found as a case
 file that stands on its own.
