@@ -240,7 +240,8 @@ uv run query-eval
 ```
 
 The default query (if no file exists) falls back to the summarisation
-prompt at `docint/utils/prompts/summarize.txt`.
+prompt. The prompt files live per locale, at
+`docint/utils/prompts/{en,de}/summarize.txt`.
 
 ## `verify` — docstore consistency
 

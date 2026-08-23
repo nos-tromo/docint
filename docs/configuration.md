@@ -83,6 +83,7 @@ identifiers, with provider-specific fallbacks.
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
 | `NER_MODEL` | `gliner-community/gliner_large-v2.5` | GLiNER NER model. |
+| `TRANSLATE_MODEL` | inherits `TEXT_MODEL` | Model used for on-demand, display-time snippet translation (`POST /translate`). Reuses the shared chat endpoint — there is no separate translation runtime and no `TRANSLATE_API_BASE`. |
 
 ## Document OCR — `OcrClientConfig`
 
@@ -619,8 +620,8 @@ Loaded by `load_frontend_env()` (`env_cfg.py:346`).
 | `NER_GRAPH_MAX_TOP_K` | `500` | Ceiling for the graph node count (API clamp + UI control max). Raise for large corpora. |
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | `1g` | Maximum upload size, in nginx size syntax. Read **twice**: the backend advertises it via `GET /config` so the SPA can size upload batches, and the frontend nginx image reads the same variable to enforce `client_max_body_size`. The two must stay in sync — a backend-only change lets the SPA send batches nginx then rejects. |
 
-All five values above are served to the SPA by `GET /config`, alongside
-`RESPONSE_LANGUAGE`.
+All four values above are served to the SPA by `GET /config`, alongside
+`RESPONSE_LANGUAGE` — five fields in all (`FrontendConfigOut`).
 
 ## Logging — `LoggingConfig`
 
