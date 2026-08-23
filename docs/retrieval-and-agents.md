@@ -7,7 +7,7 @@ engine, and the postprocessing stages that shape the final result.
 ## Agent orchestration
 
 All agent code lives under `docint/agents/`. The entry point is
-`AgentOrchestrator` (`docint/agents/orchestrator.py:18`), which wires up
+`AgentOrchestrator` (`docint/agents/orchestrator.py:70`), which wires up
 four optional agents behind a single `handle_turn()` method.
 
 ### Stages
@@ -20,7 +20,7 @@ four optional agents behind a single `handle_turn()` method.
      text model to produce an `IntentAnalysis` with a rewritten query
      and extracted entities. Falls back to `qa` if the LLM errors.
    - The FastAPI app automatically upgrades to the contextual agent
-     when a text model is available (`docint/core/api.py:74`).
+     when a text model is available (`docint/core/api.py:181`).
 
 2. **Clarification policy** — `docint/agents/policies.py`
    - `ClarificationPolicy.evaluate()` reads the intent analysis and
@@ -45,7 +45,7 @@ four optional agents behind a single `handle_turn()` method.
 5. **Response agent (optional)** — `docint/agents/generation.py`
    - `PassthroughResponseAgent` is the default no-op.
    - `ResultValidationResponseAgent`
-     (`docint/agents/generation.py:50`) re-checks the generated answer
+     (`docint/agents/generation.py:75`) re-checks the generated answer
      against the returned sources using the configured LLM. When the
      LLM disagrees, it sets `validation_mismatch=true` and attaches a
      `validation_reason`. Gated by
@@ -366,9 +366,9 @@ The session store URL is resolved by
 
 A typical `/agent/chat` request touches, in order:
 
-1. `docint/core/api.py:1070` — validates the `AgentChatIn` payload.
+1. `docint/core/api.py:3734` — validates the `AgentChatIn` payload.
 2. `AgentOrchestrator.handle_turn()`
-   (`docint/agents/orchestrator.py:47`).
+   (`docint/agents/orchestrator.py:106`).
 3. `ContextualUnderstandingAgent.analyze()`
    (`docint/agents/understanding.py`) — produces an
    `IntentAnalysis`.

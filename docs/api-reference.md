@@ -5,7 +5,7 @@ The FastAPI app exposes a REST + SSE surface defined in
 tag used in the app, and documents the request and response models.
 
 All request and response bodies are JSON. Pydantic models referenced in
-this doc are declared at the top of `docint/core/api.py:208` and onward.
+this doc are declared at the top of `docint/core/api.py:745` and onward.
 
 ## Base URL & CORS
 
@@ -112,7 +112,7 @@ Deletes the named Qdrant collection. Returns `{ "ok": true }` on success.
 ### `POST /query`
 
 Runs a single question against the active collection. Source:
-`docint/core/api.py:427`.
+`docint/core/api.py:1792`.
 
 Request (`QueryIn`):
 
@@ -657,7 +657,7 @@ session is missing or not owned.
 
 ### `POST /agent/chat`
 
-Runs the orchestrator for one turn. Source: `docint/core/api.py:1070`.
+Runs the orchestrator for one turn. Source: `docint/core/api.py:3734`.
 
 Request (`AgentChatIn`):
 
@@ -829,27 +829,31 @@ path. Used by the UI Inspector page to render citations.
 All Pydantic models used by the routes live at the top of
 `docint/core/api.py`:
 
-- `SelectCollectionIn` / `SelectCollectionOut` (`api.py:208`)
-- `MetadataFilterIn` (`api.py:217`)
-- `QueryIn` / `QueryOut` (`api.py:238`, `248`)
-- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:692`, `706`)
-- `IngestIn` / `IngestOut` (`api.py:284`, `289`)
-- `SessionListOut` / `SessionHistoryOut` (`api.py:296`, `300`)
-- `NERStatsOut` / `NERSearchOut` / `HateSpeechOut` (`api.py:304`, `312`, `316`)
-- `AgentChatIn` / `AgentChatOut` (`api.py:320`, `325`)
+- `SelectCollectionIn` / `SelectCollectionOut` (`api.py:745`, `751`)
+- `MetadataFilterIn` (`api.py:772`)
+- `QueryIn` / `QueryOut` (`api.py:837`, `907`)
+- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:931`, `950`)
+- `IngestIn` / `IngestOut` (`api.py:977`, `1001`)
+- `SessionListOut` / `SessionHistoryOut` (`api.py:1011`, `1017`)
+- `NERStatsOut` / `NERSearchOut` (`api.py:1023`, `1033`)
+- `AgentChatIn` / `AgentChatOut` (`api.py:1096`, `1107`)
 
 ## Streaming semantics
 
-`_stream_simulated_text()` at `docint/core/api.py:189` is the shared
-helper behind all token-level streaming. It:
+Both streaming endpoints end the same way — a final SSE event carrying the
+complete `QueryOut` / `AgentChatOut` payload, so the client updates
+citations and metadata in one atomic step after the tokens stop. How the
+tokens are produced differs by path:
 
-1. Runs the non-streaming handler.
-2. Splits the final answer into tokens.
-3. Yields each token as an SSE event with a fixed delay
-   (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`, `0.03` s).
-4. Yields a final event with the complete `QueryOut` / `AgentChatOut`
-   payload, so the client can update citations and metadata in one atomic
-   step after the token stream ends.
+- **Replayed** — `_stream_simulated_text()` (`docint/core/api.py:659`)
+  runs the non-streaming handler, splits the finished answer into tokens
+  and yields each with a fixed delay
+  (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`, `0.03` s). This is used on one
+  path only: `POST /stream_query` with `retrieval_mode="stateless"`.
+- **Live** — every session path (`POST /stream_query` in the default mode
+  and `POST /agent/chat/stream`) yields from `RAG.stream_chat()` through
+  `_aiter_sync_gen()` (`docint/core/api.py:673`), so tokens arrive as the
+  model produces them and no artificial delay applies.
 
 The ingestion endpoints use a different pattern: they carry **progress
 events** rather than generated tokens. `POST /ingest/upload` streams the

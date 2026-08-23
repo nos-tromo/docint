@@ -41,7 +41,7 @@ depends on a client staying attached.
 ## Supported file types
 
 The default list lives in `load_ingestion_env()` in
-`docint/utils/env_cfg.py:736`. Summary by category:
+`docint/utils/env_cfg.py:919`. Summary by category:
 
 - **Documents** — `.pdf`, `.docx`, `.md`, `.txt`
 - **Tables** — `.csv`, `.tsv`, `.xls`, `.xlsx`, `.parquet`

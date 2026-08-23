@@ -48,11 +48,11 @@ The same RAG engine is used for both ingestion (write path) and retrieval
 | `docint/core/rag.py` | RAG engine: ingest, retrieve, rerank, chat/stream |
 | `docint/core/ingest/` | Ingestion pipeline, shared image service, and media transcription (social + standalone) |
 | `docint/core/readers/` | File-type-specific readers (PDF, images, tables, JSON / Nextext transcripts) |
-| `docint/core/storage/` | Qdrant-backed docstore, hierarchical node storage, source staging |
+| `docint/core/storage/` | SQLite-backed KV docstore (`sqlite_kvstore.py`), hierarchical node storage, source staging |
 | `docint/core/state/` | Conversation sessions and citation tracking (SQLAlchemy) |
 | `docint/core/ner.py` | Named-entity extraction and graph building |
 | `docint/agents/` | Agent orchestrator, understanding, clarification, retrieval, generation |
-| `docint/cli/` | CLI entry points (`serve`, `ingest`, `query`, `eval`, `resolve`, `verify`) |
+| `docint/cli/` | CLI entry points (`serve`, `ingest`, `query`, `eval`, `resolve`, `search_index`, `verify`) |
 | `frontend/` | React SPA (Vite + TypeScript); see [ui-guide.md](ui-guide.md) |
 | `docint/utils/env_cfg.py` | Centralised environment-variable configuration |
 
@@ -65,7 +65,7 @@ The diagram below expands what happens when the UI calls `POST /query` or
    (`QueryIn` / `AgentChatIn`). For `/query`, it routes directly to
    `RAG.run_query()` or `RAG.chat()`; for `/agent/chat` it calls the
    orchestrator.
-2. **AgentOrchestrator.handle_turn()** — `docint/agents/orchestrator.py:47`
+2. **AgentOrchestrator.handle_turn()** — `docint/agents/orchestrator.py:106`
    runs the four-step pipeline:
    1. **UnderstandingAgent** (`docint/agents/understanding.py`). Produces an
       `IntentAnalysis` with `intent`, `confidence`, and extracted entities.
@@ -80,15 +80,15 @@ The diagram below expands what happens when the UI calls `POST /query` or
       default path calls `RAG.chat()` or `RAG.run_query()` depending on
       whether the caller is stateful or stateless.
    4. **ResultValidationResponseAgent**
-      (`docint/agents/generation.py:50`) — optional; re-checks answer
+      (`docint/agents/generation.py:75`) — optional; re-checks answer
       groundedness against the returned sources and sets
       `validation_mismatch` when the LLM disagrees with the answer.
 3. **RAG layer** — `docint/core/rag.py`:
    - Builds the Qdrant query with optional graph expansion
      (`expand_query_with_graph_with_debug`), metadata filters
      (`docint/core/retrieval_filters.py`) and reranker weights.
-   - Runs dense + sparse retrieval, applies rerank (LLM or
-     `VLLMRerankPostprocessor`), and postprocessors for parent-context
+   - Runs dense + sparse retrieval, applies the remote rerank
+     (`VLLMRerankPostprocessor`), and postprocessors for parent-context
      expansion and social/source diversity.
    - Calls the response synthesiser to produce a final answer string.
 4. **Session persistence** — for non-stateless queries,
@@ -97,9 +97,8 @@ The diagram below expands what happens when the UI calls `POST /query` or
    `Turn` (`docint/core/state/turn.py`) and its `Citation` rows
    (`docint/core/state/citation.py`) in SQLite.
 5. **Response envelope** — the backend reassembles a `QueryOut` /
-   `AgentChatOut` payload and returns JSON. Streaming variants replay the
-   already-generated answer as SSE tokens via `_stream_simulated_text`
-   (`docint/core/api.py:189`).
+   `AgentChatOut` payload and returns JSON. The streaming variants are
+   described under [Streaming](#streaming) below.
 
 ## Request flow: ingesting documents
 
@@ -186,7 +185,7 @@ Both modes ultimately call `RAG.run_query()`; the difference lives in
 
 ## Streaming
 
-Three endpoints stream responses back to the client:
+Two endpoints stream generated answers back to the client:
 
 - `POST /stream_query` — streams the answer to a single query.
 - `POST /agent/chat/stream` — streams the orchestrator's final answer.
@@ -196,10 +195,16 @@ or `202` with a `job_id` and lets the caller follow the build on
 `GET /ingest/jobs/events` (see below) — the same job-plus-SSE shape as
 ingestion, not token streaming.
 
-All three use `_stream_simulated_text()` (`docint/core/api.py:189`) to
-replay the complete answer as SSE tokens with a fixed token delay
-(`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`), so the client sees a token-level
-drip feed.
+The two are not fed the same way. `_stream_simulated_text()`
+(`docint/core/api.py:659`) replays an **already complete** answer as SSE
+tokens with a fixed delay (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`), and is
+used on exactly one path: `/stream_query` with
+`retrieval_mode="stateless"`, where `RAG.run_query_async()` produces the
+whole answer before streaming starts. Every session path — `/stream_query`
+with the default mode, and `/agent/chat/stream` — streams from
+`RAG.stream_chat()` through `_aiter_sync_gen()`
+(`docint/core/api.py:673`), so those tokens arrive as the model produces
+them rather than on a timer.
 
 Ingestion streams are also SSE, but carry **progress events** rather than
 generated tokens: `POST /ingest/upload` streams save progress for the bytes
