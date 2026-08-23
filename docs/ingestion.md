@@ -291,8 +291,8 @@ batch:
    `hate_speech_detected` flag in metadata.
 6. Chunks are embedded with the dense model (`EMBED_MODEL`) and, for
    hybrid collections, the sparse model (`SPARSE_MODEL`).
-7. Embeddings and nodes are upserted to Qdrant and to the Qdrant-backed
-   KV docstore (`docint/core/storage/docstore.py`) in batches of
+7. Embeddings and nodes are upserted to Qdrant and to the SQLite-backed
+   KV docstore (`docint/core/storage/sqlite_kvstore.py`) in batches of
    `DOCSTORE_BATCH_SIZE` with retry/backoff governed by
    `DOCSTORE_MAX_RETRIES`, `DOCSTORE_RETRY_BACKOFF_SECONDS`, and
    `DOCSTORE_RETRY_BACKOFF_MAX_SECONDS`.

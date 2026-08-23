@@ -80,8 +80,8 @@ the contextual understanding agent.
 - **Qdrant client management** — `list_collections()`,
   `select_collection()`, `delete_collection()`.
 - **Index construction** — `create_index()` builds a
-  `VectorStoreIndex` backed by the `QdrantKVStore` docstore
-  (`docint/core/storage/docstore.py`).
+  `VectorStoreIndex` backed by the `SQLiteKVStore` docstore
+  (`docint/core/storage/sqlite_kvstore.py`).
 - **Query engine construction** — `create_query_engine()` attaches the
   reranker, postprocessors, and response synthesiser.
 - **Stateless query** — `run_query(prompt, metadata_filters=...,
@@ -168,14 +168,28 @@ API enforces and the budget retrieval assumes cannot drift apart.
 
 ## Reranking
 
-Candidates retrieved from Qdrant are reranked with
-`FlagEmbeddingReranker` (BGE cross-encoder). Gates:
+Candidates retrieved from Qdrant are reranked by
+`VLLMRerankPostprocessor` (`rag.py`). Reranking is **always a remote
+call** on every provider — there is no local fallback model. The
+postprocessor POSTs to `{RERANK_API_BASE}/rerank` in the Jina shape
+(`{model, query, documents, top_n}`) and maps the returned order back
+onto the nodes. Gates:
 
 - `RERANK_MODEL` — model identifier (default
-  `BAAI/bge-reranker-v2-m3`).
+  `BAAI/bge-reranker-v2-m3`, `env_cfg.py:1108`).
+- `RERANK_API_BASE` / `RERANK_API_KEY` / `RERANK_TIMEOUT` — endpoint,
+  Bearer token and per-request timeout; each inherits the matching
+  `OPENAI_*` setting when unset. See
+  [configuration.md](configuration.md) for the full table.
 
-For LLM-backed rerankers, an alternative `LLMRerank` variant can be
-swapped in via the query engine construction path.
+Reranking is **fail-soft**: a transport failure degrades to the
+original retrieval order rather than failing the query, and the outcome
+is stamped on each returned node (`docint_rerank_applied`,
+`docint_rerank_error`) so `/query` responses report whether the rerank
+actually ran. The reranker is wrapped in `LazyRerankerPostprocessor`,
+which defers client construction and its healthcheck to the first
+query — building a query engine for warmup or introspection does not
+pay that cost.
 
 ## Parent-context expansion
 

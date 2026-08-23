@@ -88,7 +88,7 @@ The diagram below expands what happens when the UI calls `POST /query` or
      (`expand_query_with_graph_with_debug`), metadata filters
      (`docint/core/retrieval_filters.py`) and reranker weights.
    - Runs dense + sparse retrieval, applies rerank (LLM or
-     `FlagEmbeddingReranker`), and postprocessors for parent-context
+     `VLLMRerankPostprocessor`), and postprocessors for parent-context
      expansion and social/source diversity.
    - Calls the response synthesiser to produce a final answer string.
 4. **Session persistence** — for non-stateless queries,
@@ -147,9 +147,9 @@ The diagram below expands what happens when the UI calls `POST /query` or
 6. **Persistence** —
    - Chunks are embedded (dense + optional sparse) and upserted into
      Qdrant.
-   - Serialised nodes are persisted in a Qdrant-backed KV docstore
-     (`docint/core/storage/docstore.py`) with retry/backoff on transient
-     Qdrant failures.
+   - Serialised nodes are persisted in a SQLite-backed KV docstore
+     (`SQLiteKVStore`, `docint/core/storage/sqlite_kvstore.py`) with
+     retry/backoff on transient SQLite failures.
    - A file-hash ledger skips re-ingesting unchanged files.
 
 ## Multi-tenancy and data isolation
