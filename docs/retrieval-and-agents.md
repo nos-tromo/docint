@@ -173,7 +173,6 @@ Candidates retrieved from Qdrant are reranked with
 
 - `RERANK_MODEL` — model identifier (default
   `BAAI/bge-reranker-v2-m3`).
-- `RERANK_USE_FP16` — flip to `true` to use FP16 weights.
 
 For LLM-backed rerankers, an alternative `LLMRerank` variant can be
 swapped in via the query engine construction path.

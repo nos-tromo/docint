@@ -83,7 +83,6 @@ identifiers, with provider-specific fallbacks.
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
 | `NER_MODEL` | `gliner-community/gliner_large-v2.5` | GLiNER NER model. |
-| `IMAGE_EMBED_MODEL` | `openai/clip-vit-base-patch32` | Image embedding model (CLIP). |
 
 ## Document OCR — `OcrClientConfig`
 
@@ -152,7 +151,6 @@ Loaded by `load_retrieval_env()` (`env_cfg.py:967`).
 | `RETRIEVAL_HYBRID_ALPHA` | `0.5` | Dense-vs-sparse fusion weight `[0.0, 1.0]`. |
 | `RETRIEVAL_VECTOR_QUERY_MODE` | `auto` | One of `auto`, `default`, `sparse`, `hybrid`, `mmr`. |
 | `CHAT_RESPONSE_MODE` | `auto` | Response-synthesiser mode: `auto`, `compact`, `refine`. |
-| `RERANK_USE_FP16` | `false` | Use FP16 for the reranker. |
 | `PARENT_CONTEXT_RETRIEVAL_ENABLED` | `true` | Expand fine chunks to their hierarchical parent context when available. |
 | `PARENT_CONTEXT_SAFETY_MARGIN` | `0.95` | Fraction of `OPENAI_CTX_WINDOW` the parent-context packer may consume before windowing. Clamped to `(0, 1]`; values outside that range fall back to `0.95` with a warning. |
 | `SOCIAL_SOURCE_DIVERSITY_LIMIT` | `2` | Cap on retrieved chunks per author/hour bucket on social/table collections, enforced by `SocialSourceDiversityPostprocessor` on the chat/query path. Clamped to a minimum of `1`. |
@@ -184,8 +182,9 @@ FROM gemma4:31b-cloud
 PARAMETER num_ctx 32768
 ```
 
-`ollama create docint-gemma4 -f deploy/Modelfile.gemma4.example`, set
-`OPENAI_MODEL=docint-gemma4` and `OPENAI_CTX_WINDOW=32768`, and the
+Save that as `deploy/Modelfile.gemma4`, run
+`ollama create docint-gemma4 -f deploy/Modelfile.gemma4`, set
+`TEXT_MODEL=docint-gemma4` and `OPENAI_CTX_WINDOW=32768`, and the
 packer automatically scales up.
 
 #### What metadata reaches the chat LLM
@@ -622,14 +621,6 @@ Loaded by `load_frontend_env()` (`env_cfg.py:111`).
 
 All five values above are served to the SPA by `GET /config`, alongside
 `RESPONSE_LANGUAGE`.
-
-## Runtime device — `RuntimeConfig`
-
-Loaded by `load_runtime_env()` (`env_cfg.py:1070`).
-
-| Variable | Default | Description |
-|---|---|---|
-| `USE_DEVICE` | `auto` | Preferred device for local auxiliary models: `auto`, `cpu`, `mps`, `cuda`, or `cuda:<index>`. When set to `cpu`, `CUDA_VISIBLE_DEVICES=""` is forced at import time to prevent accidental GPU context init. |
 
 ## Logging — `LoggingConfig`
 

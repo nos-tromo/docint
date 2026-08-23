@@ -210,7 +210,9 @@ ingestion path:
 
 - Images are hashed and, if `IMAGE_CACHE_BY_HASH=true`, embeddings are
   looked up before recomputation.
-- CLIP (`IMAGE_EMBED_MODEL`) produces the dense vector.
+- CLIP produces the dense vector, via the remote CLIP service
+  (`CLIP_API_BASE`); the model identity is set as `CLIP_MODEL` on the
+  vllm-service container, not by docint.
 - When `IMAGE_OCR_ENABLED` is on, the OCR engine reads the text printed
   inside the image and stores it as `ocr_text` — ahead of the caption in
   the node text and in the search index, since it is what a reader typed.
