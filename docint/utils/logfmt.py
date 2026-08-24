@@ -175,6 +175,26 @@ def describe_inputs(root: Path, limit: int = 50) -> InputInventory:
     )
 
 
+def format_override(value: bool | None) -> str:
+    """Render a tri-state job override for the run banner.
+
+    ``hybrid`` / ``ner`` / ``hate_speech`` are per-request *overrides*: ``None``
+    means the request specified nothing and the configured default applies. Left
+    to ``str(None).lower()`` that prints as ``none``, which in a line an operator
+    greps reads as the feature being off — and ``none`` is already taken on the
+    same line, where ``by_type`` uses it for files with no extension.
+
+    Args:
+        value (bool | None): The override, or ``None`` when unspecified.
+
+    Returns:
+        str: ``"true"``, ``"false"``, or ``"default"``.
+    """
+    if value is None:
+        return "default"
+    return "true" if value else "false"
+
+
 def format_by_type(by_type: tuple[tuple[str, int], ...]) -> str:
     """Render a by-extension rollup for the banner header.
 

@@ -15,6 +15,7 @@ from docint.utils.logfmt import (
     describe_inputs,
     format_by_type,
     format_bytes,
+    format_override,
     parse_counter,
     progress_key,
 )
@@ -425,3 +426,16 @@ def test_concurrent_ticks_do_not_corrupt_state() -> None:
     # clock never advances, so every later tick is inside the interval.
     assert len(emitted) == 1
     assert emitted[0].startswith("Extracting entities: ")
+
+
+def test_format_override_separates_unspecified_from_off() -> None:
+    """An unspecified override reads as ``default``, never as ``none``.
+
+    The run banner carries these beside ``by_type``, which uses ``none`` for a
+    file with no extension — so ``none`` there would be a second meaning for a
+    token already spoken for, and reads as the feature being switched off.
+    """
+    assert format_override(True) == "true"
+    assert format_override(False) == "false"
+    assert format_override(None) == "default"
+    assert format_override(None) != format_override(False)

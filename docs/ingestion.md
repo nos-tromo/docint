@@ -421,6 +421,11 @@ Job 3d9f1c… (ingest) progress: Extracting entities: 840/2000 chunks processed
 Ingest job completed | job_id=3d9f1c… collection='field-notes' duration=14:22 duration_ms=862431 files_processed=3 files_skipped=1 files_failed=0 docs=3 nodes=1284 entities_minted=214 entities_attached=57 empty=false
 ```
 
+`hybrid`, `ner` and `hate_speech` are per-request **overrides**, so each has
+three values rather than two: `true`, `false`, and `default` — the last meaning
+the request specified nothing and the configured default applies. `resolve` is
+a plain flag and is only ever `true` or `false`.
+
 A batch of more than 50 files lists the first 50 and then prints
 `Ingest inputs truncated | … listed=50 omitted=452`; the header's
 `files=` and `bytes=` always cover the whole batch.
