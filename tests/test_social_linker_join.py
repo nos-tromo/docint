@@ -6,6 +6,7 @@ import pandas as pd
 
 from docint.core.ingest.social_linker import (
     _derive_posting_id,
+    _infer_album_posting_id,
     build_posting_album_index,
     build_posting_index,
     resolve_media_rows,
@@ -276,6 +277,44 @@ def test_album_inference_is_off_unless_an_index_is_supplied(tmp_path: Path) -> N
 
     links = resolve_media_rows(media, build_posting_index(postings), tmp_path)
     assert [link.media_id for link in links] == ["990011223303"]
+
+
+def test_manifest_key_wins_over_a_conflicting_album_inference(tmp_path: Path) -> None:
+    """A working manifest key is never overridden by the album fallback.
+
+    An export can be album-shaped (``Posting ID`` == ``<Author ID><message no>``)
+    *and* still carry a real ``Network ID`` key. The inference would then attach the
+    row to the first posting at or above its own message number — an earlier, wrong
+    posting — so the fallback must run only after the declared key has failed.
+    """
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-early", "uuid-keyed"],
+            "Posting ID": ["990011223303", "990011223309"],
+            "Author ID": ["9900112233", "9900112233"],
+            "Timestamp": ["2026-03-04 21:30:56+00", "2026-03-04 21:30:56+00"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["990011223301"],
+            "Network ID": ["990011223309"],
+            "Exported media filename": ["a.jpg"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    albums = build_posting_album_index(postings)
+    # Guard the guard: the inference really would fire here, and really would disagree.
+    # Without this the test could pass for the wrong reason on a table it cannot decompose.
+    assert _infer_album_posting_id("990011223301", pd.Timestamp("2026-03-04 21:30:56+00"), albums, 5.0) == (
+        "990011223303"
+    )
+
+    links = resolve_media_rows(media, build_posting_index(postings), tmp_path, albums=albums)
+
+    assert [link.posting_id for link in links] == ["990011223309"]
+    assert [link.posting_uuid for link in links] == ["uuid-keyed"]
 
 
 def test_album_index_is_empty_for_exports_carrying_a_join_key() -> None:
