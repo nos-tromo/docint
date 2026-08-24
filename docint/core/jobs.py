@@ -44,7 +44,13 @@ from loguru import logger
 
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import load_ingest_concurrency, load_logging_env, load_summary_concurrency
-from docint.utils.logfmt import ProgressLogThrottle, describe_inputs, format_by_type, format_bytes
+from docint.utils.logfmt import (
+    ProgressLogThrottle,
+    describe_inputs,
+    format_by_type,
+    format_bytes,
+    format_override,
+)
 
 #: Per-kind SSE event names and failure copy. Keyed by :attr:`IngestJobState.kind`.
 #: ``"ingest"`` preserves the pre-existing event names exactly (backward
@@ -858,9 +864,9 @@ class IngestJobManager:
             inventory.total_files,
             format_bytes(inventory.total_bytes),
             format_by_type(inventory.by_type),
-            str(state.hybrid).lower(),
-            str(state.ner).lower(),
-            str(state.hate_speech).lower(),
+            format_override(state.hybrid),
+            format_override(state.ner),
+            format_override(state.hate_speech),
             str(state.resolve).lower(),
         )
         for index, item in enumerate(inventory.files, start=1):
