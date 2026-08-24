@@ -894,6 +894,8 @@ class IngestionConfig:
     sentence_splitter_chunk_size: int
     supported_filetypes: list[str]
     media_filetypes: list[str]
+    social_album_link_enabled: bool
+    social_album_tolerance_s: float
 
 
 DEFAULT_MEDIA_FILETYPES: list[str] = [
@@ -936,6 +938,8 @@ def load_ingestion_env(
     default_sentence_splitter_chunk_overlap: int = 64,
     default_sentence_splitter_chunk_size: int = 1024,
     default_supported_filetypes: list[str] | None = None,
+    default_social_album_link_enabled: bool = True,
+    default_social_album_tolerance_s: float = 5.0,
 ) -> IngestionConfig:
     """Loads ingestion configuration from environment variables or defaults.
 
@@ -983,6 +987,11 @@ def load_ingestion_env(
         - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
         - supported_filetypes (list[str]): List of supported file extensions for ingestion.
+        - social_album_link_enabled (bool): Whether a social export's media rows that name no
+            known posting may be attached to one by album inference (see
+            ``docint/core/ingest/social_linker.py``).
+        - social_album_tolerance_s (float): Maximum timestamp disagreement, in seconds, allowed
+            when accepting such an inferred link.
         - media_filetypes (list[str]): List of audio/video file extensions discovered by the
             standalone media ingestion pass (not parsed by the generic document readers).
     """
@@ -1085,6 +1094,12 @@ def load_ingestion_env(
         ),
         supported_filetypes=default_supported_filetypes,
         media_filetypes=media_filetypes,
+        social_album_link_enabled=str(os.getenv("SOCIAL_ALBUM_LINK_ENABLED", default_social_album_link_enabled)).lower()
+        in {"true", "1", "yes"},
+        social_album_tolerance_s=max(
+            0.0,
+            float(os.getenv("SOCIAL_ALBUM_TOLERANCE_S", default_social_album_tolerance_s)),
+        ),
     )
 
 
