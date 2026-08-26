@@ -972,6 +972,7 @@ class DocumentIngestionPipeline:
                 nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
                 album_link_enabled=ingestion_cfg.social_album_link_enabled,
                 album_tolerance_s=ingestion_cfg.social_album_tolerance_s,
+                timestamp_link_enabled=ingestion_cfg.social_timestamp_link_enabled,
             ).run(self.data_dir)
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)
