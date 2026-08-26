@@ -17,6 +17,10 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
+#: Long numeric runs in a permalink -- short ones are page numbers, indices and
+#: the like, never a posting id.
+_URL_ID_RE = re.compile(r"\d{6,}")
+
 _COUNTER_SUFFIX = re.compile(r"_\d+$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -122,6 +126,81 @@ def _derive_posting_id(network_id: str, media_id: str, posting_uuids: dict[str, 
     for candidate in (network_id, media_id, strip_counter(media_id)):
         if candidate and candidate in posting_uuids:
             return candidate
+    return None
+
+
+def _network_id_candidates(row: pd.Series) -> set[str]:
+    """Return the network-level ids a postings row advertises.
+
+    ``Network Posting ID`` when the export fills it, plus any long numeric id in
+    the permalink -- a reel-style posting leaves the column empty and carries its
+    network id only in the ``URL``.
+
+    Args:
+        row (pd.Series): One postings row.
+
+    Returns:
+        set[str]: Candidate network-level ids, possibly empty.
+    """
+    candidates: set[str] = set()
+    network_posting_id = str(row.get("Network Posting ID") or "").strip()
+    if network_posting_id:
+        candidates.add(network_posting_id)
+        candidates.update(part for part in network_posting_id.split(":") if part)
+    candidates.update(_URL_ID_RE.findall(str(row.get("URL") or "")))
+    return candidates
+
+
+def build_network_posting_index(postings_df: pd.DataFrame) -> dict[str, str]:
+    """Return ``{network-level id: Posting ID}`` for postings whose own id is internal.
+
+    Some exports mint an internal ``Posting ID`` -- a crawler UUID the media
+    manifest never carries -- while the id the manifest *does* carry is the one
+    the network itself uses, found in ``Network Posting ID`` or in the permalink.
+
+    Two ids are refused rather than resolved to a guess: one that two postings
+    both advertise (nothing says which owns a media row) and one that is an
+    ``Author ID`` (an account appears in every one of its postings' URLs, so it
+    would attach media to an arbitrary posting of that account).
+
+    Args:
+        postings_df (pd.DataFrame): Table carrying the postings export schema.
+
+    Returns:
+        dict[str, str]: Mapping from a network-level posting id to its ``Posting ID``.
+    """
+    owners: dict[str, set[str]] = {}
+    account_ids: set[str] = set()
+    for _, row in postings_df.iterrows():
+        posting_id = str(row.get("Posting ID") or "").strip()
+        account_ids.add(str(row.get("Author ID") or "").strip())
+        if not posting_id:
+            continue
+        for candidate in _network_id_candidates(row):
+            owners.setdefault(candidate, set()).add(posting_id)
+    return {
+        candidate: next(iter(postings))
+        for candidate, postings in owners.items()
+        if len(postings) == 1 and candidate not in account_ids
+    }
+
+
+def _derive_network_posting_id(network_id: str, media_id: str, network_index: dict[str, str]) -> str | None:
+    """Return the posting a media row names by *network-level* id, or ``None``.
+
+    Tried only after :func:`_derive_posting_id` has failed.
+
+    Args:
+        network_id (str): The row's ``Network ID`` value (may be empty).
+        media_id (str): The row's ``Media ID`` value.
+        network_index (dict[str, str]): Index from :func:`build_network_posting_index`.
+
+    Returns:
+        str | None: The matched ``Posting ID``, or ``None`` when nothing matches.
+    """
+    for candidate in (network_id, media_id, strip_counter(media_id)):
+        if candidate and candidate in network_index:
+            return network_index[candidate]
     return None
 
 
@@ -298,6 +377,7 @@ def resolve_media_rows(
     root: Path,
     *,
     manifest_dir: Path | None = None,
+    network_index: dict[str, str] | None = None,
     albums: AlbumIndex | None = None,
     album_tolerance_s: float = _DEFAULT_ALBUM_TOLERANCE_S,
 ) -> list[MediaLink]:
@@ -325,6 +405,9 @@ def resolve_media_rows(
         root (Path): The batch tree root; every media file is looked up under it.
         manifest_dir (Path | None): Directory holding the manifest, used to break a
             duplicate-basename tie. Defaults to ``root``.
+        network_index (dict[str, str] | None): Index from
+            :func:`build_network_posting_index`, consulted only when the manifest's
+            declared key names no known posting. ``None`` (the default) disables it.
         albums (AlbumIndex | None): Index from :func:`build_posting_album_index`.
             ``None`` (the default) disables album inference entirely.
         album_tolerance_s (float): Maximum timestamp disagreement, in seconds,
@@ -339,6 +422,7 @@ def resolve_media_rows(
     stamp_values: list[pd.Timestamp | None] = list(stamps) if stamps is not None else [None] * len(media_df)
     links: list[MediaLink] = []
     exact_links = 0
+    network_links = 0
     album_links = 0
     orphan_skips = 0
     missing_skips = 0
@@ -350,6 +434,10 @@ def resolve_media_rows(
         network_id = str(row.get("Network ID") or "").strip()
         posting_id = _derive_posting_id(network_id, media_id, posting_uuids)
         inferred = False
+        by_network_id = False
+        if posting_id is None and network_index:
+            posting_id = _derive_network_posting_id(network_id, media_id, network_index)
+            by_network_id = posting_id is not None
         if posting_id is None and albums:
             posting_id = _infer_album_posting_id(media_id, stamp, albums, album_tolerance_s)
             inferred = posting_id is not None
@@ -368,6 +456,8 @@ def resolve_media_rows(
             continue
         if inferred:
             album_links += 1
+        elif by_network_id:
+            network_links += 1
         else:
             exact_links += 1
         links.append(MediaLink(posting_uuid=uuid, posting_id=posting_id, media_id=media_id, path=path))
@@ -376,11 +466,13 @@ def resolve_media_rows(
         # referenced files present would otherwise emit one line per row (tens of
         # thousands). A single summary keeps large drop-ins robust and quiet.
         logger.info(
-            "Social linker: {} media linked ({} by manifest key, {} by album inference), {} skipped "
+            "Social linker: {} media linked ({} by manifest key, {} by network id, "
+            "{} by album inference), {} skipped "
             "({} with no matching posting, {} with no local file, {} with an ambiguous filename) "
             "across {} manifest rows.",
             len(links),
             exact_links,
+            network_links,
             album_links,
             orphan_skips + missing_skips + ambiguous_skips,
             orphan_skips,
