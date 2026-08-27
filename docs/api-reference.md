@@ -64,6 +64,7 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `DELETE` | `/reports/{report_id}` | `Reports` | Delete a report and its items. |
 | `POST` | `/reports/{report_id}/collection-overview/refresh` | `Reports` | Recapture the frozen document-overview snapshot. |
 | `POST` | `/reports/{report_id}/items` | `Reports` | Add a snapshotted artifact (idempotent by dedupe key). |
+| `POST` | `/reports/{report_id}/items/batch` | `Reports` | Add many snapshotted artifacts in one request ("Add all"). |
 | `PATCH` | `/reports/{report_id}/items/{item_id}` | `Reports` | Set or clear an item's note. |
 | `DELETE` | `/reports/{report_id}/items/{item_id}` | `Reports` | Remove one item from a report. |
 | `POST` | `/reports/{report_id}/items/reorder` | `Reports` | Reorder a report's items. |
@@ -654,6 +655,22 @@ Adds a snapshotted artifact (`ReportItemIn`: `artifact_type`, `dedupe_key`,
 Idempotent by `dedupe_key`, so re-adding the same chunk returns the existing
 item. Image-bearing snapshots are enriched with a frozen thumbnail on the way
 in.
+
+### `POST /reports/{report_id}/items/batch`
+
+Adds many artifacts in one request (`ReportItemBatchIn`: `items`, a list of
+`ReportItemIn`, plus the `collection` they came from). Backs the Analysis
+screens' "Add all", where an investigator takes every finding of an entity or
+the whole hate-speech set into the report at once.
+
+Idempotent like the single add: an artifact the report already holds is
+counted in `skipped`, never stored twice, so the call is safe to retry. All
+image-bearing snapshots in the batch are enriched from **one** companion
+scroll. Answers with counts — `{"added", "skipped", "item_count"}` — rather
+than the items, so a batch of hundreds is read back by one report refetch.
+
+`422` on an empty list or above `REPORT_BATCH_MAX_ITEMS` (2000) items; `404`
+when the report is missing or not owned.
 
 ### `PATCH /reports/{report_id}/items/{item_id}`
 

@@ -13,6 +13,26 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   hate-speech finding. Clicking it snapshots that one artifact into the active
   report (auto-creating an "Untitled report" the first time). Re-adding the same
   chunk is a no-op — findings are deduped by `chunk_id`.
+- **"Add all" takes a whole section at once.** The Entities and Hate speech
+  headers carry a second control beside their CSV download that adds *every*
+  finding in the open section to the active report in one action — the whole
+  hate-speech set, or every chunk mentioning the selected entity. It is meant
+  for the case the per-artifact control makes tedious: a corpus with hundreds
+  of relevant findings.
+  - **"All" means every match, not the rows on screen.** The findings tables
+    page in 50 rows at a time behind a "Load more", so the control walks the
+    remaining pages itself before adding — a report built from whatever had
+    been scrolled into view would be a silent sample.
+  - Above 100 findings it asks first, and it refuses a set larger than 2000
+    (`REPORT_BATCH_MAX_ITEMS`) rather than adding a partial one; narrow the
+    selection — pick a more specific entity — and repeat.
+  - Findings the report already holds are skipped, not duplicated, so the
+    control is safe to press again after adding a few by hand. The outcome is
+    stated beside it ("12 added, 3 already in report").
+  - **A batch carries no translations.** A translation is frozen into a
+    snapshot only when it was on screen at add-time (see below), which is a
+    per-row action a section-wide add never sees. Add such a finding
+    individually if its translation belongs in the report.
 - The **Report** view lists your reports and, for the active one, shows the
   picked artifacts grouped by type with per-item notes, reordering, and removal.
 - Reports are **owner-scoped** and persisted server-side in the same SQLite
