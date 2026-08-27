@@ -333,16 +333,16 @@ class ReportManager:
             existing = s.query(ReportItem).filter_by(report_id=report_id, dedupe_key=dedupe_key).one_or_none()
             if existing is not None:
                 return self._item_to_dict(existing)
-            max_pos = s.query(ReportItem).filter_by(report_id=report_id).count()
-            item = ReportItem(
-                report_id=report.id,
+            position = s.query(ReportItem).filter_by(report_id=report_id).count()
+            item = self._stage_item(
+                s,
+                report,
                 artifact_type=artifact_type,
                 dedupe_key=dedupe_key,
-                position=max_pos,
+                snapshot=snapshot,
                 note=note,
-                snapshot=json.dumps(snapshot, ensure_ascii=False),
+                position=position,
             )
-            s.add(item)
             report.updated_at = cast(Any, datetime.now(UTC))
             try:
                 s.commit()
@@ -353,6 +353,107 @@ class ReportManager:
                 return self._item_to_dict(existing) if existing is not None else None
             s.refresh(item)
             return self._item_to_dict(item)
+
+    def add_items(
+        self,
+        report_id: int,
+        owner: str | None,
+        *,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Append many artifact snapshots to a report in one transaction.
+
+        The batch counterpart of :meth:`add_item`, backing the Analysis
+        screens' "Add all" control. Each entry carries the same fields
+        ``add_item`` takes as keywords (``artifact_type``, ``dedupe_key``,
+        ``snapshot``, optional ``note``) and is staged through the same
+        helper, so the two paths cannot drift apart.
+
+        Dedupe is by ``dedupe_key`` against both what the report already holds
+        and what earlier entries of this same batch staged — a key the report
+        has, or one repeated inside the batch, counts as skipped rather than
+        stored twice. Counts are returned instead of the items themselves: a
+        batch of hundreds is answered by one report refetch on the client, not
+        by echoing every snapshot back over the wire.
+
+        Args:
+            report_id (int): The report id.
+            owner (str | None): The principal requesting the adds.
+            items (list[dict[str, Any]]): Per-item ``add_item`` kwargs.
+
+        Returns:
+            dict[str, Any] | None: ``{"added", "skipped", "item_count"}``, or
+                ``None`` when the report is missing or not owned by ``owner``.
+        """
+        with self._session_scope() as s:
+            report = s.get(Report, report_id)
+            if report is None or report.owner != owner:
+                return None
+            rows = s.query(ReportItem.dedupe_key).filter_by(report_id=report_id).all()
+            seen = {str(r[0]) for r in rows}
+            position = len(seen)
+            added = 0
+            for entry in items:
+                dedupe_key = str(entry["dedupe_key"])
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                self._stage_item(
+                    s,
+                    report,
+                    artifact_type=str(entry["artifact_type"]),
+                    dedupe_key=dedupe_key,
+                    snapshot=entry.get("snapshot") or {},
+                    note=entry.get("note"),
+                    position=position,
+                )
+                position += 1
+                added += 1
+            if added:
+                report.updated_at = cast(Any, datetime.now(UTC))
+                s.commit()
+            return {"added": added, "skipped": len(items) - added, "item_count": position}
+
+    @staticmethod
+    def _stage_item(
+        session: Any,
+        report: Report,
+        *,
+        artifact_type: str,
+        dedupe_key: str,
+        snapshot: dict[str, Any],
+        note: str | None,
+        position: int,
+    ) -> ReportItem:
+        """Add one item row to the session (uncommitted).
+
+        The single place a :class:`ReportItem` is built, shared by
+        :meth:`add_item` and :meth:`add_items` so the snapshot freeze (JSON
+        dumped at add-time, never a live reference) stays identical on both
+        paths.
+
+        Args:
+            session (Any): The open SQLAlchemy session.
+            report (Report): The owned report being appended to.
+            artifact_type (str): The item's artifact type.
+            dedupe_key (str): Type-prefixed stable key.
+            snapshot (dict[str, Any]): Frozen artifact content.
+            note (str | None): Optional investigator note.
+            position (int): The item's ordinal within the report.
+
+        Returns:
+            ReportItem: The staged (not yet committed) row.
+        """
+        item = ReportItem(
+            report_id=report.id,
+            artifact_type=artifact_type,
+            dedupe_key=dedupe_key,
+            position=position,
+            note=note,
+            snapshot=json.dumps(snapshot, ensure_ascii=False),
+        )
+        session.add(item)
+        return item
 
     def remove_item(self, report_id: int, owner: str | None, item_id: int) -> bool:
         """Remove a single item from a report the caller owns.

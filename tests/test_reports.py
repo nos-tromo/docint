@@ -313,3 +313,70 @@ def test_set_snapshot_empty_dict_is_stored_not_cleared(report_manager: ReportMan
     assert stored["collection_overview"] == {}  # {} persists as an empty dict...
     cleared = _ok(report_manager.set_collection_overview_snapshot(r["id"], "alice", None))
     assert cleared["collection_overview"] is None  # ...only None clears
+
+
+# ---------------------------------------------------------------------------
+# Batch add — "Add all" from an Analysis section
+# ---------------------------------------------------------------------------
+
+
+def test_add_items_appends_all_with_sequential_positions(report_manager: ReportManager) -> None:
+    """A batch appends every item, positions continuing from the existing count."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c0"))
+
+    result = report_manager.add_items(rid, "alice", items=[_entity_item("c1"), _entity_item("c2"), _entity_item("c3")])
+
+    assert result is not None
+    assert (result["added"], result["skipped"]) == (3, 0)
+    report = _ok(report_manager.get_report(rid, "alice"))
+    assert [i["dedupe_key"] for i in report["items"]] == ["entity:c0", "entity:c1", "entity:c2", "entity:c3"]
+    assert [i["position"] for i in report["items"]] == [0, 1, 2, 3]
+
+
+def test_add_items_skips_keys_already_present(report_manager: ReportManager) -> None:
+    """Items whose dedupe key is already in the report count as skipped, not added."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+
+    result = report_manager.add_items(rid, "alice", items=[_entity_item("c1", text="changed"), _entity_item("c2")])
+
+    assert result is not None
+    assert (result["added"], result["skipped"]) == (1, 1)
+    report = _ok(report_manager.get_report(rid, "alice"))
+    assert len(report["items"]) == 2
+    # The pre-existing snapshot is untouched by the batch.
+    assert report["items"][0]["snapshot"]["chunk_text"] == "hello"
+
+
+def test_add_items_deduplicates_within_one_batch(report_manager: ReportManager) -> None:
+    """A key repeated inside the same batch is stored once."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+
+    result = report_manager.add_items(rid, "alice", items=[_entity_item("c1"), _entity_item("c1")])
+
+    assert result is not None
+    assert (result["added"], result["skipped"]) == (1, 1)
+    assert len(_ok(report_manager.get_report(rid, "alice"))["items"]) == 1
+
+
+def test_add_items_reports_item_count(report_manager: ReportManager) -> None:
+    """The result carries the report's total item count after the batch."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    result = report_manager.add_items(rid, "alice", items=[_entity_item("c1"), _entity_item("c2")])
+    assert result is not None
+    assert result["item_count"] == 2
+
+
+def test_add_items_cross_owner_is_not_found(report_manager: ReportManager) -> None:
+    """A batch against another owner's report returns None (the 404 seam)."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    assert report_manager.add_items(rid, "bob", items=[_entity_item("c1")]) is None
+
+
+def test_add_items_empty_batch_is_a_no_op(report_manager: ReportManager) -> None:
+    """An empty item list neither fails nor touches the report."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    result = report_manager.add_items(rid, "alice", items=[])
+    assert result is not None
+    assert (result["added"], result["skipped"], result["item_count"]) == (0, 0, 0)

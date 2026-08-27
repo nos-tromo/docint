@@ -1,5 +1,12 @@
 import { apiDelete, apiGet, apiPatch, apiPost, url } from './client'
-import type { Report, ReportExportFormat, ReportItem, ReportItemInput, ReportSummary } from './types'
+import type {
+  Report,
+  ReportBatchResult,
+  ReportExportFormat,
+  ReportItem,
+  ReportItemInput,
+  ReportSummary
+} from './types'
 
 export const listReports = (collection?: string) =>
   apiGet<{ reports: ReportSummary[] }>('/reports', collection ? { collection } : undefined)
@@ -22,6 +29,14 @@ export const deleteReport = (id: number) => apiDelete<{ ok: boolean }>(`/reports
 
 export const addReportItem = (id: number, item: ReportItemInput) =>
   apiPost<ReportItem>(`/reports/${id}/items`, item)
+
+/**
+ * Add many artifacts in one request (the Analysis screens' "Add all").
+ * Idempotent server-side, so items the report already holds come back in
+ * `skipped` rather than as an error, and the call is safe to retry.
+ */
+export const addReportItems = (id: number, items: ReportItemInput[], collection?: string | null) =>
+  apiPost<ReportBatchResult>(`/reports/${id}/items/batch`, { items, collection: collection ?? null })
 
 export const updateReportItem = (id: number, itemId: number, body: { note?: string | null }) =>
   apiPatch<ReportItem>(`/reports/${id}/items/${itemId}`, body)
