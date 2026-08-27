@@ -76,7 +76,9 @@ describe('EntityFindingsTable', () => {
   })
 
   it('shows an empty state when the selected entity has no matched chunks', () => {
-    render(<EntityFindingsTable selected={selected} findings={[]} collection="alpha" />)
+    // The header (and its "Add all" control) renders even with no findings,
+    // so this case needs the query client too.
+    renderWithClient(<EntityFindingsTable selected={selected} findings={[]} collection="alpha" />)
     expect(screen.getByText(/no chunks were matched/i)).toBeInTheDocument()
   })
 })

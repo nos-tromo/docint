@@ -1,0 +1,231 @@
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AddAllToReportButton } from './AddAllToReportButton'
+import { reportKey } from '@/hooks/useReports'
+import { useReportStore } from '@/stores/report'
+import { useUiStore } from '@/stores/ui'
+import type { Report, ReportItemInput } from '@/api/types'
+
+interface Row {
+  chunk_id: string
+}
+
+const toItem = (row: Row): ReportItemInput => ({
+  artifact_type: 'entity_finding',
+  dedupe_key: `entity:${row.chunk_id}`,
+  snapshot: { chunk_id: row.chunk_id }
+})
+
+interface Captured {
+  url: string
+  body: Record<string, unknown>
+}
+
+/**
+ * Stub fetch for the two POSTs this flow makes: report creation and the batch
+ * add. Rows are supplied directly rather than over the wire — the page walk
+ * itself is `fetchAllPages`' own test.
+ */
+function stubFetch(
+  captured: Captured[],
+  batch: { added: number; skipped: number } = { added: 0, skipped: 0 },
+  report?: Report
+) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (u: string, init?: RequestInit) => {
+      const url = String(u)
+      if (init?.method === 'POST' && init.body) captured.push({ url, body: JSON.parse(String(init.body)) })
+      if (url.endsWith('/reports') && init?.method === 'POST') {
+        return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+      }
+      if (url.includes('/items/batch')) {
+        const items = captured[captured.length - 1].body.items as unknown[]
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ added: batch.added || items.length, skipped: batch.skipped, item_count: items.length })
+        }
+      }
+      if (report && /\/reports\/\d+$/.test(url.split('?')[0])) {
+        return { ok: true, status: 200, json: async () => report }
+      }
+      return { ok: true, status: 200, json: async () => ({}) }
+    })
+  )
+}
+
+function renderButton(rows: Row[], qc: QueryClient) {
+  return render(
+    <QueryClientProvider client={qc}>
+      <AddAllToReportButton fetchAll={async () => rows} toItem={toItem} hasRows={rows.length > 0} />
+    </QueryClientProvider>
+  )
+}
+
+const client = () => new QueryClient({ defaultOptions: { queries: { retry: false } } })
+const clickAddAll = () => userEvent.click(screen.getByRole('button', { name: /add all findings to report/i }))
+
+beforeEach(() => {
+  localStorage.clear()
+  useReportStore.setState({ activeReportId: null })
+  useUiStore.setState({ selectedCollection: 'docs' })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+describe('AddAllToReportButton', () => {
+  it('posts every fetched row as ONE batch request', async () => {
+    // The point of the batch route: N findings must not become N round-trips.
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+
+    renderButton([{ chunk_id: 'c1' }, { chunk_id: 'c2' }, { chunk_id: 'c3' }], client())
+    await clickAddAll()
+
+    await waitFor(() => expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(true))
+    const batches = captured.filter((c) => c.url.includes('/items/batch'))
+    expect(batches).toHaveLength(1)
+    expect((batches[0].body.items as ReportItemInput[]).map((i) => i.dedupe_key)).toEqual([
+      'entity:c1',
+      'entity:c2',
+      'entity:c3'
+    ])
+    expect(batches[0].body.collection).toBe('docs')
+  })
+
+  it('auto-creates a report when none is active, then adds into it', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+
+    renderButton([{ chunk_id: 'c1' }], client())
+    await clickAddAll()
+
+    await waitFor(() => expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(true))
+    expect(captured[0].url).toMatch(/\/reports$/)
+    expect(captured[1].url).toContain('/reports/1/items/batch')
+    expect(useReportStore.getState().activeReportId).toBe(1)
+  })
+
+  it('skips rows already in the report instead of resending them', async () => {
+    const captured: Captured[] = []
+    const qc = client()
+    useReportStore.setState({ activeReportId: 1 })
+    const existing: Report = {
+      id: 1,
+      title: 'Case',
+      collection_name: 'docs',
+      operator: null,
+      reference_number: null,
+      show_toc: true,
+      show_collection_overview: true,
+      session_id: null,
+      created_at: null,
+      updated_at: null,
+      item_count: 1,
+      collection_overview: null,
+      items: [
+        {
+          id: 5,
+          artifact_type: 'entity_finding',
+          dedupe_key: 'entity:c1',
+          position: 0,
+          note: null,
+          snapshot: {},
+          created_at: null
+        }
+      ]
+    }
+    stubFetch(captured, { added: 1, skipped: 0 }, existing)
+    qc.setQueryData<Report>(reportKey(1), existing)
+
+    renderButton([{ chunk_id: 'c1' }, { chunk_id: 'c2' }], qc)
+    await clickAddAll()
+
+    await waitFor(() => expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(true))
+    const sent = captured.find((c) => c.url.includes('/items/batch'))!.body.items as ReportItemInput[]
+    expect(sent.map((i) => i.dedupe_key)).toEqual(['entity:c2'])
+  })
+
+  it('reports the outcome, counting locally skipped rows too', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured, { added: 1, skipped: 0 })
+    useReportStore.setState({ activeReportId: 1 })
+
+    // The same chunk twice in the fetched pages is one item, one skip.
+    renderButton([{ chunk_id: 'c1' }, { chunk_id: 'c1' }], client())
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/1 added, 1 already/i))
+  })
+
+  it('asks before adding a large batch and adds nothing when refused', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    const confirmSpy = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirmSpy)
+    const rows = Array.from({ length: 150 }, (_, i) => ({ chunk_id: `c${i}` }))
+
+    renderButton(rows, client())
+    await clickAddAll()
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('150')))
+    expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
+  })
+
+  it('adds the large batch once confirmed', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const rows = Array.from({ length: 150 }, (_, i) => ({ chunk_id: `c${i}` }))
+
+    renderButton(rows, client())
+    await clickAddAll()
+
+    await waitFor(() => expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(true))
+    expect((captured.find((c) => c.url.includes('/items/batch'))!.body.items as unknown[]).length).toBe(150)
+  })
+
+  it('refuses a batch above the server cap without posting it', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    const confirmSpy = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirmSpy)
+    const rows = Array.from({ length: 2001 }, (_, i) => ({ chunk_id: `c${i}` }))
+
+    renderButton(rows, client())
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/too many findings/i))
+    expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
+    expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('shows a retry state when the batch fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 500, json: async () => ({ detail: 'boom' }) }))
+    )
+    useReportStore.setState({ activeReportId: 1 })
+
+    renderButton([{ chunk_id: 'c1' }], client())
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/could not add/i))
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  })
+
+  it('is disabled when the section has no findings', () => {
+    renderButton([], client())
+    expect(screen.getByRole('button', { name: /add all findings to report/i })).toBeDisabled()
+  })
+})

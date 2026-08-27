@@ -1,10 +1,12 @@
 import { useRef, useState } from 'react'
 import { DownloadLink } from '@infra/ui'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { csvExportHref } from '@/api/collections'
+import { csvExportHref, getHateSpeechPage } from '@/api/collections'
 import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataPills } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { AddAllToReportButton } from '@/components/report/AddAllToReportButton'
+import { fetchAllPages } from '@/lib/fetchAllPages'
 import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
@@ -151,6 +153,11 @@ export function HateSpeechTable({
     overscan: 8
   })
 
+  // The same query the table's own infinite pages use, walked to the end at
+  // the server's page maximum so a section-wide add sees every flagged chunk.
+  const fetchAllRows = () =>
+    fetchAllPages<HateSpeechRow>((cursor) => getHateSpeechPage({ cursor, limit: 500, collection }))
+
   if (!rows.length) {
     return (
       <div className="text-sm text-muted-foreground">
@@ -166,9 +173,18 @@ export function HateSpeechTable({
           {t(rows.length === 1 ? 'hate.count_one' : 'hate.count_other', { count: rows.length })}
           {hasNextPage ? '+' : ''}.
         </p>
-        {collection && (
-          <DownloadLink href={csvExportHref(collection, 'hate-speech')} label={t('table.export_csv')} />
-        )}
+        <div className="flex items-center gap-1">
+          {/* Adds every flagged chunk in the collection, not only the rows
+              paged in — see AddAllToReportButton. */}
+          <AddAllToReportButton
+            fetchAll={fetchAllRows}
+            toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row)}
+            hasRows={rows.length > 0}
+          />
+          {collection && (
+            <DownloadLink href={csvExportHref(collection, 'hate-speech')} label={t('table.export_csv')} />
+          )}
+        </div>
       </div>
       <div className="rounded-md border border-border overflow-hidden">
         <div
