@@ -1159,6 +1159,22 @@ class ReportItemIn(BaseModel):
     collection: str | None = None
 
 
+# The most items one batch add may carry. A ceiling, not a target: it bounds
+# a single request's snapshot payload and its one companion scroll, and gives
+# the SPA a number to refuse against before it posts (see the Analysis
+# screens' "Add all"). Reports themselves stay uncapped.
+REPORT_BATCH_MAX_ITEMS = 2000
+
+
+class ReportItemBatchIn(BaseModel):
+    """Request payload adding many snapshotted artifacts to a report at once."""
+
+    items: list[ReportItemIn] = Field(min_length=1, max_length=REPORT_BATCH_MAX_ITEMS)
+    # The collection the artifacts were taken from, as on the single add. One
+    # per batch: a batch comes from one Analysis section, hence one collection.
+    collection: str | None = None
+
+
 class TranslateIn(BaseModel):
     """Request payload for on-demand snippet translation."""
 
@@ -2917,14 +2933,60 @@ def _enrich_snapshot_thumbnails(
     Returns:
         dict[str, Any]: The snapshot, enriched where possible.
     """
+    _enrich_snapshots_thumbnails([(snapshot, artifact_type)], report, principal, collection)
+    return snapshot
+
+
+def _image_containers(snapshot: dict[str, Any], artifact_type: str) -> list[dict[str, Any]]:
+    """Return the dicts within one snapshot that carry image identity.
+
+    A chat answer holds its images on its sources; a finding holds one on the
+    snapshot itself; a summary carries none by design.
+
+    Args:
+        snapshot (dict[str, Any]): The caller-supplied snapshot.
+        artifact_type (str): The report item's artifact type.
+
+    Returns:
+        list[dict[str, Any]]: Dicts to stamp a ``thumbnail`` onto.
+    """
+    if artifact_type == "chat_answer":
+        return [s for s in (snapshot.get("sources") or []) if isinstance(s, dict) and s.get("image_id")]
+    if artifact_type in ("entity_finding", "hate_speech_finding") and snapshot.get("image_id"):
+        return [snapshot]
+    return []
+
+
+def _enrich_snapshots_thumbnails(
+    pairs: list[tuple[dict[str, Any], str]],
+    report: dict[str, Any],
+    principal: Principal,
+    collection: str | None = None,
+) -> None:
+    """Freeze visual evidence into many snapshots with one companion scroll.
+
+    The batch form of :func:`_enrich_snapshot_thumbnails` and the only place
+    the companion is actually read: every image-bearing container across all
+    ``pairs`` is collected first, so a batch add of hundreds of findings costs
+    one Qdrant scroll rather than one per item. Snapshots are edited in place.
+
+    Fail-soft by contract, batch-wide: any failure leaves every snapshot
+    untouched — text-only items, never a refused add.
+
+    Args:
+        pairs (list[tuple[dict[str, Any], str]]): ``(snapshot, artifact_type)``
+            for each item being added.
+        report (dict[str, Any]): The owned report the items are being added to.
+        principal (Principal): The resolved request principal.
+        collection (str | None): Logical collection the artifacts were taken
+            from, when the client sent one.
+    """
     try:
         containers: list[dict[str, Any]] = []
-        if artifact_type == "chat_answer":
-            containers = [s for s in (snapshot.get("sources") or []) if isinstance(s, dict) and s.get("image_id")]
-        elif artifact_type in ("entity_finding", "hate_speech_finding") and snapshot.get("image_id"):
-            containers = [snapshot]
+        for snapshot, artifact_type in pairs:
+            containers.extend(_image_containers(snapshot, artifact_type))
         if not containers:
-            return snapshot
+            return
 
         physical: str | None = None
         for logical in (collection, report.get("collection_name")):
@@ -2937,14 +2999,14 @@ def _enrich_snapshot_thumbnails(
                 continue
             break
         if physical is None:
-            return snapshot
+            return
         companion = rag._image_collection_name(physical)
 
         containers = [c for c in containers if not c.get("image_collection") or c.get("image_collection") == companion]
         image_ids = sorted({str(c["image_id"]) for c in containers})
         client = getattr(rag, "qdrant_client", None)
         if not image_ids or client is None:
-            return snapshot
+            return
 
         points, _ = client.scroll(
             collection_name=companion,
@@ -2967,7 +3029,6 @@ def _enrich_snapshot_thumbnails(
                 container["thumbnail"] = thumb
     except Exception as exc:
         logger.warning("Snapshot thumbnail enrichment skipped: {}", exc)
-    return snapshot
 
 
 def _capture_collection_overview(report_id: int, collection: str, principal: Principal) -> dict[str, Any] | None:
@@ -3579,6 +3640,67 @@ def add_report_item(
     if item is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return item
+
+
+@app.post("/reports/{report_id}/items/batch", tags=["Reports"])
+def add_report_items(
+    report_id: int,
+    payload: ReportItemBatchIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
+    """Add many snapshotted artifacts to a report in one request.
+
+    Backs the Analysis screens' "Add all", where an investigator takes every
+    finding of an entity or the whole hate-speech set into the report at once.
+    Idempotent like the single add: an artifact the report already holds is
+    counted as skipped, never stored twice, so the call is safe to retry and
+    safe to fire over a section that is already partly collected.
+
+    Answers with counts rather than the items: a batch of hundreds is read
+    back by one report refetch, not by echoing every snapshot over the wire.
+
+    Args:
+        report_id (int): The report id.
+        payload (ReportItemBatchIn): The items and the collection they were
+            taken from.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"added", "skipped", "item_count"}``.
+
+    Raises:
+        HTTPException: 404 when the report is missing or not owned.
+    """
+    report = _get_owned_report(report_id, principal.effective_owner)
+    collection = payload.collection or next((item.collection for item in payload.items if item.collection), None)
+    # Enrichment edits the snapshots in place, so the manager stores what the
+    # one companion scroll stamped.
+    _enrich_snapshots_thumbnails(
+        [(item.snapshot, item.artifact_type) for item in payload.items], report, principal, collection
+    )
+    result = rag.ensure_report_manager().add_items(
+        report_id,
+        principal.effective_owner,
+        items=[
+            {
+                "artifact_type": item.artifact_type,
+                "dedupe_key": item.dedupe_key,
+                "snapshot": item.snapshot,
+                "note": item.note,
+            }
+            for item in payload.items
+        ],
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    logger.info(
+        "Report batch add | report_id={} requested={} added={} skipped={}",
+        report_id,
+        len(payload.items),
+        result["added"],
+        result["skipped"],
+    )
+    return result
 
 
 @app.patch("/reports/{report_id}/items/{item_id}", tags=["Reports"])

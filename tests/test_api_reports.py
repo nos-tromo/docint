@@ -736,3 +736,123 @@ def test_add_summary_item_is_never_enriched(client: TestClient, monkeypatch: pyt
     assert resp.status_code == 200, resp.text
     assert "thumbnail" not in resp.json()["snapshot"]
     assert fake.scrolled_collections == []
+
+
+# ---------------------------------------------------------------------------
+# Batch add — POST /reports/{id}/items/batch ("Add all" in an Analysis section)
+# ---------------------------------------------------------------------------
+
+
+def test_batch_add_items(client: TestClient) -> None:
+    """A batch adds every item in one request and reports the counts."""
+    rid = _create(client)["id"]
+
+    resp = client.post(
+        f"/reports/{rid}/items/batch",
+        json={"items": [_entity_payload("c1"), _entity_payload("c2"), _entity_payload("c3")]},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"added": 3, "skipped": 0, "item_count": 3}
+    report = client.get(f"/reports/{rid}").json()
+    assert [i["dedupe_key"] for i in report["items"]] == ["entity:c1", "entity:c2", "entity:c3"]
+
+
+def test_batch_add_skips_items_already_in_the_report(client: TestClient) -> None:
+    """Re-sending a key already present counts as skipped and adds no duplicate."""
+    rid = _create(client)["id"]
+    client.post(f"/reports/{rid}/items", json=_entity_payload("c1"))
+
+    resp = client.post(f"/reports/{rid}/items/batch", json={"items": [_entity_payload("c1"), _entity_payload("c2")]})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"added": 1, "skipped": 1, "item_count": 2}
+    assert len(client.get(f"/reports/{rid}").json()["items"]) == 2
+
+
+def test_batch_add_rejects_an_empty_batch(client: TestClient) -> None:
+    """An empty item list is a client error, not a silent success."""
+    rid = _create(client)["id"]
+    assert client.post(f"/reports/{rid}/items/batch", json={"items": []}).status_code == 422
+
+
+def test_batch_add_rejects_an_oversize_batch(client: TestClient) -> None:
+    """Above the hard cap the request is refused before anything is written."""
+    rid = _create(client)["id"]
+    items = [_entity_payload(f"c{i}") for i in range(api_module.REPORT_BATCH_MAX_ITEMS + 1)]
+
+    resp = client.post(f"/reports/{rid}/items/batch", json={"items": items})
+
+    assert resp.status_code == 422
+    assert client.get(f"/reports/{rid}").json()["items"] == []
+
+
+def test_batch_add_to_missing_report_404(client: TestClient) -> None:
+    """A batch against an unknown report id returns 404."""
+    assert client.post("/reports/99999/items/batch", json={"items": [_entity_payload()]}).status_code == 404
+
+
+def test_batch_add_cross_owner_404(client: TestClient) -> None:
+    """A batch against another owner's report is 404, like every other item route."""
+    rid = client.post("/reports", json={"title": "Alice case"}, headers={"X-Auth-User": "alice"}).json()["id"]
+
+    resp = client.post(
+        f"/reports/{rid}/items/batch", json={"items": [_entity_payload("c1")]}, headers={"X-Auth-User": "bob"}
+    )
+
+    assert resp.status_code == 404
+
+
+def test_batch_add_freezes_thumbnails_in_one_companion_scroll(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every image-bearing item in a batch is enriched, with a single scroll."""
+    fake = _wire_images(
+        monkeypatch,
+        {
+            "p1": {
+                "image_id": "kf-1",
+                "thumbnail_b64": "QUJD",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "document",
+            },
+            "p2": {
+                "image_id": "kf-2",
+                "thumbnail_b64": "REVG",
+                "thumbnail_mime": "image/jpeg",
+                "source_type": "video_keyframe",
+            },
+        },
+    )
+    rid = _create(client)["id"]
+    first, second, third = _entity_payload("c1"), _entity_payload("c2"), _entity_payload("c3")
+    first["snapshot"]["image_id"] = "kf-1"
+    second["snapshot"]["image_id"] = "kf-2"
+
+    resp = client.post(f"/reports/{rid}/items/batch", json={"items": [first, second, third], "collection": "docs"})
+
+    assert resp.status_code == 200, resp.text
+    assert fake.scrolled_collections == [f"{_physical()}_images"]
+    items = {i["dedupe_key"]: i for i in client.get(f"/reports/{rid}").json()["items"]}
+    assert items["entity:c1"]["snapshot"]["thumbnail"]["data_uri"] == "data:image/jpeg;base64,QUJD"
+    assert items["entity:c2"]["snapshot"]["thumbnail"]["kind"] == "video_keyframe"
+    assert "thumbnail" not in items["entity:c3"]["snapshot"]
+
+
+def test_batch_add_survives_companion_scroll_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dead companion degrades the batch to text-only items, never a failed add."""
+    _wire_images(monkeypatch, {})
+
+    def _boom(*_args: Any, **_kwargs: Any) -> tuple[list[Any], None]:
+        raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(api_module.rag.qdrant_client, "scroll", _boom, raising=False)
+    rid = _create(client)["id"]
+    payload = _entity_payload("c1")
+    payload["snapshot"]["image_id"] = "kf-1"
+
+    resp = client.post(f"/reports/{rid}/items/batch", json={"items": [payload], "collection": "docs"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["added"] == 1
+    assert "thumbnail" not in client.get(f"/reports/{rid}").json()["items"][0]["snapshot"]
