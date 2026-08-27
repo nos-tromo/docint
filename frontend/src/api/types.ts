@@ -439,6 +439,18 @@ export interface ReportItemInput {
   collection?: string | null
 }
 
+/**
+ * What one batch add did. Counts only — a batch of hundreds is read back by
+ * one report refetch, not by echoing every snapshot over the wire. `skipped`
+ * counts artifacts the report already held (the add is idempotent by dedupe
+ * key), so it is a normal outcome, never an error.
+ */
+export interface ReportBatchResult {
+  added: number
+  skipped: number
+  item_count: number
+}
+
 export interface ReportItem {
   id: number
   artifact_type: ArtifactType

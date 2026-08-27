@@ -2,7 +2,12 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { IconButton, ReportCheckIcon, ReportIcon, WarningIcon } from '@infra/ui'
 import type { Report, ReportItemInput } from '@/api/types'
-import { reportKey, useAddReportItem, useCreateReport, useRemoveReportItem } from '@/hooks/useReports'
+import {
+  reportKey,
+  useAddReportItem,
+  useEnsureActiveReport,
+  useRemoveReportItem
+} from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
@@ -23,14 +28,13 @@ export function AddToReportButton({ item, inReport, className }: Props) {
   const t = useT()
   const qc = useQueryClient()
   const activeReportId = useReportStore((s) => s.activeReportId)
-  const setActiveReportId = useReportStore((s) => s.setActiveReportId)
   const collection = useUiStore((s) => s.selectedCollection)
-  const createReport = useCreateReport()
+  const ensureReport = useEnsureActiveReport()
   const addItem = useAddReportItem()
   const removeItem = useRemoveReportItem()
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
-  const pending = busy || createReport.isPending || addItem.isPending || removeItem.isPending
+  const pending = busy || addItem.isPending || removeItem.isPending
 
   async function handleClick() {
     if (pending) return
@@ -45,15 +49,9 @@ export function AddToReportButton({ item, inReport, className }: Props) {
         }
         return
       }
-      let reportId = activeReportId
-      if (reportId == null) {
-        const created = await createReport.mutateAsync({
-          title: t('report.untitled_title'),
-          collection_name: collection ?? undefined
-        })
-        reportId = created.id
-        setActiveReportId(reportId)
-      }
+      // Shared with the section-wide "Add all" so the auto-create rules
+      // cannot drift between the two paths.
+      const reportId = await ensureReport()
       // The active collection travels with the add: the report may have been
       // created in another one, and the artifact's evidence lives where it was
       // retrieved.

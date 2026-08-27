@@ -1,7 +1,8 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   addReportItem,
+  addReportItems,
   createReport,
   deleteReport,
   getReport,
@@ -13,6 +14,9 @@ import {
   updateReportItem
 } from '@/api/reports'
 import type { ReportItemInput } from '@/api/types'
+import { useReportStore } from '@/stores/report'
+import { useUiStore } from '@/stores/ui'
+import { useT } from '@/i18n/LanguageContext'
 
 export const reportsKey = ['reports'] as const
 export const reportKey = (id: number) => ['reports', id] as const
@@ -75,6 +79,22 @@ export function useAddReportItem() {
   })
 }
 
+export function useAddReportItems() {
+  const invalidate = useReportInvalidator()
+  return useMutation({
+    mutationFn: ({
+      reportId,
+      items,
+      collection
+    }: {
+      reportId: number
+      items: ReportItemInput[]
+      collection?: string | null
+    }) => addReportItems(reportId, items, collection),
+    onSuccess: invalidate
+  })
+}
+
 export function useRemoveReportItem() {
   const invalidate = useReportInvalidator()
   return useMutation({
@@ -110,4 +130,117 @@ export function useRefreshCollectionOverview() {
 export function useReportDedupeKeys(id: number | null): Set<string> {
   const { data } = useReport(id)
   return useMemo(() => new Set((data?.items ?? []).map((i) => i.dedupe_key)), [data])
+}
+
+/**
+ * Resolve the report an add should land in, creating one if none is active.
+ *
+ * The first add from anywhere in the app auto-creates an "Untitled report"
+ * scoped to the current collection (one click, no modal). Shared by the
+ * per-row toggle and the section-wide "Add all" so the two cannot drift.
+ */
+export function useEnsureActiveReport() {
+  const t = useT()
+  const activeReportId = useReportStore((s) => s.activeReportId)
+  const setActiveReportId = useReportStore((s) => s.setActiveReportId)
+  const collection = useUiStore((s) => s.selectedCollection)
+  const createReport = useCreateReport()
+  return async (): Promise<number> => {
+    if (activeReportId != null) return activeReportId
+    const created = await createReport.mutateAsync({
+      title: t('report.untitled_title'),
+      collection_name: collection ?? undefined
+    })
+    setActiveReportId(created.id)
+    return created.id
+  }
+}
+
+/** Above this many items, "Add all" asks before it commits. */
+export const ADD_ALL_CONFIRM_THRESHOLD = 100
+
+/** The most items one batch request may carry (mirrors the server's cap). */
+export const ADD_ALL_MAX_ITEMS = 2000
+
+export type AddAllStatus = 'idle' | 'fetching' | 'adding' | 'done' | 'failed' | 'too_many'
+
+export interface AddAllOutcome {
+  status: AddAllStatus
+  added: number
+  skipped: number
+}
+
+/**
+ * Add every finding of an Analysis section to the active report in one action.
+ *
+ * The caller supplies `fetchAll` — a walk of the section's own cursor pages —
+ * and `toItem`, the same pure snapshot builder its rows use, so a batched
+ * snapshot is byte-identical to a hand-added one save for `translation`,
+ * which is per-row view state a batch never sees.
+ *
+ * The whole set is fetched outside React Query (the rendered list is not
+ * force-expanded), pre-filtered against what the report already holds, and
+ * posted as one request — one round-trip and one cache invalidation, not one
+ * per finding. Above `ADD_ALL_CONFIRM_THRESHOLD` items it confirms first;
+ * above `ADD_ALL_MAX_ITEMS` it refuses rather than posting a request the
+ * server would reject.
+ */
+export function useAddAllToReport<Row>(params: {
+  fetchAll: () => Promise<Row[]>
+  toItem: (row: Row) => ReportItemInput
+}) {
+  const t = useT()
+  const ensureReport = useEnsureActiveReport()
+  const activeReportId = useReportStore((s) => s.activeReportId)
+  const collection = useUiStore((s) => s.selectedCollection)
+  const existingKeys = useReportDedupeKeys(activeReportId)
+  const addItems = useAddReportItems()
+  const [outcome, setOutcome] = useState<AddAllOutcome>({ status: 'idle', added: 0, skipped: 0 })
+
+  const run = async (): Promise<void> => {
+    setOutcome({ status: 'fetching', added: 0, skipped: 0 })
+    try {
+      const rows = await params.fetchAll()
+      const items: ReportItemInput[] = []
+      const seen = new Set<string>()
+      let skipped = 0
+      for (const row of rows) {
+        const item = params.toItem(row)
+        // Already in the report, or the same chunk twice in the fetched pages:
+        // the server dedupes too, but not sending them keeps the request small
+        // and the confirmation count honest.
+        if (existingKeys.has(item.dedupe_key) || seen.has(item.dedupe_key)) {
+          skipped += 1
+          continue
+        }
+        seen.add(item.dedupe_key)
+        items.push({ ...item, collection: collection ?? null })
+      }
+      if (items.length > ADD_ALL_MAX_ITEMS) {
+        setOutcome({ status: 'too_many', added: 0, skipped: 0 })
+        return
+      }
+      if (items.length === 0) {
+        setOutcome({ status: 'done', added: 0, skipped })
+        return
+      }
+      if (
+        items.length > ADD_ALL_CONFIRM_THRESHOLD &&
+        !window.confirm(t('report.add_all_confirm', { count: items.length }))
+      ) {
+        setOutcome({ status: 'idle', added: 0, skipped: 0 })
+        return
+      }
+      setOutcome({ status: 'adding', added: 0, skipped: 0 })
+      const reportId = await ensureReport()
+      const result = await addItems.mutateAsync({ reportId, items, collection })
+      setOutcome({ status: 'done', added: result.added, skipped: skipped + result.skipped })
+    } catch (e) {
+      console.error('Add all to report failed', e)
+      setOutcome({ status: 'failed', added: 0, skipped: 0 })
+    }
+  }
+
+  const reset = () => setOutcome({ status: 'idle', added: 0, skipped: 0 })
+  return { run, reset, ...outcome }
 }
