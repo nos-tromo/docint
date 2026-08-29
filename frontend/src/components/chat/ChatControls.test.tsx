@@ -70,4 +70,44 @@ describe('ChatControls', () => {
     expect(panel?.className).toContain('top-full')
     expect(panel?.className).not.toContain('bottom-full')
   })
+
+  it('carries the reasoning toggle, off by default and named by its state', () => {
+    render(<ChatControls />)
+
+    // Off is the safe default: thinking costs latency and tokens, so the user
+    // opts in per chat. The state lives in the accessible name, like the
+    // retrieval mode, because the control carries no label.
+    const toggle = screen.getByRole('button', { name: /reasoning/i })
+    expect(toggle).toHaveAccessibleName(/off/i)
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('flips reasoning on and off, and says so', async () => {
+    render(<ChatControls />)
+
+    await userEvent.click(screen.getByRole('button', { name: /reasoning/i }))
+
+    expect(useChatFiltersStore.getState().reasoning).toBe(true)
+    const toggle = screen.getByRole('button', { name: /reasoning/i })
+    expect(toggle).toHaveAccessibleName(/on/i)
+    expect(toggle).toHaveAttribute('aria-pressed', 'true')
+
+    await userEvent.click(toggle)
+    expect(useChatFiltersStore.getState().reasoning).toBe(false)
+  })
+
+  it('lights the brain up when reasoning is on, rather than only tinting it', async () => {
+    // Same rule as the retrieval pair: the two states must survive a glance
+    // without a hover, so the drawing changes, not just the background.
+    const { container } = render(<ChatControls />)
+    const off = screen.getByRole('button', { name: /reasoning/i }).querySelector('svg')?.innerHTML
+
+    await userEvent.click(screen.getByRole('button', { name: /reasoning/i }))
+    const on = screen.getByRole('button', { name: /reasoning/i }).querySelector('svg')?.innerHTML
+
+    expect(off).toBeTruthy()
+    expect(on).toBeTruthy()
+    expect(on).not.toBe(off)
+    void container
+  })
 })

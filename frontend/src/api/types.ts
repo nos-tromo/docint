@@ -203,6 +203,10 @@ export interface ChatRequest {
   // turn, so a selection made before it exists has nowhere to be written —
   // pinning it afterwards left that first answer unscoped.
   scope_chunk_ids?: string[]
+  // The chat's reasoning toggle. Sent as an explicit boolean: the server
+  // reads an absent field as "use the env default", which a toggle the user
+  // can see must never silently mean. Applies to answer synthesis only.
+  reasoning?: boolean
 }
 
 export interface SessionSummary {

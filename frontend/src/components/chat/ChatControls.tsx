@@ -1,4 +1,4 @@
-import { Button } from '@infra/ui'
+import { BrainActiveIcon, BrainIcon, Button } from '@infra/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { FilterBuilder } from '@/components/chat/FilterBuilder'
 import { ChatContextIcon, SingleMessageIcon } from '@/components/common/icons'
@@ -46,7 +46,46 @@ export function RetrievalToggle() {
 }
 
 /**
- * The two settings that govern what the next answer retrieves against: the
+ * Whether the model thinks before it answers, as a single icon button.
+ *
+ * Reasoning buys answer quality with latency and tokens, so it is off until
+ * asked for and flipped per chat rather than per deployment — the server's
+ * env default only governs API clients that omit the field. Like the
+ * retrieval toggle it carries no label, so the state lives in the accessible
+ * name and the drawing itself changes: the brain lights up rather than merely
+ * taking a pressed tint (the `BrainIcon`/`BrainActiveIcon` state pair from
+ * `@infra/ui`).
+ */
+export function ReasoningToggle() {
+  const t = useT()
+  const reasoning = useChatFiltersStore((s) => s.reasoning)
+  const setReasoning = useChatFiltersStore((s) => s.setReasoning)
+  const name = t('chat.reasoning_state', {
+    mode: reasoning ? t('chat.reasoning_on') : t('chat.reasoning_off')
+  })
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      aria-pressed={reasoning}
+      aria-label={name}
+      title={name}
+      onClick={() => setReasoning(!reasoning)}
+      className="h-8 w-8 shrink-0 px-0"
+    >
+      {reasoning ? <BrainActiveIcon className="h-4 w-4" /> : <BrainIcon className="h-4 w-4" />}
+    </Button>
+  )
+}
+
+/**
+ * The settings that govern the next answer: the reasoning toggle, the
+ * retrieval mode and the metadata filters. The last two decide what the answer
+ * retrieves against; the first, how hard the model works on what it found.
+ *
+ * The two retrieval settings: the
  * metadata filters and the retrieval mode.
  *
  * They belong to the **chat**, not to the search panel, and sit beside the
@@ -65,6 +104,7 @@ export function RetrievalToggle() {
 export function ChatControls() {
   return (
     <div className="flex items-center gap-2">
+      <ReasoningToggle />
       <RetrievalToggle />
       {/* Last, so its right edge *is* the header row's right edge: the panel it
           drops is right-aligned under it and therefore lands on the same line

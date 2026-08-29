@@ -38,7 +38,7 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 | `OPENAI_TEMPERATURE` | `0.0` | Sampling temperature. |
 | `OPENAI_TOP_P` | `0.1` | Nucleus sampling. |
 | `OPENAI_TIMEOUT` | `300.0` | Request timeout in seconds. |
-| `OPENAI_ENABLE_THINKING` | `false` | Opt into reasoning/"thinking" mode. |
+| `OPENAI_ENABLE_THINKING` | `false` | Default for reasoning/"thinking" mode on post-retrieval answer synthesis. The chat UI's reasoning toggle overrides it per turn (`reasoning` on `/query`, `/stream_query`, `/agent/chat*`); the default only governs API clients that omit the field. On `INFERENCE_PROVIDER=vllm` the switch is sent as `chat_template_kwargs.enable_thinking`, explicitly in both states. |
 | `OPENAI_THINKING_EFFORT` | `medium` | One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
 
 ## Embedding — `EmbeddingConfig`

@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Chat, chatReducer } from './Chat'
 import type { ChatFinalEvent } from '@/api/types'
+import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useSearchUiStore } from '@/stores/searchUi'
@@ -99,6 +100,31 @@ describe('Chat SSE handling', () => {
         question: 'hi',
         collection: 'test-collection'
       })
+    })
+  })
+
+  it('sends the reasoning toggle in the /stream_query request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: bodyFromString('data: {"response":"ok","sources":[],"session_id":"s"}\n\n')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'test-collection' })
+    useChatFiltersStore.setState({ reasoning: true })
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      const streamCall = fetchMock.mock.calls.find(([u]) => String(u).includes('/stream_query'))
+      expect(streamCall).toBeDefined()
+      // Sent as an explicit boolean either way: the server's `null` means
+      // "use the env default", which is not what a toggle the user can see
+      // should ever mean.
+      expect(JSON.parse(streamCall![1].body)).toMatchObject({ reasoning: true })
     })
   })
 

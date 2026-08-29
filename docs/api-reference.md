@@ -167,10 +167,16 @@ Request (`QueryIn`):
   "question": "What is in this document?",
   "session_id": null,
   "metadata_filters": [],
-  "retrieval_mode": "session"
+  "retrieval_mode": "session",
+  "reasoning": null
 }
 ```
 
+- `reasoning` — `true`/`false` forces the model's reasoning ("thinking") mode
+  on or off for this answer; `null`/absent (the default) defers to
+  `OPENAI_ENABLE_THINKING`. Applies to post-retrieval answer synthesis only —
+  query rewriting stays on the plain model. The SPA's brain toggle sends an
+  explicit boolean every turn.
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
   `RAG.run_query()` directly.
@@ -762,8 +768,10 @@ Runs the orchestrator for one turn. Source: `docint/core/api.py:3734`.
 Request (`AgentChatIn`):
 
 ```json
-{ "message": "Find every mention of Acme Corp.", "session_id": null }
+{ "message": "Find every mention of Acme Corp.", "session_id": null, "reasoning": null }
 ```
+
+`reasoning` has the same semantics as on `POST /query`.
 
 Response (`AgentChatOut`):
 

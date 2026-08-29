@@ -103,6 +103,9 @@ export const en = {
   'chat.retrieval_session': 'Whole chat (stateful)',
   'chat.retrieval_stateless': 'Last message only (stateless)',
   'chat.retrieval_state': 'Retrieval: {mode}',
+  'chat.reasoning_state': 'Reasoning: {mode}',
+  'chat.reasoning_on': 'On — the model thinks before answering',
+  'chat.reasoning_off': 'Off — faster, plain answer',
   'chat.error_wrong_collection':
     'This chat belongs to a different collection — switch to that collection to continue it, or start a new chat.',
   'chat.error_no_collection': 'Select a collection before chatting.',

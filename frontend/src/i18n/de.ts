@@ -109,6 +109,9 @@ export const de: Strings = {
   'chat.retrieval_session': 'Kompletten Chat einbeziehen (stateful)',
   'chat.retrieval_stateless': 'Nur aktuellste Nachricht (stateless)',
   'chat.retrieval_state': 'Abruf: {mode}',
+  'chat.reasoning_state': 'Reasoning: {mode}',
+  'chat.reasoning_on': 'An — das Modell denkt vor der Antwort nach',
+  'chat.reasoning_off': 'Aus — schneller, direkte Antwort',
   'chat.error_wrong_collection':
     'Dieser Chat gehört zu einer anderen Sammlung — wechseln Sie zu dieser Sammlung, um ihn fortzusetzen, oder starten Sie einen neuen Chat.',
   'chat.error_no_collection': 'Wählen Sie eine Sammlung aus, bevor Sie einen Chat starten.',
