@@ -121,13 +121,34 @@ the row is left unlinked rather than attributed to the wrong post. Exports that
 do carry a key are untouched — the inference runs only after the declared key
 fails, and needs `Posting ID` to start with the row's own `Author ID`, which a
 Meta-style `<postingId>_<accountId>` id does not. Set
-`SOCIAL_ALBUM_LINK_ENABLED=false` to switch it off. The counts land in one
-ingest log line:
+`SOCIAL_ALBUM_LINK_ENABLED=false` to switch it off.
+
+**Postings keyed by a crawler UUID.** Another shape carries no *usable* key: the
+postings' `Posting ID` is a UUID minted by the crawler while the manifest holds
+the bare network id, so nothing the manifest key path compares can ever be
+equal. Two more fallbacks recover those rows:
+
+- **The posting's own URL.** A permalink usually ends in the network id
+  (`…/reel/<id>/`, `…/video/<id>`), which makes it an *exact* key, not a guess —
+  so it needs no corroboration and no flag. An id claimed by two different
+  postings is dropped rather than linked ambiguously, and numbers shorter than
+  eight digits are ignored (a path segment that short is a page or a version).
+- **The author's own timeline.** Failing everything else, a media row is attached
+  to a posting by the same `Author` on the same `Network` whose timestamp agrees
+  within `SOCIAL_ALBUM_TOLERANCE_S` — and **only when exactly one** posting falls
+  inside that window. Two candidates is ambiguity, and a coin flip presented as
+  provenance is worse than an unlinked row. This shares the album knobs
+  (`SOCIAL_ALBUM_LINK_ENABLED=false` disables both), since both are the same
+  trade: a key-less row attached on timestamp agreement.
+
+The four paths are tried strongest first — manifest key, URL id, album
+inference, timestamp — so an export that already joins never reaches a fallback.
+The counts land in one ingest log line:
 
 ```
-Social linker: 352 media linked (94 by manifest key, 258 by album inference), 0 skipped
-(0 with no matching posting, 0 with no local file, 0 with an ambiguous filename)
-across 352 manifest rows.
+Social linker: 352 media linked (94 by manifest key, 12 by posting URL,
+246 by album inference, 0 by timestamp), 0 skipped (0 with no matching posting,
+0 with no local file, 0 with an ambiguous filename) across 352 manifest rows.
 ```
 
 **Linker.** During ingestion, `posting_uuid` is written into every artifact

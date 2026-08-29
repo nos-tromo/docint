@@ -560,3 +560,73 @@ def test_run_leaves_album_members_unlinked_when_disabled(tmp_path: Path) -> None
     consumed_names = {path.name for path in result.consumed_paths}
     assert "last.jpg" in consumed_names
     assert "shot.jpg" not in consumed_names
+
+
+def _write_keyless_export(root: Path, *, media_timestamp: str = "2026-03-30 17:38:44+00") -> None:
+    """Write an export whose ``Posting ID`` is a crawler UUID, not a network id.
+
+    Neither media row can be linked by the manifest key: the first is reachable
+    only through the numeric id in its posting's ``URL``, the second only by
+    author + timestamp agreement.
+
+    Args:
+        root: Temporary directory in which to create the export.
+        media_timestamp: Stamp for the second media row, whose posting is found
+            by timestamp agreement alone.
+    """
+    postings_data: dict[str, list[str]] = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
+    postings_data["UUID"] = ["u-url", "u-time"]
+    postings_data["Posting ID"] = [
+        "3f4c1a90-0000-4000-8000-000000000001",
+        "3f4c1a90-0000-4000-8000-000000000002",
+    ]
+    postings_data["URL"] = ["https://example.invalid/reel/2830654730615424/", ""]
+    postings_data["Author ID"] = ["100007940942252", "100007940942252"]
+    postings_data["Author"] = ["Jane Poster", "Jane Poster"]
+    postings_data["Network"] = ["ExampleNet", "ExampleNet"]
+    postings_data["Timestamp"] = ["2026-03-30 17:38:44+00", "2026-05-05 12:14:25+00"]
+    postings_data["Text Content"] = ["reel post", "photo post"]
+    pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False)
+    pd.DataFrame(
+        {
+            "Media ID": ["2830654730615424", "4623689304572389"],
+            "Network ID": ["2830654730615424", "4623689304572389"],
+            "Exported media filename": ["reel.jpg", "photo.jpg"],
+            "Author": ["Jane Poster", "Jane Poster"],
+            "Network": ["ExampleNet", "ExampleNet"],
+            "Timestamp": ["2026-03-30 17:38:44+00", media_timestamp],
+        }
+    ).to_csv(root / "media.csv", index=False)
+    (root / "reel.jpg").write_bytes(b"\xff\xd8\xff")
+    (root / "photo.jpg").write_bytes(b"\xff\xd8\xff")
+
+
+def test_run_links_keyless_media_by_posting_url_and_timestamp(tmp_path: Path) -> None:
+    """An export keyed by crawler UUIDs still links through URL and timestamp."""
+    _write_keyless_export(tmp_path, media_timestamp="2026-05-05 12:14:25+00")
+
+    img = _FakeImageService()
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    assert [asset.source_doc_id for asset in img.images] == ["u-url", "u-time"]
+    consumed_names = {path.name for path in result.consumed_paths}
+    assert {"reel.jpg", "photo.jpg"}.issubset(consumed_names)
+
+
+def test_run_keeps_the_url_key_when_album_linking_is_disabled(tmp_path: Path) -> None:
+    """``album_link_enabled=False`` switches off inference, not the exact URL key.
+
+    The URL id is an exact match, so the flag that governs the two *inferred*
+    paths must not take it down with them.
+    """
+    _write_keyless_export(tmp_path, media_timestamp="2026-05-05 12:14:25+00")
+
+    img = _FakeImageService()
+    SocialLinker(
+        image_service=img,
+        nextext_client=_FakeNextext(),
+        target_collection="c",
+        album_link_enabled=False,
+    ).run(tmp_path)
+
+    assert [asset.source_doc_id for asset in img.images] == ["u-url"]

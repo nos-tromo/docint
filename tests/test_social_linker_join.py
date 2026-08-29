@@ -9,6 +9,8 @@ from docint.core.ingest.social_linker import (
     _infer_album_posting_id,
     build_posting_album_index,
     build_posting_index,
+    build_posting_time_index,
+    build_posting_url_index,
     resolve_media_rows,
     strip_counter,
 )
@@ -347,3 +349,304 @@ def test_album_index_ignores_postings_with_unparseable_timestamps() -> None:
     )
     index = build_posting_album_index(postings)
     assert [entry[1] for entry in index["9900112233"]] == ["990011223303"]
+
+
+# ---------------------------------------------------------------------------
+# URL-derived key + author/timestamp fallbacks (key-less Meta-style exports)
+# ---------------------------------------------------------------------------
+
+
+def _keyless_export() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return a (postings, media) pair shaped like a key-less Meta-style export.
+
+    The posting carries a crawler-minted UUID as its ``Posting ID`` while the
+    manifest's media id is the bare network id, so no candidate the manifest-key
+    path tries can ever name the posting. Its ``URL`` still ends in that id, and
+    its author/network/timestamp still match the media row.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame]: The postings and media tables.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-reel"],
+            "Posting ID": ["3f4c1a90-0000-4000-8000-000000000001"],
+            "URL": ["https://example.invalid/reel/2830654730615424/"],
+            "Author ID": ["100007940942252"],
+            "Author": ["authorname"],
+            "Network": ["ExampleNet"],
+            "Timestamp": ["2026-03-30 17:38:44+00"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["2830654730615424"],
+            "Network ID": ["2830654730615424"],
+            "Exported media filename": ["a.jpg"],
+            "Author": ["authorname"],
+            "Network": ["ExampleNet"],
+            "Timestamp": ["2026-03-30 17:38:44+00"],
+        }
+    )
+    return postings, media
+
+
+def test_url_index_maps_numeric_path_segments_to_their_posting() -> None:
+    """A posting URL's numeric id becomes a join key for the manifest's media id."""
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1", "uuid-2"],
+            "Posting ID": ["p-1", "p-2"],
+            "URL": [
+                "https://example.invalid/reel/2830654730615424/",
+                "https://example.invalid/@name/video/7490165774523354390",
+            ],
+        }
+    )
+    assert build_posting_url_index(postings) == {
+        "2830654730615424": "p-1",
+        "7490165774523354390": "p-2",
+    }
+
+
+def test_url_index_ignores_short_and_non_numeric_segments() -> None:
+    """Only long all-digit segments are keys; slugs and short ids are not.
+
+    A short numeric segment (a version number, a page index) is not a network
+    id, and matching one would attach media to an arbitrary posting.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["p-1"],
+            "URL": ["https://example.invalid/v2/name/posts/pfbid0abc123/"],
+        }
+    )
+    assert build_posting_url_index(postings) == {}
+
+
+def test_url_index_drops_ids_claimed_by_two_postings() -> None:
+    """An id appearing in two postings' URLs is ambiguous and is not indexed."""
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1", "uuid-2"],
+            "Posting ID": ["p-1", "p-2"],
+            "URL": [
+                "https://example.invalid/reel/2830654730615424/",
+                "https://example.invalid/story/2830654730615424/",
+            ],
+        }
+    )
+    assert build_posting_url_index(postings) == {}
+
+
+def test_url_fallback_links_media_whose_posting_id_is_a_uuid(tmp_path: Path) -> None:
+    """Bare-digit media ids reach a UUID-keyed posting through its URL."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        url_index=build_posting_url_index(postings),
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-reel"]
+    assert [link.posting_id for link in links] == ["3f4c1a90-0000-4000-8000-000000000001"]
+
+
+def test_url_fallback_is_off_unless_an_index_is_supplied(tmp_path: Path) -> None:
+    """Omitting the URL index leaves the manifest-key-only behaviour intact."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+
+    assert resolve_media_rows(media, build_posting_index(postings), tmp_path) == []
+
+
+def test_manifest_key_wins_over_a_conflicting_url_match(tmp_path: Path) -> None:
+    """A working manifest key is never overridden by the URL fallback."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-url", "uuid-keyed"],
+            "Posting ID": ["3f4c1a90-0000-4000-8000-000000000001", "2830654730615424"],
+            "URL": ["https://example.invalid/reel/2830654730615424/", ""],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["2830654730615424"],
+            "Network ID": ["2830654730615424"],
+            "Exported media filename": ["a.jpg"],
+        }
+    )
+    url_index = build_posting_url_index(postings)
+    # Guard the guard: the URL path really would fire here, and really would disagree.
+    assert url_index == {"2830654730615424": "3f4c1a90-0000-4000-8000-000000000001"}
+
+    links = resolve_media_rows(media, build_posting_index(postings), tmp_path, url_index=url_index)
+
+    assert [link.posting_uuid for link in links] == ["uuid-keyed"]
+
+
+def test_time_index_groups_by_network_and_author_case_insensitively() -> None:
+    """Channel keys fold case, so ``ExampleNet``/``examplenet`` are one channel."""
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1", "uuid-2"],
+            "Posting ID": ["p-1", "p-2"],
+            "Author": ["AuthorName", "authorname"],
+            "Network": ["ExampleNet", "examplenet"],
+            "Timestamp": ["2026-03-30 17:38:44+00", "2026-03-30 18:00:00+00"],
+        }
+    )
+
+    index = build_posting_time_index(postings)
+
+    assert list(index) == [("examplenet", "authorname")]
+    assert [posting_id for _, posting_id in index[("examplenet", "authorname")]] == ["p-1", "p-2"]
+
+
+def test_time_index_skips_rows_with_no_stamp_or_no_author() -> None:
+    """Rows that cannot anchor a match are left out of the index entirely."""
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1", "uuid-2", "uuid-3"],
+            "Posting ID": ["p-1", "p-2", "p-3"],
+            "Author": ["authorname", "", "authorname"],
+            "Network": ["ExampleNet", "ExampleNet", "ExampleNet"],
+            "Timestamp": ["not a date", "2026-03-30 17:38:44+00", "2026-03-30 17:38:44+00"],
+        }
+    )
+
+    assert build_posting_time_index(postings) == {
+        ("examplenet", "authorname"): [(pd.Timestamp("2026-03-30 17:38:44+00"), "p-3")]
+    }
+
+
+def test_timestamp_fallback_links_a_media_row_to_its_own_posting(tmp_path: Path) -> None:
+    """Same author, same network, agreeing stamps: the row links."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+    postings["URL"] = [""]  # force the timestamp path, not the URL one
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        time_index=build_posting_time_index(postings),
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-reel"]
+
+
+def test_timestamp_fallback_is_refused_outside_the_tolerance(tmp_path: Path) -> None:
+    """The tolerance is the guard: a posting a minute away is not the parent."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+    postings["URL"] = [""]
+    media["Timestamp"] = ["2026-03-30 17:39:44+00"]  # a minute after the posting
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        time_index=build_posting_time_index(postings),
+        album_tolerance_s=5.0,
+    )
+
+    assert links == []
+
+
+def test_timestamp_fallback_is_refused_when_two_postings_are_in_range(tmp_path: Path) -> None:
+    """Two candidates inside the window is ambiguity, not a link.
+
+    Picking either would be a coin flip presented to the investigator as
+    provenance, so the row stays unlinked.
+    """
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+    second = pd.DataFrame(
+        {
+            "UUID": ["uuid-other"],
+            "Posting ID": ["3f4c1a90-0000-4000-8000-000000000002"],
+            "URL": [""],
+            "Author ID": ["100007940942252"],
+            "Author": ["authorname"],
+            "Network": ["ExampleNet"],
+            "Timestamp": ["2026-03-30 17:38:46+00"],
+        }
+    )
+    postings["URL"] = [""]
+    postings = pd.concat([postings, second], ignore_index=True)
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        time_index=build_posting_time_index(postings),
+    )
+
+    assert links == []
+
+
+def test_timestamp_fallback_is_refused_across_authors(tmp_path: Path) -> None:
+    """A stamp match on a different author's posting is not a link."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+    postings["URL"] = [""]
+    media["Author"] = ["someone-else"]
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        time_index=build_posting_time_index(postings),
+    )
+
+    assert links == []
+
+
+def test_timestamp_fallback_is_off_unless_an_index_is_supplied(tmp_path: Path) -> None:
+    """Omitting the time index leaves the manifest-key-only behaviour intact."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+    postings["URL"] = [""]
+
+    assert resolve_media_rows(media, build_posting_index(postings), tmp_path) == []
+
+
+def test_url_match_wins_over_a_conflicting_timestamp_match(tmp_path: Path) -> None:
+    """An exact URL id beats a corroborated-but-inferred timestamp match."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-url", "uuid-timestamp"],
+            "Posting ID": ["p-url", "p-timestamp"],
+            "URL": ["https://example.invalid/reel/2830654730615424/", ""],
+            "Author": ["authorname", "authorname"],
+            "Network": ["ExampleNet", "ExampleNet"],
+            "Timestamp": ["2026-03-30 19:00:00+00", "2026-03-30 17:38:44+00"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["2830654730615424"],
+            "Network ID": ["2830654730615424"],
+            "Exported media filename": ["a.jpg"],
+            "Author": ["authorname"],
+            "Network": ["ExampleNet"],
+            "Timestamp": ["2026-03-30 17:38:44+00"],
+        }
+    )
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        url_index=build_posting_url_index(postings),
+        time_index=build_posting_time_index(postings),
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-url"]

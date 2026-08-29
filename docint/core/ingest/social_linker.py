@@ -27,9 +27,21 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 #: mis-attribution a pruned/partial export could otherwise produce.
 _DEFAULT_ALBUM_TOLERANCE_S = 5.0
 
+#: Shortest all-digit URL path segment treated as a network id. A shorter number
+#: in a posting URL is a page, version or index — matching one would attach media
+#: to an arbitrary posting.
+_MIN_URL_ID_DIGITS = 8
+
+#: All-digit path segments of a posting URL (``…/reel/<id>/``, ``…/video/<id>``).
+_URL_ID_SEGMENT = re.compile(rf"/(\d{{{_MIN_URL_ID_DIGITS},}})(?=[/?#]|$)")
+
 #: ``{Author ID: sorted [(message_no, Posting ID, timestamp)]}`` — see
 #: :func:`build_posting_album_index`.
 AlbumIndex = dict[str, list[tuple[int, str, pd.Timestamp]]]
+
+#: ``{(network, author): sorted [(timestamp, Posting ID)]}`` — see
+#: :func:`build_posting_time_index`.
+TimeIndex = dict[tuple[str, str], list[tuple[pd.Timestamp, str]]]
 
 
 @dataclass(frozen=True)
@@ -123,6 +135,144 @@ def _derive_posting_id(network_id: str, media_id: str, posting_uuids: dict[str, 
         if candidate and candidate in posting_uuids:
             return candidate
     return None
+
+
+def build_posting_url_index(postings_df: pd.DataFrame) -> dict[str, str]:
+    """Return ``{network id: Posting ID}`` derived from the postings' own URLs.
+
+    Some exports key a posting by a crawler-minted UUID while the media manifest
+    holds the bare network id, so the two can never meet through
+    :func:`_derive_posting_id`. The posting's ``URL`` still carries that network
+    id as a path segment (``…/reel/<id>/``, ``…/video/<id>``), which makes it an
+    **exact** key rather than an inference — hence no timestamp corroboration and
+    no enable flag.
+
+    An id claimed by two different postings is dropped: linking against it would
+    be a coin flip. Segments shorter than :data:`_MIN_URL_ID_DIGITS` are ignored,
+    since a short number in a path is a page or version, not a network id.
+
+    Args:
+        postings_df (pd.DataFrame): Table carrying ``Posting ID`` + ``URL``.
+
+    Returns:
+        dict[str, str]: Mapping from URL-borne network id to posting id, empty
+        when the table has no ``URL`` column.
+    """
+    if "URL" not in postings_df.columns:
+        return {}
+    index: dict[str, str] = {}
+    collisions: set[str] = set()
+    for _, row in postings_df.iterrows():
+        posting_id = str(row.get("Posting ID") or "").strip()
+        url = str(row.get("URL") or "").strip()
+        if not posting_id or not url:
+            continue
+        for candidate in _URL_ID_SEGMENT.findall(url):
+            if index.get(candidate, posting_id) != posting_id:
+                collisions.add(candidate)
+            index.setdefault(candidate, posting_id)
+    for candidate in collisions:
+        index.pop(candidate, None)
+    return index
+
+
+def _derive_posting_id_from_url(network_id: str, media_id: str, url_index: dict[str, str]) -> str | None:
+    """Return the posting whose URL names this media row's id, or ``None``.
+
+    Tries the same candidates in the same order as :func:`_derive_posting_id`,
+    against the URL-derived index instead of the postings' own ids.
+
+    Args:
+        network_id (str): The row's ``Network ID`` value (may be empty).
+        media_id (str): The row's ``Media ID`` value.
+        url_index (dict[str, str]): Index from :func:`build_posting_url_index`.
+
+    Returns:
+        str | None: The matched posting id, or ``None`` when no candidate is known.
+    """
+    for candidate in (network_id, media_id, strip_counter(media_id)):
+        if candidate and candidate in url_index:
+            return url_index[candidate]
+    return None
+
+
+def build_posting_time_index(postings_df: pd.DataFrame) -> TimeIndex:
+    """Return the per-channel timestamp index used to corroborate a key-less row.
+
+    Keyed by ``(Network, Author)`` case-folded, because a *media* row carries the
+    author's display name and network — not the ``Author ID`` the album index
+    keys on. Values are sorted by timestamp so
+    :func:`_infer_timestamp_posting_id` can bisect a window.
+
+    Postings with no parseable timestamp, author or network are skipped: they
+    cannot anchor a match, and indexing them would let an empty media field find
+    an equally empty posting one.
+
+    Args:
+        postings_df (pd.DataFrame): Table carrying the postings export schema.
+
+    Returns:
+        TimeIndex: ``{(network, author): sorted [(timestamp, Posting ID)]}``,
+        empty when the table lacks the columns the match needs.
+    """
+    if not {"Author", "Network"}.issubset(postings_df.columns):
+        return {}
+    stamps = _parse_timestamps(postings_df)
+    if stamps is None:
+        return {}
+    channels: TimeIndex = {}
+    for (_, row), stamp in zip(postings_df.iterrows(), stamps, strict=True):
+        if pd.isna(stamp):
+            continue
+        posting_id = str(row.get("Posting ID") or "").strip()
+        author = str(row.get("Author") or "").strip().casefold()
+        network = str(row.get("Network") or "").strip().casefold()
+        if not posting_id or not author or not network:
+            continue
+        channels.setdefault((network, author), []).append((stamp, posting_id))
+    for entries in channels.values():
+        entries.sort(key=lambda entry: entry[0])
+    return channels
+
+
+def _infer_timestamp_posting_id(
+    network: str,
+    author: str,
+    media_stamp: pd.Timestamp | None,
+    times: TimeIndex,
+    tolerance_s: float,
+) -> str | None:
+    """Return the posting a key-less media row belongs to, or ``None``.
+
+    The last resort for an export that carries no usable media→posting key at
+    all: match within the same author's channel on timestamp agreement alone.
+    Accepted **only when exactly one** posting falls inside the window — two
+    candidates is ambiguity, and a coin flip presented to an investigator as
+    provenance is worse than an unlinked row.
+
+    Args:
+        network (str): The media row's ``Network`` value.
+        author (str): The media row's ``Author`` value.
+        media_stamp (pd.Timestamp | None): The row's parsed ``Timestamp``.
+        times (TimeIndex): Index from :func:`build_posting_time_index`.
+        tolerance_s (float): Maximum allowed timestamp difference, in seconds.
+
+    Returns:
+        str | None: The parent ``Posting ID``, or ``None`` when the channel is
+        unknown, no posting agrees, or more than one does.
+    """
+    if not times or media_stamp is None or pd.isna(media_stamp):
+        return None
+    entries = times.get((network.strip().casefold(), author.strip().casefold()))
+    if not entries:
+        return None
+    window = pd.Timedelta(seconds=tolerance_s)
+    stamps = [entry[0] for entry in entries]
+    low = bisect.bisect_left(stamps, media_stamp - window)
+    high = bisect.bisect_right(stamps, media_stamp + window)
+    if high - low != 1:
+        return None
+    return entries[low][1]
 
 
 def _split_channel(identifier: str, prefix: str) -> int | None:
@@ -298,7 +448,9 @@ def resolve_media_rows(
     root: Path,
     *,
     manifest_dir: Path | None = None,
+    url_index: dict[str, str] | None = None,
     albums: AlbumIndex | None = None,
+    time_index: TimeIndex | None = None,
     album_tolerance_s: float = _DEFAULT_ALBUM_TOLERANCE_S,
 ) -> list[MediaLink]:
     """Resolve manifest rows to MediaLinks by basename anywhere under ``root``.
@@ -311,9 +463,15 @@ def resolve_media_rows(
     rather than from refusing to recurse, which is why subdirectories
     (``dir/photos/``, ``dir/videos/``) are safe to search.
 
-    Each row's parent posting is taken from the manifest's own key when it names a
-    known posting (see :func:`_derive_posting_id`); only when it does not is album
-    membership inferred from ``albums``, and then only with timestamp agreement.
+    Each row's parent posting is resolved by the first of four paths that answers,
+    strongest key first, so an export that already joins never reaches a fallback:
+
+    1. the manifest's own key (:func:`_derive_posting_id`);
+    2. the id carried in a posting's ``URL`` (:func:`_derive_posting_id_from_url`)
+       — still an exact match, for exports whose ``Posting ID`` is a crawler UUID;
+    3. album membership (:func:`_infer_album_posting_id`), timestamp-corroborated;
+    4. the author's own timeline (:func:`_infer_timestamp_posting_id`), accepted
+       only when exactly one posting agrees.
 
     Orphan rows, rows with no local file and rows whose basename is ambiguous are
     counted and reported once, not logged per row (a full manifest may have tens of
@@ -325,21 +483,27 @@ def resolve_media_rows(
         root (Path): The batch tree root; every media file is looked up under it.
         manifest_dir (Path | None): Directory holding the manifest, used to break a
             duplicate-basename tie. Defaults to ``root``.
+        url_index (dict[str, str] | None): Index from :func:`build_posting_url_index`.
+            ``None`` (the default) disables URL-key matching entirely.
         albums (AlbumIndex | None): Index from :func:`build_posting_album_index`.
             ``None`` (the default) disables album inference entirely.
+        time_index (TimeIndex | None): Index from :func:`build_posting_time_index`.
+            ``None`` (the default) disables timestamp inference entirely.
         album_tolerance_s (float): Maximum timestamp disagreement, in seconds,
-            allowed when accepting an inferred album link.
+            allowed when accepting an inferred album or timestamp link.
 
     Returns:
         list[MediaLink]: One per row whose posting is known and file exists.
     """
     tie_break_dir = manifest_dir if manifest_dir is not None else root
     present = build_file_index(root)
-    stamps = _parse_timestamps(media_df) if albums else None
+    stamps = _parse_timestamps(media_df) if (albums or time_index) else None
     stamp_values: list[pd.Timestamp | None] = list(stamps) if stamps is not None else [None] * len(media_df)
     links: list[MediaLink] = []
     exact_links = 0
+    url_links = 0
     album_links = 0
+    timestamp_links = 0
     orphan_skips = 0
     missing_skips = 0
     ambiguous_skips = 0
@@ -349,10 +513,22 @@ def resolve_media_rows(
             continue
         network_id = str(row.get("Network ID") or "").strip()
         posting_id = _derive_posting_id(network_id, media_id, posting_uuids)
-        inferred = False
+        matched_by = "key"
+        if posting_id is None and url_index:
+            posting_id = _derive_posting_id_from_url(network_id, media_id, url_index)
+            matched_by = "url"
         if posting_id is None and albums:
             posting_id = _infer_album_posting_id(media_id, stamp, albums, album_tolerance_s)
-            inferred = posting_id is not None
+            matched_by = "album"
+        if posting_id is None and time_index:
+            posting_id = _infer_timestamp_posting_id(
+                str(row.get("Network") or ""),
+                str(row.get("Author") or ""),
+                stamp,
+                time_index,
+                album_tolerance_s,
+            )
+            matched_by = "timestamp"
         if posting_id is None or posting_id not in posting_uuids:
             orphan_skips += 1
             continue
@@ -366,8 +542,12 @@ def resolve_media_rows(
         if path is None:
             ambiguous_skips += 1
             continue
-        if inferred:
+        if matched_by == "url":
+            url_links += 1
+        elif matched_by == "album":
             album_links += 1
+        elif matched_by == "timestamp":
+            timestamp_links += 1
         else:
             exact_links += 1
         links.append(MediaLink(posting_uuid=uuid, posting_id=posting_id, media_id=media_id, path=path))
@@ -376,12 +556,15 @@ def resolve_media_rows(
         # referenced files present would otherwise emit one line per row (tens of
         # thousands). A single summary keeps large drop-ins robust and quiet.
         logger.info(
-            "Social linker: {} media linked ({} by manifest key, {} by album inference), {} skipped "
+            "Social linker: {} media linked ({} by manifest key, {} by posting URL, {} by album inference, "
+            "{} by timestamp), {} skipped "
             "({} with no matching posting, {} with no local file, {} with an ambiguous filename) "
             "across {} manifest rows.",
             len(links),
             exact_links,
+            url_links,
             album_links,
+            timestamp_links,
             orphan_skips + missing_skips + ambiguous_skips,
             orphan_skips,
             missing_skips,
@@ -534,12 +717,17 @@ class SocialLinker:
         posting_references = build_posting_reference_index(postings_df)
         media_df = pd.read_csv(media_csv, sep=_sniff_delimiter(media_csv), dtype=str, encoding="utf-8-sig")
         albums = build_posting_album_index(postings_df) if self.album_link_enabled else None
+        # The URL key is an exact match, so it needs no enable flag; the timestamp
+        # fallback is an inference and shares the album knobs.
+        times = build_posting_time_index(postings_df) if self.album_link_enabled else None
         links = resolve_media_rows(
             media_df,
             posting_uuids,
             data_dir,
             manifest_dir=media_csv.parent,
+            url_index=build_posting_url_index(postings_df),
             albums=albums,
+            time_index=times,
             album_tolerance_s=self.album_tolerance_s,
         )
 
