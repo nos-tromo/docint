@@ -130,6 +130,34 @@ Social linker: 352 media linked (94 by manifest key, 258 by album inference), 0 
 across 352 manifest rows.
 ```
 
+**How a media row finds its posting.** Four rules, tried in order; the first
+that names a known posting wins, and each is consulted only once the ones above
+it have failed:
+
+1. **The manifest's declared key** — `Network ID`, else `Media ID`, else
+   `Media ID` with a trailing `_<counter>` stripped, matched against
+   `Posting ID`. The ordinary path; most exports never leave it.
+2. **The posting's network-level id** — some exports mint an internal
+   `Posting ID` (a crawler UUID) that the manifest never carries, and name the
+   posting by the id its own network uses. That id is read from
+   `Network Posting ID`, or from the long numeric id in the permalink when the
+   column is empty, as it is for reel-style posts. An id that two postings both
+   advertise, or one that is an `Author ID`, is refused rather than resolved to
+   a guess.
+3. **Album inference** — for exports carrying no key at all; see above.
+4. **Timestamp** — the last resort: the single posting by the same author
+   stamped at the same instant. Two such postings, or none, leave the row
+   unlinked. The second case is what a partial export looks like, and it must
+   not be papered over with a neighbouring post. Switch it off with
+   `SOCIAL_TIMESTAMP_LINK_ENABLED=false`.
+
+The ingest log reports the split, so an operator can see at a glance how much of
+a run rested on inference rather than on a declared key:
+
+```
+Social linker: 2019 media linked (1983 by manifest key, 13 by network id, 0 by album inference, 23 by timestamp), 101 skipped …
+```
+
 **Linker.** During ingestion, `posting_uuid` is written into every artifact
 node (image embedding, keyframe, Nextext transcript segment). At retrieval
 time, `_attach_posting_group` reads that UUID from `reference_metadata.uuid`

@@ -560,3 +560,14 @@ def test_run_leaves_album_members_unlinked_when_disabled(tmp_path: Path) -> None
     consumed_names = {path.name for path in result.consumed_paths}
     assert "last.jpg" in consumed_names
     assert "shot.jpg" not in consumed_names
+
+
+def test_timestamp_link_can_be_switched_off() -> None:
+    """``SOCIAL_TIMESTAMP_LINK_ENABLED=false`` leaves the fallback inert."""
+    linker = SocialLinker(
+        image_service=None,
+        nextext_client=None,
+        target_collection=None,
+        timestamp_link_enabled=False,
+    )
+    assert linker.timestamp_link_enabled is False

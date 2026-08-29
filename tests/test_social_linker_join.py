@@ -7,8 +7,11 @@ import pandas as pd
 from docint.core.ingest.social_linker import (
     _derive_posting_id,
     _infer_album_posting_id,
+    _infer_stamp_posting_id,
+    build_network_posting_index,
     build_posting_album_index,
     build_posting_index,
+    build_posting_stamp_index,
     resolve_media_rows,
     strip_counter,
 )
@@ -347,3 +350,277 @@ def test_album_index_ignores_postings_with_unparseable_timestamps() -> None:
     )
     index = build_posting_album_index(postings)
     assert [entry[1] for entry in index["9900112233"]] == ["990011223303"]
+
+
+def test_network_posting_index_maps_the_networks_own_id_to_the_posting() -> None:
+    """A posting is findable by the id its own network uses, not just ``Posting ID``.
+
+    Some exports mint an internal ``Posting ID`` (a UUID) while the id the media
+    manifest carries is the network's own — recorded in ``Network Posting ID``.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["1929d6fa-da9c-586b-912b-86a33371d93e"],
+            "Network Posting ID": ["900622622300677"],
+            "Author ID": ["100007940942252"],
+            "URL": ["https://www.example.invalid/posts/abc"],
+        }
+    )
+    assert build_network_posting_index(postings) == {"900622622300677": "1929d6fa-da9c-586b-912b-86a33371d93e"}
+
+
+def test_network_posting_index_harvests_the_id_embedded_in_a_url() -> None:
+    """A reel-style posting carries its network id only in its ``URL``.
+
+    ``Network Posting ID`` is empty for those rows, so the numeric id in the
+    permalink is the sole way the manifest's media id can name the posting.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["1929d6fa-da9c-586b-912b-86a33371d93e"],
+            "Network Posting ID": [""],
+            "Author ID": ["100007940942252"],
+            "URL": ["https://www.example.invalid/reel/900622622300677/"],
+        }
+    )
+    assert build_network_posting_index(postings) == {"900622622300677": "1929d6fa-da9c-586b-912b-86a33371d93e"}
+
+
+def test_network_posting_index_drops_an_id_naming_two_postings() -> None:
+    """An id that two postings advertise identifies neither.
+
+    Nothing in the data says which one owns a media row, so the id is dropped
+    rather than resolved to whichever posting happened to be read last.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1", "uuid-2"],
+            "Posting ID": ["internal-1", "internal-2"],
+            "Network Posting ID": ["900622622300677", "900622622300677"],
+            "Author ID": ["100007940942252", "100007940942252"],
+            "URL": ["", ""],
+        }
+    )
+    assert build_network_posting_index(postings) == {}
+
+
+def test_network_posting_index_drops_the_account_id() -> None:
+    """A permalink carries the account id beside the posting id.
+
+    The account appears in every one of its postings' URLs, so treating it as a
+    posting id would attach media to an arbitrary posting of that account.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["internal-1"],
+            "Network Posting ID": [""],
+            "Author ID": ["100007940942252"],
+            "URL": ["https://www.example.invalid/100007940942252/posts/900622622300677"],
+        }
+    )
+    assert build_network_posting_index(postings) == {"900622622300677": "internal-1"}
+
+
+def _network_id_export() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return a (postings, media) pair whose key is the network's own id.
+
+    ``Posting ID`` is internal to the crawler, so the manifest's media id can
+    only reach the posting through its network-level id.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame]: The postings and media tables.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["1929d6fa-da9c-586b-912b-86a33371d93e"],
+            "Network Posting ID": [""],
+            "Author ID": ["100007940942252"],
+            "URL": ["https://www.example.invalid/reel/900622622300677/"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["900622622300677"],
+            "Network ID": ["900622622300677"],
+            "Exported media filename": ["a.jpg"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    return postings, media
+
+
+def test_resolve_links_through_the_network_posting_id(tmp_path: Path) -> None:
+    """A media row naming the network's posting id resolves to that posting."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _network_id_export()
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        network_index=build_network_posting_index(postings),
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-1"]
+
+
+def test_resolve_ignores_the_network_index_without_one(tmp_path: Path) -> None:
+    """Omitting the index leaves the manifest-key-only behaviour intact."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _network_id_export()
+
+    assert resolve_media_rows(media, build_posting_index(postings), tmp_path) == []
+
+
+def test_manifest_key_wins_over_the_network_posting_index(tmp_path: Path) -> None:
+    """A working manifest key is never overridden by the network-id index.
+
+    An export can name a posting outright *and* advertise a network-level id that
+    another posting also matches; the declared key is the stronger statement, so
+    the index is consulted only once that key has failed.
+    """
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-declared", "uuid-network"],
+            "Posting ID": ["900622622300677", "internal-2"],
+            "Network Posting ID": ["", "900622622300677"],
+            "Author ID": ["100007940942252", "100007940942252"],
+            "URL": ["", ""],
+            "Timestamp": ["2026-03-04 21:30:56+00", "2026-03-04 21:30:56+00"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["900622622300677"],
+            "Network ID": ["900622622300677"],
+            "Exported media filename": ["a.jpg"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    index = build_network_posting_index(postings)
+    # Guard the guard: the index really does offer a different answer here.
+    assert index == {"900622622300677": "internal-2"}
+
+    links = resolve_media_rows(media, build_posting_index(postings), tmp_path, network_index=index)
+
+    assert [link.posting_uuid for link in links] == ["uuid-declared"]
+
+
+def _keyless_export() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return a (postings, media) pair with no reachable media->posting key.
+
+    ``Posting ID`` is internal, the permalink carries no numeric id, and the
+    manifest's media id names a photo rather than a post -- so only the stamp
+    the two share can associate them.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame]: The postings and media tables.
+    """
+    postings = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Posting ID": ["1929d6fa-da9c-586b-912b-86a33371d93e"],
+            "Network Posting ID": ["pfbid02D4AdkWqDmfcEjyCdxhWPfNWLHinwFZ"],
+            "Author ID": ["100007940942252"],
+            "Author": ["authorname"],
+            "Network": ["Facebook"],
+            "URL": ["https://www.example.invalid/authorname/posts/pfbid02D4AdkWqDmfcEjyCdxhWPfNWLHinwFZ"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["847656814058061"],
+            "Network ID": ["847656814058061"],
+            "Author": ["authorname"],
+            "Network": ["Facebook"],
+            "Exported media filename": ["a.jpg"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+        }
+    )
+    return postings, media
+
+
+def test_stamp_inference_links_a_keyless_row_to_its_only_stamp_mate(tmp_path: Path) -> None:
+    """A row no key can reach attaches to the one posting sharing its stamp."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        stamps=build_posting_stamp_index(postings),
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-1"]
+
+
+def test_stamp_inference_refuses_two_postings_at_one_instant(tmp_path: Path) -> None:
+    """Two postings by one author at the same instant identify neither."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+    postings = pd.concat([postings, postings.assign(UUID="uuid-2", **{"Posting ID": "internal-2"})])
+
+    links = resolve_media_rows(
+        media, build_posting_index(postings), tmp_path, stamps=build_posting_stamp_index(postings)
+    )
+
+    assert links == []
+
+
+def test_stamp_inference_refuses_an_instant_no_posting_shares(tmp_path: Path) -> None:
+    """A partial export is missing the parent; the row stays unlinked.
+
+    This is the common case for a manifest slice whose postings were crawled
+    separately, and it must not be papered over with a neighbouring post.
+    """
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    postings, media = _keyless_export()
+    media["Timestamp"] = ["2026-03-04 23:59:59+00"]
+
+    links = resolve_media_rows(
+        media, build_posting_index(postings), tmp_path, stamps=build_posting_stamp_index(postings)
+    )
+
+    assert links == []
+
+
+def test_album_inference_wins_over_the_timestamp_fallback(tmp_path: Path) -> None:
+    """Album ordering is the stronger statement, so it is consulted first.
+
+    The fallback knows only that two rows share an instant; album inference
+    knows the message numbering as well, so where both answer it is the one to
+    believe.
+    """
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        (tmp_path / name).write_bytes(b"\xff\xd8\xff")
+    postings, media = _album_export()
+    postings["Network"] = ["Telegram"]
+    postings["Author"] = ["authorname"]
+    decoy = postings.assign(
+        UUID="uuid-decoy",
+        **{"Posting ID": "990011223309", "Timestamp": "2026-03-04 21:30:55+00"},
+    )
+    postings = pd.concat([postings, decoy], ignore_index=True)
+    media["Network"] = ["Telegram"] * len(media)
+    media["Author"] = ["authorname"] * len(media)
+    stamps = build_posting_stamp_index(postings)
+    # Guard the guard: the fallback really would answer differently here.
+    assert _infer_stamp_posting_id(media.iloc[0], pd.Timestamp("2026-03-04 21:30:55+00"), stamps) == "990011223309"
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(postings),
+        tmp_path,
+        albums=build_posting_album_index(postings),
+        stamps=stamps,
+    )
+
+    assert {link.posting_uuid for link in links} == {"uuid-1"}

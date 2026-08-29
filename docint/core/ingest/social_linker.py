@@ -17,6 +17,10 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
+#: Long numeric runs in a permalink -- short ones are page numbers, indices and
+#: the like, never a posting id.
+_URL_ID_RE = re.compile(r"\d{6,}")
+
 _COUNTER_SUFFIX = re.compile(r"_\d+$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -30,6 +34,10 @@ _DEFAULT_ALBUM_TOLERANCE_S = 5.0
 #: ``{Author ID: sorted [(message_no, Posting ID, timestamp)]}`` — see
 #: :func:`build_posting_album_index`.
 AlbumIndex = dict[str, list[tuple[int, str, pd.Timestamp]]]
+
+#: ``{(network, author, timestamp): [Posting ID]}`` -- see
+#: :func:`build_posting_stamp_index`.
+StampIndex = dict[tuple[str, str, pd.Timestamp], list[str]]
 
 
 @dataclass(frozen=True)
@@ -122,6 +130,81 @@ def _derive_posting_id(network_id: str, media_id: str, posting_uuids: dict[str, 
     for candidate in (network_id, media_id, strip_counter(media_id)):
         if candidate and candidate in posting_uuids:
             return candidate
+    return None
+
+
+def _network_id_candidates(row: pd.Series) -> set[str]:
+    """Return the network-level ids a postings row advertises.
+
+    ``Network Posting ID`` when the export fills it, plus any long numeric id in
+    the permalink -- a reel-style posting leaves the column empty and carries its
+    network id only in the ``URL``.
+
+    Args:
+        row (pd.Series): One postings row.
+
+    Returns:
+        set[str]: Candidate network-level ids, possibly empty.
+    """
+    candidates: set[str] = set()
+    network_posting_id = str(row.get("Network Posting ID") or "").strip()
+    if network_posting_id:
+        candidates.add(network_posting_id)
+        candidates.update(part for part in network_posting_id.split(":") if part)
+    candidates.update(_URL_ID_RE.findall(str(row.get("URL") or "")))
+    return candidates
+
+
+def build_network_posting_index(postings_df: pd.DataFrame) -> dict[str, str]:
+    """Return ``{network-level id: Posting ID}`` for postings whose own id is internal.
+
+    Some exports mint an internal ``Posting ID`` -- a crawler UUID the media
+    manifest never carries -- while the id the manifest *does* carry is the one
+    the network itself uses, found in ``Network Posting ID`` or in the permalink.
+
+    Two ids are refused rather than resolved to a guess: one that two postings
+    both advertise (nothing says which owns a media row) and one that is an
+    ``Author ID`` (an account appears in every one of its postings' URLs, so it
+    would attach media to an arbitrary posting of that account).
+
+    Args:
+        postings_df (pd.DataFrame): Table carrying the postings export schema.
+
+    Returns:
+        dict[str, str]: Mapping from a network-level posting id to its ``Posting ID``.
+    """
+    owners: dict[str, set[str]] = {}
+    account_ids: set[str] = set()
+    for _, row in postings_df.iterrows():
+        posting_id = str(row.get("Posting ID") or "").strip()
+        account_ids.add(str(row.get("Author ID") or "").strip())
+        if not posting_id:
+            continue
+        for candidate in _network_id_candidates(row):
+            owners.setdefault(candidate, set()).add(posting_id)
+    return {
+        candidate: next(iter(postings))
+        for candidate, postings in owners.items()
+        if len(postings) == 1 and candidate not in account_ids
+    }
+
+
+def _derive_network_posting_id(network_id: str, media_id: str, network_index: dict[str, str]) -> str | None:
+    """Return the posting a media row names by *network-level* id, or ``None``.
+
+    Tried only after :func:`_derive_posting_id` has failed.
+
+    Args:
+        network_id (str): The row's ``Network ID`` value (may be empty).
+        media_id (str): The row's ``Media ID`` value.
+        network_index (dict[str, str]): Index from :func:`build_network_posting_index`.
+
+    Returns:
+        str | None: The matched ``Posting ID``, or ``None`` when nothing matches.
+    """
+    for candidate in (network_id, media_id, strip_counter(media_id)):
+        if candidate and candidate in network_index:
+            return network_index[candidate]
     return None
 
 
@@ -235,6 +318,58 @@ def _infer_album_posting_id(
     return posting_id
 
 
+def build_posting_stamp_index(postings_df: pd.DataFrame) -> StampIndex:
+    """Return the author-scoped timestamp index used for keyless media rows.
+
+    The last resort for an export that carries no media->posting key at all and
+    no message numbering to infer one from: a media row and its parent posting
+    are stamped at the same instant, so the posting sharing a row's exact
+    timestamp is its parent -- *provided there is only one*.
+
+    Args:
+        postings_df (pd.DataFrame): Table carrying the postings export schema.
+
+    Returns:
+        StampIndex: Posting ids grouped by ``(network, author, timestamp)``,
+        empty when the table carries no parseable ``Timestamp``.
+    """
+    stamps = _parse_timestamps(postings_df)
+    if stamps is None:
+        return {}
+    index: StampIndex = {}
+    for (_, row), stamp in zip(postings_df.iterrows(), stamps, strict=True):
+        posting_id = str(row.get("Posting ID") or "").strip()
+        if not posting_id or pd.isna(stamp):
+            continue
+        key = (str(row.get("Network") or "").strip(), str(row.get("Author") or "").strip(), stamp)
+        index.setdefault(key, []).append(posting_id)
+    return index
+
+
+def _infer_stamp_posting_id(row: pd.Series, media_stamp: pd.Timestamp | None, stamps: StampIndex) -> str | None:
+    """Return the posting a keyless media row shares its instant with, or ``None``.
+
+    Ambiguity is refused, never guessed at: two postings by one author at the
+    same instant say nothing about which owns the media. So does an instant no
+    posting shares, which is what a partial export looks like -- the parent is
+    simply absent, and inventing one would be worse than leaving the row
+    unlinked.
+
+    Args:
+        row (pd.Series): The manifest row.
+        media_stamp (pd.Timestamp | None): The row's parsed ``Timestamp``.
+        stamps (StampIndex): Index from :func:`build_posting_stamp_index`.
+
+    Returns:
+        str | None: The parent ``Posting ID``, or ``None`` when absent or ambiguous.
+    """
+    if media_stamp is None or pd.isna(media_stamp):
+        return None
+    key = (str(row.get("Network") or "").strip(), str(row.get("Author") or "").strip(), media_stamp)
+    candidates = stamps.get(key, [])
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _parse_timestamps(frame: pd.DataFrame) -> pd.Series | None:
     """Return ``frame``'s ``Timestamp`` column parsed to UTC, or ``None``.
 
@@ -298,8 +433,10 @@ def resolve_media_rows(
     root: Path,
     *,
     manifest_dir: Path | None = None,
+    network_index: dict[str, str] | None = None,
     albums: AlbumIndex | None = None,
     album_tolerance_s: float = _DEFAULT_ALBUM_TOLERANCE_S,
+    stamps: StampIndex | None = None,
 ) -> list[MediaLink]:
     """Resolve manifest rows to MediaLinks by basename anywhere under ``root``.
 
@@ -325,21 +462,29 @@ def resolve_media_rows(
         root (Path): The batch tree root; every media file is looked up under it.
         manifest_dir (Path | None): Directory holding the manifest, used to break a
             duplicate-basename tie. Defaults to ``root``.
+        network_index (dict[str, str] | None): Index from
+            :func:`build_network_posting_index`, consulted only when the manifest's
+            declared key names no known posting. ``None`` (the default) disables it.
         albums (AlbumIndex | None): Index from :func:`build_posting_album_index`.
             ``None`` (the default) disables album inference entirely.
         album_tolerance_s (float): Maximum timestamp disagreement, in seconds,
             allowed when accepting an inferred album link.
+        stamps (StampIndex | None): Index from :func:`build_posting_stamp_index`,
+            the last resort for a row no key and no album ordering can reach.
+            ``None`` (the default) disables it.
 
     Returns:
         list[MediaLink]: One per row whose posting is known and file exists.
     """
     tie_break_dir = manifest_dir if manifest_dir is not None else root
     present = build_file_index(root)
-    stamps = _parse_timestamps(media_df) if albums else None
-    stamp_values: list[pd.Timestamp | None] = list(stamps) if stamps is not None else [None] * len(media_df)
+    media_stamps = _parse_timestamps(media_df) if (albums or stamps) else None
+    stamp_values: list[pd.Timestamp | None] = list(media_stamps) if media_stamps is not None else [None] * len(media_df)
     links: list[MediaLink] = []
     exact_links = 0
+    network_links = 0
     album_links = 0
+    stamp_links = 0
     orphan_skips = 0
     missing_skips = 0
     ambiguous_skips = 0
@@ -350,9 +495,17 @@ def resolve_media_rows(
         network_id = str(row.get("Network ID") or "").strip()
         posting_id = _derive_posting_id(network_id, media_id, posting_uuids)
         inferred = False
+        by_network_id = False
+        if posting_id is None and network_index:
+            posting_id = _derive_network_posting_id(network_id, media_id, network_index)
+            by_network_id = posting_id is not None
         if posting_id is None and albums:
             posting_id = _infer_album_posting_id(media_id, stamp, albums, album_tolerance_s)
             inferred = posting_id is not None
+        by_stamp = False
+        if posting_id is None and stamps:
+            posting_id = _infer_stamp_posting_id(row, stamp, stamps)
+            by_stamp = posting_id is not None
         if posting_id is None or posting_id not in posting_uuids:
             orphan_skips += 1
             continue
@@ -368,6 +521,10 @@ def resolve_media_rows(
             continue
         if inferred:
             album_links += 1
+        elif by_stamp:
+            stamp_links += 1
+        elif by_network_id:
+            network_links += 1
         else:
             exact_links += 1
         links.append(MediaLink(posting_uuid=uuid, posting_id=posting_id, media_id=media_id, path=path))
@@ -376,12 +533,15 @@ def resolve_media_rows(
         # referenced files present would otherwise emit one line per row (tens of
         # thousands). A single summary keeps large drop-ins robust and quiet.
         logger.info(
-            "Social linker: {} media linked ({} by manifest key, {} by album inference), {} skipped "
+            "Social linker: {} media linked ({} by manifest key, {} by network id, "
+            "{} by album inference, {} by timestamp), {} skipped "
             "({} with no matching posting, {} with no local file, {} with an ambiguous filename) "
             "across {} manifest rows.",
             len(links),
             exact_links,
+            network_links,
             album_links,
+            stamp_links,
             orphan_skips + missing_skips + ambiguous_skips,
             orphan_skips,
             missing_skips,
@@ -491,6 +651,7 @@ class SocialLinker:
     nextext_max_concurrency: int = 4
     album_link_enabled: bool = True
     album_tolerance_s: float = _DEFAULT_ALBUM_TOLERANCE_S
+    timestamp_link_enabled: bool = True
 
     def _find_tables(self, data_dir: Path) -> tuple[Path | None, Path | None]:
         """Locate the postings table and media manifest anywhere in the tree.
@@ -534,13 +695,17 @@ class SocialLinker:
         posting_references = build_posting_reference_index(postings_df)
         media_df = pd.read_csv(media_csv, sep=_sniff_delimiter(media_csv), dtype=str, encoding="utf-8-sig")
         albums = build_posting_album_index(postings_df) if self.album_link_enabled else None
+        network_index = build_network_posting_index(postings_df)
+        stamps = build_posting_stamp_index(postings_df) if self.timestamp_link_enabled else None
         links = resolve_media_rows(
             media_df,
             posting_uuids,
             data_dir,
             manifest_dir=media_csv.parent,
+            network_index=network_index,
             albums=albums,
             album_tolerance_s=self.album_tolerance_s,
+            stamps=stamps,
         )
 
         result.consumed_paths.add(media_csv)
