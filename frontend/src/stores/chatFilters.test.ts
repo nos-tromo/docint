@@ -22,6 +22,15 @@ describe('useChatFiltersStore', () => {
     expect(persisted.state.retrievalMode).toBe('stateless')
   })
 
+  it('persists the reasoning toggle, off by default', () => {
+    expect(useChatFiltersStore.getState().reasoning).toBe(false)
+
+    useChatFiltersStore.getState().setReasoning(true)
+
+    const persisted = JSON.parse(localStorage.getItem('docint-chat-filters') ?? '{}')
+    expect(persisted.state.reasoning).toBe(true)
+  })
+
   it('persists custom filter rules', () => {
     useChatFiltersStore.getState().setFilterEnabled(true)
     useChatFiltersStore.getState().addRule()

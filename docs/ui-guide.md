@@ -230,8 +230,10 @@ locale) is not yet supported.
   Persisted to `localStorage`: the active collection + owner, current
   session id, and the graph node-count override.
 - **`src/stores/chatFilters.ts`** (`useChatFiltersStore`) — query mode,
-  retrieval mode, and the metadata-filter builder state; `buildPayload()`
-  serialises it for requests. In-memory only.
+  retrieval mode, the reasoning toggle (off by default; sent as `reasoning`
+  on every chat request), and the metadata-filter builder state;
+  `buildPayload()` serialises the filters for requests. Persisted to
+  `localStorage`.
 - Server state (collections, documents, NER, sessions) is owned by
   TanStack Query hooks under `src/hooks/` (`useCollections`, `useNer`,
   `useSessions`, `useDocuments`).

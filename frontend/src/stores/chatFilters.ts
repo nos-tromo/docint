@@ -19,6 +19,7 @@ export interface CustomRule {
 
 interface ChatFiltersState {
   retrievalMode: RetrievalMode
+  reasoning: boolean
   filterEnabled: boolean
   mimePattern: string
   dateFrom: string
@@ -26,6 +27,7 @@ interface ChatFiltersState {
   hateSpeechOnly: boolean
   customRules: CustomRule[]
   setRetrievalMode: (m: RetrievalMode) => void
+  setReasoning: (b: boolean) => void
   setFilterEnabled: (b: boolean) => void
   setMimePattern: (s: string) => void
   setDateFrom: (s: string) => void
@@ -40,6 +42,9 @@ interface ChatFiltersState {
 
 const initial = {
   retrievalMode: 'session' as RetrievalMode,
+  // Off until asked for: thinking buys answer quality with latency and
+  // tokens, so the user opts in per chat rather than paying it on every turn.
+  reasoning: false,
   filterEnabled: false,
   mimePattern: '',
   dateFrom: '',
@@ -53,6 +58,7 @@ export const useChatFiltersStore = create<ChatFiltersState>()(
     (set, get) => ({
       ...initial,
       setRetrievalMode: (retrievalMode) => set({ retrievalMode }),
+      setReasoning: (reasoning) => set({ reasoning }),
       setFilterEnabled: (filterEnabled) => set({ filterEnabled }),
       setMimePattern: (mimePattern) => set({ mimePattern }),
       setDateFrom: (dateFrom) => set({ dateFrom }),
@@ -99,6 +105,7 @@ export const useChatFiltersStore = create<ChatFiltersState>()(
       // open chat. Actions are excluded automatically by partialize.
       partialize: (s) => ({
         retrievalMode: s.retrievalMode,
+        reasoning: s.reasoning,
         filterEnabled: s.filterEnabled,
         mimePattern: s.mimePattern,
         dateFrom: s.dateFrom,

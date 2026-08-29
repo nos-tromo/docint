@@ -2519,6 +2519,14 @@ class RemoteSparseEncoder:
 # ``to_thread.run_sync`` hops used by the streaming endpoints.
 _active_collection: ContextVar[str | None] = ContextVar("docint_active_collection", default=None)
 
+# Per-request reasoning override, bound by :meth:`RAG.reasoning_scope`. ``None``
+# (the default outside a scope, or when a request omits the field) defers to the
+# ``OPENAI_ENABLE_THINKING`` process default; ``True``/``False`` force the
+# post-retrieval model on or off for this request only. Same ContextVar
+# mechanics as ``_active_collection``, so the override follows the request
+# into the anyio worker threads the streaming endpoints spawn.
+_reasoning_override: ContextVar[bool | None] = ContextVar("docint_reasoning_override", default=None)
+
 # Upper bound on the per-collection retrieval-handle caches (``index`` /
 # ``query_engine``). Each cached handle pins a SQLite docstore connection, so an
 # unbounded cache would leak file descriptors on a host with many collections.
@@ -2959,6 +2967,29 @@ class RAG:
         finally:
             _active_collection.reset(token)
 
+    @contextmanager
+    def reasoning_scope(self, enabled: bool | None) -> Iterator[None]:
+        """Bind a per-request reasoning override for the enclosed block.
+
+        ``True``/``False`` make :attr:`post_retrieval_text_model` resolve to the
+        reasoning or the plain model regardless of ``OPENAI_ENABLE_THINKING``;
+        ``None`` leaves the process default in force (a no-op scope, so callers
+        can pass the request field through unconditionally). Scoped to the
+        current context like :meth:`collection_scope`, so concurrent requests
+        and the worker threads they spawn each see only their own setting.
+
+        Args:
+            enabled (bool | None): The request's override, or ``None`` for none.
+
+        Yields:
+            None: Control returns to the caller with the override active.
+        """
+        token = _reasoning_override.set(enabled)
+        try:
+            yield
+        finally:
+            _reasoning_override.reset(token)
+
     def _cache_get(self, cache: OrderedDict[str, Any], key: str) -> Any:
         """Return a cached handle for ``key``, marking it most-recently-used.
 
@@ -3222,6 +3253,14 @@ class RAG:
             self.openai_config,
             enabled=enable_reasoning,
         )
+        if self.openai_config.inference_provider == "vllm":
+            # ``reasoning_effort`` is OpenAI's knob; on vLLM the switch that a
+            # Qwen3/Gemma-style chat template actually reads is
+            # ``chat_template_kwargs.enable_thinking``. Sent explicitly in both
+            # states so the plain model overrides a stack whose ``.env``
+            # defaults thinking *on*. vLLM-only: OpenAI proper rejects unknown
+            # body fields, and the other providers have no such switch.
+            additional_kwargs["chat_template_kwargs"] = {"enable_thinking": bool(enable_reasoning)}
 
         # LlamaIndex OpenAI class supports api_key, api_base, timeout, max_retries, seed, top_p
         # Use LocalOpenAI which tolerates unknown model names (e.g. paths) by falling back to default metadata
@@ -3266,10 +3305,17 @@ class RAG:
         reasoning/thinking. Pre-retrieval steps such as query rewriting remain
         on the default non-reasoning model.
 
+        Whether reasoning is requested at all is decided per request when a
+        :meth:`reasoning_scope` is active (the chat UI's toggle), else by the
+        ``OPENAI_ENABLE_THINKING`` process default. Both model instances are
+        cached, so flipping the override costs no model construction.
+
         Returns:
             OpenAI: The post-retrieval generation model.
         """
-        if get_openai_reasoning_effort(self.openai_config, enabled=True) is None:
+        override = _reasoning_override.get()
+        enabled = self.openai_config.thinking_enabled if override is None else override
+        if not enabled or get_openai_reasoning_effort(self.openai_config, enabled=True) is None:
             return self.text_model
 
         if self._post_retrieval_text_model is None:

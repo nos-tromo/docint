@@ -393,6 +393,13 @@ class DummyRAG:
         self.query_engine = None
 
     @contextlib.contextmanager
+    def reasoning_scope(self, enabled: bool | None) -> Iterator[None]:
+        """No-op mirror of :meth:`RAG.reasoning_scope`; the stub has no model to switch."""
+        _ = enabled
+
+        yield
+
+    @contextlib.contextmanager
     def collection_scope(self, physical: str) -> Iterator[None]:
         """Mirror :meth:`RAG.collection_scope` for the stub.
 

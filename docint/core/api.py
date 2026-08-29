@@ -854,6 +854,11 @@ class QueryIn(BaseModel):
     # beforehand — installing it afterwards left that first answer unscoped
     # while the UI already claimed it was scoped.
     scope_chunk_ids: list[str] | None = None
+    # Per-turn reasoning override from the chat UI's toggle. ``true``/``false``
+    # force the model's thinking mode on or off for this answer; absent (the
+    # default) defers to ``OPENAI_ENABLE_THINKING``. Applies to answer
+    # synthesis only — query rewriting stays on the plain model.
+    reasoning: bool | None = None
 
 
 class ScopeIn(BaseModel):
@@ -1102,6 +1107,11 @@ class AgentChatIn(BaseModel):
     # per-request physical collection. Falls back to the process default when
     # omitted (legacy single-collection use).
     collection: str | None = None
+    # Per-turn reasoning override from the chat UI's toggle. ``true``/``false``
+    # force the model's thinking mode on or off for this answer; absent (the
+    # default) defers to ``OPENAI_ENABLE_THINKING``. Applies to answer
+    # synthesis only — query rewriting stays on the plain model.
+    reasoning: bool | None = None
 
 
 class AgentChatOut(BaseModel):
@@ -1837,7 +1847,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             principal.effective_owner,
         )
 
-        with rag.collection_scope(physical):
+        with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
             if getattr(rag, "query_engine", None) is None:
                 if getattr(rag, "index", None) is None:
                     rag.create_index()
@@ -2319,7 +2329,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         Yields:
             str: SSE event lines from the scoped stream body.
         """
-        with rag.collection_scope(physical):
+        with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
             if getattr(rag, "index", None) is None:
                 await to_thread.run_sync(rag.create_index)
             async for chunk in _stream_body():
@@ -3876,7 +3886,7 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     # physical collection (per-request ContextVar), and thread the session id
     # explicitly so the turn persists under the right conversation.
     try:
-        with rag.collection_scope(physical):
+        with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
             session_id = rag.start_session(payload.session_id, owner=owner.name)
             ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
             if ctx and rag.sessions:
@@ -4049,7 +4059,7 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
         """
-        with rag.collection_scope(physical):
+        with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
 
             def _prepare() -> tuple[str, Any, Any, Any]:
                 """Run the blocking session/understanding pre-amble off the loop.

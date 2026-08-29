@@ -15,6 +15,7 @@ import types
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -2483,6 +2484,9 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     """
     rag = RAG(qdrant_collection="test")
     rag._text_model = cast(Any, object())
+    # Synthesis must pick the post-retrieval (reasoning) model, so make the
+    # env default opt in; the plain model above is a sentinel that would fail.
+    rag.openai_config = replace(rag.openai_config, thinking_enabled=True)
     rag._reranker = cast(Any, object())
     rag.index = cast(
         Any,
@@ -2556,6 +2560,9 @@ def test_build_query_engine_uses_hybrid_retrieval_by_default_when_enabled(
     """
     rag = RAG(qdrant_collection="test", enable_hybrid=True)
     rag._text_model = cast(Any, object())
+    # Synthesis must pick the post-retrieval (reasoning) model, so make the
+    # env default opt in; the plain model above is a sentinel that would fail.
+    rag.openai_config = replace(rag.openai_config, thinking_enabled=True)
     rag._reranker = cast(Any, object())
 
     captured_retriever_kwargs: dict[str, Any] = {}
@@ -2592,6 +2599,9 @@ def test_build_query_engine_adds_parent_context_postprocessor_when_supported(
     """
     rag = RAG(qdrant_collection="test")
     rag._text_model = cast(Any, object())
+    # Synthesis must pick the post-retrieval (reasoning) model, so make the
+    # env default opt in; the plain model above is a sentinel that would fail.
+    rag.openai_config = replace(rag.openai_config, thinking_enabled=True)
     rag._reranker = cast(Any, object())
     rag.index = cast(
         Any,
