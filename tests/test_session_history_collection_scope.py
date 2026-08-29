@@ -70,6 +70,13 @@ class _ScopedSourceRag:
         return self.active_collection
 
     @contextmanager
+    def reasoning_scope(self, enabled: bool | None) -> Iterator[None]:
+        """No-op mirror of :meth:`RAG.reasoning_scope`; the stub has no model to switch."""
+        _ = enabled
+
+        yield
+
+    @contextmanager
     def collection_scope(self, physical: str) -> Iterator[None]:
         """Bind ``physical`` as the active collection for the block.
 

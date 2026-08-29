@@ -157,6 +157,13 @@ class _ReplayRag:
         self.qdrant_collection: str = "uabc123__testbatch"
 
     @contextmanager
+    def reasoning_scope(self, enabled: bool | None) -> Iterator[None]:
+        """No-op mirror of :meth:`RAG.reasoning_scope`; the stub has no model to switch."""
+        _ = enabled
+
+        yield
+
+    @contextmanager
     def collection_scope(self, physical: str) -> Iterator[None]:
         """Bind ``physical`` as the active collection for the block.
 

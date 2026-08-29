@@ -11,6 +11,7 @@ a stubbed chat model, no network, no real inference.
 from __future__ import annotations
 
 import types
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -230,6 +231,11 @@ def _build_rag(
     rag._qdrant_client = cast(Any, _FakeQdrant(points, reverse_retrieve=reverse_retrieve))
     rag._qdrant_src_dir = tmp_path
     rag._post_retrieval_text_model = cast(Any, _StubTextModel())
+    # The stub sits in the reasoning slot, which ``post_retrieval_text_model``
+    # only selects when thinking is on (env default or request override) —
+    # so opt the env default in, or the property falls through to a real
+    # ``text_model`` and the build dials out.
+    rag.openai_config = replace(rag.openai_config, thinking_enabled=True)
     # Deterministic, locale-independent map/fold prompts (see the module
     # docstring comment above the marker constants).
     rag.summary_map_prompt = _MAP_PROMPT_TEMPLATE

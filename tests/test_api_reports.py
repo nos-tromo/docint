@@ -71,6 +71,13 @@ class _ReportRAG:
         return self._com
 
     @contextmanager
+    def reasoning_scope(self, enabled: bool | None) -> Iterator[None]:
+        """No-op mirror of :meth:`RAG.reasoning_scope`; the stub has no model to switch."""
+        _ = enabled
+
+        yield
+
+    @contextmanager
     def collection_scope(self, physical: str) -> Iterator[None]:
         """No-op scope: this stand-in carries no per-request collection state."""
         yield

@@ -91,6 +91,13 @@ class _StubRAG:
         return self._owners
 
     @contextmanager
+    def reasoning_scope(self, enabled: bool | None) -> Iterator[None]:
+        """No-op mirror of :meth:`RAG.reasoning_scope`; the stub has no model to switch."""
+        _ = enabled
+
+        yield
+
+    @contextmanager
     def collection_scope(self, physical: str) -> Iterator[None]:
         """Mirror ``RAG.collection_scope``: bind then restore the active collection."""
         prev = self.qdrant_collection
