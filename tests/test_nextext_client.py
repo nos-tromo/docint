@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 import httpx
+import pytest
 
 from docint.utils.env_cfg import NextextConfig
 from docint.utils.nextext_client import NextextClient
@@ -190,19 +191,21 @@ def _options_from_multipart(request: httpx.Request) -> dict[str, object]:
 
 
 def test_options_payload_requests_keyframes_explicitly() -> None:
-    """The options payload asks for keyframes and pins every forwarded key.
+    """The options payload pins every key docint forwards to Nextext.
 
-    Nextext made keyframe extraction opt-in (``JobOptions.keyframes``, default
-    false), so a payload carrying only the two rate knobs samples nothing and
-    the keyframes artifact 404s — indistinguishable from an audio-only clip.
-    The comparison is exact so a silently dropped key fails here too.
+    Two of them are opt-in switches pointing opposite ways. Keyframe extraction
+    defaults to off, so a payload carrying only the rate knobs samples nothing
+    and the artifact 404s — indistinguishable from an audio-only clip.
+    Captioning defaults to on, so omitting ``visual_context`` buys a vision
+    request per frame for prose docint never downloads. The comparison is exact
+    so a silently dropped key fails here too.
     """
     payload = json.loads(NextextClient(_cfg())._options_payload())
-    assert payload == {"keyframes": True, "keyframes_per_minute": 4, "keyframes_max": 20}
+    assert payload == {"keyframes": True, "visual_context": False, "keyframes_per_minute": 4, "keyframes_max": 20}
 
 
 def test_submit_multipart_carries_keyframes_option(tmp_path: Path) -> None:
-    """The submitted multipart body really carries the keyframes request.
+    """The submitted multipart body really carries the job options.
 
     Pins the outgoing wire contract, not just the payload builder: the form
     field name and its JSON encoding are what Nextext parses.
@@ -219,4 +222,31 @@ def test_submit_multipart_carries_keyframes_option(tmp_path: Path) -> None:
     client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(handler))
     result = NextextClient(_cfg(), client=client).process_media(media)
     assert result.status == "completed"
-    assert seen == {"keyframes": True, "keyframes_per_minute": 4, "keyframes_max": 20}
+    assert seen == {"keyframes": True, "visual_context": False, "keyframes_per_minute": 4, "keyframes_max": 20}
+
+
+def test_rejected_options_names_the_required_nextext_version(
+    tmp_path: Path, loguru_caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 422 on submission says which Nextext version this build needs.
+
+    Nextext's ``JobOptions`` forbids unknown fields, so an option this client
+    sends to a server that predates it fails the whole submission — the clip is
+    skipped with no transcript either, not just without frames. The bare status
+    code does not say that, and an operator seeing it for every video in a batch
+    should not have to work back to a version floor.
+    """
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"x")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": [{"type": "extra_forbidden"}]})
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(handler))
+    result = NextextClient(_cfg(), client=client).process_media(media)
+
+    assert result.status == "error"
+    assert result.transcript_jsonl is None
+    assert result.keyframes == []
+    assert "v1.9.0" in loguru_caplog.text
+    assert "422" in loguru_caplog.text
