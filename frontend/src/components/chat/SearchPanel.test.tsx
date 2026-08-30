@@ -460,6 +460,28 @@ describe('SearchPanel hit expansion', () => {
     expect(screen.queryByText(/Danach folgte die Aussprache/)).toBeNull()
   })
 
+  it('wires the disclosure to the body, and expanding never pins the hit', async () => {
+    // The disclosure is a sibling of the tile's own role="button", not a
+    // child of it: opening a chunk to read it must not silently re-scope the
+    // chat to that chunk.
+    mockApi(okResult)
+
+    renderPanel()
+
+    await screen.findByText(/alpha\.pdf/)
+    const disclosure = screen.getByRole('button', { name: /show full chunk/i })
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    expect(disclosure.getAttribute('aria-controls')).toBe(
+      screen.getByTestId('hit-preview').id
+    )
+
+    await userEvent.click(disclosure)
+
+    await screen.findByTestId('hit-full-text')
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+    expect(useSearchUiStore.getState().scopes[SESSION]?.tokens ?? {}).toEqual({})
+  })
+
   it('caches the fetched text, so re-expanding costs no second request', async () => {
     const fetchMock = mockApi(okResult)
 

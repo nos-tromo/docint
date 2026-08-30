@@ -1,5 +1,5 @@
 import { useId, useState } from 'react'
-import { Badge, Button, ChevronDownIcon, Spinner } from '@infra/ui'
+import { Badge, DisclosureButton, Spinner } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
 import type { SearchHit } from '@/api/types'
@@ -199,21 +199,13 @@ export function SearchHitRow({ hit, keywords, selected, onToggle }: SearchHitRow
         </div>
       </div>
       {canExpand && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-expanded={expanded}
-          aria-controls={bodyId}
-          aria-label={expanded ? t('search.collapse_hit') : t('search.expand_hit')}
-          title={expanded ? t('search.collapse_hit') : t('search.expand_hit')}
+        <DisclosureButton
+          expanded={expanded}
+          controls={bodyId}
+          label={expanded ? t('search.collapse_hit') : t('search.expand_hit')}
           onClick={() => setExpanded((open) => !open)}
-          className="absolute right-1 top-1 h-6 w-6 px-0"
-        >
-          <ChevronDownIcon
-            className={cn('h-4 w-4 transition-transform', expanded && 'rotate-180')}
-          />
-        </Button>
+          className="absolute right-1 top-1 h-6 w-6"
+        />
       )}
     </li>
   )

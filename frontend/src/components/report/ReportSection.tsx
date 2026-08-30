@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { ChevronDownIcon } from '@infra/ui'
+import { DisclosureButton } from '@infra/ui'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
 /** How much of a folded section stays visible, in px — two or three lines. */
 const PEEK_HEIGHT = 64
@@ -8,13 +9,13 @@ const PEEK_HEIGHT = 64
 /**
  * One foldable section of a report, with its contents peeking out while shut.
  *
- * The bar is the whole width of the column and the caret sits at the far right,
- * so a section reads as something you can open rather than as a caption that
- * happens to sit above some cards. That is the shape of the collapsible this
- * was modelled on; the marker is a rotated chevron rather than that example's
- * typed `+`/`−`, because a character renders from whatever font the machine
- * falls back to and `aria-expanded` already carries the state for anyone not
- * looking at it.
+ * The bar is the whole width of the column and the control sits at the far
+ * right, so a section reads as something you can open rather than as a caption
+ * that happens to sit above some cards. The control is the shared
+ * `DisclosureButton` rather than the whole row, which is how the same gesture
+ * is drawn everywhere in the federation — one chevron rotated under
+ * `aria-expanded`, never a typed `+`/`−` rendering from whatever font the
+ * machine falls back to.
  *
  * Folded does not mean hidden. A report is a pile of evidence someone picked by
  * hand, and a row of closed bars tells them nothing about which pile is which —
@@ -41,6 +42,7 @@ export function ReportSection({
   defaultOpen?: boolean
   children: ReactNode
 }) {
+  const t = useT()
   const [open, setOpen] = useState(defaultOpen)
   const [overflows, setOverflows] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -63,26 +65,27 @@ export function ReportSection({
 
   return (
     <div className="space-y-2">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        aria-controls={panelId}
-        className="flex w-full items-center gap-2 rounded-md py-1 text-left transition-colors hover:bg-muted/60"
-      >
+      <div className="flex w-full items-center gap-2 py-1 text-left">
         <span className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
           {title}
         </span>
         {count && <span className="truncate text-xs text-muted-foreground">{count}</span>}
-        {/* One caret rotated, never a pair. `ml-auto` is what pushes it to the
-            far edge, which is what makes the whole row read as the control. */}
-        <ChevronDownIcon
-          className={cn(
-            'ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform',
-            !open && '-rotate-90'
-          )}
+        {/* `ml-auto` puts the control at the far edge of the bar, where the
+            caret sat when the row itself was the button. The name carries the
+            section title: a report holds several of these, and "Show" alone
+            would read identically on every one of them. */}
+        <DisclosureButton
+          expanded={open}
+          controls={panelId}
+          label={
+            open
+              ? t('report.section_hide', { title })
+              : t('report.section_show', { title })
+          }
+          onClick={() => setOpen((v) => !v)}
+          className="ml-auto h-6 w-6"
         />
-      </button>
+      </div>
       <div className="relative">
         {/* `inert` while folded: the peek cuts a card in half, and the half
             below the fold still holds a note field and three buttons. Left

@@ -46,8 +46,10 @@ export function CollectionOverviewPreview({ overview }: { overview: CollectionOv
     // The manifest is the longest thing in a report and the least often read —
     // sixteen documents pushed the report's own findings off the screen. Its
     // totals ride on the bar, so a folded overview still says how much is
-    // behind it, and they keep the bar's accessible name distinct from the
-    // "Document overview" checkbox in the metadata row above.
+    // behind it. (They no longer carry the bar's accessible name: the control
+    // is the section's own disclosure button, whose name is "Show/Hide
+    // {title}" — already distinct from the "Document overview" checkbox in
+    // the metadata row above, and a different role besides.)
     <ReportSection
       title={t('report.document_overview')}
       count={countStrip}

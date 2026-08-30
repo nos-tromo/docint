@@ -174,7 +174,9 @@ the table has lazily loaded (the counts are not derived from the loaded rows).
 
 The Report Builder surface. Lists the caller's reports and, for the active one,
 shows the picked artifacts grouped by type with per-item notes, reordering, and
-removal, plus the five export formats. Artifacts are added from elsewhere in
+removal, plus the five export formats. Each type is a foldable section whose
+contents peek out while shut; the control is the `@infra/ui`
+`DisclosureButton` at the bar's right edge, not the bar itself. Artifacts are added from elsewhere in
 the app: an **"+ Report"** control sits on every chat answer, entity finding,
 and hate-speech finding. Switching the active collection releases the active
 report, so a report and its evidence always describe the same collection.

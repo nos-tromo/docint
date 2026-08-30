@@ -48,18 +48,20 @@ describe('ReportSection', () => {
     expect(panel).toHaveAttribute('data-state', 'collapsed')
   })
 
-  it("carries the count in the bar's accessible name", () => {
+  it('shows the count on the bar and names the control after the section', () => {
     render(
       <ReportSection title="Document overview" count="4 documents · 312 nodes">
         <p>manifest</p>
       </ReportSection>
     )
 
-    // The overview's bar and the "Document overview" checkbox in the metadata
-    // row would otherwise be two controls with one name; the totals are what
-    // tell them apart, for a screen reader as much as for a test.
+    // The totals stay on the bar as text — a folded overview still says how
+    // much is behind it. The accessible name is the disclosure's own, which
+    // carries the title: "Show" alone would read identically on every section
+    // in the report.
+    expect(screen.getByText('4 documents · 312 nodes')).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: /document overview 4 documents · 312 nodes/i })
+      screen.getByRole('button', { name: 'Hide Document overview' })
     ).toBeInTheDocument()
   })
 
