@@ -69,10 +69,18 @@ class NextextClient:
 
     def _options_payload(self) -> str:
         """Return the JSON ``options`` form field forwarded to Nextext."""
+        # Keyframe sampling is opt-in server-side and defaults to off, so it
+        # must be asked for explicitly: without the flag Nextext samples
+        # nothing and the keyframes artifact 404s, which reads here exactly
+        # like an audio-only clip — no frames, no error. Requesting it
+        # unconditionally is not a new switch, because Nextext returns no
+        # frames itself once a rate is non-positive; the rates below stay the
+        # off-switch and the whole tuning surface.
         # Note: keyframe_dedup_cosine is NOT forwarded; near-duplicate pruning
         # is applied client-side in docint's image service.
         return json.dumps(
             {
+                "keyframes": True,
                 "keyframes_per_minute": self._cfg.keyframes_per_minute,
                 "keyframes_max": self._cfg.keyframes_max,
             }

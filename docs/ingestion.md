@@ -205,6 +205,17 @@ the transcript. Transcripts are cached in the per-collection `IngestManifest`
 by media-file hash so re-ingestion of unchanged files skips the Nextext
 round-trip entirely.
 
+Sampling is **requested explicitly** — docint sends `keyframes: true` in each
+job's options, because Nextext made keyframe extraction an opt-in pipeline
+step defaulting to off. This requires a Nextext build carrying that change
+(its PR #159); an older Nextext rejects the unknown option with 422, and the
+clip is then skipped fail-soft with a warning and no transcript either. The
+reverse skew is the quiet one: against a current Nextext, a client that does
+not ask gets no frames and a 404 on the keyframes artifact — which looks
+exactly like an audio-only clip. `KEYFRAMES_PER_MINUTE=0` (or
+`KEYFRAMES_MAX=0`) remains the way to turn sampling off; Nextext returns no
+frames for a non-positive rate.
+
 Every `NEXTEXT_*` and `KEYFRAME*` variable, with its default, is documented in
 [configuration.md](configuration.md#nextext-media-processing--nextextconfig).
 
