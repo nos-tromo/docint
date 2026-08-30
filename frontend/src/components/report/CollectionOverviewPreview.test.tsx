@@ -25,7 +25,9 @@ describe('CollectionOverviewPreview', () => {
     // ride on the bar and the first rows peek out below it, clipped rather
     // than unmounted, so a folded section still says what is in it.
     expect(bar).toHaveAttribute('aria-expanded', 'false')
-    expect(bar).toHaveTextContent(/1 document ·/)
+    // The totals sit beside the control on the bar, not inside it — the
+    // disclosure is icon-only and names itself after the section.
+    expect(screen.getByText(/1 document ·/)).toBeInTheDocument()
     const panel = document.getElementById(bar.getAttribute('aria-controls') ?? '')
     expect(panel).not.toBeNull()
     expect(panel!.style.maxHeight).not.toBe('')

@@ -134,6 +134,8 @@ export const de: Strings = {
   'chat.value_placeholder': 'Wert',
   'chat.remove_rule_aria': 'Regel entfernen',
   'chat.graph_debug': 'Graph-Debug',
+  'chat.graph_debug_show': 'Graph-Debug anzeigen',
+  'chat.graph_debug_hide': 'Graph-Debug ausblenden',
   'chat.scope_not_applied':
     'Diese Antwort wurde nicht auf die {count} ausgewählten Abschnitte eingegrenzt — sie stammt aus der normalen Suche.',
   'chat.rerank_not_applied':
@@ -362,6 +364,8 @@ export const de: Strings = {
   'report.format_json': 'JSON',
   'report.empty_report_hint':
     'Dieser Bericht ist leer. Verwenden Sie das Berichtssymbol bei einer Chat-Antwort, einem Entitätsfund oder einem Hatespeech-Fund, um sie hier hinzuzufügen.',
+  'report.section_show': '{title} anzeigen',
+  'report.section_hide': '{title} ausblenden',
   'report.section_summaries': 'Zusammenfassungen',
   'report.section_chat_answers': 'Chat-Antworten',
   'report.section_entity_findings': 'Entitätsfunde',

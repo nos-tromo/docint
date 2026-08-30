@@ -128,6 +128,8 @@ export const en = {
   'chat.value_placeholder': 'value',
   'chat.remove_rule_aria': 'Remove rule',
   'chat.graph_debug': 'Graph debug',
+  'chat.graph_debug_show': 'Show graph debug',
+  'chat.graph_debug_hide': 'Hide graph debug',
   'chat.scope_not_applied':
     'This answer was not restricted to the {count} selected chunks — it came from ordinary retrieval.',
   'chat.rerank_not_applied':
@@ -352,6 +354,8 @@ export const en = {
   'report.format_json': 'JSON',
   'report.empty_report_hint':
     'This report is empty. Use the report icon on a chat answer, entity finding, or hate-speech finding to add it here.',
+  'report.section_show': 'Show {title}',
+  'report.section_hide': 'Hide {title}',
   'report.section_summaries': 'Summaries',
   'report.section_chat_answers': 'Chat answers',
   'report.section_entity_findings': 'Entity findings',
