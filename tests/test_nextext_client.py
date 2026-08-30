@@ -1,6 +1,7 @@
 """Tests for the Nextext remote media-processing client."""
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -170,3 +171,52 @@ def test_default_client_empty_identity_sends_no_header() -> None:
     )
     client = NextextClient(cfg)
     assert "X-Auth-User" not in client._client.headers
+
+
+def _options_from_multipart(request: httpx.Request) -> dict[str, object]:
+    """Return the decoded ``options`` JSON of a multipart submission.
+
+    Args:
+        request (httpx.Request): The captured ``POST /jobs`` request.
+
+    Returns:
+        dict[str, object]: The parsed ``options`` form field.
+    """
+    body = request.content.decode("utf-8", "replace")
+    part = body.split('name="options"', 1)[1]
+    # Skip the part's own header block; its value follows the blank line.
+    value = part.split("\r\n\r\n", 1)[1].split("\r\n--", 1)[0]
+    return json.loads(value)
+
+
+def test_options_payload_requests_keyframes_explicitly() -> None:
+    """The options payload asks for keyframes and pins every forwarded key.
+
+    Nextext made keyframe extraction opt-in (``JobOptions.keyframes``, default
+    false), so a payload carrying only the two rate knobs samples nothing and
+    the keyframes artifact 404s — indistinguishable from an audio-only clip.
+    The comparison is exact so a silently dropped key fails here too.
+    """
+    payload = json.loads(NextextClient(_cfg())._options_payload())
+    assert payload == {"keyframes": True, "keyframes_per_minute": 4, "keyframes_max": 20}
+
+
+def test_submit_multipart_carries_keyframes_option(tmp_path: Path) -> None:
+    """The submitted multipart body really carries the keyframes request.
+
+    Pins the outgoing wire contract, not just the payload builder: the form
+    field name and its JSON encoding are what Nextext parses.
+    """
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"fakevideo")
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/jobs":
+            seen.update(_options_from_multipart(request))
+        return _handler(request)
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(handler))
+    result = NextextClient(_cfg(), client=client).process_media(media)
+    assert result.status == "completed"
+    assert seen == {"keyframes": True, "keyframes_per_minute": 4, "keyframes_max": 20}
