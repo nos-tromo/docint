@@ -1259,10 +1259,13 @@ class ImageIngestionService:
         Each frame is CLIP-embedded once. A greedy pass keeps a frame only when
         its maximum cosine similarity (== dot product, since CLIP vectors are
         L2-normalized) to an already-kept frame is below ``dedup_cosine``. Only
-        survivors are sent to the (expensive) vision tagger and stored, each
-        stamped with ``source_doc_id``/``extra_metadata`` so it links back to its
-        source — a posting for the social-media path, or the media file itself for
-        standalone video. Fail-soft: a frame that fails to embed is skipped, not raised.
+        survivors are stored, each stamped with ``source_doc_id``/``extra_metadata``
+        so it links back to its source — a posting for the social-media path, or the
+        media file itself for standalone video. A survivor reaches the (expensive)
+        vision tagger only when the ``_images`` companion holds no point for its
+        content hash yet; otherwise the stored description, tags and OCR text are
+        reused, while the point is still written for this source's link field.
+        Fail-soft: a frame that fails to embed is skipped, not raised.
 
         Args:
             frames (list[bytes]): Candidate keyframe image bytes, in time order.
@@ -1311,9 +1314,32 @@ class ImageIngestionService:
                 continue
             kept_embeddings.append(embedding)
 
+            image_id = self._hash_image_bytes(frame_bytes)
+            point_id = self._point_id_from_image_id(image_id)
+
+            # The same frame recurs across clips and across a re-run — the
+            # cosine prune above only spans the one call it is given, and its
+            # ``kept_embeddings`` start empty every time. Reuse what an earlier
+            # pass already read out of the frame rather than paying the vision
+            # model (and the OCR call) for the same pixels twice. Unlike
+            # ``ingest_image`` this does NOT short-circuit the write: the point
+            # carries *this* posting's ``link_field``, so a frame shared by two
+            # postings must still be stamped for the second one or it stops
+            # grouping with it at retrieval. The upsert is cheap; the calls are
+            # not.
+            cached_payload: dict[str, Any] | None = None
+            if self.img_ingestion_config.cache_by_hash:
+                existing = self._existing_by_image_id(image_id, collection_name=target_collection)
+                if existing is not None:
+                    cached_payload = existing[1]
+
             description: str = ""
             tags: list[str] = []
-            if self.img_ingestion_config.tagging_enabled and tagger is not None:
+            if cached_payload is not None:
+                description = str(cached_payload.get("llm_description") or "")
+                cached_tags = cached_payload.get("llm_tags")
+                tags = [str(tag) for tag in cached_tags] if isinstance(cached_tags, list) else []
+            elif self.img_ingestion_config.tagging_enabled and tagger is not None:
                 try:
                     description, tags = self._run_with_retries(
                         lambda fb=frame_bytes, t=tagger: t.describe_and_tag(fb, "image/jpeg")
@@ -1321,15 +1347,14 @@ class ImageIngestionService:
                 except Exception as exc:
                     logger.warning("Keyframe tagging failed: {}", exc)
 
-            image_id = self._hash_image_bytes(frame_bytes)
-            point_id = self._point_id_from_image_id(image_id)
             # A clip contributes many frames and most carry no text; slides are
             # the case that does, so reading them is opt-in per deployment.
-            frame_ocr = (
-                self._read_image_text(frame_bytes, context=f"keyframe {image_id[:12]}")
-                if self.img_ingestion_config.keyframe_ocr_enabled
-                else ""
-            )
+            if cached_payload is not None:
+                frame_ocr = str(cached_payload.get("ocr_text") or "")
+            elif self.img_ingestion_config.keyframe_ocr_enabled:
+                frame_ocr = self._read_image_text(frame_bytes, context=f"keyframe {image_id[:12]}")
+            else:
+                frame_ocr = ""
             text_parts = [frame_ocr.strip(), description.strip()]
             if tags:
                 text_parts.append("Tags: " + ", ".join(tags))
