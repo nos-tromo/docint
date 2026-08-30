@@ -105,6 +105,22 @@ describe('Ingest', () => {
     expect(screen.getByRole('combobox', { name: /collection/i })).toHaveValue('mydocs')
   })
 
+  it('renders the enrichment options as toggle buttons that flip the run store', async () => {
+    renderIn(<Ingest />)
+    // Wait for the deployment-defaults seed (`ner`/`hate` both false here).
+    const ner = await screen.findByRole('button', { name: 'Entities' })
+    const hate = screen.getByRole('button', { name: 'Hate speech' })
+    await waitFor(() => expect(ner).toHaveAttribute('aria-pressed', 'false'))
+    expect(hate).toHaveAttribute('aria-pressed', 'false')
+
+    ner.click()
+    await waitFor(() => expect(ner).toHaveAttribute('aria-pressed', 'true'))
+    expect(useIngestRunStore.getState().ner).toBe(true)
+    // The other option is untouched — each toggle owns exactly one flag.
+    expect(hate).toHaveAttribute('aria-pressed', 'false')
+    expect(useIngestRunStore.getState().hate).toBe(false)
+  })
+
   it('renders live progress for the active job and never flashes the interrupted banner', async () => {
     useIngestRunStore.setState({ activeJobId: 'job-1' })
     useIngestJobsStore.getState().appendEvent('job-1', {
@@ -347,10 +363,10 @@ describe('Ingest — interrupted run', () => {
     renderIn(<Ingest />)
 
     // Let the deployment-defaults seed settle first (it writes `ner`/`hate`
-    // on mount), then make an explicit choice — mirrors a user ticking a box
-    // before hitting "Run again", and avoids racing the seed effect.
-    const nerCheckbox = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
-    await waitFor(() => expect(nerCheckbox.checked).toBe(false))
+    // on mount), then make an explicit choice — mirrors a user pressing a
+    // toggle before hitting "Run again", and avoids racing the seed effect.
+    const nerToggle = await screen.findByRole('button', { name: 'Entities' })
+    await waitFor(() => expect(nerToggle).toHaveAttribute('aria-pressed', 'false'))
     useIngestRunStore.getState().setNer(true)
 
     const rerun = await screen.findByRole('button', { name: /run again|erneut/i })
