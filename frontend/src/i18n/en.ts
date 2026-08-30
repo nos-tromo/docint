@@ -213,8 +213,8 @@ export const en = {
   'ingest.finished': 'Ingestion finished',
   'ingest.failed_default': 'Ingestion failed.',
   'ingest.save_failed_file': 'Upload failed: “{filename}” could not be saved.',
-  'ingest.opt_ner': 'Extract entities',
-  'ingest.opt_hate': 'Detect hate speech',
+  'ingest.opt_ner': 'Entities',
+  'ingest.opt_hate': 'Hate speech',
 
   // inspector orphans
   'inspector.file_types': 'File types',

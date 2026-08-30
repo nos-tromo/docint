@@ -222,8 +222,8 @@ export const de: Strings = {
   'ingest.finished': 'Datenimport abgeschlossen',
   'ingest.failed_default': 'Datenimport fehlgeschlagen.',
   'ingest.save_failed_file': 'Upload fehlgeschlagen: „{filename}“ konnte nicht gespeichert werden.',
-  'ingest.opt_ner': 'Entitäten extrahieren',
-  'ingest.opt_hate': 'Hatespeech erkennen',
+  'ingest.opt_ner': 'Entitäten',
+  'ingest.opt_hate': 'Hatespeech',
 
   // inspector orphans
   'inspector.file_types': 'Dateitypen',

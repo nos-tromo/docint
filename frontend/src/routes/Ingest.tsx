@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Banner, Button, Card, FileList, Input, PageHeader } from '@infra/ui'
+import { Banner, Button, Card, FileList, Input, PageHeader, ToggleButton } from '@infra/ui'
 import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
@@ -252,22 +252,27 @@ export function Ingest() {
             }}
           />
 
-          {/* One row, not a stack: two short options read as a single "how"
-              line under the files, and stacking them made the card's only
-              narrow elements taller than the choice deserved. */}
-          <fieldset className="flex flex-wrap gap-x-6 gap-y-1 text-sm" disabled={busy}>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={run.ner} onChange={(e) => run.setNer(e.target.checked)} />
+          {/* One row of toggle panels, mirroring Nextext's upload form: what
+              a run includes is read as lit and unlit buttons rather than
+              hunted for in checkbox marks. `flex-1` shares the span evenly;
+              the minimum width makes them wrap instead of crush on a narrow
+              screen or in a long-worded locale. The fieldset carries the one
+              `disabled` for both. */}
+          <fieldset className="flex flex-wrap gap-2" disabled={busy}>
+            <ToggleButton
+              className="min-w-32 flex-1"
+              pressed={run.ner}
+              onClick={() => run.setNer(!run.ner)}
+            >
               {t('ingest.opt_ner')}
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={run.hate}
-                onChange={(e) => run.setHate(e.target.checked)}
-              />
+            </ToggleButton>
+            <ToggleButton
+              className="min-w-32 flex-1"
+              pressed={run.hate}
+              onClick={() => run.setHate(!run.hate)}
+            >
               {t('ingest.opt_hate')}
-            </label>
+            </ToggleButton>
           </fieldset>
 
           {/* Full width: it is the card's one action, and everything above it —

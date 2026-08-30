@@ -99,7 +99,9 @@ a blank query, where it exports the whole filtered collection.
 Drag-and-drop upload (`src/components/ingest/Dropzone.tsx`) into a selected
 or newly-created collection. Streams the multipart upload plus SSE progress
 events (`src/components/ingest/IngestionStatus.tsx`) for per-file and
-per-stage status.
+per-stage status. The entity-extraction and hate-speech enrichment options
+are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount from
+`GET /config/ingest-defaults`.
 
 ### Analysis (`src/routes/Analysis.tsx`)
 
