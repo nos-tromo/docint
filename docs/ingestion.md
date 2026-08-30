@@ -280,6 +280,13 @@ ingestion path:
 
 - Images are hashed and, if `IMAGE_CACHE_BY_HASH=true`, embeddings are
   looked up before recomputation.
+- **Video keyframes reuse a known frame's description.** The same flag covers
+  keyframes: a survivor of the near-duplicate prune reaches the vision tagger
+  and the OCR engine only when the `_images` companion holds no point for its
+  content hash yet. The cosine prune spans a single clip, so without this a
+  frame recurring across clips — or across a re-ingest — was described again
+  each time. The point is still written on a cache hit, because it carries
+  *this* posting's `posting_uuid`; only the model calls are skipped.
 - CLIP produces the dense vector, via the remote CLIP service
   (`CLIP_API_BASE`); the model identity is set as `CLIP_MODEL` on the
   vllm-service container, not by docint.

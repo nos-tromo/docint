@@ -459,7 +459,7 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 | `IMAGE_TAGGING_ENABLED` | `true` | Call the vision LLM for tags/captions. |
 | `IMAGE_QDRANT_COLLECTION` | `{collection}_images` | Image-vector collection template. |
 | `IMAGE_QDRANT_VECTOR_NAME` | `image-dense` | Vector field name. |
-| `IMAGE_CACHE_BY_HASH` | `true` | Cache embeddings keyed by image hash. |
+| `IMAGE_CACHE_BY_HASH` | `true` | Cache by image hash: a known image (or video keyframe) reuses the stored description, tags and OCR text instead of calling the vision model again. |
 | `IMAGE_FAIL_ON_EMBED_ERROR` | `false` | Treat embedding failures as fatal. |
 | `IMAGE_FAIL_ON_TAG_ERROR` | `false` | Treat tagging failures as fatal. |
 | `IMAGE_RETRIEVE_TOP_K` | `5` | CLIP candidates the image lane contributes to each query's ranking. |
