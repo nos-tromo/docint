@@ -340,7 +340,7 @@ defaults apply only to callers that omit these fields.
 | Variable | Default | Description |
 |---|---|---|
 | `KEYFRAMES_MAX` | `20` | Hard ceiling on frames per clip. Nextext rejects more than 200. |
-| `KEYFRAMES_PER_MINUTE` | `4` | Target frames sampled per minute of video. Sampling itself is requested per job (docint sends `keyframes: true`); `0` here — or in `KEYFRAMES_MAX` — turns it off. |
+| `KEYFRAMES_PER_MINUTE` | `4` | Target frames sampled per minute of video. Sampling itself is requested per job (docint sends `keyframes: true` and `visual_context: false`, declining Nextext's own captions — which needs Nextext ≥ v1.9.0); `0` here — or in `KEYFRAMES_MAX` — turns it off. |
 | `KEYFRAME_DEDUP_COSINE` | `0.95` | Client-side near-duplicate pruning before storage, in `[0, 1]`. A frame whose cosine similarity to an already-kept frame reaches this is dropped. |
 
 ## Metrics — `MetricsConfig`

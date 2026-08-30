@@ -29,6 +29,11 @@ __all__ = ["NextextClient", "NextextResult"]
 
 _TERMINAL_OK = "completed"
 _TERMINAL_FAIL = {"failed", "error", "cancelled"}
+# Nextext's JobOptions forbids unknown fields, so an option this client sends
+# and that server has never heard of is a 422 on submission — which skips the
+# clip whole, transcript included. Name the floor rather than making an
+# operator work back to it from a bare status code.
+_MIN_NEXTEXT_VERSION = "v1.9.0"
 
 
 @dataclass(frozen=True)
@@ -76,11 +81,20 @@ class NextextClient:
         # unconditionally is not a new switch, because Nextext returns no
         # frames itself once a rate is non-positive; the rates below stay the
         # off-switch and the whole tuning surface.
+        # Describing those frames is Nextext's own separate switch, and we
+        # decline it: it costs a vision request per frame for prose we never
+        # download (only docint.jsonl and keyframes.zip are fetched, and
+        # neither carries captions), while docint runs its own tagger over the
+        # frames for the structured description+tags its index needs. Declining
+        # also keeps a frames-only job off Nextext's chat provider entirely, so
+        # an unhealthy router can no longer fail the job and lose the transcript
+        # with it.
         # Note: keyframe_dedup_cosine is NOT forwarded; near-duplicate pruning
         # is applied client-side in docint's image service.
         return json.dumps(
             {
                 "keyframes": True,
+                "visual_context": False,
                 "keyframes_per_minute": self._cfg.keyframes_per_minute,
                 "keyframes_max": self._cfg.keyframes_max,
             }
@@ -164,6 +178,18 @@ class NextextClient:
             transcript = self._fetch_artifact(job_id, "docint.jsonl")
             keyframes = self._unzip_jpegs(self._fetch_artifact(job_id, "keyframes.zip"))
             return NextextResult(status="completed", transcript_jsonl=transcript, keyframes=keyframes)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:
+                logger.warning(
+                    "Nextext rejected the job options for {} (422). This docint build requires "
+                    "Nextext {} or newer; an older one refuses the options it does not know and "
+                    "the clip is skipped entirely, transcript included.",
+                    file_path.name,
+                    _MIN_NEXTEXT_VERSION,
+                )
+                return NextextResult(status="error", error=str(exc))
+            logger.warning("Nextext processing failed for {}: {}", file_path.name, exc)
+            return NextextResult(status="error", error=str(exc))
         except Exception as exc:
             logger.warning("Nextext processing failed for {}: {}", file_path.name, exc)
             return NextextResult(status="error", error=str(exc))
