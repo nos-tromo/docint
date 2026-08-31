@@ -10,9 +10,11 @@ property consults it, and an absent override falls back to the
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
+from openai.resources.chat.completions import Completions
 
 from docint.core import rag as rag_module
 from docint.core.api import AgentChatIn, QueryIn
@@ -130,15 +132,19 @@ def test_vllm_gets_enable_thinking_template_kwarg(fake_llm: list[dict[str, Any]]
 
     ``reasoning_effort`` alone does not toggle a Qwen3/Gemma-style template;
     and the plain model must send ``false`` so a stack whose ``.env`` defaults
-    thinking on is still overridden per request.
+    thinking on is still overridden per request. The switch must ride inside
+    ``extra_body``: llama_index merges ``additional_kwargs`` top-level into
+    ``Completions.create()``, whose signature rejects unknown kwargs with a
+    ``TypeError`` before any request is made, while ``extra_body`` contents are
+    merged into the JSON body where vLLM reads them.
     """
     rag = _rag(provider="vllm", thinking_enabled=False)
 
     rag._create_text_model()
     rag._create_text_model(enable_reasoning=True)
 
-    assert fake_llm[0]["additional_kwargs"] == {"chat_template_kwargs": {"enable_thinking": False}}
-    assert fake_llm[1]["additional_kwargs"] == {"chat_template_kwargs": {"enable_thinking": True}}
+    assert fake_llm[0]["additional_kwargs"] == {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    assert fake_llm[1]["additional_kwargs"] == {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
 
 
 def test_other_providers_do_not_get_template_kwargs(fake_llm: list[dict[str, Any]]) -> None:
@@ -147,7 +153,26 @@ def test_other_providers_do_not_get_template_kwargs(fake_llm: list[dict[str, Any
 
     rag._create_text_model(enable_reasoning=True)
 
-    assert "chat_template_kwargs" not in fake_llm[0]["additional_kwargs"]
+    assert fake_llm[0]["additional_kwargs"] == {}
+
+
+def test_vllm_additional_kwargs_bind_to_openai_sdk() -> None:
+    """Every top-level ``additional_kwargs`` key must be a real ``Completions.create`` parameter.
+
+    llama_index forwards ``additional_kwargs`` as top-level kwargs to the
+    installed openai SDK, so a key its signature does not name raises
+    ``TypeError`` on the first chat call — client-side, before any request
+    reaches the endpoint (the v2.2.0 ``chat_template_kwargs`` regression).
+    Guarded against the real installed SDK, not a fake, so an SDK upgrade
+    that drops a parameter fails here instead of in production.
+    """
+    accepted = set(inspect.signature(Completions.create).parameters)
+
+    for enable_reasoning in (False, True):
+        rag = _rag(provider="vllm", thinking_enabled=False)
+        model = rag._create_text_model(enable_reasoning=enable_reasoning)
+        unknown = set(model.additional_kwargs) - accepted
+        assert not unknown, f"kwargs the openai SDK would reject with TypeError: {unknown}"
 
 
 def test_request_payloads_carry_optional_reasoning_flag() -> None:
