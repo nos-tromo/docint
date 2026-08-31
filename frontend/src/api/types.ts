@@ -452,6 +452,11 @@ export interface ReportItemInput {
 export interface ReportBatchResult {
   added: number
   skipped: number
+  /**
+   * Items the report already held that gained a translation from this batch.
+   * The only amendment the server makes to a frozen snapshot.
+   */
+  updated: number
   item_count: number
 }
 

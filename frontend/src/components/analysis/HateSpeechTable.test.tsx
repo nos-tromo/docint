@@ -151,7 +151,7 @@ describe('HateSpeechTable', () => {
         }
         if (url.includes('/items/batch')) {
           captured.push(JSON.parse(String(init?.body)))
-          return { ok: true, status: 200, json: async () => ({ added: 2, skipped: 0, item_count: 2 }) }
+          return { ok: true, status: 200, json: async () => ({ added: 2, skipped: 0, updated: 0, item_count: 2 }) }
         }
         return { ok: true, status: 200, json: async () => ({}) }
       })

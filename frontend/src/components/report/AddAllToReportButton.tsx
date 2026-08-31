@@ -32,7 +32,7 @@ interface Props<Row> {
  */
 export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className }: Props<Row>) {
   const t = useT()
-  const { run, status, added, skipped, cap } = useAddAllToReport<Row>({ fetchAll, toItem })
+  const { run, status, added, skipped, updated, cap } = useAddAllToReport<Row>({ fetchAll, toItem })
   const busy = status === 'fetching' || status === 'adding'
   const failed = status === 'failed'
   // Both refusals are the caller's to act on, not the server's to retry.
@@ -46,7 +46,9 @@ export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className
   else if (status === 'too_large') message = t('report.add_all_too_large')
   else if (failed) message = t('report.add_all_failed')
   else if (status === 'done') {
-    message = added === 0 && skipped > 0 ? t('report.add_all_none') : t('report.add_all_done', { added, skipped })
+    if (added === 0 && updated === 0 && skipped > 0) message = t('report.add_all_none')
+    else if (updated > 0) message = t('report.add_all_done_updated', { added, updated, skipped })
+    else message = t('report.add_all_done', { added, skipped })
   }
 
   return (

@@ -10,13 +10,48 @@ import type { Report, ReportItemInput } from '@/api/types'
 
 interface Row {
   chunk_id: string
+  translation?: { text: string; target_lang: string; model: string }
 }
 
 const toItem = (row: Row): ReportItemInput => ({
   artifact_type: 'entity_finding',
   dedupe_key: `entity:${row.chunk_id}`,
-  snapshot: { chunk_id: row.chunk_id }
+  snapshot: {
+    chunk_id: row.chunk_id,
+    // Conditional exactly as the real builders spread it, so a row with no
+    // translation produces a snapshot with no such key.
+    ...(row.translation ? { translation: row.translation } : {})
+  }
 })
+
+/** A report holding one item, whose snapshot the tests vary. */
+function reportHolding(snapshot: Record<string, unknown>): Report {
+  return {
+    id: 1,
+    title: 'Case',
+    collection_name: 'docs',
+    operator: null,
+    reference_number: null,
+    show_toc: true,
+    show_collection_overview: true,
+    session_id: null,
+    created_at: null,
+    updated_at: null,
+    item_count: 1,
+    collection_overview: null,
+    items: [
+      {
+        id: 5,
+        artifact_type: 'entity_finding',
+        dedupe_key: 'entity:c1',
+        position: 0,
+        note: null,
+        snapshot,
+        created_at: null
+      }
+    ]
+  }
+}
 
 interface Captured {
   url: string
@@ -30,7 +65,7 @@ interface Captured {
  */
 function stubFetch(
   captured: Captured[],
-  batch: { added: number; skipped: number } = { added: 0, skipped: 0 },
+  batch: { added: number; skipped: number; updated?: number } = { added: 0, skipped: 0 },
   report?: Report
 ) {
   vi.stubGlobal(
@@ -46,7 +81,12 @@ function stubFetch(
         return {
           ok: true,
           status: 200,
-          json: async () => ({ added: batch.added || items.length, skipped: batch.skipped, item_count: items.length })
+          json: async () => ({
+            added: batch.added || items.length,
+            skipped: batch.skipped,
+            updated: batch.updated ?? 0,
+            item_count: items.length
+          })
         }
       }
       if (report && /\/reports\/\d+$/.test(url.split('?')[0])) {
@@ -151,6 +191,62 @@ describe('AddAllToReportButton', () => {
     await waitFor(() => expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(true))
     const sent = captured.find((c) => c.url.includes('/items/batch'))!.body.items as ReportItemInput[]
     expect(sent.map((i) => i.dedupe_key)).toEqual(['entity:c2'])
+  })
+
+  it('resends an item the report holds when it can gain a translation', async () => {
+    // The one exception to "duplicates are never sent": a stored snapshot with
+    // no translation, and a fresh one that has it. Without this a report
+    // collected before its corpus was translated could never become readable.
+    const captured: Captured[] = []
+    const qc = client()
+    useReportStore.setState({ activeReportId: 1 })
+    const existing = reportHolding({ chunk_id: 'c1' })
+    stubFetch(captured, { added: 0, skipped: 0, updated: 1 }, existing)
+    qc.setQueryData<Report>(reportKey(1), existing)
+    const translation = { text: 'translated', target_lang: 'en', model: 'm' }
+
+    renderButton([{ chunk_id: 'c1', translation }], qc)
+    await clickAddAll()
+
+    await waitFor(() => expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(true))
+    const sent = captured.find((c) => c.url.includes('/items/batch'))!.body.items as ReportItemInput[]
+    expect(sent.map((i) => i.dedupe_key)).toEqual(['entity:c1'])
+    expect(sent[0].snapshot.translation).toEqual(translation)
+  })
+
+  it('does not resend an item whose stored snapshot already carries a translation', async () => {
+    const captured: Captured[] = []
+    const qc = client()
+    useReportStore.setState({ activeReportId: 1 })
+    const existing = reportHolding({
+      chunk_id: 'c1',
+      translation: { text: 'stored', target_lang: 'en', model: 'm' }
+    })
+    stubFetch(captured, { added: 0, skipped: 0 }, existing)
+    qc.setQueryData<Report>(reportKey(1), existing)
+
+    renderButton([{ chunk_id: 'c1', translation: { text: 'fresher', target_lang: 'en', model: 'm' } }], qc)
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toBeInTheDocument())
+    expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
+  })
+
+  it('states the translations a batch backfilled, not only what it added', async () => {
+    const captured: Captured[] = []
+    const qc = client()
+    useReportStore.setState({ activeReportId: 1 })
+    const existing = reportHolding({ chunk_id: 'c1' })
+    stubFetch(captured, { added: 1, skipped: 0, updated: 1 }, existing)
+    qc.setQueryData<Report>(reportKey(1), existing)
+    const translation = { text: 'translated', target_lang: 'en', model: 'm' }
+
+    renderButton([{ chunk_id: 'c1', translation }, { chunk_id: 'c2', translation }], qc)
+    await clickAddAll()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('add-all-message')).toHaveTextContent(/1 added, 1 translations added/i)
+    )
   })
 
   it('reports the outcome, counting locally skipped rows too', async () => {

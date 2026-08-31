@@ -392,6 +392,7 @@ export const en = {
   'report.add_all_busy': 'Adding findings to report…',
   'report.add_all_confirm': 'Add {count} findings to the report?',
   'report.add_all_done': '{added} added, {skipped} already in report',
+  'report.add_all_done_updated': '{added} added, {updated} translations added, {skipped} already in report',
   'report.add_all_none': 'All findings are already in the report',
   'report.add_all_failed': 'Could not add the findings — click to retry',
   'report.add_all_too_many': 'Too many findings to add at once (limit {max}) — narrow the selection first',

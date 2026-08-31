@@ -135,6 +135,22 @@ export function useReportDedupeKeys(id: number | null): Set<string> {
 }
 
 /**
+ * Dedupe keys the report holds whose snapshot carries no translation.
+ *
+ * The one reason to send an item the report already has: the server merges a
+ * translation into a snapshot that lacks one, and nothing else about a frozen
+ * snapshot is ever revisited. Knowing which items those are keeps the batch to
+ * the findings that can actually gain something.
+ */
+export function useReportUntranslatedKeys(id: number | null): Set<string> {
+  const { data } = useReport(id)
+  return useMemo(
+    () => new Set((data?.items ?? []).filter((i) => i.snapshot?.translation == null).map((i) => i.dedupe_key)),
+    [data]
+  )
+}
+
+/**
  * Resolve the report an add should land in, creating one if none is active.
  *
  * The first add from anywhere in the app auto-creates an "Untitled report"
@@ -181,6 +197,8 @@ export interface AddAllOutcome {
   status: AddAllStatus
   added: number
   skipped: number
+  /** Items already in the report that gained a translation from this batch. */
+  updated: number
 }
 
 /**
@@ -193,8 +211,9 @@ export interface AddAllOutcome {
  * `translation` included.
  *
  * The whole set is fetched outside React Query (the rendered list is not
- * force-expanded), pre-filtered against what the report already holds, and
- * posted as one request — one round-trip and one cache invalidation, not one
+ * force-expanded), pre-filtered against what the report already holds — bar
+ * findings whose stored snapshot has no translation and whose fresh one does,
+ * which are sent so the server can backfill them — and posted as one request — one round-trip and one cache invalidation, not one
  * per finding. Above `ADD_ALL_CONFIRM_THRESHOLD` items it confirms first.
  *
  * The cap comes from `GET /config` (the server's own `REPORT_BATCH_MAX_ITEMS`),
@@ -211,20 +230,21 @@ export function useAddAllToReport<Row>(params: {
   const activeReportId = useReportStore((s) => s.activeReportId)
   const collection = useUiStore((s) => s.selectedCollection)
   const existingKeys = useReportDedupeKeys(activeReportId)
+  const untranslatedKeys = useReportUntranslatedKeys(activeReportId)
   const addItems = useAddReportItems()
   const { data: config } = useConfig()
   const cap = Math.max(1, Math.trunc(config?.report_batch_max_items ?? ADD_ALL_MAX_ITEMS_FALLBACK))
-  const [outcome, setOutcome] = useState<AddAllOutcome>({ status: 'idle', added: 0, skipped: 0 })
+  const [outcome, setOutcome] = useState<AddAllOutcome>({ status: 'idle', added: 0, skipped: 0, updated: 0 })
 
   const run = async (): Promise<void> => {
-    setOutcome({ status: 'fetching', added: 0, skipped: 0 })
+    setOutcome({ status: 'fetching', added: 0, skipped: 0, updated: 0 })
     try {
       const rows = await params.fetchAll(cap + 1)
       // Checked before dedupe, on the raw walk: the extra row means the walk
       // stopped early, so how much of the section is missing is unknowable and
       // no subset of it can honestly be called "all".
       if (rows.length > cap) {
-        setOutcome({ status: 'too_many', added: 0, skipped: 0 })
+        setOutcome({ status: 'too_many', added: 0, skipped: 0, updated: 0 })
         return
       }
       const items: ReportItemInput[] = []
@@ -232,44 +252,57 @@ export function useAddAllToReport<Row>(params: {
       let skipped = 0
       for (const row of rows) {
         const item = params.toItem(row)
-        // Already in the report, or the same chunk twice in the fetched pages:
-        // the server dedupes too, but not sending them keeps the request small
-        // and the confirmation count honest.
-        if (existingKeys.has(item.dedupe_key) || seen.has(item.dedupe_key)) {
+        // The same chunk twice in the fetched pages: the server dedupes too,
+        // but not sending them keeps the request small and the confirmation
+        // count honest.
+        if (seen.has(item.dedupe_key)) {
           skipped += 1
           continue
+        }
+        // Already in the report — normally not worth sending, with one
+        // exception: an item whose stored snapshot has no translation and
+        // whose fresh snapshot does. That is the only amendment the server
+        // makes to a frozen snapshot, and without it a report collected
+        // before its corpus was translated could never become readable.
+        if (existingKeys.has(item.dedupe_key)) {
+          const gainsTranslation =
+            item.snapshot.translation != null && untranslatedKeys.has(item.dedupe_key)
+          if (!gainsTranslation) {
+            skipped += 1
+            continue
+          }
         }
         seen.add(item.dedupe_key)
         items.push({ ...item, collection: collection ?? null })
       }
       if (items.length === 0) {
-        setOutcome({ status: 'done', added: 0, skipped })
+        setOutcome({ status: 'done', added: 0, skipped, updated: 0 })
         return
       }
       if (
         items.length > ADD_ALL_CONFIRM_THRESHOLD &&
         !window.confirm(t('report.add_all_confirm', { count: items.length }))
       ) {
-        setOutcome({ status: 'idle', added: 0, skipped: 0 })
+        setOutcome({ status: 'idle', added: 0, skipped: 0, updated: 0 })
         return
       }
-      setOutcome({ status: 'adding', added: 0, skipped: 0 })
+      setOutcome({ status: 'adding', added: 0, skipped: 0, updated: 0 })
       const reportId = await ensureReport()
       const result = await addItems.mutateAsync({ reportId, items, collection })
-      setOutcome({ status: 'done', added: result.added, skipped: skipped + result.skipped })
+      setOutcome({ status: 'done', added: result.added, skipped: skipped + result.skipped, updated: result.updated })
     } catch (e) {
       console.error('Add all to report failed', e)
       // nginx refuses an oversize body before FastAPI ever sees it, so the
       // same request cannot succeed on a retry — say it is too big instead of
       // offering the retry the generic failure wears.
       if (e instanceof ApiError && e.status === 413) {
-        setOutcome({ status: 'too_large', added: 0, skipped: 0 })
+        setOutcome({ status: 'too_large', added: 0, skipped: 0, updated: 0 })
         return
       }
-      setOutcome({ status: 'failed', added: 0, skipped: 0 })
+      setOutcome({ status: 'failed', added: 0, skipped: 0, updated: 0 })
     }
   }
 
-  const reset = () => setOutcome({ status: 'idle', added: 0, skipped: 0 })
+  const reset = () => setOutcome({ status: 'idle', added: 0, skipped: 0, updated: 0 })
   return { run, reset, cap, ...outcome }
 }

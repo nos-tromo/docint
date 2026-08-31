@@ -403,6 +403,8 @@ export const de: Strings = {
   'report.add_all_busy': 'Funde werden zum Bericht hinzugefügt…',
   'report.add_all_confirm': '{count} Funde zum Bericht hinzufügen?',
   'report.add_all_done': '{added} hinzugefügt, {skipped} bereits im Bericht',
+  'report.add_all_done_updated':
+    '{added} hinzugefügt, {updated} Übersetzungen ergänzt, {skipped} bereits im Bericht',
   'report.add_all_none': 'Alle Funde sind bereits im Bericht',
   'report.add_all_failed': 'Funde konnten nicht hinzugefügt werden — zum Wiederholen klicken',
   'report.add_all_too_many': 'Zu viele Funde auf einmal (Grenze {max}) — Auswahl zuerst eingrenzen',
