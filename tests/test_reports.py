@@ -39,13 +39,37 @@ def _ok(value: dict[str, Any] | None) -> dict[str, Any]:
     return value
 
 
-def _entity_item(chunk_id: str, *, text: str = "hello") -> dict[str, Any]:
-    """Build an add_item kwargs dict for an entity finding."""
+def _entity_item(
+    chunk_id: str,
+    *,
+    text: str = "hello",
+    translation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an add_item kwargs dict for an entity finding.
+
+    Args:
+        chunk_id (str): The chunk the finding sits on; drives the dedupe key.
+        text (str): The snapshot's chunk text.
+        translation (dict[str, Any] | None): A frozen translation payload, as
+            the SPA nests it inside the snapshot. Omitted when None, exactly
+            like an untranslated finding.
+
+    Returns:
+        dict[str, Any]: The ``add_item`` kwargs.
+    """
+    snapshot: dict[str, Any] = {"chunk_id": chunk_id, "chunk_text": text, "entity_label": "Acme [ORG]"}
+    if translation is not None:
+        snapshot["translation"] = translation
     return {
         "artifact_type": "entity_finding",
         "dedupe_key": f"entity:{chunk_id}",
-        "snapshot": {"chunk_id": chunk_id, "chunk_text": text, "entity_label": "Acme [ORG]"},
+        "snapshot": snapshot,
     }
+
+
+def _translation(text: str = "hallo") -> dict[str, Any]:
+    """Build a frozen translation payload in the shape the SPA sends."""
+    return {"text": text, "target_lang": "de", "model": "test-model"}
 
 
 def test_create_and_get_round_trip(report_manager: ReportManager) -> None:
@@ -380,3 +404,115 @@ def test_add_items_empty_batch_is_a_no_op(report_manager: ReportManager) -> None
     result = report_manager.add_items(rid, "alice", items=[])
     assert result is not None
     assert (result["added"], result["skipped"], result["item_count"]) == (0, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Batch add — translation backfill into snapshots the report already holds
+# ---------------------------------------------------------------------------
+
+
+def test_add_items_backfills_a_translation_into_an_existing_snapshot(report_manager: ReportManager) -> None:
+    """A duplicate carrying a translation amends the stored snapshot instead of being inert."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+
+    result = report_manager.add_items(rid, "alice", items=[_entity_item("c1", translation=_translation())])
+
+    assert result is not None
+    assert (result["added"], result["updated"], result["skipped"]) == (0, 1, 0)
+    stored = _ok(report_manager.get_report(rid, "alice"))["items"][0]["snapshot"]
+    assert stored["translation"] == _translation()
+    # Additive: the rest of the frozen snapshot is exactly as it was added.
+    assert stored["chunk_text"] == "hello"
+    assert stored["entity_label"] == "Acme [ORG]"
+
+
+def test_add_items_never_overwrites_a_stored_translation(report_manager: ReportManager) -> None:
+    """A snapshot that already carries a translation keeps it; the incoming one is dropped."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1", translation=_translation("erste")))
+
+    result = report_manager.add_items(rid, "alice", items=[_entity_item("c1", translation=_translation("zweite"))])
+
+    assert result is not None
+    assert (result["added"], result["updated"], result["skipped"]) == (0, 0, 1)
+    stored = _ok(report_manager.get_report(rid, "alice"))["items"][0]["snapshot"]
+    assert stored["translation"]["text"] == "erste"
+
+
+def test_add_items_duplicate_without_translation_is_still_skipped(report_manager: ReportManager) -> None:
+    """The plain duplicate path is unchanged — nothing is written back."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+
+    result = report_manager.add_items(rid, "alice", items=[_entity_item("c1", text="changed")])
+
+    assert result is not None
+    assert (result["added"], result["updated"], result["skipped"]) == (0, 0, 1)
+    stored = _ok(report_manager.get_report(rid, "alice"))["items"][0]["snapshot"]
+    assert stored["chunk_text"] == "hello"
+    assert "translation" not in stored
+
+
+def test_add_items_counts_add_update_and_skip_to_the_batch_length(report_manager: ReportManager) -> None:
+    """Every entry lands in exactly one of the three counts."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+    report_manager.add_item(rid, "alice", **_entity_item("c2"))
+
+    items = [
+        _entity_item("c1", translation=_translation()),  # backfilled
+        _entity_item("c2"),  # plain duplicate
+        _entity_item("c3", translation=_translation()),  # new
+    ]
+    result = report_manager.add_items(rid, "alice", items=items)
+
+    assert result is not None
+    assert (result["added"], result["updated"], result["skipped"]) == (1, 1, 1)
+    assert result["added"] + result["updated"] + result["skipped"] == len(items)
+
+
+def test_add_items_backfill_repeated_in_one_batch_merges_once(report_manager: ReportManager) -> None:
+    """The same key twice in one batch backfills once; the second is a plain skip."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+
+    result = report_manager.add_items(
+        rid,
+        "alice",
+        items=[
+            _entity_item("c1", translation=_translation("erste")),
+            _entity_item("c1", translation=_translation("zweite")),
+        ],
+    )
+
+    assert result is not None
+    assert (result["added"], result["updated"], result["skipped"]) == (0, 1, 1)
+    stored = _ok(report_manager.get_report(rid, "alice"))["items"][0]["snapshot"]
+    assert stored["translation"]["text"] == "erste"
+
+
+def test_add_items_backfill_touches_updated_at(report_manager: ReportManager) -> None:
+    """An update-only batch bumps the report's timestamp — it did change the report."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+    before = _ok(report_manager.get_report(rid, "alice"))["updated_at"]
+
+    report_manager.add_items(rid, "alice", items=[_entity_item("c1", translation=_translation())])
+
+    after = _ok(report_manager.get_report(rid, "alice"))["updated_at"]
+    assert after >= before
+
+
+def test_add_items_backfill_ignores_a_non_dict_translation(report_manager: ReportManager) -> None:
+    """Only a translation object amends a snapshot; a stray scalar is not a translation."""
+    rid = report_manager.create_report(title="A", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+
+    item = _entity_item("c1")
+    item["snapshot"]["translation"] = "hallo"
+    result = report_manager.add_items(rid, "alice", items=[item])
+
+    assert result is not None
+    assert (result["added"], result["updated"], result["skipped"]) == (0, 0, 1)
+    assert "translation" not in _ok(report_manager.get_report(rid, "alice"))["items"][0]["snapshot"]

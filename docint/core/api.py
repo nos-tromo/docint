@@ -3678,7 +3678,11 @@ def add_report_items(
     finding of an entity or the whole hate-speech set into the report at once.
     Idempotent like the single add: an artifact the report already holds is
     counted as skipped, never stored twice, so the call is safe to retry and
-    safe to fire over a section that is already partly collected.
+    safe to fire over a section that is already partly collected. The one
+    exception is additive — a duplicate carrying a ``translation`` the stored
+    snapshot lacks backfills it and counts as ``updated``, which is how a
+    report collected before its corpus was translated becomes readable
+    without being rebuilt.
 
     Answers with counts rather than the items: a batch of hundreds is read
     back by one report refetch, not by echoing every snapshot over the wire.
@@ -3690,7 +3694,7 @@ def add_report_items(
         principal (Principal): The resolved request principal.
 
     Returns:
-        dict[str, Any]: ``{"added", "skipped", "item_count"}``.
+        dict[str, Any]: ``{"added", "skipped", "updated", "item_count"}``.
 
     Raises:
         HTTPException: 404 when the report is missing or not owned.
@@ -3718,10 +3722,11 @@ def add_report_items(
     if result is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     logger.info(
-        "Report batch add | report_id={} requested={} added={} skipped={}",
+        "Report batch add | report_id={} requested={} added={} updated={} skipped={}",
         report_id,
         len(payload.items),
         result["added"],
+        result["updated"],
         result["skipped"],
     )
     return result

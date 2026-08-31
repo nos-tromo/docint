@@ -112,18 +112,21 @@ def _create(client: TestClient, title: str = "Case A", collection: str | None = 
     return cast(dict[str, Any], resp.json())
 
 
-def _entity_payload(chunk_id: str = "c1") -> dict[str, Any]:
+def _entity_payload(chunk_id: str = "c1", *, translation: dict[str, Any] | None = None) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "chunk_id": chunk_id,
+        "entity_label": "Acme [ORG]",
+        "chunk_text": "Acme met Bob",
+        "filename": "a.pdf",
+        "page": 1,
+        "entities": [{"text": "Acme", "type": "ORG"}],
+    }
+    if translation is not None:
+        snapshot["translation"] = translation
     return {
         "artifact_type": "entity_finding",
         "dedupe_key": f"entity:{chunk_id}",
-        "snapshot": {
-            "chunk_id": chunk_id,
-            "entity_label": "Acme [ORG]",
-            "chunk_text": "Acme met Bob",
-            "filename": "a.pdf",
-            "page": 1,
-            "entities": [{"text": "Acme", "type": "ORG"}],
-        },
+        "snapshot": snapshot,
     }
 
 
@@ -760,7 +763,7 @@ def test_batch_add_items(client: TestClient) -> None:
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"added": 3, "skipped": 0, "item_count": 3}
+    assert resp.json() == {"added": 3, "skipped": 0, "updated": 0, "item_count": 3}
     report = client.get(f"/reports/{rid}").json()
     assert [i["dedupe_key"] for i in report["items"]] == ["entity:c1", "entity:c2", "entity:c3"]
 
@@ -773,8 +776,26 @@ def test_batch_add_skips_items_already_in_the_report(client: TestClient) -> None
     resp = client.post(f"/reports/{rid}/items/batch", json={"items": [_entity_payload("c1"), _entity_payload("c2")]})
 
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"added": 1, "skipped": 1, "item_count": 2}
+    assert resp.json() == {"added": 1, "skipped": 1, "updated": 0, "item_count": 2}
     assert len(client.get(f"/reports/{rid}").json()["items"]) == 2
+
+
+def test_batch_add_backfills_a_translation_into_an_item_already_in_the_report(client: TestClient) -> None:
+    """A duplicate carrying a translation amends the stored snapshot and counts as updated."""
+    rid = _create(client)["id"]
+    client.post(f"/reports/{rid}/items", json=_entity_payload("c1"))
+    translation = {"text": "Acme traf Bob", "target_lang": "de", "model": "test-model"}
+
+    resp = client.post(
+        f"/reports/{rid}/items/batch",
+        json={"items": [_entity_payload("c1", translation=translation)]},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"added": 0, "skipped": 0, "updated": 1, "item_count": 1}
+    stored = client.get(f"/reports/{rid}").json()["items"][0]["snapshot"]
+    assert stored["translation"] == translation
+    assert stored["chunk_text"] == "Acme met Bob"
 
 
 def test_batch_add_rejects_an_empty_batch(client: TestClient) -> None:
