@@ -8,7 +8,7 @@ import type { SVGProps } from 'react'
  * different on every machine — and in a control that carries no label of its
  * own, that is the whole affordance. These are 24×24 stroked outlines that
  * inherit `currentColor` and are sized by the caller, matching the hand-rolled
- * glyphs already in `TranslateToggle` and `SourcePreviewAction`.
+ * drawing already in `SourcePreviewAction`.
  *
  * Every icon is `aria-hidden`: each is mounted inside a control that carries
  * its own accessible name.
@@ -76,5 +76,19 @@ export const ChatContextIcon = ({ className = 'h-4 w-4', ...props }: IconProps) 
 export const SingleMessageIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => (
   <svg {...base} className={className} {...props}>
     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </svg>
+)
+
+/**
+ * Translation, drawn as the standard character-over-glyph pair.
+ *
+ * Shared by the per-row `TranslateToggle` and the section-wide
+ * `TranslateAllButton`, so the two controls read as one family — the second is
+ * the first applied to every finding at once.
+ */
+export const TranslateIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => (
+  <svg {...base} className={className} {...props}>
+    <path d="M4 5h9M9 3v2c0 4-2 7-6 8M5 9c0 3 3 5 7 5" />
+    <path d="m13 21 4-9 4 9M15.5 17h5" />
   </svg>
 )
