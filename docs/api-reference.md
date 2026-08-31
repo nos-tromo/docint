@@ -90,10 +90,11 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 ### `GET /config`
 
 Deploy-time frontend configuration for the SPA, read once on load and served
-without a principal. Returns five fields (`FrontendConfigOut`):
-`graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`
-and `language`. They come from `NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`,
-`FRONTEND_COLLECTION_TIMEOUT`, `DOCINT_CLIENT_MAX_BODY_SIZE` and
+without a principal. Returns six fields (`FrontendConfigOut`):
+`graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`,
+`report_batch_max_items` and `language`. They come from `NER_GRAPH_TOP_K`,
+`NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
+`DOCINT_CLIENT_MAX_BODY_SIZE`, `REPORT_BATCH_MAX_ITEMS` and
 `RESPONSE_LANGUAGE` respectively (see
 [configuration.md](configuration.md#frontend--frontendconfig)).
 
@@ -675,8 +676,11 @@ image-bearing snapshots in the batch are enriched from **one** companion
 scroll. Answers with counts — `{"added", "skipped", "item_count"}` — rather
 than the items, so a batch of hundreds is read back by one report refetch.
 
-`422` on an empty list or above `REPORT_BATCH_MAX_ITEMS` (2000) items; `404`
-when the report is missing or not owned.
+`422` on an empty list or above `REPORT_BATCH_MAX_ITEMS` items (default 2000,
+env-tunable and advertised via `GET /config`, so a client can refuse an
+oversize set before posting it); `404` when the report is missing or not owned.
+A batch this size is several MB of snapshots, which is why the frontend nginx
+gives the JSON API locations their own `DOCINT_API_MAX_BODY_SIZE` ceiling.
 
 ### `PATCH /reports/{report_id}/items/{item_id}`
 

@@ -210,6 +210,73 @@ describe('AddAllToReportButton', () => {
     expect(confirmSpy).not.toHaveBeenCalled()
   })
 
+  it('walks one row past the cap so an overflowing section is detectable', async () => {
+    // fetchAllPages truncates silently at its maxItems. Asking for cap + 1 is
+    // what turns "there are more findings than we can add" into an observable
+    // fact instead of a batch that quietly carries an arbitrary sample.
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    const fetchAll = vi.fn(async () => [{ chunk_id: 'c1' }])
+    const qc = client()
+    render(
+      <QueryClientProvider client={qc}>
+        <AddAllToReportButton fetchAll={fetchAll} toItem={toItem} hasRows />
+      </QueryClientProvider>
+    )
+
+    await clickAddAll()
+
+    await waitFor(() => expect(fetchAll).toHaveBeenCalledWith(2001))
+  })
+
+  it('refuses against the cap the server advertises, not the shipped default', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    const qc = client()
+    qc.setQueryData(['app-config'], {
+      graph_top_k: 80,
+      graph_max_top_k: 500,
+      collection_timeout: 120,
+      max_upload_bytes: 1024,
+      report_batch_max_items: 3,
+      language: 'en'
+    })
+
+    renderButton([{ chunk_id: 'c1' }, { chunk_id: 'c2' }, { chunk_id: 'c3' }, { chunk_id: 'c4' }], qc)
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/too many findings/i))
+    expect(screen.getByTestId('add-all-message')).toHaveTextContent('3')
+    expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
+  })
+
+  it('explains a 413 as a size problem instead of offering a retry', async () => {
+    // nginx refuses an oversize body before FastAPI sees it. Retrying the same
+    // body cannot succeed, so this must not wear the retry affordance.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string) => {
+        const url = String(u)
+        if (url.endsWith('/reports')) {
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        if (url.includes('/items/batch')) {
+          return new Response('<html><title>413 Request Entity Too Large</title></html>', { status: 413 })
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    useReportStore.setState({ activeReportId: 1 })
+
+    renderButton([{ chunk_id: 'c1' }], client())
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/larger than the server accepts/i))
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+  })
+
   it('shows a retry state when the batch fails', async () => {
     vi.stubGlobal(
       'fetch',

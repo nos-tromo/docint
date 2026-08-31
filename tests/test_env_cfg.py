@@ -601,6 +601,7 @@ def _clear_frontend_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "NER_GRAPH_TOP_K",
         "NER_GRAPH_MAX_TOP_K",
         "DOCINT_CLIENT_MAX_BODY_SIZE",
+        "REPORT_BATCH_MAX_ITEMS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -640,6 +641,50 @@ def test_parse_nginx_size_invalid_falls_back(value: str | None) -> None:
         assert parse_nginx_size(value, default_bytes=999) == 0
     else:
         assert parse_nginx_size(value, default_bytes=999) == 999
+
+
+def test_frontend_config_report_batch_cap_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without an override the report batch cap defaults to 2000 items.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_frontend_env(monkeypatch)
+
+    cfg = load_frontend_env()
+
+    assert cfg.report_batch_max_items == 2000
+
+
+def test_frontend_config_report_batch_cap_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can raise the batch cap for collections with many findings.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_frontend_env(monkeypatch)
+    monkeypatch.setenv("REPORT_BATCH_MAX_ITEMS", "5000")
+
+    cfg = load_frontend_env()
+
+    assert cfg.report_batch_max_items == 5000
+
+
+def test_frontend_config_report_batch_cap_clamped_to_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero or negative cap is clamped to 1.
+
+    The value becomes a pydantic ``max_length``, which rejects anything below
+    1 — a cap of 0 would refuse every batch add with no way to diagnose it.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_frontend_env(monkeypatch)
+    monkeypatch.setenv("REPORT_BATCH_MAX_ITEMS", "0")
+
+    cfg = load_frontend_env()
+
+    assert cfg.report_batch_max_items == 1
 
 
 def test_frontend_config_upload_bytes_default(monkeypatch: pytest.MonkeyPatch) -> None:

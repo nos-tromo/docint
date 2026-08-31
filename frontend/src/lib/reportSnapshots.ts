@@ -8,6 +8,17 @@ import type { TranslationPayload } from '@/hooks/useTranslatable'
  * an item needs no extra round-trip and the report is immune to re-ingestion.
  */
 
+/**
+ * The canonical text of a finding row.
+ *
+ * One derivation shared by the row's display, the string the Translate control
+ * posts, the translations-store key, and the section-wide "Add all" lookup — so
+ * a translation is always found back under the key the row filed it under.
+ */
+export function chunkTextOf(row: { chunk_text?: string | null; text?: string | null }): string {
+  return (row.chunk_text ?? row.text ?? '').trim()
+}
+
 export function chatAnswerSnapshot(params: {
   sessionId: string
   turnIdx: number

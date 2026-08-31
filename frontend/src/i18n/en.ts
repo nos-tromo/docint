@@ -382,6 +382,8 @@ export const en = {
   'report.add_all_none': 'All findings are already in the report',
   'report.add_all_failed': 'Could not add the findings — click to retry',
   'report.add_all_too_many': 'Too many findings to add at once (limit {max}) — narrow the selection first',
+  'report.add_all_too_large':
+    'The batch is larger than the server accepts — narrow the selection and add the findings in smaller sets',
   'report.col_document': 'Document',
   'report.col_pages_rows': 'Pages / rows',
   'report.count_node_one': '{count} node',

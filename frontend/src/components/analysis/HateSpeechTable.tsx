@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef } from 'react'
 import { DownloadLink } from '@infra/ui'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { csvExportHref, getHateSpeechPage } from '@/api/collections'
@@ -7,13 +7,14 @@ import { referenceMetadataPills } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { AddAllToReportButton } from '@/components/report/AddAllToReportButton'
 import { fetchAllPages } from '@/lib/fetchAllPages'
-import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
+import { useTranslatable } from '@/hooks/useTranslatable'
+import { storedTranslation, useTranslationsStore } from '@/stores/translations'
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
 import { EvidenceThumbnail } from '@/components/common/EvidenceThumbnail'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
-import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
+import { chunkTextOf, hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
@@ -59,12 +60,15 @@ function HateSpeechTableRow({
   reportDedupeKeys?: Set<string>
 }) {
   const i18n = useT()
-  const [translation, setTranslation] = useState<TranslationPayload | null>(null)
-  const reportItem = hateSpeechSnapshot(row, translation ?? undefined)
+  const chunkText = chunkTextOf(row)
+  // The shared store, not row state: the same translation must reach a
+  // hand-added snapshot and a section-wide "Add all" alike, and survive the
+  // virtualizer unmounting this row.
+  const translation = useTranslationsStore((s) => s.byText[chunkText])
+  const reportItem = hateSpeechSnapshot(row, translation)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
   const pills = referenceMetadataPills(row.reference_metadata, i18n)
-  const chunkText = (row.chunk_text ?? row.text ?? '').trim()
-  const translationState = useTranslatable(chunkText, setTranslation)
+  const translationState = useTranslatable(chunkText)
   const source = row.source_ref ?? row.filename ?? i18n('common.unknown_source')
   const location = locationParts(row, i18n)
   const category = hateCategoryLabel((row.category ?? 'unknown').trim(), i18n)
@@ -155,8 +159,10 @@ export function HateSpeechTable({
 
   // The same query the table's own infinite pages use, walked to the end at
   // the server's page maximum so a section-wide add sees every flagged chunk.
-  const fetchAllRows = () =>
-    fetchAllPages<HateSpeechRow>((cursor) => getHateSpeechPage({ cursor, limit: 500, collection }))
+  const fetchAllRows = (maxItems: number) =>
+    fetchAllPages<HateSpeechRow>((cursor) => getHateSpeechPage({ cursor, limit: 500, collection }), {
+      maxItems
+    })
 
   if (!rows.length) {
     return (
@@ -178,7 +184,7 @@ export function HateSpeechTable({
               paged in — see AddAllToReportButton. */}
           <AddAllToReportButton
             fetchAll={fetchAllRows}
-            toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row)}
+            toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(chunkTextOf(row)))}
             hasRows={rows.length > 0}
           />
           {collection && (

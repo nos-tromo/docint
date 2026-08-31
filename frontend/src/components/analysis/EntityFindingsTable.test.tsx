@@ -1,8 +1,11 @@
-import { describe, expect, it, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { EntityFindingsTable } from './EntityFindingsTable'
 import { useUiStore } from '@/stores/ui'
+import { useReportStore } from '@/stores/report'
+import { useTranslationsStore } from '@/stores/translations'
 import type { NerEntityRow, NerSourceRow } from '@/api/types'
 
 // Rows render a TranslateControl (mounted whenever a row has chunk text),
@@ -38,7 +41,15 @@ const findings: NerSourceRow[] = [
 ]
 
 beforeEach(() => {
+  localStorage.clear()
   useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: null, previewModal: null })
+  useTranslationsStore.setState({ byText: {} })
+  useReportStore.setState({ activeReportId: null })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('EntityFindingsTable', () => {
@@ -68,6 +79,56 @@ describe('EntityFindingsTable', () => {
     expect(href).toContain('entity_text=Berlin')
     expect(href).toContain('entity_type=LOC')
     expect(link).toHaveAttribute('download')
+  })
+
+  it('Add all sends the stored translation for a translated finding and none for the rest', async () => {
+    // The batch snapshots rows walked from the server, which were never
+    // rendered — the translation comes from the shared store under the same
+    // trimmed key the row files it under (hence the padded chunk_text).
+    useTranslationsStore.setState({
+      byText: { 'Berlin ist die Hauptstadt.': { text: 'Berlin is the capital.', target_lang: 'en', model: 'm' } }
+    })
+    const batchRows: NerSourceRow[] = [
+      { chunk_id: 'c9', filename: 'doc.pdf', chunk_text: '  Berlin ist die Hauptstadt.  ', entities: [{ text: 'Berlin', type: 'LOC' }] },
+      { chunk_id: 'c10', filename: 'doc.pdf', chunk_text: 'Ohne Übersetzung.', entities: [{ text: 'Berlin', type: 'LOC' }] }
+    ]
+    const captured: Record<string, unknown>[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/collections/ner/sources')) {
+          return { ok: true, status: 200, json: async () => ({ items: batchRows, next_cursor: null }) }
+        }
+        if (url.endsWith('/reports') && init?.method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        if (url.includes('/items/batch')) {
+          captured.push(JSON.parse(String(init?.body)))
+          return { ok: true, status: 200, json: async () => ({ added: 2, skipped: 0, item_count: 2 }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+
+    renderWithClient(
+      <EntityFindingsTable
+        selected={selected}
+        findings={batchRows}
+        collection="alpha"
+        reportDedupeKeys={new Set()}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: /add all findings to report/i }))
+
+    await waitFor(() => expect(captured).toHaveLength(1))
+    const items = captured[0].items as { snapshot: Record<string, unknown> }[]
+    expect(items[0].snapshot.translation).toEqual({
+      text: 'Berlin is the capital.',
+      target_lang: 'en',
+      model: 'm'
+    })
+    expect(items[1].snapshot).not.toHaveProperty('translation')
   })
 
   it('prompts to pick an entity when none is selected', () => {

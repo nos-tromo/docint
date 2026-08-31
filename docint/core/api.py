@@ -1056,6 +1056,7 @@ class FrontendConfigOut(BaseModel):
     graph_max_top_k: int
     collection_timeout: int
     max_upload_bytes: int
+    report_batch_max_items: int
     language: str
 
 
@@ -1173,7 +1174,15 @@ class ReportItemIn(BaseModel):
 # a single request's snapshot payload and its one companion scroll, and gives
 # the SPA a number to refuse against before it posts (see the Analysis
 # screens' "Add all"). Reports themselves stay uncapped.
-REPORT_BATCH_MAX_ITEMS = 2000
+#
+# Tunable via REPORT_BATCH_MAX_ITEMS, but read once here at import: pydantic
+# bakes it into ReportItemBatchIn's schema below, so a per-request read could
+# advertise a ceiling the validator does not enforce. Changing it needs a
+# backend restart, like any other container env var. A collection whose
+# sections run far past this also needs nginx's DOCINT_API_MAX_BODY_SIZE
+# checked -- the count is what the SPA refuses against, the bytes are what
+# actually stops the request.
+REPORT_BATCH_MAX_ITEMS = load_frontend_env().report_batch_max_items
 
 
 class ReportItemBatchIn(BaseModel):
@@ -1219,13 +1228,17 @@ def get_frontend_config() -> dict[str, int | str]:
     Served without a principal dependency so the SPA can read it on first load,
     before any collection or session exists. Values are read from environment
     variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`
-    and :func:`docint.utils.env_cfg.load_language_env`).
+    and :func:`docint.utils.env_cfg.load_language_env`) -- except
+    ``report_batch_max_items``, which is the process-constant the request model
+    was built with, so the advertised cap is always the enforced one.
 
     Returns:
         dict[str, int | str]: ``graph_top_k``, ``graph_max_top_k``,
         ``collection_timeout``, ``max_upload_bytes`` (the per-request upload
         ceiling nginx enforces, which the SPA uses to size its upload batches),
-        and ``language`` (the active ``RESPONSE_LANGUAGE`` locale, ``"en"`` or
+        ``report_batch_max_items`` (the most artifacts one report batch add may
+        carry, which the SPA refuses an oversize section against), and
+        ``language`` (the active ``RESPONSE_LANGUAGE`` locale, ``"en"`` or
         ``"de"``).
     """
     cfg = load_frontend_env()
@@ -1234,6 +1247,7 @@ def get_frontend_config() -> dict[str, int | str]:
         "graph_max_top_k": cfg.graph_max_top_k,
         "collection_timeout": cfg.collection_timeout,
         "max_upload_bytes": cfg.max_upload_bytes,
+        "report_batch_max_items": REPORT_BATCH_MAX_ITEMS,
         "language": load_language_env().code,
     }
 

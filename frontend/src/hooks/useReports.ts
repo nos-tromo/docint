@@ -14,6 +14,8 @@ import {
   updateReportItem
 } from '@/api/reports'
 import type { ReportItemInput } from '@/api/types'
+import { ApiError } from '@/api/client'
+import { useConfig } from '@/hooks/useConfig'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
@@ -159,10 +161,21 @@ export function useEnsureActiveReport() {
 /** Above this many items, "Add all" asks before it commits. */
 export const ADD_ALL_CONFIRM_THRESHOLD = 100
 
-/** The most items one batch request may carry (mirrors the server's cap). */
-export const ADD_ALL_MAX_ITEMS = 2000
+/**
+ * Cap used until `GET /config` lands, mirroring the server's own default.
+ * `useConfig` is fetched at app mount and never refetched, so this stands in
+ * only for a click in the first instants of a session.
+ */
+export const ADD_ALL_MAX_ITEMS_FALLBACK = 2000
 
-export type AddAllStatus = 'idle' | 'fetching' | 'adding' | 'done' | 'failed' | 'too_many'
+export type AddAllStatus =
+  | 'idle'
+  | 'fetching'
+  | 'adding'
+  | 'done'
+  | 'failed'
+  | 'too_many'
+  | 'too_large'
 
 export interface AddAllOutcome {
   status: AddAllStatus
@@ -173,20 +186,24 @@ export interface AddAllOutcome {
 /**
  * Add every finding of an Analysis section to the active report in one action.
  *
- * The caller supplies `fetchAll` — a walk of the section's own cursor pages —
- * and `toItem`, the same pure snapshot builder its rows use, so a batched
- * snapshot is byte-identical to a hand-added one save for `translation`,
- * which is per-row view state a batch never sees.
+ * The caller supplies `fetchAll` — a walk of the section's own cursor pages,
+ * bounded by the item count it is given — and `toItem`, the same pure snapshot
+ * builder its rows use. Both read translations from the shared translations
+ * store, so a batched snapshot is byte-identical to a hand-added one,
+ * `translation` included.
  *
  * The whole set is fetched outside React Query (the rendered list is not
  * force-expanded), pre-filtered against what the report already holds, and
  * posted as one request — one round-trip and one cache invalidation, not one
- * per finding. Above `ADD_ALL_CONFIRM_THRESHOLD` items it confirms first;
- * above `ADD_ALL_MAX_ITEMS` it refuses rather than posting a request the
- * server would reject.
+ * per finding. Above `ADD_ALL_CONFIRM_THRESHOLD` items it confirms first.
+ *
+ * The cap comes from `GET /config` (the server's own `REPORT_BATCH_MAX_ITEMS`),
+ * and the walk asks for one row *past* it: `fetchAllPages` truncates silently,
+ * so fetching exactly the cap could not tell a section that just fits from one
+ * that does not, and "Add all" would carry an arbitrary sample of a larger set.
  */
 export function useAddAllToReport<Row>(params: {
-  fetchAll: () => Promise<Row[]>
+  fetchAll: (maxItems: number) => Promise<Row[]>
   toItem: (row: Row) => ReportItemInput
 }) {
   const t = useT()
@@ -195,12 +212,21 @@ export function useAddAllToReport<Row>(params: {
   const collection = useUiStore((s) => s.selectedCollection)
   const existingKeys = useReportDedupeKeys(activeReportId)
   const addItems = useAddReportItems()
+  const { data: config } = useConfig()
+  const cap = Math.max(1, Math.trunc(config?.report_batch_max_items ?? ADD_ALL_MAX_ITEMS_FALLBACK))
   const [outcome, setOutcome] = useState<AddAllOutcome>({ status: 'idle', added: 0, skipped: 0 })
 
   const run = async (): Promise<void> => {
     setOutcome({ status: 'fetching', added: 0, skipped: 0 })
     try {
-      const rows = await params.fetchAll()
+      const rows = await params.fetchAll(cap + 1)
+      // Checked before dedupe, on the raw walk: the extra row means the walk
+      // stopped early, so how much of the section is missing is unknowable and
+      // no subset of it can honestly be called "all".
+      if (rows.length > cap) {
+        setOutcome({ status: 'too_many', added: 0, skipped: 0 })
+        return
+      }
       const items: ReportItemInput[] = []
       const seen = new Set<string>()
       let skipped = 0
@@ -215,10 +241,6 @@ export function useAddAllToReport<Row>(params: {
         }
         seen.add(item.dedupe_key)
         items.push({ ...item, collection: collection ?? null })
-      }
-      if (items.length > ADD_ALL_MAX_ITEMS) {
-        setOutcome({ status: 'too_many', added: 0, skipped: 0 })
-        return
       }
       if (items.length === 0) {
         setOutcome({ status: 'done', added: 0, skipped })
@@ -237,10 +259,17 @@ export function useAddAllToReport<Row>(params: {
       setOutcome({ status: 'done', added: result.added, skipped: skipped + result.skipped })
     } catch (e) {
       console.error('Add all to report failed', e)
+      // nginx refuses an oversize body before FastAPI ever sees it, so the
+      // same request cannot succeed on a retry — say it is too big instead of
+      // offering the retry the generic failure wears.
+      if (e instanceof ApiError && e.status === 413) {
+        setOutcome({ status: 'too_large', added: 0, skipped: 0 })
+        return
+      }
       setOutcome({ status: 'failed', added: 0, skipped: 0 })
     }
   }
 
   const reset = () => setOutcome({ status: 'idle', added: 0, skipped: 0 })
-  return { run, reset, ...outcome }
+  return { run, reset, cap, ...outcome }
 }

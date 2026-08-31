@@ -622,9 +622,10 @@ Loaded by `load_frontend_env()` (`env_cfg.py:346`).
 | `NER_GRAPH_TOP_K` | `80` | Default node count for the Analysis entity-graph view; the SPA seeds its control from this. |
 | `NER_GRAPH_MAX_TOP_K` | `500` | Ceiling for the graph node count (API clamp + UI control max). Raise for large corpora. |
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | `1g` | Maximum upload size, in nginx size syntax. Read **twice**: the backend advertises it via `GET /config` so the SPA can size upload batches, and the frontend nginx image reads the same variable to enforce `client_max_body_size`. The two must stay in sync — a backend-only change lets the SPA send batches nginx then rejects. |
+| `REPORT_BATCH_MAX_ITEMS` | `2000` | Most artifacts one `POST /reports/{id}/items/batch` may carry (clamped to ≥ 1). Read **once at import**: it becomes the request model's `max_length`, so a change needs a backend restart, and `GET /config` always advertises the value actually enforced. The Analysis screens' "Add all" refuses a larger section against this number rather than adding part of it. Raising it far past the default also means checking `DOCINT_API_MAX_BODY_SIZE` (see [deployment.md](deployment.md)) — the count is what the SPA refuses against, the bytes are what nginx stops. |
 
-All four values above are served to the SPA by `GET /config`, alongside
-`RESPONSE_LANGUAGE` — five fields in all (`FrontendConfigOut`).
+All five values above are served to the SPA by `GET /config`, alongside
+`RESPONSE_LANGUAGE` — six fields in all (`FrontendConfigOut`).
 
 ## Logging — `LoggingConfig`
 

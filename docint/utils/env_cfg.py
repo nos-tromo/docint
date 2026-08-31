@@ -341,6 +341,7 @@ class FrontendConfig:
     graph_top_k: int
     graph_max_top_k: int
     max_upload_bytes: int
+    report_batch_max_items: int
 
 
 def load_frontend_env(
@@ -348,6 +349,7 @@ def load_frontend_env(
     default_graph_top_k: int = 80,
     default_graph_max_top_k: int = 500,
     default_max_upload_size: str = "1g",
+    default_report_batch_max_items: int = 2000,
 ) -> FrontendConfig:
     """Loads frontend configuration from environment variables or defaults.
 
@@ -362,6 +364,8 @@ def load_frontend_env(
             nginx ``size`` notation. Must mirror the frontend image's
             ``DOCINT_CLIENT_MAX_BODY_SIZE`` default so the value the SPA reads
             matches what nginx actually enforces.
+        default_report_batch_max_items (int): Default ceiling on the items one
+            ``POST /reports/{id}/items/batch`` may carry.
 
     Returns:
         FrontendConfig: Parsed frontend configuration.
@@ -371,6 +375,10 @@ def load_frontend_env(
         - max_upload_bytes (int): Per-request upload ceiling in bytes, parsed
           from ``DOCINT_CLIENT_MAX_BODY_SIZE`` (the same var nginx reads). The
           SPA splits large selections into batches that each stay under this.
+        - report_batch_max_items (int): Most items one report batch add may
+          carry, from ``REPORT_BATCH_MAX_ITEMS`` (clamped to >= 1). Bound into
+          the request model at import and advertised via ``GET /config`` so the
+          SPA refuses an oversize set against the number the API enforces.
     """
     graph_top_k = max(1, int(os.getenv("NER_GRAPH_TOP_K", default_graph_top_k)))
     graph_max_top_k = max(graph_top_k, int(os.getenv("NER_GRAPH_MAX_TOP_K", default_graph_max_top_k)))
@@ -384,6 +392,7 @@ def load_frontend_env(
         graph_top_k=graph_top_k,
         graph_max_top_k=graph_max_top_k,
         max_upload_bytes=max_upload_bytes,
+        report_batch_max_items=max(1, int(os.getenv("REPORT_BATCH_MAX_ITEMS", default_report_batch_max_items))),
     )
 
 

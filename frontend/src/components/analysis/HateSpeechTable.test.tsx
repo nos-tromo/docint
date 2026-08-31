@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -6,8 +6,19 @@ import { HateSpeechTable } from './HateSpeechTable'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import type { HateSpeechRow } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
+import { useReportStore } from '@/stores/report'
+import { useTranslationsStore } from '@/stores/translations'
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+beforeEach(() => {
+  localStorage.clear()
+  useTranslationsStore.setState({ byText: {} })
+  useReportStore.setState({ activeReportId: null })
+})
 
 // Rows render a TranslateControl (mounted whenever a row has chunk text),
 // which calls useTranslate()/useMutation() — it needs a QueryClientProvider
@@ -100,6 +111,63 @@ describe('HateSpeechTable', () => {
       { text: 'übersetzt', target_lang: 'de', model: 'm' }
     )
     expect(snap.snapshot.translation).toEqual({ text: 'übersetzt', target_lang: 'de', model: 'm' })
+  })
+
+  it('Add all sends the stored translation for a translated row and none for the rest', async () => {
+    // The batch snapshots rows walked from the server, which were never
+    // rendered — the translation has to come from the shared store, keyed by
+    // the same trimmed text the row files it under (hence the padded
+    // chunk_text here, which would miss under an untrimmed key).
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    useTranslationsStore.setState({
+      byText: { 'Erste markierte Zeile.': { text: 'First flagged line.', target_lang: 'en', model: 'm' } }
+    })
+    const batchRows: HateSpeechRow[] = [
+      {
+        chunk_id: 'h20',
+        filename: 'a.txt',
+        category: 'harassment',
+        confidence: 'high',
+        chunk_text: '  Erste markierte Zeile.  '
+      },
+      {
+        chunk_id: 'h21',
+        filename: 'b.txt',
+        category: 'harassment',
+        confidence: 'low',
+        chunk_text: 'Zweite Zeile ohne Übersetzung.'
+      }
+    ]
+    const captured: Record<string, unknown>[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/collections/hate-speech')) {
+          return { ok: true, status: 200, json: async () => ({ items: batchRows, next_cursor: null }) }
+        }
+        if (url.endsWith('/reports') && init?.method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        if (url.includes('/items/batch')) {
+          captured.push(JSON.parse(String(init?.body)))
+          return { ok: true, status: 200, json: async () => ({ added: 2, skipped: 0, item_count: 2 }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+
+    renderWithClient(<HateSpeechTable rows={batchRows} collection="alpha" reportDedupeKeys={new Set()} />)
+    await userEvent.click(screen.getByRole('button', { name: /add all findings to report/i }))
+
+    await waitFor(() => expect(captured).toHaveLength(1))
+    const items = captured[0].items as { snapshot: Record<string, unknown> }[]
+    expect(items[0].snapshot.translation).toEqual({
+      text: 'First flagged line.',
+      target_lang: 'en',
+      model: 'm'
+    })
+    expect(items[1].snapshot).not.toHaveProperty('translation')
   })
 })
 

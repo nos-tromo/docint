@@ -1,15 +1,15 @@
-import { useState } from 'react'
 import type { NerSourceRow } from '@/api/types'
 import { referenceMetadataPills, type MetadataPillItem } from '@/lib/referenceMetadata'
 import { highlightSegments } from '@/lib/highlight'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
-import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
+import { useTranslatable } from '@/hooks/useTranslatable'
+import { useTranslationsStore } from '@/stores/translations'
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
 import { EvidenceThumbnail } from '@/components/common/EvidenceThumbnail'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
-import { entityFindingSnapshot } from '@/lib/reportSnapshots'
+import { chunkTextOf, entityFindingSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
@@ -86,13 +86,15 @@ export function EntityFinding({
   gridTemplate
 }: Props) {
   const t = useT()
-  const [translation, setTranslation] = useState<TranslationPayload | null>(null)
-  const reportItem =
-    entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation ?? undefined) : null
+  const chunkText = chunkTextOf(source)
+  // The shared store, not row state: the same translation must reach a
+  // hand-added snapshot and a section-wide "Add all" alike, and survive the
+  // virtualizer unmounting this row.
+  const translation = useTranslationsStore((s) => s.byText[chunkText])
+  const reportItem = entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
-  const chunkText = (source.chunk_text ?? source.text ?? '').trim()
   const segments = highlightSegments(chunkText, highlightTerms)
-  const translationState = useTranslatable(chunkText, setTranslation)
+  const translationState = useTranslatable(chunkText)
   const mentions = matchedMentions(source, highlightTerms, selectedTypeLower)
   const locParts: string[] = []
   if (source.page !== null && source.page !== undefined) {

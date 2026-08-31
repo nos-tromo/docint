@@ -23,16 +23,22 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
     page in 50 rows at a time behind a "Load more", so the control walks the
     remaining pages itself before adding — a report built from whatever had
     been scrolled into view would be a silent sample.
-  - Above 100 findings it asks first, and it refuses a set larger than 2000
-    (`REPORT_BATCH_MAX_ITEMS`) rather than adding a partial one; narrow the
-    selection — pick a more specific entity — and repeat.
+  - Above 100 findings it asks first, and it refuses a set larger than the
+    deployment's cap (`REPORT_BATCH_MAX_ITEMS`, default 2000, advertised by
+    `GET /config`) rather than adding a partial one; narrow the selection —
+    pick a more specific entity — and repeat. It walks one finding past the cap
+    on purpose, so an oversize section is refused outright instead of being
+    quietly trimmed to a capful.
   - Findings the report already holds are skipped, not duplicated, so the
     control is safe to press again after adding a few by hand. The outcome is
     stated beside it ("12 added, 3 already in report").
-  - **A batch carries no translations.** A translation is frozen into a
-    snapshot only when it was on screen at add-time (see below), which is a
-    per-row action a section-wide add never sees. Add such a finding
-    individually if its translation belongs in the report.
+  - **A batch carries the translations you already made.** Translations are
+    held app-wide for the session, keyed by the chunk's own text, so "Add all"
+    freezes one into every snapshot whose text you translated — including rows
+    scrolled out of view. It never translates anything itself: a finding you
+    never translated is added untranslated. Translate *before* adding, since a
+    finding already in the report is skipped as a duplicate and its frozen
+    snapshot is never revisited.
 - The **Report** view lists your reports and, for the active one, shows the
   picked artifacts grouped by type with per-item notes, reordering, and removal.
 - Reports are **owner-scoped** and persisted server-side in the same SQLite
