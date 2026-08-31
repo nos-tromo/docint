@@ -3260,7 +3260,14 @@ class RAG:
             # states so the plain model overrides a stack whose ``.env``
             # defaults thinking *on*. vLLM-only: OpenAI proper rejects unknown
             # body fields, and the other providers have no such switch.
-            additional_kwargs["chat_template_kwargs"] = {"enable_thinking": bool(enable_reasoning)}
+            #
+            # It must be nested under ``extra_body``: llama_index merges
+            # ``additional_kwargs`` top-level into ``Completions.create()``,
+            # whose signature rejects an unknown kwarg with a client-side
+            # ``TypeError`` before any request is sent. ``extra_body`` is a real
+            # parameter whose contents the SDK merges into the JSON body, which
+            # is where vLLM reads them.
+            additional_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(enable_reasoning)}}
 
         # LlamaIndex OpenAI class supports api_key, api_base, timeout, max_retries, seed, top_p
         # Use LocalOpenAI which tolerates unknown model names (e.g. paths) by falling back to default metadata
