@@ -36,9 +36,21 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
     held app-wide for the session, keyed by the chunk's own text, so "Add all"
     freezes one into every snapshot whose text you translated — including rows
     scrolled out of view. It never translates anything itself: a finding you
-    never translated is added untranslated. Translate *before* adding, since a
-    finding already in the report is skipped as a duplicate and its frozen
-    snapshot is never revisited.
+    never translated is added untranslated. Use **Translate all** first (see
+    below) — and if you added findings before translating them, run it and then
+    press "Add all" again: the second pass backfills the translations into the
+    snapshots already in the report.
+- **Translate all** sits beside it in the same header and translates every
+  finding the section's filter matches — again the whole set, not the rows
+  paged in. It is a foreground run of one call per distinct chunk text: the
+  button shows how far it has got, stays clickable to stop, and can be pressed
+  again to pick up the remainder (anything already translated this session is
+  never re-sent). Above 100 findings it asks first, since a large section takes
+  minutes. If the translation model is unreachable the run stops after three
+  consecutive failures rather than working through the whole section to report
+  the same outage. Nothing is stored by translating: the translations live in
+  the browser for the session, and only reach the server when a finding they
+  belong to is added to a report.
 - The **Report** view lists your reports and, for the active one, shows the
   picked artifacts grouped by type with per-item notes, reordering, and removal.
 - Reports are **owner-scoped** and persisted server-side in the same SQLite
@@ -86,6 +98,15 @@ it as an additive labeled block or column next to the original — e.g.
 "Machine translation (→ Deutsch)" when the active locale is German. The
 translation overlay itself is described in
 [ui-guide.md](ui-guide.md#on-demand-translation-of-source-content).
+
+A finding added before it was translated is not stuck that way. Re-running
+"Add all" over the section backfills the translation into the stored snapshot:
+findings the report already holds are still skipped, except where the report's
+copy has no translation and the new one does. The merge is strictly additive —
+only the translation is written, and a translation already in the report is
+never replaced, since it is the one you saw when you added the finding. The
+outcome line counts those separately ("1 added, 12 translations added, 40
+already in report").
 
 ## Exporting
 
