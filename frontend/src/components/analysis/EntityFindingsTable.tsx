@@ -5,6 +5,7 @@ import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
 import { csvExportHref, getNerSourcesPage } from '@/api/collections'
 import { EntityFinding } from './EntityFinding'
 import { AddAllToReportButton } from '@/components/report/AddAllToReportButton'
+import { TranslateAllButton } from '@/components/common/TranslateAllButton'
 import { fetchAllPages } from '@/lib/fetchAllPages'
 import { chunkTextOf, entityFindingSnapshot } from '@/lib/reportSnapshots'
 import { storedTranslation } from '@/stores/translations'
@@ -114,6 +115,9 @@ export function EntityFindingsTable({
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {/* Translates every matching finding, so the rows below and the
+              snapshots "Add all" freezes are readable — see TranslateAllButton. */}
+          <TranslateAllButton fetchAll={fetchAllFindings} textOf={chunkTextOf} hasRows={findings.length > 0} />
           {/* Adds every finding the entity filter matches, not only the rows
               paged in — see AddAllToReportButton. */}
           <AddAllToReportButton

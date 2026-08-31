@@ -169,6 +169,41 @@ describe('HateSpeechTable', () => {
     })
     expect(items[1].snapshot).not.toHaveProperty('translation')
   })
+
+  it('Translate all walks the section and fills the store for rows never rendered', async () => {
+    // Wired to the section's own page walk, not to the rows on screen, so a
+    // flagged chunk below the fold is translated too — which is what lets the
+    // subsequent "Add all" carry it into the report.
+    const walked: HateSpeechRow[] = [
+      { chunk_id: 'h30', filename: 'a.txt', category: 'harassment', confidence: 'high', chunk_text: '  Erste Zeile.  ' },
+      { chunk_id: 'h31', filename: 'b.txt', category: 'harassment', confidence: 'low', chunk_text: 'Zweite Zeile.' }
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/collections/hate-speech')) {
+          return { ok: true, status: 200, json: async () => ({ items: walked, next_cursor: null }) }
+        }
+        if (url.includes('/translate')) {
+          const text = String(JSON.parse(String(init?.body)).text)
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, translation: `en:${text}`, model: 'm', target_lang: 'en' })
+          }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+
+    renderWithClient(<HateSpeechTable rows={[walked[0]]} collection="alpha" />)
+    await userEvent.click(screen.getByRole('button', { name: /translate all findings/i }))
+
+    await waitFor(() =>
+      expect(Object.keys(useTranslationsStore.getState().byText).sort()).toEqual(['Erste Zeile.', 'Zweite Zeile.'])
+    )
+  })
 })
 
 it('breaks unbreakable metadata values instead of overflowing the column', () => {

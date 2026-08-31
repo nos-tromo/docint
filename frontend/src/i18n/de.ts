@@ -54,6 +54,20 @@ export const de: Strings = {
   'common.translation': 'Übersetzung',
   'common.show_original': 'Original anzeigen',
   'common.translation_unavailable': 'Übersetzung nicht verfügbar — Original wird angezeigt.',
+  'common.translate_all': 'Alle Funde übersetzen',
+  'common.translate_all_stop': 'Übersetzung stoppen',
+  'common.translate_all_retry': 'Übersetzung erneut versuchen',
+  'common.translate_all_busy': 'Zu übersetzende Funde werden gesammelt…',
+  'common.translate_all_confirm':
+    '{count} Funde übersetzen? Die Übersetzungen laufen nacheinander und können mehrere Minuten dauern.',
+  'common.translate_all_progress': '{done} von {total} übersetzt…',
+  'common.translate_all_done': '{done} übersetzt, {skipped} bereits übersetzt',
+  'common.translate_all_done_failed': '{done} übersetzt, {failed} konnten nicht übersetzt werden',
+  'common.translate_all_none': 'Alle Funde sind bereits übersetzt',
+  'common.translate_all_stopped': 'Gestoppt — {done} von {total} übersetzt',
+  'common.translate_all_failed': 'Übersetzung nicht verfügbar — zum erneuten Versuch klicken',
+  'common.translate_all_too_many':
+    'Zu viele Funde für eine Übersetzung auf einmal (Grenze {max}) — bitte zuerst die Auswahl eingrenzen',
   'common.loading_ellipsis': 'Lädt…',
   'common.pill_open_link': 'Beitrag öffnen',
 

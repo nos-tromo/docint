@@ -6,6 +6,7 @@ import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataPills } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { AddAllToReportButton } from '@/components/report/AddAllToReportButton'
+import { TranslateAllButton } from '@/components/common/TranslateAllButton'
 import { fetchAllPages } from '@/lib/fetchAllPages'
 import { useTranslatable } from '@/hooks/useTranslatable'
 import { storedTranslation, useTranslationsStore } from '@/stores/translations'
@@ -180,6 +181,9 @@ export function HateSpeechTable({
           {hasNextPage ? '+' : ''}.
         </p>
         <div className="flex items-center gap-1">
+          {/* Translates every flagged chunk, so the rows below and the
+              snapshots "Add all" freezes are readable — see TranslateAllButton. */}
+          <TranslateAllButton fetchAll={fetchAllRows} textOf={chunkTextOf} hasRows={rows.length > 0} />
           {/* Adds every flagged chunk in the collection, not only the rows
               paged in — see AddAllToReportButton. */}
           <AddAllToReportButton

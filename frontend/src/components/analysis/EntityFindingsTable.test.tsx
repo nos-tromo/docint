@@ -131,6 +131,44 @@ describe('EntityFindingsTable', () => {
     expect(items[1].snapshot).not.toHaveProperty('translation')
   })
 
+  it('Translate all walks the section and fills the store for rows never rendered', async () => {
+    // The control is wired to the section's own page walk, not to the rows on
+    // screen — so a finding below the fold is translated too, which is the
+    // whole reason the subsequent "Add all" can carry it.
+    const walked: NerSourceRow[] = [
+      { chunk_id: 'c11', filename: 'doc.pdf', chunk_text: '  Berlin ist die Hauptstadt.  ', entities: [] },
+      { chunk_id: 'c12', filename: 'doc.pdf', chunk_text: 'Zweiter Fund.', entities: [] }
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/collections/ner/sources')) {
+          return { ok: true, status: 200, json: async () => ({ items: walked, next_cursor: null }) }
+        }
+        if (url.includes('/translate')) {
+          const text = String(JSON.parse(String(init?.body)).text)
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, translation: `en:${text}`, model: 'm', target_lang: 'en' })
+          }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+
+    renderWithClient(<EntityFindingsTable selected={selected} findings={[walked[0]]} collection="alpha" />)
+    await userEvent.click(screen.getByRole('button', { name: /translate all findings/i }))
+
+    await waitFor(() =>
+      expect(Object.keys(useTranslationsStore.getState().byText).sort()).toEqual([
+        'Berlin ist die Hauptstadt.',
+        'Zweiter Fund.'
+      ])
+    )
+  })
+
   it('prompts to pick an entity when none is selected', () => {
     render(<EntityFindingsTable selected={null} findings={[]} collection="alpha" />)
     expect(screen.getByText(/pick an entity/i)).toBeInTheDocument()
