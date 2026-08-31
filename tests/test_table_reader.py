@@ -140,6 +140,7 @@ def test_table_reader_detects_social_media_messages_schema(tmp_path: Path) -> No
         "network": "Signal",
         "type": "message",
         "uuid": "u1",
+        "url": "https://example.com",
         "timestamp": "2026-02-03T11:00:00Z",
         "author": "Bob",
         "author_id": None,

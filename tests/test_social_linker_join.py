@@ -8,10 +8,13 @@ from docint.core.ingest.social_linker import (
     _derive_posting_id,
     _infer_album_posting_id,
     _infer_stamp_posting_id,
+    _infer_text_posting_id,
     build_network_posting_index,
     build_posting_album_index,
     build_posting_index,
     build_posting_stamp_index,
+    build_posting_text_index,
+    normalize_postings_frame,
     resolve_media_rows,
     strip_counter,
 )
@@ -624,3 +627,210 @@ def test_album_inference_wins_over_the_timestamp_fallback(tmp_path: Path) -> Non
     )
 
     assert {link.posting_uuid for link in links} == {"uuid-1"}
+
+
+def _messages_export() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return a (messages, media) pair in the chat-style export shape.
+
+    The postings-equivalent table carries the messages schema (``Chat ID`` /
+    ``Sender`` / ``Text``) and its ids are media-entity snowflakes the manifest
+    never names, so only the stamp or the text can associate the two.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame]: The messages and media tables.
+    """
+    messages = pd.DataFrame(
+        {
+            "UUID": ["uuid-1"],
+            "Chat ID": ["4400000000000000001"],
+            "Sender": ["Jane Poster"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+            "Text": ["A short invented post about nothing at all."],
+            "Tags": [""],
+            "URL": ["https://social.invalid/janeposter/status/4400000000000000001"],
+            "Chat Group": [""],
+            "Answers Count": ["0"],
+            "Reply To": [""],
+            "Network": ["ChatNet"],
+        }
+    )
+    media = pd.DataFrame(
+        {
+            "Media ID": ["7700000000000000009"],
+            "Network ID": ["7700000000000000009"],
+            "Author": ["Jane Poster"],
+            "Network": ["ChatNet"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+            "Title": ["A short invented post about nothing at all."],
+            "Exported media filename": ["a.jpg"],
+        }
+    )
+    return messages, media
+
+
+def test_normalize_maps_the_messages_vocabulary_to_the_postings_one() -> None:
+    """A messages table is renamed into the vocabulary the join rules read."""
+    messages, _ = _messages_export()
+
+    normalized = normalize_postings_frame(messages)
+
+    assert normalized["Posting ID"].tolist() == ["4400000000000000001"]
+    assert normalized["Author"].tolist() == ["Jane Poster"]
+    assert normalized["Text Content"].tolist() == ["A short invented post about nothing at all."]
+    assert "Chat ID" not in normalized.columns
+
+
+def test_normalize_leaves_a_postings_table_untouched() -> None:
+    """A real postings table already speaks the vocabulary and is returned as-is."""
+    postings, _ = _keyless_export()
+
+    assert normalize_postings_frame(postings) is postings
+
+
+def test_normalize_ignores_a_table_matching_no_profile() -> None:
+    """A foreign table that merely carries a Text column is never rewritten."""
+    foreign = pd.DataFrame({"Text": ["hello"], "Something Else": ["x"]})
+
+    assert normalize_postings_frame(foreign) is foreign
+
+
+def test_stamp_inference_links_a_messages_row_through_the_renamed_columns(tmp_path: Path) -> None:
+    """The stamp rule reaches a chat-style export once its columns are normalized."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    messages, media = _messages_export()
+    join_df = normalize_postings_frame(messages)
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(join_df),
+        tmp_path,
+        stamps=build_posting_stamp_index(join_df),
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-1"]
+    assert [link.posting_id for link in links] == ["4400000000000000001"]
+
+
+def test_text_match_links_a_row_whose_title_names_one_posting(tmp_path: Path) -> None:
+    """A shared post names another author, so only the repeated text can link it."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    messages, media = _messages_export()
+    # The manifest records the original author; the export's row is the sharer's.
+    media["Author"] = ["Original Author"]
+    join_df = normalize_postings_frame(messages)
+    stamps = build_posting_stamp_index(join_df)
+    # Guard the guard: the author-scoped stamp rule really cannot reach this row.
+    assert _infer_stamp_posting_id(media.iloc[0], pd.Timestamp("2026-03-04 21:30:56+00"), stamps) is None
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(join_df),
+        tmp_path,
+        stamps=stamps,
+        texts=build_posting_text_index(join_df),
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-1"]
+
+
+def test_text_match_refuses_two_postings_carrying_the_same_text(tmp_path: Path) -> None:
+    """One text advertised by two postings identifies neither."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    messages, media = _messages_export()
+    media["Author"] = ["Original Author"]
+    messages = pd.concat(
+        [messages, messages.assign(UUID="uuid-2", **{"Chat ID": "4400000000000000002"})],
+        ignore_index=True,
+    )
+    join_df = normalize_postings_frame(messages)
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(join_df),
+        tmp_path,
+        texts=build_posting_text_index(join_df),
+    )
+
+    assert links == []
+
+
+def test_text_match_refuses_a_title_no_posting_carries(tmp_path: Path) -> None:
+    """A partial export is missing the parent; the row stays unlinked."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    messages, media = _messages_export()
+    media["Author"] = ["Original Author"]
+    media["Title"] = ["A different invented post nobody in this export wrote."]
+    join_df = normalize_postings_frame(messages)
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(join_df),
+        tmp_path,
+        texts=build_posting_text_index(join_df),
+    )
+
+    assert links == []
+
+
+def test_text_index_skips_postings_with_no_text() -> None:
+    """An empty text is shared by every media-only post and names none of them."""
+    messages, _ = _messages_export()
+    messages["Text"] = [""]
+
+    assert build_posting_text_index(normalize_postings_frame(messages)) == {}
+
+
+def test_text_match_is_scoped_to_the_network() -> None:
+    """One network's text says nothing about another's posting of the same words."""
+    messages, media = _messages_export()
+    media["Network"] = ["OtherNet"]
+    texts = build_posting_text_index(normalize_postings_frame(messages))
+
+    assert _infer_text_posting_id(media.iloc[0], texts) is None
+
+
+def test_text_match_is_off_unless_an_index_is_supplied(tmp_path: Path) -> None:
+    """Without the index the rule never runs, which is the kill switch's shape."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    messages, media = _messages_export()
+    media["Author"] = ["Original Author"]
+    join_df = normalize_postings_frame(messages)
+
+    links = resolve_media_rows(media, build_posting_index(join_df), tmp_path)
+
+    assert links == []
+
+
+def test_timestamp_link_wins_over_the_text_match(tmp_path: Path) -> None:
+    """The stamp is the stronger statement, so it is consulted first.
+
+    The text rule knows only that two rows carry the same words -- which a quoted
+    or re-posted text shares by design; the stamp rule knows the author agreed
+    too, so where both answer it is the one to believe.
+    """
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
+    messages, media = _messages_export()
+    decoy = messages.assign(
+        UUID="uuid-decoy",
+        **{"Chat ID": "4400000000000000002", "Sender": "Someone Else"},
+    )
+    messages = pd.concat([messages, decoy], ignore_index=True)
+    # The decoy repeats the text, so the text rule alone answers ambiguously; give
+    # it a single unambiguous answer that disagrees with the stamp rule's.
+    messages.loc[0, "Text"] = "The words only the stamp rule's posting carries."
+    join_df = normalize_postings_frame(messages)
+    texts = build_posting_text_index(join_df)
+    stamps = build_posting_stamp_index(join_df)
+    media["Title"] = ["A short invented post about nothing at all."]
+    # Guard the guard: the text rule really would answer differently here.
+    assert _infer_text_posting_id(media.iloc[0], texts) == "4400000000000000002"
+
+    links = resolve_media_rows(
+        media,
+        build_posting_index(join_df),
+        tmp_path,
+        stamps=stamps,
+        texts=texts,
+    )
+
+    assert [link.posting_uuid for link in links] == ["uuid-1"]

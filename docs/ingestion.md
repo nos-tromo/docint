@@ -125,12 +125,20 @@ Meta-style `<postingId>_<accountId>` id does not. Set
 ingest log line:
 
 ```
-Social linker: 352 media linked (94 by manifest key, 258 by album inference), 0 skipped
+Social linker: 352 media linked (94 by manifest key, 258 by album inference, 0 by timestamp, 0 by text match), 0 skipped
 (0 with no matching posting, 0 with no local file, 0 with an ambiguous filename)
 across 352 manifest rows.
 ```
 
-**How a media row finds its posting.** Four rules, tried in order; the first
+**Exports whose postings table is a messages table.** A chat-style export
+(X/Twitter and friends) has no postings table: its posts live in a table
+carrying the *messages* schema — `Chat ID` / `Sender` / `Text` where a postings
+table has `Posting ID` / `Author` / `Text Content`. Such a table is accepted in
+the postings role and renamed into the postings vocabulary before any rule runs,
+so all five apply unchanged. A real postings table always wins when both are
+present; the messages one is a substitute, never a competitor.
+
+**How a media row finds its posting.** Five rules, tried in order; the first
 that names a known posting wins, and each is consulted only once the ones above
 it have failed:
 
@@ -145,17 +153,26 @@ it have failed:
    advertise, or one that is an `Author ID`, is refused rather than resolved to
    a guess.
 3. **Album inference** — for exports carrying no key at all; see above.
-4. **Timestamp** — the last resort: the single posting by the same author
-   stamped at the same instant. Two such postings, or none, leave the row
-   unlinked. The second case is what a partial export looks like, and it must
-   not be papered over with a neighbouring post. Switch it off with
-   `SOCIAL_TIMESTAMP_LINK_ENABLED=false`.
+4. **Timestamp** — the single posting by the same author stamped at the same
+   instant. Two such postings, or none, leave the row unlinked. The second case
+   is what a partial export looks like, and it must not be papered over with a
+   neighbouring post. Switch it off with `SOCIAL_TIMESTAMP_LINK_ENABLED=false`.
+5. **Text** — the last resort, for the one shape the author-scoped timestamp
+   cannot reach: a **shared post**, where the manifest records the *original*
+   author while the export's own row is the sharer's. Both carry the post's text
+   verbatim, so a row whose text exactly matches that of a single posting on the
+   same network attaches to it. Equality is exact and case-sensitive — the whole
+   confidence of the rule is that a complete post text matched character for
+   character. Ambiguity (two postings carrying those words) and absence both
+   leave the row unlinked, and a posting with no text is never indexed, since an
+   empty text is shared by every media-only post. Switch it off with
+   `SOCIAL_TEXT_LINK_ENABLED=false`.
 
 The ingest log reports the split, so an operator can see at a glance how much of
 a run rested on inference rather than on a declared key:
 
 ```
-Social linker: 2019 media linked (1983 by manifest key, 13 by network id, 0 by album inference, 23 by timestamp), 101 skipped …
+Social linker: 2019 media linked (1983 by manifest key, 13 by network id, 0 by album inference, 23 by timestamp, 0 by text match), 101 skipped …
 ```
 
 **Linker.** During ingestion, `posting_uuid` is written into every artifact
