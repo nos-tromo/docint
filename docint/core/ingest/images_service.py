@@ -6,7 +6,7 @@ import base64
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -1253,6 +1253,7 @@ class ImageIngestionService:
         dedup_cosine: float = 0.95,
         keyframe_source_type: str = "social_media_keyframe",
         link_field: str | None = "posting_uuid",
+        frame_times: Sequence[float | None] | None = None,
     ) -> list[StoredImageRecord]:
         """Embed candidate keyframes, prune near-duplicates, caption survivors.
 
@@ -1285,6 +1286,10 @@ class ImageIngestionService:
                 its value (e.g. ``posting_uuid`` for the social-media path).
                 Pass ``None`` to omit this link field entirely (e.g. standalone
                 video keyframes, which have no posting to link to).
+            frame_times (Sequence[float | None] | None): Seconds into the clip
+                each frame was sampled from, parallel to ``frames``. Ignored
+                when the lengths disagree — mislabelling a frame is worse than
+                leaving it untimed.
 
         Returns:
             list[StoredImageRecord]: One record per survivor (status ``stored``).
@@ -1301,10 +1306,17 @@ class ImageIngestionService:
             logger.warning("Keyframe ingestion skipped: {}", exc)
             return []
 
+        times: Sequence[float | None] = frame_times or []
+        if frame_times is not None and len(frame_times) != len(frames):
+            logger.warning(
+                "Ignoring {} keyframe time(s) for {} frame(s): the two do not pair.", len(frame_times), len(frames)
+            )
+            times = []
+
         kept_embeddings: list[list[float]] = []
         records: list[StoredImageRecord] = []
         tagger = self._get_tagging_backend()
-        for frame_bytes in frames:
+        for frame_index, frame_bytes in enumerate(frames):
             try:
                 embedding = self._run_with_retries(lambda fb=frame_bytes: embedding_backend.embed(fb))
             except Exception as exc:
@@ -1373,6 +1385,8 @@ class ImageIngestionService:
                 "llm_description": description,
                 "llm_tags": tags,
                 "ocr_text": frame_ocr,
+                "keyframe_index": frame_index,
+                "keyframe_time_sec": times[frame_index] if frame_index < len(times) else None,
                 "vector_name": self.img_ingestion_config.vector_name,
                 "image_collection": target_collection,
             }

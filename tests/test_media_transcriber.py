@@ -6,7 +6,7 @@ from typing import Any
 from loguru import logger
 
 from docint.core.ingest.media_transcribe import MediaClip, MediaTranscriber
-from docint.utils.nextext_client import NextextResult
+from docint.utils.nextext_client import NextextKeyframe, NextextResult
 
 
 class _FakeNextext:
@@ -84,7 +84,10 @@ def test_video_yields_transcript_documents_and_keyframes(tmp_path: Path) -> None
         NextextResult(
             status="completed",
             transcript_jsonl=b'{"text":"hello","start_seconds":0,"end_seconds":1}\n',
-            keyframes=[b"f0", b"f1"],
+            keyframes=[
+                NextextKeyframe(jpeg=b"f0", index=0, time_sec=0.0),
+                NextextKeyframe(jpeg=b"f1", index=1, time_sec=4.5),
+            ],
         )
     )
     images = _FakeImages()
@@ -98,6 +101,8 @@ def test_video_yields_transcript_documents_and_keyframes(tmp_path: Path) -> None
     call = images.keyframe_calls[0]
     assert call["keyframe_source_type"] == "video_keyframe"
     assert call["link_field"] is None
+    assert call["frames"] == [b"f0", b"f1"]
+    assert call["frame_times"] == [0.0, 4.5]
     assert call["source_doc_id"] == "hash-1"
 
 
@@ -264,7 +269,7 @@ def test_processes_every_clip_in_a_batch(tmp_path: Path) -> None:
         NextextResult(
             status="completed",
             transcript_jsonl=b'{"text":"spoken","start_seconds":0,"end_seconds":1}\n',
-            keyframes=[b"\xff\xd8\xff0"],
+            keyframes=[NextextKeyframe(jpeg=b"\xff\xd8\xff0", index=0, time_sec=0.0)],
         )
     )
     clips = []
@@ -315,7 +320,7 @@ def test_isolates_a_failed_clip_in_a_batch(tmp_path: Path) -> None:
             return NextextResult(
                 status="completed",
                 transcript_jsonl=b'{"text":"spoken","start_seconds":0,"end_seconds":1}\n',
-                keyframes=[b"\xff\xd8\xff0"],
+                keyframes=[NextextKeyframe(jpeg=b"\xff\xd8\xff0", index=0, time_sec=0.0)],
             )
 
     images = _FakeImages()

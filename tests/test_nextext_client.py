@@ -27,11 +27,13 @@ def _cfg() -> NextextConfig:
     )
 
 
-def _keyframes_zip() -> bytes:
+def _keyframes_zip(manifest: object | None = None) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("frame_0.jpg", b"\xff\xd8\xff0")
         zf.writestr("frame_1.jpg", b"\xff\xd8\xff1")
+        if manifest is not None:
+            zf.writestr("manifest.json", json.dumps(manifest))
     return buf.getvalue()
 
 
@@ -55,7 +57,65 @@ def test_process_media_returns_transcript_and_keyframes(tmp_path: Path) -> None:
     result = NextextClient(_cfg(), client=client).process_media(media)
     assert result.status == "completed"
     assert result.transcript_jsonl is not None and b"hi" in result.transcript_jsonl
-    assert len(result.keyframes) == 2
+    assert [frame.jpeg for frame in result.keyframes] == [b"\xff\xd8\xff0", b"\xff\xd8\xff1"]
+    assert [frame.time_sec for frame in result.keyframes] == [None, None]
+
+
+def test_keyframes_carry_the_manifest_times(tmp_path: Path) -> None:
+    """A manifest pairs each frame with the second it was sampled from."""
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"fakevideo")
+    manifest = {
+        "frames": [
+            {"file": "frame_1.jpg", "index": 1, "time_sec": 12.5},
+            {"file": "frame_0.jpg", "index": 0, "time_sec": 0.0},
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/J1/artifacts/keyframes.zip":
+            return httpx.Response(200, content=_keyframes_zip(manifest))
+        return _handler(request)
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(handler))
+    result = NextextClient(_cfg(), client=client).process_media(media)
+    assert [(frame.index, frame.time_sec) for frame in result.keyframes] == [(0, 0.0), (1, 12.5)]
+    assert [frame.jpeg for frame in result.keyframes] == [b"\xff\xd8\xff0", b"\xff\xd8\xff1"]
+
+
+def test_keyframes_ignore_a_manifest_naming_unknown_files(tmp_path: Path) -> None:
+    """A frame the manifest does not name keeps its position and no time."""
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"fakevideo")
+    manifest = {"frames": [{"file": "other.jpg", "index": 0, "time_sec": 3.0}]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/J1/artifacts/keyframes.zip":
+            return httpx.Response(200, content=_keyframes_zip(manifest))
+        return _handler(request)
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(handler))
+    result = NextextClient(_cfg(), client=client).process_media(media)
+    assert [frame.time_sec for frame in result.keyframes] == [None, None]
+
+
+def test_keyframes_survive_a_corrupt_manifest(tmp_path: Path) -> None:
+    """Unreadable JSON degrades to untimed frames rather than losing the clip."""
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"fakevideo")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/J1/artifacts/keyframes.zip":
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("frame_0.jpg", b"\xff\xd8\xff0")
+                zf.writestr("manifest.json", "{not json")
+            return httpx.Response(200, content=buf.getvalue())
+        return _handler(request)
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(handler))
+    result = NextextClient(_cfg(), client=client).process_media(media)
+    assert [(frame.index, frame.time_sec) for frame in result.keyframes] == [(0, None)]
 
 
 def test_process_media_failsoft_on_job_failure(tmp_path: Path) -> None:
