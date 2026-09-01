@@ -1,12 +1,12 @@
 import { IconButton, WarningIcon } from '@infra/ui'
 import type { ReportItemInput } from '@/api/types'
 import { CheckAllIcon } from '@/components/common/icons'
-import { ADD_ALL_MAX_ITEMS, useAddAllToReport } from '@/hooks/useReports'
+import { useAddAllToReport } from '@/hooks/useReports'
 import { useT } from '@/i18n/LanguageContext'
 
 interface Props<Row> {
-  /** Walk the section's cursor pages and return every matching row. */
-  fetchAll: () => Promise<Row[]>
+  /** Walk the section's cursor pages, stopping after `maxItems` rows. */
+  fetchAll: (maxItems: number) => Promise<Row[]>
   /** The same pure snapshot builder the section's rows use. */
   toItem: (row: Row) => ReportItemInput
   /** Whether the section currently has anything to add. */
@@ -28,25 +28,29 @@ interface Props<Row> {
  */
 export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className }: Props<Row>) {
   const t = useT()
-  const { run, status, added, skipped } = useAddAllToReport<Row>({ fetchAll, toItem })
+  const { run, status, added, skipped, updated, cap } = useAddAllToReport<Row>({ fetchAll, toItem })
   const busy = status === 'fetching' || status === 'adding'
   const failed = status === 'failed'
+  // Both refusals are the caller's to act on, not the server's to retry.
+  const refused = status === 'too_many' || status === 'too_large'
 
-  // One line of plain text beside the button — the SPA has no toast layer, and
-  // the outcome is worth stating: "0 added, 40 already in report" is a
-  // different answer from "40 added", and both look identical in the rows.
+  // No toast layer, and the outcome is worth stating: "0 added, 40 already in
+  // report" and "40 added" look identical in the rows.
   let message: string | null = null
-  if (status === 'too_many') message = t('report.add_all_too_many', { max: ADD_ALL_MAX_ITEMS })
+  if (status === 'too_many') message = t('report.add_all_too_many', { max: cap })
+  else if (status === 'too_large') message = t('report.add_all_too_large')
   else if (failed) message = t('report.add_all_failed')
   else if (status === 'done') {
-    message = added === 0 && skipped > 0 ? t('report.add_all_none') : t('report.add_all_done', { added, skipped })
+    if (added === 0 && updated === 0 && skipped > 0) message = t('report.add_all_none')
+    else if (updated > 0) message = t('report.add_all_done_updated', { added, updated, skipped })
+    else message = t('report.add_all_done', { added, skipped })
   }
 
   return (
     <div className={`flex items-center gap-2 ${className ?? ''}`}>
       {message && (
         <span
-          className={`text-xs ${failed || status === 'too_many' ? 'text-destructive' : 'text-muted-foreground'}`}
+          className={`text-xs ${failed || refused ? 'text-destructive' : 'text-muted-foreground'}`}
           role="status"
           data-testid="add-all-message"
         >

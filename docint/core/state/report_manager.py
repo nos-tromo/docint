@@ -25,6 +25,10 @@ from docint.core.state.report_item import ReportItem
 if TYPE_CHECKING:
     from docint.core.rag import RAG
 
+# Keys per backfill lookup: SQLite caps host parameters at 999, and a batch
+# may carry REPORT_BATCH_MAX_ITEMS of them.
+_BACKFILL_KEY_CHUNK = 500
+
 
 @dataclass(slots=True)
 class ReportManager:
@@ -376,26 +380,42 @@ class ReportManager:
         batch of hundreds is answered by one report refetch on the client, not
         by echoing every snapshot back over the wire.
 
+        One amendment is accepted on an already-stored snapshot: a
+        ``translation`` it lacks, counted as ``updated``. Findings are usually
+        added before anyone translates them, and a frozen snapshot is
+        otherwise never revisited. A stored translation is never replaced — it
+        is the one the investigator saw when they added the finding.
+
         Args:
             report_id (int): The report id.
             owner (str | None): The principal requesting the adds.
             items (list[dict[str, Any]]): Per-item ``add_item`` kwargs.
 
         Returns:
-            dict[str, Any] | None: ``{"added", "skipped", "item_count"}``, or
-                ``None`` when the report is missing or not owned by ``owner``.
+            dict[str, Any] | None: ``{"added", "skipped", "updated",
+                "item_count"}``, or ``None`` when the report is missing or not
+                owned by ``owner``.
         """
         with self._session_scope() as s:
             report = s.get(Report, report_id)
             if report is None or report.owner != owner:
                 return None
             rows = s.query(ReportItem.dedupe_key).filter_by(report_id=report_id).all()
-            seen = {str(r[0]) for r in rows}
-            position = len(seen)
+            stored_keys = {str(r[0]) for r in rows}
+            seen = set(stored_keys)
+            position = len(stored_keys)
             added = 0
+            # Translations offered for findings already stored, first one
+            # winning. Keyed off the pre-batch set, so an item this batch adds
+            # is never re-read.
+            backfill: dict[str, dict[str, Any]] = {}
             for entry in items:
                 dedupe_key = str(entry["dedupe_key"])
                 if dedupe_key in seen:
+                    if dedupe_key in stored_keys and dedupe_key not in backfill:
+                        translation = (entry.get("snapshot") or {}).get("translation")
+                        if isinstance(translation, dict):
+                            backfill[dedupe_key] = translation
                     continue
                 seen.add(dedupe_key)
                 self._stage_item(
@@ -409,10 +429,53 @@ class ReportManager:
                 )
                 position += 1
                 added += 1
-            if added:
+            updated = self._backfill_translations(s, report_id, backfill) if backfill else 0
+            if added or updated:
                 report.updated_at = cast(Any, datetime.now(UTC))
                 s.commit()
-            return {"added": added, "skipped": len(items) - added, "item_count": position}
+            return {
+                "added": added,
+                "skipped": len(items) - added - updated,
+                "updated": updated,
+                "item_count": position,
+            }
+
+    @staticmethod
+    def _backfill_translations(
+        session: Any,
+        report_id: int,
+        translations: dict[str, dict[str, Any]],
+    ) -> int:
+        """Merge translations into stored snapshots lacking one (uncommitted).
+
+        Keyed by dedupe key; returns how many snapshots gained one. Reads back
+        only the items named, in chunks: snapshots carry frozen text and
+        thumbnails, so loading the whole report to amend a handful would cost
+        megabytes.
+        """
+        keys = list(translations)
+        updated = 0
+        for start in range(0, len(keys), _BACKFILL_KEY_CHUNK):
+            chunk = keys[start : start + _BACKFILL_KEY_CHUNK]
+            stored = (
+                session.query(ReportItem)
+                .filter(ReportItem.report_id == report_id, ReportItem.dedupe_key.in_(chunk))
+                .all()
+            )
+            for item in stored:
+                raw = cast(str | None, item.snapshot)
+                try:
+                    # Any, not dict: the isinstance guard below decides that.
+                    snapshot: Any = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    # As in _item_to_dict: leave an unreadable snapshot alone.
+                    continue
+                if not isinstance(snapshot, dict) or snapshot.get("translation"):
+                    continue
+                snapshot["translation"] = translations[str(item.dedupe_key)]
+                item.snapshot = cast(Any, json.dumps(snapshot, ensure_ascii=False))
+                updated += 1
+        return updated
 
     @staticmethod
     def _stage_item(

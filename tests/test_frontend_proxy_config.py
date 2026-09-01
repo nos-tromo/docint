@@ -209,6 +209,58 @@ def test_ingest_proxy_streams_request_body() -> None:
     assert "proxy_request_buffering off;" in _ingest_location_block()
 
 
+def _api_location_block() -> str:
+    """Return the directives inside the backend-API ``location`` block."""
+    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+    match = re.search(r"location ~ \^/\([^)]*\)\(/\|\$\) \{(.*?)\n    \}", nginx_conf, re.DOTALL)
+    assert match is not None, "backend-API location block not found in nginx config"
+    return match.group(1)
+
+
+def test_api_proxy_uses_configurable_json_body_limit() -> None:
+    """JSON API bodies must have their own configurable ceiling.
+
+    A full batch add is single-digit MB; without this the location inherits
+    nginx's 1m default and 413s before FastAPI sees it.
+    """
+    assert "client_max_body_size ${DOCINT_API_MAX_BODY_SIZE};" in _api_location_block()
+
+
+def test_api_proxy_streams_request_body() -> None:
+    """Large JSON bodies must stream through nginx unbuffered.
+
+    As at the ingest location: a buffered body spools to /tmp, which is a 16m
+    tmpfs here — well under the API body ceiling.
+    """
+    block = _api_location_block()
+
+    assert "proxy_request_buffering off;" in block
+    assert "proxy_http_version 1.1;" in block
+
+
+def test_frontend_image_defaults_api_body_limit() -> None:
+    """The image must default DOCINT_API_MAX_BODY_SIZE.
+
+    envsubst renders an undefined variable empty, leaving `client_max_body_size
+    ;` and stopping nginx from booting.
+    """
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.frontend").read_text(encoding="utf-8")
+
+    assert "ENV DOCINT_API_MAX_BODY_SIZE=64m" in dockerfile
+
+
+def test_frontend_compose_exposes_api_body_limit_override() -> None:
+    """Only the frontend needs the JSON-API ceiling, unlike the upload one.
+
+    DOCINT_CLIENT_MAX_BODY_SIZE is on both services because the backend
+    advertises those bytes via GET /config; this one is enforcement-only.
+    """
+    compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
+
+    occurrences = compose.count("DOCINT_API_MAX_BODY_SIZE: ${DOCINT_API_MAX_BODY_SIZE:-64m}")
+    assert occurrences == 1, f"expected the JSON-API body limit on the frontend only, found {occurrences}"
+
+
 def test_backend_tmp_is_disk_backed_volume() -> None:
     """The backend's upload spool (/tmp) must be a disk volume, not a RAM tmpfs.
 

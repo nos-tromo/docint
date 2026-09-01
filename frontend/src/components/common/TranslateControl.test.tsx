@@ -1,10 +1,14 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TranslateControl } from './TranslateControl'
+import { useTranslationsStore } from '@/stores/translations'
 
 afterEach(() => vi.restoreAllMocks())
+// Keyed by text app-wide: one test's translation would otherwise satisfy the
+// next one's toggle.
+beforeEach(() => useTranslationsStore.setState({ byText: {} }))
 
 function renderControl(onTranslated?: (t: unknown) => void) {
   const qc = new QueryClient({

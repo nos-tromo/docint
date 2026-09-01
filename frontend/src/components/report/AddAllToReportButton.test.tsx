@@ -10,13 +10,48 @@ import type { Report, ReportItemInput } from '@/api/types'
 
 interface Row {
   chunk_id: string
+  translation?: { text: string; target_lang: string; model: string }
 }
 
 const toItem = (row: Row): ReportItemInput => ({
   artifact_type: 'entity_finding',
   dedupe_key: `entity:${row.chunk_id}`,
-  snapshot: { chunk_id: row.chunk_id }
+  snapshot: {
+    chunk_id: row.chunk_id,
+    // Conditional exactly as the real builders spread it, so a row with no
+    // translation produces a snapshot with no such key.
+    ...(row.translation ? { translation: row.translation } : {})
+  }
 })
+
+/** A report holding one item, whose snapshot the tests vary. */
+function reportHolding(snapshot: Record<string, unknown>): Report {
+  return {
+    id: 1,
+    title: 'Case',
+    collection_name: 'docs',
+    operator: null,
+    reference_number: null,
+    show_toc: true,
+    show_collection_overview: true,
+    session_id: null,
+    created_at: null,
+    updated_at: null,
+    item_count: 1,
+    collection_overview: null,
+    items: [
+      {
+        id: 5,
+        artifact_type: 'entity_finding',
+        dedupe_key: 'entity:c1',
+        position: 0,
+        note: null,
+        snapshot,
+        created_at: null
+      }
+    ]
+  }
+}
 
 interface Captured {
   url: string
@@ -30,7 +65,7 @@ interface Captured {
  */
 function stubFetch(
   captured: Captured[],
-  batch: { added: number; skipped: number } = { added: 0, skipped: 0 },
+  batch: { added: number; skipped: number; updated?: number } = { added: 0, skipped: 0 },
   report?: Report
 ) {
   vi.stubGlobal(
@@ -46,7 +81,12 @@ function stubFetch(
         return {
           ok: true,
           status: 200,
-          json: async () => ({ added: batch.added || items.length, skipped: batch.skipped, item_count: items.length })
+          json: async () => ({
+            added: batch.added || items.length,
+            skipped: batch.skipped,
+            updated: batch.updated ?? 0,
+            item_count: items.length
+          })
         }
       }
       if (report && /\/reports\/\d+$/.test(url.split('?')[0])) {
@@ -153,6 +193,61 @@ describe('AddAllToReportButton', () => {
     expect(sent.map((i) => i.dedupe_key)).toEqual(['entity:c2'])
   })
 
+  it('resends an item the report holds when it can gain a translation', async () => {
+    // The one exception to "duplicates are never sent": a stored snapshot with
+    // no translation and a fresh one that has it.
+    const captured: Captured[] = []
+    const qc = client()
+    useReportStore.setState({ activeReportId: 1 })
+    const existing = reportHolding({ chunk_id: 'c1' })
+    stubFetch(captured, { added: 0, skipped: 0, updated: 1 }, existing)
+    qc.setQueryData<Report>(reportKey(1), existing)
+    const translation = { text: 'translated', target_lang: 'en', model: 'm' }
+
+    renderButton([{ chunk_id: 'c1', translation }], qc)
+    await clickAddAll()
+
+    await waitFor(() => expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(true))
+    const sent = captured.find((c) => c.url.includes('/items/batch'))!.body.items as ReportItemInput[]
+    expect(sent.map((i) => i.dedupe_key)).toEqual(['entity:c1'])
+    expect(sent[0].snapshot.translation).toEqual(translation)
+  })
+
+  it('does not resend an item whose stored snapshot already carries a translation', async () => {
+    const captured: Captured[] = []
+    const qc = client()
+    useReportStore.setState({ activeReportId: 1 })
+    const existing = reportHolding({
+      chunk_id: 'c1',
+      translation: { text: 'stored', target_lang: 'en', model: 'm' }
+    })
+    stubFetch(captured, { added: 0, skipped: 0 }, existing)
+    qc.setQueryData<Report>(reportKey(1), existing)
+
+    renderButton([{ chunk_id: 'c1', translation: { text: 'fresher', target_lang: 'en', model: 'm' } }], qc)
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toBeInTheDocument())
+    expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
+  })
+
+  it('states the translations a batch backfilled, not only what it added', async () => {
+    const captured: Captured[] = []
+    const qc = client()
+    useReportStore.setState({ activeReportId: 1 })
+    const existing = reportHolding({ chunk_id: 'c1' })
+    stubFetch(captured, { added: 1, skipped: 0, updated: 1 }, existing)
+    qc.setQueryData<Report>(reportKey(1), existing)
+    const translation = { text: 'translated', target_lang: 'en', model: 'm' }
+
+    renderButton([{ chunk_id: 'c1', translation }, { chunk_id: 'c2', translation }], qc)
+    await clickAddAll()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('add-all-message')).toHaveTextContent(/1 added, 1 translations added/i)
+    )
+  })
+
   it('reports the outcome, counting locally skipped rows too', async () => {
     const captured: Captured[] = []
     stubFetch(captured, { added: 1, skipped: 0 })
@@ -208,6 +303,71 @@ describe('AddAllToReportButton', () => {
     await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/too many findings/i))
     expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
     expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('walks one row past the cap so an overflowing section is detectable', async () => {
+    // fetchAllPages truncates silently, so asking for cap + 1 is what makes an
+    // oversize section observable rather than a quiet sample.
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    const fetchAll = vi.fn(async () => [{ chunk_id: 'c1' }])
+    const qc = client()
+    render(
+      <QueryClientProvider client={qc}>
+        <AddAllToReportButton fetchAll={fetchAll} toItem={toItem} hasRows />
+      </QueryClientProvider>
+    )
+
+    await clickAddAll()
+
+    await waitFor(() => expect(fetchAll).toHaveBeenCalledWith(2001))
+  })
+
+  it('refuses against the cap the server advertises, not the shipped default', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    const qc = client()
+    qc.setQueryData(['app-config'], {
+      graph_top_k: 80,
+      graph_max_top_k: 500,
+      collection_timeout: 120,
+      max_upload_bytes: 1024,
+      report_batch_max_items: 3,
+      language: 'en'
+    })
+
+    renderButton([{ chunk_id: 'c1' }, { chunk_id: 'c2' }, { chunk_id: 'c3' }, { chunk_id: 'c4' }], qc)
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/too many findings/i))
+    expect(screen.getByTestId('add-all-message')).toHaveTextContent('3')
+    expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
+  })
+
+  it('explains a 413 as a size problem instead of offering a retry', async () => {
+    // Retrying the same oversize body cannot succeed, so no retry affordance.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string) => {
+        const url = String(u)
+        if (url.endsWith('/reports')) {
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        if (url.includes('/items/batch')) {
+          return new Response('<html><title>413 Request Entity Too Large</title></html>', { status: 413 })
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    useReportStore.setState({ activeReportId: 1 })
+
+    renderButton([{ chunk_id: 'c1' }], client())
+    await clickAddAll()
+
+    await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/larger than the server accepts/i))
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
   })
 
   it('shows a retry state when the batch fails', async () => {

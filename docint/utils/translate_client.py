@@ -50,12 +50,14 @@ def _pipeline() -> OpenAIPipeline:
     return OpenAIPipeline()
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=4096)
 def _translate_cached(text: str, target_lang: str, model: str) -> str:
     """Translate ``text`` (cached).
 
     Raises on transport/model failure so failures are *not* cached (only
-    successful translations are).
+    successful translations are). Sized for a whole Analysis section, since
+    "Translate all" walks thousands of findings and its browser-side store is
+    session-lifetime — a reload re-asks for every one.
     """
     system_prompt = load_localized_prompt("translate", default=_DEFAULT_TRANSLATE_PROMPT, lang=target_lang)
     return _pipeline().call_chat(text, system_prompt=system_prompt, model=model).strip()

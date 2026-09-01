@@ -1,10 +1,12 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { useTranslatable } from './useTranslatable'
+import { useTranslationsStore, storedTranslation } from '@/stores/translations'
 
 afterEach(() => vi.restoreAllMocks())
+beforeEach(() => useTranslationsStore.setState({ byText: {} }))
 
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({
@@ -60,6 +62,56 @@ describe('useTranslatable', () => {
     // Cached: no second network round-trip, no second report to the caller.
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(onTranslated).toHaveBeenCalledTimes(1)
+  })
+
+  it('writes a successful translation to the shared store', async () => {
+    mockFetchOk({ ok: true, translation: 'Hallo Welt', model: 'm', target_lang: 'de' })
+    const { result } = renderHook(() => useTranslatable('Hello world'), { wrapper })
+
+    await act(async () => {
+      await result.current.toggle()
+    })
+
+    expect(storedTranslation('Hello world')).toEqual({
+      text: 'Hallo Welt',
+      target_lang: 'de',
+      model: 'm'
+    })
+  })
+
+  it('shows a translation already in the shared store without fetching', async () => {
+    const fetchMock = mockFetchOk({ ok: true, translation: 'unused', model: 'm', target_lang: 'de' })
+    useTranslationsStore.setState({
+      byText: { 'Hello world': { text: 'Hallo Welt', target_lang: 'de', model: 'm' } }
+    })
+    const { result } = renderHook(() => useTranslatable('Hello world'), { wrapper })
+
+    await act(async () => {
+      await result.current.toggle()
+    })
+
+    expect(result.current.shown).toBe(true)
+    expect(result.current.translation).toBe('Hallo Welt')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('a remounted row reuses the stored translation instead of re-posting it', async () => {
+    // The tables are virtualized: an unmount destroys hook state, so without
+    // the shared store the next toggle pays for the translation again.
+    const fetchMock = mockFetchOk({ ok: true, translation: 'Hallo Welt', model: 'm', target_lang: 'de' })
+    const first = renderHook(() => useTranslatable('Hello world'), { wrapper })
+    await act(async () => {
+      await first.result.current.toggle()
+    })
+    first.unmount()
+
+    const second = renderHook(() => useTranslatable('Hello world'), { wrapper })
+    await act(async () => {
+      await second.result.current.toggle()
+    })
+
+    expect(second.result.current.translation).toBe('Hallo Welt')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('sets failed and does not call onTranslated when the fetch rejects at the transport layer', async () => {

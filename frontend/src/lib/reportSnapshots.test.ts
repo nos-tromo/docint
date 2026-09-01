@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { chatAnswerSnapshot, entityFindingSnapshot, hateSpeechSnapshot, summarySnapshot } from './reportSnapshots'
+import {
+  chatAnswerSnapshot,
+  chunkTextOf,
+  entityFindingSnapshot,
+  hateSpeechSnapshot,
+  summarySnapshot
+} from './reportSnapshots'
 import type { HateSpeechRow, NerSourceRow } from '@/api/types'
 
 describe('reportSnapshots', () => {
@@ -90,6 +96,15 @@ describe('reportSnapshots', () => {
     const sources = input.snapshot.sources as Record<string, unknown>[]
     expect(sources[0].citation_index).toBe(2)
     expect(sources[1]).not.toHaveProperty('citation_index')
+  })
+
+  it('chunkTextOf prefers chunk_text, falls back to text, and trims', () => {
+    // One derivation for display, the translate POST and the store key, so a
+    // batch looks a translation up by what the row stored it under.
+    expect(chunkTextOf({ chunk_text: '  flagged line  ', text: 'other' })).toBe('flagged line')
+    expect(chunkTextOf({ text: '  fallback line ' })).toBe('fallback line')
+    expect(chunkTextOf({ chunk_text: null, text: null })).toBe('')
+    expect(chunkTextOf({})).toBe('')
   })
 
   it('finding snapshots carry image identity only when the row has one', () => {

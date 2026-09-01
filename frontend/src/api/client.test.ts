@@ -54,6 +54,26 @@ describe('client', () => {
     mockFetch({ detail: 'bad' }, { status: 400, ok: false })
     await expect(apiGet('/x')).rejects.toBeInstanceOf(ApiError)
   })
+
+  it('keeps the status when the error body is not JSON', async () => {
+    // nginx answers an oversize body with an HTML page, and a Response yields
+    // its body once — json()-then-text() throws and loses the 413.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('<html><head><title>413 Request Entity Too Large</title></head></html>', {
+          status: 413,
+          headers: { 'content-type': 'text/html' }
+        })
+      )
+    )
+
+    const err = await apiPost('/reports/1/items/batch', { items: [] }).catch((e) => e)
+
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(413)
+    expect(String((err as ApiError).detail)).toContain('413 Request Entity Too Large')
+  })
 })
 
 describe('apiGetOrNull', () => {

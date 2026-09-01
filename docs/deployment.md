@@ -94,6 +94,13 @@ the frontend port is published for local development.
   advertise it via `GET /config` (`max_upload_bytes`); the SPA uses it to split
   large selections into sub-cap batches, so the total upload is not bounded by
   this cap — only an individual file bigger than it would still be rejected.
+- Environment: `DOCINT_API_MAX_BODY_SIZE` (default `64m`) — the request-body
+  cap nginx enforces on the JSON API locations (`/reports`, `/query`, …).
+  Frontend-only and never read by the backend, unlike the upload cap above: the
+  SPA is bounded by the item count the backend advertises
+  (`REPORT_BATCH_MAX_ITEMS`), not by these bytes. It exists because the report
+  batch add posts every picked finding's snapshot in one body, which is
+  single-digit MB for a large section and well past nginx's own 1 MB default.
 - Attaches to `docint-net` and to `edge-net` with the alias
   `docint-frontend` (how the `edge-plane` gateway reaches the SPA under its
   `/docint/` sub-path), and `depends_on` the `backend` so Compose starts the
@@ -210,6 +217,7 @@ of network, proxy, and runtime overrides are Compose-specific:
 | `DATA_NET` | Name of the shared external data network (default `data-net`). |
 | `DOCINT_HOST_PORT` | Host port for the React SPA under `make up-dev` (default `8080`). |
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | Per-request upload cap nginx enforces on the frontend (default `1g`); the backend reads the same value to advertise it to the SPA (which batches large uploads under it). Raise only for single files larger than the default. |
+| `DOCINT_API_MAX_BODY_SIZE` | Per-request cap nginx enforces on the JSON API locations (default `64m`), sized for the report batch add. Frontend-only — nothing advertises it. Raise it alongside `REPORT_BATCH_MAX_ITEMS` when a section's findings run into the tens of thousands. |
 | `PRELOAD_MODELS` | When `true`, the backend runs `load-models` at startup before `uvicorn`. |
 
 If you use an outbound proxy, put the proxy variables in `.env` too, so

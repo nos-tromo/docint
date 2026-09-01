@@ -452,6 +452,8 @@ export interface ReportItemInput {
 export interface ReportBatchResult {
   added: number
   skipped: number
+  /** Items the report already held that gained a translation from this batch. */
+  updated: number
   item_count: number
 }
 
@@ -616,6 +618,12 @@ export interface AppConfig {
    * safety margin) so no single POST is rejected with 413.
    */
   max_upload_bytes: number
+  /**
+   * The most artifacts one report batch add may carry (`REPORT_BATCH_MAX_ITEMS`).
+   * Optional: a backend predating this field leaves "Add all" on its shipped
+   * fallback rather than breaking.
+   */
+  report_batch_max_items?: number
   /** Active UI/response locale, driven by `RESPONSE_LANGUAGE` on the backend. */
   language: 'en' | 'de'
 }

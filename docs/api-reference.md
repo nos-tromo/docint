@@ -90,10 +90,11 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 ### `GET /config`
 
 Deploy-time frontend configuration for the SPA, read once on load and served
-without a principal. Returns five fields (`FrontendConfigOut`):
-`graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`
-and `language`. They come from `NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`,
-`FRONTEND_COLLECTION_TIMEOUT`, `DOCINT_CLIENT_MAX_BODY_SIZE` and
+without a principal. Returns six fields (`FrontendConfigOut`):
+`graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`,
+`report_batch_max_items` and `language`. They come from `NER_GRAPH_TOP_K`,
+`NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
+`DOCINT_CLIENT_MAX_BODY_SIZE`, `REPORT_BATCH_MAX_ITEMS` and
 `RESPONSE_LANGUAGE` respectively (see
 [configuration.md](configuration.md#frontend--frontendconfig)).
 
@@ -672,11 +673,23 @@ the whole hate-speech set into the report at once.
 Idempotent like the single add: an artifact the report already holds is
 counted in `skipped`, never stored twice, so the call is safe to retry. All
 image-bearing snapshots in the batch are enriched from **one** companion
-scroll. Answers with counts — `{"added", "skipped", "item_count"}` — rather
-than the items, so a batch of hundreds is read back by one report refetch.
+scroll. Answers with counts — `{"added", "skipped", "updated", "item_count"}`
+— rather than the items, so a batch of hundreds is read back by one report
+refetch.
 
-`422` on an empty list or above `REPORT_BATCH_MAX_ITEMS` (2000) items; `404`
-when the report is missing or not owned.
+`updated` counts the one amendment a duplicate can make. An entry whose
+snapshot carries a `translation` the stored snapshot lacks merges it in and
+counts as `updated` rather than `skipped`; a finding is usually added before
+anyone translates it, and a frozen snapshot is otherwise never revisited. The
+merge writes only that key, only onto a snapshot without one, and never
+replaces a translation already stored. `added`, `updated` and `skipped`
+together always account for every entry sent.
+
+`422` on an empty list or above `REPORT_BATCH_MAX_ITEMS` items (default 2000,
+env-tunable and advertised via `GET /config`, so a client can refuse an
+oversize set before posting it); `404` when the report is missing or not owned.
+A batch this size is several MB of snapshots, which is why the frontend nginx
+gives the JSON API locations their own `DOCINT_API_MAX_BODY_SIZE` ceiling.
 
 ### `PATCH /reports/{report_id}/items/{item_id}`
 
@@ -945,6 +958,13 @@ translates text the caller already holds, so there is nothing to leak and no
 store re-fetch. Fail-soft — a transport or model failure returns `ok: false`
 with the same shape rather than an error status, so the client keeps showing
 the original. Nothing ingested or stored is ever translated.
+
+There is no batch variant by design. The SPA's section-wide "Translate all"
+drives this route directly, three calls in flight at a time: translation is
+one model round-trip per snippet either way, and a single request running for
+the length of a whole section would be a background job without any of the
+machinery one needs. Successful translations are cached server-side by
+`(text, target_lang, model)`, so a repeated run is cheap.
 
 ## Request-model reference
 

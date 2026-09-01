@@ -4543,6 +4543,21 @@ def test_get_config_reports_upload_ceiling(client: TestClient, monkeypatch: pyte
     assert response.json()["max_upload_bytes"] == 4 * 1024**3
 
 
+def test_get_config_advertises_report_batch_cap(client: TestClient) -> None:
+    """`GET /config` advertises the batch-add item cap the API actually enforces.
+
+    Asserted against the module constant, not a monkeypatched env var: pydantic
+    binds the cap at import, so the two must match by construction.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    assert response.json()["report_batch_max_items"] == api_module.REPORT_BATCH_MAX_ITEMS
+
+
 def test_get_config_includes_language(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """`GET /config` reports the active `RESPONSE_LANGUAGE` locale.
 

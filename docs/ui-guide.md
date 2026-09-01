@@ -160,6 +160,12 @@ locator/reference metadata flattened into a single Metadata column and an
 inline "Add to report" control. `HateSpeechTable` follows the same one-row-per-
 finding table shape.
 
+Both tables carry the same three section-wide controls in their header, in
+order: **Translate all**, **Add all findings to report**, **Export CSV**. Each
+acts on every finding the section's filter matches — the tables page 50 rows at
+a time, so all three walk the remaining cursor pages themselves rather than act
+on what happens to be on screen.
+
 ### Inspector (`src/routes/Inspector.tsx`)
 
 A paginated document table (`src/components/inspector/DocumentTable.tsx`)
@@ -214,8 +220,19 @@ the original is always one click away, never discarded. Long chunks stay
 clamped to four lines behind a "Show more" toggle in either view. This is a
 display-time overlay only: nothing ingested or stored is ever translated.
 
+**Translate all**, in each Analysis section's header, does the same for every
+finding the section matches instead of one at a time — a corpus in a language
+nobody on the team reads is not made readable one hover at a time. It runs in
+the foreground, one call per distinct chunk text with three in flight, showing
+how far it has got and staying clickable to stop; pressing it again picks up
+the remainder, since nothing already translated this session is re-sent. Three
+consecutive failures end the run, so an unreachable model is reported in
+seconds rather than after the whole section. It stores nothing — the
+translations live in the browser for the session.
+
 Translating a finding before adding it to a report carries that translation
-into the report's snapshot — see [reports.md](reports.md).
+into the report's snapshot, and re-running "Add all" backfills translations
+into findings already added — see [reports.md](reports.md).
 
 Translation reuses the same chat model as the rest of docint over the same
 router endpoint — there is no dedicated translation runtime and no

@@ -5,8 +5,10 @@ import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
 import { csvExportHref, getNerSourcesPage } from '@/api/collections'
 import { EntityFinding } from './EntityFinding'
 import { AddAllToReportButton } from '@/components/report/AddAllToReportButton'
+import { TranslateAllButton } from '@/components/common/TranslateAllButton'
 import { fetchAllPages } from '@/lib/fetchAllPages'
-import { entityFindingSnapshot } from '@/lib/reportSnapshots'
+import { chunkTextOf, entityFindingSnapshot } from '@/lib/reportSnapshots'
+import { storedTranslation } from '@/stores/translations'
 import { useT } from '@/i18n/LanguageContext'
 
 // Single source of truth for the table's column widths; the header row and
@@ -77,16 +79,18 @@ export function EntityFindingsTable({
   const selectedTypeLower = (selected.type || '').toLowerCase()
   // The same query the table's own infinite pages use, walked to the end at
   // the server's page maximum so a section-wide add sees every match.
-  const fetchAllFindings = () =>
-    fetchAllPages<NerSourceRow>((cursor) =>
-      getNerSourcesPage({
-        cursor,
-        limit: 500,
-        entity_text: selected.text,
-        entity_type: selected.type,
-        entity_merge_mode: entityMergeMode,
-        collection
-      })
+  const fetchAllFindings = (maxItems: number) =>
+    fetchAllPages<NerSourceRow>(
+      (cursor) =>
+        getNerSourcesPage({
+          cursor,
+          limit: 500,
+          entity_text: selected.text,
+          entity_type: selected.type,
+          entity_merge_mode: entityMergeMode,
+          collection
+        }),
+      { maxItems }
     )
   const exportParams = {
     entity_text: selected.text,
@@ -111,11 +115,15 @@ export function EntityFindingsTable({
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {/* Every matching finding, not just the rows paged in. */}
+          <TranslateAllButton fetchAll={fetchAllFindings} textOf={chunkTextOf} hasRows={findings.length > 0} />
           {/* Adds every finding the entity filter matches, not only the rows
               paged in — see AddAllToReportButton. */}
           <AddAllToReportButton
             fetchAll={fetchAllFindings}
-            toItem={(row: NerSourceRow) => entityFindingSnapshot(row, entityLabel)}
+            toItem={(row: NerSourceRow) =>
+              entityFindingSnapshot(row, entityLabel, storedTranslation(chunkTextOf(row)))
+            }
             hasRows={findings.length > 0}
           />
           {collection && (

@@ -23,16 +23,34 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
     page in 50 rows at a time behind a "Load more", so the control walks the
     remaining pages itself before adding — a report built from whatever had
     been scrolled into view would be a silent sample.
-  - Above 100 findings it asks first, and it refuses a set larger than 2000
-    (`REPORT_BATCH_MAX_ITEMS`) rather than adding a partial one; narrow the
-    selection — pick a more specific entity — and repeat.
+  - Above 100 findings it asks first, and it refuses a set larger than the
+    deployment's cap (`REPORT_BATCH_MAX_ITEMS`, default 2000, advertised by
+    `GET /config`) rather than adding a partial one; narrow the selection —
+    pick a more specific entity — and repeat. It walks one finding past the cap
+    on purpose, so an oversize section is refused outright instead of being
+    quietly trimmed to a capful.
   - Findings the report already holds are skipped, not duplicated, so the
     control is safe to press again after adding a few by hand. The outcome is
     stated beside it ("12 added, 3 already in report").
-  - **A batch carries no translations.** A translation is frozen into a
-    snapshot only when it was on screen at add-time (see below), which is a
-    per-row action a section-wide add never sees. Add such a finding
-    individually if its translation belongs in the report.
+  - **A batch carries the translations you already made.** Translations are
+    held app-wide for the session, keyed by the chunk's own text, so "Add all"
+    freezes one into every snapshot whose text you translated — including rows
+    scrolled out of view. It never translates anything itself: a finding you
+    never translated is added untranslated. Use **Translate all** first (see
+    below) — and if you added findings before translating them, run it and then
+    press "Add all" again: the second pass backfills the translations into the
+    snapshots already in the report.
+- **Translate all** sits beside it in the same header and translates every
+  finding the section's filter matches — again the whole set, not the rows
+  paged in. It is a foreground run of one call per distinct chunk text: the
+  button shows how far it has got, stays clickable to stop, and can be pressed
+  again to pick up the remainder (anything already translated this session is
+  never re-sent). Above 100 findings it asks first, since a large section takes
+  minutes. If the translation model is unreachable the run stops after three
+  consecutive failures rather than working through the whole section to report
+  the same outage. Nothing is stored by translating: the translations live in
+  the browser for the session, and only reach the server when a finding they
+  belong to is added to a report.
 - The **Report** view lists your reports and, for the active one, shows the
   picked artifacts grouped by type with per-item notes, reordering, and removal.
 - Reports are **owner-scoped** and persisted server-side in the same SQLite
@@ -80,6 +98,15 @@ it as an additive labeled block or column next to the original — e.g.
 "Machine translation (→ Deutsch)" when the active locale is German. The
 translation overlay itself is described in
 [ui-guide.md](ui-guide.md#on-demand-translation-of-source-content).
+
+A finding added before it was translated is not stuck that way. Re-running
+"Add all" over the section backfills the translation into the stored snapshot:
+findings the report already holds are still skipped, except where the report's
+copy has no translation and the new one does. The merge is strictly additive —
+only the translation is written, and a translation already in the report is
+never replaced, since it is the one you saw when you added the finding. The
+outcome line counts those separately ("1 added, 12 translations added, 40
+already in report").
 
 ## Exporting
 

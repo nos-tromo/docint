@@ -181,6 +181,10 @@ services:
       - /etc/nginx/conf.d:size=1m,mode=1777
     environment:
       DOCINT_CLIENT_MAX_BODY_SIZE: ${DOCINT_CLIENT_MAX_BODY_SIZE:-1g}
+      # Frontend only, unlike the upload limit above: nginx enforces this one
+      # and nothing advertises it. The SPA is bounded by the item count the
+      # backend advertises (REPORT_BATCH_MAX_ITEMS), not by these bytes.
+      DOCINT_API_MAX_BODY_SIZE: ${DOCINT_API_MAX_BODY_SIZE:-64m}
     networks:
       docint-net:
         aliases:
