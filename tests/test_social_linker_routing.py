@@ -219,8 +219,8 @@ def test_run_stamps_posting_reference_metadata(tmp_path: Path) -> None:
     assert segment_ref["posting_text"] == "b"
 
 
-def test_build_posting_reference_index_requires_postings_profile() -> None:
-    """Header drift away from the postings profile degrades to link-ids-only."""
+def test_build_posting_reference_index_requires_a_known_social_profile() -> None:
+    """Header drift away from both social profiles degrades to link-ids-only."""
     from docint.core.ingest.social_linker import build_posting_reference_index
 
     df = pd.DataFrame({"UUID": ["u1"], "Posting ID": ["P_1"], "Something Else": ["x"]})
@@ -571,3 +571,189 @@ def test_timestamp_link_can_be_switched_off() -> None:
         timestamp_link_enabled=False,
     )
     assert linker.timestamp_link_enabled is False
+
+
+#: The messages profile's exact header list, as a chat-style export writes it.
+_MESSAGES_COLUMNS: list[str] = [
+    "UUID",
+    "Chat ID",
+    "Sender",
+    "Timestamp",
+    "Text",
+    "Tags",
+    "URL",
+    "Chat Group",
+    "Answers Count",
+    "Reply To",
+    "Network",
+]
+
+
+def _write_messages_export(
+    root: Path,
+    *,
+    media_author: str = "Jane Poster",
+    filename: str = "pic.jpg",
+) -> None:
+    """Write a chat-style export: a messages-schema table plus a media manifest.
+
+    Serialized like :func:`_write_semicolon_postings` (``;`` + UTF-8 BOM). The
+    manifest's ids name no message, so only the stamp links the row — or the
+    repeated text, when *media_author* names someone else.
+
+    Args:
+        root: Temporary directory in which to create the export.
+        media_author: ``Author`` on the manifest row; a value other than the
+            message's ``Sender`` produces the shared-post shape.
+        filename: Basename written into ``Exported media filename``.
+    """
+    pd.DataFrame(
+        {
+            "UUID": ["u1"],
+            "Chat ID": ["4400000000000000001"],
+            "Sender": ["Jane Poster"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+            "Text": ["A short invented post about nothing at all."],
+            "Tags": [""],
+            "URL": ["https://social.invalid/janeposter/status/4400000000000000001"],
+            "Chat Group": [""],
+            "Answers Count": ["0"],
+            "Reply To": [""],
+            "Network": ["ChatNet"],
+        },
+        columns=_MESSAGES_COLUMNS,
+    ).to_csv(root / "messages.csv", index=False, sep=";", encoding="utf-8-sig")
+    pd.DataFrame(
+        {
+            "Media ID": ["7700000000000000009"],
+            "Network ID": ["7700000000000000009"],
+            "Author": [media_author],
+            "Network": ["ChatNet"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+            "Title": ["A short invented post about nothing at all."],
+            "Exported media filename": [filename],
+        }
+    ).to_csv(root / "media.csv", index=False, sep=";", encoding="utf-8-sig")
+
+
+def test_find_tables_accepts_a_messages_schema_as_the_postings_table(tmp_path: Path) -> None:
+    """A chat-style export carries its postings in the messages schema."""
+    _write_messages_export(tmp_path)
+    linker = SocialLinker(image_service=_FakeImageService(), nextext_client=_FakeNextext(), target_collection="c")
+
+    postings_csv, media_csv = linker._find_tables(tmp_path)
+
+    assert postings_csv is not None
+    assert postings_csv.name == "messages.csv"
+    assert media_csv is not None
+    assert media_csv.name == "media.csv"
+
+
+def test_postings_profile_wins_over_a_messages_table(tmp_path: Path) -> None:
+    """A real postings table is the authority; the messages one only stands in.
+
+    The messages file is named to sort first, so a first-match-wins sweep fails.
+    """
+    _write_semicolon_postings(tmp_path, {"P_1_0": "pic.jpg"})
+    _write_messages_export(tmp_path)
+    (tmp_path / "messages.csv").rename(tmp_path / "chats.csv")
+    linker = SocialLinker(image_service=_FakeImageService(), nextext_client=_FakeNextext(), target_collection="c")
+
+    postings_csv, _ = linker._find_tables(tmp_path)
+
+    assert postings_csv is not None
+    assert postings_csv.name == "postings.csv"
+
+
+def test_run_links_media_for_a_messages_style_export(tmp_path: Path) -> None:
+    """A chat-style export links end to end, keyed by the message's own id.
+
+    Regression: requiring the exact postings profile made such exports no-op.
+    """
+    _write_messages_export(tmp_path)
+    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    img = _FakeImageService()
+
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    assert len(img.images) == 1
+    assert img.images[0].source_doc_id == "u1"
+    assert img.images[0].extra_metadata["posting_id"] == "4400000000000000001"
+    consumed_names = {p.name for p in result.consumed_paths}
+    assert {"media.csv", "pic.jpg"}.issubset(consumed_names)
+    assert "messages.csv" not in consumed_names
+
+
+def test_run_stamps_posting_reference_metadata_from_a_messages_table(tmp_path: Path) -> None:
+    """Derived artifacts carry the message's own reference fields."""
+    _write_messages_export(tmp_path)
+    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    img = _FakeImageService()
+
+    SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    metadata = img.images[0].extra_metadata
+    assert metadata["posting_author"] == "Jane Poster"
+    assert metadata["posting_text"] == "A short invented post about nothing at all."
+    assert metadata["posting_network"] == "ChatNet"
+    assert metadata["posting_url"] == "https://social.invalid/janeposter/status/4400000000000000001"
+    assert metadata["posting_timestamp"] == "2026-03-04 21:30:56+00"
+
+
+def test_build_posting_reference_index_reads_a_messages_frame() -> None:
+    """A messages table is keyed by its own id column, not by ``Posting ID``."""
+    from docint.core.ingest.social_linker import build_posting_reference_index
+
+    df = pd.DataFrame(
+        {
+            "UUID": ["u1"],
+            "Chat ID": ["4400000000000000001"],
+            "Sender": ["Jane Poster"],
+            "Timestamp": ["2026-03-04 21:30:56+00"],
+            "Text": ["A short invented post about nothing at all."],
+            "Tags": [""],
+            "URL": ["https://social.invalid/janeposter/status/4400000000000000001"],
+            "Chat Group": [""],
+            "Answers Count": ["0"],
+            "Reply To": [""],
+            "Network": ["ChatNet"],
+        },
+        columns=_MESSAGES_COLUMNS,
+    )
+
+    index = build_posting_reference_index(df)
+
+    assert list(index) == ["4400000000000000001"]
+    assert index["4400000000000000001"]["posting_author"] == "Jane Poster"
+
+
+def test_run_links_a_shared_post_by_text_when_the_author_differs(tmp_path: Path) -> None:
+    """A shared post names the original author, so only its text can link it.
+
+    The manifest records the writer while the row is the sharer's, so the
+    author-scoped stamp rule refuses it and only the text rule is left.
+    """
+    _write_messages_export(tmp_path, media_author="Original Author")
+    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    img = _FakeImageService()
+
+    SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    assert len(img.images) == 1
+    assert img.images[0].source_doc_id == "u1"
+
+
+def test_text_link_can_be_switched_off(tmp_path: Path) -> None:
+    """``SOCIAL_TEXT_LINK_ENABLED=false`` leaves a shared post unlinked."""
+    _write_messages_export(tmp_path, media_author="Original Author")
+    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    img = _FakeImageService()
+
+    SocialLinker(
+        image_service=img,
+        nextext_client=_FakeNextext(),
+        target_collection="c",
+        text_link_enabled=False,
+    ).run(tmp_path)
+
+    assert img.images == []
