@@ -5,6 +5,7 @@ import { useUiStore } from '@/stores/ui'
 import { DocumentTable } from '@/components/inspector/DocumentTable'
 import { DocumentSummary } from '@/components/inspector/DocumentSummary'
 import { SessionZipButton } from '@/components/inspector/SessionZipButton'
+import { ExtractsPanel } from '@/components/inspector/ExtractsPanel'
 import { useT } from '@/i18n/LanguageContext'
 
 export function Inspector() {
@@ -30,6 +31,7 @@ export function Inspector() {
       ) : (
         <>
           <DocumentSummary summary={summary} />
+          <ExtractsPanel />
           <DocumentTable
             docs={docs}
             isFetching={query.isFetching}

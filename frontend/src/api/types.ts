@@ -506,6 +506,24 @@ export interface CollectionOverviewSnapshot {
   documents: CollectionOverviewDocument[]
 }
 
+/**
+ * One stored extract bundle, as listed by `GET /collections/{name}/extracts`.
+ *
+ * Read from the server's on-disk store rather than its job registry: jobs are
+ * in-memory and finished ones are evicted, while the archives outlive them.
+ */
+export interface ExtractRecord {
+  extract_id: string
+  collection: string
+  filename: string
+  created_at: string
+  size: number
+  target: string | null
+  counts: Record<string, number>
+  /** True when the bundle is complete but its combined PDF was capped out. */
+  pdf_skipped: boolean
+}
+
 export interface IngestEvent {
   event:
     | 'start'
@@ -524,6 +542,9 @@ export interface IngestEvent {
     | 'summary_started'
     | 'summary_progress'
     | 'summary_completed'
+    | 'extract_started'
+    | 'extract_progress'
+    | 'extract_completed'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was
@@ -588,6 +609,12 @@ export interface IngestJobSnapshot {
   error: string | null
   empty: boolean
   resolution: Record<string, number> | null
+  /** Which job kind this is; drives the event names its frames carry. */
+  kind?: 'ingest' | 'summary' | 'extract'
+  /** The one source an extract job covers, or null for a whole collection. */
+  target?: string | null
+  /** What a finished extract job stored, and what the client can download. */
+  artifact?: ExtractRecord | null
   created_at: string
   /**
    * When the run began, upload leg included — earlier than `created_at` by

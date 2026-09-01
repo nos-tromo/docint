@@ -429,6 +429,25 @@ export const en = {
   'inspector.caption': 'Browse indexed documents',
   'inspector.select_collection': 'Select a collection.',
 
+  // data extracts (Inspector)
+  'extract.title': 'Data extracts',
+  'extract.caption': 'Full transcripts, keyframe descriptions and document text as files',
+  'extract.build': 'Build extract',
+  'extract.running': 'Building the extract…',
+  'extract.running_progress': 'Rendering {done} of {total}',
+  'extract.failed': 'The extract could not be built.',
+  'extract.none': 'No extracts yet.',
+  'extract.download': 'Download extract (ZIP)',
+  'extract.download_source': 'Download this source as an extract (ZIP)',
+  'extract.delete': 'Delete extract',
+  'extract.delete_confirm': 'Delete this extract?',
+  'extract.pdf_skipped': 'PDF skipped (too large)',
+  'extract.count_documents': 'documents',
+  'extract.count_media': 'clips',
+  'extract.count_postings': 'postings',
+  'extract.count_images': 'images',
+  'extract.count_figures': 'figures',
+
   // reference-metadata field labels (shared by chat citations, entity
   // findings, hate-speech rows, and the .txt/.md download exports)
   'common.refmeta_network': 'Network',
