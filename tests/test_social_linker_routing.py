@@ -597,17 +597,14 @@ def _write_messages_export(
 ) -> None:
     """Write a chat-style export: a messages-schema table plus a media manifest.
 
-    Mirrors :func:`_write_semicolon_postings`'s serialization (``;`` + UTF-8 BOM)
-    but with the messages profile standing in for the postings table, as an
-    X-style export carries it. The manifest's ids are media-entity snowflakes
-    naming no message, so only the shared stamp -- or, when *media_author*
-    names someone else, the repeated text -- can link the row.
+    Serialized like :func:`_write_semicolon_postings` (``;`` + UTF-8 BOM). The
+    manifest's ids name no message, so only the stamp links the row — or the
+    repeated text, when *media_author* names someone else.
 
     Args:
         root: Temporary directory in which to create the export.
-        media_author: ``Author`` recorded on the manifest row. The default
-            agrees with the message's ``Sender``; a different value produces the
-            shared-post shape only the text rule reaches.
+        media_author: ``Author`` on the manifest row; a value other than the
+            message's ``Sender`` produces the shared-post shape.
         filename: Basename written into ``Exported media filename``.
     """
     pd.DataFrame(
@@ -655,8 +652,7 @@ def test_find_tables_accepts_a_messages_schema_as_the_postings_table(tmp_path: P
 def test_postings_profile_wins_over_a_messages_table(tmp_path: Path) -> None:
     """A real postings table is the authority; the messages one only stands in.
 
-    The messages file is named so it sorts first, so a first-match-wins sweep
-    would pick it and this test would fail.
+    The messages file is named to sort first, so a first-match-wins sweep fails.
     """
     _write_semicolon_postings(tmp_path, {"P_1_0": "pic.jpg"})
     _write_messages_export(tmp_path)
@@ -672,8 +668,7 @@ def test_postings_profile_wins_over_a_messages_table(tmp_path: Path) -> None:
 def test_run_links_media_for_a_messages_style_export(tmp_path: Path) -> None:
     """A chat-style export links end to end, keyed by the message's own id.
 
-    The regression this guards: the linker used to require the exact postings
-    profile, so an X-style export silently no-opped and linked nothing at all.
+    Regression: requiring the exact postings profile made such exports no-op.
     """
     _write_messages_export(tmp_path)
     (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
@@ -735,9 +730,8 @@ def test_build_posting_reference_index_reads_a_messages_frame() -> None:
 def test_run_links_a_shared_post_by_text_when_the_author_differs(tmp_path: Path) -> None:
     """A shared post names the original author, so only its text can link it.
 
-    The manifest records who wrote the post while the export's row is the
-    sharer's, so the author-scoped stamp rule refuses it and the text rule is
-    the only one left -- the shape 180 rows of a real X export take.
+    The manifest records the writer while the row is the sharer's, so the
+    author-scoped stamp rule refuses it and only the text rule is left.
     """
     _write_messages_export(tmp_path, media_author="Original Author")
     (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")

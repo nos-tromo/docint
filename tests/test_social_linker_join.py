@@ -632,9 +632,7 @@ def test_album_inference_wins_over_the_timestamp_fallback(tmp_path: Path) -> Non
 def _messages_export() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return a (messages, media) pair in the chat-style export shape.
 
-    The postings-equivalent table carries the messages schema (``Chat ID`` /
-    ``Sender`` / ``Text``) and its ids are media-entity snowflakes the manifest
-    never names, so only the stamp or the text can associate the two.
+    The manifest's ids name no message, so only the stamp or the text links them.
 
     Returns:
         tuple[pd.DataFrame, pd.DataFrame]: The messages and media tables.
@@ -804,9 +802,8 @@ def test_text_match_is_off_unless_an_index_is_supplied(tmp_path: Path) -> None:
 def test_timestamp_link_wins_over_the_text_match(tmp_path: Path) -> None:
     """The stamp is the stronger statement, so it is consulted first.
 
-    The text rule knows only that two rows carry the same words -- which a quoted
-    or re-posted text shares by design; the stamp rule knows the author agreed
-    too, so where both answer it is the one to believe.
+    Same words are shared by design by a quote or re-post; a shared stamp means
+    the author agrees too.
     """
     (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
     messages, media = _messages_export()

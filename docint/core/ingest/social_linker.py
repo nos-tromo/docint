@@ -379,14 +379,10 @@ def _infer_stamp_posting_id(row: pd.Series, media_stamp: pd.Timestamp | None, st
 def build_posting_text_index(postings_df: pd.DataFrame) -> TextIndex:
     """Return the network-scoped text index used for rows no author matches.
 
-    The final rule, for the one shape the author-scoped timestamp cannot reach: a
-    shared post, where the manifest records the *original* author while the
-    export's own row is the *sharer's*. Both carry the post's text verbatim, so
-    the posting whose text a media row repeats is its parent -- *provided there
-    is only one*.
-
-    Postings with no text are never indexed: an empty text is shared by every
-    media-only post, so indexing it would name all of them at once.
+    The final rule, for the shape no author-scoped rule reaches: a shared post,
+    whose manifest names the *original* author while the export's row is the
+    *sharer's*. Both carry the text verbatim. Postings with no text are never
+    indexed — an empty text would name every media-only post at once.
 
     Args:
         postings_df (pd.DataFrame): Table carrying the postings export schema.
@@ -410,15 +406,9 @@ def build_posting_text_index(postings_df: pd.DataFrame) -> TextIndex:
 def _infer_text_posting_id(row: pd.Series, texts: TextIndex) -> str | None:
     """Return the posting whose text a media row repeats verbatim, or ``None``.
 
-    Equality is exact and case-sensitive: the rule's whole confidence is that a
-    *complete* post text matched character for character, and case-folding or
-    trimming punctuation would trade that away for nothing. Ambiguity and
-    absence are both refused, exactly as in :func:`_infer_stamp_posting_id`.
-
-    Note a manifest whose text column holds a generic caption repeated across
-    rows could attach many rows to one posting. That is bounded by requiring
-    verbatim equality with a whole posting text, by this rule running last, and
-    by its kill switch.
+    Equality is exact and case-sensitive — the rule's whole confidence is a
+    *complete* text matching character for character. Ambiguity and absence are
+    both refused, as in :func:`_infer_stamp_posting_id`.
 
     Args:
         row (pd.Series): The manifest row.
@@ -665,9 +655,8 @@ def _profile_headers(style: str) -> set[str]:
 #: Exact header set of the postings profile — the canonical shape of a postings table.
 _POSTINGS_HEADERS: set[str] = _profile_headers("postings")
 
-#: Exact header set of the messages profile. Chat-style exports (X/Twitter and
-#: friends) carry their postings in this shape instead, so the linker accepts it as
-#: a *substitute* postings table — see :func:`normalize_postings_frame`.
+#: Exact header set of the messages profile — the shape a chat-style export
+#: carries its postings in, accepted as a substitute postings table.
 _MESSAGES_HEADERS: set[str] = _profile_headers("messages")
 
 #: Messages-profile columns renamed into the postings vocabulary the join rules read.
@@ -681,17 +670,13 @@ _MESSAGES_TO_POSTINGS: dict[str, str] = {
 def normalize_postings_frame(postings_df: pd.DataFrame) -> pd.DataFrame:
     """Return ``postings_df`` with a messages-schema table renamed into postings vocabulary.
 
-    The join rules read one vocabulary (``Posting ID`` / ``Author`` / ``Text
-    Content``); a chat-style export names the same things ``Chat ID`` / ``Sender``
-    / ``Text``. Renaming once here keeps every rule and index builder untouched,
-    so a postings-profile export provably behaves exactly as before.
+    A chat-style export names the same things ``Chat ID`` / ``Sender`` /
+    ``Text``; renaming once here leaves every rule and index builder untouched.
+    Only an exact messages header-set match is rewritten, so a foreign table
+    that merely carries a ``Text`` column is not reinterpreted.
 
-    Only an exact messages header-set match is rewritten: a foreign table that
-    merely happens to carry a ``Text`` column must not be reinterpreted.
-
-    Note the rename destroys the profile match, so
-    :func:`build_posting_reference_index` — which detects the profile from the
-    headers — must run on the *original* frame, before this call.
+    The rename destroys the profile match, so
+    :func:`build_posting_reference_index` must run on the *original* frame.
 
     Args:
         postings_df (pd.DataFrame): The table found in the postings-table role.
@@ -731,12 +716,11 @@ _POSTING_REFERENCE_KEYS: dict[str, str] = {
 def build_posting_reference_index(postings_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     """Return ``{posting id: prefixed posting reference fields}`` from a postings table.
 
-    Reuses the :class:`TableReader` schema profiles so the column mapping stays
-    declared in exactly one place — the postings profile, or the messages profile
-    a chat-style export carries instead. Rows are keyed by the profile's own
-    ``id_col`` (``Posting ID`` / ``Chat ID``), which is what
-    :func:`normalize_postings_frame` renames into ``Posting ID`` for the join, so
-    the two agree without a second rename path. Keys are prefixed via
+    Reuses the :class:`TableReader` schema profiles — postings, or the messages
+    profile a chat-style export carries instead — so the column mapping stays
+    declared in one place. Rows are keyed by the profile's own ``id_col``
+    (``Posting ID`` / ``Chat ID``), the same column
+    :func:`normalize_postings_frame` renames for the join. Keys are prefixed via
     :data:`_POSTING_REFERENCE_KEYS` (``network`` → ``posting_network``, ...);
     empty / missing values are omitted.
 
