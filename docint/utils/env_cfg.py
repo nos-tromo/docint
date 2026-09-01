@@ -376,9 +376,7 @@ def load_frontend_env(
           from ``DOCINT_CLIENT_MAX_BODY_SIZE`` (the same var nginx reads). The
           SPA splits large selections into batches that each stay under this.
         - report_batch_max_items (int): Most items one report batch add may
-          carry, from ``REPORT_BATCH_MAX_ITEMS`` (clamped to >= 1). Bound into
-          the request model at import and advertised via ``GET /config`` so the
-          SPA refuses an oversize set against the number the API enforces.
+          carry, from ``REPORT_BATCH_MAX_ITEMS`` (clamped to >= 1).
     """
     graph_top_k = max(1, int(os.getenv("NER_GRAPH_TOP_K", default_graph_top_k)))
     graph_max_top_k = max(graph_top_k, int(os.getenv("NER_GRAPH_MAX_TOP_K", default_graph_max_top_k)))

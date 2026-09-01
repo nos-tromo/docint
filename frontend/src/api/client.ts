@@ -19,9 +19,8 @@ export class ApiError extends Error {
 
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    // Read the body once, then parse from the string: a response body can only
-    // be consumed once, so json()-then-text() throws on a non-JSON error page
-    // (nginx's own 413 page, say) and the status is lost with it.
+    // Read once, then parse: a body can only be consumed once, so
+    // json()-then-text() throws on a non-JSON error page and loses the status.
     const body = await res.text()
     let detail: unknown = body
     try {

@@ -25,8 +25,8 @@ from docint.core.state.report_item import ReportItem
 if TYPE_CHECKING:
     from docint.core.rag import RAG
 
-# How many dedupe keys one backfill lookup may name. SQLite's default host
-# parameter ceiling is 999, and a batch may carry REPORT_BATCH_MAX_ITEMS keys.
+# Keys per backfill lookup: SQLite caps host parameters at 999, and a batch
+# may carry REPORT_BATCH_MAX_ITEMS of them.
 _BACKFILL_KEY_CHUNK = 500
 
 
@@ -380,17 +380,11 @@ class ReportManager:
         batch of hundreds is answered by one report refetch on the client, not
         by echoing every snapshot back over the wire.
 
-        A duplicate is not always inert, though. One amendment is accepted on
-        an already-stored snapshot: a ``translation`` it does not have. A
-        finding is often added before anyone translates it, and a frozen
-        snapshot is otherwise never revisited, so without this a report built
-        early stays unreadable however much of the corpus is translated
-        afterwards — re-running "Add all" backfills it instead. Strictly
-        additive: only the ``translation`` key is written, only onto a snapshot
-        that lacks one, and a stored translation is never replaced — it is the
-        one an investigator saw when they added the finding. Those entries
-        count as ``updated``; ``added``, ``updated`` and ``skipped`` together
-        always account for every entry in the request.
+        One amendment is accepted on an already-stored snapshot: a
+        ``translation`` it lacks, counted as ``updated``. Findings are usually
+        added before anyone translates them, and a frozen snapshot is
+        otherwise never revisited. A stored translation is never replaced — it
+        is the one the investigator saw when they added the finding.
 
         Args:
             report_id (int): The report id.
@@ -411,9 +405,9 @@ class ReportManager:
             seen = set(stored_keys)
             position = len(stored_keys)
             added = 0
-            # Translations offered for findings the report already holds, first
-            # occurrence winning. Collected against the keys stored *before*
-            # this batch, so an item the batch itself adds is never re-read.
+            # Translations offered for findings already stored, first one
+            # winning. Keyed off the pre-batch set, so an item this batch adds
+            # is never re-read.
             backfill: dict[str, dict[str, Any]] = {}
             for entry in items:
                 dedupe_key = str(entry["dedupe_key"])
@@ -452,20 +446,12 @@ class ReportManager:
         report_id: int,
         translations: dict[str, dict[str, Any]],
     ) -> int:
-        """Merge translations into stored snapshots that lack one (uncommitted).
+        """Merge translations into stored snapshots lacking one (uncommitted).
 
-        Reads back only the items actually named, in chunks, rather than the
-        whole report: a snapshot carries frozen text and a thumbnail, so
-        loading every one of them to amend a handful would cost megabytes.
-
-        Args:
-            session (Any): The open SQLAlchemy session.
-            report_id (int): The report being amended.
-            translations (dict[str, dict[str, Any]]): Translation payload per
-                dedupe key.
-
-        Returns:
-            int: How many stored snapshots gained a translation.
+        Keyed by dedupe key; returns how many snapshots gained one. Reads back
+        only the items named, in chunks: snapshots carry frozen text and
+        thumbnails, so loading the whole report to amend a handful would cost
+        megabytes.
         """
         keys = list(translations)
         updated = 0
@@ -479,12 +465,10 @@ class ReportManager:
             for item in stored:
                 raw = cast(str | None, item.snapshot)
                 try:
-                    # Any, not dict: the isinstance guard below is what decides
-                    # whether this JSON is a snapshot object at all.
+                    # Any, not dict: the isinstance guard below decides that.
                     snapshot: Any = json.loads(raw) if raw else {}
                 except (TypeError, ValueError):
-                    # Same tolerance as _item_to_dict: an unreadable snapshot is
-                    # left exactly as it is rather than rewritten.
+                    # As in _item_to_dict: leave an unreadable snapshot alone.
                     continue
                 if not isinstance(snapshot, dict) or snapshot.get("translation"):
                     continue

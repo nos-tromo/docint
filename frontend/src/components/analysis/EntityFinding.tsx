@@ -88,8 +88,7 @@ export function EntityFinding({
   const t = useT()
   const chunkText = chunkTextOf(source)
   // The shared store, not row state: the same translation must reach a
-  // hand-added snapshot and a section-wide "Add all" alike, and survive the
-  // virtualizer unmounting this row.
+  // hand-added snapshot and "Add all" alike, and survive an unmount.
   const translation = useTranslationsStore((s) => s.byText[chunkText])
   const reportItem = entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)

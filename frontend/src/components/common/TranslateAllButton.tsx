@@ -14,16 +14,9 @@ interface Props<Row> {
 }
 
 /**
- * Translate every finding of an Analysis section at once.
- *
- * The section-wide counterpart of the per-row Translate toggle, sitting in the
- * section header beside "Add all". A corpus nobody on the team reads is not
- * made readable one hover at a time, and a report exported from it carries
- * only the translations that existed when its findings went in — so this runs
- * first and "Add all" carries the lot.
- *
- * It knows nothing about entities vs. hate speech: the section hands it the
- * same page walk and the same text derivation its own rows use.
+ * Translate every finding of an Analysis section at once — the section-wide
+ * counterpart of the per-row Translate toggle. It knows nothing about entities
+ * vs. hate speech: the section hands it the walk and text derivation.
  */
 export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }: Props<Row>) {
   const t = useT()
@@ -31,8 +24,8 @@ export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }
   const translating = status === 'translating'
   const isFailed = status === 'failed'
 
-  // One line of plain text beside the button — the SPA has no toast layer, and
-  // a run of several minutes has to say where it is while it runs.
+  // The SPA has no toast layer, and a run of several minutes has to say where
+  // it has got to.
   let message: string | null = null
   if (status === 'too_many') message = t('common.translate_all_too_many', { max: cap })
   else if (translating) message = t('common.translate_all_progress', { done, total })
@@ -44,9 +37,8 @@ export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }
     else message = t('common.translate_all_done', { done, skipped })
   }
 
-  // `IconButton`'s `busy` disables the control, which is right while the page
-  // walk runs and wrong once translating starts: that is precisely when the
-  // button has to stay clickable to stop the run.
+  // `IconButton`'s `busy` disables the control: right for the page walk, wrong
+  // once translating starts, which is when it has to stay clickable to stop.
   return (
     <div className={`flex items-center gap-2 ${className ?? ''}`}>
       {message && (

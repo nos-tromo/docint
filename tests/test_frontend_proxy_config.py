@@ -210,11 +210,7 @@ def test_ingest_proxy_streams_request_body() -> None:
 
 
 def _api_location_block() -> str:
-    """Return the body of the backend-API ``location`` block in the nginx config.
-
-    Returns:
-        str: The directives between the backend-API location's braces.
-    """
+    """Return the directives inside the backend-API ``location`` block."""
     nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
     match = re.search(r"location ~ \^/\([^)]*\)\(/\|\$\) \{(.*?)\n    \}", nginx_conf, re.DOTALL)
     assert match is not None, "backend-API location block not found in nginx config"
@@ -224,11 +220,8 @@ def _api_location_block() -> str:
 def test_api_proxy_uses_configurable_json_body_limit() -> None:
     """JSON API bodies must have their own configurable ceiling.
 
-    The report batch add posts up to REPORT_BATCH_MAX_ITEMS frozen snapshots in
-    one body — single-digit MB at the defaults. Without a directive here the
-    location inherits nginx's compiled-in 1m default and the request is refused
-    with 413 before FastAPI ever sees it, which is what "Add all" hit on a
-    collection with ~1700 findings.
+    A full batch add is single-digit MB; without this the location inherits
+    nginx's 1m default and 413s before FastAPI sees it.
     """
     assert "client_max_body_size ${DOCINT_API_MAX_BODY_SIZE};" in _api_location_block()
 
@@ -236,9 +229,8 @@ def test_api_proxy_uses_configurable_json_body_limit() -> None:
 def test_api_proxy_streams_request_body() -> None:
     """Large JSON bodies must stream through nginx unbuffered.
 
-    Same reason as the ingest location: nginx spools a buffered request body to
-    /tmp, and the frontend container's /tmp is a 16m tmpfs — well under the
-    API body ceiling.
+    As at the ingest location: a buffered body spools to /tmp, which is a 16m
+    tmpfs here — well under the API body ceiling.
     """
     block = _api_location_block()
 
@@ -249,8 +241,8 @@ def test_api_proxy_streams_request_body() -> None:
 def test_frontend_image_defaults_api_body_limit() -> None:
     """The image must default DOCINT_API_MAX_BODY_SIZE.
 
-    envsubst renders an undefined variable as the empty string, which would
-    leave `client_max_body_size ;` in the config and stop nginx from booting.
+    envsubst renders an undefined variable empty, leaving `client_max_body_size
+    ;` and stopping nginx from booting.
     """
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile.frontend").read_text(encoding="utf-8")
 
@@ -260,11 +252,8 @@ def test_frontend_image_defaults_api_body_limit() -> None:
 def test_frontend_compose_exposes_api_body_limit_override() -> None:
     """Only the frontend needs the JSON-API ceiling, unlike the upload one.
 
-    DOCINT_CLIENT_MAX_BODY_SIZE appears in both services because the backend
-    *advertises* those bytes to the SPA via GET /config. This var is
-    enforcement-only: the SPA is governed by the item count the backend
-    advertises (REPORT_BATCH_MAX_ITEMS), never by these bytes, so a second
-    occurrence would be a smell rather than a fix.
+    DOCINT_CLIENT_MAX_BODY_SIZE is on both services because the backend
+    advertises those bytes via GET /config; this one is enforcement-only.
     """
     compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
 

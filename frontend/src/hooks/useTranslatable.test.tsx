@@ -96,9 +96,8 @@ describe('useTranslatable', () => {
   })
 
   it('a remounted row reuses the stored translation instead of re-posting it', async () => {
-    // The findings tables are virtualized: scrolling a row out unmounts it and
-    // destroys its hook state. Without the shared store the translation is lost
-    // and the next toggle pays for it again.
+    // The tables are virtualized: an unmount destroys hook state, so without
+    // the shared store the next toggle pays for the translation again.
     const fetchMock = mockFetchOk({ ok: true, translation: 'Hallo Welt', model: 'm', target_lang: 'de' })
     const first = renderHook(() => useTranslatable('Hello world'), { wrapper })
     await act(async () => {

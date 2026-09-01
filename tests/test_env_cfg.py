@@ -673,8 +673,7 @@ def test_frontend_config_report_batch_cap_env_override(monkeypatch: pytest.Monke
 def test_frontend_config_report_batch_cap_clamped_to_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """A zero or negative cap is clamped to 1.
 
-    The value becomes a pydantic ``max_length``, which rejects anything below
-    1 — a cap of 0 would refuse every batch add with no way to diagnose it.
+    It becomes a pydantic ``max_length``: a cap of 0 would refuse every batch.
 
     Args:
         monkeypatch: Fixture to override environment variables.

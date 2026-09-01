@@ -47,15 +47,8 @@ def _entity_item(
 ) -> dict[str, Any]:
     """Build an add_item kwargs dict for an entity finding.
 
-    Args:
-        chunk_id (str): The chunk the finding sits on; drives the dedupe key.
-        text (str): The snapshot's chunk text.
-        translation (dict[str, Any] | None): A frozen translation payload, as
-            the SPA nests it inside the snapshot. Omitted when None, exactly
-            like an untranslated finding.
-
-    Returns:
-        dict[str, Any]: The ``add_item`` kwargs.
+    ``translation`` is nested inside the snapshot as the SPA sends it, and
+    omitted when None, like an untranslated finding.
     """
     snapshot: dict[str, Any] = {"chunk_id": chunk_id, "chunk_text": text, "entity_label": "Acme [ORG]"}
     if translation is not None:

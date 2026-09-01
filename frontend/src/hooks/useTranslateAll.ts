@@ -6,23 +6,15 @@ import { useTranslationsStore } from '@/stores/translations'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
- * How many translate calls may be in flight at once.
- *
- * `POST /translate` is a synchronous FastAPI route, so every in-flight call
- * holds one worker thread of a pool the whole API shares, and nothing on the
- * server rate-limits it. Three is enough to keep a section moving without a
- * bulk run starving unrelated requests.
+ * Calls in flight at once. `/translate` is a sync route, so each one holds a
+ * thread of the pool the whole API shares, and nothing there rate-limits it.
  */
 export const TRANSLATE_ALL_CONCURRENCY = 3
 
 /**
- * How many consecutive failures end a run.
- *
- * A translate failure is fail-soft and cheap on its own, but a dead or
- * misconfigured model fails *every* call — and a section is thousands of them.
- * Stopping after three in a row reports the outage in seconds instead of
- * grinding through the whole corpus to say the same thing, the same budget
- * `DocumentOcrEngine` keeps for the same reason.
+ * Consecutive failures that end a run. A dead model fails every call and a
+ * section is thousands of them, so the outage is reported in seconds — the
+ * same budget `DocumentOcrEngine` keeps.
  */
 export const TRANSLATE_ALL_MAX_CONSECUTIVE_FAILURES = 3
 
@@ -39,9 +31,7 @@ export interface TranslateAllOutcome {
   status: TranslateAllStatus
   /** Snippets this run set out to translate (already-known ones excluded). */
   total: number
-  /** Snippets translated so far. */
   done: number
-  /** Snippets the model could not translate. */
   failed: number
   /** Rows skipped because their text was already translated this session. */
   skipped: number
@@ -50,28 +40,10 @@ export interface TranslateAllOutcome {
 /**
  * Translate every finding of an Analysis section in one action.
  *
- * The section-wide counterpart of the per-row Translate toggle. A corpus in a
- * language the investigator does not read is not made readable one hover at a
- * time, and a report built from it is only as readable as the findings that
- * were translated before they went in — so the whole section is translated
- * up front, and "Add all" then carries every translation into its snapshots.
- *
- * The caller supplies `fetchAll` — the same page walk its "Add all" uses, so
- * "all" means every finding the section's filter matches rather than the rows
- * paged in — and `textOf`, the same `chunkTextOf` derivation the store is
- * keyed by, so a row finds back exactly what this run filed for it.
- *
- * Translations land in the shared translations store, not here: that is what
- * makes them visible to the rows, to the per-row snapshot builder and to the
- * batch add alike. Texts the store already holds are never re-sent, which is
- * what makes a re-run after a stop, a failure, or a few manual clicks cost
- * only the remainder.
- *
- * Deliberately N small client calls rather than a batch endpoint: translation
- * is one model round-trip per snippet either way, and a request that ran for
- * the length of a whole section would be a background job with none of the
- * machinery a background job needs. Here the work is visible, stoppable, and
- * resumable, and a failure costs one snippet.
+ * `fetchAll` is the section's own page walk, so this reaches rows never
+ * rendered; results go to the shared store, and texts it already holds are
+ * never re-sent, so a re-run costs only the remainder. N small client calls
+ * rather than a batch endpoint: one round-trip per snippet either way.
  */
 export function useTranslateAll<Row>(params: {
   /** Walk the section's cursor pages, stopping after `maxItems` rows. */
@@ -81,8 +53,8 @@ export function useTranslateAll<Row>(params: {
 }) {
   const t = useT()
   const { data: config } = useConfig()
-  // The same ceiling "Add all" refuses at: a section too large to add is a
-  // section there is no point translating for a report.
+  // The ceiling "Add all" refuses at: too large to add is too large to bother
+  // translating for a report.
   const cap = Math.max(1, Math.trunc(config?.report_batch_max_items ?? ADD_ALL_MAX_ITEMS_FALLBACK))
   const [outcome, setOutcome] = useState<TranslateAllOutcome>({
     status: 'idle',
@@ -99,20 +71,20 @@ export function useTranslateAll<Row>(params: {
     setOutcome({ status: 'fetching', total: 0, done: 0, failed: 0, skipped: 0 })
     try {
       const rows = await params.fetchAll(cap + 1)
-      // One row past the cap means the walk stopped early, so how much of the
-      // section is missing is unknowable — the same refusal "Add all" makes.
+      // A row past the cap means the walk stopped early, so how much is
+      // missing is unknowable — the refusal "Add all" makes.
       if (rows.length > cap) {
         setOutcome({ status: 'too_many', total: 0, done: 0, failed: 0, skipped: 0 })
         return
       }
-      // Read the store once, outside React: `put` replaces the whole map, so a
-      // subscribed hook would re-render this section's header per translation.
+      // Read outside React: `put` replaces the whole map, so subscribing here
+      // would re-render the section header once per translation.
       const known = useTranslationsStore.getState().byText
       const queue: string[] = []
       const seen = new Set<string>()
       for (const row of rows) {
         const text = params.textOf(row)
-        // Identical text is one translation, not one per row that carries it.
+        // Identical text is one translation, not one per row carrying it.
         if (!text || seen.has(text)) continue
         seen.add(text)
         if (!known[text]) queue.push(text)
@@ -151,7 +123,7 @@ export function useTranslateAll<Row>(params: {
               done += 1
               consecutive = 0
             } else {
-              // Fail-soft `ok: false` — the endpoint answered, the model did not.
+              // Fail-soft `ok: false`: the endpoint answered, the model did not.
               failed += 1
               consecutive += 1
             }
@@ -175,11 +147,9 @@ export function useTranslateAll<Row>(params: {
   }
 
   /**
-   * Stop issuing new translate calls.
-   *
-   * Calls already in flight run to completion and still file their result —
-   * `apiPost` carries no abort signal, and throwing away an answer the model
-   * already produced would only make the resume more expensive.
+   * Stop issuing new calls. Ones in flight finish and still file their result:
+   * `apiPost` has no abort signal, and discarding a paid-for answer would only
+   * make the resume dearer.
    */
   const stop = () => {
     stopRef.current = true

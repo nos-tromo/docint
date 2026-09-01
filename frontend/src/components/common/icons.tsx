@@ -79,13 +79,7 @@ export const SingleMessageIcon = ({ className = 'h-4 w-4', ...props }: IconProps
   </svg>
 )
 
-/**
- * Translation, drawn as the standard character-over-glyph pair.
- *
- * Shared by the per-row `TranslateToggle` and the section-wide
- * `TranslateAllButton`, so the two controls read as one family — the second is
- * the first applied to every finding at once.
- */
+/** Translation. Shared by `TranslateToggle` and `TranslateAllButton`. */
 export const TranslateIcon = ({ className = 'h-4 w-4', ...props }: IconProps) => (
   <svg {...base} className={className} {...props}>
     <path d="M4 5h9M9 3v2c0 4-2 7-6 8M5 9c0 3 3 5 7 5" />

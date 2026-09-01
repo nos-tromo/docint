@@ -195,8 +195,7 @@ describe('AddAllToReportButton', () => {
 
   it('resends an item the report holds when it can gain a translation', async () => {
     // The one exception to "duplicates are never sent": a stored snapshot with
-    // no translation, and a fresh one that has it. Without this a report
-    // collected before its corpus was translated could never become readable.
+    // no translation and a fresh one that has it.
     const captured: Captured[] = []
     const qc = client()
     useReportStore.setState({ activeReportId: 1 })
@@ -307,9 +306,8 @@ describe('AddAllToReportButton', () => {
   })
 
   it('walks one row past the cap so an overflowing section is detectable', async () => {
-    // fetchAllPages truncates silently at its maxItems. Asking for cap + 1 is
-    // what turns "there are more findings than we can add" into an observable
-    // fact instead of a batch that quietly carries an arbitrary sample.
+    // fetchAllPages truncates silently, so asking for cap + 1 is what makes an
+    // oversize section observable rather than a quiet sample.
     const captured: Captured[] = []
     stubFetch(captured)
     useReportStore.setState({ activeReportId: 1 })
@@ -349,8 +347,7 @@ describe('AddAllToReportButton', () => {
   })
 
   it('explains a 413 as a size problem instead of offering a retry', async () => {
-    // nginx refuses an oversize body before FastAPI sees it. Retrying the same
-    // body cannot succeed, so this must not wear the retry affordance.
+    // Retrying the same oversize body cannot succeed, so no retry affordance.
     vi.stubGlobal(
       'fetch',
       vi.fn(async (u: string) => {

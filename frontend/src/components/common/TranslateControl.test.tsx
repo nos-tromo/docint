@@ -6,8 +6,8 @@ import { TranslateControl } from './TranslateControl'
 import { useTranslationsStore } from '@/stores/translations'
 
 afterEach(() => vi.restoreAllMocks())
-// Translations are shared app-wide and keyed by text, so one test's successful
-// translation of "Hello world" would otherwise satisfy the next one's toggle.
+// Keyed by text app-wide: one test's translation would otherwise satisfy the
+// next one's toggle.
 beforeEach(() => useTranslationsStore.setState({ byText: {} }))
 
 function renderControl(onTranslated?: (t: unknown) => void) {

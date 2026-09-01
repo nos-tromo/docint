@@ -99,9 +99,8 @@ describe('reportSnapshots', () => {
   })
 
   it('chunkTextOf prefers chunk_text, falls back to text, and trims', () => {
-    // One derivation for the row's display text, the string the Translate
-    // control posts, and the translations-store key — a batch add looks a
-    // translation up by exactly what the row stored it under.
+    // One derivation for display, the translate POST and the store key, so a
+    // batch looks a translation up by what the row stored it under.
     expect(chunkTextOf({ chunk_text: '  flagged line  ', text: 'other' })).toBe('flagged line')
     expect(chunkTextOf({ text: '  fallback line ' })).toBe('fallback line')
     expect(chunkTextOf({ chunk_text: null, text: null })).toBe('')

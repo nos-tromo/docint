@@ -115,8 +115,7 @@ export function EntityFindingsTable({
           </span>
         </div>
         <div className="flex items-center gap-1">
-          {/* Translates every matching finding, so the rows below and the
-              snapshots "Add all" freezes are readable — see TranslateAllButton. */}
+          {/* Every matching finding, not just the rows paged in. */}
           <TranslateAllButton fetchAll={fetchAllFindings} textOf={chunkTextOf} hasRows={findings.length > 0} />
           {/* Adds every finding the entity filter matches, not only the rows
               paged in — see AddAllToReportButton. */}

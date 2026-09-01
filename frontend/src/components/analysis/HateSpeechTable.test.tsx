@@ -114,10 +114,9 @@ describe('HateSpeechTable', () => {
   })
 
   it('Add all sends the stored translation for a translated row and none for the rest', async () => {
-    // The batch snapshots rows walked from the server, which were never
-    // rendered — the translation has to come from the shared store, keyed by
-    // the same trimmed text the row files it under (hence the padded
-    // chunk_text here, which would miss under an untrimmed key).
+    // The batch snapshots rows walked from the server, never rendered, so the
+    // translation comes from the store under the row's own trimmed key — the
+    // padded chunk_text would miss under an untrimmed one.
     useUiStore.setState({ selectedCollection: 'alpha' })
     useTranslationsStore.setState({
       byText: { 'Erste markierte Zeile.': { text: 'First flagged line.', target_lang: 'en', model: 'm' } }
@@ -171,9 +170,8 @@ describe('HateSpeechTable', () => {
   })
 
   it('Translate all walks the section and fills the store for rows never rendered', async () => {
-    // Wired to the section's own page walk, not to the rows on screen, so a
-    // flagged chunk below the fold is translated too — which is what lets the
-    // subsequent "Add all" carry it into the report.
+    // Wired to the section's page walk, not the rows on screen, so a flagged
+    // chunk below the fold is translated too.
     const walked: HateSpeechRow[] = [
       { chunk_id: 'h30', filename: 'a.txt', category: 'harassment', confidence: 'high', chunk_text: '  Erste Zeile.  ' },
       { chunk_id: 'h31', filename: 'b.txt', category: 'harassment', confidence: 'low', chunk_text: 'Zweite Zeile.' }

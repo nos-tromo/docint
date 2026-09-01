@@ -5,11 +5,7 @@ import { useAddAllToReport } from '@/hooks/useReports'
 import { useT } from '@/i18n/LanguageContext'
 
 interface Props<Row> {
-  /**
-   * Walk the section's cursor pages and return every matching row, stopping
-   * after `maxItems` (the hook asks for one past the cap so it can tell a
-   * section that overflows from one that just fits).
-   */
+  /** Walk the section's cursor pages, stopping after `maxItems` rows. */
   fetchAll: (maxItems: number) => Promise<Row[]>
   /** The same pure snapshot builder the section's rows use. */
   toItem: (row: Row) => ReportItemInput
@@ -38,9 +34,8 @@ export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className
   // Both refusals are the caller's to act on, not the server's to retry.
   const refused = status === 'too_many' || status === 'too_large'
 
-  // One line of plain text beside the button — the SPA has no toast layer, and
-  // the outcome is worth stating: "0 added, 40 already in report" is a
-  // different answer from "40 added", and both look identical in the rows.
+  // No toast layer, and the outcome is worth stating: "0 added, 40 already in
+  // report" and "40 added" look identical in the rows.
   let message: string | null = null
   if (status === 'too_many') message = t('report.add_all_too_many', { max: cap })
   else if (status === 'too_large') message = t('report.add_all_too_large')

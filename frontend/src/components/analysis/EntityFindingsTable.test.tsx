@@ -82,9 +82,9 @@ describe('EntityFindingsTable', () => {
   })
 
   it('Add all sends the stored translation for a translated finding and none for the rest', async () => {
-    // The batch snapshots rows walked from the server, which were never
-    // rendered — the translation comes from the shared store under the same
-    // trimmed key the row files it under (hence the padded chunk_text).
+    // The batch snapshots rows walked from the server, never rendered, so the
+    // translation comes from the store under the row's own trimmed key (hence
+    // the padded chunk_text).
     useTranslationsStore.setState({
       byText: { 'Berlin ist die Hauptstadt.': { text: 'Berlin is the capital.', target_lang: 'en', model: 'm' } }
     })
@@ -132,9 +132,8 @@ describe('EntityFindingsTable', () => {
   })
 
   it('Translate all walks the section and fills the store for rows never rendered', async () => {
-    // The control is wired to the section's own page walk, not to the rows on
-    // screen — so a finding below the fold is translated too, which is the
-    // whole reason the subsequent "Add all" can carry it.
+    // Wired to the section's page walk, not the rows on screen, so a finding
+    // below the fold is translated too.
     const walked: NerSourceRow[] = [
       { chunk_id: 'c11', filename: 'doc.pdf', chunk_text: '  Berlin ist die Hauptstadt.  ', entities: [] },
       { chunk_id: 'c12', filename: 'doc.pdf', chunk_text: 'Zweiter Fund.', entities: [] }

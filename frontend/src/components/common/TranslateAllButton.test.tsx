@@ -16,11 +16,9 @@ interface Deferred {
 }
 
 /**
- * Stub fetch for the calls this flow makes.
- *
- * `/translate` is branched on explicitly: a catch-all returning `{}` would
- * make every call read as `ok: false`, the failure breaker would trip on the
- * third one, and the tests would pass for entirely the wrong reason.
+ * Stub fetch for the calls this flow makes. `/translate` is branched on
+ * explicitly: a catch-all `{}` reads as `ok: false`, so the breaker would trip
+ * and the tests would pass for the wrong reason.
  */
 function stubFetch(opts: {
   calls: string[]
@@ -67,8 +65,8 @@ const client = () => new QueryClient({ defaultOptions: { queries: { retry: false
 const clickTranslateAll = () => userEvent.click(screen.getByRole('button', { name: /translate all findings/i }))
 
 beforeEach(() => {
-  // Translations are keyed by text app-wide, so one test's success would
-  // otherwise satisfy the next test's already-translated check.
+  // Keyed by text app-wide: one test's success would otherwise satisfy the
+  // next one's already-translated check.
   useTranslationsStore.setState({ byText: {} })
   vi.stubGlobal('confirm', vi.fn(() => true))
 })
@@ -144,8 +142,7 @@ describe('TranslateAllButton', () => {
   })
 
   it('stops after three consecutive failures instead of grinding through the section', async () => {
-    // The whole point of the breaker: a dead model must not cost one call per
-    // finding before it is reported.
+    // The point of the breaker: a dead model must not cost one call per finding.
     const calls: string[] = []
     stubFetch({ calls, fail: () => true })
     const rows = Array.from({ length: 12 }, (_, i) => ({ chunk_text: `t${i}` }))

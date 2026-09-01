@@ -135,12 +135,9 @@ export function useReportDedupeKeys(id: number | null): Set<string> {
 }
 
 /**
- * Dedupe keys the report holds whose snapshot carries no translation.
- *
- * The one reason to send an item the report already has: the server merges a
- * translation into a snapshot that lacks one, and nothing else about a frozen
- * snapshot is ever revisited. Knowing which items those are keeps the batch to
- * the findings that can actually gain something.
+ * Dedupe keys the report holds whose snapshot carries no translation — the one
+ * reason to send an item it already has, since that is the only amendment the
+ * server makes to a frozen snapshot.
  */
 export function useReportUntranslatedKeys(id: number | null): Set<string> {
   const { data } = useReport(id)
@@ -177,11 +174,7 @@ export function useEnsureActiveReport() {
 /** Above this many items, "Add all" asks before it commits. */
 export const ADD_ALL_CONFIRM_THRESHOLD = 100
 
-/**
- * Cap used until `GET /config` lands, mirroring the server's own default.
- * `useConfig` is fetched at app mount and never refetched, so this stands in
- * only for a click in the first instants of a session.
- */
+/** Cap until `GET /config` lands (fetched once at mount), mirroring its default. */
 export const ADD_ALL_MAX_ITEMS_FALLBACK = 2000
 
 export type AddAllStatus =
@@ -204,22 +197,15 @@ export interface AddAllOutcome {
 /**
  * Add every finding of an Analysis section to the active report in one action.
  *
- * The caller supplies `fetchAll` — a walk of the section's own cursor pages,
- * bounded by the item count it is given — and `toItem`, the same pure snapshot
- * builder its rows use. Both read translations from the shared translations
- * store, so a batched snapshot is byte-identical to a hand-added one,
- * `translation` included.
+ * `fetchAll` walks the section's own cursor pages and `toItem` is the builder
+ * its rows use, both reading the shared translations store — so a batched
+ * snapshot is byte-identical to a hand-added one. The set posts as one
+ * request; items already in the report are dropped first, bar those carrying a
+ * translation its snapshot lacks, which the server backfills.
  *
- * The whole set is fetched outside React Query (the rendered list is not
- * force-expanded), pre-filtered against what the report already holds — bar
- * findings whose stored snapshot has no translation and whose fresh one does,
- * which are sent so the server can backfill them — and posted as one request — one round-trip and one cache invalidation, not one
- * per finding. Above `ADD_ALL_CONFIRM_THRESHOLD` items it confirms first.
- *
- * The cap comes from `GET /config` (the server's own `REPORT_BATCH_MAX_ITEMS`),
- * and the walk asks for one row *past* it: `fetchAllPages` truncates silently,
- * so fetching exactly the cap could not tell a section that just fits from one
- * that does not, and "Add all" would carry an arbitrary sample of a larger set.
+ * The walk asks for one row past the cap because `fetchAllPages` truncates
+ * silently: at exactly the cap, a section that just fits and one that
+ * overflows look the same, and "Add all" would carry an arbitrary sample.
  */
 export function useAddAllToReport<Row>(params: {
   fetchAll: (maxItems: number) => Promise<Row[]>
@@ -240,9 +226,8 @@ export function useAddAllToReport<Row>(params: {
     setOutcome({ status: 'fetching', added: 0, skipped: 0, updated: 0 })
     try {
       const rows = await params.fetchAll(cap + 1)
-      // Checked before dedupe, on the raw walk: the extra row means the walk
-      // stopped early, so how much of the section is missing is unknowable and
-      // no subset of it can honestly be called "all".
+      // Checked on the raw walk: the extra row means it stopped early, so no
+      // subset of what came back can honestly be called "all".
       if (rows.length > cap) {
         setOutcome({ status: 'too_many', added: 0, skipped: 0, updated: 0 })
         return
@@ -259,11 +244,9 @@ export function useAddAllToReport<Row>(params: {
           skipped += 1
           continue
         }
-        // Already in the report — normally not worth sending, with one
-        // exception: an item whose stored snapshot has no translation and
-        // whose fresh snapshot does. That is the only amendment the server
-        // makes to a frozen snapshot, and without it a report collected
-        // before its corpus was translated could never become readable.
+        // Already in the report, so normally not worth sending — unless it
+        // carries a translation the stored snapshot lacks, the one amendment
+        // the server will make.
         if (existingKeys.has(item.dedupe_key)) {
           const gainsTranslation =
             item.snapshot.translation != null && untranslatedKeys.has(item.dedupe_key)
@@ -292,9 +275,8 @@ export function useAddAllToReport<Row>(params: {
       setOutcome({ status: 'done', added: result.added, skipped: skipped + result.skipped, updated: result.updated })
     } catch (e) {
       console.error('Add all to report failed', e)
-      // nginx refuses an oversize body before FastAPI ever sees it, so the
-      // same request cannot succeed on a retry — say it is too big instead of
-      // offering the retry the generic failure wears.
+      // nginx refuses an oversize body before FastAPI sees it, so a retry
+      // cannot succeed — say it is too big rather than offering one.
       if (e instanceof ApiError && e.status === 413) {
         setOutcome({ status: 'too_large', added: 0, skipped: 0, updated: 0 })
         return

@@ -23,10 +23,8 @@ export interface Translatable {
  * Fail-soft: never throws. `onTranslated` fires once per successful fetch with
  * the nested payload.
  *
- * The translated text itself lives in the shared translations store, keyed by
- * `rawText` — only the show/hide flag is local. That is what lets a virtualized
- * row keep its translation across an unmount, and what lets the section-wide
- * "Add all" carry translations for rows it never rendered.
+ * The text lives in the shared translations store keyed by `rawText`; only
+ * the show/hide flag is local, so a row keeps its translation across a remount.
  */
 export function useTranslatable(
   rawText: string,

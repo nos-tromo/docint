@@ -4546,11 +4546,8 @@ def test_get_config_reports_upload_ceiling(client: TestClient, monkeypatch: pyte
 def test_get_config_advertises_report_batch_cap(client: TestClient) -> None:
     """`GET /config` advertises the batch-add item cap the API actually enforces.
 
-    Asserted against the module constant rather than a monkeypatched env var on
-    purpose: pydantic binds the cap into `ReportItemBatchIn` at import, so a
-    per-request env read could advertise a ceiling the validator does not
-    enforce. The SPA refuses oversize sets against this number, so the two must
-    be the same number by construction.
+    Asserted against the module constant, not a monkeypatched env var: pydantic
+    binds the cap at import, so the two must match by construction.
 
     Args:
         client (TestClient): The TestClient instance.

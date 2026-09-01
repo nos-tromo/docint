@@ -1170,18 +1170,10 @@ class ReportItemIn(BaseModel):
     collection: str | None = None
 
 
-# The most items one batch add may carry. A ceiling, not a target: it bounds
-# a single request's snapshot payload and its one companion scroll, and gives
-# the SPA a number to refuse against before it posts (see the Analysis
-# screens' "Add all"). Reports themselves stay uncapped.
-#
-# Tunable via REPORT_BATCH_MAX_ITEMS, but read once here at import: pydantic
-# bakes it into ReportItemBatchIn's schema below, so a per-request read could
-# advertise a ceiling the validator does not enforce. Changing it needs a
-# backend restart, like any other container env var. A collection whose
-# sections run far past this also needs nginx's DOCINT_API_MAX_BODY_SIZE
-# checked -- the count is what the SPA refuses against, the bytes are what
-# actually stops the request.
+# The most items one batch add may carry; reports themselves stay uncapped.
+# Read once at import because pydantic bakes it into ReportItemBatchIn below,
+# so a per-request read could advertise a ceiling the validator does not
+# enforce. The byte ceiling is separate: nginx's DOCINT_API_MAX_BODY_SIZE.
 REPORT_BATCH_MAX_ITEMS = load_frontend_env().report_batch_max_items
 
 
@@ -1229,8 +1221,8 @@ def get_frontend_config() -> dict[str, int | str]:
     before any collection or session exists. Values are read from environment
     variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`
     and :func:`docint.utils.env_cfg.load_language_env`) -- except
-    ``report_batch_max_items``, which is the process-constant the request model
-    was built with, so the advertised cap is always the enforced one.
+    ``report_batch_max_items``, which is the constant the request model was
+    built with, so the advertised cap is the enforced one.
 
     Returns:
         dict[str, int | str]: ``graph_top_k``, ``graph_max_top_k``,
@@ -3678,11 +3670,9 @@ def add_report_items(
     finding of an entity or the whole hate-speech set into the report at once.
     Idempotent like the single add: an artifact the report already holds is
     counted as skipped, never stored twice, so the call is safe to retry and
-    safe to fire over a section that is already partly collected. The one
-    exception is additive — a duplicate carrying a ``translation`` the stored
-    snapshot lacks backfills it and counts as ``updated``, which is how a
-    report collected before its corpus was translated becomes readable
-    without being rebuilt.
+    safe to fire over a section that is already partly collected. One
+    exception is additive: a duplicate carrying a ``translation`` the stored
+    snapshot lacks backfills it and counts as ``updated``.
 
     Answers with counts rather than the items: a batch of hundreds is read
     back by one report refetch, not by echoing every snapshot over the wire.

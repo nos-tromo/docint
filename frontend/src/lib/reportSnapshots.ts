@@ -9,11 +9,9 @@ import type { TranslationPayload } from '@/hooks/useTranslatable'
  */
 
 /**
- * The canonical text of a finding row.
- *
- * One derivation shared by the row's display, the string the Translate control
- * posts, the translations-store key, and the section-wide "Add all" lookup — so
- * a translation is always found back under the key the row filed it under.
+ * The canonical text of a finding row. One derivation shared by display, the
+ * translate POST, the store key and the "Add all" lookup, so a translation is
+ * always found under the key the row filed it under.
  */
 export function chunkTextOf(row: { chunk_text?: string | null; text?: string | null }): string {
   return (row.chunk_text ?? row.text ?? '').trim()

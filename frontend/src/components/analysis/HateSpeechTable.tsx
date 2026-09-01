@@ -63,8 +63,7 @@ function HateSpeechTableRow({
   const i18n = useT()
   const chunkText = chunkTextOf(row)
   // The shared store, not row state: the same translation must reach a
-  // hand-added snapshot and a section-wide "Add all" alike, and survive the
-  // virtualizer unmounting this row.
+  // hand-added snapshot and "Add all" alike, and survive an unmount.
   const translation = useTranslationsStore((s) => s.byText[chunkText])
   const reportItem = hateSpeechSnapshot(row, translation)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
@@ -181,8 +180,7 @@ export function HateSpeechTable({
           {hasNextPage ? '+' : ''}.
         </p>
         <div className="flex items-center gap-1">
-          {/* Translates every flagged chunk, so the rows below and the
-              snapshots "Add all" freezes are readable — see TranslateAllButton. */}
+          {/* Every flagged chunk, not just the rows paged in. */}
           <TranslateAllButton fetchAll={fetchAllRows} textOf={chunkTextOf} hasRows={rows.length > 0} />
           {/* Adds every flagged chunk in the collection, not only the rows
               paged in — see AddAllToReportButton. */}

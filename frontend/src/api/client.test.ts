@@ -56,10 +56,8 @@ describe('client', () => {
   })
 
   it('keeps the status when the error body is not JSON', async () => {
-    // nginx answers an oversize body with its own HTML page, and a real
-    // Response only yields its body once — reading it as JSON first and then
-    // falling back to text() throws "body already consumed", losing the 413
-    // the caller needs to tell "too large" from "server broke".
+    // nginx answers an oversize body with an HTML page, and a Response yields
+    // its body once — json()-then-text() throws and loses the 413.
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
