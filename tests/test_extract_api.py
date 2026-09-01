@@ -161,16 +161,29 @@ def make_client(monkeypatch: pytest.MonkeyPatch, store_root: Path) -> Generator[
         lambda client, collection, image_collection, source_id=None: (_MAIN_POINTS, _IMAGE_POINTS),
     )
     clients: list[TestClient] = []
+    entered: list[TestClient] = []
 
     def _make(runner: JobRunner | None = None) -> TestClient:
         manager = IngestJobManager(runner=runner or api_module._run_job)
         api_module.app.dependency_overrides[api_module.get_job_manager] = lambda: manager
         ctx = TestClient(api_module.app)
         clients.append(ctx)
-        return ctx.__enter__()
+        client = ctx.__enter__()
+        entered.append(client)
+        return client
 
     yield _make
 
+    # Drain before teardown: a job outlives the request that queued it, and the
+    # store reads its root from EXTRACT_DIR at write time — so a job still
+    # running when this fixture's monkeypatch unwinds writes its bundle into
+    # the *next* test's directory.
+    for client in entered:
+        for _ in range(200):
+            jobs = client.get("/ingest/jobs").json()["jobs"]
+            if all(job["status"] in {"completed", "failed"} for job in jobs):
+                break
+            time.sleep(0.05)
     for ctx in clients:
         ctx.__exit__(None, None, None)
     api_module.app.dependency_overrides.clear()
