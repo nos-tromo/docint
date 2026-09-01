@@ -8,6 +8,8 @@ import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -48,6 +50,10 @@ from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
+from docint.core.extract.bundle import build_bundle, build_single
+from docint.core.extract.gather import scroll_collection
+from docint.core.extract.store import ExtractStore
+from docint.core.extract.units import Unit, partition, resolve_target
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
@@ -59,11 +65,13 @@ from docint.core.retrieval_filters import (
 from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, field_indexes_ready
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.search.index import search_index_status
+from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
     load_corrective_retry_env,
+    load_extract_env,
     load_frontend_env,
     load_hate_speech_env,
     load_host_env,
@@ -970,6 +978,18 @@ class SummarizeOut(BaseModel):
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
     job_id: str | None = None
+
+
+class ExtractIn(BaseModel):
+    """Request payload for queuing a collection extract.
+
+    Attributes:
+        target (str | None): One source to render — a file hash, a media
+            hash, an image id or a posting uuid. Omit for the whole
+            collection.
+    """
+
+    target: str | None = None
 
 
 class IngestDefaultsOut(BaseModel):
@@ -4294,6 +4314,89 @@ def _run_summary_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     return {"empty": empty, "resolution": None}
 
 
+def _extract_store() -> ExtractStore:
+    """Return the store rendered extracts are written to and served from."""
+    return ExtractStore(load_path_env().extracts)
+
+
+def _gather_units(physical: str, source_id: str | None = None) -> list[Unit]:
+    """Read a collection (or one source of it) and partition it into units.
+
+    Args:
+        physical (str): The physical Qdrant collection, already owner-gated.
+        source_id (str | None): Restrict to one source when given.
+
+    Returns:
+        list[Unit]: The units, in bundle order.
+    """
+    main_points, image_points = scroll_collection(
+        rag.qdrant_client,
+        physical,
+        rag._image_collection_name(physical),
+        source_id=source_id,
+    )
+    units = partition(main_points, image_points)
+    return resolve_target(units, source_id) if source_id else units
+
+
+def _run_extract_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Execute one extract job: gather, render, store, prune.
+
+    Injected via :func:`_run_job` so ``core/jobs.py`` stays free of docint
+    domain imports. Runs on a worker thread; ``push`` is thread-safe.
+
+    Args:
+        state (IngestJobState): The job being executed.
+        push (PushEvent): Thread-safe event publisher.
+
+    Returns:
+        dict[str, Any]: ``{"empty", "resolution", "artifact", "stats"}``. An
+            empty collection stores nothing — there would be no extract to
+            download.
+    """
+
+    def _progress(rendered: int, total: int) -> None:
+        push(
+            "extract_progress",
+            {"message": f"Rendering {rendered}/{total}", "rendered": rendered, "total_units": total},
+        )
+
+    with rag.collection_scope(state.physical):
+        units = _gather_units(state.physical, state.target)
+    if not units:
+        return {"empty": True, "resolution": None}
+
+    cfg = load_extract_env()
+    now = datetime.now(tz=UTC)
+    bundle = build_bundle(
+        units,
+        collection=state.logical_name,
+        cfg=cfg,
+        pdf=html_to_pdf,
+        now=now,
+        progress=_progress,
+    )
+    store = _extract_store()
+    record = store.write(
+        state.physical,
+        zip_bytes=bundle.zip_bytes,
+        meta={
+            "collection": state.logical_name,
+            "target": state.target,
+            "counts": bundle.counts,
+            "pdf_skipped": bundle.pdf_skipped,
+        },
+        now=now,
+    )
+    store.prune(
+        state.physical,
+        retention_days=cfg.retention_days,
+        max_per_collection=cfg.max_per_collection,
+        now=now,
+    )
+    return {"empty": False, "resolution": None, "artifact": record, "stats": bundle.counts}
+
+
 def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """Dispatch a job to its kind-specific runner.
 
@@ -4306,6 +4409,8 @@ def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """
     if state.kind == "summary":
         return _run_summary_job(state, push)
+    if state.kind == "extract":
+        return _run_extract_job(state, push)
     return _run_ingest_job(state, push)
 
 
@@ -4678,6 +4783,179 @@ async def ingest_finalize(
             detail={"message": "Ingestion already in progress.", "job_id": state.job_id},
         )
     return {"job_id": state.job_id}
+
+
+@app.post("/collections/{name}/extracts", response_model=None, tags=["Query"])
+async def create_extract(
+    name: str,
+    payload: ExtractIn | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 - FastAPI dependency marker
+) -> Response:
+    """Queue a written extract of a collection, or of one source in it.
+
+    Rendering a whole collection reads every point and every stored thumbnail,
+    so it runs as a background job like a summary rebuild. Progress arrives on
+    ``GET /ingest/jobs/events`` as ``extract_started``/``extract_progress``/
+    ``extract_completed``; the terminal frame carries the stored artifact.
+
+    Args:
+        name (str): The caller's logical collection name.
+        payload (ExtractIn | None): Optional ``target`` naming one source.
+        principal (Principal): The resolved request principal.
+        jobs (IngestJobManager): The shared job registry.
+
+    Returns:
+        Response: 202 ``{"job_id"}``.
+
+    Raises:
+        HTTPException: 404 when the collection is not owned; 409 when a build
+            for this collection is already in flight.
+    """
+    physical = _require_owned_collection(name, principal)
+    state, created = await jobs.create_if_idle(
+        owner=principal.effective_owner,
+        logical_name=name,
+        physical=physical,
+        kind="extract",
+        target=(payload.target if payload else None),
+    )
+    if not created:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "An extract is already being built.", "job_id": state.job_id},
+        )
+    return JSONResponse({"job_id": state.job_id}, status_code=202)
+
+
+@app.get("/collections/{name}/extracts", tags=["Query"])
+def list_extracts(name: str, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 - FastAPI dependency marker
+    """List a collection's stored extracts, newest first.
+
+    Read from the store rather than the job registry: jobs live in memory and
+    finished ones are evicted, while the archives on disk outlive them.
+
+    Args:
+        name (str): The caller's logical collection name.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"extracts": [...]}``.
+    """
+    physical = _require_owned_collection(name, principal)
+    return {"extracts": _extract_store().list(physical)}
+
+
+@app.get("/collections/{name}/extracts/{extract_id}/download", tags=["Query"])
+def download_extract(
+    name: str,
+    extract_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> FileResponse:
+    """Download one stored extract bundle.
+
+    Args:
+        name (str): The caller's logical collection name.
+        extract_id (str): The build's id.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        FileResponse: The ZIP archive.
+
+    Raises:
+        HTTPException: 404 when the collection is not owned, or the id is
+            unknown or malformed.
+    """
+    physical = _require_owned_collection(name, principal)
+    store = _extract_store()
+    record = store.get(physical, extract_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Extract not found.")
+    stem = str(record.get("filename") or f"{name}-extract.zip").removesuffix(".zip")
+    return FileResponse(
+        store.path(physical, extract_id),
+        media_type="application/zip",
+        headers=_download_headers(stem, "zip"),
+    )
+
+
+@app.delete("/collections/{name}/extracts/{extract_id}", tags=["Query"])
+def delete_extract(
+    name: str,
+    extract_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, bool]:
+    """Delete one stored extract.
+
+    Args:
+        name (str): The caller's logical collection name.
+        extract_id (str): The build's id.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}``.
+
+    Raises:
+        HTTPException: 404 when the collection is not owned or the id is unknown.
+    """
+    physical = _require_owned_collection(name, principal)
+    if not _extract_store().delete(physical, extract_id):
+        raise HTTPException(status_code=404, detail="Extract not found.")
+    return {"ok": True}
+
+
+@app.get("/collections/{name}/sources/{source_id}/extract.{fmt}", response_model=None, tags=["Query"])
+async def export_source_extract(
+    name: str,
+    source_id: str,
+    fmt: Literal["md", "pdf", "zip"],
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> Response:
+    """Render one source's extract and return it immediately.
+
+    ``source_id`` is whichever identity the caller had: a document's file hash,
+    a media file's content hash, an image id or a posting uuid. A postings
+    table is the one shape that is not small - its file hash expands to every
+    posting recorded in it - so an oversize target is refused with 413 and the
+    caller is expected to queue a job rather than receive a truncated bundle.
+
+    Args:
+        name (str): The caller's logical collection name.
+        source_id (str): The source to render.
+        fmt (Literal["md", "pdf", "zip"]): Output format.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        Response: The rendered document.
+
+    Raises:
+        HTTPException: 404 when the collection is not owned or the source is
+            unknown; 413 above ``EXTRACT_SYNC_MAX_UNITS``; 503 when the PDF
+            engine is unavailable.
+    """
+    physical = _require_owned_collection(name, principal)
+    units = await to_thread.run_sync(_gather_units, physical, source_id)
+    if not units:
+        raise HTTPException(status_code=404, detail="Source not found.")
+
+    cfg = load_extract_env()
+    if len(units) > cfg.sync_max_units:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "message": "This source is too large to render on the request; queue an extract instead.",
+                "units": len(units),
+            },
+        )
+
+    try:
+        body, media_type = await to_thread.run_sync(
+            partial(build_single, units, fmt, collection=name, now=datetime.now(tz=UTC), pdf=html_to_pdf)
+        )
+    except PdfEngineUnavailableError as exc:
+        logger.exception("PDF export engine unavailable")
+        raise HTTPException(status_code=503, detail="PDF export is not available.") from exc
+    return Response(content=body, media_type=media_type, headers=_download_headers(f"{name}-{source_id[:12]}", fmt))
 
 
 @app.get("/ingest/jobs", tags=["Ingestion"])

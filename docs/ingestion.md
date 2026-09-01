@@ -238,6 +238,14 @@ exactly like an audio-only clip. `KEYFRAMES_PER_MINUTE=0` (or `KEYFRAMES_MAX=0`)
 remains the way to turn sampling off; Nextext returns no frames for a
 non-positive rate.
 
+`keyframes.zip` also carries a `manifest.json` naming each frame's sampling
+time (Nextext ≥ v1.11.0). The client pairs it with the frames and stamps
+`keyframe_index` and `keyframe_time_sec` on each point, so an extract can say
+*when* in the clip a described frame appeared. Without the manifest the frames
+are stored untimed rather than guessed. The index is Nextext's own sampling
+position, recorded before the near-duplicate prune, so a dropped frame never
+renumbers its neighbours.
+
 Every `NEXTEXT_*` and `KEYFRAME*` variable, with its default, is documented in
 [configuration.md](configuration.md#nextext-media-processing--nextextconfig).
 

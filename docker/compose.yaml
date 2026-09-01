@@ -118,6 +118,7 @@ services:
       DATA_PATH: /var/lib/docint/pipeline/data
       PIPELINE_ARTIFACTS_DIR: /var/lib/docint/pipeline/artifacts
       RESULTS_PATH: /var/lib/docint/pipeline/results
+      EXTRACT_DIR: /var/lib/docint/pipeline/extracts
       # Explicit (matches the volume mount) rather than derived from $HOME.
       HF_HUB_CACHE: /home/app/.cache/huggingface/hub
       # Same value nginx enforces (frontend service, below). The backend only

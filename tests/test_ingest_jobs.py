@@ -922,6 +922,108 @@ async def test_terminal_jobs_are_capped_per_owner() -> None:
     assert created[-1].job_id in retained_ids
 
 
+class TestExtractJobs:
+    """``kind="extract"`` jobs carry an artifact the other kinds do not."""
+
+    @pytest.mark.anyio
+    async def test_extract_job_emits_extract_events(self) -> None:
+        """A ``kind="extract"`` job frames ``extract_started``/``extract_completed``."""
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            push("extract_progress", {"message": "Rendering 1/2", "rendered": 1, "total_units": 2})
+            return {"empty": False, "resolution": None}
+
+        manager = IngestJobManager(runner=runner, extract_concurrency=1)
+        state = await manager.create(owner="owner-a", logical_name="col", physical="phys", kind="extract")
+        await _drain(manager, state)
+
+        history = "".join(state.history())
+        assert "event: extract_started" in history
+        assert "event: extract_progress" in history
+        assert "event: extract_completed" in history
+        assert state.snapshot()["kind"] == "extract"
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_terminal_frame_carries_the_stored_artifact(self) -> None:
+        """A client learns what to download from the frame that ends the run."""
+        record = {"extract_id": "20260102-030405-deadbeef", "filename": "col-extract.zip", "size": 12}
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            return {"empty": False, "resolution": None, "artifact": record}
+
+        manager = IngestJobManager(runner=runner, extract_concurrency=1)
+        state = await manager.create(owner="o", logical_name="c", physical="p", kind="extract")
+        await _drain(manager, state)
+
+        assert state.artifact == record
+        assert state.snapshot()["artifact"] == record
+        assert "20260102-030405-deadbeef" in "".join(state.history())
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_a_job_without_an_artifact_omits_the_key(self) -> None:
+        """An ingest job's terminal frame is unchanged by the extract kind."""
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            return {"empty": False, "resolution": None}
+
+        manager = IngestJobManager(runner=runner, extract_concurrency=1)
+        state = await manager.create(owner="o", logical_name="c", physical="p", kind="extract")
+        await _drain(manager, state)
+
+        assert state.artifact is None
+        assert '"artifact"' not in "".join(state.history())
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_the_target_rides_the_snapshot(self) -> None:
+        """A per-source job says which source it is for."""
+        manager = IngestJobManager(runner=lambda state, push: {"empty": False, "resolution": None})
+        state = await manager.create(owner="o", logical_name="c", physical="p", kind="extract", target="a1b2c3d4")
+        await _drain(manager, state)
+
+        assert state.snapshot()["target"] == "a1b2c3d4"
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_extract_failure_uses_its_own_code(self) -> None:
+        """A failed extract must not read as a failed ingest."""
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        manager = IngestJobManager(runner=runner, extract_concurrency=1)
+        state = await manager.create(owner="o", logical_name="c", physical="p", kind="extract")
+        await _drain(manager, state)
+
+        assert state.status is JobStatus.FAILED
+        assert '"code": "extract_failed"' in "".join(state.history())
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_extract_runs_on_its_own_semaphore(self) -> None:
+        """A bundle render must not consume the single ingest worker slot."""
+        gate = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            if state.kind == "ingest":
+                asyncio.run_coroutine_threadsafe(gate.wait(), loop).result(timeout=5)
+            return {"empty": False, "resolution": None}
+
+        manager = IngestJobManager(runner=runner, concurrency=1, extract_concurrency=1)
+        ingest = await manager.create(owner="o", logical_name="c", physical="p", kind="ingest")
+        extract = await manager.create(owner="o", logical_name="c", physical="p", kind="extract")
+        await _drain(manager, extract)
+
+        assert extract.status is JobStatus.COMPLETED
+        assert ingest.status is JobStatus.RUNNING
+        gate.set()
+        await _drain(manager, ingest)
+        await manager.stop()
+
+
 class TestSummaryJobs:
     """``kind="summary"`` jobs share the registry but frame their own events."""
 

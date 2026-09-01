@@ -5093,6 +5093,49 @@ def test_delete_collection_fail_fast_on_primary_failure(monkeypatch: pytest.Monk
     assert deleted == ["target"]
 
 
+def test_delete_collection_removes_stored_extracts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Extracts share the collection's lifecycle, like the _images companion.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory standing in for the extract store root.
+    """
+    extracts = tmp_path / "extracts"
+    monkeypatch.setenv("EXTRACT_DIR", str(extracts))
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path / "sources"
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+    stored = extracts / "target"
+    stored.mkdir(parents=True)
+    (stored / "20260102-030405-deadbeef.zip").write_bytes(b"PK")
+
+    rag.delete_collection("target")
+
+    assert not stored.exists()
+
+
+def test_delete_collection_survives_an_extract_store_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A store that cannot be cleaned must not fail the collection delete.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory for the source dir.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+    monkeypatch.setattr(
+        "docint.core.rag.ExtractStore",
+        lambda root: (_ for _ in ()).throw(RuntimeError("store boom")),
+    )
+
+    rag.delete_collection("target")
+
+
 def test_delete_collection_resets_singleton_when_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
