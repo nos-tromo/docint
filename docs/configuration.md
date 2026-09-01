@@ -673,10 +673,26 @@ Loaded by `load_path_env()` (`docint/utils/env_cfg.py`). Every path expands `~`.
 | `RESULTS_PATH` | `~/docint/results` | Directory for CLI export artifacts. Compose: `/var/lib/docint/pipeline/results`. |
 | `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. |
 | `QDRANT_SRC_DIR` | `~/docint/qdrant_sources` | Where raw source files are staged for preview. |
+| `EXTRACT_DIR` | `~/docint/extracts` | Where rendered data extracts are stored. Compose: `/var/lib/docint/pipeline/extracts`. |
 | `HF_HUB_CACHE` | `~/.cache/huggingface/hub` | HF Hub cache path. |
 
 `PathConfig` also exposes a derived `prompts` path pointing at
 `docint/utils/prompts/` — it is not overridable by env var.
+
+## Data extracts — `ExtractConfig`
+
+Loaded by `load_extract_env()` (`docint/utils/env_cfg.py`). Governs the written
+extracts described in [extracts.md](extracts.md); the store's location is
+`EXTRACT_DIR` in the Paths table above.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EXTRACT_RETENTION_DAYS` | `7` | Age at which a stored bundle is pruned. Minimum 1. |
+| `EXTRACT_MAX_PER_COLLECTION` | `5` | Bundles kept per collection; the oldest beyond this are dropped after each build. Minimum 1. |
+| `EXTRACT_PDF_MAX_UNITS` | `200` | Above this the combined PDF is skipped and the bundle's README says so. `0` disables the PDF entirely. |
+| `EXTRACT_PDF_MAX_FIGURES` | `400` | The same cap counted in figures — what actually fills WeasyPrint's memory. |
+| `EXTRACT_SYNC_MAX_UNITS` | `50` | Units a per-source download may render on the request. Above it the route answers 413 and the caller queues a job. Minimum 1. |
+| `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent extract jobs. Its own semaphore, so a bundle render never consumes an ingest or summary worker slot. |
 
 ## Response language — `LanguageConfig`
 

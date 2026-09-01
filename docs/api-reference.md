@@ -607,6 +607,40 @@ curl -O "http://localhost:8000/collections/my_collection/export/documents.csv"
 curl -O "http://localhost:8000/collections/my_collection/export/entities.csv?entity_merge_mode=resolved"
 ```
 
+### Data extracts
+
+A written extract of everything ingested — full transcripts, keyframe
+descriptions, image captions and OCR text, document text, and the posting each
+artifact belongs to. See [extracts.md](extracts.md) for the bundle layout and
+the caps.
+
+Owner-gated by the collection name in the path, like the CSV exports above:
+`404` when the collection is not owned by the caller.
+
+| Route | Contents |
+|---|---|
+| `POST /collections/{name}/extracts` | Queue a build. `202 {"job_id"}`; `409 {"message","job_id"}` while one is in flight. Optional body `{"target": "<source id>"}`. |
+| `GET /collections/{name}/extracts` | `{"extracts": [...]}`, newest first, read from the on-disk store rather than the job registry (jobs are in-memory and evicted; the archives outlive them). |
+| `GET /collections/{name}/extracts/{extract_id}/download` | The ZIP bundle. `404` on an unknown or malformed id. |
+| `DELETE /collections/{name}/extracts/{extract_id}` | `{"ok": true}`; `404` when unknown. |
+| `GET /collections/{name}/sources/{source_id}/extract.{md,pdf,zip}` | One source, rendered on the request. `404` unknown; `413 {"message","units"}` above `EXTRACT_SYNC_MAX_UNITS`; `503` when the PDF engine is unavailable. |
+
+A collection build runs as a `kind="extract"` job on the shared
+owner-multiplexed stream (`GET /ingest/jobs/events`), framed as
+`extract_started` / `extract_progress` / `extract_completed`. The terminal
+frame and the job snapshot both carry the stored `artifact`.
+
+`source_id` is whichever identity the caller holds — a document's file hash, a
+media file's content hash, a standalone image's id, or a posting uuid. A
+postings table's file hash expands to every post recorded in it, which is what
+the `413` exists for: the caller queues a targeted job instead of receiving a
+truncated bundle.
+
+```bash
+curl -X POST "http://localhost:8000/collections/my_collection/extracts"
+curl -O "http://localhost:8000/collections/my_collection/sources/<file_hash>/extract.zip"
+```
+
 All CSV schemas are defined in `docint/utils/csv_stream.py`, which the
 streaming endpoints and the `query` CLI share — so both produce byte-identical
 CSVs for the same collection. For batch jobs that take many minutes (or should

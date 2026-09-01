@@ -16,7 +16,7 @@ NETWORKS := inference-net data-net edge-net
 VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache pipeline-storage
 include make/common.mk
 
-.PHONY: help resolve health search-index search-index-all
+.PHONY: help resolve health search-index search-index-all extract
 
 help:
 	@echo "docint — build-host helpers."
@@ -33,6 +33,7 @@ help:
 	@echo "  make down       stop + remove containers (never touches data-plane state)"
 	@echo "  make health     check backend dependency status (Qdrant reachability); chain as 'make up health'"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
+	@echo "  make extract    write a collection's data extract to RESULTS_PATH (COLLECTION=<name> optional)"
 	@echo "  make search-index  build the full-text search index (COLLECTION=<name> optional)"
 	@echo "  make search-index-all  build it for every collection on this host (one-time backport)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
@@ -65,6 +66,19 @@ resolve:
 		printf '%s\n' "$(COLLECTION)" | $(COMPOSE) run --rm -T backend resolve; \
 	else \
 		$(COMPOSE) run --rm backend resolve; \
+	fi
+
+# Render a collection's written data extract — full transcripts, keyframe
+# descriptions, image captions and document text — as a ZIP under
+# RESULTS_PATH. Reads Qdrant only; no inference, so it is safe on an
+# airgapped host. Runs in a one-off backend container to reach the qdrant
+# alias; interactive by default, pass COLLECTION=<name> to run
+# non-interactively.
+extract:
+	@if [ -n "$(COLLECTION)" ]; then \
+		$(COMPOSE) run --rm -T backend extract "$(COLLECTION)"; \
+	else \
+		$(COMPOSE) run --rm backend extract; \
 	fi
 
 # Build the full-text search index for a collection: creates the `search_text`

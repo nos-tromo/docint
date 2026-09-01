@@ -1,0 +1,123 @@
+# Data extracts
+
+A **data extract** is the written form of what docint ingested: full
+transcripts with timestamps and speakers, keyframe descriptions with the
+second they were sampled from, image captions and the text read out of the
+pixels, document text, and the social posting each artifact hangs off.
+
+It exists because that content is otherwise only inside Qdrant payloads.
+Text is easy enough to re-obtain from the original file; a transcript is not.
+Before this, an analyst who needed one for a report had to push the media
+through [Nextext](https://github.com/nos-tromo/Nextext) separately — a round
+trip whose output knows nothing of the manifest → postings joins docint made
+when it linked that clip to its post.
+
+Extracts complement the [Report Builder](reports.md) rather than replacing
+it. A report is hand-picked evidence; an extract is everything, unfiltered.
+
+## What you get
+
+A ZIP laid out one folder per source:
+
+```
+mydocs-extract-20260102-0304/
+  README.md                  index of every source, with its folder
+  extract.md                 all sources in one document
+  extract.pdf                the same, paginated (see the caps below)
+  documents/report-a1b2c3d4/
+    extract.md               the document's text, then its figures
+    figures/<image id>.jpg   each figure as its stored thumbnail
+  media/clip-f1e2d3c4/
+    extract.md               transcript and keyframes together
+    transcript.txt           Nextext's own banner-fenced layout
+    keyframes/frame_000_01-12.jpg
+  postings/examplenet/example-account/20260102-1111aaaa/
+    extract.md               the post, its pictures, its clips
+    transcript.txt           one per clip on the post
+    media/<image id>.jpg
+```
+
+Figures are the **stored 768px thumbnails**, never a re-fetch of the
+original: an extract must be renderable from the index alone, with no source
+volume mounted. The transcript layout matches Nextext's `transcript.txt`
+byte for byte, so a reader who has seen one recognises the other.
+
+Headings follow `RESPONSE_LANGUAGE`, like the report exports.
+
+## Building one
+
+**From the SPA.** The Inspector has an *Data extracts* panel: **Build
+extract** queues one for the active collection, progress appears in the
+panel, and finished bundles are listed underneath with a download link. Each
+document row also carries a download action for that source alone.
+
+**Over HTTP.** See [api-reference.md](api-reference.md):
+
+| Route | What it does |
+|---|---|
+| `POST /collections/{name}/extracts` | Queue a build (202 + `job_id`, 409 while one is in flight). Body may carry `{"target": "<id>"}`. |
+| `GET /collections/{name}/extracts` | List stored bundles, newest first. |
+| `GET /collections/{name}/extracts/{id}/download` | Download one bundle. |
+| `DELETE /collections/{name}/extracts/{id}` | Delete one bundle. |
+| `GET /collections/{name}/sources/{source_id}/extract.{md,pdf,zip}` | Render one source immediately. |
+
+A collection build is a background job (`kind="extract"`) sharing the
+owner-multiplexed stream at `GET /ingest/jobs/events`, framed as
+`extract_started` / `extract_progress` / `extract_completed`. The terminal
+frame carries the stored artifact.
+
+**From the CLI**, on a host with no HTTP access to the backend:
+
+```bash
+make extract                      # prompts for the collection
+make extract COLLECTION=mydocs
+uv run extract mydocs --target a1b2c3d4 --no-pdf --out ./out
+```
+
+The CLI writes into `RESULTS_PATH` by default and reads Qdrant only — no
+inference, so it is safe on an airgapped host.
+
+## Addressing one source
+
+`source_id` is whichever identity you have: a document's file hash, a media
+file's content hash, a standalone image's id, or a posting uuid. The
+Inspector's document table shows the file hash.
+
+One shape is not small: a **postings table**'s file hash expands to every
+post recorded in it. Above `EXTRACT_SYNC_MAX_UNITS` (default 50) the
+synchronous route answers **413** rather than rendering for minutes on the
+request; the SPA turns that into a targeted background build, so the same
+click still gets you the bundle.
+
+## Limits and retention
+
+| Variable | Default | Effect |
+|---|---|---|
+| `EXTRACT_DIR` | `~/docint/extracts` | Where bundles are stored. Compose pins it onto the `pipeline-storage` volume. |
+| `EXTRACT_RETENTION_DAYS` | `7` | Age at which a stored bundle is pruned. |
+| `EXTRACT_MAX_PER_COLLECTION` | `5` | Bundles kept per collection. |
+| `EXTRACT_PDF_MAX_UNITS` | `200` | Above this the combined PDF is skipped. |
+| `EXTRACT_PDF_MAX_FIGURES` | `400` | Same, counted in figures. |
+| `EXTRACT_SYNC_MAX_UNITS` | `50` | Units a per-source download may render inline. |
+| `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent builds. |
+
+The PDF caps are about memory: WeasyPrint holds the whole document plus every
+decoded image resident, and a figure-heavy collection is a multi-gigabyte
+render. When a cap trips, the Markdown files and the figures are still
+complete and the README says why the PDF is missing — the bundle is never
+silently short.
+
+Stored bundles share their collection's lifecycle: deleting a collection
+deletes its extracts, like its `_images` and `_entities` companions.
+
+## What an extract does not do
+
+- **It does not re-read anything.** No inference, no OCR, no transcription —
+  only what ingestion already stored. A clip ingested before keyframe
+  timestamps existed extracts without them; see
+  [migrations.md](migrations.md).
+- **It does not re-order a document it cannot order.** Chunks read in page,
+  then character-offset order. A collection that stamped neither is emitted
+  in storage order and says so in the output, rather than passing that off as
+  the document's own reading order.
+- **It is not a durable archive.** Bundles are pruned. Download what you need.
