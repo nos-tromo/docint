@@ -14,6 +14,7 @@ from docint.core.extract.units import (
     ImageUnit,
     MediaUnit,
     PostingUnit,
+    handle_from_url,
     partition,
     resolve_target,
 )
@@ -275,3 +276,69 @@ def test_units_sort_deterministically_regardless_of_input_order() -> None:
     """Two builds of the same collection must lay out identically."""
     points = [_chunk("a", "h2", "b", page=1), _chunk("b", "h1", "a", page=1)]
     assert [u.key for u in partition(points, [])] == [u.key for u in partition(list(reversed(points)), [])]
+
+
+# --------------------------------------------------------------------------- #
+# Posting identity
+# --------------------------------------------------------------------------- #
+def test_a_postings_title_distinguishes_two_posts_by_one_author() -> None:
+    """Eight posts by one account are otherwise eight identical headings."""
+    unit = PostingUnit(key="u1", reference={"author": "authorname", "timestamp": "2025-05-19T14:51:03+00:00"})
+    assert unit.title == "authorname · 2025-05-19 14:51"
+
+
+def test_a_postings_title_falls_back_when_a_field_is_missing() -> None:
+    """Neither half is guaranteed; the title never becomes a bare separator."""
+    assert PostingUnit(key="u1", reference={"author": "authorname"}).title == "authorname"
+    assert PostingUnit(key="u1", reference={"timestamp": "2025-05-19T14:51:03"}).title == "2025-05-19 14:51"
+    assert PostingUnit(key="u1", reference={}).title == "u1"
+
+
+def test_a_handle_is_read_back_out_of_a_posting_url() -> None:
+    """A chat-style export names the account only in its permalink."""
+    assert handle_from_url("https://x.com/vanityname/status/4400000000000000004") == "vanityname"
+    assert handle_from_url("https://www.twitter.com/vanityname/status/1") == "vanityname"
+
+
+def test_a_url_that_names_no_account_yields_no_handle() -> None:
+    """A wrong guess here would put a route in the report's account row."""
+    assert handle_from_url("https://x.com/i/status/1") == ""
+    assert handle_from_url("https://example.invalid/vanityname/status/1") == ""
+    assert handle_from_url("https://x.com") == ""
+    assert handle_from_url("") == ""
+
+
+def test_a_chat_export_gains_its_handle_from_the_url() -> None:
+    """The messages schema carries no handle column, so the link supplies it."""
+    payload = {
+        "reference_metadata": {
+            "network": "x",
+            "type": "posting",
+            "uuid": "u1",
+            "author": "authorname",
+            "url": "https://x.com/vanityname/status/4400000000000000004",
+        },
+        "table": {"row_index": 4},
+        "text": "the posted words",
+    }
+    (unit,) = partition([("p1", payload)], [])
+    assert isinstance(unit, PostingUnit)
+    assert unit.reference["vanity"] == "vanityname"
+    assert unit.row == 4
+
+
+def test_an_exports_own_handle_is_never_overwritten_by_the_url() -> None:
+    """A declared handle is data; the URL-derived one is only a fallback."""
+    payload = {
+        "reference_metadata": {
+            "network": "x",
+            "type": "posting",
+            "uuid": "u1",
+            "vanity": "declared",
+            "url": "https://x.com/fromurl/status/1",
+        },
+        "text": "words",
+    }
+    (unit,) = partition([("p1", payload)], [])
+    assert isinstance(unit, PostingUnit)
+    assert unit.reference["vanity"] == "declared"

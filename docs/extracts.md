@@ -15,6 +15,14 @@ when it linked that clip to its post.
 Extracts complement the [Report Builder](reports.md) rather than replacing
 it. A report is hand-picked evidence; an extract is everything, unfiltered.
 
+The bundle's PDF is written as **that report's appendix**, not as a second
+document with its own conventions: it carries the report's footer disclaimer,
+its case-file number in the running header, its operator line, a contents
+block, and — the load-bearing part — the report's own provenance rows, so a
+posting cited in the report and the same posting in the appendix name the
+account identically. Every entry is numbered `A.1`, `A.2` …, which is how a
+finding cites one.
+
 ## What you get
 
 A ZIP laid out one folder per source:
@@ -39,10 +47,35 @@ mydocs-extract-20260102-0304/
 
 Figures are the **stored 768px thumbnails**, never a re-fetch of the
 original: an extract must be renderable from the index alone, with no source
-volume mounted. The transcript layout matches Nextext's `transcript.txt`
+volume mounted. The transcript layout in `transcript.txt` matches Nextext's
 byte for byte, so a reader who has seen one recognises the other.
 
+In the PDF a figure sits **beside** the words describing it rather than above
+them, and a transcript is a table (time, speaker, text) rather than a run of
+timestamped lines — one column per field means a reader can scan a speaker,
+and a stamp in its own cell cannot be reordered into the words by an
+Arabic line's bidi run. Right-to-left text is marked as such explicitly,
+because WeasyPrint honours neither `dir="auto"` nor `unicode-bidi`.
+
+The vision tagger's **keyword lists are not extracted**. They are retrieval
+machinery, and beside a caption that already says what a picture shows they
+read as noise; the caption and the text read out of the pixels are both kept.
+
 Headings follow `RESPONSE_LANGUAGE`, like the report exports.
+
+## Filing an appendix under a report
+
+The case file and operator printed on the PDF come from the **active report**:
+the SPA sends them with the build, and the extracts panel names the report the
+next build will be filed under. With no active report both are simply absent,
+for the reason the Report screen leaves its own operator empty rather than
+guessing — an appendix naming a different operator than its report would be
+worse than one naming none.
+
+Over HTTP they are `reference_number` and `operator`, on the `POST` body and
+as query parameters on the per-source download. The CLI takes
+`--reference-number` and `--operator`, which is how an offline build gets them
+with no report to inherit from.
 
 ## Building one
 
@@ -55,11 +88,11 @@ document row also carries a download action for that source alone.
 
 | Route | What it does |
 |---|---|
-| `POST /collections/{name}/extracts` | Queue a build (202 + `job_id`, 409 while one is in flight). Body may carry `{"target": "<id>"}`. |
+| `POST /collections/{name}/extracts` | Queue a build (202 + `job_id`, 409 while one is in flight). Body may carry `{"target": "<id>"}`, `reference_number` and `operator`. |
 | `GET /collections/{name}/extracts` | List stored bundles, newest first. |
 | `GET /collections/{name}/extracts/{id}/download` | Download one bundle. |
 | `DELETE /collections/{name}/extracts/{id}` | Delete one bundle. |
-| `GET /collections/{name}/sources/{source_id}/extract.{md,pdf,zip}` | Render one source immediately. |
+| `GET /collections/{name}/sources/{source_id}/extract.{md,pdf,zip}` | Render one source immediately. Takes `reference_number` and `operator` as query parameters. |
 
 A collection build is a background job (`kind="extract"`) sharing the
 owner-multiplexed stream at `GET /ingest/jobs/events`, framed as
@@ -72,6 +105,7 @@ frame carries the stored artifact.
 make extract                      # prompts for the collection
 make extract COLLECTION=mydocs
 uv run extract mydocs --target a1b2c3d4 --no-pdf --out ./out
+uv run extract mydocs --reference-number AZ-12/26 --operator "A. Analyst"
 ```
 
 The CLI writes into `RESULTS_PATH` by default and reads Qdrant only — no
@@ -116,6 +150,11 @@ deletes its extracts, like its `_images` and `_entities` companions.
   only what ingestion already stored. A clip ingested before keyframe
   timestamps existed extracts without them; see
   [migrations.md](migrations.md).
+- **It does not read an account out of thin air.** A chat-style export (the
+  `messages` schema) carries no account-id or handle column, so the handle is
+  recovered from the permalink's own path — and only for hosts where that path
+  segment *is* the account. The numeric id in such a URL identifies the
+  posting, not the account, and is never printed as one.
 - **It does not re-order a document it cannot order.** Chunks read in page,
   then character-offset order. A collection that stamped neither is emitted
   in storage order and says so in the output, rather than passing that off as

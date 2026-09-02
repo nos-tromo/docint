@@ -35,9 +35,16 @@ __all__ = [
     "PostingUnit",
     "Segment",
     "Unit",
+    "handle_from_url",
     "partition",
     "resolve_target",
 ]
+
+#: Networks whose posting URL is ``https://<host>/<handle>/status/<id>``, so a
+#: handle can be read back out of a link when the export never carried one.
+_HANDLE_URL_HOSTS = frozenset({"x.com", "twitter.com", "mobile.twitter.com"})
+#: Path segments that are a route, never an account.
+_HANDLE_URL_RESERVED = frozenset({"i", "status", "home", "search", "hashtag", "intent"})
 
 #: Payload key marking a transcript segment node.
 DOC_KIND_FIELD = "docint_doc_kind"
@@ -165,6 +172,7 @@ class PostingUnit:
     reference: dict[str, Any] = field(default_factory=dict)
     text: str = ""
     file_name: str = ""
+    row: int | None = None
     images: list[Figure] = field(default_factory=list)
     media: list[MediaUnit] = field(default_factory=list)
     source_hashes: set[str] = field(default_factory=set)
@@ -172,9 +180,17 @@ class PostingUnit:
 
     @property
     def title(self) -> str:
-        """Display name for this unit."""
+        """Display name for this unit: the account, then when it posted.
+
+        An account's postings are otherwise a run of identical headings — the
+        example collection opens with eight of them — and the timestamp is the
+        one field that always distinguishes two posts by the same author.
+        """
         author = str(self.reference.get("author") or self.reference.get("author_id") or "").strip()
-        return author or self.key
+        stamp = str(self.reference.get("timestamp") or "").strip()[:16].replace("T", " ")
+        if author and stamp:
+            return f"{author} · {stamp}"
+        return author or stamp or self.key
 
     @property
     def figures(self) -> list[Figure]:
@@ -283,6 +299,39 @@ def _basename(value: Any) -> str:
     return text.rsplit("/", 1)[-1] if text else ""
 
 
+def handle_from_url(url: str) -> str:
+    """Return the account handle a posting URL names, or ``""``.
+
+    A chat-style export (the ``messages`` schema: ``Chat ID``/``Sender``/
+    ``Text``) has no account-id or handle column at all, so the only place the
+    account is identified is the permalink —
+    ``https://x.com/<handle>/status/<id>``. Reading it back is what lets the
+    appendix name an account the way the curated report does, on collections
+    already ingested and with no pipeline change.
+
+    Deliberately narrow: only hosts whose first path segment *is* the account
+    (:data:`_HANDLE_URL_HOSTS`), and never a known route segment. The numeric
+    id in such a URL identifies the *posting*, not the account, so it is never
+    surfaced as one.
+
+    Args:
+        url (str): The posting's URL.
+
+    Returns:
+        str: The handle without its ``@``, or ``""`` when the URL names none.
+    """
+    text = _text(url)
+    if "://" not in text:
+        return ""
+    _scheme, _, rest = text.partition("://")
+    host, _, path = rest.partition("/")
+    host = host.split("@")[-1].split(":")[0].lower().removeprefix("www.")
+    if host not in _HANDLE_URL_HOSTS or not path:
+        return ""
+    handle = path.split("?")[0].split("#")[0].split("/")[0].strip()
+    return "" if handle.lower() in _HANDLE_URL_RESERVED else handle
+
+
 def _segment(payload: dict[str, Any]) -> Segment:
     """Build a :class:`Segment` from a transcript-segment payload."""
     return Segment(
@@ -338,6 +387,15 @@ def _chunk_order(point_id: str, payload: dict[str, Any]) -> tuple[int, int, int,
     offset = _as_int(node.get("start_char_idx")) or 0
     part = _as_int(payload.get("split_part_index")) or 0
     return (page, offset, part, point_id)
+
+
+def _row_index(payload: dict[str, Any]) -> int | None:
+    """Return the table row a payload came from, by either of its spellings."""
+    row = _as_int(payload.get("row"))
+    if row is not None:
+        return row
+    table = payload.get("table")
+    return _as_int(table.get("row_index")) if isinstance(table, dict) else None
 
 
 def _has_order_signal(payload: dict[str, Any]) -> bool:
@@ -398,6 +456,12 @@ def _ingest_main_point(point_id: str, payload: dict[str, Any], acc: _Accumulator
         posting.reference = {**ref, **posting.reference} if posting.reference else dict(ref)
         posting.text = posting.text or _text(ref.get("text")) or payload_text(payload)
         posting.file_name = posting.file_name or _first(payload, "file_name", "filename")
+        if posting.row is None:
+            posting.row = _row_index(payload)
+        if not _text(posting.reference.get("vanity")):
+            handle = handle_from_url(_text(posting.reference.get("url")))
+            if handle:
+                posting.reference["vanity"] = handle
         file_hash = _text(payload.get("file_hash"))
         if file_hash:
             posting.source_hashes.add(file_hash)

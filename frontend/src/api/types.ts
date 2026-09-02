@@ -522,6 +522,10 @@ export interface ExtractRecord {
   counts: Record<string, number>
   /** True when the bundle is complete but its combined PDF was capped out. */
   pdf_skipped: boolean
+  /** Case file the appendix was filed under, when one was active. */
+  reference_number?: string | null
+  /** Who built it, when known. */
+  operator?: string | null
 }
 
 export interface IngestEvent {

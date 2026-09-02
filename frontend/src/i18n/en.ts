@@ -139,6 +139,7 @@ export const en = {
   'chat.add_rule': 'Rule',
   'chat.field_placeholder': 'field (or pick)',
   'chat.value_placeholder': 'value',
+  'chat.operator_aria': 'Operator',
   'chat.remove_rule_aria': 'Remove rule',
   'chat.graph_debug': 'Graph debug',
   'chat.graph_debug_show': 'Show graph debug',
@@ -432,6 +433,7 @@ export const en = {
   // data extracts (Inspector)
   'extract.title': 'Data extracts',
   'extract.caption': 'Full transcripts, keyframe descriptions and document text as files',
+  'extract.appendix_of': 'Appendix to: {title}',
   'extract.build': 'Build extract',
   'extract.running': 'Building the extract…',
   'extract.running_progress': 'Rendering {done} of {total}',

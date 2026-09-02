@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createExtract, deleteExtract, listExtracts } from '@/api/extracts'
+import { useAppendixFields } from '@/hooks/useAppendixFields'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useUiStore } from '@/stores/ui'
 import type { IngestEvent } from '@/api/types'
@@ -36,9 +37,10 @@ export function useDeleteExtract() {
 /** Queue an extract build. Used by the panel and by a per-row 413 fallback. */
 export function useStartExtract() {
   const collection = useUiStore((s) => s.selectedCollection)
+  const appendix = useAppendixFields()
   return async (target?: string) => {
     if (!collection) return null
-    return createExtract(collection, target)
+    return createExtract(collection, target, appendix)
   }
 }
 

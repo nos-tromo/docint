@@ -345,3 +345,44 @@ def test_a_missing_pdf_engine_degrades_to_503(client: TestClient, monkeypatch: p
 def test_an_unknown_format_is_rejected(client: TestClient) -> None:
     """Only the three documented formats are routable."""
     assert client.get("/collections/col/sources/a1b2c3d4/extract.docx").status_code == 422
+
+
+def test_the_case_file_travels_from_the_request_to_the_stored_bundle(client: TestClient) -> None:
+    """An appendix is filed under the report the caller had open.
+
+    The listing is what the SPA shows, so the fields have to survive the job
+    and land in the store's sidecar, not merely reach the renderer.
+    """
+    response = client.post(
+        "/collections/col/extracts",
+        json={"reference_number": "AZ-12/26", "operator": "A. Analyst"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    for _ in range(100):
+        snapshot = client.get(f"/ingest/jobs/{job_id}").json()
+        if snapshot["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.05)
+    assert snapshot["status"] == "completed"
+
+    (record,) = client.get("/collections/col/extracts").json()["extracts"]
+    assert record["reference_number"] == "AZ-12/26"
+    assert record["operator"] == "A. Analyst"
+
+
+def test_a_single_source_download_takes_the_case_file_too(client: TestClient) -> None:
+    """The same appendix chrome on the one-source route.
+
+    Checked through the ZIP, whose README carries the header; the bare ``md``
+    format is one unit's own document and has no header block to put it in.
+    """
+    response = client.get(
+        "/collections/col/sources/a1b2c3d4/extract.zip",
+        params={"reference_number": "AZ-12/26", "operator": "A. Analyst"},
+    )
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        readme = archive.read(next(n for n in archive.namelist() if n.endswith("README.md"))).decode("utf-8")
+    assert "AZ-12/26" in readme
+    assert "A. Analyst" in readme
