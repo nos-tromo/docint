@@ -139,7 +139,6 @@ export const en = {
   'chat.add_rule': 'Rule',
   'chat.field_placeholder': 'field (or pick)',
   'chat.value_placeholder': 'value',
-  'chat.operator_aria': 'Operator',
   'chat.remove_rule_aria': 'Remove rule',
   'chat.graph_debug': 'Graph debug',
   'chat.graph_debug_show': 'Show graph debug',

@@ -146,7 +146,6 @@ export const de: Strings = {
   'chat.add_rule': 'Regel',
   'chat.field_placeholder': 'Feld (oder wählen)',
   'chat.value_placeholder': 'Wert',
-  'chat.operator_aria': 'Operator',
   'chat.remove_rule_aria': 'Regel entfernen',
   'chat.graph_debug': 'Graph-Debug',
   'chat.graph_debug_show': 'Graph-Debug anzeigen',
