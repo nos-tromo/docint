@@ -86,8 +86,10 @@ describe('Analysis auto-select guard (table view only)', () => {
 
     // Table view is the default; the "Entity" dropdown should surface the
     // auto-picked top entity once the stats query resolves.
-    await screen.findByRole('option', { name: /Acme/i })
-    expect(screen.getByLabelText('Entity')).toHaveValue('Acme::ORG')
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
+    )
+    expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent('Acme [ORG]')
   })
 
   it('does not carry a dimming selection into a freshly-mounted graph view', async () => {
@@ -98,8 +100,10 @@ describe('Analysis auto-select guard (table view only)', () => {
     // becomes non-null there) — this is the scenario the graph-view fix
     // guards against: a pre-existing selection from table view should not
     // wash out the graph on arrival.
-    await screen.findByRole('option', { name: /Acme/i })
-    expect(screen.getByLabelText('Entity')).toHaveValue('Acme::ORG')
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
+    )
+    expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent('Acme [ORG]')
 
     await userEvent.click(screen.getByRole('button', { name: 'Graph' }))
 
@@ -148,7 +152,9 @@ describe('Analysis entity merge mode is fixed to resolved', () => {
     vi.stubGlobal('fetch', mockFetch())
     renderAnalysis()
 
-    await screen.findByRole('option', { name: /Acme/i })
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
+    )
     expect(screen.queryByRole('group', { name: /merge/i })).not.toBeInTheDocument()
   })
 
@@ -157,7 +163,9 @@ describe('Analysis entity merge mode is fixed to resolved', () => {
     vi.stubGlobal('fetch', fetchMock)
     renderAnalysis()
 
-    await screen.findByRole('option', { name: /Acme/i })
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
+    )
     await userEvent.click(screen.getByRole('button', { name: 'Graph' }))
     await screen.findByRole('button', { name: /Acme \(ORG\)/ })
 
@@ -207,14 +215,16 @@ describe('Analysis entity-key resolution', () => {
     vi.stubGlobal('fetch', mockFetch())
     renderAnalysis()
 
-    await screen.findByRole('option', { name: /Acme/i })
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
+    )
     await waitFor(() => {
       expect(useAnalysisUiStore.getState().entity).toEqual({
         key: 'Acme::ORG',
         collection: 'alpha'
       })
     })
-    expect(screen.getByLabelText('Entity')).toHaveValue('Acme::ORG')
+    expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent('Acme [ORG]')
   })
 
   it('leaves a key the aggregate cannot place alone', async () => {
@@ -226,7 +236,9 @@ describe('Analysis entity-key resolution', () => {
     vi.stubGlobal('fetch', mockFetch())
     renderAnalysis()
 
-    await screen.findByRole('option', { name: /Acme/i })
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
+    )
     expect(useAnalysisUiStore.getState().entity).toEqual({
       key: 'Nobody::PER',
       collection: 'alpha'

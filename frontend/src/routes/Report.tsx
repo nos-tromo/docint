@@ -2,6 +2,8 @@ import {
   ChevronDownIcon,
   DeleteButton,
   DownloadButton,
+  Menu,
+  MenuItem,
   MoveDownButton,
   MoveUpButton,
   NewButton,
@@ -54,14 +56,13 @@ function exportFormats(t: Translate): Array<{ format: ReportExportFormat; label:
 }
 
 /**
- * Export disclosure for one report: a single download icon whose formats
- * expand on hover or focus.
+ * Export menu for one report: a single download icon that opens the formats.
  *
- * Lifted out of the detail pane unchanged when the report list became a
- * selector, so it could join the create and delete actions on the header line.
- * The caret stays — it is the only thing saying the icon opens a list rather
- * than downloading something on the spot. The links stay in the DOM and are
- * merely CSS-hidden, which is also what keeps them reachable by keyboard.
+ * The caret is what says the icon opens a list rather than downloading
+ * something on the spot. It was a CSS hover disclosure until the federation
+ * grew a shared `Menu` — hover is not a gesture a touch screen or a keyboard
+ * has, and the panel had no `role="menu"`, no `aria-expanded` and no way to
+ * dismiss it.
  *
  * @param reportId - The report to export.
  * @param t - The active locale's translate function.
@@ -69,26 +70,31 @@ function exportFormats(t: Translate): Array<{ format: ReportExportFormat; label:
  */
 function ExportMenu({ reportId, t }: { reportId: number; t: Translate }) {
   return (
-    <div className="relative group shrink-0">
-      <DownloadButton label={t('chat.download')} aria-haspopup="menu" className="gap-1 px-2">
-        <ChevronDownIcon className="h-3.5 w-3.5" />
-      </DownloadButton>
-      <div className="absolute right-0 top-full z-10 hidden pt-1 group-hover:block group-focus-within:block">
-        <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-muted p-1 shadow-lg">
-          {exportFormats(t).map((e) => (
-            <a
-              key={e.format}
-              href={reportExportHref(reportId, e.format)}
-              {...(e.view ? { target: '_blank', rel: 'noreferrer' } : { download: true })}
-              className="block rounded px-3 py-1.5 text-sm hover:bg-accent whitespace-nowrap"
-              title={e.view ? t('report.open_new_tab_title') : t('report.download_format_title', { label: e.label })}
-            >
-              {e.label}
-            </a>
-          ))}
-        </div>
-      </div>
-    </div>
+    <Menu
+      align="end"
+      className="shrink-0"
+      panelClassName="min-w-[11rem]"
+      trigger={(props) => (
+        <DownloadButton {...props} label={t('chat.download')} className="gap-1 px-2">
+          <ChevronDownIcon className="h-3.5 w-3.5" />
+        </DownloadButton>
+      )}
+    >
+      {exportFormats(t).map((e) => (
+        <MenuItem
+          key={e.format}
+          href={reportExportHref(reportId, e.format)}
+          {...(e.view ? { target: '_blank' as const, rel: 'noreferrer' } : { download: true })}
+          hint={
+            e.view
+              ? t('report.open_new_tab_title')
+              : t('report.download_format_title', { label: e.label })
+          }
+        >
+          {e.label}
+        </MenuItem>
+      ))}
+    </Menu>
   )
 }
 

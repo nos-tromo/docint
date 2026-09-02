@@ -14,6 +14,17 @@ export function buildCollectionEntries(view: CollectionsView): CollectionEntry[]
   ]
 }
 
+/**
+ * Stable identity for one entry, for use as a picker's option value.
+ *
+ * Two owners may name a collection the same thing, so the name alone cannot
+ * identify a row. The separator is a control character precisely because it
+ * cannot occur in either half.
+ */
+export function entryKey(entry: CollectionEntry): string {
+  return `${entry.owner ?? ''}\u001f${entry.name}`
+}
+
 export function entryMatches(entry: CollectionEntry, name: string | null, owner: string | null): boolean {
   return entry.name === name && entry.owner === owner
 }
