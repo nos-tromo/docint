@@ -145,3 +145,10 @@ def test_a_symlinked_root_still_round_trips(tmp_path: Path) -> None:
     extract_id = _write(store)
     assert store.path("u0000__col", extract_id).read_bytes() == b"PK-payload"
     assert [record["extract_id"] for record in store.list("u0000__col")] == [extract_id]
+
+
+def test_a_sibling_sharing_the_roots_name_is_refused(tmp_path: Path) -> None:
+    """The prefix carries a separator, so `extracts-evil` is not under `extracts`."""
+    store = _store(tmp_path)
+    with pytest.raises(ValueError):
+        store._contained(tmp_path / "extracts-evil" / "loot.zip")

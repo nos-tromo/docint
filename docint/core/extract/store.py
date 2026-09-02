@@ -42,7 +42,9 @@ class ExtractStore:
             root (Path): Directory holding one subdirectory per collection.
         """
         self._root = Path(root)
-        self._root_real = os.path.realpath(self._root)
+        #: The root's normalized form with a trailing separator, so a prefix test
+        #: cannot pass for a sibling whose name merely starts with the root's.
+        self._root_prefix = os.path.join(os.path.realpath(self._root), "")
 
     def _contained(self, candidate: Path) -> Path:
         """Return a path once it is proven to resolve under the store root.
@@ -52,6 +54,12 @@ class ExtractStore:
         path and compares it against the root, which is what makes the guard
         independent of the caller and holds even where the root is reached
         through a symlink.
+
+        The shape matters as much as the check. Normalizing and then testing the
+        prefix on its own is what a static analyser can follow, so the condition
+        stays a single ``startswith`` whose false branch raises. Widening it into
+        a compound test leaves the surviving branch proving nothing, which is how
+        an earlier attempt at this guard passed review and still read as unsafe.
 
         Args:
             candidate (Path): The path about to be read or written.
@@ -63,7 +71,7 @@ class ExtractStore:
             ValueError: When the path resolves outside the root.
         """
         resolved = os.path.realpath(candidate)
-        if resolved != self._root_real and not resolved.startswith(self._root_real + os.sep):
+        if not resolved.startswith(self._root_prefix):
             raise ValueError(f"Extract path escapes the store root: {candidate!r}")
         return Path(resolved)
 
