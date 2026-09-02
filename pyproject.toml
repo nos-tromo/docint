@@ -113,3 +113,5 @@ ignore-missing-imports = ["*"]
 
 [tool.uv]
 package = true
+# nltk >=3.10.3 refuses hardlinked data files (st_nlink>1); see docs/development.md.
+link-mode = "copy"

@@ -61,6 +61,18 @@ CPU-only; all ML inference is remote, so there is no `cpu`/`cuda` split.)
 | `uv run uvicorn docint.core.api:app --reload` | Start the backend locally with hot-reload. |
 | `uv run docint` | Run the backend (uvicorn) via the console script. |
 
+`[tool.uv]` sets `link-mode = "copy"`. uv's default on Linux is to *hardlink*
+each installed file to its copy in the uv cache, which leaves every file in
+`.venv` with two links — and nltk ≥ 3.10.3 refuses to open any data file with
+more than one hard link (`pathsec._hardened_open`, no opt-out). llama_index
+reads its bundled `_static/nltk_cache` through nltk on every sentence-split
+ingest, so a hardlinked install fails the moment a document is chunked
+(`docint/core/storage/hierarchical.py` → `SentenceSplitter`). Copying costs a
+little disk and install time and nothing else; macOS uses `clone` either way,
+and `docker/Dockerfile.backend` already sets `UV_LINK_MODE=copy`. A Linux
+`.venv` synced before this setting existed keeps its hardlinks until
+`uv sync --reinstall`; CI creates a fresh one on every run.
+
 ## Frontend (`frontend/`)
 
 The React SPA is a separate pnpm package. Common commands, run inside
@@ -188,7 +200,7 @@ UI in the React app under `frontend/src/` (see [ui-guide.md](ui-guide.md)).
 
 A single workflow, `.github/workflows/ci.yml`, runs on pushes and pull
 requests to `main`. It delegates to the shared reusable pipeline
-`nos-tromo/.github/.github/workflows/python-app-ci.yml@v2.3`, which runs:
+`nos-tromo/.github/.github/workflows/python-app-ci.yml` (SHA-pinned in `ci.yml`, v3.14 at the time of writing), which runs:
 
 - **ruff** (lint + format check) and **pyrefly** (strict) — the same checks
   as pre-commit, so a clean local `pre-commit run --all-files` should pass
