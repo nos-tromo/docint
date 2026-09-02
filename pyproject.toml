@@ -19,7 +19,7 @@ dependencies = [
   # python-docx (docling's DOCX backend), openpyxl (pandas read_excel).
   "docling-core[chunking]>=2.92.0",
   "docling-parse>=7.16.0",
-  "docling-slim>=2.123.0",
+  "docling-slim>=2.123.1",
   "fastapi>=0.141.1",
   "fastparquet>=2026.5.0",
   "httpx>=0.28.1",
@@ -38,7 +38,7 @@ dependencies = [
   "pandas>=3.0.5",
   "pillow>=12.3.0",
   "prometheus-fastapi-instrumentator>=8.1.0",
-  "pydantic>=2.13.4",
+  "pydantic>=2.13.5",
   "pypdfium2>=5.13.0",  # page rasterisation (vision OCR) + embedded-image pixels in core/readers/documents/
   "python-docx>=1.2.0",
   "python-dotenv>=1.2.3",
