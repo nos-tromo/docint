@@ -15,12 +15,6 @@ updates:
     ignore:
       - dependency-name: "pyrefly"
       - dependency-name: "ruff"
-      # transformers is capped <5.9 in pyproject.toml: docling 2.102.1
-      # (docling-core[chunking]) requires transformers<5.9.0, so bumping past
-      # it makes `uv lock` unsatisfiable. Lift once docling allows transformers
-      # >=5.9 (i.e. docling-slim depends on docling-core>=3.0).
-      - dependency-name: "transformers"
-        versions: [">= 5.9.0"]
       # qdrant-client is capped <1.19 in pyproject.toml: 1.19.0 relocated
       # IDF_EMBEDDING_MODELS from qdrant_client.qdrant_fastembed to
       # qdrant_client.fastembed_common, and llama-index-vector-stores-qdrant
