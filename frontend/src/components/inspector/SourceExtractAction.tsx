@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { DownloadIcon, HoverIconAction } from '@infra/ui'
 import { createExtract, sourceExtractHref } from '@/api/extracts'
+import { useAppendixFields } from '@/hooks/useAppendixFields'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -22,15 +23,16 @@ export function SourceExtractAction({
 }) {
   const t = useT()
   const collection = useUiStore((s) => s.selectedCollection)
+  const appendix = useAppendixFields()
   const [busy, setBusy] = useState(false)
   if (!collection || !fileHash) return null
 
   const onClick = async () => {
     setBusy(true)
     try {
-      const response = await fetch(sourceExtractHref(collection, fileHash, 'zip'))
+      const response = await fetch(sourceExtractHref(collection, fileHash, 'zip', appendix))
       if (response.status === 413) {
-        await createExtract(collection, fileHash)
+        await createExtract(collection, fileHash, appendix)
         return
       }
       if (!response.ok) return

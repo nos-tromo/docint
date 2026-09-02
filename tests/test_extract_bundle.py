@@ -255,3 +255,44 @@ def test_single_pdf_uses_the_injected_engine() -> None:
     body, media_type = build_single([_document()], "pdf", collection="c", now=_NOW, pdf=lambda html: b"%PDF-1.7")
     assert media_type == "application/pdf"
     assert body == b"%PDF-1.7"
+
+
+def test_the_bundle_numbers_its_units_for_citation() -> None:
+    """A curated finding cites "appendix A.2"; the README must agree."""
+    result = build_bundle([_document(), _media()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
+    readme = _read(result.zip_bytes, next(n for n in _names(result.zip_bytes) if n.endswith("README.md")))
+    combined = _read(
+        result.zip_bytes, next(n for n in _names(result.zip_bytes) if n.endswith("c-extract-20260102-0304/extract.md"))
+    )
+    assert "A.1  report.pdf" in readme.decode("utf-8")
+    assert "A.2  clip.mp4" in readme.decode("utf-8")
+    assert "# A.2  clip.mp4" in combined.decode("utf-8")
+
+
+def test_the_case_file_reaches_the_readme_and_the_pdf() -> None:
+    """An appendix is filed under the report it belongs to."""
+    rendered: list[str] = []
+
+    def _pdf(html: str) -> bytes:
+        rendered.append(html)
+        return b"%PDF-1.7"
+
+    result = build_bundle(
+        [_document()],
+        collection="c",
+        cfg=_cfg(),
+        pdf=_pdf,
+        now=_NOW,
+        reference_number="AZ-12/26",
+        operator="A. Analyst",
+    )
+    readme = _read(result.zip_bytes, next(n for n in _names(result.zip_bytes) if n.endswith("README.md")))
+    assert "AZ-12/26" in readme.decode("utf-8")
+    assert "A. Analyst" in readme.decode("utf-8")
+    assert "AZ-12/26" in rendered[0]
+
+
+def test_a_single_source_download_numbers_from_the_top() -> None:
+    """One source rendered alone is its own document, so it starts at A.1."""
+    body, _media_type = build_single([_media()], "md", collection="c", now=_NOW)
+    assert body.decode("utf-8").startswith("# A.1  clip.mp4")

@@ -131,3 +131,10 @@ def test_parse_args_defaults() -> None:
     args = cli.parse_args(["mydocs", "--target", "abc", "--no-pdf"])
     assert (args.collection, args.target, args.no_pdf) == ("mydocs", "abc", True)
     assert cli.parse_args([]).collection is None
+
+
+def test_parse_args_takes_the_appendix_chrome() -> None:
+    """Offline there is no report to inherit from, so the flags supply it."""
+    args = cli.parse_args(["mydocs", "--reference-number", "AZ-12/26", "--operator", "A. Analyst"])
+    assert (args.reference_number, args.operator) == ("AZ-12/26", "A. Analyst")
+    assert cli.parse_args(["mydocs"]).reference_number is None

@@ -1183,3 +1183,30 @@ async def test_eviction_never_drops_an_unfinished_job() -> None:
     assert in_flight.job_id in retained_ids
     assert in_flight.status is not JobStatus.COMPLETED
     gate.set()
+
+
+@pytest.mark.anyio
+async def test_create_if_idle_carries_the_extract_options_onto_the_job() -> None:
+    """The queued job is the only place the runner reads these from.
+
+    ``target`` was accepted and then dropped, so every extract queued through
+    the route rendered the whole collection instead of the one source it
+    named — the 413 fallback for an oversize postings table among them.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    state, created = await manager.create_if_idle(
+        owner="alice",
+        logical_name="mydocs",
+        physical="p1",
+        kind="extract",
+        target="a1b2c3d4",
+        reference_number="AZ-12/26",
+        operator="A. Analyst",
+    )
+
+    assert created
+    assert state.target == "a1b2c3d4"
+    assert state.reference_number == "AZ-12/26"
+    assert state.operator == "A. Analyst"
+    await _drain(manager, state)
+    await manager.stop()

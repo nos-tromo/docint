@@ -222,6 +222,10 @@ class IngestJobState:
     kind: str = "ingest"
     #: The one source an extract job covers; ``None`` for a whole collection.
     target: str | None = None
+    #: Case file an extract is filed under, printed on every page of its PDF.
+    reference_number: str | None = None
+    #: Who asked for the extract, printed under its title.
+    operator: str | None = None
     #: The stored artifact a finished extract job produced, if any.
     artifact: dict[str, Any] | None = None
     batch_dir: Path | None = None
@@ -462,6 +466,8 @@ class IngestJobManager:
         resolve: bool = False,
         kind: str = "ingest",
         target: str | None = None,
+        reference_number: str | None = None,
+        operator: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Register a job and dispatch its worker, unconditionally.
@@ -490,6 +496,9 @@ class IngestJobManager:
                 the SSE event names (:data:`KIND_EVENTS`) and the worker
                 semaphore this job waits on.
             target (str | None): The one source an extract covers.
+            reference_number (str | None): Case file an extract is filed
+                under. Extract-only.
+            operator (str | None): Who asked for the extract. Extract-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports.
@@ -508,6 +517,8 @@ class IngestJobManager:
             resolve=resolve,
             kind=kind,
             target=target,
+            reference_number=reference_number,
+            operator=operator,
             upload_lead_s=upload_lead_s,
         )
         async with self._lock:
@@ -528,6 +539,8 @@ class IngestJobManager:
         resolve: bool = False,
         kind: str = "ingest",
         target: str | None = None,
+        reference_number: str | None = None,
+        operator: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> tuple[IngestJobState, bool]:
         """Atomically check for an in-flight job and create one only if idle.
@@ -570,6 +583,9 @@ class IngestJobManager:
                 this job waits on, and the idleness scope checked before
                 creating.
             target (str | None): The one source an extract covers.
+            reference_number (str | None): Case file an extract is filed
+                under. Extract-only.
+            operator (str | None): Who asked for the extract. Extract-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports. Ignored when an in-flight
@@ -597,6 +613,9 @@ class IngestJobManager:
                 hate_speech=hate_speech,
                 resolve=resolve,
                 kind=kind,
+                target=target,
+                reference_number=reference_number,
+                operator=operator,
                 upload_lead_s=upload_lead_s,
             )
             self._jobs[state.job_id] = state
@@ -616,6 +635,8 @@ class IngestJobManager:
         resolve: bool = False,
         kind: str = "ingest",
         target: str | None = None,
+        reference_number: str | None = None,
+        operator: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Build a fresh, unregistered job state.
@@ -636,6 +657,9 @@ class IngestJobManager:
                 Ingest-only.
             kind (str): ``"ingest"``, ``"summary"`` or ``"extract"``.
             target (str | None): The one source an extract covers.
+            reference_number (str | None): Case file an extract is filed
+                under. Extract-only.
+            operator (str | None): Who asked for the extract. Extract-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed. Clamped here — it reaches the server as a
                 client-reported number, and it bounds a log line, so it must
@@ -651,6 +675,8 @@ class IngestJobManager:
             physical=physical,
             kind=kind,
             target=target,
+            reference_number=reference_number,
+            operator=operator,
             batch_dir=batch_dir,
             hybrid=hybrid,
             ner=ner,

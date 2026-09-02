@@ -38,6 +38,17 @@ describe('extract API', () => {
     await expect(createExtract('mydocs')).resolves.toEqual({ job_id: 'j1', adopted: false })
   })
 
+  it('files a queued build under the active report, omitting what is unset', async () => {
+    const spy = stubFetch({ job_id: 'j1' })
+    await createExtract('mydocs', undefined, { reference_number: 'AZ-12', operator: '' })
+    expect(JSON.parse(String(spy.mock.calls[0][1]?.body))).toEqual({ reference_number: 'AZ-12' })
+  })
+
+  it('carries the appendix fields on a single-source download', () => {
+    const href = sourceExtractHref('mydocs', 'a1b2', 'pdf', { reference_number: 'AZ-12' })
+    expect(href).toContain('reference_number=AZ-12')
+  })
+
   it('adopts the in-flight job a 409 names', async () => {
     stubFetch({ detail: { message: 'busy', job_id: 'j9' } }, { ok: false, status: 409 })
     await expect(createExtract('mydocs')).resolves.toEqual({ job_id: 'j9', adopted: true })

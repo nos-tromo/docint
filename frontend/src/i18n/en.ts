@@ -433,6 +433,7 @@ export const en = {
   // data extracts (Inspector)
   'extract.title': 'Data extracts',
   'extract.caption': 'Full transcripts, keyframe descriptions and document text as files',
+  'extract.appendix_of': 'Appendix to: {title}',
   'extract.build': 'Build extract',
   'extract.running': 'Building the extract…',
   'extract.running_progress': 'Rendering {done} of {total}',

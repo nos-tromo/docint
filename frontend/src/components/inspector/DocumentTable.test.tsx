@@ -1,9 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { ReactNode } from 'react'
 import { DocumentTable } from './DocumentTable'
 import type { DocumentRecord } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
 import userEvent from '@testing-library/user-event'
+
+// Each row carries the extract action, which reads the active report's
+// appendix fields — so the table needs the query client the app provides.
+function wrapper({ children }: { children: ReactNode }) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>
+}
 
 const DOCS: DocumentRecord[] = [
   {
@@ -27,14 +36,14 @@ const DOCS: DocumentRecord[] = [
 
 describe('DocumentTable', () => {
   it('renders aligned column headers', () => {
-    render(<DocumentTable docs={DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
     for (const header of ['Filename', 'Type', 'Units', 'Nodes', 'Entities', 'Hash']) {
       expect(screen.getByText(header)).toBeInTheDocument()
     }
   })
 
   it('drives header and body rows from one shared grid template (the alignment fix)', () => {
-    render(<DocumentTable docs={DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
     const rows = screen.getAllByRole('row')
     const headerTemplate = (rows[0] as HTMLElement).style.gridTemplateColumns
     const bodyTemplate = (rows[1] as HTMLElement).style.gridTemplateColumns
@@ -44,7 +53,7 @@ describe('DocumentTable', () => {
   })
 
   it('humanizes MIME types and formats units, using an em dash for image "pages"', () => {
-    render(<DocumentTable docs={DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
     expect(screen.getByText('JPEG')).toBeInTheDocument()
     expect(screen.getByText('CSV')).toBeInTheDocument()
     expect(screen.getByText('138 rows')).toBeInTheDocument()
@@ -53,14 +62,14 @@ describe('DocumentTable', () => {
   })
 
   it('renders entity types as chips with a +N overflow', () => {
-    render(<DocumentTable docs={DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
     expect(screen.getByText('person')).toBeInTheDocument()
     // 8 entity types -> first 4 shown + "+4".
     expect(screen.getByText('+4')).toBeInTheDocument()
   })
 
   it('truncates the hash and offers a copy control per row', () => {
-    render(<DocumentTable docs={DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
     expect(screen.getByText('abd4fc78')).toBeInTheDocument()
     expect(screen.getByText('05dccacd')).toBeInTheDocument()
     expect(
@@ -69,14 +78,14 @@ describe('DocumentTable', () => {
   })
 
   it('shows the document count and a CSV export link', () => {
-    render(<DocumentTable docs={DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
     expect(screen.getByText(/2 documents/)).toBeInTheDocument()
     const link = screen.getByRole('link', { name: 'Export CSV' })
     expect(link).toHaveAttribute('href', expect.stringContaining('/collections/mydocs/export/documents.csv'))
   })
 
   it('renders an empty state instead of a bare table when there are no documents', () => {
-    render(<DocumentTable docs={[]} collection="mydocs" isFetching={false} />)
+    render(<DocumentTable docs={[]} collection="mydocs" isFetching={false} />, { wrapper })
     expect(screen.getByText('No documents in this collection yet.')).toBeInTheDocument()
     expect(screen.queryByText('Filename')).not.toBeInTheDocument()
   })
@@ -85,7 +94,7 @@ describe('DocumentTable', () => {
 describe('DocumentTable document preview', () => {
   it('opens the shared preview dialog for a listed document', async () => {
     useUiStore.setState({ selectedCollection: 'mydocs', previewModal: null })
-    render(<DocumentTable docs={[DOCS[1]]} collection="mydocs" />)
+    render(<DocumentTable docs={[DOCS[1]]} collection="mydocs" />, { wrapper })
 
     await userEvent.click(screen.getByRole('button', { name: /preview/i }))
 
@@ -101,7 +110,7 @@ describe('DocumentTable document preview', () => {
     // `group` ancestor the control is mounted but permanently invisible to
     // mouse users (jsdom cannot see that, hence the class assertion).
     useUiStore.setState({ selectedCollection: 'mydocs', previewModal: null })
-    render(<DocumentTable docs={[DOCS[1]]} collection="mydocs" />)
+    render(<DocumentTable docs={[DOCS[1]]} collection="mydocs" />, { wrapper })
 
     const action = screen.getByRole('button', { name: /preview/i })
     expect(action.closest('.group')).not.toBeNull()
@@ -151,7 +160,7 @@ describe('DocumentTable sorting', () => {
   }
 
   it('sorts filenames naturally, not lexicographically, and reverses on a second click', async () => {
-    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />, { wrapper })
 
     await userEvent.click(screen.getByRole('button', { name: 'Filename' }))
     // Lexicographic order would put report_10 before report_9.
@@ -162,7 +171,7 @@ describe('DocumentTable sorting', () => {
   })
 
   it('sorts the node count numerically, largest first', async () => {
-    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />, { wrapper })
 
     // A numeric column sorts descending on the first click; as text that same
     // descending pass would read 9, 42, 138.
@@ -174,7 +183,7 @@ describe('DocumentTable sorting', () => {
   })
 
   it('leaves the columns that opt out of sorting unsortable', () => {
-    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />)
+    render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />, { wrapper })
     expect(screen.queryByRole('button', { name: 'Entities' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Hash' })).not.toBeInTheDocument()
   })

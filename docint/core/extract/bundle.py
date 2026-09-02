@@ -16,13 +16,20 @@ import io
 import re
 import unicodedata
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from loguru import logger
 
-from docint.core.extract.render import extract_html, format_short, index_markdown, transcript_txt, unit_markdown
+from docint.core.extract.render import (
+    appendix_numbers,
+    extract_html,
+    format_short,
+    index_markdown,
+    transcript_txt,
+    unit_markdown,
+)
 from docint.core.extract.units import DocumentUnit, Figure, ImageUnit, MediaUnit, PostingUnit, Unit
 from docint.utils.env_cfg import ExtractConfig
 
@@ -177,6 +184,9 @@ def _render_pdf(
     cfg: ExtractConfig,
     pdf: Callable[[str], bytes] | None,
     figures: int,
+    reference_number: str | None = None,
+    operator: str | None = None,
+    numbers: Mapping[str, str] | None = None,
 ) -> bytes | None:
     """Render the combined PDF, or ``None`` when it is capped or unavailable.
 
@@ -186,7 +196,16 @@ def _render_pdf(
     if pdf is None or len(units) > cfg.pdf_max_units or figures > cfg.pdf_max_figures:
         return None
     try:
-        return pdf(extract_html(units, collection=collection, created_at=created_at))
+        return pdf(
+            extract_html(
+                units,
+                collection=collection,
+                created_at=created_at,
+                reference_number=reference_number,
+                operator=operator,
+                numbers=numbers,
+            )
+        )
     except Exception as exc:
         logger.warning("Extract PDF skipped: {}", exc)
         return None
@@ -200,6 +219,8 @@ def build_bundle(
     pdf: Callable[[str], bytes] | None,
     now: datetime,
     progress: Callable[[int, int], None] | None = None,
+    reference_number: str | None = None,
+    operator: str | None = None,
 ) -> BundleResult:
     """Assemble an extract into a ZIP.
 
@@ -212,6 +233,8 @@ def build_bundle(
         now (datetime): Build time, used in the root folder name.
         progress (Callable[[int, int], None] | None): Called with
             ``(rendered, total)`` after each unit.
+        reference_number (str | None): Case file this appendix belongs to.
+        operator (str | None): Who built it.
 
     Returns:
         BundleResult: The archive, its counts, and whether the PDF was skipped.
@@ -219,6 +242,7 @@ def build_bundle(
     created_at = now.isoformat()
     root = f"{slug(collection, fallback='collection')}-extract-{now:%Y%m%d-%H%M}"
     paths = {unit.key: _unit_dir(unit) for unit in units}
+    numbers = appendix_numbers(units)
 
     buffer = io.BytesIO()
     combined: list[str] = []
@@ -227,9 +251,9 @@ def build_bundle(
         for position, unit in enumerate(units, start=1):
             folder = paths[unit.key]
             figure_files = _figure_files(unit)
-            body = unit_markdown(unit, {figure.image_id: path for figure, path in figure_files})
+            body = unit_markdown(unit, {figure.image_id: path for figure, path in figure_files}, numbers=numbers)
             _write(archive, f"{root}/{folder}/extract.md", body.encode("utf-8"))
-            combined.append(unit_markdown(unit))
+            combined.append(unit_markdown(unit, numbers=numbers))
             for name, text in _transcripts(unit):
                 _write(archive, f"{root}/{folder}/{name}", text.encode("utf-8"))
             for figure, path in figure_files:
@@ -240,13 +264,30 @@ def build_bundle(
                 progress(position, total)
 
         figures = sum(len(unit.figures) for unit in units)
-        document = _render_pdf(units, collection=collection, created_at=created_at, cfg=cfg, pdf=pdf, figures=figures)
+        document = _render_pdf(
+            units,
+            collection=collection,
+            created_at=created_at,
+            cfg=cfg,
+            pdf=pdf,
+            figures=figures,
+            reference_number=reference_number,
+            operator=operator,
+            numbers=numbers,
+        )
         pdf_skipped = pdf is not None and document is None
         if document is not None:
             _write(archive, f"{root}/extract.pdf", document)
         _write(archive, f"{root}/extract.md", "\n\n---\n\n".join(combined).encode("utf-8"))
         readme = index_markdown(
-            units, collection=collection, created_at=created_at, paths=paths, pdf_skipped=pdf_skipped
+            units,
+            collection=collection,
+            created_at=created_at,
+            paths=paths,
+            pdf_skipped=pdf_skipped,
+            reference_number=reference_number,
+            operator=operator,
+            numbers=numbers,
         )
         _write(archive, f"{root}/README.md", readme.encode("utf-8"))
 
@@ -260,6 +301,8 @@ def build_single(
     collection: str,
     now: datetime,
     pdf: Callable[[str], bytes] | None = None,
+    reference_number: str | None = None,
+    operator: str | None = None,
 ) -> tuple[bytes, str]:
     """Render one source's extract for an immediate download.
 
@@ -269,6 +312,8 @@ def build_single(
         collection (str): The collection's logical name.
         now (datetime): Build time.
         pdf (Callable[[str], bytes] | None): Engine, required for ``"pdf"``.
+        reference_number (str | None): Case file this appendix belongs to.
+        operator (str | None): Who built it.
 
     Returns:
         tuple[bytes, str]: ``(payload, media type)``.
@@ -278,13 +323,31 @@ def build_single(
     """
     if fmt not in _MEDIA_TYPES:
         raise ValueError(f"Unsupported extract format: {fmt!r}")
+    # A single-source download is its own document, so it numbers from A.1.
+    numbers = appendix_numbers(units)
     if fmt == "md":
-        body = "\n\n---\n\n".join(unit_markdown(unit) for unit in units)
+        body = "\n\n---\n\n".join(unit_markdown(unit, numbers=numbers) for unit in units)
         return body.encode("utf-8"), _MEDIA_TYPES["md"]
     if fmt == "pdf":
         if pdf is None:
             raise ValueError("PDF export requires an engine.")
-        html = extract_html(units, collection=collection, created_at=now.isoformat())
+        html = extract_html(
+            units,
+            collection=collection,
+            created_at=now.isoformat(),
+            reference_number=reference_number,
+            operator=operator,
+            numbers=numbers,
+        )
         return pdf(html), _MEDIA_TYPES["pdf"]
     cfg = ExtractConfig(retention_days=1, max_per_collection=1, pdf_max_units=0, pdf_max_figures=0, sync_max_units=1)
-    return build_bundle(units, collection=collection, cfg=cfg, pdf=None, now=now).zip_bytes, _MEDIA_TYPES["zip"]
+    bundle = build_bundle(
+        units,
+        collection=collection,
+        cfg=cfg,
+        pdf=None,
+        now=now,
+        reference_number=reference_number,
+        operator=operator,
+    )
+    return bundle.zip_bytes, _MEDIA_TYPES["zip"]

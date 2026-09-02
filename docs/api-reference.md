@@ -619,11 +619,11 @@ Owner-gated by the collection name in the path, like the CSV exports above:
 
 | Route | Contents |
 |---|---|
-| `POST /collections/{name}/extracts` | Queue a build. `202 {"job_id"}`; `409 {"message","job_id"}` while one is in flight. Optional body `{"target": "<source id>"}`. |
+| `POST /collections/{name}/extracts` | Queue a build. `202 {"job_id"}`; `409 {"message","job_id"}` while one is in flight. Optional body `{"target": "<source id>", "reference_number": "<case file>", "operator": "<name>"}`. |
 | `GET /collections/{name}/extracts` | `{"extracts": [...]}`, newest first, read from the on-disk store rather than the job registry (jobs are in-memory and evicted; the archives outlive them). |
 | `GET /collections/{name}/extracts/{extract_id}/download` | The ZIP bundle. `404` on an unknown or malformed id. |
 | `DELETE /collections/{name}/extracts/{extract_id}` | `{"ok": true}`; `404` when unknown. |
-| `GET /collections/{name}/sources/{source_id}/extract.{md,pdf,zip}` | One source, rendered on the request. `404` unknown; `413 {"message","units"}` above `EXTRACT_SYNC_MAX_UNITS`; `503` when the PDF engine is unavailable. |
+| `GET /collections/{name}/sources/{source_id}/extract.{md,pdf,zip}` | One source, rendered on the request. Optional `reference_number` / `operator` query parameters. `404` unknown; `413 {"message","units"}` above `EXTRACT_SYNC_MAX_UNITS`; `503` when the PDF engine is unavailable. |
 
 A collection build runs as a `kind="extract"` job on the shared
 owner-multiplexed stream (`GET /ingest/jobs/events`), framed as
@@ -635,6 +635,12 @@ media file's content hash, a standalone image's id, or a posting uuid. A
 postings table's file hash expands to every post recorded in it, which is what
 the `413` exists for: the caller queues a targeted job instead of receiving a
 truncated bundle.
+
+`reference_number` and `operator` are the case file and case worker printed on
+the rendered PDF, which is written as the curated report's appendix. Both are
+client-supplied, as the report's own are: the trusted-header principal carries
+a username, not a display name. The SPA sends the active report's values, and
+they are stored on the bundle's sidecar so the listing carries them back.
 
 ```bash
 curl -X POST "http://localhost:8000/collections/my_collection/extracts"

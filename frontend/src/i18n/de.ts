@@ -445,6 +445,7 @@ export const de: Strings = {
   // Datenauszüge (Inspector)
   'extract.title': 'Datenauszüge',
   'extract.caption': 'Vollständige Transkripte, Frame-Beschreibungen und Dokumenttexte als Dateien',
+  'extract.appendix_of': 'Anlage zu: {title}',
   'extract.build': 'Auszug erstellen',
   'extract.running': 'Auszug wird erstellt…',
   'extract.running_progress': '{done} von {total} werden ausgegeben',

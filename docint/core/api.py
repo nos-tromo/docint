@@ -987,9 +987,16 @@ class ExtractIn(BaseModel):
         target (str | None): One source to render — a file hash, a media
             hash, an image id or a posting uuid. Omit for the whole
             collection.
+        reference_number (str | None): Case file the extract is filed under,
+            printed on every page of its PDF like the report's.
+        operator (str | None): Who asked for it, printed under the title.
+            Client-supplied, as the report's is — the trusted-header principal
+            carries a username, not a display name.
     """
 
     target: str | None = None
+    reference_number: str | None = None
+    operator: str | None = None
 
 
 class IngestDefaultsOut(BaseModel):
@@ -4375,6 +4382,8 @@ def _run_extract_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         pdf=html_to_pdf,
         now=now,
         progress=_progress,
+        reference_number=state.reference_number,
+        operator=state.operator,
     )
     store = _extract_store()
     record = store.write(
@@ -4385,6 +4394,8 @@ def _run_extract_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
             "target": state.target,
             "counts": bundle.counts,
             "pdf_skipped": bundle.pdf_skipped,
+            "reference_number": state.reference_number,
+            "operator": state.operator,
         },
         now=now,
     )
@@ -4801,7 +4812,8 @@ async def create_extract(
 
     Args:
         name (str): The caller's logical collection name.
-        payload (ExtractIn | None): Optional ``target`` naming one source.
+        payload (ExtractIn | None): Optional ``target`` naming one source,
+            plus the appendix's case file and operator.
         principal (Principal): The resolved request principal.
         jobs (IngestJobManager): The shared job registry.
 
@@ -4819,6 +4831,8 @@ async def create_extract(
         physical=physical,
         kind="extract",
         target=(payload.target if payload else None),
+        reference_number=(payload.reference_number if payload else None),
+        operator=(payload.operator if payload else None),
     )
     if not created:
         raise HTTPException(
@@ -4909,6 +4923,8 @@ async def export_source_extract(
     name: str,
     source_id: str,
     fmt: Literal["md", "pdf", "zip"],
+    reference_number: str | None = None,
+    operator: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
 ) -> Response:
     """Render one source's extract and return it immediately.
@@ -4923,6 +4939,8 @@ async def export_source_extract(
         name (str): The caller's logical collection name.
         source_id (str): The source to render.
         fmt (Literal["md", "pdf", "zip"]): Output format.
+        reference_number (str | None): Case file the appendix is filed under.
+        operator (str | None): Who asked for it.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4950,7 +4968,16 @@ async def export_source_extract(
 
     try:
         body, media_type = await to_thread.run_sync(
-            partial(build_single, units, fmt, collection=name, now=datetime.now(tz=UTC), pdf=html_to_pdf)
+            partial(
+                build_single,
+                units,
+                fmt,
+                collection=name,
+                now=datetime.now(tz=UTC),
+                pdf=html_to_pdf,
+                reference_number=reference_number,
+                operator=operator,
+            )
         )
     except PdfEngineUnavailableError as exc:
         logger.exception("PDF export engine unavailable")

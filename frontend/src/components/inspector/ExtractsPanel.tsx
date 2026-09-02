@@ -1,5 +1,6 @@
 import { Button, DeleteButton, DownloadLink } from '@infra/ui'
 import { extractDownloadHref } from '@/api/extracts'
+import { useAppendixReportTitle } from '@/hooks/useAppendixFields'
 import { useDeleteExtract, useExtractJob, useExtracts } from '@/hooks/useExtracts'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
@@ -52,6 +53,7 @@ export function ExtractsPanel() {
   const { progress, start, running } = useExtractJob()
   const remove = useDeleteExtract()
   const countsLabel = useCountsLabel()
+  const reportTitle = useAppendixReportTitle()
   if (!collection) return null
 
   const extracts = data?.extracts ?? []
@@ -61,6 +63,11 @@ export function ExtractsPanel() {
         <div>
           <h2 className="text-sm font-medium">{t('extract.title')}</h2>
           <p className="text-xs text-muted-foreground">{t('extract.caption')}</p>
+          {reportTitle && (
+            <p className="text-xs text-muted-foreground">
+              {t('extract.appendix_of', { title: reportTitle })}
+            </p>
+          )}
         </div>
         <Button onClick={() => void start()} disabled={running}>
           {t('extract.build')}

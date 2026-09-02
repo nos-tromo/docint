@@ -30,17 +30,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         argv (list[str] | None): Argument vector; defaults to ``sys.argv``.
 
     Returns:
-        argparse.Namespace: ``collection``, ``target``, ``out``, ``no_pdf``.
+        argparse.Namespace: ``collection``, ``target``, ``out``, ``no_pdf``,
+            ``reference_number``, ``operator``.
     """
     parser = argparse.ArgumentParser(description="Render a collection's data extract as a ZIP bundle.")
     parser.add_argument("collection", nargs="?", help="Logical or physical collection name.")
     parser.add_argument("-t", "--target", help="Render one source: a file hash, an image id or a posting uuid.")
     parser.add_argument("-o", "--out", type=Path, help="Directory to write the bundle into (default: RESULTS_PATH).")
     parser.add_argument("--no-pdf", action="store_true", help="Skip the combined PDF.")
+    parser.add_argument("--reference-number", help="Case file the appendix is filed under, printed on every page.")
+    parser.add_argument("--operator", help="Who built the appendix, printed under its title.")
     return parser.parse_args(argv)
 
 
-def build_extract(collection: str, *, target: str | None, out_dir: Path, with_pdf: bool) -> Path:
+def build_extract(
+    collection: str,
+    *,
+    target: str | None,
+    out_dir: Path,
+    with_pdf: bool,
+    reference_number: str | None = None,
+    operator: str | None = None,
+) -> Path:
     """Render one collection's extract and write it to disk.
 
     Args:
@@ -48,6 +59,8 @@ def build_extract(collection: str, *, target: str | None, out_dir: Path, with_pd
         target (str | None): One source to render, or ``None`` for all of it.
         out_dir (Path): Directory the bundle is written into.
         with_pdf (bool): Whether to render the combined PDF.
+        reference_number (str | None): Case file the appendix is filed under.
+        operator (str | None): Who built it.
 
     Returns:
         Path: The written archive.
@@ -92,6 +105,8 @@ def build_extract(collection: str, *, target: str | None, out_dir: Path, with_pd
             pdf=engine,
             now=now,
             progress=lambda rendered, total: logger.info("Rendering {}/{}", rendered, total),
+            reference_number=reference_number,
+            operator=operator,
         )
     finally:
         rag.unload_models()
@@ -126,6 +141,8 @@ def main(argv: list[str] | None = None) -> None:
         target=args.target,
         out_dir=args.out or load_path_env().results,
         with_pdf=not args.no_pdf,
+        reference_number=args.reference_number,
+        operator=args.operator,
     )
 
 
