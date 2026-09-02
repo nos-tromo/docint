@@ -27,12 +27,14 @@ export interface IngestJobsState {
 /**
  * SSE event names that open a run, across every job kind this store can hold:
  * an ingest job starts with `ingestion_started`, a summary job with
- * `summary_started`. The backend replays a job's collapsed history from its
- * started frame on every reconnect, so both must reset the local log.
+ * `summary_started`, an extract job with `extract_started`. The backend
+ * replays a job's collapsed history from its started frame on every
+ * reconnect, so all of them must reset the local log.
  */
 const STARTED_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_started',
-  'summary_started'
+  'summary_started',
+  'extract_started'
 ])
 
 export const useIngestJobsStore = create<IngestJobsState>((set) => ({
@@ -72,7 +74,7 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
  * SSE event names, across every job kind this store can hold, that end a
  * run. Mirrors the backend's `jobs.py::TERMINAL_EVENTS` — an ingest job
  * terminates on `ingestion_complete`, a summary job on `summary_completed`,
- * either kind on `error`. The stream is multiplexed across kinds with no
+ * an extract job on `extract_completed`, any kind on `error`. The stream is multiplexed across kinds with no
  * kind filter (`useIngestJobStream.ts`), so both must be recognized here or
  * a completed summary job would look permanently "running" to the selector
  * below and leave the sidebar badge stuck on.
@@ -80,6 +82,7 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
 const TERMINAL_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_complete',
   'summary_completed',
+  'extract_completed',
   'error'
 ])
 

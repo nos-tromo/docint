@@ -68,6 +68,15 @@ owner-scoped report you can reorder, annotate, and export as Markdown, HTML,
 JSON, a CSV bundle, or a paginated PDF that references nothing outside itself.
 See [reports.md](docs/reports.md).
 
+**Data extracts read the whole collection back out in writing.** A transcript,
+a keyframe description and an image's OCR text live only in the index, so a
+report that needs them meant pushing the media through Nextext a second time.
+The Inspector builds a ZIP instead: full transcripts with timestamps and
+speakers, keyframe descriptions with the second they came from, captions, OCR
+text and document text, one folder per source, with the stored thumbnails as
+files. One source can be downloaded on its own. See
+[extracts.md](docs/extracts.md).
+
 **Multi-user by default.** Collections, chat sessions and reports are
 owner-scoped: two users can each hold a `my_collection` without collision,
 cross-owner access is a 404, and the active collection is resolved per request
@@ -87,6 +96,7 @@ injected by the gateway (`X-Auth-User`); production leaves
 | `make build` · `make up-dev` · `make stop` | Build the images, start with the frontend port published, stop. `make up` is the production shape. |
 | `make health` | Ask the running backend whether Qdrant is reachable. Chain it: `make up health`. |
 | `make resolve COLLECTION=<name>` | Merge duplicate and semantically-similar entities (`USA`/`United States`) into durable canonical records. Re-runnable and idempotent. |
+| `make extract COLLECTION=<name>` | Write the collection's data extract — full transcripts, keyframe descriptions, captions and document text — as a ZIP under `RESULTS_PATH`. Reads Qdrant only. |
 | `make search-index COLLECTION=<name>` · `make search-index-all` | Build the full-text search index for one collection, or backport every collection on the host. Payload-only — no re-embedding, no inference. |
 | `make verify` · `make test` | Pre-push gate (ruff + pyrefly + frontend lint/build), then pytest + vitest. |
 
@@ -104,11 +114,12 @@ The [`docs/`](docs/README.md) directory is the in-repo reference manual:
 - [Architecture](docs/architecture.md) — runtime components, request flow, multi-tenancy
 - [Configuration](docs/configuration.md) — every env var grouped by dataclass, with defaults
 - [API reference](docs/api-reference.md) — every FastAPI route
-- [CLI reference](docs/cli-reference.md) — the nine console scripts
+- [CLI reference](docs/cli-reference.md) — the ten console scripts
 - [Ingestion pipeline](docs/ingestion.md) — readers, chunking, NER, media, social exports
 - [Retrieval and agents](docs/retrieval-and-agents.md) — orchestrator, hybrid retrieval, graph-RAG, citations
 - [UI guide](docs/ui-guide.md) — React SPA screens and localization
 - [Reports](docs/reports.md) — the Report Builder and its export formats
+- [Data extracts](docs/extracts.md) — full transcripts, keyframe descriptions and document text as files
 - [Deployment](docs/deployment.md) — Docker services, volumes, co-deployment, offline bundles
 - [Migrations](docs/migrations.md) — what existing collections do not pick up on their own
 - [Development](docs/development.md) — dev workflow, pre-commit, pytest layout, CI

@@ -27,6 +27,7 @@ import { mimeLabel, shortHash, unitsLabel } from '@/lib/documentFormat'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
+import { SourceExtractAction } from '@/components/inspector/SourceExtractAction'
 
 /**
  * The table's feature set, stitched statically so only what this grid uses is
@@ -66,6 +67,10 @@ function buildColumns(t: ReturnType<typeof useT>): ColumnDef<Features, DocumentR
             {c.getValue<string>()}
           </span>
           <SourcePreviewAction
+            fileHash={c.row.original.file_hash}
+            filename={c.getValue<string>()}
+          />
+          <SourceExtractAction
             fileHash={c.row.original.file_hash}
             filename={c.getValue<string>()}
           />

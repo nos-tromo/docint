@@ -79,6 +79,24 @@ canonical records, so the NER views can group by canonical entity under
 `make resolve` target runs this in a one-off `backend` container so it
 reaches the `qdrant` / `vllm-router` network aliases.
 
+## `extract` — written data extracts
+
+```bash
+uv run extract                                  # prompts for the collection
+uv run extract mydocs                           # the whole collection
+uv run extract mydocs --target <file_hash>      # one source
+uv run extract mydocs --no-pdf --out ./out      # skip the PDF, choose a directory
+```
+
+Source: `docint/cli/extract.py`. Renders a collection's full transcripts,
+keyframe descriptions, image captions and document text as a ZIP under
+`RESULTS_PATH` — the offline twin of `POST /collections/{name}/extracts`,
+sharing its gather, partition and bundle code. Reads Qdrant only: no
+inference, so it is safe on an airgapped host. In Docker the `make extract`
+target runs it in a one-off `backend` container so it reaches the `qdrant`
+alias. The bundle layout and the caps are documented in
+[extracts.md](extracts.md).
+
 ## `search-index` — full-text search backfill
 
 ```bash

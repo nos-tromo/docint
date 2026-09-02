@@ -1940,6 +1940,7 @@ class PathConfig:
     prompts: Path
     qdrant_sources: Path
     hf_hub_cache: Path
+    extracts: Path
 
 
 def load_path_env() -> PathConfig:
@@ -1956,6 +1957,7 @@ def load_path_env() -> PathConfig:
         - prompts (Path): Path to the prompts directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
+        - extracts (Path): Directory holding rendered collection extracts.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
@@ -1970,6 +1972,7 @@ def load_path_env() -> PathConfig:
 
     default_qdrant_sources: Path = docint_home_dir / "qdrant_sources"
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
+    default_extracts_dir: Path = docint_home_dir / "extracts"
 
     return PathConfig(
         artifacts=Path(os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)).expanduser(),
@@ -1980,6 +1983,7 @@ def load_path_env() -> PathConfig:
         prompts=default_prompts_dir,
         qdrant_sources=Path(os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
+        extracts=Path(os.getenv("EXTRACT_DIR", default_extracts_dir)).expanduser(),
     )
 
 
@@ -2520,3 +2524,92 @@ def load_summary_concurrency(default: int = 1) -> int:
         logger.warning("DOCINT_SUMMARY_CONCURRENCY {} is < 1; clamping to 1.", value)
         return 1
     return value
+
+
+def load_extract_concurrency(default: int = 1) -> int:
+    """Max extract-bundle jobs run concurrently.
+
+    Read from ``DOCINT_EXTRACT_CONCURRENCY``. Defaults to 1: a bundle render
+    holds a whole collection's text and figures in memory, and the PDF pass
+    holds a WeasyPrint document on top, so a second concurrent render is the
+    one that runs the container out of memory.
+
+    Args:
+        default (int): Fallback when the variable is unset or unparseable.
+
+    Returns:
+        int: The configured concurrency, at least 1.
+    """
+    raw = os.getenv("DOCINT_EXTRACT_CONCURRENCY", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid DOCINT_EXTRACT_CONCURRENCY {!r}; using {}.", raw, default)
+        return default
+    if value < 1:
+        logger.warning("DOCINT_EXTRACT_CONCURRENCY {} is < 1; clamping to 1.", value)
+        return 1
+    return value
+
+
+@dataclass(frozen=True)
+class ExtractConfig:
+    """Configuration for rendered collection extracts.
+
+    Attributes:
+        retention_days (int): Days a stored extract is kept before pruning.
+        max_per_collection (int): Stored extracts kept per collection.
+        pdf_max_units (int): Units above which the combined PDF is skipped.
+        pdf_max_figures (int): Figures above which the combined PDF is skipped.
+        sync_max_units (int): Units a synchronous per-source extract may render
+            before the caller is told to queue a job instead.
+    """
+
+    retention_days: int
+    max_per_collection: int
+    pdf_max_units: int
+    pdf_max_figures: int
+    sync_max_units: int
+
+
+def _extract_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Read one non-negative integer knob, warning on anything unusable.
+
+    Args:
+        name (str): Environment variable to read.
+        default (int): Value used when unset or unparseable.
+        minimum (int): Lower bound the value is clamped to.
+
+    Returns:
+        int: The configured value, at least ``minimum``.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid {} {!r}; using {}.", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("{} {} is < {}; clamping.", name, value, minimum)
+        return minimum
+    return value
+
+
+def load_extract_env() -> ExtractConfig:
+    """Load extract configuration from the environment.
+
+    Returns:
+        ExtractConfig: Retention, store size, PDF caps and the synchronous
+            per-source unit cap.
+    """
+    return ExtractConfig(
+        retention_days=_extract_int("EXTRACT_RETENTION_DAYS", 7, minimum=1),
+        max_per_collection=_extract_int("EXTRACT_MAX_PER_COLLECTION", 5, minimum=1),
+        pdf_max_units=_extract_int("EXTRACT_PDF_MAX_UNITS", 200),
+        pdf_max_figures=_extract_int("EXTRACT_PDF_MAX_FIGURES", 400),
+        sync_max_units=_extract_int("EXTRACT_SYNC_MAX_UNITS", 50, minimum=1),
+    )

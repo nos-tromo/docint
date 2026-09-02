@@ -3,7 +3,7 @@
 Mirrors the posture of ``ner_client``/``clip_client``: docint forwards a
 media file to Nextext, which decodes it (PyAV/ffmpeg), runs VAD → diarize →
 Whisper, and exposes a ``docint.jsonl`` transcript plus a ``keyframes.zip``
-artifact. docint stays CPU-only and media-dependency-free.
+artifact (whose optional ``manifest.json`` times each frame). docint stays CPU-only and media-dependency-free.
 
 All failures are fail-soft: ``process_media`` returns a ``NextextResult`` with
 a non-``completed`` status (``disabled``, ``timeout``, ``poll_error``, a server
@@ -25,7 +25,7 @@ from loguru import logger
 
 from docint.utils.env_cfg import NextextConfig, load_nextext_env
 
-__all__ = ["NextextClient", "NextextResult"]
+__all__ = ["NextextClient", "NextextKeyframe", "NextextResult"]
 
 _TERMINAL_OK = "completed"
 _TERMINAL_FAIL = {"failed", "error", "cancelled"}
@@ -37,12 +37,28 @@ _MIN_NEXTEXT_VERSION = "v1.9.0"
 
 
 @dataclass(frozen=True)
+class NextextKeyframe:
+    """One sampled video frame and where in the clip it came from.
+
+    Attributes:
+        jpeg (bytes): The encoded frame.
+        index (int): Position in Nextext's own sampling order.
+        time_sec (float | None): Seconds from the clip's start, or ``None``
+            when the server sent no manifest to say.
+    """
+
+    jpeg: bytes
+    index: int
+    time_sec: float | None = None
+
+
+@dataclass(frozen=True)
 class NextextResult:
     """Outcome of a single media file processed by Nextext."""
 
     status: str
     transcript_jsonl: bytes | None = None
-    keyframes: list[bytes] = field(default_factory=list)
+    keyframes: list[NextextKeyframe] = field(default_factory=list)
     error: str | None = None
 
 
@@ -134,15 +150,54 @@ class NextextClient:
         return resp.content
 
     @staticmethod
-    def _unzip_jpegs(blob: bytes | None) -> list[bytes]:
-        """Return the JPEG members of a keyframes zip in name order."""
+    def _manifest_times(zf: zipfile.ZipFile) -> dict[str, float]:
+        """Return each frame file's sampling time from the zip's manifest.
+
+        Args:
+            zf (zipfile.ZipFile): The open keyframes archive.
+
+        Returns:
+            dict[str, float]: Seconds keyed by member name; empty when the
+                manifest is absent or unreadable — an untimed frame is a
+                degraded result, a mislabelled one is a wrong answer.
+        """
+        try:
+            raw = zf.read("manifest.json")
+        except KeyError:
+            return {}
+        try:
+            entries = json.loads(raw).get("frames") or []
+        except (ValueError, AttributeError) as exc:
+            logger.warning("Ignoring unreadable keyframe manifest: {}", exc)
+            return {}
+        times: dict[str, float] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name, time_sec = entry.get("file"), entry.get("time_sec")
+            if isinstance(name, str) and isinstance(time_sec, int | float):
+                times[name] = float(time_sec)
+        return times
+
+    @classmethod
+    def _unzip_keyframes(cls, blob: bytes | None) -> list[NextextKeyframe]:
+        """Return the frames of a keyframes zip in name order, timed when known.
+
+        Args:
+            blob (bytes | None): The archive bytes, or ``None`` when absent.
+
+        Returns:
+            list[NextextKeyframe]: Frames in member-name order. ``time_sec`` is
+                ``None`` for a frame the manifest does not name.
+        """
         if not blob:
             return []
-        frames: list[bytes] = []
+        frames: list[NextextKeyframe] = []
         with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-            for name in sorted(zf.namelist()):
-                if name.lower().endswith((".jpg", ".jpeg", ".png")):
-                    frames.append(zf.read(name))
+            times = cls._manifest_times(zf)
+            names = [n for n in sorted(zf.namelist()) if n.lower().endswith((".jpg", ".jpeg", ".png"))]
+            for index, name in enumerate(names):
+                frames.append(NextextKeyframe(jpeg=zf.read(name), index=index, time_sec=times.get(name)))
         return frames
 
     def process_media(self, file_path: Path) -> NextextResult:
@@ -176,7 +231,7 @@ class NextextClient:
                 logger.warning("Nextext job {} for {} ended status={}", job_id, file_path.name, status)
                 return NextextResult(status=status)
             transcript = self._fetch_artifact(job_id, "docint.jsonl")
-            keyframes = self._unzip_jpegs(self._fetch_artifact(job_id, "keyframes.zip"))
+            keyframes = self._unzip_keyframes(self._fetch_artifact(job_id, "keyframes.zip"))
             return NextextResult(status="completed", transcript_jsonl=transcript, keyframes=keyframes)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:

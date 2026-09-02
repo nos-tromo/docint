@@ -1089,6 +1089,29 @@ def _load_weasyprint() -> tuple[Any, Exception | None]:
         return None, exc
 
 
+def html_to_pdf(document: str) -> bytes:
+    """Paginate a self-contained HTML document with WeasyPrint.
+
+    Args:
+        document (str): The complete HTML, styles and images inlined.
+
+    Returns:
+        bytes: The PDF document.
+
+    Raises:
+        PdfEngineUnavailableError: When WeasyPrint or its native libraries are
+            not installed, so a route can degrade to a 503 on the PDF format
+            alone and leave the others working.
+    """
+    html_cls, error = _load_weasyprint()
+    if html_cls is None:
+        raise PdfEngineUnavailableError(
+            "PDF export requires WeasyPrint and its native libraries (Pango/cairo); "
+            f"install them to enable PDF reports. Underlying error: {error}"
+        )
+    return bytes(html_cls(string=document).write_pdf())
+
+
 def render_pdf(report: dict[str, Any]) -> bytes:
     """Render the report as a real paginated PDF via WeasyPrint.
 
@@ -1099,17 +1122,9 @@ def render_pdf(report: dict[str, Any]) -> bytes:
         bytes: The PDF document.
 
     Raises:
-        PdfEngineUnavailableError: When WeasyPrint or its native libraries are
-            not installed (so the API can degrade to a 503 on the PDF route
-            only, leaving the other export formats working).
+        PdfEngineUnavailableError: See :func:`html_to_pdf`.
     """
-    html_cls, error = _load_weasyprint()
-    if html_cls is None:
-        raise PdfEngineUnavailableError(
-            "PDF export requires WeasyPrint and its native libraries (Pango/cairo); "
-            f"install them to enable PDF reports. Underlying error: {error}"
-        )
-    return bytes(html_cls(string=render_html(report)).write_pdf())
+    return html_to_pdf(render_html(report))
 
 
 # --------------------------------------------------------------------------- #

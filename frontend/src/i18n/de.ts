@@ -441,6 +441,25 @@ export const de: Strings = {
   'inspector.caption': 'Indexierte Dokumente durchsuchen',
   'inspector.select_collection': 'Wählen Sie eine Sammlung aus.',
 
+  // Datenauszüge (Inspector)
+  'extract.title': 'Datenauszüge',
+  'extract.caption': 'Vollständige Transkripte, Frame-Beschreibungen und Dokumenttexte als Dateien',
+  'extract.build': 'Auszug erstellen',
+  'extract.running': 'Auszug wird erstellt…',
+  'extract.running_progress': '{done} von {total} werden ausgegeben',
+  'extract.failed': 'Der Auszug konnte nicht erstellt werden.',
+  'extract.none': 'Noch keine Auszüge.',
+  'extract.download': 'Auszug herunterladen (ZIP)',
+  'extract.download_source': 'Diese Quelle als Auszug herunterladen (ZIP)',
+  'extract.delete': 'Auszug löschen',
+  'extract.delete_confirm': 'Diesen Auszug löschen?',
+  'extract.pdf_skipped': 'PDF übersprungen (zu groß)',
+  'extract.count_documents': 'Dokumente',
+  'extract.count_media': 'Clips',
+  'extract.count_postings': 'Beiträge',
+  'extract.count_images': 'Bilder',
+  'extract.count_figures': 'Abbildungen',
+
   // reference-metadata field labels (shared by chat citations, entity
   // findings, hate-speech rows, and the .txt/.md download exports)
   'common.refmeta_network': 'Netzwerk',

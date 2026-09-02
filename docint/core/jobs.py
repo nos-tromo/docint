@@ -43,7 +43,12 @@ from anyio import to_thread
 from loguru import logger
 
 from docint.utils.duration import format_elapsed
-from docint.utils.env_cfg import load_ingest_concurrency, load_logging_env, load_summary_concurrency
+from docint.utils.env_cfg import (
+    load_extract_concurrency,
+    load_ingest_concurrency,
+    load_logging_env,
+    load_summary_concurrency,
+)
 from docint.utils.logfmt import (
     ProgressLogThrottle,
     describe_inputs,
@@ -71,14 +76,21 @@ KIND_EVENTS: dict[str, dict[str, str]] = {
         "failed_code": "summary_failed",
         "failed_message": "Summary generation failed.",
     },
+    "extract": {
+        "started": "extract_started",
+        "progress": "extract_progress",
+        "complete": "extract_completed",
+        "failed_code": "extract_failed",
+        "failed_message": "Extract failed.",
+    },
 }
 
 #: SSE event names, across all kinds, that open a run's history.
-STARTED_EVENTS: frozenset[str] = frozenset({"ingestion_started", "summary_started"})
+STARTED_EVENTS: frozenset[str] = frozenset({"ingestion_started", "summary_started", "extract_started"})
 #: SSE event names, across all kinds, carrying a collapsed-to-latest progress update.
-PROGRESS_EVENTS: frozenset[str] = frozenset({"ingestion_progress", "summary_progress"})
+PROGRESS_EVENTS: frozenset[str] = frozenset({"ingestion_progress", "summary_progress", "extract_progress"})
 #: SSE event names, across all kinds, that end a run.
-TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "summary_completed", "error"})
+TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "summary_completed", "extract_completed", "error"})
 
 
 #: Upper bound on a caller-reported upload lead. A day is far longer than any
@@ -208,6 +220,10 @@ class IngestJobState:
     logical_name: str
     physical: str
     kind: str = "ingest"
+    #: The one source an extract job covers; ``None`` for a whole collection.
+    target: str | None = None
+    #: The stored artifact a finished extract job produced, if any.
+    artifact: dict[str, Any] | None = None
     batch_dir: Path | None = None
     hybrid: bool | None = None
     ner: bool | None = None
@@ -354,6 +370,8 @@ class IngestJobState:
             "error": self.error,
             "empty": self.empty,
             "resolution": self.resolution,
+            "target": self.target,
+            "artifact": self.artifact,
             "created_at": self.created_at.isoformat(),
             "run_started_at": self.run_started_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -399,6 +417,7 @@ class IngestJobManager:
         runner: JobRunner,
         concurrency: int | None = None,
         summary_concurrency: int | None = None,
+        extract_concurrency: int | None = None,
     ) -> None:
         """Initialize the manager.
 
@@ -411,6 +430,9 @@ class IngestJobManager:
             summary_concurrency (int | None): Worker semaphore size for
                 ``kind="summary"`` jobs. Defaults to
                 :func:`docint.utils.env_cfg.load_summary_concurrency`.
+            extract_concurrency (int | None): Worker semaphore size for
+                ``kind="extract"`` jobs. Defaults to
+                :func:`docint.utils.env_cfg.load_extract_concurrency`.
         """
         self._runner = runner
         self._jobs: dict[str, IngestJobState] = {}
@@ -420,6 +442,9 @@ class IngestJobManager:
             "ingest": asyncio.Semaphore(concurrency if concurrency is not None else load_ingest_concurrency()),
             "summary": asyncio.Semaphore(
                 summary_concurrency if summary_concurrency is not None else load_summary_concurrency()
+            ),
+            "extract": asyncio.Semaphore(
+                extract_concurrency if extract_concurrency is not None else load_extract_concurrency()
             ),
         }
         self._tasks: set[asyncio.Task[None]] = set()
@@ -436,6 +461,7 @@ class IngestJobManager:
         hate_speech: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
+        target: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Register a job and dispatch its worker, unconditionally.
@@ -460,9 +486,10 @@ class IngestJobManager:
                 Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"`` or ``"summary"``. Selects the SSE event
-                names (:data:`KIND_EVENTS`) and the worker semaphore this job
-                waits on.
+            kind (str): ``"ingest"``, ``"summary"`` or ``"extract"``. Selects
+                the SSE event names (:data:`KIND_EVENTS`) and the worker
+                semaphore this job waits on.
+            target (str | None): The one source an extract covers.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports.
@@ -480,6 +507,7 @@ class IngestJobManager:
             hate_speech=hate_speech,
             resolve=resolve,
             kind=kind,
+            target=target,
             upload_lead_s=upload_lead_s,
         )
         async with self._lock:
@@ -499,6 +527,7 @@ class IngestJobManager:
         hate_speech: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
+        target: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> tuple[IngestJobState, bool]:
         """Atomically check for an in-flight job and create one only if idle.
@@ -536,9 +565,11 @@ class IngestJobManager:
                 Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"`` or ``"summary"``. Selects the SSE event
-                names (:data:`KIND_EVENTS`), the worker semaphore this job
-                waits on, and the idleness scope checked before creating.
+            kind (str): ``"ingest"``, ``"summary"`` or ``"extract"``. Selects
+                the SSE event names (:data:`KIND_EVENTS`), the worker semaphore
+                this job waits on, and the idleness scope checked before
+                creating.
+            target (str | None): The one source an extract covers.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports. Ignored when an in-flight
@@ -584,6 +615,7 @@ class IngestJobManager:
         hate_speech: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
+        target: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Build a fresh, unregistered job state.
@@ -602,7 +634,8 @@ class IngestJobManager:
                 Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"`` or ``"summary"``.
+            kind (str): ``"ingest"``, ``"summary"`` or ``"extract"``.
+            target (str | None): The one source an extract covers.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed. Clamped here — it reaches the server as a
                 client-reported number, and it bounds a log line, so it must
@@ -617,6 +650,7 @@ class IngestJobManager:
             logical_name=logical_name,
             physical=physical,
             kind=kind,
+            target=target,
             batch_dir=batch_dir,
             hybrid=hybrid,
             ner=ner,
@@ -1058,6 +1092,7 @@ class IngestJobManager:
                 _log(line)
             state.empty = bool(result.get("empty", False))
             state.resolution = result.get("resolution")
+            state.artifact = result.get("artifact")
             state.status = JobStatus.COMPLETED
             state.finished_at = _utcnow()
             state.duration_s = state.elapsed_s()
@@ -1073,6 +1108,8 @@ class IngestJobManager:
             }
             if state.resolution is not None:
                 terminal["resolution"] = state.resolution
+            if state.artifact is not None:
+                terminal["artifact"] = state.artifact
             _emit(names["complete"], terminal)
 
     async def _prune_terminal(self, owner: str) -> None:

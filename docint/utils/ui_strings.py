@@ -59,6 +59,33 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_machine_translation": "Machine translation",
         "report_label_image_evidence": "Image evidence",
         "report_label_video_keyframe": "Video keyframe",
+        "extract_title": "Data extract",
+        "extract_heading_documents": "Documents",
+        "extract_heading_media": "Audio and video",
+        "extract_heading_postings": "Postings",
+        "extract_heading_images": "Images",
+        "extract_label_contents": "Contents",
+        "extract_label_transcript": "Transcript",
+        "extract_label_keyframes": "Keyframes",
+        "extract_label_figures": "Figures",
+        "extract_label_text": "Text",
+        "extract_label_description": "Description",
+        "extract_label_tags": "Tags",
+        "extract_label_ocr_text": "Text in image",
+        "extract_label_document": "Document",
+        "extract_label_clip": "Clip",
+        "extract_label_segments": "Segments",
+        "extract_note_order_approximate": (
+            "This document records no page or character offsets, so the text below is in storage order, "
+            "which may differ from the original reading order."
+        ),
+        "extract_note_pdf_skipped": (
+            "The combined PDF was skipped: this extract is larger than the configured PDF limit. "
+            "The per-source Markdown files and figures are complete."
+        ),
+        "extract_note_no_transcript": "No transcript was produced for this clip.",
+        "extract_empty": "This collection holds nothing to extract.",
+        "extract_disclaimer": "Transcripts, image descriptions and tags are machine-generated.",
         "report_disclaimer": "AI-generated report.",
         "report_empty": "This report has no items yet.",
     },
@@ -107,6 +134,33 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_machine_translation": "Maschinelle Übersetzung",
         "report_label_image_evidence": "Bild",
         "report_label_video_keyframe": "Video-Frame",
+        "extract_title": "Datenauszug",
+        "extract_heading_documents": "Dokumente",
+        "extract_heading_media": "Audio und Video",
+        "extract_heading_postings": "Beiträge",
+        "extract_heading_images": "Bilder",
+        "extract_label_contents": "Inhalt",
+        "extract_label_transcript": "Transkript",
+        "extract_label_keyframes": "Video-Frames",
+        "extract_label_figures": "Abbildungen",
+        "extract_label_text": "Text",
+        "extract_label_description": "Beschreibung",
+        "extract_label_tags": "Schlagwörter",
+        "extract_label_ocr_text": "Text im Bild",
+        "extract_label_document": "Dokument",
+        "extract_label_clip": "Clip",
+        "extract_label_segments": "Segmente",
+        "extract_note_order_approximate": (
+            "Dieses Dokument enthält weder Seitenzahlen noch Zeichenpositionen. Der Text steht daher in "
+            "Speicherreihenfolge, die von der ursprünglichen Lesereihenfolge abweichen kann."
+        ),
+        "extract_note_pdf_skipped": (
+            "Das kombinierte PDF wurde übersprungen: Dieser Auszug überschreitet das konfigurierte PDF-Limit. "
+            "Die Markdown-Dateien und Abbildungen je Quelle sind vollständig."
+        ),
+        "extract_note_no_transcript": "Für diesen Clip wurde kein Transkript erstellt.",
+        "extract_empty": "Diese Collection enthält nichts, was ausgelesen werden könnte.",
+        "extract_disclaimer": "Transkripte, Bildbeschreibungen und Schlagwörter sind maschinell erzeugt.",
         "report_disclaimer": ("KI-generierter Bericht."),
         "report_empty": "Dieser Bericht enthält noch keine Einträge.",
     },

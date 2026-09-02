@@ -176,3 +176,23 @@ describe('useIngestJobsStore', () => {
     expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
   })
 })
+
+describe('extract jobs share the store', () => {
+  beforeEach(() => useIngestJobsStore.getState().clear())
+
+  it('treats extract_started as the start of a fresh fold', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'extract_started', data: {} } as IngestEvent)
+    store.appendEvent('j1', { event: 'warning', data: { message: 'a warning' } } as IngestEvent)
+    store.appendEvent('j1', { event: 'extract_started', data: {} } as IngestEvent)
+    expect(useIngestJobsStore.getState().events.j1).toHaveLength(1)
+  })
+
+  it('stops counting an extract job as running once it completes', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'extract_started', data: {} } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(true)
+    store.appendEvent('j1', { event: 'extract_completed', data: {} } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
+  })
+})

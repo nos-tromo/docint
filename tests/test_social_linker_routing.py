@@ -1,5 +1,6 @@
 """Routing tests for SocialLinker: image CLIP path, video Nextext path, manifest caching."""
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +8,7 @@ import pandas as pd
 
 from docint.core.ingest.images_service import IngestContext
 from docint.core.ingest.social_linker import SocialLinker
-from docint.utils.nextext_client import NextextResult
+from docint.utils.nextext_client import NextextKeyframe, NextextResult
 
 
 class _FakeImageService:
@@ -41,6 +42,7 @@ class _FakeImageService:
         dedup_cosine: float = 0.95,
         keyframe_source_type: str = "social_media_keyframe",
         link_field: str | None = "posting_uuid",
+        frame_times: Sequence[float | None] | None = None,
     ) -> list[Any]:
         """Record the keyframe call and return an empty list.
 
@@ -58,6 +60,7 @@ class _FakeImageService:
             dedup_cosine: Cosine similarity threshold (ignored).
             keyframe_source_type: ``source_type`` payload value (recorded, not applied).
             link_field: Payload key aliasing ``source_doc_id`` (recorded, not applied).
+            frame_times: Per-frame sampling times (recorded, not applied).
 
         Returns:
             An empty list (no records stored in the stub).
@@ -70,6 +73,7 @@ class _FakeImageService:
                 "dedup_cosine": dedup_cosine,
                 "keyframe_source_type": keyframe_source_type,
                 "link_field": link_field,
+                "frame_times": frame_times,
             }
         )
         return []
@@ -90,7 +94,7 @@ class _FakeNextext:
         return NextextResult(
             status="completed",
             transcript_jsonl=b'{"text":"spoken","start_seconds":0,"end_seconds":1}\n',
-            keyframes=[b"\xff\xd8\xff0"],
+            keyframes=[NextextKeyframe(jpeg=b"\xff\xd8\xff0", index=0, time_sec=2.0)],
         )
 
 

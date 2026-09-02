@@ -70,3 +70,58 @@ def test_standalone_video_keyframe_has_no_posting_uuid(monkeypatch: pytest.Monke
     assert "posting_uuid" not in payload
     assert payload["source_doc_id"] == "hash-1"
     assert payload["source_file"] == "clip.mp4"
+
+
+def test_keyframe_payload_carries_index_and_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timed frame records where in the clip it came from."""
+    svc, stored = _service(monkeypatch)
+    svc.ingest_keyframe_set(
+        [b"f0", b"f1"],
+        context=IngestContext(source_collection="c"),
+        source_doc_id="hash-1",
+        keyframe_source_type="video_keyframe",
+        link_field=None,
+        frame_times=[0.0, 12.5],
+        dedup_cosine=1.01,
+    )
+    assert [(n.metadata["keyframe_index"], n.metadata["keyframe_time_sec"]) for n in stored] == [(0, 0.0), (1, 12.5)]
+
+
+def test_keyframe_index_survives_the_dedup_prune(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pruned frame does not renumber its neighbours; the index stays Nextext's."""
+    svc, stored = _service(monkeypatch)
+    svc.ingest_keyframe_set(
+        [b"f0", b"f1"],
+        context=IngestContext(source_collection="c"),
+        source_doc_id="hash-1",
+        link_field=None,
+        frame_times=[0.0, 12.5],
+    )
+    assert [(n.metadata["keyframe_index"], n.metadata["keyframe_time_sec"]) for n in stored] == [(0, 0.0)]
+
+
+def test_keyframe_payload_without_times_keeps_its_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An untimed frame still records its position, so ordering survives."""
+    svc, stored = _service(monkeypatch)
+    svc.ingest_keyframe_set(
+        [b"f0"],
+        context=IngestContext(source_collection="c"),
+        source_doc_id="hash-1",
+        link_field=None,
+    )
+    assert stored[0].metadata["keyframe_index"] == 0
+    assert stored[0].metadata["keyframe_time_sec"] is None
+
+
+def test_keyframe_times_that_do_not_pair_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mislabelling a frame is worse than leaving it untimed."""
+    svc, stored = _service(monkeypatch)
+    svc.ingest_keyframe_set(
+        [b"f0", b"f1"],
+        context=IngestContext(source_collection="c"),
+        source_doc_id="hash-1",
+        link_field=None,
+        frame_times=[3.0],
+        dedup_cosine=1.01,
+    )
+    assert [n.metadata["keyframe_time_sec"] for n in stored] == [None, None]

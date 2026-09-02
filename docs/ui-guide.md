@@ -176,6 +176,17 @@ over the active collection, plus a per-session ZIP export
 file-type / entity-type breakdown stay accurate regardless of how many pages
 the table has lazily loaded (the counts are not derived from the loaded rows).
 
+Between the two sits the **Data extracts** panel
+(`src/components/inspector/ExtractsPanel.tsx`): one control builds a written
+extract of the collection, and the bundles already stored for it are listed
+with their size, contents and a download link. Progress comes from the shared
+job store that `Shell`'s single owner-multiplexed stream already feeds, so a
+build survives navigating away and a reload re-attaches to it like an ingest
+run. Each document row also carries a download action for that source alone
+(`SourceExtractAction`); it fetches rather than links, because a postings
+table's hash expands to every post in it and the server answers 413 — the same
+click then queues a targeted build. See [extracts.md](extracts.md).
+
 ### Report (`src/routes/Report.tsx`)
 
 The Report Builder surface. Lists the caller's reports and, for the active one,

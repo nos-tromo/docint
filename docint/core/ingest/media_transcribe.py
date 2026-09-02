@@ -140,7 +140,8 @@ class MediaTranscriber:
                 )
             if outcome.keyframes:
                 self.image_service.ingest_keyframe_set(
-                    outcome.keyframes,
+                    [frame.jpeg for frame in outcome.keyframes],
+                    frame_times=[frame.time_sec for frame in outcome.keyframes],
                     context=context,
                     source_doc_id=clip.source_doc_id,
                     extra_metadata=clip.keyframe_extra_metadata,

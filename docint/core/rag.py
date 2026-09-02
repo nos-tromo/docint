@@ -136,6 +136,7 @@ from docint.core.entities.resolution import (
     resolve_collection,
 )
 from docint.core.entities.store import EntityStore
+from docint.core.extract.store import ExtractStore
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.ingest.streaming_executor import overlapped
@@ -6079,6 +6080,12 @@ class RAG:
                     collection_name,
                     e,
                 )
+
+        # 3. Cleanup stored extracts, which share the collection's lifecycle.
+        try:
+            ExtractStore(self.path_config.extracts).delete_collection(target)
+        except Exception as e:
+            logger.warning("Failed to delete stored extracts for collection '{}': {}", target, e)
 
     def verify_collection(
         self,

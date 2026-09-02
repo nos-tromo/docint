@@ -18,6 +18,7 @@ it, and what it can do) with topic-by-topic deep dives.
 | [retrieval-and-agents.md](retrieval-and-agents.md) | Agent orchestration, hybrid retrieval, reranking, parent-context expansion, Graph-RAG |
 | [ui-guide.md](ui-guide.md) | React SPA pages — Dashboard, Chat, Ingest, Analysis, Inspector, Report — plus localization |
 | [reports.md](reports.md) | Report Builder: curating findings into a case file, frozen image evidence, the five export formats |
+| [extracts.md](extracts.md) | Data extracts: full transcripts, keyframe descriptions and document text as downloadable files |
 | [deployment.md](deployment.md) | Docker services, shared volumes, networks, vLLM co-deployment, proxies |
 | [migrations.md](migrations.md) | Changes existing collections do not pick up on their own, and the one action that fixes each |
 | [development.md](development.md) | Dev workflow, `uv`, pre-commit, pytest layout, CI, extension points |
@@ -33,7 +34,8 @@ it, and what it can do) with topic-by-topic deep dives.
   [ingestion.md](ingestion.md) and [retrieval-and-agents.md](retrieval-and-agents.md).
 - **Investigators** working a case in the app — [ui-guide.md](ui-guide.md)
   for the screens, then [reports.md](reports.md) for turning findings into an
-  exportable case file.
+  exportable case file, or [extracts.md](extracts.md) for a full written
+  extract of everything ingested.
 - **API consumers** wiring a client against the FastAPI surface — go
   straight to [api-reference.md](api-reference.md).
 - **UI contributors** — see [ui-guide.md](ui-guide.md) and the React SPA
