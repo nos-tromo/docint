@@ -486,6 +486,14 @@ the words printed in it rather than only through a paraphrase of them. The
 same applies to a figure lifted out of a PDF and to a standalone image file —
 one code path reads them all.
 
+The caption and its tags are written in the operator's language: the vision
+prompt is `docint/utils/prompts/{en,de}/image_caption.txt`, like every other
+model prompt, so a German deployment gets German captions. Only the JSON *keys*
+the model returns stay English in every locale — they are protocol, not prose —
+and so does `ocr_text`, which is transcribed rather than written. Because
+captions are stored, switching `RESPONSE_LANGUAGE` does not rewrite the ones a
+collection already holds: see [migrations.md](migrations.md).
+
 Turning it on affects **newly ingested** images only: there is no payload
 migration, so an existing collection gains `ocr_text` by being re-ingested (file
 hashes make an unchanged document cheap to re-run, but the images themselves are

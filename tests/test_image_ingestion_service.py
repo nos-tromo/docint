@@ -21,7 +21,9 @@ from docint.core.ingest.images_service import (
     ImageIngestionService,
     IngestContext,
     VisionJSONTagger,
+    _caption_prompt,
 )
+from docint.utils.prompt_loader import load_localized_prompt
 
 """Unit tests for the image ingestion service.
 
@@ -1288,3 +1290,41 @@ def test_write_image_search_text_is_fail_soft_when_field_indexing_breaks() -> No
         ),
     ):
         service._write_image_search_text("docs_images", "point-1", "a caption")
+
+
+# --------------------------------------------------------------------------- #
+# Caption locale
+# --------------------------------------------------------------------------- #
+def test_the_caption_prompt_follows_the_response_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caption is prose an investigator reads, so it follows the locale.
+
+    German operators were getting English captions in a German report because
+    this was the one model prompt that never consulted ``RESPONSE_LANGUAGE``.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    assert "Deutsch" in _caption_prompt()
+
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    assert "English" in _caption_prompt()
+
+
+def test_the_caption_prompt_keeps_its_json_keys_english_in_every_locale() -> None:
+    """The keys are protocol; only the values they carry are prose."""
+    for locale in ("en", "de"):
+        text = load_localized_prompt("image_caption", default="", lang=locale)
+        assert "description" in text
+        assert "tags" in text
+
+
+def test_an_unknown_locale_still_yields_a_usable_caption_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing language pack must not leave the tagger promptless."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "xx")
+    prompt = _caption_prompt()
+    assert "description" in prompt
+    assert "tags" in prompt
+
+
+def test_the_tagger_reads_its_prompt_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read per instance, so a locale set after import still takes effect."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    assert "Deutsch" in VisionJSONTagger().prompt_template

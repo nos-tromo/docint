@@ -35,6 +35,7 @@ from docint.utils.env_cfg import (
 from docint.utils.llm_sanitize import looks_like_no_image_refusal, strip_reasoning
 from docint.utils.mimetype import get_mimetype
 from docint.utils.openai_cfg import OpenAIPipeline
+from docint.utils.prompt_loader import load_localized_prompt
 
 T = TypeVar("T")
 
@@ -176,20 +177,42 @@ class ImageTaggingBackend(Protocol):
         """Return ``(description, tags)`` for the image."""
 
 
+#: English fallback for the caption prompt, used when the language pack is
+#: missing — the convention every other localized prompt follows.
+_CAPTION_PROMPT_DEFAULT = (
+    "Return strict JSON with keys description and tags.\n"
+    "description: concise factual caption in <= 8 sentences.\n"
+    "tags: 5-20 concise tags, each 1-3 words.\n"
+    "Write the description and the tags in English.\n"
+    "Keep the key names exactly as given, in English.\n"
+    "Do not include markdown or prose outside JSON."
+)
+
+
+def _caption_prompt() -> str:
+    """Return the caption prompt for the active locale.
+
+    Read per instantiation rather than at import, so a locale set after this
+    module loads still takes effect — the same reason the agents build their
+    templates in ``__init__``.
+    """
+    return load_localized_prompt("image_caption", default=_CAPTION_PROMPT_DEFAULT)
+
+
 @dataclass
 class VisionJSONTagger:
-    """OpenAI-compatible vision tagger that returns structured description/tags."""
+    """OpenAI-compatible vision tagger that returns structured description/tags.
+
+    The prompt follows ``RESPONSE_LANGUAGE``: a caption is prose an investigator
+    reads, so in a German deployment it must be German, like every other
+    model-authored string in the app. The JSON *keys* stay English in every
+    locale — they are protocol, not prose — and so does the text read out of the
+    pixels, which is transcribed rather than written (see ``core/ocr``).
+    """
 
     pipeline: OpenAIPipeline = field(default_factory=OpenAIPipeline)
     max_image_dimension: int = 1024
-    prompt_template: str = field(
-        default=(
-            "Return strict JSON with keys description and tags.\n"
-            "description: concise factual caption in <= 8 sentences.\n"
-            "tags: 5-20 concise tags, each 1-3 words.\n"
-            "Do not include markdown or prose outside JSON."
-        )
-    )
+    prompt_template: str = field(default_factory=_caption_prompt)
 
     @staticmethod
     def parse_tag_payload(raw: str) -> tuple[str, list[str]]:
