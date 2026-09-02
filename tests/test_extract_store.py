@@ -126,3 +126,22 @@ def test_sidecar_records_what_the_build_produced(tmp_path: Path) -> None:
     assert sidecar["counts"] == {"documents": 2, "figures": 5}
     assert sidecar["pdf_skipped"] is True
     assert sidecar["target"] == "abc"
+
+
+def test_a_path_outside_the_root_is_refused(tmp_path: Path) -> None:
+    """Containment is proven against the resolved root, not the caller's care."""
+    store = _store(tmp_path)
+    with pytest.raises(ValueError):
+        store._contained(tmp_path / "elsewhere" / "loot.zip")
+
+
+def test_a_symlinked_root_still_round_trips(tmp_path: Path) -> None:
+    """Normalising both sides must not make a legitimate root look foreign."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "extracts"
+    link.symlink_to(real, target_is_directory=True)
+    store = ExtractStore(link)
+    extract_id = _write(store)
+    assert store.path("u0000__col", extract_id).read_bytes() == b"PK-payload"
+    assert [record["extract_id"] for record in store.list("u0000__col")] == [extract_id]

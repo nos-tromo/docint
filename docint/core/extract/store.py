@@ -42,6 +42,30 @@ class ExtractStore:
             root (Path): Directory holding one subdirectory per collection.
         """
         self._root = Path(root)
+        self._root_real = os.path.realpath(self._root)
+
+    def _contained(self, candidate: Path) -> Path:
+        """Return a path once it is proven to resolve under the store root.
+
+        The patterns above already reject every separator, so a valid name can
+        never fail here. This is the containment proof itself: it normalizes the
+        path and compares it against the root, which is what makes the guard
+        independent of the caller and holds even where the root is reached
+        through a symlink.
+
+        Args:
+            candidate (Path): The path about to be read or written.
+
+        Returns:
+            Path: The normalized path.
+
+        Raises:
+            ValueError: When the path resolves outside the root.
+        """
+        resolved = os.path.realpath(candidate)
+        if resolved != self._root_real and not resolved.startswith(self._root_real + os.sep):
+            raise ValueError(f"Extract path escapes the store root: {candidate!r}")
+        return Path(resolved)
 
     def _dir(self, physical: str) -> Path:
         """Return a collection's directory, refusing an unsafe name.
@@ -57,7 +81,7 @@ class ExtractStore:
         """
         if not _COLLECTION_PATTERN.match(physical or ""):
             raise ValueError(f"Unsafe collection name for the extract store: {physical!r}")
-        return self._root / physical
+        return self._contained(self._root / physical)
 
     def path(self, physical: str, extract_id: str) -> Path:
         """Return the archive path for one build.
@@ -74,7 +98,7 @@ class ExtractStore:
         """
         if not _ID_PATTERN.match(extract_id or ""):
             raise ValueError(f"Unsafe extract id: {extract_id!r}")
-        return self._dir(physical) / f"{extract_id}.zip"
+        return self._contained(self._dir(physical) / f"{extract_id}.zip")
 
     def write(self, physical: str, *, zip_bytes: bytes, meta: dict[str, Any], now: datetime) -> ExtractRecord:
         """Store one build and return its record.

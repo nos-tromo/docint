@@ -50,7 +50,7 @@ dependencies = [
   "scipy>=1.6.0",
   "sqlalchemy>=2.0.52",
   "striprtf>=0.0.33",
-  "transformers>=5.8.1,<5.9",  # <5.9 required by docling 2.102.1 (docling-core[chunking])
+  "transformers>=5.10.0",  # CVE-2026-9856; docling-core's <5.9 cap is darwin-only, see [tool.uv] environments
   "uvicorn>=0.52.4",
   "weasyprint>=69.0",
 ]
@@ -114,5 +114,11 @@ ignore-missing-imports = ["*"]
 
 [tool.uv]
 package = true
+# The lock is resolved for Linux only. docling-core[chunking] caps transformers
+# <5.9 on darwin but allows <6.0 everywhere else, so a lock that also covers
+# macOS forks the resolution and keeps the CVE-2026-9856 version (5.8.1) in
+# uv.lock forever. docint runs on Debian-slim in Docker and CI runs on Linux;
+# `uv sync` on macOS will refuse this lock. See docs/development.md.
+environments = ["sys_platform == 'linux'"]
 # nltk >=3.10.3 refuses hardlinked data files (st_nlink>1); see docs/development.md.
 link-mode = "copy"
