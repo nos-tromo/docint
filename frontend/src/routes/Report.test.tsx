@@ -102,9 +102,18 @@ describe('Report view', () => {
     expect(screen.getByText(/Entity findings/i)).toBeInTheDocument()
     expect(screen.getByText(/Hate-speech findings/i)).toBeInTheDocument()
 
-    const pdf = screen.getByRole('link', { name: 'PDF' })
+    // The formats live behind the download button now, and it opens on a
+    // click rather than on hover — which is what made them reachable by touch
+    // and by keyboard at all.
+    expect(screen.queryByRole('menuitem', { name: 'PDF' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /download/i }))
+
+    const pdf = screen.getByRole('menuitem', { name: 'PDF' })
     expect(pdf).toHaveAttribute('href', expect.stringContaining('/reports/1/export.pdf'))
-    expect(screen.getByRole('link', { name: 'HTML' })).toHaveAttribute('target', '_blank')
+    expect(pdf).toHaveAttribute('download')
+    const html = screen.getByRole('menuitem', { name: 'HTML' })
+    expect(html).toHaveAttribute('target', '_blank')
+    expect(html).toHaveAttribute('rel', 'noreferrer')
   })
 
   it('prompts to select a report when none is active', async () => {

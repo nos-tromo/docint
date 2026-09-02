@@ -135,3 +135,21 @@ describe('FilterBuilder disclosure', () => {
     expect(useChatFiltersStore.getState().customRules[0].field).toBe('file_name')
   })
 })
+
+describe('FilterBuilder custom rules', () => {
+  it('names the operator picker and changes the rule with it', async () => {
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.setState({ filterEnabled: true })
+    render(<FilterBuilder />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Rule' }))
+    // As a bare <select> in a four-column grid with no visible caption, this
+    // had no accessible name at all.
+    const operator = screen.getByRole('combobox', { name: 'Operator' })
+    expect(operator).toHaveTextContent('eq')
+
+    await userEvent.click(operator)
+    await userEvent.click(screen.getByRole('option', { name: 'contains' }))
+    expect(screen.getByRole('combobox', { name: 'Operator' })).toHaveTextContent('contains')
+  })
+})

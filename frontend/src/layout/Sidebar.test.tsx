@@ -8,6 +8,21 @@ import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 
+/**
+ * Choose a collection from the sidebar picker.
+ *
+ * The panel is unmounted while closed, so its options cannot be waited on
+ * directly; an empty picker announces itself with `aria-disabled`, which is the
+ * signal that the listing has arrived.
+ */
+async function pickCollection(name: string) {
+  const picker = await screen.findByRole('combobox', { name: /select collection/i })
+  await waitFor(() => expect(picker).not.toHaveAttribute('aria-disabled'))
+  await userEvent.click(picker)
+  await userEvent.click(await screen.findByRole('option', { name }))
+}
+
+
 function mockFetch(map: Record<string, unknown>) {
   return vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
     const path = typeof input === 'string' ? input : input.toString()
@@ -95,6 +110,55 @@ describe('Sidebar collection selection', () => {
     expect(screen.queryByTestId('active-collection')).not.toBeInTheDocument()
   })
 
+  it("groups another owner's collections under their name", async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': {
+        mine: ['alpha'],
+        others: [{ owner: 'a.beispiel', collections: ['shared-notes', 'shared-media'] }]
+      },
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSidebar()
+
+    const picker = await screen.findByRole('combobox', { name: /select collection/i })
+    await waitFor(() => expect(picker).not.toHaveAttribute('aria-disabled'))
+    await userEvent.click(picker)
+
+    // The owner is a heading over their run, not a collection you can pick —
+    // the same distinction `<optgroup>` drew before.
+    const group = screen.getByRole('group')
+    expect(group).toHaveAccessibleName('a.beispiel')
+    expect(screen.queryByRole('option', { name: 'a.beispiel' })).not.toBeInTheDocument()
+    expect(group).toContainElement(screen.getByRole('option', { name: 'shared-notes' }))
+    // Own collections lead the list, outside every heading.
+    expect(group).not.toContainElement(screen.getByRole('option', { name: 'alpha' }))
+  })
+
+  it('tells two same-named collections apart by their owner', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': {
+        mine: ['shared'],
+        others: [{ owner: 'a.beispiel', collections: ['shared'] }]
+      },
+      '/sessions/list': { sessions: [] },
+      '/collections/select': { ok: true, name: 'shared' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSidebar()
+
+    const picker = await screen.findByRole('combobox', { name: /select collection/i })
+    await waitFor(() => expect(picker).not.toHaveAttribute('aria-disabled'))
+    await userEvent.click(picker)
+    // Two rows read "shared"; picking the second must select the foreign one.
+    await userEvent.click(screen.getAllByRole('option', { name: 'shared' })[1])
+
+    await waitFor(() => expect(useUiStore.getState().selectedOwner).toBe('a.beispiel'))
+    expect(useUiStore.getState().selectedCollection).toBe('shared')
+  })
+
   it('posts to /collections/select and shows the Active badge after picking one', async () => {
     const fetchMock = mockFetch({
       '/collections/list': ['alpha', 'beta'],
@@ -105,9 +169,7 @@ describe('Sidebar collection selection', () => {
 
     renderSidebar()
 
-    const select = await screen.findByLabelText(/select collection/i)
-    await screen.findByRole('option', { name: 'alpha' })
-    await userEvent.selectOptions(select, 'alpha')
+    await pickCollection('alpha')
 
     await waitFor(() => {
       expect(useUiStore.getState().selectedCollection).toBe('alpha')
@@ -198,9 +260,7 @@ describe('Sidebar collection selection', () => {
 
     renderSidebar()
 
-    const select = await screen.findByLabelText(/select collection/i)
-    await screen.findByRole('option', { name: 'beta' })
-    await userEvent.selectOptions(select, 'beta')
+    await pickCollection('beta')
 
     await waitFor(() => {
       expect(useUiStore.getState().selectedCollection).toBe('beta')
@@ -227,9 +287,7 @@ describe('Sidebar collection selection', () => {
 
     renderSidebar()
 
-    const select = await screen.findByLabelText(/select collection/i)
-    await screen.findByRole('option', { name: 'beta' })
-    await userEvent.selectOptions(select, 'beta')
+    await pickCollection('beta')
 
     await waitFor(() => {
       const selectCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/collections/select'))
@@ -364,9 +422,7 @@ describe('Sidebar keeps the current section when switching collections', () => {
 
     renderSidebarAt('/analysis')
 
-    const select = await screen.findByLabelText(/select collection/i)
-    await screen.findByRole('option', { name: 'beta' })
-    await userEvent.selectOptions(select, 'beta')
+    await pickCollection('beta')
 
     await waitFor(() => {
       expect(useUiStore.getState().selectedCollection).toBe('beta')
@@ -385,9 +441,7 @@ describe('Sidebar keeps the current section when switching collections', () => {
 
     renderSidebarAt('/chat/sess-old')
 
-    const select = await screen.findByLabelText(/select collection/i)
-    await screen.findByRole('option', { name: 'beta' })
-    await userEvent.selectOptions(select, 'beta')
+    await pickCollection('beta')
 
     await waitFor(() => {
       expect(useUiStore.getState().selectedCollection).toBe('beta')

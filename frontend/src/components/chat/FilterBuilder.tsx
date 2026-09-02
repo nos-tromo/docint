@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Badge, Button, Input, PlusIcon, RemoveButton, Select } from '@infra/ui'
+import { Badge, Button, Input, PlusIcon, RemoveButton, SelectMenu } from '@infra/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
 import { cn } from '@/lib/cn'
@@ -149,16 +149,17 @@ export function FilterBuilder() {
                         placeholder={t('chat.field_placeholder')}
                         list={FIELD_OPTIONS_ID}
                       />
-                      <Select
+                      <SelectMenu
+                        variant="field"
+                        // The operators are protocol strings and stay
+                        // untranslated, so the row needs a name of its own:
+                        // there is no visible caption in this grid to borrow.
+                        label={t('chat.operator_aria')}
+                        options={OPERATORS.map((o) => ({ value: o, label: o }))}
                         value={r.operator}
-                        onChange={(e) => s.updateRule(r.id, { operator: e.target.value })}
-                      >
-                        {OPERATORS.map((o) => (
-                          <option key={o} value={o}>
-                            {o}
-                          </option>
-                        ))}
-                      </Select>
+                        onChange={(operator) => s.updateRule(r.id, { operator })}
+                        className="w-28"
+                      />
                       <Input
                         value={r.value}
                         onChange={(e) => s.updateRule(r.id, { value: e.target.value })}

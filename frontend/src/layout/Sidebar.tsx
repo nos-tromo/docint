@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { HoverIconAction, NewButton, TrashIcon } from '@infra/ui'
+import { HoverIconAction, NewButton, SelectMenu, TrashIcon } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
@@ -9,7 +9,12 @@ import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useIngestJobsStore, selectHasRunningJob } from '@/stores/ingestJobs'
 import { cn } from '@/lib/cn'
-import { buildCollectionEntries, entryMatches, type CollectionEntry } from '@/lib/collectionEntries'
+import {
+  buildCollectionEntries,
+  entryKey,
+  entryMatches,
+  type CollectionEntry
+} from '@/lib/collectionEntries'
 import { useT } from '@/i18n/LanguageContext'
 
 const NAV = [
@@ -49,7 +54,7 @@ export function Sidebar() {
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
   const sessions = sessionsData?.sessions ?? []
   const entries = collections ? buildCollectionEntries(collections) : []
-  const selectedIndex = entries.findIndex((e) => entryMatches(e, selected, selectedOwner))
+  const selectedEntry = entries.find((e) => entryMatches(e, selected, selectedOwner)) ?? null
 
   // A persisted collection can point at one this user no longer has access to
   // (deleted, or a foreign one no longer shared, since last visit). Once the
@@ -184,33 +189,26 @@ export function Sidebar() {
               {selectedOwner}
             </span>
           )}
-          <select
-            aria-label={t('common.select_collection_aria')}
-            className="min-w-0 flex-1 cursor-pointer bg-transparent text-sm font-medium text-foreground outline-hidden"
-            value={selectedIndex >= 0 ? String(selectedIndex) : ''}
-            onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
-          >
-            <option value="" disabled>
-              {entries.length ? t('common.choose_collection') : t('common.no_collections')}
-            </option>
-            {collections?.mine.map((c) => (
-              <option key={`own:${c}`} value={String(entries.findIndex((e) => entryMatches(e, c, null)))}>
-                {c}
-              </option>
-            ))}
-            {collections?.others.map((g) => (
-              <optgroup key={g.owner} label={g.owner}>
-                {g.collections.map((c) => (
-                  <option
-                    key={`${g.owner}:${c}`}
-                    value={String(entries.findIndex((e) => entryMatches(e, c, g.owner)))}
-                  >
-                    {c}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+          {/* Keyed by owner-and-name rather than by list position: the index
+              was recomputed per option against the same array it indexed, and
+              two owners may name a collection the same thing. */}
+          <SelectMenu
+            label={t('common.select_collection_aria')}
+            options={entries.map((entry) => ({
+              value: entryKey(entry),
+              label: entry.name,
+              ...(entry.owner ? { group: entry.owner } : {})
+            }))}
+            value={selectedEntry ? entryKey(selectedEntry) : null}
+            onChange={(key) => {
+              const entry = entries.find((e) => entryKey(e) === key)
+              if (entry) void onSelectCollection(entry)
+            }}
+            placeholder={t('common.choose_collection')}
+            emptyLabel={t('common.no_collections')}
+            className="min-w-0 flex-1"
+            triggerClassName="text-sm font-medium"
+          />
           {/* Trash, not ×: deleting a collection destroys every ingested
               document in it. The icon is what says how far the action goes.
               Hover-revealed, because destroying a collection is the rarest

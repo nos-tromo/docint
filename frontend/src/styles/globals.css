@@ -105,15 +105,6 @@ option {
   font-family: inherit;
 }
 
-/* Explicitly theme native <option> popup on Linux/GTK where the OS
-   theme overrides transparent/inherited colours, causing unreadable
-   light-text-on-light-background in the dropdown list. Uses the semantic
-   tokens (not literal colors) so it tracks the active theme. */
-option {
-  background-color: var(--color-background);
-  color: var(--color-foreground);
-}
-
 * {
   @apply border-border;
 }

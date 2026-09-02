@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { SelectMenu } from '@infra/ui'
 import type { NerEntityRow } from '@/api/types'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -64,39 +65,33 @@ export function EntitySelect({ entities, selectedKey, onSelectEntity, keyOf }: P
       : ''
 
   return (
+    // Captions are spans rather than labels: a picker's trigger is a button,
+    // and its text is the chosen entity rather than the name of the field.
     <div className="grid grid-cols-[12rem_1fr] gap-3 items-end">
-      <label className="flex flex-col gap-1 text-sm">
+      <div className="flex flex-col gap-1 text-sm">
         <span className="text-xs uppercase text-muted-foreground">{t('entities.category_label')}</span>
-        <select
-          aria-label={t('entities.category_label')}
+        <SelectMenu
+          variant="field"
+          label={t('entities.category_label')}
+          options={[
+            { value: '', label: t('entities.category_all') },
+            ...types.map((ty) => ({ value: ty, label: ty }))
+          ]}
           value={category}
-          onChange={(e) => handleCategoryChange(e.target.value)}
-          className="bg-muted border border-border rounded-md px-2 py-1"
-        >
-          <option value="">{t('entities.category_all')}</option>
-          {types.map((ty) => (
-            <option key={ty} value={ty}>
-              {ty}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="flex flex-col gap-1 text-sm">
+          onChange={handleCategoryChange}
+        />
+      </div>
+      <div className="flex flex-col gap-1 text-sm">
         <span className="text-xs uppercase text-muted-foreground">{t('entities.entity_label')}</span>
-        <select
-          aria-label={t('entities.entity_label')}
-          value={valueInFiltered}
-          onChange={(e) => onSelectEntity(e.target.value || null)}
-          className="bg-muted border border-border rounded-md px-2 py-1"
-        >
-          {filtered.length === 0 && <option value="">{t('entities.no_entities_option')}</option>}
-          {filtered.map((e) => (
-            <option key={keyOf(e)} value={keyOf(e)}>
-              {entityOptionLabel(e)}
-            </option>
-          ))}
-        </select>
-      </label>
+        <SelectMenu
+          variant="field"
+          label={t('entities.entity_label')}
+          options={filtered.map((e) => ({ value: keyOf(e), label: entityOptionLabel(e) }))}
+          value={valueInFiltered || null}
+          onChange={(key) => onSelectEntity(key || null)}
+          emptyLabel={t('entities.no_entities_option')}
+        />
+      </div>
     </div>
   )
 }
