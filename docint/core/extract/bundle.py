@@ -33,7 +33,7 @@ from docint.core.extract.render import (
 from docint.core.extract.units import DocumentUnit, Figure, ImageUnit, MediaUnit, PostingUnit, Unit
 from docint.utils.env_cfg import ExtractConfig
 
-__all__ = ["BundleResult", "build_bundle", "build_single"]
+__all__ = ["BundleResult", "build_bundle", "build_single", "safe_name"]
 
 #: Folder each unit kind lives under, inside the bundle root.
 _KIND_DIR = {"document": "documents", "media": "media", "posting": "postings", "image": "images"}
@@ -47,6 +47,11 @@ _MEDIA_TYPES = {
 _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 _SLUG_MAX = 48
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+#: Longest file name a bundle member may carry, before its hash suffix.
+_NAME_MAX = 80
+#: What a file name may never contain: path separators, control characters and
+#: the set Windows rejects, since a bundle is unzipped wherever the analyst is.
+_NAME_STRIP = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]+')
 
 
 @dataclass
@@ -79,9 +84,31 @@ def slug(text: str, *, fallback: str = "item") -> str:
     return cleaned[:_SLUG_MAX].strip("-") or fallback
 
 
+def safe_name(text: str, *, fallback: str = "item") -> str:
+    """Reduce an original file name to one safe path segment, verbatim where it can be.
+
+    An analyst looks for the name a file had in the export, so case, spaces and
+    non-ASCII survive — unlike :func:`slug`, which is right for a handle or a
+    network but turns ``Bericht März.pdf`` into something nobody exported.
+    Only what a path or a filesystem cannot take is removed.
+
+    Args:
+        text (str): Untrusted source text, possibly a whole path.
+        fallback (str): Used when nothing survives the reduction.
+
+    Returns:
+        str: A single, length-capped path segment.
+    """
+    base = text.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = _NAME_STRIP.sub("_", base).replace("..", "_").strip().strip(".").strip()
+    return cleaned[:_NAME_MAX].strip() or fallback
+
+
 def _stem(name: str, fallback: str) -> str:
-    """Slug a filename without its extension."""
-    return slug(name.rsplit(".", 1)[0] if "." in name else name, fallback=fallback)
+    """A safe file name without its extension."""
+    base = safe_name(name, fallback=fallback)
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    return stem.strip() or fallback
 
 
 def _unit_dir(unit: Unit) -> str:
@@ -97,34 +124,78 @@ def _unit_dir(unit: Unit) -> str:
         author = slug(str(ref.get("author") or ref.get("author_id") or ""), fallback="account")
         stamp = _SLUG_STRIP.sub("", str(ref.get("timestamp") or ""))[:8] or "undated"
         return f"postings/{network}/{author}/{stamp}-{short}"
-    return f"{_KIND_DIR[unit.kind]}/{_stem(unit.title, unit.kind)}-{short}"
+    return f"{_KIND_DIR[unit.kind]}/{safe_name(unit.title, fallback=unit.kind)}-{short}"
 
 
-def _figure_name(figure: Figure, position: int) -> str:
-    """Return the file name a figure is written under, inside its folder."""
+def _figure_name(figure: Figure, position: int, source: str) -> str:
+    """Return the file name a figure is written under, inside its folder.
+
+    Named after the file it came out of, because that is the name an analyst
+    has: the clip a frame was sampled from, the document a figure was cut out
+    of, the picture as the export shipped it. A content hash identified the
+    bytes and nothing else. The extension is the thumbnail's own, so a frame
+    from ``clip.mp4`` and a picture stored as JPEG both say what they are.
+
+    Args:
+        figure (Figure): The figure to name.
+        position (int): Its index in the unit, the last resort for a frame that
+            never recorded its sampling position.
+        source (str): Name of the file the figure came from.
+
+    Returns:
+        str: A path relative to the unit's folder.
+    """
     extension = "png" if "png" in (figure.thumbnail_mime or "") else "jpg"
     if figure.kind == "keyframe":
         stamp = format_short(figure.time_sec).replace(":", "-")
         index = figure.index if figure.index is not None else position
         suffix = f"_{stamp}" if stamp else ""
-        return f"keyframes/frame_{index:03d}{suffix}.{extension}"
-    return f"figures/{slug(figure.image_id, fallback='figure')}.{extension}"
+        return f"keyframes/{_stem(source, 'clip')}_frame_{index:03d}{suffix}.{extension}"
+    if figure.kind == "figure":
+        # A figure was cut out of a page and never had a name of its own, so it
+        # is named for the document and the page it sat on.
+        page = f"_page{figure.page_number}" if figure.page_number is not None else ""
+        return f"figures/{_stem(source, 'document')}{page}_{figure.image_id[:8]}.{extension}"
+    return f"media/{_stem(source or figure.file_name, 'image')}.{extension}"
+
+
+def _unique(pairs: list[tuple[Figure, str]]) -> list[tuple[Figure, str]]:
+    """Disambiguate figures whose source names collide inside one folder.
+
+    Two pictures on one posting can legitimately arrive under the same name,
+    and a bundle that wrote one over the other would silently lose evidence.
+    """
+    seen: set[str] = set()
+    out: list[tuple[Figure, str]] = []
+    for figure, path in pairs:
+        candidate = path
+        head, _, extension = path.rpartition(".")
+        for suffix in (figure.image_id[:8], *(f"{figure.image_id[:8]}-{n}" for n in range(2, 100))):
+            if candidate not in seen:
+                break
+            candidate = f"{head}-{suffix}.{extension}" if head else f"{path}-{suffix}"
+        seen.add(candidate)
+        out.append((figure, candidate))
+    return out
 
 
 def _figure_files(unit: Unit) -> list[tuple[Figure, str]]:
     """Pair every figure of a unit with its path inside the unit's folder."""
     pairs: list[tuple[Figure, str]] = []
     if isinstance(unit, MediaUnit):
-        pairs += [(figure, _figure_name(figure, i)) for i, figure in enumerate(unit.keyframes)]
+        pairs += [(figure, _figure_name(figure, i, unit.title)) for i, figure in enumerate(unit.keyframes)]
     elif isinstance(unit, PostingUnit):
-        pairs += [(figure, f"media/{slug(figure.image_id, fallback='image')}.jpg") for figure in unit.images]
+        pairs += [(figure, _figure_name(figure, i, figure.file_name)) for i, figure in enumerate(unit.images)]
         for clip in unit.media:
-            pairs += [(figure, _figure_name(figure, i)) for i, figure in enumerate(clip.keyframes)]
+            pairs += [(figure, _figure_name(figure, i, clip.title)) for i, figure in enumerate(clip.keyframes)]
     elif isinstance(unit, DocumentUnit):
-        pairs += [(figure, _figure_name(figure, i)) for i, figure in enumerate(unit.figures)]
+        pairs += [
+            (figure, _figure_name(figure, i, unit.file_name or figure.file_name))
+            for i, figure in enumerate(unit.figures)
+        ]
     elif isinstance(unit, ImageUnit) and unit.figure is not None:
-        pairs.append((unit.figure, _figure_name(unit.figure, 0)))
-    return pairs
+        pairs.append((unit.figure, _figure_name(unit.figure, 0, unit.file_name or unit.figure.file_name)))
+    return _unique(pairs)
 
 
 def _decode(figure: Figure) -> bytes | None:
@@ -145,15 +216,14 @@ def _transcripts(unit: Unit) -> list[tuple[str, str]]:
     """Return ``(relative path, text)`` for every transcript a unit holds."""
     if isinstance(unit, MediaUnit):
         text = transcript_txt(unit.segments)
-        return [("transcript.txt", text)] if text else []
+        return [(f"{_stem(unit.title, 'clip')}.transcript.txt", text)] if text else []
     if isinstance(unit, PostingUnit):
         files: list[tuple[str, str]] = []
         for clip in unit.media:
             text = transcript_txt(clip.segments)
             if not text:
                 continue
-            name = "transcript.txt" if len(unit.media) == 1 else f"transcript-{_stem(clip.title, 'clip')}.txt"
-            files.append((name, text))
+            files.append((f"{_stem(clip.title, 'clip')}.transcript.txt", text))
         return files
     return []
 

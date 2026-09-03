@@ -32,18 +32,35 @@ mydocs-extract-20260102-0304/
   README.md                  index of every source, with its folder
   extract.md                 all sources in one document
   extract.pdf                the same, paginated (see the caps below)
-  documents/report-a1b2c3d4/
+  documents/report.pdf-a1b2c3d4/
     extract.md               the document's text, then its figures
-    figures/<image id>.jpg   each figure as its stored thumbnail
-  media/clip-f1e2d3c4/
+    figures/report_page1_<id>.jpg   each figure as its stored thumbnail
+  media/clip.mp4-f1e2d3c4/
     extract.md               transcript and keyframes together
-    transcript.txt           Nextext's own banner-fenced layout
-    keyframes/frame_000_01-12.jpg
+    clip.transcript.txt      Nextext's own banner-fenced layout
+    keyframes/clip_frame_000_01-12.jpg
   postings/examplenet/example-account/20260102-1111aaaa/
     extract.md               the post, its pictures, its clips
-    transcript.txt           one per clip on the post
-    media/<image id>.jpg
+    post-clip.transcript.txt one per clip on the post
+    media/Bild März.jpg
 ```
+
+Every file is named after the file it came out of, as the export shipped it —
+case, spaces and non-ASCII included. A content hash identified the bytes and
+nothing else, which is no help to an analyst who knows the attachment by name.
+Only what a path or a filesystem cannot take is removed (separators, control
+characters, the set Windows rejects), a folder keeps its short hash suffix
+because two sources may legitimately share a name, and two pictures colliding
+inside one posting are disambiguated rather than one overwriting the other.
+Three things have no name of their own and are named for their source: a
+document figure (`<document>_page<N>_<id>`), a video keyframe
+(`<clip>_frame_<index>_<mm-ss>`), and the thumbnail's extension, which is the
+stored format rather than the original's — the bytes in the bundle are JPEG.
+
+Postings are listed **newest first**. Documents, clips and loose pictures carry
+no date of their own — an ingest date would order the export rather than the
+evidence — so they keep their name order, and an undated posting sorts after
+the dated ones rather than being buried among them.
 
 Figures are the **stored 768px thumbnails**, never a re-fetch of the
 original: an extract must be renderable from the index alone, with no source
@@ -150,6 +167,14 @@ deletes its extracts, like its `_images` and `_entities` companions.
   only what ingestion already stored. A clip ingested before keyframe
   timestamps existed extracts without them; see
   [migrations.md](migrations.md).
+- **It does not rename what was never named.** A social keyframe ingested
+  before the clip's name was stamped on it has no file name to show, and a
+  re-ingest cannot add one to its transcript segments (the pipeline skips a
+  file hash it already holds), so such a collection has to be ingested afresh
+  to gain them. Segments naming the transient `<clip>.nextext.jsonl` the
+  transcript was parsed from are the one case that *is* recovered on read: the
+  suffix is stripped, because that file is deleted during the ingest and
+  naming it sends a reader after something that never existed.
 - **It does not read an account out of thin air.** A chat-style export (the
   `messages` schema) carries no account-id or handle column, so the handle is
   recovered from the permalink's own path — and only for hosts where that path

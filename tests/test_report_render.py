@@ -916,3 +916,50 @@ def test_sources_without_citation_index_are_not_renumbered(monkeypatch: pytest.M
     html = R.render_html(_report_with_thumbnails())
     assert "<li>a.pdf (Page 2)</li>" in html
     assert "<figcaption>a.pdf</figcaption>" in html
+
+
+def test_a_keyframe_finding_names_the_clip_it_came_from(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frame is evidence about a video, and the row has to say which video.
+
+    The linker stamps the clip on every artifact cut from it, so a keyframe
+    reaches the report the way a transcript segment already did.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+    report["items"][2]["snapshot"] = {
+        "chunk_id": "k1",
+        "category": "slur",
+        "confidence": "high",
+        "reason": "shown on screen",
+        "chunk_text": "a frame caption",
+        "filename": "clip.mp4",
+        "reference_metadata": {
+            "type": "keyframe",
+            "source_file": "clip.mp4",
+            "posting_network": "Facebook",
+            "posting_author": "Jane Poster",
+            "posting_timestamp": "2026-03-04 09:00:00+00",
+        },
+    }
+
+    for blob in (R.render_markdown(report), R.render_html(report)):
+        assert "clip.mp4" in blob
+
+
+def test_a_document_figure_finding_names_its_document_and_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A figure has no name of its own; the document and page are its address."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+    report["items"][2]["snapshot"] = {
+        "chunk_id": "f1",
+        "category": "slur",
+        "confidence": "low",
+        "reason": "text in figure",
+        "chunk_text": "a chart caption",
+        "filename": "quarterly report.pdf",
+        "page": 3,
+        "reference_metadata": cast(dict[str, Any], {}),
+    }
+
+    for blob in (R.render_markdown(report), R.render_html(report)):
+        assert f"quarterly report.pdf · {ui_string('report_label_page')} 3" in blob
