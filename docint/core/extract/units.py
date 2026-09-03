@@ -22,9 +22,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
-from docint.core.summary.units import _reference_metadata, is_social_payload, payload_text
+from docint.core.summary.units import _reference_metadata, is_social_payload, payload_text, source_file_name
 
 __all__ = [
     "Chunk",
@@ -37,6 +38,7 @@ __all__ = [
     "Unit",
     "handle_from_url",
     "partition",
+    "posted_at",
     "resolve_target",
 ]
 
@@ -281,7 +283,7 @@ def _figure(payload: dict[str, Any], kind: str) -> Figure:
     return Figure(
         image_id=_text(payload.get("image_id")),
         kind=kind,
-        file_name=_first(payload, "file_name", "filename", "source_file") or _basename(payload.get("source_path")),
+        file_name=_figure_file_name(payload),
         page_number=_as_int(payload.get("page_number")),
         time_sec=_as_float(payload.get("keyframe_time_sec")),
         index=_as_int(payload.get("keyframe_index")),
@@ -297,6 +299,20 @@ def _basename(value: Any) -> str:
     """Return the file name part of a path-ish payload value."""
     text = _text(value)
     return text.rsplit("/", 1)[-1] if text else ""
+
+
+def _figure_file_name(payload: dict[str, Any]) -> str:
+    """Name the file a stored image came from.
+
+    A document figure is the one image that does not name itself: it was cut
+    out of a page and written as ``image-<page>-<hex>.png``, so its
+    ``file_name`` is the artifact's, and the document an analyst asked about is
+    in ``source_path``. Every other image — a picture, a keyframe — names its
+    own source, which :func:`source_file_name` reads.
+    """
+    if _text(payload.get("source_type")) == "document":
+        return _basename(payload.get("source_path")) or source_file_name(payload)
+    return source_file_name(payload)
 
 
 def handle_from_url(url: str) -> str:
@@ -445,7 +461,7 @@ def _ingest_main_point(point_id: str, payload: dict[str, Any], acc: _Accumulator
             return
         clip = acc.clip(uuid, media_key)
         if not clip.file_name:
-            clip.file_name = _first(payload, "source_file", "file_name", "filename")
+            clip.file_name = source_file_name(payload)
         acc.segment_rows.setdefault((uuid, media_key), []).append(_segment(payload))
         return
 
@@ -549,8 +565,52 @@ def _finalize(acc: _Accumulator) -> list[Unit]:
         document.figures.sort(key=lambda figure: (figure.page_number or 0, figure.image_id))
 
     units: list[Unit] = [*acc.documents.values(), *acc.media.values(), *acc.postings.values(), *acc.images.values()]
-    units.sort(key=lambda unit: (_KIND_RANK[unit.kind], unit.title.lower(), unit.key))
+    units.sort(key=_unit_order)
     return units
+
+
+def posted_at(unit: Unit) -> datetime | None:
+    """Return when a posting was posted, or ``None`` when nothing dates it.
+
+    The only timestamp docint stores per unit: a document, a clip and a loose
+    picture carry no date of their own, and an ingest date would order the
+    export rather than the evidence. A naive stamp is read as UTC — an export's
+    stamps are all in one zone, so this only has to keep them comparable.
+
+    Args:
+        unit (Unit): The unit to date.
+
+    Returns:
+        datetime | None: The posting time, timezone-aware, or ``None``.
+    """
+    if not isinstance(unit, PostingUnit):
+        return None
+    raw = _text(unit.reference.get("timestamp")).replace("Z", "+00:00")
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+
+
+def _unit_order(unit: Unit) -> tuple[int, int, float, str, str]:
+    """Order units: kind, then newest first where a date exists, then name.
+
+    An investigator reads social evidence newest-first, and an account's posts
+    are otherwise a run of near-identical headings in whatever order the export
+    happened to be written. Undated units keep their name order and sort after
+    the dated ones, so a partial export never buries a post with no stamp.
+    """
+    stamp = posted_at(unit)
+    return (
+        _KIND_RANK[unit.kind],
+        0 if stamp is not None else 1,
+        -stamp.timestamp() if stamp is not None else 0.0,
+        unit.title.lower(),
+        unit.key,
+    )
 
 
 def partition(

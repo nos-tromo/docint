@@ -288,7 +288,7 @@ def test_html_names_the_collection_and_date() -> None:
 def test_html_carries_the_reports_own_footer_disclaimer() -> None:
     """The appendix and the report it belongs to caveat themselves alike."""
     document = extract_html([], collection="c", created_at="2026-01-02T03:04:05+00:00")
-    assert "AI-generated report." in document
+    assert "AI-generated report" in document
     assert "machine-generated" not in document
 
 

@@ -21,6 +21,7 @@ from loguru import logger
 
 from docint.core.ingest.images_service import IngestContext
 from docint.core.readers.json import CustomJSONReader
+from docint.core.summary.units import TRANSIENT_TRANSCRIPT_SUFFIX
 from docint.utils.hashing import compute_file_hash
 from docint.utils.nextext_client import NextextResult
 
@@ -171,7 +172,7 @@ class MediaTranscriber:
             transcript (bytes): The transcript NDJSON bytes.
             result (MediaTranscribeResult): Accumulator for consumed paths + Documents.
         """
-        transient = clip.path.parent / (clip.path.name + ".nextext.jsonl")
+        transient = clip.path.parent / (clip.path.name + TRANSIENT_TRANSCRIPT_SUFFIX)
         transient.write_bytes(transcript)
         result.consumed_paths.add(transient)
         try:

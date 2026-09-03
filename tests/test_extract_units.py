@@ -16,6 +16,7 @@ from docint.core.extract.units import (
     PostingUnit,
     handle_from_url,
     partition,
+    posted_at,
     resolve_target,
 )
 
@@ -342,3 +343,85 @@ def test_an_exports_own_handle_is_never_overwritten_by_the_url() -> None:
     (unit,) = partition([("p1", payload)], [])
     assert isinstance(unit, PostingUnit)
     assert unit.reference["vanity"] == "declared"
+
+
+# --------------------------------------------------------------------------- #
+# Ordering
+# --------------------------------------------------------------------------- #
+def _dated(uuid: str, timestamp: str) -> tuple[str, dict[str, Any]]:
+    """Build a posting-row payload stamped at ``timestamp``."""
+    point, payload = _posting_row(uuid, uuid, "words")
+    payload["reference_metadata"]["timestamp"] = timestamp
+    return point, payload
+
+
+def test_postings_read_newest_first() -> None:
+    """An investigator reads social evidence newest-first, not alphabetically."""
+    points = [_dated("old", "2026-01-02T03:04:05"), _dated("new", "2026-03-04T21:30:56"), _dated("mid", "2026-02-01")]
+    assert [u.key for u in partition(points, [])] == ["new", "mid", "old"]
+
+
+def test_postings_order_across_the_two_stamp_formats() -> None:
+    """A CSV writes ``2026-03-04 21:30:56+00``; a spreadsheet writes the T form."""
+    points = [_dated("csv", "2026-03-04 21:30:56+00"), _dated("sheet", "2026-04-24T08:30:00")]
+    assert [u.key for u in partition(points, [])] == ["sheet", "csv"]
+
+
+def test_an_undated_posting_sorts_after_every_dated_one() -> None:
+    """A partial export must not bury a post whose stamp never arrived."""
+    points = [_dated("aaa-undated", ""), _dated("zzz-dated", "2020-01-01T00:00:00")]
+    assert [u.key for u in partition(points, [])] == ["zzz-dated", "aaa-undated"]
+
+
+def test_an_unparseable_stamp_does_not_reorder_anything() -> None:
+    """A stamp docint cannot read is no stamp; it never guesses a date."""
+    assert posted_at(PostingUnit(key="u1", reference={"timestamp": "last tuesday"})) is None
+
+
+def test_documents_keep_their_name_order() -> None:
+    """Only postings carry a date; everything else stays where a reader expects."""
+    points = [_chunk("a", "h2", "b", page=1), _chunk("b", "h1", "a", page=1)]
+    units = partition(points, [])
+    assert [u.kind for u in units] == ["document", "document"]
+
+
+# --------------------------------------------------------------------------- #
+# Naming
+# --------------------------------------------------------------------------- #
+def test_a_clip_is_named_by_the_media_file_its_segments_came_from() -> None:
+    """The clip's own name, stamped by the linker, is what titles the unit."""
+    points = [_segment("s1", 0, "spoken", posting_uuid="u1", media_id="m1", source_file="clip.mp4")]
+    posting = partition(points, [])[0]
+    assert isinstance(posting, PostingUnit)
+    assert posting.media[0].file_name == "clip.mp4"
+
+
+def test_a_legacy_segment_recovers_the_clip_from_the_transient_transcript_name() -> None:
+    """Collections ingested before the clip was stamped named the parsed JSONL.
+
+    Those segments cannot be re-stamped by a re-ingest — the pipeline skips a
+    file hash it already holds — so the read side strips the suffix instead of
+    showing a file that never survived the ingest.
+    """
+    point, payload = _segment("s1", 0, "spoken", media_id="m1")
+    del payload["source_file"]
+    payload["file_name"] = "clip.mp4.nextext.jsonl"
+    units = partition([(point, payload)], [])
+    assert units[0].file_name == "clip.mp4"
+
+
+def test_a_document_figure_is_named_by_the_document_not_the_extracted_artifact() -> None:
+    """A figure's own file name is ``image-<page>-<hex>.png``; nobody exported that."""
+    points = [
+        _image_point(
+            "i1",
+            "fig-1",
+            source_type="document",
+            source_doc_id="h1",
+            file_name="image-3-a1b2c3d4.png",
+            source_path="/staged/batch/report.pdf",
+            page_number=3,
+        )
+    ]
+    units = partition([], points)
+    assert units[0].figures[0].file_name == "report.pdf"

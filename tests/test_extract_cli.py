@@ -64,7 +64,7 @@ def test_writes_a_bundle_named_for_the_collection(tmp_path: Path) -> None:
     assert path.parent == tmp_path
     assert path.name.startswith("mydocs-extract-")
     with zipfile.ZipFile(path) as archive:
-        assert any(name.endswith("documents/report-a1b2c3d4/extract.md") for name in archive.namelist())
+        assert any(name.endswith("documents/report.pdf-a1b2c3d4/extract.md") for name in archive.namelist())
 
 
 def test_no_pdf_skips_the_engine_entirely(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +97,7 @@ def test_a_target_renders_only_that_source(tmp_path: Path) -> None:
     """``--target`` narrows the bundle to one source."""
     path = cli.build_extract("mydocs", target="a1b2c3d4", out_dir=tmp_path, with_pdf=False)
     with zipfile.ZipFile(path) as archive:
-        assert any("documents/report-a1b2c3d4" in name for name in archive.namelist())
+        assert any("documents/report.pdf-a1b2c3d4" in name for name in archive.namelist())
 
 
 def test_an_unknown_target_exits_rather_than_writing_an_empty_bundle(tmp_path: Path) -> None:

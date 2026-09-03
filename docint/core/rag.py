@@ -186,7 +186,7 @@ from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
-from docint.core.summary.units import MapUnit, partition_units, payload_text
+from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_name
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.duration import format_elapsed
@@ -4630,13 +4630,20 @@ class RAG:
         # ``source_path`` is the image companion's own filename key; the
         # `_images` payload carries neither ``file_name`` nor ``file_path``.
         source_path = payload.get("source_path")
-        filename = (
-            origin.get("filename")
-            or payload.get("file_name")
-            or payload.get("filename")
-            or payload.get("file_path")
-            or (Path(source_path).name if isinstance(source_path, str) and source_path else None)
-        )
+        # A document figure is the one artifact that does not name itself: its
+        # ``file_name`` is the extracted ``image-<page>-<hex>.png``, while the
+        # document it was cut out of is in ``source_path``. Everything else is
+        # named by the shared rule, which is also what recovers a clip's name
+        # from a transcript segment ingested before the clip was stamped.
+        if str(payload.get("source_type") or "") == "document" and isinstance(source_path, str) and source_path:
+            filename = Path(source_path).name
+        else:
+            filename = (
+                source_file_name(payload)
+                or origin.get("filename")
+                or payload.get("file_path")
+                or (Path(source_path).name if isinstance(source_path, str) and source_path else None)
+            )
         filetype = (
             origin.get("filetype")
             or origin.get("mimetype")

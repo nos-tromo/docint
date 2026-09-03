@@ -761,3 +761,46 @@ def test_text_link_can_be_switched_off(tmp_path: Path) -> None:
     ).run(tmp_path)
 
     assert img.images == []
+
+
+def test_derived_artifacts_name_the_media_file_they_came_from(tmp_path: Path) -> None:
+    """A keyframe and a transcript segment must name the clip, not the transient JSONL.
+
+    Without this the only identity a social video artifact carries is a posting
+    UUID and a manifest media id, so neither an extract nor a report can say
+    which attachment an analyst is looking at. The standalone path has always
+    stamped these; the social path did not.
+    """
+    _write_export(tmp_path)
+    img = _FakeImageService()
+
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    keyframe_extra = img.keyframe_calls[0]["extra_metadata"]
+    assert keyframe_extra["source_file"] == "clip.mp4"
+    assert keyframe_extra["source_path"].endswith("clip.mp4")
+    assert keyframe_extra["reference_metadata"]["source_file"] == "clip.mp4"
+    assert keyframe_extra["media_file_hash"] == keyframe_extra["reference_metadata"]["media_file_hash"]
+
+    segment = result.transcript_documents[0].metadata
+    assert segment["source_file"] == "clip.mp4"
+    assert segment["file_name"] == "clip.mp4"
+    assert segment["reference_metadata"]["source_file"] == "clip.mp4"
+
+
+def test_a_transcript_segment_keeps_the_transcript_hash(tmp_path: Path) -> None:
+    """``file_hash`` must stay the parsed transcript's, not the clip's.
+
+    The pipeline skips documents whose ``file_hash`` is already in the
+    collection. Stamping the media hash here would make every segment of an
+    already-ingested clip look new, and a re-ingest would duplicate the whole
+    transcript. The clip's own hash rides along as ``media_file_hash``.
+    """
+    _write_export(tmp_path)
+    img = _FakeImageService()
+
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    segment = result.transcript_documents[0].metadata
+    assert segment["media_file_hash"]
+    assert segment["file_hash"] != segment["media_file_hash"]

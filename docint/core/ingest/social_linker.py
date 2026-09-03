@@ -632,6 +632,7 @@ from llama_index.core import Document  # noqa: E402
 from docint.core.ingest.images_service import ImageAsset, IngestContext  # noqa: E402
 from docint.core.ingest.media_transcribe import MediaClip, MediaTranscriber  # noqa: E402
 from docint.core.readers.tables import TableReader, is_media_manifest  # noqa: E402
+from docint.utils.hashing import compute_file_hash  # noqa: E402
 
 
 def _profile_headers(style: str) -> set[str]:
@@ -882,19 +883,46 @@ class SocialLinker:
                     context=context,
                 )
             else:
+                # The clip's own name and hash, stamped on every artifact cut
+                # from it: without them a keyframe names no file at all and a
+                # segment names the transient JSONL it was parsed from, so an
+                # extract and a report cannot say which attachment an artifact
+                # came out of. `file_hash` is deliberately NOT set here -- it
+                # is the transcript's own hash, and the pipeline dedupes
+                # already-ingested files by it.
+                media_hash = compute_file_hash(link.path)
+                media_ref = {
+                    "source_file": link.path.name,
+                    "media_file_hash": media_hash,
+                }
                 clips.append(
                     MediaClip(
                         path=link.path,
                         source_doc_id=link.posting_uuid,
+                        media_hash=media_hash,
                         keyframe_extra_metadata={
                             **link_ids,
                             "source_type": "social_media",
+                            **media_ref,
+                            "source_path": str(link.path),
                             **posting_ref,
-                            "reference_metadata": {"type": "keyframe", **link_ids, **posting_ref},
+                            "reference_metadata": {
+                                "type": "keyframe",
+                                **link_ids,
+                                **media_ref,
+                                **posting_ref,
+                            },
                         },
                         # Flat keys only: the transcript reader owns the segment's
                         # reference_metadata and merges these in additively.
-                        transcript_extra_info={**link_ids, **posting_ref},
+                        transcript_extra_info={
+                            **link_ids,
+                            **media_ref,
+                            "file_name": link.path.name,
+                            "filename": link.path.name,
+                            "file_path": str(link.path),
+                            **posting_ref,
+                        },
                     )
                 )
         sub = MediaTranscriber(

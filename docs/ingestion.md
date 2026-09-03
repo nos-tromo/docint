@@ -366,7 +366,7 @@ The following fields from a Nextext segment are extracted into
 | `speaker` | Speaker name or identifier (if present in segment) |
 | `language` | Transcript-text language code (the target for `translate`, the source for `transcribe`) |
 | `detected_language` | Auto-detected source-audio language code (equals `language` for `transcribe`; the original source for `translate`) |
-| `source_file` | Name of the original transcript file |
+| `source_file` | Name of the media file the segment was transcribed from (social and standalone alike; `media_file_hash` carries that file's own hash, while `file_hash` stays the parsed transcript's) |
 | `type` | Always `"transcript_segment"` |
 | `network` | Always `"nextext"` |
 

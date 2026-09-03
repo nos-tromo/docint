@@ -105,6 +105,37 @@ def diversity_bucket(payload: dict[str, Any]) -> str:
     return f"{author.lower()}::{time_bucket}"
 
 
+#: Suffix of the transient NDJSON ``media_transcribe`` writes beside a clip so
+#: ``CustomJSONReader``, which reads from a path, can parse Nextext's answer.
+#: The file is unlinked immediately, but a segment ingested before the clip's
+#: own name was stamped carries this as its file name — which is why the read
+#: side strips it rather than showing a path that never survived the ingest.
+TRANSIENT_TRANSCRIPT_SUFFIX = ".nextext.jsonl"
+
+
+def source_file_name(payload: dict[str, Any]) -> str:
+    """Return the name of the file a payload's content came from.
+
+    One rule for every artifact, because every caller wants the same thing: the
+    name the file had in the export. ``source_file`` is the media file a
+    transcript segment or keyframe was cut from and therefore wins; a document
+    chunk or a picture names itself under ``file_name``/``filename``; an
+    ``_images`` point may name only a path.
+
+    Args:
+        payload (dict[str, Any]): Raw Qdrant payload.
+
+    Returns:
+        str: The original file name, or ``""`` when the payload names none.
+    """
+    for key in ("source_file", "file_name", "filename"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value.removesuffix(TRANSIENT_TRANSCRIPT_SUFFIX)
+    path = str(payload.get("source_path") or "").strip()
+    return path.rsplit("/", 1)[-1].removesuffix(TRANSIENT_TRANSCRIPT_SUFFIX) if path else ""
+
+
 def payload_text(payload: dict[str, Any]) -> str:
     """Best-effort node text from a raw Qdrant payload.
 

@@ -66,7 +66,11 @@ def _posting() -> PostingUnit:
             "timestamp": "2026-01-02T03:04:05",
         },
         text="the posted words",
-        images=[Figure(image_id="img-2", kind="image", description="a picture", thumbnail_b64=_JPEG)],
+        images=[
+            Figure(
+                image_id="img-2", kind="image", file_name="Bild März.png", description="a picture", thumbnail_b64=_JPEG
+            )
+        ],
         media=[
             MediaUnit(
                 key="media-1",
@@ -104,35 +108,35 @@ def test_bundle_lays_out_one_folder_per_unit() -> None:
     root = "testcol-extract-20260102-0304"
     assert f"{root}/README.md" in names
     assert f"{root}/extract.md" in names
-    assert f"{root}/documents/report-a1b2c3d4/extract.md" in names
-    assert f"{root}/documents/report-a1b2c3d4/figures/img-1.jpg" in names
-    assert f"{root}/media/clip-f1e2d3c4/extract.md" in names
-    assert f"{root}/media/clip-f1e2d3c4/transcript.txt" in names
-    assert f"{root}/media/clip-f1e2d3c4/keyframes/frame_000_01-12.jpg" in names
+    assert f"{root}/documents/report.pdf-a1b2c3d4/extract.md" in names
+    assert f"{root}/documents/report.pdf-a1b2c3d4/figures/report_page1_img-1.jpg" in names
+    assert f"{root}/media/clip.mp4-f1e2d3c4/extract.md" in names
+    assert f"{root}/media/clip.mp4-f1e2d3c4/clip.transcript.txt" in names
+    assert f"{root}/media/clip.mp4-f1e2d3c4/keyframes/clip_frame_000_01-12.jpg" in names
     assert f"{root}/postings/examplenet/example-account/20260102-11112222/extract.md" in names
-    assert f"{root}/postings/examplenet/example-account/20260102-11112222/transcript.txt" in names
+    assert f"{root}/postings/examplenet/example-account/20260102-11112222/post-clip.transcript.txt" in names
 
 
 def test_figures_are_the_stored_thumbnail_bytes() -> None:
     """The bundle never re-fetches an original; it ships what was stored."""
     result = build_bundle([_document()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
-    name = next(n for n in _names(result.zip_bytes) if n.endswith("img-1.jpg"))
+    name = next(n for n in _names(result.zip_bytes) if n.endswith("_img-1.jpg"))
     assert _read(result.zip_bytes, name) == b"\xff\xd8\xffjpeg"
 
 
 def test_unit_markdown_links_its_figures_relatively() -> None:
     """Inside a folder a figure is a neighbouring file, not inline base64."""
     result = build_bundle([_document()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
-    name = next(n for n in _names(result.zip_bytes) if n.endswith("documents/report-a1b2c3d4/extract.md"))
+    name = next(n for n in _names(result.zip_bytes) if n.endswith("documents/report.pdf-a1b2c3d4/extract.md"))
     body = _read(result.zip_bytes, name).decode("utf-8")
-    assert "(figures/img-1.jpg)" in body
+    assert "(figures/report_page1_img-1.jpg)" in body
     assert "base64" not in body
 
 
 def test_transcript_txt_uses_the_banner_layout() -> None:
     """The clip's transcript is the file a Nextext user already knows."""
     result = build_bundle([_media()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
-    name = next(n for n in _names(result.zip_bytes) if n.endswith("transcript.txt"))
+    name = next(n for n in _names(result.zip_bytes) if n.endswith(".transcript.txt"))
     assert _read(result.zip_bytes, name).decode("utf-8").startswith("=" * 40)
 
 
@@ -140,15 +144,15 @@ def test_a_silent_clip_writes_no_transcript_file() -> None:
     """An empty transcript.txt would read as a failed transcription."""
     unit = MediaUnit(key="m1", file_name="quiet.mp4", keyframes=[Figure("f", "keyframe", thumbnail_b64=_JPEG)])
     result = build_bundle([unit], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
-    assert not any(name.endswith("transcript.txt") for name in _names(result.zip_bytes))
+    assert not any(name.endswith(".transcript.txt") for name in _names(result.zip_bytes))
 
 
 def test_readme_indexes_every_unit() -> None:
     """The README is how a reader finds a source's folder."""
     result = build_bundle([_document(), _media()], collection="testcol", cfg=_cfg(), pdf=None, now=_NOW)
     readme = _read(result.zip_bytes, "testcol-extract-20260102-0304/README.md").decode("utf-8")
-    assert "documents/report-a1b2c3d4" in readme
-    assert "media/clip-f1e2d3c4" in readme
+    assert "documents/report.pdf-a1b2c3d4" in readme
+    assert "media/clip.mp4-f1e2d3c4" in readme
 
 
 # --------------------------------------------------------------------------- #
@@ -296,3 +300,58 @@ def test_a_single_source_download_numbers_from_the_top() -> None:
     """One source rendered alone is its own document, so it starts at A.1."""
     body, _media_type = build_single([_media()], "md", collection="c", now=_NOW)
     assert body.decode("utf-8").startswith("# A.1  clip.mp4")
+
+
+# --------------------------------------------------------------------------- #
+# File names
+# --------------------------------------------------------------------------- #
+def test_a_picture_keeps_the_name_the_export_shipped_it_under() -> None:
+    """An analyst looks for the file name, not a content hash.
+
+    Non-ASCII survives: a slug would turn ``Bild März.png`` into something
+    nobody exported and nobody can search for.
+    """
+    result = build_bundle([_posting()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
+    assert any(name.endswith("/media/Bild März.jpg") for name in _names(result.zip_bytes))
+
+
+def test_a_thumbnail_is_named_for_its_own_format_not_the_originals() -> None:
+    """The stored bytes are JPEG; a ``.png`` name would misdescribe them."""
+    result = build_bundle([_posting()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
+    assert not any(name.endswith(".png") for name in _names(result.zip_bytes))
+
+
+def test_two_pictures_sharing_one_name_are_both_written() -> None:
+    """A bundle that wrote one over the other would silently lose evidence."""
+    posting = _posting()
+    posting.images.append(Figure(image_id="img-3", kind="image", file_name="Bild März.png", thumbnail_b64=_JPEG))
+    result = build_bundle([posting], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
+    pictures = [name for name in _names(result.zip_bytes) if "/media/" in name]
+    assert len(pictures) == len(set(pictures)) == 2
+
+
+def test_a_keyframe_names_the_clip_it_was_sampled_from() -> None:
+    """Two clips on one posting both start at frame 000; only the clip separates them."""
+    result = build_bundle([_posting()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
+    assert any(name.endswith("/keyframes/post-clip_frame_000_00-01.jpg") for name in _names(result.zip_bytes))
+
+
+def test_a_document_figure_names_its_document_and_page() -> None:
+    """A figure was cut out of a page and never had a name of its own."""
+    result = build_bundle([_document()], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
+    assert any(name.endswith("/figures/report_page1_img-1.jpg") for name in _names(result.zip_bytes))
+
+
+def test_a_file_name_can_never_steer_a_write() -> None:
+    """A file name is untrusted input, like a handle."""
+    unit = DocumentUnit(
+        key="hash-1",
+        file_name="../../etc/passwd",
+        figures=[Figure(image_id="img-4", kind="figure", file_name="../evil.png", thumbnail_b64=_JPEG)],
+    )
+    result = build_bundle([unit], collection="c", cfg=_cfg(), pdf=None, now=_NOW)
+    root = "c-extract-20260102-0304/"
+    for name in _names(result.zip_bytes):
+        assert name.startswith(root)
+        assert ".." not in name
+    assert any("documents/passwd-hash-1/" in name for name in _names(result.zip_bytes))

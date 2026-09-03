@@ -95,3 +95,31 @@ def test_source_without_any_identity_omits_the_id_key() -> None:
 
     assert "id" not in src
     assert "chunk_id" not in src
+
+
+def test_a_transcript_segment_names_the_clip_not_the_parsed_transcript() -> None:
+    """The ``.nextext.jsonl`` a segment was parsed from is deleted during ingest.
+
+    Naming it in a citation sends an analyst looking for a file that never
+    outlived the run. Segments ingested before the clip's own name was stamped
+    carry it, so the name is recovered by stripping the suffix.
+    """
+    payload = {
+        "file_name": "clip.mp4.nextext.jsonl",
+        "filename": "clip.mp4.nextext.jsonl",
+        "origin": {"filename": "clip.mp4.nextext.jsonl"},
+        "docint_doc_kind": "transcript_segment",
+    }
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["filename"] == "clip.mp4"
+
+
+def test_a_stamped_transcript_segment_names_its_clip_directly() -> None:
+    """Once the linker stamps the clip, nothing has to be recovered."""
+    payload = {"source_file": "clip.mp4", "file_name": "clip.mp4.nextext.jsonl"}
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["filename"] == "clip.mp4"

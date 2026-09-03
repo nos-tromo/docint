@@ -135,3 +135,40 @@ def test_text_sources_are_unaffected_by_the_image_keys() -> None:
     assert src["text"] == "Station 3."
     assert "image_id" not in src
     assert "bbox" not in src
+
+
+def test_a_document_figure_is_named_by_its_document() -> None:
+    """A figure's own ``file_name`` is the extracted artifact, which names nothing.
+
+    ``image-3-a1b2c3d4.png`` was minted during extraction and exists on no
+    analyst's disk; the document it was cut out of is what a citation, a report
+    provenance row and an extract all have to name.
+    """
+    payload = {
+        **IMAGE_PAYLOAD,
+        "source_type": "document",
+        "file_name": "image-3-a1b2c3d4.png",
+        "filename": "image-3-a1b2c3d4.png",
+        "source_path": "/staged/batch/quarterly report.pdf",
+    }
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["filename"] == "quarterly report.pdf"
+
+
+def test_a_social_keyframe_is_named_by_the_clip_it_was_sampled_from() -> None:
+    """A frame is evidence about a video; the report row has to say which one."""
+    payload = {
+        "image_id": "frame-1",
+        "source_type": "social_media_keyframe",
+        "source_doc_id": "pu-1",
+        "posting_uuid": "pu-1",
+        "source_file": "clip.mp4",
+        "keyframe_index": 0,
+        "keyframe_time_sec": 8.0,
+    }
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["filename"] == "clip.mp4"
