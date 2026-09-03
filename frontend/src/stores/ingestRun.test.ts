@@ -43,8 +43,13 @@ describe('useIngestRunStore', () => {
     s.addFiles([file('a.txt')])
     await useIngestRunStore.getState().start(1000, defaultT)
 
-    expect(useIngestRunStore.getState().uploadEvents).toHaveLength(2)
-    expect(useIngestRunStore.getState().activeJobId).toBe('job-1')
+    // The upload leg's events move to the job they produced, so `uploadEvents`
+    // only ever describes the upload currently in flight.
+    expect(useIngestRunStore.getState().uploadEventsByJob['job-1']).toHaveLength(2)
+    expect(useIngestRunStore.getState().uploadEvents).toEqual([])
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-1', collection: 'mydocs' }
+    ])
     expect(useIngestRunStore.getState().uploading).toBe(false)
   })
 
@@ -187,7 +192,7 @@ describe('useIngestRunStore', () => {
     // Pins the retry-without-re-picking claim: the files that were already
     // staged server-side stay selected so the user can hit start() again.
     expect(useIngestRunStore.getState().files.map((f) => f.name)).toEqual(['a.txt'])
-    expect(useIngestRunStore.getState().activeJobId).toBeNull()
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([])
     expect(useIngestRunStore.getState().uploading).toBe(false)
     expect(useIngestRunStore.getState().error).toBe(defaultT('ingest.failed_default'))
   })
@@ -207,6 +212,106 @@ describe('useIngestRunStore', () => {
 
     expect(useIngestRunStore.getState().warnings).toEqual(['batch 2/2 too large; upload it separately'])
     expect(useIngestRunStore.getState().failedFiles).toEqual(['big.pdf'])
-    expect(useIngestRunStore.getState().activeJobId).toBe('job-1')
+    expect(useIngestRunStore.getState().trackedJobs[0].job_id).toBe('job-1')
+  })
+})
+
+describe('useIngestRunStore — tracking several jobs', () => {
+  it('keeps every started job, newest first', async () => {
+    const s = useIngestRunStore.getState()
+    s.setCollection('first')
+    s.addFiles([file('a.txt')])
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    createIngestJob.mockResolvedValue({ job_id: 'job-2', adopted: false })
+    useIngestRunStore.getState().setCollection('second')
+    useIngestRunStore.getState().addFiles([file('b.txt')])
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-2', collection: 'second' },
+      { job_id: 'job-1', collection: 'first' }
+    ])
+  })
+
+  it('files each run\'s upload events under its own job', async () => {
+    const s = useIngestRunStore.getState()
+    s.setCollection('first')
+    s.addFiles([file('a.txt')])
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    createIngestJob.mockResolvedValue({ job_id: 'job-2', adopted: false })
+    useIngestRunStore.getState().setCollection('second')
+    useIngestRunStore.getState().addFiles([file('b.txt')])
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    const byJob = useIngestRunStore.getState().uploadEventsByJob
+    expect(Object.keys(byJob).sort()).toEqual(['job-1', 'job-2'])
+  })
+
+  it('re-tracking an adopted job id does not duplicate it', () => {
+    const s = useIngestRunStore.getState()
+    s.trackJob('job-1', 'mydocs')
+    s.trackJob('job-1', 'mydocs')
+    expect(useIngestRunStore.getState().trackedJobs).toHaveLength(1)
+  })
+
+  it('untracks one job and drops only its upload events', () => {
+    const s = useIngestRunStore.getState()
+    s.trackJob('job-1', 'first')
+    s.trackJob('job-2', 'second')
+    useIngestRunStore.setState({
+      uploadEventsByJob: {
+        'job-1': [{ event: 'start', data: {}, receivedAt: 0 }],
+        'job-2': [{ event: 'start', data: {}, receivedAt: 0 }]
+      }
+    })
+    s.untrackJob('job-1')
+
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-2', collection: 'second' }
+    ])
+    expect(Object.keys(useIngestRunStore.getState().uploadEventsByJob)).toEqual(['job-2'])
+  })
+
+  it('records handled jobs without losing the earlier ones', () => {
+    const s = useIngestRunStore.getState()
+    s.markJobHandled('job-1')
+    s.markJobHandled('job-2')
+    expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-1', 'job-2'])
+  })
+
+  it('bounds the handled-job list so it cannot grow forever', () => {
+    const s = useIngestRunStore.getState()
+    for (let i = 0; i < 60; i += 1) s.markJobHandled(`job-${i}`)
+    const handled = useIngestRunStore.getState().handledJobIds
+    expect(handled).toHaveLength(50)
+    // The newest are the ones worth keeping: an old id is only consulted to
+    // stop a completed job reading as interrupted.
+    expect(handled[handled.length - 1]).toBe('job-59')
+  })
+
+  it('carries a v1 single-job state into the tracked list on migration', () => {
+    localStorage.setItem(
+      'docint-ingest-run',
+      JSON.stringify({
+        version: 1,
+        state: {
+          collection: 'edited',
+          ner: true,
+          hate: false,
+          activeJobId: 'job-1',
+          activeJobCollection: 'mydocs',
+          handledJobId: 'job-0'
+        }
+      })
+    )
+    useIngestRunStore.persist.rehydrate()
+
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-1', collection: 'mydocs' }
+    ])
+    expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-0'])
+    expect(useIngestRunStore.getState().ner).toBe(true)
   })
 })

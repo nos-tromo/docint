@@ -11,6 +11,13 @@ import type { IngestEvent } from '@/api/types'
  */
 export interface IngestJobsState {
   events: Record<string, IngestEvent[]>
+  /**
+   * Ids whose log has reached a terminal frame. Derived from `events`, but
+   * kept as its own map so a consumer that only cares *whether* a job is
+   * finished — the Ingest screen's "Clear finished" — can subscribe to
+   * something that changes once per run rather than once per progress frame.
+   */
+  terminal: Record<string, true>
   /** True once the SSE stream exhausted its reconnect budget. */
   streamLost: boolean
   /** Bumped to force `useIngestJobStream` to re-subscribe after giving up. */
@@ -37,12 +44,41 @@ const STARTED_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'extract_started'
 ])
 
+/**
+ * Fold one frame into the terminal-job map, returning the *same* map when
+ * nothing changed.
+ *
+ * @param terminal - The current map.
+ * @param jobId - The job the frame belongs to.
+ * @param ev - The frame.
+ * @returns The next map, or `terminal` itself when unchanged.
+ */
+function nextTerminal(
+  terminal: Record<string, true>,
+  jobId: string,
+  ev: IngestEvent
+): Record<string, true> {
+  if (TERMINAL_EVENTS.has(ev.event)) {
+    return terminal[jobId] ? terminal : { ...terminal, [jobId]: true }
+  }
+  if (STARTED_EVENTS.has(ev.event) && terminal[jobId]) {
+    const next = { ...terminal }
+    delete next[jobId]
+    return next
+  }
+  return terminal
+}
+
 export const useIngestJobsStore = create<IngestJobsState>((set) => ({
   events: {},
+  terminal: {},
   streamLost: false,
   retryNonce: 0,
   appendEvent: (jobId, ev) =>
     set((s) => ({
+      // Only rebuilt when the flag actually changes, so a run of progress
+      // frames leaves the reference — and every subscriber — untouched.
+      terminal: nextTerminal(s.terminal, jobId, ev),
       events: {
         ...s.events,
         // A job's *started* frame is the first frame of every replay, so it
@@ -61,13 +97,15 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
   setStreamLost: (streamLost) => set({ streamLost }),
   dropJob: (jobId) =>
     set((s) => {
-      if (!(jobId in s.events)) return s // stable reference -> no needless re-render
+      if (!(jobId in s.events) && !(jobId in s.terminal)) return s // stable reference -> no needless re-render
       const events = { ...s.events }
       delete events[jobId]
-      return { events }
+      const terminal = { ...s.terminal }
+      delete terminal[jobId]
+      return { events, terminal }
     }),
   retryStream: () => set((s) => ({ streamLost: false, retryNonce: s.retryNonce + 1 })),
-  clear: () => set({ events: {}, streamLost: false, retryNonce: 0 })
+  clear: () => set({ events: {}, terminal: {}, streamLost: false, retryNonce: 0 })
 }))
 
 /**

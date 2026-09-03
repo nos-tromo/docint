@@ -215,6 +215,7 @@ export const en = {
   'ingest.button': 'Ingest',
   'ingest.busy': 'Ingesting…',
   'ingest.status_idle': 'Idle',
+  'ingest.status_queued': 'Queued',
   'ingest.status_uploading': 'Uploading',
   'ingest.status_processing': 'Processing',
   'ingest.status_complete': 'Complete',
@@ -530,5 +531,7 @@ export const en = {
   'ingest.stream_lost': 'Live updates disconnected.',
   'ingest.reconnect': 'Reconnect',
   'ingest.dismiss': 'Dismiss',
+  'ingest.clear_finished': 'Clear finished ({count})',
+  'ingest.clear_partial_failure': 'Cleared {cleared} of {total}; {failed} failed',
   'nav.ingest_running': 'Ingestion running',
 }

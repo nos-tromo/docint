@@ -55,6 +55,14 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     pulse: false,
     tone: 'sky'
   },
+  queued: {
+    border: 'border-border',
+    pill: 'bg-muted-foreground',
+    label: 'text-muted-foreground',
+    textKey: 'ingest.status_queued',
+    pulse: false,
+    tone: 'sky'
+  },
   uploading: {
     border: 'border-sky-700',
     pill: 'bg-sky-400',
@@ -129,7 +137,7 @@ function useElapsedMs(
   // Tick once per second while the ingest is in flight so the elapsed
   // counter updates without re-deriving status on every animation frame.
   const [now, setNow] = useState(() => Date.now())
-  const ticking = phase === 'uploading' || phase === 'processing'
+  const ticking = phase === 'uploading' || phase === 'processing' || phase === 'queued'
   useEffect(() => {
     if (!ticking) return
     const id = window.setInterval(() => setNow(Date.now()), 1000)
@@ -165,6 +173,7 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
     >
       <Header status={status} theme={theme} elapsedMs={elapsedMs} />
 
+      {status.phase === 'queued' && <QueuedBody />}
       {status.phase === 'uploading' && <UploadingBody status={status} />}
       {status.phase === 'processing' && <ProcessingBody status={status} />}
       {status.phase === 'complete' && <CompleteBody status={status} />}
@@ -235,6 +244,11 @@ function Header({
       )}
     </div>
   )
+}
+
+function QueuedBody() {
+  const t = useT()
+  return <div className="mt-3 text-sm text-muted-foreground">{t('ingest.job_queued')}</div>
 }
 
 function UploadingBody({ status }: { status: IngestStatus }) {

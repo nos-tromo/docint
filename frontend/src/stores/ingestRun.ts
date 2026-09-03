@@ -8,9 +8,31 @@ import type { Strings } from '@/i18n'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
+/** The slice of the run that survives a reload. */
+interface PersistedIngestRun {
+  collection: string
+  ner: boolean
+  hate: boolean
+  trackedJobs: TrackedJob[]
+  handledJobIds: string[]
+}
+
+/** A job this browser queued, and the collection it was queued against. */
+export interface TrackedJob {
+  job_id: string
+  collection: string
+}
+
+/**
+ * How many handled-job ids to keep. Matches the backend's own
+ * `MAX_TERMINAL_JOBS_PER_OWNER`, so an id is only ever forgotten once the
+ * server has forgotten the job too.
+ */
+const MAX_HANDLED_JOBS = 50
+
 /**
  * The ingest run controller: owns a run from picked files through to a queued
- * server-side job.
+ * server-side job, and remembers every job this browser queued.
  *
  * Lives in a module singleton rather than the `Ingest` route component on
  * purpose. The upload leg is a sequence of fetches that outlives an unmounted
@@ -18,33 +40,40 @@ type Translate = (key: keyof Strings, vars?: Record<string, string | number>) =>
  * keeps the transfer running while its progress vanishes into a dead reducer.
  * Here, leaving and returning shows the run exactly where it is.
  *
- * Persisted: the form (collection, enrichment toggles) and `activeJobId`, so a
- * reload re-attaches. Not persisted: `files` (`File` handles cannot survive a
- * reload, and a reloaded page could not act on them anyway) and the transient
- * run state.
+ * Persisted: the form (collection, enrichment toggles), `trackedJobs` and
+ * `handledJobIds`, so a reload re-attaches to every run in flight. Not
+ * persisted: `files` (`File` handles cannot survive a reload, and a reloaded
+ * page could not act on them anyway) and the transient run state.
  */
 export interface IngestRunState {
   collection: string
   ner: boolean
   hate: boolean
-  activeJobId: string | null
   /**
-   * The collection `activeJobId` was queued against, captured at queue time.
-   * Read by the interrupted-run "Run again" flow instead of the live
-   * `collection` field, which the user can edit between the interruption and
-   * the click — otherwise a re-run can finalize a different collection than
-   * the one that was actually interrupted.
+   * Jobs this browser queued, newest first. Persisted, and kept even after a
+   * job finishes: it is the only way to tell a job the server has forgotten
+   * (an interrupted run, worth offering a re-run for) from one that never
+   * existed. The server's own list is the other source the Ingest screen
+   * merges in — that one also carries jobs queued from another tab.
    */
-  activeJobCollection: string | null
+  trackedJobs: TrackedJob[]
   /**
-   * Id of the job whose terminal `ingestion_complete` has already triggered
-   * the view's post-ingest collection-select side effect. Persisted (like
-   * `activeJobId`) rather than kept in component state, so navigating away
-   * and back — or a reload — doesn't repeat the effect for a job that was
-   * already handled in an earlier mount.
+   * Ids whose terminal `ingestion_complete` already triggered the view's
+   * post-ingest collection-select side effect. Persisted (like `trackedJobs`)
+   * rather than kept in component state, so navigating away and back — or a
+   * reload — doesn't repeat the effect for a job already handled in an
+   * earlier mount. Bounded to {@link MAX_HANDLED_JOBS}, newest last.
    */
-  handledJobId: string | null
+  handledJobIds: string[]
+  /**
+   * The upload leg's events, filed under the job that leg produced, so each
+   * job's card can still report what it saved. Transient: a reload loses them
+   * and the card falls back to the server's own progress.
+   */
+  uploadEventsByJob: Record<string, IngestEvent[]>
   files: File[]
+  /** Events of the upload currently in flight; moved to `uploadEventsByJob`
+   *  the moment that upload's job is queued. */
   uploadEvents: IngestEvent[]
   failedFiles: string[]
   warnings: string[]
@@ -76,13 +105,18 @@ export interface IngestRunState {
    */
   markJobHandled: (jobId: string) => void
   /**
-   * Adopt `jobId` as the active run without touching the upload leg — used
-   * to re-queue an interrupted run (the staged files are already on the
-   * server; `POST /ingest/finalize` re-ingests over them directly) or to
-   * adopt a 409-in-flight job id.
+   * Track `jobId` without touching the upload leg — used to re-queue an
+   * interrupted run (the staged files are already on the server; `POST
+   * /ingest/finalize` re-ingests over them directly) or to adopt a
+   * 409-in-flight job id. Re-tracking a known id only refreshes its position.
+   *
+   * @param jobId - The server's job id.
+   * @param collection - The collection it was queued against.
+   * @param uploadEvents - The upload leg that produced it, if any.
    */
-  adoptJob: (jobId: string) => void
-  dismissActive: () => void
+  trackJob: (jobId: string, collection: string, uploadEvents?: IngestEvent[]) => void
+  /** Forget a job: drop it from the list along with its upload events. */
+  untrackJob: (jobId: string) => void
   reset: () => void
 }
 
@@ -101,9 +135,9 @@ export const useIngestRunStore = create<IngestRunState>()(
       collection: '',
       ner: false,
       hate: false,
-      activeJobId: null,
-      activeJobCollection: null,
-      handledJobId: null,
+      trackedJobs: [],
+      handledJobIds: [],
+      uploadEventsByJob: {},
       ...transient,
       setCollection: (collection) => set({ collection }),
       setNer: (ner) => set({ ner }),
@@ -111,25 +145,39 @@ export const useIngestRunStore = create<IngestRunState>()(
       addFiles: (v) => set((s) => ({ files: mergeFiles(s.files, v) })),
       removeFile: (i) => set((s) => ({ files: s.files.filter((_, idx) => idx !== i) })),
       clearFiles: () => set({ files: [] }),
-      markJobHandled: (jobId) => set({ handledJobId: jobId }),
-      adoptJob: (jobId) =>
-        set({ activeJobId: jobId, handledJobId: null, uploadEvents: [], failedFiles: [], error: null }),
-      dismissActive: () =>
-        set({
-          activeJobId: null,
-          activeJobCollection: null,
-          handledJobId: null,
-          uploadEvents: [],
-          failedFiles: []
+      markJobHandled: (jobId) =>
+        set((s) =>
+          s.handledJobIds.includes(jobId)
+            ? s
+            : { handledJobIds: [...s.handledJobIds, jobId].slice(-MAX_HANDLED_JOBS) }
+        ),
+      trackJob: (jobId, collection, uploadEvents) =>
+        set((s) => ({
+          trackedJobs: [
+            { job_id: jobId, collection },
+            ...s.trackedJobs.filter((j) => j.job_id !== jobId)
+          ],
+          uploadEventsByJob: uploadEvents
+            ? { ...s.uploadEventsByJob, [jobId]: uploadEvents }
+            : s.uploadEventsByJob
+        })),
+      untrackJob: (jobId) =>
+        set((s) => {
+          const uploadEventsByJob = { ...s.uploadEventsByJob }
+          delete uploadEventsByJob[jobId]
+          return {
+            trackedJobs: s.trackedJobs.filter((j) => j.job_id !== jobId),
+            uploadEventsByJob
+          }
         }),
       reset: () =>
         set({
           collection: '',
           ner: false,
           hate: false,
-          activeJobId: null,
-          activeJobCollection: null,
-          handledJobId: null,
+          trackedJobs: [],
+          handledJobIds: [],
+          uploadEventsByJob: {},
           ...transient
         }),
       start: async (limitBytes, t) => {
@@ -181,7 +229,8 @@ export const useIngestRunStore = create<IngestRunState>()(
           // instant `deriveIngestStatus` anchors the card's timer to — so the
           // duration the server ends up logging and echoing back covers the
           // upload leg the user was already watching tick.
-          const runStartedAt = get().uploadEvents[0]?.receivedAt
+          const uploadEvents = get().uploadEvents
+          const runStartedAt = uploadEvents[0]?.receivedAt
           const { job_id } = await createIngestJob({
             collection,
             ner,
@@ -189,10 +238,14 @@ export const useIngestRunStore = create<IngestRunState>()(
             upload_elapsed_ms:
               runStartedAt === undefined ? undefined : Date.now() - runStartedAt
           })
+          // The upload leg belongs to the job it produced from here on, so
+          // `uploadEvents` is free to describe the *next* upload. Without the
+          // handover a second run in the same tab would fold the previous
+          // run's log into its own card.
+          get().trackJob(job_id, collection, uploadEvents)
           set({
-            activeJobId: job_id,
-            activeJobCollection: collection,
             uploading: false,
+            uploadEvents: [],
             files: [],
             failedFiles: failures.flatMap((f) => f.files)
           })
@@ -208,16 +261,33 @@ export const useIngestRunStore = create<IngestRunState>()(
       name: 'docint-ingest-run',
       // `File` handles cannot be serialized, and a reloaded page could not act
       // on them anyway — the user must re-pick. Everything else about the form
-      // is worth restoring, and `activeJobId` is what makes reattach possible.
+      // is worth restoring, and `trackedJobs` is what makes reattach possible.
       partialize: (s) => ({
         collection: s.collection,
         ner: s.ner,
         hate: s.hate,
-        activeJobId: s.activeJobId,
-        activeJobCollection: s.activeJobCollection,
-        handledJobId: s.handledJobId
+        trackedJobs: s.trackedJobs,
+        handledJobIds: s.handledJobIds
       }),
-      version: 1
+      version: 2,
+      // v1 tracked exactly one job in three scalars. Carry it over so a reload
+      // across the upgrade still re-attaches to the run that was in flight.
+      migrate: (persisted, version): PersistedIngestRun => {
+        if (version >= 2) return persisted as PersistedIngestRun
+        const old = (persisted ?? {}) as Record<string, unknown>
+        const jobId = typeof old.activeJobId === 'string' ? old.activeJobId : null
+        const collection = typeof old.collection === 'string' ? old.collection : ''
+        const jobCollection =
+          typeof old.activeJobCollection === 'string' ? old.activeJobCollection : collection
+        const handled = typeof old.handledJobId === 'string' ? [old.handledJobId] : []
+        return {
+          collection,
+          ner: old.ner === true,
+          hate: old.hate === true,
+          trackedJobs: jobId ? [{ job_id: jobId, collection: jobCollection }] : [],
+          handledJobIds: handled
+        }
+      }
     }
   )
 )

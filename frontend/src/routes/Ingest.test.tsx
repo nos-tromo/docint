@@ -33,12 +33,26 @@ let queuedJobIds: Set<string>
 /** Server-side timestamps per job id; the default (absent) mirrors a job
  *  that has not started. */
 let jobTimes: Record<string, { started_at: string | null; finished_at: string | null }>
+/** Job ids the mocked list reports as already finished. */
+let finishedJobIds: Set<string>
+/** Per-job collection names, for tests that run several collections at once. */
+let jobCollections: Record<string, string>
+
+/** Track a job the way `run.start()` does once its finalize resolves. */
+function track(jobId: string, collection = 'mydocs') {
+  useIngestRunStore.getState().trackJob(jobId, collection)
+}
 
 function jobSnapshot(id: string) {
   return {
     job_id: id,
-    collection: 'mydocs',
-    status: (queuedJobIds.has(id) ? 'queued' : 'running') as 'queued' | 'running',
+    collection: jobCollections[id] ?? 'mydocs',
+    kind: 'ingest' as const,
+    status: (queuedJobIds.has(id)
+      ? 'queued'
+      : finishedJobIds.has(id)
+        ? 'completed'
+        : 'running') as 'queued' | 'running' | 'completed',
     message: null,
     error: null,
     empty: false,
@@ -63,8 +77,10 @@ beforeEach(() => {
   useIngestJobsStore.getState().clear()
   knownJobIds = new Set()
   queuedJobIds = new Set()
+  finishedJobIds = new Set()
+  jobCollections = {}
   jobTimes = {}
-  fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const u = typeof input === 'string' ? input : input.toString()
     if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
     if (u.includes('/collections/list')) return jsonRes([])
@@ -72,7 +88,17 @@ beforeEach(() => {
     if (u.includes('/ingest/finalize')) return jsonRes({ job_id: 'job-2' })
     if (u.includes('/ingest/jobs/')) {
       const id = u.split('/ingest/jobs/')[1]?.split('?')[0]
-      return id && knownJobIds.has(id) ? jsonRes(jobSnapshot(id)) : notFoundRes()
+      if (!id || !knownJobIds.has(id)) return notFoundRes()
+      // Dismissal really removes the job, so the list stops carrying it —
+      // otherwise a dismissed card would come straight back on the refetch.
+      if (init?.method === 'DELETE') {
+        knownJobIds.delete(id)
+        return jsonRes({ ok: true })
+      }
+      return jsonRes(jobSnapshot(id))
+    }
+    if (u.includes('/ingest/jobs')) {
+      return jsonRes({ jobs: [...knownJobIds].map((id) => jobSnapshot(id)) })
     }
     if (u.includes('/config'))
       return jsonRes({
@@ -122,7 +148,7 @@ describe('Ingest', () => {
   })
 
   it('renders live progress for the active job and never flashes the interrupted banner', async () => {
-    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    track('job-1')
     useIngestJobsStore.getState().appendEvent('job-1', {
       event: 'ingestion_progress',
       data: { job_id: 'job-1', message: 'Extracting entities: 3/9 chunks processed' },
@@ -153,7 +179,7 @@ describe('Ingest', () => {
     // still has a non-empty event log forever (nothing ever clears it), so
     // "interrupted" must not be gated on whether the job ever had live SSE
     // evidence — only on what the server says about it *now*.
-    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    track('job-1')
     const { appendEvent } = useIngestJobsStore.getState()
     appendEvent('job-1', {
       event: 'ingestion_started',
@@ -175,7 +201,7 @@ describe('Ingest', () => {
   })
 
   it('offers a re-run when the active job is unknown to the server', async () => {
-    useIngestRunStore.setState({ activeJobId: 'ghost' })
+    track('ghost')
     renderIn(<Ingest />)
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /run again|erneut/i })).toBeInTheDocument()
@@ -188,7 +214,7 @@ describe('Ingest', () => {
     // worker slot frees up — `status.phase` never leaves 'idle' and the
     // whole status block is otherwise gated out, so the run would vanish
     // from view with no card, no spinner, no error.
-    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    track('job-1')
     knownJobIds.add('job-1')
     queuedJobIds.add('job-1')
     // No jobEvents at all — this is the exact state a queued job is in.
@@ -207,7 +233,8 @@ describe('Ingest', () => {
     // consulting `handledJobId` (which already records "this job reached
     // ingestion_complete"), a run that finished successfully would flash the
     // "interrupted" banner and a spurious Run-again button.
-    useIngestRunStore.setState({ activeJobId: 'job-1', handledJobId: 'job-1' })
+    track('job-1')
+    useIngestRunStore.getState().markJobHandled('job-1')
     // `knownJobIds` stays empty — `getIngestJob('job-1')` 404s, as it would
     // after a restart wiped the in-memory job registry.
 
@@ -226,7 +253,7 @@ describe('Ingest — elapsed time across a reload', () => {
     // synthetic upload `start` frame that anchors the client timer is gone,
     // so the elapsed display must fall back to the snapshot's
     // `started_at`/`finished_at` pair.
-    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    track('job-1')
     knownJobIds.add('job-1')
     jobTimes['job-1'] = {
       started_at: '2026-08-14T10:00:00Z',
@@ -256,7 +283,7 @@ describe('Ingest post-ingest side effects', () => {
     // history, so a naive effect keyed only on "last event is
     // ingestion_complete" would re-fire the collection-select side effect on
     // every replay.
-    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    track('job-1')
     const { appendEvent } = useIngestJobsStore.getState()
     const complete = () =>
       appendEvent('job-1', {
@@ -293,7 +320,7 @@ describe('Ingest post-ingest side effects', () => {
     // module-level job store, so navigating away and back (or a reload)
     // still observes the same terminal frame. A component-local guard (e.g.
     // a `useRef`) resets on remount and would repeat the side effect.
-    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    track('job-1')
     const { appendEvent } = useIngestJobsStore.getState()
     appendEvent('job-1', {
       event: 'ingestion_started',
@@ -316,18 +343,14 @@ describe('Ingest post-ingest side effects', () => {
   })
 })
 
-describe('Ingest — second run in the same tab', () => {
-  it('does not show the previous job as complete while a second run is still uploading', async () => {
-    // `activeJobId` still points at the *previous* run's job until
-    // `createIngestJob` resolves for the new run (stores/ingestRun.ts). This
-    // reproduces that exact window directly via store state, mirroring what
-    // `run.start()` produces mid-flight.
-    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
-    // A completed-but-not-dismissed job stays listed by the real backend
-    // (dismissal is a separate, explicit action) — so it must not read as
-    // interrupted, which would otherwise render a second, unrelated Dismiss
-    // control this test isn't exercising.
+describe('Ingest — several runs at once', () => {
+  it('keeps the earlier job on screen while a second run is uploading', async () => {
+    // The whole point of the list: starting a second run must not hide the
+    // first. The finished job keeps its own card (and its own Dismiss) while
+    // the new upload reports its own progress above.
+    track('job-1')
     knownJobIds.add('job-1')
+    finishedJobIds.add('job-1')
     const { appendEvent } = useIngestJobsStore.getState()
     appendEvent('job-1', {
       event: 'ingestion_started',
@@ -341,25 +364,145 @@ describe('Ingest — second run in the same tab', () => {
     })
 
     renderIn(<Ingest />)
-    await waitFor(() => expect(callsMatching('/collections/select')).toBe(1))
+    await waitFor(() => expect(screen.getByText('Complete')).toBeInTheDocument())
 
     useIngestRunStore.setState({
       uploading: true,
       uploadEvents: [
-        { event: 'start', data: { collection: 'mydocs', files: ['b.txt'] }, receivedAt: Date.now() },
+        { event: 'start', data: { collection: 'other', files: ['b.txt'] }, receivedAt: Date.now() },
         { event: 'upload_progress', data: { filename: 'b.txt', bytes_written: 5 }, receivedAt: Date.now() }
       ]
     })
 
     await waitFor(() => expect(screen.getByText('Uploading')).toBeInTheDocument())
-    expect(screen.queryByText('Complete')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument()
+    expect(screen.getByText('Complete')).toBeInTheDocument()
+  })
+
+  it('renders one card per tracked job, newest first', async () => {
+    track('job-1', 'first')
+    track('job-2', 'second')
+    knownJobIds.add('job-1')
+    knownJobIds.add('job-2')
+    const { appendEvent } = useIngestJobsStore.getState()
+    for (const id of ['job-1', 'job-2']) {
+      appendEvent(id, {
+        event: 'ingestion_started',
+        data: { job_id: id, collection: id === 'job-1' ? 'first' : 'second' },
+        receivedAt: Date.now()
+      })
+    }
+
+    renderIn(<Ingest />)
+    await waitFor(() => expect(screen.getByText('second')).toBeInTheDocument())
+    expect(screen.getByText('first')).toBeInTheDocument()
+    const cards = screen.getAllByRole('status')
+    // `trackJob` prepends, so the most recently started run leads.
+    expect(cards[0]).toHaveTextContent('second')
+  })
+
+  it('shows a job the server lists but this browser never queued', async () => {
+    // Queued from another tab, or before this page was loaded: only the
+    // server list knows about it.
+    knownJobIds.add('job-9')
+    jobCollections['job-9'] = 'from-another-tab'
+
+    renderIn(<Ingest />)
+    await waitFor(() => expect(screen.getByText('from-another-tab')).toBeInTheDocument())
+  })
+
+  it('queues one run while another is processing, each on its own card', async () => {
+    track('job-1', 'running-one')
+    track('job-2', 'waiting-one')
+    knownJobIds.add('job-1')
+    knownJobIds.add('job-2')
+    queuedJobIds.add('job-2')
+    jobCollections['job-1'] = 'running-one'
+    jobCollections['job-2'] = 'waiting-one'
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Extracting entities: 3/9 chunks processed' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'Waiting for a worker slot — this run will start as soon as the current ingest finishes.'
+        )
+      ).toBeInTheDocument()
+    )
+    expect(screen.getByText(/3\s*\/\s*9/)).toBeInTheDocument()
+  })
+
+  it('dismisses one finished job without touching the other', async () => {
+    track('job-1', 'first')
+    track('job-2', 'second')
+    knownJobIds.add('job-1')
+    knownJobIds.add('job-2')
+    jobCollections['job-1'] = 'first'
+    jobCollections['job-2'] = 'second'
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-2', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-2', message: 'Extracting entities: 1/9 chunks processed' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    const dismiss = await screen.findByRole('button', { name: /dismiss/i })
+    dismiss.click()
+
+    await waitFor(() =>
+      expect(useIngestRunStore.getState().trackedJobs.map((j) => j.job_id)).toEqual(['job-2'])
+    )
+    expect(screen.getByText('second')).toBeInTheDocument()
+  })
+
+  it('clears every finished job at once and leaves the running one', async () => {
+    track('job-1', 'first')
+    track('job-2', 'second')
+    track('job-3', 'third')
+    for (const id of ['job-1', 'job-2', 'job-3']) knownJobIds.add(id)
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-2', {
+      event: 'error',
+      data: { job_id: 'job-2', code: 'ingestion_failed' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-3', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-3', message: 'Extracting entities: 1/9 chunks processed' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    const clear = await screen.findByRole('button', { name: /clear finished \(2\)/i })
+    clear.click()
+
+    await waitFor(() =>
+      expect(useIngestRunStore.getState().trackedJobs.map((j) => j.job_id)).toEqual(['job-3'])
+    )
+    // The running job is untouched, and its card stays.
+    expect(knownJobIds.has('job-3')).toBe(true)
+    expect(screen.queryByRole('button', { name: /clear finished/i })).not.toBeInTheDocument()
   })
 })
 
 describe('Ingest — interrupted run', () => {
   it('re-queues directly (finalize only) instead of re-uploading', async () => {
-    useIngestRunStore.setState({ activeJobId: 'ghost', collection: 'mydocs' })
+    track('ghost')
+    useIngestRunStore.getState().setCollection('mydocs')
     renderIn(<Ingest />)
 
     // Let the deployment-defaults seed settle first (it writes `ner`/`hate`
@@ -374,7 +517,9 @@ describe('Ingest — interrupted run', () => {
 
     await waitFor(() => expect(callsMatching('/ingest/finalize')).toBe(1))
     expect(callsMatching('/ingest/upload')).toBe(0)
-    await waitFor(() => expect(useIngestRunStore.getState().activeJobId).toBe('job-2'))
+    await waitFor(() =>
+      expect(useIngestRunStore.getState().trackedJobs[0].job_id).toBe('job-2')
+    )
 
     const finalizeCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ingest/finalize'))!
     const body = JSON.parse((finalizeCall[1] as RequestInit).body as string)
@@ -387,11 +532,8 @@ describe('Ingest — interrupted run', () => {
     // "Run again", the button must still finalize the collection the
     // interrupted job actually targeted (`activeJobCollection`, captured at
     // queue time), not whatever the field currently holds.
-    useIngestRunStore.setState({
-      activeJobId: 'ghost',
-      collection: 'edited-after-interruption',
-      activeJobCollection: 'original-mydocs'
-    })
+    track('ghost', 'original-mydocs')
+    useIngestRunStore.getState().setCollection('edited-after-interruption')
     renderIn(<Ingest />)
 
     const rerun = await screen.findByRole('button', { name: /run again|erneut/i })
@@ -404,13 +546,13 @@ describe('Ingest — interrupted run', () => {
   })
 
   it('lets the user dismiss a permanently-interrupted (ghost) job', async () => {
-    useIngestRunStore.setState({ activeJobId: 'ghost' })
+    track('ghost')
     renderIn(<Ingest />)
 
     const dismiss = await screen.findByRole('button', { name: /dismiss/i })
     dismiss.click()
 
-    await waitFor(() => expect(useIngestRunStore.getState().activeJobId).toBeNull())
+    await waitFor(() => expect(useIngestRunStore.getState().trackedJobs).toEqual([]))
     expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
   })
 
@@ -418,7 +560,7 @@ describe('Ingest — interrupted run', () => {
     // The queued snapshot is served from a cached query with a long
     // `staleTime`; nothing invalidates it when the job leaves the queue, so
     // without an active poll the notice outlives the condition it describes.
-    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    track('job-1')
     knownJobIds.add('job-1')
     queuedJobIds.add('job-1')
 

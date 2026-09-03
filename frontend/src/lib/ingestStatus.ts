@@ -3,6 +3,9 @@ import type { IngestEvent, IngestJobSnapshot } from '@/api/types'
 export type IngestPhase =
   | 'idle'
   | 'uploading'
+  // Never derived from events — a job waiting on a worker slot emits none.
+  // The Ingest card sets it from the server's own snapshot.
+  | 'queued'
   | 'processing'
   | 'complete'
   | 'error'

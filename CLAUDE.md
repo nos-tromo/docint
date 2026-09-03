@@ -103,7 +103,13 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   ingesting is refused with 409 carrying the in-flight `job_id` — overlapping
   runs can double-write, since file hashes are only recorded after a run's
   final node batch. Entity resolution runs as a stage *inside* the job, so it
-  no longer depends on a client being attached. Jobs survive a browser reload
+  no longer depends on a client being attached. **The SPA lists every job the
+  caller owns, one card each** (`frontend/src/components/ingest/IngestJobList.tsx`),
+  so a second run no longer hides the first: `GET /ingest/jobs` is discovery
+  (a queued job emits no frames at all, and a job queued in another tab has no
+  local record), the per-id snapshot answers interrupted-vs-alive (a 404 is a
+  backend restart, which the list cannot tell from a job it never held), and
+  the stream carries progress. Jobs survive a browser reload
   but **not** a backend restart (in-memory by design, mirroring Nextext's
   `nextext/api/jobs.py`); the staged files remain on disk and hash dedup makes
   a re-run cheap. The module holds no docint domain imports — the pipeline call

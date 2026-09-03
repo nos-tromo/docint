@@ -103,6 +103,15 @@ per-stage status. The entity-extraction and hate-speech enrichment options
 are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount from
 `GET /config/ingest-defaults`.
 
+Below the form, every ingest job the caller owns is listed newest first, one
+card each (`src/components/ingest/IngestJobList.tsx`): queued runs waiting on
+a worker slot, runs in progress, finished runs with their warnings, and
+interrupted runs offering a re-queue. Starting a second run therefore never
+hides the first. Each card carries its own Dismiss once the run has ended;
+"Clear finished" above the list dismisses them all at once and leaves
+anything still running. A completed run selects the collection it filled, so
+with several finishing in a row the last one wins.
+
 ### Analysis (`src/routes/Analysis.tsx`)
 
 Three tabs: **NER**, **Hate Speech** (`HateSpeechTable`), and **Summary**

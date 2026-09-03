@@ -196,3 +196,42 @@ describe('extract jobs share the store', () => {
     expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
   })
 })
+
+describe('terminal job tracking', () => {
+  it('marks a job terminal on its completion frame and clears it on a replay', () => {
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', { event: 'ingestion_started', data: {}, receivedAt: 1 })
+    expect(useIngestJobsStore.getState().terminal['job-1']).toBeUndefined()
+
+    appendEvent('job-1', { event: 'ingestion_complete', data: {}, receivedAt: 2 })
+    expect(useIngestJobsStore.getState().terminal['job-1']).toBe(true)
+
+    // A reconnect replays the job's history from its started frame; the fold
+    // restarts, so the flag must too or it would describe the previous fold.
+    appendEvent('job-1', { event: 'ingestion_started', data: {}, receivedAt: 3 })
+    expect(useIngestJobsStore.getState().terminal['job-1']).toBeUndefined()
+  })
+
+  it('marks a failed job terminal', () => {
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', { event: 'error', data: { code: 'ingestion_failed' }, receivedAt: 1 })
+    expect(useIngestJobsStore.getState().terminal['job-1']).toBe(true)
+  })
+
+  it('keeps a stable reference while only progress frames arrive', () => {
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', { event: 'ingestion_started', data: {}, receivedAt: 1 })
+    const before = useIngestJobsStore.getState().terminal
+    appendEvent('job-1', { event: 'ingestion_progress', data: { message: 'a 1/9' }, receivedAt: 2 })
+    appendEvent('job-1', { event: 'ingestion_progress', data: { message: 'a 2/9' }, receivedAt: 3 })
+    // A new identity here re-renders every job card on every progress frame.
+    expect(useIngestJobsStore.getState().terminal).toBe(before)
+  })
+
+  it('forgets a dropped job', () => {
+    const { appendEvent, dropJob } = useIngestJobsStore.getState()
+    appendEvent('job-1', { event: 'ingestion_complete', data: {}, receivedAt: 1 })
+    dropJob('job-1')
+    expect(useIngestJobsStore.getState().terminal['job-1']).toBeUndefined()
+  })
+})
