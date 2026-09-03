@@ -87,7 +87,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "extract_note_no_image": "The image itself was not stored.",
         "extract_empty": "This collection holds nothing to extract.",
         "extract_disclaimer": "Transcripts and image descriptions are machine-generated.",
-        "report_disclaimer": "AI-generated report.",
+        "report_disclaimer": "AI-generated report",
         "report_empty": "This report has no items yet.",
     },
     "de": {
@@ -163,7 +163,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "extract_note_no_image": "Das Bild selbst wurde nicht gespeichert.",
         "extract_empty": "Diese Collection enthält nichts, was ausgelesen werden könnte.",
         "extract_disclaimer": "Transkripte und Bildbeschreibungen sind maschinell erzeugt.",
-        "report_disclaimer": ("KI-generierter Bericht."),
+        "report_disclaimer": ("KI-generierter Bericht"),
         "report_empty": "Dieser Bericht enthält noch keine Einträge.",
     },
 }
