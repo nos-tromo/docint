@@ -618,3 +618,42 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     assert "Tell me about Alice" in rewrite_context
     assert "Alice posted about launch" in rewrite_context
     engine.query.assert_called_once_with("What did Alice post?")
+
+
+def test_an_image_citation_persists_a_hash_the_store_can_resolve(
+    session_manager: SessionManager,
+) -> None:
+    """An ``_images`` node carries no ``file_hash``; the row must not store null.
+
+    A keyframe names the clip it was cut from and a still image names its own
+    content hash — the same rule the live source uses — otherwise the session
+    ZIP silently skips every picture the answer cited.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    keyframe = MagicMock()
+    keyframe.node_id = "kf-1"
+    keyframe.metadata = {
+        "filename": "clip.mp4",
+        "image_id": "frame-hash",
+        "media_file_hash": "clip-hash",
+        "source_doc_id": "posting-1",
+        "posting_uuid": "posting-1",
+    }
+    still = MagicMock()
+    still.node_id = "img-1"
+    still.metadata = {
+        "filename": "pic.png",
+        "image_id": "pic-hash",
+        "source_doc_id": "posting-1",
+        "posting_uuid": "posting-1",
+    }
+    resp_mock.source_nodes = [MagicMock(node=keyframe, score=0.5), MagicMock(node=still, score=0.4)]
+
+    session_manager._persist_turn("image-session", "hello", resp_mock, {"response": "Hi"})
+
+    history = session_manager.get_session_history("image-session", owner=None)
+    assert [s["file_hash"] for s in history[1]["sources"]] == ["clip-hash", "pic-hash"]

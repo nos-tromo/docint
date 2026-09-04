@@ -515,6 +515,21 @@ def _resolve_source_file_path(
                 limit=1,
                 with_payload=True,
             )
+        if not points:
+            # An image or keyframe has no point in the main collection: the
+            # hash names its own content or the clip it was cut from, and only
+            # the ``_images`` companion knows the path either one was read from.
+            points, _ = rag.qdrant_client.scroll(
+                collection_name=f"{collection}_images",
+                scroll_filter=models.Filter(
+                    should=[
+                        models.FieldCondition(key=key, match=models.MatchValue(value=file_hash))
+                        for key in ("image_id", "media_file_hash")
+                    ]
+                ),
+                limit=1,
+                with_payload=True,
+            )
         if points:
             payload = points[0].payload or {}
             file_path_str = (
@@ -522,6 +537,7 @@ def _resolve_source_file_path(
                 or payload.get("path")
                 or (payload.get("metadata") or {}).get("file_path")
                 or (payload.get("origin") or {}).get("file_path")
+                or payload.get("source_path")
             )
     except Exception as exc:
         logger.warning("Failed to resolve source file for {}/{}: {}", collection, file_hash, exc)

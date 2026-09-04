@@ -136,6 +136,33 @@ def source_file_name(payload: dict[str, Any]) -> str:
     return path.rsplit("/", 1)[-1].removesuffix(TRANSIENT_TRANSCRIPT_SUFFIX) if path else ""
 
 
+def source_file_hash(payload: dict[str, Any]) -> str:
+    """Return the hash of the stored file a payload's content came from.
+
+    One rule for every artifact, because the preview and the session ZIP both
+    resolve a source by this hash. A chunk carries ``file_hash``; an ``_images``
+    point carries none, so a keyframe names the clip it was cut from
+    (``media_file_hash``) and a still image names itself (``image_id``, its
+    content sha256). ``source_doc_id`` names a *file* only for a document
+    figure -- on a social artifact it is the posting's uuid, which no store
+    can resolve, so it is skipped whenever it merely repeats ``posting_uuid``.
+
+    Args:
+        payload (dict[str, Any]): Raw Qdrant payload.
+
+    Returns:
+        str: The file hash, or ``""`` when the payload names none.
+    """
+    for key in ("file_hash", "media_file_hash"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    source_doc_id = str(payload.get("source_doc_id") or "").strip()
+    if source_doc_id and source_doc_id != str(payload.get("posting_uuid") or "").strip():
+        return source_doc_id
+    return str(payload.get("image_id") or "").strip()
+
+
 def payload_text(payload: dict[str, Any]) -> str:
     """Best-effort node text from a raw Qdrant payload.
 

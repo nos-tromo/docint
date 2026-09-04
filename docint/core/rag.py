@@ -202,7 +202,7 @@ from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
-from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_name
+from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_hash, source_file_name
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.duration import format_elapsed
@@ -4930,14 +4930,10 @@ class RAG:
             or payload.get("file_format")
         )
         source_kind = payload.get("source") or payload.get("source_type") or payload.get("reader")
-        # ``source_doc_id`` is the image companion's link back to the file the
-        # image was extracted from; it is what makes the preview link resolve.
-        file_hash = (
-            origin.get("file_hash")
-            or payload.get("file_hash")
-            or payload.get("source_doc_id")
-            or RAG._extract_file_hash(payload)
-        )
+        # ``source_file_hash`` knows the image companion's keys (a keyframe's
+        # clip, a still image's own hash, a figure's document); it is what
+        # makes the preview link resolve.
+        file_hash = origin.get("file_hash") or source_file_hash(payload) or RAG._extract_file_hash(payload)
 
         page = (
             payload.get("page")
@@ -5180,9 +5176,14 @@ class RAG:
         except Exception:
             payload = None
 
-        if payload is None:
+        # A cited image lives only in the ``_images`` companion -- the docstore
+        # holds no node for it -- so a session revisit that looked in the main
+        # collection alone rehydrated every picture as an empty source.
+        for collection in (self.qdrant_collection, f"{self.qdrant_collection}_images"):
+            if payload is not None:
+                break
             try:
-                recs = self.qdrant_client.retrieve(collection_name=self.qdrant_collection, ids=[node_id])
+                recs = self.qdrant_client.retrieve(collection_name=collection, ids=[node_id])
                 if recs:
                     candidate = getattr(recs[0], "payload", None)
                     if isinstance(candidate, dict):
@@ -5196,6 +5197,7 @@ class RAG:
             collection=self.qdrant_collection,
             payload=payload,
             score=score,
+            node_id=node_id,
         )
 
     def _get_existing_file_hashes(self) -> set[str]:

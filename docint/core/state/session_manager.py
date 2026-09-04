@@ -28,6 +28,7 @@ from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
 from docint.core.state.turn import Turn
+from docint.core.summary.units import source_file_hash
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -1007,7 +1008,7 @@ class SessionManager:
                     or ""
                 )
                 filetype = meta_node.get("mimetype") or meta_node.get("filetype") or meta_node.get("content_type") or ""
-                file_hash = meta_node.get("file_hash")
+                file_hash = source_file_hash(meta_node) or None
                 source_kind = meta_node.get("source", "")
                 page = meta_node.get("page_label") or meta_node.get("page") or None
                 table_meta = meta_node.get("table") or {}

@@ -172,3 +172,48 @@ def test_a_social_keyframe_is_named_by_the_clip_it_was_sampled_from() -> None:
     src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
 
     assert src["filename"] == "clip.mp4"
+
+
+def test_a_social_still_image_is_previewed_by_its_own_hash() -> None:
+    """``source_doc_id`` on a social artifact is the posting's uuid, not a file.
+
+    The preview resolved that uuid against the store and 404'd for every
+    social picture; the image's ``image_id`` is its content hash, which the
+    ``_images`` companion can map back to the file it was read from.
+    """
+    payload = {
+        **IMAGE_PAYLOAD,
+        "source_type": "social_media",
+        "source_doc_id": "posting-uuid-1",
+        "posting_uuid": "posting-uuid-1",
+    }
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["file_hash"] == "img-9f2c"
+    assert src["preview_url"] == "/sources/preview?collection=uabc__docs&file_hash=img-9f2c"
+
+
+def test_a_keyframe_is_previewed_by_the_clip_it_was_cut_from() -> None:
+    """A keyframe's stored file is the clip, named by ``media_file_hash``."""
+    payload = {
+        **IMAGE_PAYLOAD,
+        "source_type": "social_media",
+        "source_doc_id": "posting-uuid-1",
+        "posting_uuid": "posting-uuid-1",
+        "media_file_hash": "clip-hash-7",
+        "keyframe_index": 3,
+    }
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["file_hash"] == "clip-hash-7"
+
+
+def test_a_document_figure_is_still_previewed_by_its_document() -> None:
+    """A figure's ``source_doc_id`` names the document it was cut out of."""
+    payload = {**IMAGE_PAYLOAD, "source_type": "document", "source_doc_id": "doc-hash-1"}
+
+    src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
+
+    assert src["file_hash"] == "doc-hash-1"
