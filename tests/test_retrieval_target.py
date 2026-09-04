@@ -313,3 +313,23 @@ def test_a_documents_turn_reports_no_visual_block(monkeypatch: pytest.MonkeyPatc
 
     assert result["retrieval_target"] == "documents"
     assert result.get("visual") is None
+
+
+def test_the_image_settings_are_read_before_the_image_service_exists(
+    monkeypatch: pytest.MonkeyPatch, engine_capture: dict[str, Any]
+) -> None:
+    """The operator's setting must hold on the first turn too.
+
+    The image service is built lazily on first retrieval, which is after the
+    query engine. Falling back to the hardcoded default there discarded the
+    configured value for exactly one turn per process — the turn that then
+    attached more thumbnails than the endpoint accepts.
+    """
+    monkeypatch.setenv("VISUAL_ANSWER_MAX_IMAGES", "1")
+    rag = _rag(monkeypatch)
+    assert rag._image_ingestion_service is None
+
+    assert rag._visual_answer_max_images() == 1
+
+    rag.build_query_engine(retrieval_target="visual")
+    assert engine_capture["response_synthesizer"]["visual"] is True

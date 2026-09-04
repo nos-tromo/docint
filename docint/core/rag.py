@@ -54,6 +54,7 @@ from docint.utils.env_cfg import (
     load_graphrag_env,
     load_hate_speech_env,
     load_host_env,
+    load_image_ingestion_config,
     load_ingestion_env,
     load_language_env,
     load_model_env,
@@ -3868,18 +3869,23 @@ class RAG:
 
         The service owns the loaded ``ImageIngestionConfig``, but it is
         constructed lazily on first retrieval — and the query engine is built
-        before that.
+        before that. Falling back to the *hardcoded* default there silently
+        discarded the operator's setting for exactly one turn per process: the
+        first visual turn attached six thumbnails to an endpoint configured to
+        accept one, whatever ``VISUAL_ANSWER_MAX_IMAGES`` said, and every later
+        turn honoured it. So load the settings from the environment instead,
+        which is where the service would have read them anyway.
 
         Args:
             name (str): Config field name.
-            default (Any): Value to use when the service is not built yet.
+            default (Any): Value to use when the setting does not exist.
 
         Returns:
             Any: The configured value, or ``default``.
         """
         config = getattr(self._image_ingestion_service, "img_ingestion_config", None)
         if config is None:
-            return default
+            config = load_image_ingestion_config()
         return getattr(config, name, default)
 
     def _visual_answer_max_images(self) -> int:
