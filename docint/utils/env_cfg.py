@@ -779,6 +779,10 @@ class ImageIngestionConfig:
     fail_on_tagging_error: bool
     retrieve_top_k: int
     rerank_min_score: float = 0.05
+    # The visual retrieval target draws deeper than the image lane: it is the
+    # whole evidence set rather than a handful of candidates beside the text.
+    visual_retrieve_top_k: int = 24
+    visual_answer_max_images: int = 6
     tagging_max_image_dimension: int = 1024
     # Reading the text *inside* an image (a screenshot, a photographed letter,
     # a slide) — a different question from captioning it, answered by the OCR
@@ -800,6 +804,8 @@ def load_image_ingestion_config(
     default_fail_on_tagging_error: bool = False,
     default_retrieve_top_k: int = 5,
     default_rerank_min_score: float = 0.05,
+    default_visual_retrieve_top_k: int = 24,
+    default_visual_answer_max_images: int = 6,
     default_tagging_max_image_dimension: int = 1024,
     default_image_ocr_enabled: bool | None = None,
     default_keyframe_ocr_enabled: bool = False,
@@ -820,6 +826,10 @@ def load_image_ingestion_config(
         default_fail_on_tagging_error (bool): Fail the entire ingestion if image tagging fails.
             Default False.
         default_retrieve_top_k (int): The number of top image matches to retrieve for a text query. Default is 5.
+        default_visual_retrieve_top_k (int): Candidate depth for the visual retrieval target, where
+            imagery is the whole evidence set rather than a lane beside the text. Default is 24.
+        default_visual_answer_max_images (int): How many stored thumbnails a visual answer may
+            attach to the generation call. Each costs roughly 600 prompt tokens. Default is 6.
         default_rerank_min_score (float): Minimum reranker relevance score an image caption must
             reach to surface as a source. Raw CLIP cosine similarity is not comparable across
             queries (unrelated images sit in the same 0.20-0.30 band as relevant ones), so the
@@ -869,6 +879,8 @@ def load_image_ingestion_config(
         in {"1", "true", "yes"},
         retrieve_top_k=int(os.getenv("IMAGE_RETRIEVE_TOP_K", default_retrieve_top_k)),
         rerank_min_score=float(os.getenv("IMAGE_RERANK_MIN_SCORE", default_rerank_min_score)),
+        visual_retrieve_top_k=int(os.getenv("VISUAL_RETRIEVE_TOP_K", default_visual_retrieve_top_k)),
+        visual_answer_max_images=int(os.getenv("VISUAL_ANSWER_MAX_IMAGES", default_visual_answer_max_images)),
         tagging_max_image_dimension=int(os.getenv("IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension)),
         ocr_enabled=str(os.getenv("IMAGE_OCR_ENABLED", default_image_ocr_enabled)).lower() in {"1", "true", "yes"},
         keyframe_ocr_enabled=str(os.getenv("KEYFRAME_OCR_ENABLED", default_keyframe_ocr_enabled)).lower()

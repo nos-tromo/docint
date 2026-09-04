@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from docint.agents.context import TurnContext as AgentTurnContext
 from docint.agents.types import PriorTurn
+from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
@@ -90,6 +91,7 @@ def _log_turn_summary(
             f"session={session_id}",
             f"turn={turn_idx}",
             f"mode={response.get('retrieval_mode')}",
+            f"target={response.get('retrieval_target')}",
             f"sources={len(sources)}",
             f"images={images}",
             f"rerank={rerank_state}",
@@ -345,6 +347,7 @@ class SessionManager:
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -384,6 +387,9 @@ class SessionManager:
                 attempt. The rolling summary is left alone in that case: the
                 turn count has not changed, and folding in the answer that was
                 just discarded would poison later context.
+            retrieval_target (RetrievalTarget): Which evidence may answer the
+                turn: ``all``, ``documents`` or ``visual``. A scope outranks
+                it. See :mod:`docint.core.retrieval.visual`.
 
         Returns:
             dict[str, Any]: The response data, including ``turn_idx`` — the
@@ -405,9 +411,17 @@ class SessionManager:
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=metadata_filters_active,
                 scoped_node_ids=scoped_node_ids,
+                retrieval_target=retrieval_target,
             )
             # A scope must never reuse the cached engine: that one retrieves.
-            if scoped_node_ids or metadata_filters is not None or vector_store_kwargs
+            # Neither may a non-default target: the cached engine is the
+            # ``all`` one, and reusing it would answer a visual turn from text.
+            if (
+                scoped_node_ids
+                or metadata_filters is not None
+                or vector_store_kwargs
+                or retrieval_target != DEFAULT_RETRIEVAL_TARGET
+            )
             else self.rag.query_engine
         )
         if engine is None:
@@ -444,6 +458,12 @@ class SessionManager:
             # answer, so running it would only add noise to the prompt.
             expanded_query = retrieval_query
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
+        elif retrieval_target == "visual":
+            # The entity graph is built from text chunks, so its terms widen a
+            # lane the visual target does not use — and they would still land
+            # in the synthesis prompt.
+            expanded_query = retrieval_query
+            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
         else:
             expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
@@ -461,6 +481,11 @@ class SessionManager:
             retrieval_mode=retrieval_mode,
         )
         response["graph_debug"] = graph_debug
+        response["retrieval_target"] = retrieval_target
+        if retrieval_target == "visual" and response.get("visual") is None:
+            # See RAG.run_query: zero is a degraded visual turn, absent is a
+            # turn that never targeted imagery.
+            response["visual"] = {"images_attached": 0}
         if scoped_node_ids:
             response["scoped_chunk_count"] = len(list(scoped_node_ids))
         response["turn_idx"] = self._persist_turn(
@@ -491,6 +516,7 @@ class SessionManager:
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> Iterator[str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -521,6 +547,9 @@ class SessionManager:
             replace_turn_idx (int | None): See :meth:`chat`. Set by the
                 corrective retry so its second answer overwrites the rejected
                 one rather than appending a turn the user never asked for.
+            retrieval_target (RetrievalTarget): Which evidence may answer the
+                turn: ``all``, ``documents`` or ``visual``. A scope outranks
+                it. See :mod:`docint.core.retrieval.visual`.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -548,6 +577,7 @@ class SessionManager:
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
             scoped_node_ids=scoped_node_ids,
+            retrieval_target=retrieval_target,
         )
 
         # Resolve the session per request (see :meth:`chat`): pure/idempotent,
@@ -571,6 +601,12 @@ class SessionManager:
             # answer, so running it would only add noise to the prompt.
             expanded_query = retrieval_query
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
+        elif retrieval_target == "visual":
+            # The entity graph is built from text chunks, so its terms widen a
+            # lane the visual target does not use — and they would still land
+            # in the synthesis prompt.
+            expanded_query = retrieval_query
+            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
         else:
             expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
@@ -609,6 +645,9 @@ class SessionManager:
             retrieval_mode=retrieval_mode,
         )
         normalized["graph_debug"] = graph_debug
+        normalized["retrieval_target"] = retrieval_target
+        if retrieval_target == "visual" and normalized.get("visual") is None:
+            normalized["visual"] = {"images_attached": 0}
         turn_idx = self._persist_turn(
             session_id, user_msg, final_response, normalized, owner=owner, replace_idx=replace_turn_idx
         )
@@ -628,6 +667,8 @@ class SessionManager:
             "coverage_unit": normalized.get("coverage_unit"),
             "retrieval_mode": normalized.get("retrieval_mode"),
             "rerank": normalized.get("rerank"),
+            "retrieval_target": normalized.get("retrieval_target"),
+            "visual": normalized.get("visual"),
             "turn_idx": turn_idx,
         }
         if scoped_node_ids:

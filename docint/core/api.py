@@ -57,6 +57,7 @@ from docint.core.extract.units import Unit, partition, resolve_target
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
+from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -867,6 +868,13 @@ class QueryIn(BaseModel):
     # default) defers to ``OPENAI_ENABLE_THINKING``. Applies to answer
     # synthesis only — query rewriting stays on the plain model.
     reasoning: bool | None = None
+    # Which evidence may answer this turn. Orthogonal to ``retrieval_mode``
+    # above, which is session routing: a stateless turn and a session turn can
+    # each target documents, imagery, or both. ``visual`` answers from the
+    # image companion alone and is the only target that puts pixels in front
+    # of the model. A pinned scope outranks it — hand-picked chunks are
+    # hand-picked whatever the target says.
+    retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET
 
 
 class ScopeIn(BaseModel):
@@ -936,6 +944,14 @@ class QueryOut(BaseModel):
     #: turn that must not pass as a normal one. ``None`` when no reranker
     #: was in the loop (scoped turn, no sources).
     rerank: dict[str, Any] | None = None
+    #: Which evidence answered the turn: ``all``, ``documents`` or ``visual``.
+    retrieval_target: str | None = None
+    #: What the visual target put in front of the model:
+    #: ``{"images_attached": int}``. ``0`` means the answer came from stored
+    #: captions alone because the thumbnails could not be fetched — a degraded
+    #: visual turn that must not pass as a normal one. ``None`` on any other
+    #: target.
+    visual: dict[str, Any] | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -1911,6 +1927,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                     scoped_node_ids=stateless_scope or None,
+                    retrieval_target=payload.retrieval_target,
                 )
                 if graph_debug is not None:
                     data["graph_debug"] = graph_debug
@@ -1938,6 +1955,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                     scoped_node_ids=scoped_node_ids or None,
+                    retrieval_target=payload.retrieval_target,
                 )
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
@@ -1988,6 +2006,12 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 data.get("scoped_chunk_count") if isinstance(data, dict) and retrieval_mode == "scoped" else None
             ),
             "rerank": data.get("rerank") if isinstance(data, dict) else None,
+            "retrieval_target": (
+                str(data.get("retrieval_target") or payload.retrieval_target)
+                if isinstance(data, dict)
+                else payload.retrieval_target
+            ),
+            "visual": data.get("visual") if isinstance(data, dict) else None,
             **validation,
         }
     except HTTPException:
@@ -2090,6 +2114,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                     scoped_node_ids=stateless_scope or None,
+                    retrieval_target=payload.retrieval_target,
                 )
                 if graph_debug is not None:
                     stateless_data["graph_debug"] = graph_debug
@@ -2107,6 +2132,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     "session_id": payload.session_id or "stateless",
                     "reasoning": stateless_data.get("reasoning"),
                     "graph_debug": stateless_data.get("graph_debug"),
+                    "retrieval_target": stateless_data.get("retrieval_target") or payload.retrieval_target,
+                    "visual": stateless_data.get("visual"),
                 }
             else:
                 # Resolved once, on the first pass, and reused by the corrective
@@ -2178,6 +2205,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             skip_query_rewrite=question is not None,
                             scoped_node_ids=stream_state["scoped_node_ids"],
                             replace_turn_idx=replace_turn_idx,
+                            retrieval_target=payload.retrieval_target,
                         ),
                     )
 
@@ -2330,6 +2358,10 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         exc,
                     )
             if payload_out:
+                # The SPA reads the target off this frame; a turn that never
+                # reached the retrieval layer (an empty collection, say) still
+                # answered under the requested target.
+                payload_out.setdefault("retrieval_target", payload.retrieval_target)
                 yield f"data: {json.dumps(payload_out)}\n\n"
         except EmbeddingEndpointError:
             # Retrieval could not embed the query, so no generation was ever
