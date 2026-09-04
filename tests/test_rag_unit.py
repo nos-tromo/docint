@@ -29,6 +29,7 @@ from llama_index.core.storage.docstore.keyval_docstore import (
     KVDocumentStore as _KVDocumentStore,
 )
 from loguru import logger as _loguru_logger
+from qdrant_client import models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core import rag as rag_module
@@ -39,7 +40,7 @@ from docint.core.retrieval_filters import (
     matches_metadata_filters,
 )
 from docint.core.search.fields import UnknownSearchFieldError
-from docint.core.search.fulltext import build_scan_filter
+from docint.core.search.fulltext import build_scan_filter, not_coarse_condition
 from docint.utils.embed_chunking import effective_budget, estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
@@ -6175,9 +6176,32 @@ def test_build_retriever_keeps_parent_context_filter_under_native_filters(
     rag._build_retriever(vector_store_kwargs={"qdrant_filters": user_filter})
 
     merged = captured["vector_store_kwargs"]["qdrant_filters"]
-    keys = [condition.key for condition in (merged.must or [])]
-    assert "docint_hier_type" in keys
-    assert "mimetype" in keys
+    assert user_filter is not None
+    assert merged == models.Filter(must=[*(user_filter.must or []), not_coarse_condition()])
+    assert "filters" not in captured
+
+
+def test_build_retriever_excludes_parents_without_requiring_the_fine_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Untagged chunks must stay retrievable next to a hierarchical document.
+
+    Only the hierarchical readers tag their chunks; transcript segments and
+    table rows carry no ``docint_hier_type`` at all. Requiring ``fine`` made
+    every one of them unretrievable as soon as a single tagged point existed —
+    measured on a mixed collection, every non-visual turn came back with the
+    one tagged chunk and nothing else.
+    """
+    rag = RAG(qdrant_collection="test")
+    captured: dict[str, Any] = {}
+    rag.index = cast(Any, types.SimpleNamespace(as_retriever=lambda **kwargs: captured.update(kwargs) or object()))
+    monkeypatch.setattr(RAG, "_build_image_lane", lambda self, **kwargs: None)
+    monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [{"docint_hier_type": "fine"}])
+
+    rag._build_retriever()
+
+    assert captured["vector_store_kwargs"]["qdrant_filters"] == models.Filter(must=[not_coarse_condition()])
+    # Never through a llama-index ``NE`` filter: that renders as Qdrant
+    # ``MatchExcept`` and still drops every chunk that carries no tag.
+    assert "filters" not in captured
 
 
 def test_persisted_nodes_get_search_text_written_to_their_payload(

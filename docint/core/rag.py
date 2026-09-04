@@ -98,9 +98,6 @@ from llama_index.core.schema import (
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.core.storage.kvstore.types import BaseKVStore
 from llama_index.core.vector_stores.types import (
-    FilterCondition,
-    FilterOperator,
-    MetadataFilter,
     MetadataFilters,
     VectorStoreQueryMode,
 )
@@ -181,6 +178,7 @@ from docint.core.search.fulltext import (
     build_scan_filter,
     build_search_filter,
     matches_any_phrase,
+    not_coarse_condition,
     parse_keywords,
 )
 from docint.core.search.index import (
@@ -5469,34 +5467,6 @@ class RAG:
         self._parent_context_support_cache[collection] = supported
         return supported
 
-    @staticmethod
-    def _merge_metadata_filters(
-        base_filters: MetadataFilters | None,
-        extra_filters: list[MetadataFilter],
-    ) -> MetadataFilters | None:
-        """Merge request-scoped filters with internal retrieval filters.
-
-        Args:
-            base_filters (MetadataFilters | None): Original filters from the query engine, or None.
-            extra_filters (list[MetadataFilter]): Additional filters that must be applied for
-                retrieval, such as parent-context scoping.
-
-        Returns:
-            MetadataFilters | None: ``base_filters`` AND ``extra_filters`` combined, or None if
-                neither produces any filter.
-        """
-        if not extra_filters:
-            return base_filters
-        if base_filters is None:
-            return MetadataFilters(
-                filters=cast(list[MetadataFilter | MetadataFilters], extra_filters),
-                condition=FilterCondition.AND,
-            )
-        return MetadataFilters(
-            filters=[*base_filters.filters, *extra_filters],
-            condition=FilterCondition.AND,
-        )
-
     def _resolve_vector_store_query_mode(
         self,
         raw_mode: str | None = None,
@@ -5749,50 +5719,44 @@ class RAG:
             similarity_top_k=similarity_top_k,
             retrieval_options=retrieval_options,
         )
-        # The internal condition is expressed twice — once per filter
-        # representation — because either may be the one that executes:
-        # QdrantVectorStore.query uses ``qdrant_filters`` *instead of* the
-        # LlamaIndex filters when both are supplied.
-        internal_filters: list[MetadataFilter] = []
-        internal_conditions: list[qdrant_models.FieldCondition] = []
+        internal_conditions: list[qdrant_models.Filter] = []
         if retrieval_settings["parent_context_enabled"]:
-            internal_filters.append(
-                MetadataFilter(
-                    key="docint_hier_type",
-                    value="fine",
-                    operator=FilterOperator.EQ,
-                )
-            )
-            internal_conditions.append(
-                qdrant_models.FieldCondition(
-                    key="docint_hier_type",
-                    match=qdrant_models.MatchValue(value="fine"),
-                )
-            )
-
-        merged_filters = self._merge_metadata_filters(metadata_filters, internal_filters)
+            # Keep the coarse parents out of retrieval, expressed as "not
+            # coarse" rather than "is fine": only the hierarchical readers tag
+            # their chunks, so a transcript segment or a table row next to one
+            # PDF carries no tag at all, and requiring ``fine`` made every such
+            # chunk unretrievable the moment a single tagged point existed.
+            # This has to be the *native* filter: llama-index renders a ``NE``
+            # metadata filter as Qdrant ``MatchExcept``, which only matches
+            # points that carry the key, so an untagged chunk would still be
+            # dropped.
+            internal_conditions.append(not_coarse_condition())
 
         retriever_kwargs: dict[str, Any] = {
             "similarity_top_k": retrieval_settings["similarity_top_k"],
             "vector_store_query_mode": retrieval_settings["vector_store_query_mode"],
         }
-        if merged_filters is not None:
-            retriever_kwargs["filters"] = merged_filters
+        if metadata_filters is not None:
+            retriever_kwargs["filters"] = metadata_filters
         if retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.HYBRID:
             retriever_kwargs["alpha"] = retrieval_settings["alpha"]
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
             retriever_kwargs["hybrid_top_k"] = retrieval_settings["hybrid_top_k"]
         elif retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.SPARSE:
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
-        if vector_store_kwargs:
-            # Copy before mutating: the caller owns this dict and may reuse it
-            # across the text and image lanes of the same request.
-            native_kwargs = dict(vector_store_kwargs)
-            if internal_conditions and native_kwargs.get("qdrant_filters") is not None:
-                native_kwargs["qdrant_filters"] = merge_qdrant_filters(
-                    native_kwargs["qdrant_filters"],
-                    internal_conditions,
-                )
+        # Copy before mutating: the caller owns this dict and may reuse it
+        # across the text and image lanes of the same request.
+        # ``QdrantVectorStore.query`` uses ``qdrant_filters`` *instead of* the
+        # LlamaIndex ``MetadataFilters`` when both are supplied; every caller
+        # compiles its rules into both, so the native filter is the one that
+        # counts and the internal condition is merged into it.
+        native_kwargs = dict(vector_store_kwargs or {})
+        if internal_conditions:
+            native_kwargs["qdrant_filters"] = merge_qdrant_filters(
+                native_kwargs.get("qdrant_filters"),
+                internal_conditions,
+            )
+        if native_kwargs:
             retriever_kwargs["vector_store_kwargs"] = native_kwargs
         text_retriever = self.index.as_retriever(**retriever_kwargs)
         if not include_images:
