@@ -86,6 +86,14 @@ export interface ChatFinalEvent extends ValidationFields {
   retried?: boolean
   /** The reformulated retrieval query that retry used. */
   retry_query?: string
+  /** Which evidence answered the turn. */
+  retrieval_target?: RetrievalTarget
+  /**
+   * What a visual turn put in front of the model. `images_attached: 0` means
+   * the answer came from stored captions alone because the thumbnails could
+   * not be fetched — a degraded visual turn. Absent on any other target.
+   */
+  visual?: { images_attached: number } | null
 }
 
 /** A rule targets either one `field` or several `fields`; with several, it
@@ -99,6 +107,16 @@ export interface MetadataFilter {
 }
 
 export type RetrievalMode = 'stateless' | 'session'
+
+/**
+ * Which evidence may answer a turn. Orthogonal to `RetrievalMode`, which is
+ * session routing: `all` fuses documents and imagery, `documents` drops the
+ * image lane, and `visual` answers from stored imagery alone — the only
+ * target that puts the pictures themselves in front of the model.
+ */
+export type RetrievalTarget = 'all' | 'documents' | 'visual'
+
+export const RETRIEVAL_TARGETS: readonly RetrievalTarget[] = ['all', 'documents', 'visual'] as const
 
 /** One chunk matching every keyword of a full-text search (`POST /search`). */
 export interface SearchHit {
@@ -198,6 +216,8 @@ export interface ChatRequest {
   collection?: string
   metadata_filters?: MetadataFilter[]
   retrieval_mode?: RetrievalMode
+  // Which evidence may answer this turn. A pinned scope outranks it.
+  retrieval_target?: RetrievalTarget
   // Hand-picked chunk ids this turn must answer from. Sent with the question
   // rather than installed beforehand: the session id is minted by the first
   // turn, so a selection made before it exists has nowhere to be written —

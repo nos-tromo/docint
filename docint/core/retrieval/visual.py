@@ -31,6 +31,7 @@ from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle
 from loguru import logger
 from qdrant_client import models
+from typing_extensions import override
 
 from docint.core.search.fulltext import matches_phrase
 
@@ -145,6 +146,7 @@ class VisualRetriever(BaseRetriever):
             logger.warning("Visual {} lane failed: {}. Continuing without it.", name, exc)
             return []
 
+    @override
     def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
         """Retrieve fused visual candidates as citation nodes.
 

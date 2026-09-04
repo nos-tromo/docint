@@ -5,9 +5,13 @@ import { useSearchUiStore } from '@/stores/searchUi'
 import { cn } from '@/lib/cn'
 import { SlidersIcon } from '@/components/common/icons'
 import { referenceMetadataFieldOptions } from '@/lib/referenceMetadata'
+import { parseClockSeconds } from '@/lib/clock'
 import { useT } from '@/i18n/LanguageContext'
 
 const OPERATORS = ['eq', 'neq', 'contains', 'gte', 'lte', 'in']
+
+/** The kinds of stored imagery a visual turn can be narrowed to. */
+const VISUAL_SOURCE_TYPES = ['any', 'video', 'social', 'image'] as const
 
 /** One `<datalist>` id, referenced by every custom-rule field input. */
 const FIELD_OPTIONS_ID = 'filter-field-options'
@@ -119,6 +123,69 @@ export function FilterBuilder() {
                   />
                 </label>
               </div>
+
+              {/* Only under the visual target, because these narrow the image
+                  companion: a keyframe-time rule against a text chunk matches
+                  nothing, so offering them elsewhere would invite a filter
+                  that silently empties the answer. */}
+              {s.retrievalTarget === 'visual' && (
+                <div className="flex flex-col gap-2" data-testid="visual-filters">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-muted-foreground">
+                      {t('chat.visual_source_type')}
+                    </span>
+                    <SelectMenu
+                      options={VISUAL_SOURCE_TYPES.map((name) => ({
+                        value: name,
+                        label: t(`chat.visual_source.${name}`)
+                      }))}
+                      value={s.visualSourceType}
+                      onChange={(value) =>
+                        s.setVisualSourceType(value as (typeof VISUAL_SOURCE_TYPES)[number])
+                      }
+                      label={t('chat.visual_source_type')}
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-muted-foreground">{t('chat.visual_clip_file')}</span>
+                    <Input
+                      value={s.visualClipFile}
+                      onChange={(e) => s.setVisualClipFile(e.target.value)}
+                      placeholder="clip.mp4"
+                    />
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs text-muted-foreground">
+                        {t('chat.visual_time_from')}
+                      </span>
+                      <Input
+                        value={s.visualTimeFrom}
+                        onChange={(e) => s.setVisualTimeFrom(e.target.value)}
+                        placeholder="0:00"
+                        aria-invalid={
+                          s.visualTimeFrom !== '' && parseClockSeconds(s.visualTimeFrom) === null
+                        }
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs text-muted-foreground">
+                        {t('chat.visual_time_to')}
+                      </span>
+                      <Input
+                        value={s.visualTimeTo}
+                        onChange={(e) => s.setVisualTimeTo(e.target.value)}
+                        placeholder="2:30"
+                        aria-invalid={
+                          s.visualTimeTo !== '' && parseClockSeconds(s.visualTimeTo) === null
+                        }
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
 
               {/* A boolean toggle is not a text field: it gets its own
                   checkbox-beside-label row rather than a grid cell sized for

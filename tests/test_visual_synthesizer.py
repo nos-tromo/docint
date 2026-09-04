@@ -6,7 +6,7 @@ stored thumbnails to the same synthesis call — and must do so without letting
 those pixels leak onto a node, into ``sources``, or into a persisted turn.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRole, TextBlock
@@ -102,60 +102,65 @@ class _Upstream:
         """Initialize the stand-in."""
         self.upstream_calls = 0
 
-    def _update_response(self, _program: Any, _program_kwargs: Any, _response_kwargs: Any) -> str:
+    def _update_response(self, program: Any, program_kwargs: dict[str, Any], response_kwargs: dict[str, Any]) -> Any:
         """Answer the way the non-visual synthesizer would.
 
         Args:
-            _program (Any): Unused.
-            _program_kwargs (Any): Unused.
-            _response_kwargs (Any): Unused.
+            program (Any): Unused.
+            program_kwargs (dict[str, Any]): Unused.
+            response_kwargs (dict[str, Any]): Unused.
 
         Returns:
-            str: A marker answer.
+            Any: A marker answer.
         """
         self.upstream_calls += 1
         return "upstream"
 
-    def synthesize(self, _query: Any, _nodes: Any, *_args: Any, **_kwargs: Any) -> str:
+    def synthesize(self, query: Any, nodes: Any, *args: Any, **kwargs: Any) -> Any:
         """Record an upstream synthesis.
 
         Args:
-            _query (Any): Unused.
-            _nodes (Any): Unused.
-            *_args (Any): Unused.
-            **_kwargs (Any): Unused.
+            query (Any): Unused.
+            nodes (Any): Unused.
+            *args (Any): Unused.
+            **kwargs (Any): Unused.
 
         Returns:
-            str: A marker response.
+            Any: A marker response.
         """
         self.upstream_calls += 1
         return "synthesized"
 
-    async def asynthesize(self, _query: Any, _nodes: Any, *_args: Any, **_kwargs: Any) -> str:
+    async def asynthesize(self, query: Any, nodes: Any, *args: Any, **kwargs: Any) -> Any:
         """Record an upstream async synthesis.
 
         Args:
-            _query (Any): Unused.
-            _nodes (Any): Unused.
-            *_args (Any): Unused.
-            **_kwargs (Any): Unused.
+            query (Any): Unused.
+            nodes (Any): Unused.
+            *args (Any): Unused.
+            **kwargs (Any): Unused.
 
         Returns:
-            str: A marker response.
+            Any: A marker response.
         """
         self.upstream_calls += 1
         return "synthesized"
 
-    async def _aupdate_response(self, _program: Any, _program_kwargs: Any, _response_kwargs: Any) -> str:
+    async def _aupdate_response(
+        self,
+        program: Any,
+        program_kwargs: dict[str, Any],
+        response_kwargs: dict[str, Any],
+    ) -> Any:
         """Answer the way the non-visual synthesizer would, asynchronously.
 
         Args:
-            _program (Any): Unused.
-            _program_kwargs (Any): Unused.
-            _response_kwargs (Any): Unused.
+            program (Any): Unused.
+            program_kwargs (dict[str, Any]): Unused.
+            response_kwargs (dict[str, Any]): Unused.
 
         Returns:
-            str: A marker answer.
+            Any: A marker answer.
         """
         self.upstream_calls += 1
         return "upstream"
@@ -164,7 +169,13 @@ class _Upstream:
 class _Synth(VisualImagesMixin, _Upstream):
     """The mixin over a recording stand-in."""
 
-    def __init__(self, *, streaming: bool = False, max_images: int = 6, thumbnails: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        *,
+        streaming: bool = False,
+        max_images: int = 6,
+        thumbnails: dict[str, Any] | None = None,
+    ) -> None:
         """Initialize the synthesizer.
 
         Args:
@@ -176,10 +187,10 @@ class _Synth(VisualImagesMixin, _Upstream):
         self._llm = _LLM()
         self._streaming = streaming
         self._structured_answer_filtering = False
-        self._output_cls = None
+        self._output_cls: type | None = None
         self._max_images = max_images
         self._legend_template = "Attached:\n{image_legend}"
-        self._attached = []
+        self._attached: list[tuple[int, str, str]] = []
         served = {"point-1": ("image/jpeg", THUMBNAIL_B64)} if thumbnails is None else thumbnails
         self._fetch_thumbnails = lambda ids: {key: served[key] for key in ids if key in served}
 
@@ -306,7 +317,8 @@ def test_image_blocks_render_as_data_uri_image_url_parts() -> None:
 
     rendered = to_openai_message_dict(synth._llm.seen[0][-1])
 
-    parts = [part for part in rendered["content"] if part.get("type") == "image_url"]
+    content = cast(list[dict[str, Any]], rendered["content"])
+    parts = [part for part in content if part.get("type") == "image_url"]
     assert parts[0]["image_url"]["url"] == f"data:image/jpeg;base64,{THUMBNAIL_B64}"
 
 

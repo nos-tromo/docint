@@ -470,6 +470,7 @@ class DummyRAG:
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
         scoped_node_ids: Any = None,
+        retrieval_target: str = "all",
     ) -> dict[str, Any]:
         """Chat with the RAG system.
 
@@ -482,6 +483,7 @@ class DummyRAG:
             metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
             scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
+            retrieval_target (str): Which evidence may answer the turn.
 
         Returns:
             dict[str, Any]: The response from the RAG system.
@@ -542,6 +544,7 @@ class DummyRAG:
         skip_query_rewrite: Any = None,
         scoped_node_ids: Any = None,
         replace_turn_idx: int | None = None,
+        retrieval_target: str = "all",
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -557,6 +560,7 @@ class DummyRAG:
             skip_query_rewrite (Any): Accepted for parity with RAG.stream_chat; ignored by the stub.
             scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
             replace_turn_idx (int | None): Turn to overwrite; recorded by the stub.
+            retrieval_target (str): Which evidence may answer the turn.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -607,6 +611,7 @@ class DummyRAG:
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
         scoped_node_ids: Any = None,
+        retrieval_target: str = "all",
     ) -> dict[str, Any]:
         """Run a stateless retrieval query.
 
@@ -616,6 +621,7 @@ class DummyRAG:
             metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
             scoped_node_ids: Hand-picked chunk ids to answer from; recorded by the stub.
+            retrieval_target: Which evidence may answer the turn.
 
         Returns:
             dict[str, Any]: Response payload.
@@ -640,6 +646,7 @@ class DummyRAG:
         vector_store_kwargs: Any = None,
         retrieval_options: Any = None,
         scoped_node_ids: Any = None,
+        retrieval_target: str = "all",
     ) -> dict[str, Any]:
         """Async stateless retrieval query mirroring :meth:`run_query`.
 
@@ -650,6 +657,7 @@ class DummyRAG:
             vector_store_kwargs: Optional native vector-store query kwargs.
             retrieval_options: Optional runtime retrieval overrides.
             scoped_node_ids: Hand-picked chunk ids to answer from.
+            retrieval_target: Which evidence may answer the turn.
 
         Returns:
             dict[str, Any]: Response payload.
@@ -5342,3 +5350,118 @@ def test_chunk_endpoint_404s_for_an_unknown_chunk(client: TestClient) -> None:
     response = client.get("/search/chunk", params={"id": "gone"})
 
     assert response.status_code == 404
+
+
+def test_query_defaults_to_the_all_retrieval_target(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A client that says nothing about the target gets the historical behaviour.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def _chat(question: str, **kwargs: Any) -> dict[str, Any]:
+        """Record the target the API threaded through.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): Chat arguments.
+
+        Returns:
+            dict[str, Any]: A fixed answer.
+        """
+        seen["target"] = kwargs.get("retrieval_target")
+        return {"response": "answer", "sources": []}
+
+    monkeypatch.setattr(api_module.rag, "chat", _chat)
+
+    response = client.post("/query", json={"question": "what is at the gate"})
+
+    assert response.status_code == 200
+    assert seen["target"] == "all"
+    assert response.json()["retrieval_target"] == "all"
+
+
+def test_query_threads_the_visual_target_to_the_engine(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """The target decides which evidence answers, so it must reach retrieval.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def _chat(question: str, **kwargs: Any) -> dict[str, Any]:
+        """Record the target and report attached imagery.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): Chat arguments.
+
+        Returns:
+            dict[str, Any]: A fixed answer carrying a visual block.
+        """
+        seen["target"] = kwargs.get("retrieval_target")
+        return {"response": "answer", "sources": [], "visual": {"images_attached": 3}}
+
+    monkeypatch.setattr(api_module.rag, "chat", _chat)
+
+    response = client.post("/query", json={"question": "what is at the gate", "retrieval_target": "visual"})
+
+    assert seen["target"] == "visual"
+    assert response.json()["visual"] == {"images_attached": 3}
+
+
+def test_query_rejects_an_unknown_retrieval_target(client: TestClient) -> None:
+    """The vocabulary is closed; a typo must not silently answer from text.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post("/query", json={"question": "hello", "retrieval_target": "pictures"})
+
+    assert response.status_code == 422
+
+
+def test_query_reports_no_visual_block_for_a_text_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Absent is what a turn that showed no pixels looks like.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    monkeypatch.setattr(
+        api_module.rag,
+        "chat",
+        lambda question, **kwargs: {"response": "answer", "sources": []},
+    )
+
+    response = client.post("/query", json={"question": "hello", "retrieval_target": "documents"})
+
+    assert response.json()["visual"] is None
+    assert response.json()["retrieval_target"] == "documents"
+
+
+def test_stream_query_final_frame_carries_the_retrieval_target(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The SPA reads the target off the final frame, so it must be on it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+
+    response = client.post(
+        "/stream_query",
+        json={"question": "what is at the gate", "retrieval_mode": "stateless", "retrieval_target": "visual"},
+    )
+
+    assert response.status_code == 200
+    frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert frames[-1]["retrieval_target"] == "visual"

@@ -469,6 +469,8 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 | `IMAGE_OCR_ENABLED` | on when `OCR_MODEL` is set | Read the text *inside* an image (a screenshot, a photographed letter, a slide) and store it as `ocr_text`. |
 | `KEYFRAME_OCR_ENABLED` | `false` | Read video keyframes too. Off by default: a clip contributes many frames and only slides tend to carry text. |
 | `IMAGE_OCR_MAX_IMAGE_DIM` | `1536` | Longest side of an image sent to be read. |
+| `VISUAL_RETRIEVE_TOP_K` | `24` | Candidate depth for the `visual` retrieval target, where imagery is the whole evidence set rather than a lane beside the text. |
+| `VISUAL_ANSWER_MAX_IMAGES` | `6` | How many stored thumbnails a visual answer attaches to the generation call. Each costs roughly 600 prompt tokens, which is taken off the caption context. |
 
 Images retrieve as ordinary sources: `IMAGE_RETRIEVE_TOP_K` CLIP candidates join
 the text hits *before* ranking, so the shared reranker scores both modalities in
@@ -477,6 +479,17 @@ model therefore sees images in its context and can cite them by number.
 `IMAGE_RERANK_MIN_SCORE` then drops the ones that are merely nearest rather than
 relevant — the top-n cut alone cannot protect a sparse collection, where an
 irrelevant image would take a slot for lack of competition.
+
+The `visual` retrieval target draws deeper (`VISUAL_RETRIEVE_TOP_K`) because
+nothing else is answering the turn, and it is the one path that puts pixels in
+front of the model: after ranking, up to `VISUAL_ANSWER_MAX_IMAGES` stored
+768px thumbnails ride along with the synthesis call. Raising either costs
+prompt budget the captions would otherwise use. Its filters (kind of imagery,
+clip, time range) are applied by the companion collection itself, which needs
+KEYWORD indexes on `source_type`/`source_doc_id`/`source_file` and a FLOAT
+index on `keyframe_time_sec`; ingestion creates them, and a collection
+ingested earlier gains them on its first visual query or on re-ingest. See
+[retrieval-and-agents.md](retrieval-and-agents.md#retrieval-targets).
 
 Captioning and reading are different questions about the same picture, and both
 are asked. The caption says what an image *shows*; `IMAGE_OCR_ENABLED` adds what

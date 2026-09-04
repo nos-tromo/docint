@@ -940,4 +940,38 @@ describe('Chat session switching', () => {
       expect(screen.getByText(/Evidence insufficient/)).toBeInTheDocument()
     })
   })
+
+  it('sends the retrieval target with the question it applies to', async () => {
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = typeof req === 'string' ? req : String(req)
+      if (u.includes('/stream_query')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: bodyFromString('data: {"response":"ok","sources":[],"session_id":"sess-new"}\n\n')
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ messages: [] }),
+        text: async () => '{"messages":[]}'
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useChatFiltersStore.getState().setRetrievalTarget('visual')
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/stream_query'))
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1]!.body)).retrieval_target).toBe('visual')
+    })
+  })
 })

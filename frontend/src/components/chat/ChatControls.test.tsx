@@ -110,4 +110,25 @@ describe('ChatControls', () => {
     expect(on).not.toBe(off)
     void container
   })
+
+  it('offers the three retrieval targets, defaulting to everything', async () => {
+    render(<ChatControls />)
+
+    const picker = screen.getByRole('combobox', { name: /answer from/i })
+    expect(picker).toHaveTextContent('Everything')
+
+    await userEvent.click(picker)
+
+    expect(await screen.findByRole('option', { name: 'Documents' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Images' })).toBeInTheDocument()
+  })
+
+  it('choosing a target records it, since it decides what an answer is made of', async () => {
+    render(<ChatControls />)
+
+    await userEvent.click(screen.getByRole('combobox', { name: /answer from/i }))
+    await userEvent.click(await screen.findByRole('option', { name: 'Images' }))
+
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('visual')
+  })
 })

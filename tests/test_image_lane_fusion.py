@@ -215,16 +215,44 @@ def test_floor_drops_unscored_images_when_other_nodes_did_score(score: float | N
     assert [n.node.node_id for n in out] == ["t1"]
 
 
-def test_the_lane_forwards_the_request_filter_rules() -> None:
-    """Image candidates are filtered in memory, so the rules must reach them."""
-    rag = RAG(qdrant_collection="testbatch")
-    captured: dict[str, Any] = {}
+def _capturing_lane(rag: RAG, captured: dict[str, Any]) -> None:
+    """Record the arguments the image lane hands its retrieval call.
 
-    def _capture(query: str, *, top_k: int, metadata_filter_rules: Any = None) -> list[NodeWithScore]:
+    Args:
+        rag (RAG): The instance whose retrieval call to replace.
+        captured (dict[str, Any]): Dict the arguments are recorded into.
+    """
+
+    def _capture(
+        query: str,
+        *,
+        top_k: int,
+        metadata_filter_rules: Any = None,
+        qdrant_filter: Any = None,
+    ) -> list[NodeWithScore]:
+        """Record and return nothing.
+
+        Args:
+            query (str): The query.
+            top_k (int): Candidate depth.
+            metadata_filter_rules (Any): Raw request filters.
+            qdrant_filter (Any): Compiled native filter.
+
+        Returns:
+            list[NodeWithScore]: Always empty.
+        """
         captured["rules"] = metadata_filter_rules
+        captured["qdrant_filter"] = qdrant_filter
         return []
 
     rag._retrieve_image_nodes = _capture
+
+
+def test_the_lane_forwards_the_request_filter_rules() -> None:
+    """The rules are the lane's second pass, so they must reach it."""
+    rag = RAG(qdrant_collection="testbatch")
+    captured: dict[str, Any] = {}
+    _capturing_lane(rag, captured)
     rules = [{"field": "mimetype", "operator": "mime_match", "value": "image/*"}]
 
     lane = rag._build_image_lane(metadata_filter_rules=rules, metadata_filters_active=True)
@@ -232,6 +260,44 @@ def test_the_lane_forwards_the_request_filter_rules() -> None:
     assert lane is not None
     lane("banner")
     assert captured["rules"] == rules
+
+
+def test_the_lane_forwards_the_compiled_filter_to_the_companion() -> None:
+    """Filtering after the top-k cut is what emptied a filtered image lane.
+
+    Five unfiltered candidates rarely survive a clip or time-range rule, so
+    the filter has to reach the companion collection, which applies it before
+    ranking rather than after.
+    """
+    rag = RAG(qdrant_collection="testbatch")
+    captured: dict[str, Any] = {}
+    _capturing_lane(rag, captured)
+    native = object()
+
+    lane = rag._build_image_lane(
+        metadata_filter_rules=[{"field": "source_type", "operator": "eq", "value": "video_keyframe"}],
+        metadata_filters_active=True,
+        qdrant_filter=native,
+    )
+
+    assert lane is not None
+    lane("banner")
+    assert captured["qdrant_filter"] is native
+
+
+def test_the_lane_runs_when_only_the_compiled_filter_reached_it() -> None:
+    """A native filter alone is a complete description of what may match."""
+    rag = RAG(qdrant_collection="testbatch")
+    captured: dict[str, Any] = {}
+    _capturing_lane(rag, captured)
+
+    lane = rag._build_image_lane(
+        metadata_filter_rules=None,
+        metadata_filters_active=True,
+        qdrant_filter=object(),
+    )
+
+    assert lane is not None
 
 
 def test_the_lane_stands_down_when_filters_never_reached_the_runtime() -> None:

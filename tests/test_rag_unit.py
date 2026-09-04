@@ -1318,7 +1318,12 @@ def test_session_manager_chat_lazy_inits_query_engine(monkeypatch: pytest.Monkey
 
     # ``turn_idx`` is the persisted turn's index, returned so a corrective
     # retry can overwrite that turn rather than append a second one.
-    assert response == {"response": "ok", "graph_debug": {"applied": False}, "turn_idx": 0}
+    assert response == {
+        "response": "ok",
+        "graph_debug": {"applied": False},
+        "retrieval_target": "all",
+        "turn_idx": 0,
+    }
     assert len(build_calls) == 1, (
         "SessionManager.chat must lazily call rag.build_query_engine() exactly once when rag.query_engine is None"
     )

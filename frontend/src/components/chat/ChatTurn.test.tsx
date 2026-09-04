@@ -124,6 +124,43 @@ describe('ChatTurn', () => {
     expect(screen.getByTestId('rerank-not-applied')).toBeInTheDocument()
   })
 
+  it('says so when a visual answer never got to see the pictures', () => {
+    // The point of the visual target is that the model looks at the imagery.
+    // A turn where the thumbnails could not be fetched answered from captions
+    // alone, and must not read as an ordinary visual answer.
+    const meta = {
+      session_id: 's',
+      sources: [{ id: 1 }],
+      retrieval_target: 'visual',
+      visual: { images_attached: 0 }
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'what is at the gate?', assistant: 'A barrier.', done: true, meta })
+
+    expect(screen.getByTestId('visual-pixels-missing')).toBeInTheDocument()
+  })
+
+  it('stays quiet when a visual answer did see the pictures', () => {
+    const meta = {
+      session_id: 's',
+      sources: [{ id: 1 }],
+      retrieval_target: 'visual',
+      visual: { images_attached: 3 }
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'what is at the gate?', assistant: 'A barrier.', done: true, meta })
+
+    expect(screen.queryByTestId('visual-pixels-missing')).not.toBeInTheDocument()
+  })
+
+  it('stays quiet on a text turn, which was never going to show pictures', () => {
+    const meta = { session_id: 's', sources: [{ id: 1 }], retrieval_target: 'all' } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta })
+
+    expect(screen.queryByTestId('visual-pixels-missing')).not.toBeInTheDocument()
+  })
+
   it('stays quiet when the sources were re-ranked, or no reranker was in the loop', () => {
     const healthy = {
       session_id: 's',

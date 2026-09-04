@@ -259,6 +259,7 @@ export function Chat() {
           collection: selectedCollection ?? undefined,
           metadata_filters: filters.buildPayload(),
           retrieval_mode: filters.retrievalMode,
+          retrieval_target: filters.retrievalTarget,
           reasoning: filters.reasoning,
           // The scope rides along with the question it scopes. An unstarted
           // chat has no session row to pin it to yet, and even on an open one

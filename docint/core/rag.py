@@ -79,10 +79,10 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.indices.prompt_helper import PromptHelper
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.indices.prompt_helper import PromptHelper
 from llama_index.core.response_synthesizers import BaseSynthesizer, CompactAndRefine, Refine
 from llama_index.core.response_synthesizers.type import ResponseMode
 from llama_index.core.retrievers import BaseRetriever
@@ -3974,7 +3974,9 @@ class RAG:
                 query_text=self._image_query_for_clip(query),
                 top_k=top_k,
                 source_collection=self.qdrant_collection,
-                qdrant_filter=qdrant_filter,
+                # Only when there is one, so an unfiltered turn calls exactly
+                # the signature it always did.
+                **({"qdrant_filter": qdrant_filter} if qdrant_filter is not None else {}),
             )
         except Exception as exc:
             logger.warning("Image source retrieval failed: {}", exc)
@@ -4132,7 +4134,7 @@ class RAG:
                     # Ranking happens here, not in Qdrant, so the scroll draws
                     # deeper than the cut it feeds.
                     limit=max(1, top_k * 4),
-                    with_payload=models.PayloadSelectorExclude(exclude=list(BLOB_PAYLOAD_KEYS)),
+                    with_payload=qdrant_models.PayloadSelectorExclude(exclude=list(BLOB_PAYLOAD_KEYS)),
                     with_vectors=False,
                 )
             except Exception as exc:
@@ -6043,7 +6045,9 @@ class RAG:
         max_images = self._visual_answer_max_images()
         # The caption context has to fit *beside* the pixels, so the window
         # the packer works from is the real one minus what the images cost.
-        window = max(1024, int(self.openai_ctx_window * self.parent_context_safety_margin) - image_token_reserve(max_images))
+        window = max(
+            1024, int(self.openai_ctx_window * self.parent_context_safety_margin) - image_token_reserve(max_images)
+        )
         kwargs["prompt_helper"] = PromptHelper(context_window=window, num_output=self.openai_num_output)
         visual_cls = VisualStreamingCompactAndRefine if compact else VisualStreamingRefine
         synthesizer = visual_cls(**kwargs)

@@ -1,4 +1,5 @@
-import { BrainActiveIcon, BrainIcon, Button } from '@infra/ui'
+import { BrainActiveIcon, BrainIcon, Button, SelectMenu } from '@infra/ui'
+import { RETRIEVAL_TARGETS, type RetrievalTarget } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { FilterBuilder } from '@/components/chat/FilterBuilder'
 import { ChatContextIcon, SingleMessageIcon } from '@/components/common/icons'
@@ -101,9 +102,40 @@ export function ReasoningToggle() {
  * sideways the first time an answer lands. Every control in that row is 32px
  * tall, the same as the search panel's own Search button across from it.
  */
+/**
+ * Which evidence the next answer may come from: everything, documents only,
+ * or stored imagery only.
+ *
+ * A picker rather than a toggle, because unlike the two-state controls beside
+ * it this has three values and none of them is a mere on/off of the others —
+ * and unlike them it changes what an answer is *made of*, which is worth
+ * spelling out rather than hiding behind an icon. Under the visual target the
+ * filter panel grows its own presets (clip, time range, kind of imagery).
+ */
+export function RetrievalTargetPicker() {
+  const t = useT()
+  const target = useChatFiltersStore((s) => s.retrievalTarget)
+  const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
+
+  return (
+    <SelectMenu
+      options={RETRIEVAL_TARGETS.map((name) => ({
+        value: name,
+        label: t(`chat.retrieval_target.${name}`)
+      }))}
+      value={target}
+      onChange={(value) => setRetrievalTarget(value as RetrievalTarget)}
+      label={t('chat.retrieval_target')}
+      className="min-w-0"
+      triggerClassName="h-8 text-xs font-medium"
+    />
+  )
+}
+
 export function ChatControls() {
   return (
     <div className="flex items-center gap-2">
+      <RetrievalTargetPicker />
       <ReasoningToggle />
       <RetrievalToggle />
       {/* Last, so its right edge *is* the header row's right edge: the panel it
