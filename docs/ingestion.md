@@ -12,7 +12,7 @@ through every stage, from file triage to Qdrant persistence.
 | `POST /ingest` | `docint/core/api.py` (`ingest`) | Ingests the configured `DATA_PATH` directly. CLI/batch path. |
 | `POST /ingest/upload` | `docint/core/api.py` (`ingest_upload`) | Stages files into the collection's batch directory. Upload only — no ingestion. |
 | `POST /ingest/finalize` | `docint/core/api.py` (`ingest_finalize`) | Queues one server-owned job over the staged batches. The SPA's path. |
-| SPA Ingest page | `frontend/src/routes/Ingest.tsx` | Uploads in batches, then finalizes once; consumes `GET /ingest/jobs/events`. |
+| SPA Ingest page | `frontend/src/routes/Ingest.tsx` | Uploads in batches, then finalizes once; lists every owned job (`frontend/src/components/ingest/IngestJobList.tsx`) and consumes `GET /ingest/jobs/events`. |
 
 All of them end up calling `RAG.ingest_docs()` in `docint/core/rag.py`,
 which owns the whole pipeline.
@@ -27,9 +27,17 @@ owner-multiplexed SSE stream at `GET /ingest/jobs/events`.
 This exists because ingestion used to stream progress on the request that
 started it, so any client disconnect — navigation, reload, a closed tab —
 severed the only view of a run that kept going regardless. Jobs are held in
-memory: they survive a browser reload (the client re-discovers them by
-owner) but not a backend restart. The staged files remain on disk either
-way, and hash dedup makes a re-run cheap.
+memory: they survive a browser reload but not a backend restart. The staged
+files remain on disk either way, and hash dedup makes a re-run cheap.
+
+The client re-discovers a caller's runs from two sources, because neither is
+complete alone. `GET /ingest/jobs` lists them — the only way to see a job
+still waiting on a worker slot, which emits no frames at all, or one queued
+from another tab. The per-job snapshot (`GET /ingest/jobs/{job_id}`) answers
+the one question the list cannot: a `404` means the backend restarted while
+that run was in flight, and the screen offers to re-queue it. Progress comes
+from the stream. The Ingest screen shows one card per job, so starting a
+second run no longer hides the first.
 
 Concurrency is bounded by `DOCINT_INGEST_CONCURRENCY` (default `1`, so runs
 serialise). A second job for a collection that is already ingesting is

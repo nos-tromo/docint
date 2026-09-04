@@ -1,22 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Banner, Button, Card, FileList, Input, PageHeader, ToggleButton } from '@infra/ui'
-import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
-import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
+import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useIngestDefaults } from '@/hooks/useIngestDefaults'
-import { dismissIngestJob, createIngestJob, getIngestJob } from '@/api/jobs'
-import { ApiError } from '@/api/client'
-import { selectCollection } from '@/api/collections'
-import { useCollections, collectionsKey } from '@/hooks/useCollections'
+import { ingestJobsKey } from '@/hooks/useIngestJobs'
+import { useCollections } from '@/hooks/useCollections'
 import { useConfig } from '@/hooks/useConfig'
-import { useUiStore } from '@/stores/ui'
 import { Dropzone } from '@/components/ingest/Dropzone'
 import { IngestionStatus } from '@/components/ingest/IngestionStatus'
-import {
-  deriveIngestStatus,
-  withServerTimes,
-  type IngestStatus
-} from '@/lib/ingestStatus'
+import { IngestJobList } from '@/components/ingest/IngestJobList'
+import { deriveIngestStatus, type IngestStatus } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
@@ -25,34 +19,14 @@ import { useT } from '@/i18n/LanguageContext'
  * never 413 even before the real `max_upload_bytes` is known.
  */
 const FALLBACK_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024
-/** How often to re-check a job that is still waiting on a worker slot. */
-const QUEUED_POLL_INTERVAL_MS = 2_000
 
 export function Ingest() {
   const t = useT()
   const run = useIngestRunStore()
-  const jobEvents = useIngestJobsStore(selectJobEvents(run.activeJobId))
   const streamLost = useIngestJobsStore((s) => s.streamLost)
-  // Queried directly by job id rather than inferred from a list snapshot —
-  // see the `interrupted` derivation below for why. `enabled: false` when
-  // there's no active job keeps this a no-op the rest of the time.
-  const jobQuery = useQuery({
-    queryKey: ['ingest-job', run.activeJobId],
-    queryFn: () => getIngestJob(run.activeJobId!),
-    enabled: !!run.activeJobId,
-    retry: false,
-    staleTime: 30_000,
-    // A queued job emits no SSE frames until a worker slot frees up, so
-    // nothing else would refresh this snapshot — the "waiting for a slot"
-    // notice would outlive the queue by up to `staleTime`. Poll only while
-    // queued; every other status is driven by the event stream.
-    refetchInterval: (query) =>
-      query.state.data?.status === 'queued' ? QUEUED_POLL_INTERVAL_MS : false
-  })
   const { data: ingestDefaults } = useIngestDefaults()
   const { data: collections } = useCollections()
   const { data: config } = useConfig()
-  const setSelected = useUiStore((s) => s.setSelectedCollection)
   const qc = useQueryClient()
 
   const limitBytes = config?.max_upload_bytes ?? FALLBACK_UPLOAD_LIMIT_BYTES
@@ -75,142 +49,20 @@ export function Ingest() {
     setSeeded(true)
   }, [seeded, ingestDefaults])
 
-  // Upload events and job events fold into one timeline, so the existing
-  // (already tested) status reducer keeps working unchanged across the seam
-  // between "uploading to the server" and "the server is ingesting".
   const fileSizes = useMemo(() => {
     const sizes: Record<string, number> = {}
     for (const f of run.files) sizes[f.webkitRelativePath || f.name] = f.size
     return sizes
   }, [run.files])
 
-  const status: IngestStatus = useMemo(() => {
-    // While a fresh upload is in flight, `activeJobId` still points at the
-    // *previous* run's job — `run.start()` only overwrites it once
-    // `createIngestJob` resolves for the new run (stores/ingestRun.ts). So a
-    // second run in the same tab must not merge in the old job's log: its
-    // trailing `ingestion_complete` would land after this run's own upload
-    // events and flip `deriveIngestStatus` to `phase: 'complete'`, wiping the
-    // live `uploadingFile`/`uploadingBytes` fields it clears on that event.
-    const merged = run.uploading ? run.uploadEvents : [...run.uploadEvents, ...jobEvents]
-    const derived = deriveIngestStatus(merged, fileSizes)
-    // While uploading, the snapshot (keyed on the stale `activeJobId`) also
-    // belongs to the previous run, so its timestamps must not be merged.
-    if (run.uploading) return derived
-    // A reattached log has no synthetic upload `start` frame, so the elapsed
-    // timer has no client anchor — fall back to the server snapshot's
-    // `started_at`/`finished_at` (already fetched by `jobQuery`).
-    const timed = withServerTimes(derived, jobQuery.data)
-    // A merged log can start mid-stream — reattaching to a job whose
-    // `ingestion_started` frame arrived before this tab did — and still
-    // carry real progress. Treat "an active job has events" as never idle so
-    // progress stays visible even without an explicit phase-setting frame.
-    if (timed.phase === 'idle' && run.activeJobId && jobEvents.length > 0) {
-      return { ...timed, phase: 'processing' }
-    }
-    return timed
-  }, [run.uploadEvents, jobEvents, fileSizes, run.activeJobId, run.uploading, jobQuery.data])
-
-  // A job the server 404s on is an interrupted run: the backend restarted
-  // while it was in flight (jobs are in-memory by design). Answered by
-  // querying the job directly — the authoritative source — rather than
-  // inferred from a `/ingest/jobs` *list* snapshot, which went through three
-  // failed attempts at this exact spot (a stale-list false positive; a
-  // permanently-stuck false negative from gating on historical SSE events;
-  // a transient false-positive flash from invalidating a shared list query
-  // but still rendering against its pre-refetch data for one commit). Every
-  // one of those was really an attempt to reason about a snapshot's
-  // freshness relative to job creation. `jobQuery`'s key includes the job
-  // id, so a new `activeJobId` is a brand-new cache entry with no stale data
-  // to race against: `data`/`error` start undefined and `interrupted` stays
-  // false until an actual 404 comes back — no invalidation effect needed.
-  // A completed-but-undismissed job also 404s after a backend restart (its
-  // in-memory record is gone either way), but `handledJobId` already records
-  // "this job reached `ingestion_complete`" — so excluding that case keeps a
-  // run that actually finished from reading as interrupted.
-  const interrupted =
-    jobQuery.isError &&
-    jobQuery.error instanceof ApiError &&
-    jobQuery.error.status === 404 &&
-    run.handledJobId !== run.activeJobId
-
-  // A job waiting on the server's concurrency semaphore emits zero frames
-  // until it starts running (docint/core/jobs.py) — without this, `status`
-  // never leaves `phase: 'idle'` and the whole status block below is gated
-  // out, so the run vanishes from view with no card, no spinner, no error.
-  const queued = jobQuery.data?.status === 'queued'
-
-  // Post-ingest side effects: select the collection and refresh the owned
-  // list once, the moment the active job's log reaches its terminal
-  // `ingestion_complete` frame. Guarded by `handledJobId` — a *persisted*
-  // store field, not a component ref — so this fires once per job id no
-  // matter how many times it's observed: within a mount (a reconnect replay
-  // re-delivers the same terminal frame in a new event-log array) and across
-  // mounts (navigating away and back, or a reload, while the job's log lives
-  // on in the module-level job store and gets replayed by the SSE stream).
-  useEffect(() => {
-    const last = jobEvents[jobEvents.length - 1]
-    if (!run.activeJobId || !last || last.event !== 'ingestion_complete') return
-    if (run.handledJobId === run.activeJobId) return
-    const jobId = run.activeJobId
-    const data = last.data as { collection?: unknown }
-    const name = typeof data.collection === 'string' ? data.collection : run.collection
-    // Mark handled synchronously, before the async work below, so a
-    // re-render triggered by that very write (or any other update while the
-    // work is in flight) can't slip past the guard a second time.
-    useIngestRunStore.getState().markJobHandled(jobId)
-    if (!name) return
-    void (async () => {
-      await selectCollection(name)
-      // Refresh the owned-collections list BEFORE selecting: the Sidebar's
-      // reconcile effect clears any active collection not present in that
-      // cached list, so selecting a brand-new collection while the list is
-      // stale would immediately snap the selection back to null. Awaiting the
-      // refetch first ensures the new name is in the list before we select it.
-      await qc.invalidateQueries({ queryKey: collectionsKey })
-      setSelected(name)
-    })()
-  }, [jobEvents, run.activeJobId, run.handledJobId, run.collection, qc, setSelected])
-
-  const dismissMutation = useMutation({
-    mutationFn: (jobId: string) => dismissIngestJob(jobId),
-    onSuccess: (_data, jobId) => {
-      useIngestJobsStore.getState().dropJob(jobId)
-      run.dismissActive()
-      // `dismissActive()` clears `activeJobId` in the same tick, which
-      // disables `jobQuery` on the next render — but invalidate its cache
-      // entry too, so a dismissed-then-somehow-revisited job id never serves
-      // a stale cached snapshot.
-      void qc.invalidateQueries({ queryKey: ['ingest-job', jobId] })
-    }
-  })
-
-  // Re-queuing an interrupted run does NOT re-upload: the batches this run
-  // already staged are still in the collection's server-side upload
-  // directory (only the in-memory job registry was lost), so re-finalizing
-  // directly is what "re-running skips whatever was already indexed" (the
-  // banner copy) actually promises. `run.start()` would be a no-op here
-  // anyway — `run.files` is always empty by the time a run can be observed
-  // as interrupted (cleared the moment the original job was queued).
-  const rerunMutation = useMutation({
-    mutationFn: () =>
-      // Re-run against the collection the interrupted job was actually
-      // queued for, not the live form field — the user can edit `run.collection`
-      // between the interruption and clicking "Run again". Falls back to the
-      // live field only for state persisted before `activeJobCollection`
-      // existed.
-      createIngestJob({
-        collection: run.activeJobCollection ?? run.collection,
-        ner: run.ner,
-        hate_speech: run.hate
-      }),
-    onSuccess: ({ job_id }) => {
-      // No cache invalidation needed: `adoptJob` points `activeJobId` at the
-      // new job id, which `jobQuery` (keyed by that id) picks up as a
-      // brand-new, uncached query on its own.
-      useIngestRunStore.getState().adoptJob(job_id)
-    }
-  })
+  // The upload leg only. Its events move to the job they produced the moment
+  // that job is queued (stores/ingestRun.ts), so this card describes the
+  // transfer in flight and nothing else — and an upload that failed before
+  // reaching a job, which has no job card to live on.
+  const uploadStatus: IngestStatus = useMemo(
+    () => deriveIngestStatus(run.uploadEvents, fileSizes),
+    [run.uploadEvents, fileSizes]
+  )
 
   const busy = run.uploading
 
@@ -282,7 +134,13 @@ export function Ingest() {
           <Button
             variant="primary"
             className="w-full"
-            onClick={() => void run.start(limitBytes, t)}
+            onClick={() => {
+              void run.start(limitBytes, t).then(() => {
+                // The new job exists server-side now; the list is what makes
+                // it visible to any other tab (and to this one after a reload).
+                void qc.invalidateQueries({ queryKey: ingestJobsKey })
+              })
+            }}
             disabled={busy || !run.collection || run.files.length === 0}
           >
             {run.uploading ? t('ingest.busy') : t('ingest.button')}
@@ -292,44 +150,15 @@ export function Ingest() {
         </Card>
 
         <div className="min-w-0 space-y-4">
-          {/* Derived from the merged upload+job log (`status.warnings`), not
-              `run.warnings` (upload leg only) — a job-stream warning (a
-              soft-empty ingest, a failed post-ingest entity resolution) is just
-              as actionable and must not go unreported. */}
-          {status.warnings.length > 0 && (
+          {uploadStatus.warnings.length > 0 && (
             <ul className="text-sm text-[var(--status-amber-fg)] space-y-1" role="alert">
-              {status.warnings.map((w, i) => (
+              {uploadStatus.warnings.map((w, i) => (
                 <li key={i}>{w}</li>
               ))}
             </ul>
           )}
 
-          {queued && !interrupted && (
-            <Card className="text-sm text-muted-foreground" role="status">
-              {t('ingest.job_queued')}
-            </Card>
-          )}
-
-          {interrupted && (
-            <Card className="text-sm space-y-2" role="status">
-              <p className="text-muted-foreground">{t('ingest.job_interrupted')}</p>
-              <div className="flex gap-2">
-                <Button
-                  variant="primary"
-                  disabled={rerunMutation.isPending}
-                  onClick={() => rerunMutation.mutate()}
-                >
-                  {t('ingest.job_rerun')}
-                </Button>
-                {/* An interrupted, never-going-to-report-progress-again job would
-                    otherwise strand this banner forever — `activeJobId` is
-                    persisted and nothing else clears it. */}
-                <Button variant="secondary" onClick={() => run.dismissActive()}>
-                  {t('ingest.dismiss')}
-                </Button>
-              </div>
-            </Card>
-          )}
+          {uploadStatus.phase !== 'idle' && <IngestionStatus status={uploadStatus} />}
 
           {streamLost && (
             <div className="space-y-2 text-sm text-[var(--status-amber-fg)]" role="alert">
@@ -343,19 +172,7 @@ export function Ingest() {
             </div>
           )}
 
-          {status.phase !== 'idle' && (
-            <div className="space-y-2">
-              <IngestionStatus status={status} />
-              {(status.phase === 'complete' || status.phase === 'error') && run.activeJobId && (
-                <Button
-                  variant="secondary"
-                  onClick={() => dismissMutation.mutate(run.activeJobId!)}
-                >
-                  {t('ingest.dismiss')}
-                </Button>
-              )}
-            </div>
-          )}
+          <IngestJobList />
         </div>
       </div>
     </div>

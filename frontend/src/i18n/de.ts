@@ -224,6 +224,7 @@ export const de: Strings = {
   'ingest.button': 'Importieren',
   'ingest.busy': 'Wird importiert…',
   'ingest.status_idle': 'Inaktiv',
+  'ingest.status_queued': 'In Warteschlange',
   'ingest.status_uploading': 'Wird hochgeladen',
   'ingest.status_processing': 'Wird verarbeitet',
   'ingest.status_complete': 'Abgeschlossen',
@@ -542,5 +543,7 @@ export const de: Strings = {
   'ingest.stream_lost': 'Live-Aktualisierung getrennt.',
   'ingest.reconnect': 'Neu verbinden',
   'ingest.dismiss': 'Ausblenden',
+  'ingest.clear_finished': 'Abgeschlossene ausblenden ({count})',
+  'ingest.clear_partial_failure': '{cleared} von {total} ausgeblendet; {failed} fehlgeschlagen',
   'nav.ingest_running': 'Verarbeitung läuft',
 }
