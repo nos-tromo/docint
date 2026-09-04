@@ -1,4 +1,13 @@
-import { BrainActiveIcon, BrainIcon, Button, SelectMenu } from '@infra/ui'
+import type { ReactNode } from 'react'
+import {
+  BrainActiveIcon,
+  BrainIcon,
+  Button,
+  CycleButton,
+  DocumentsIcon,
+  ImageIcon,
+  LayersIcon
+} from '@infra/ui'
 import { RETRIEVAL_TARGETS, type RetrievalTarget } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { FilterBuilder } from '@/components/chat/FilterBuilder'
@@ -103,14 +112,31 @@ export function ReasoningToggle() {
  * tall, the same as the search panel's own Search button across from it.
  */
 /**
+ * The drawing for each target: the whole corpus, the written documents, the
+ * stored imagery. One per value, because the icon is the control's only
+ * visible state — a single icon tinted would leave the setting legible on
+ * hover alone, which is how a setting gets left wrong.
+ */
+const TARGET_ICON: Record<RetrievalTarget, ReactNode> = {
+  all: <LayersIcon className="h-4 w-4" />,
+  documents: <DocumentsIcon className="h-4 w-4" />,
+  visual: <ImageIcon className="h-4 w-4" />
+}
+
+/**
  * Which evidence the next answer may come from: everything, documents only,
  * or stored imagery only.
  *
- * A picker rather than a toggle, because unlike the two-state controls beside
- * it this has three values and none of them is a mere on/off of the others —
- * and unlike them it changes what an answer is *made of*, which is worth
- * spelling out rather than hiding behind an icon. Under the visual target the
- * filter panel grows its own presets (clip, time range, kind of imagery).
+ * Three values rather than two, so it is not a pressed/unpressed toggle — but
+ * it is set rarely and sits in a row of 32px icon controls, where a labelled
+ * dropdown reads as a different *kind* of control and spends far more width
+ * than the setting is worth. So it steps through the three
+ * (`CycleButton` from `@infra/ui`), each with its own drawing, and the
+ * accessible name and tooltip carry the current value in full — "Answer from:
+ * Images" — exactly as its two neighbours name their states.
+ *
+ * Under the visual target the filter panel grows its own presets (clip, time
+ * range, kind of imagery).
  */
 export function RetrievalTargetPicker() {
   const t = useT()
@@ -118,16 +144,15 @@ export function RetrievalTargetPicker() {
   const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
 
   return (
-    <SelectMenu
-      options={RETRIEVAL_TARGETS.map((name) => ({
-        value: name,
-        label: t(`chat.retrieval_target.${name}`)
+    <CycleButton
+      name={t('chat.retrieval_target')}
+      options={RETRIEVAL_TARGETS.map((value) => ({
+        value,
+        icon: TARGET_ICON[value],
+        label: t(`chat.retrieval_target.${value}`)
       }))}
       value={target}
-      onChange={(value) => setRetrievalTarget(value as RetrievalTarget)}
-      label={t('chat.retrieval_target')}
-      className="min-w-0"
-      triggerClassName="h-8 text-xs font-medium"
+      onChange={setRetrievalTarget}
     />
   )
 }
