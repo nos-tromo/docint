@@ -2105,6 +2105,27 @@ def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
     assert body["graph_debug"]["applied"] is True
 
 
+def test_stateless_visual_query_is_not_expanded_with_the_graph(client: TestClient) -> None:
+    """Session mode skips graph expansion for the visual target; stateless must too.
+
+    The graph's terms are mined from text chunks, so they widen a lane the
+    visual target does not use and still land in the synthesis prompt.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+
+    response = client.post(
+        "/query",
+        json={"question": "What?", "retrieval_mode": "stateless", "retrieval_target": "visual"},
+    )
+
+    assert response.status_code == 200
+    assert rag.stateless_queries[-1] == "What?"
+    assert not (response.json().get("graph_debug") or {}).get("applied")
+
+
 def test_query_collection_field_resolves_and_scopes_physical(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:

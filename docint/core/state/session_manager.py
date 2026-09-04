@@ -483,7 +483,7 @@ class SessionManager:
         )
         response["graph_debug"] = graph_debug
         response["retrieval_target"] = retrieval_target
-        if retrieval_target == "visual" and response.get("visual") is None:
+        if retrieval_target == "visual" and not scoped_node_ids and response.get("visual") is None:
             # See RAG.run_query: zero is a degraded visual turn, absent is a
             # turn that never targeted imagery.
             response["visual"] = {"images_attached": 0}
@@ -647,7 +647,7 @@ class SessionManager:
         )
         normalized["graph_debug"] = graph_debug
         normalized["retrieval_target"] = retrieval_target
-        if retrieval_target == "visual" and normalized.get("visual") is None:
+        if retrieval_target == "visual" and not scoped_node_ids and normalized.get("visual") is None:
             normalized["visual"] = {"images_attached": 0}
         turn_idx = self._persist_turn(
             session_id, user_msg, final_response, normalized, owner=owner, replace_idx=replace_turn_idx

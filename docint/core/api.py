@@ -1925,7 +1925,10 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                if callable(expand_with_debug) and not stateless_scope:
+                # Session mode skips expansion for the visual target too: the
+                # graph's terms widen a text lane this target does not use and
+                # would still land in the synthesis prompt.
+                if callable(expand_with_debug) and not stateless_scope and payload.retrieval_target != "visual":
                     try:
                         expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
                         retrieval_query = str(expanded)
@@ -2109,7 +2112,10 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                if callable(expand_with_debug) and not stateless_scope:
+                # Session mode skips expansion for the visual target too: the
+                # graph's terms widen a text lane this target does not use and
+                # would still land in the synthesis prompt.
+                if callable(expand_with_debug) and not stateless_scope and payload.retrieval_target != "visual":
                     try:
                         expanded, debug_payload = cast(
                             "tuple[Any, Any]",

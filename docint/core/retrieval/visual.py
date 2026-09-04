@@ -196,14 +196,14 @@ def reciprocal_rank_fusion(*ranked_ids: Sequence[str], k: int = 60) -> list[str]
             round-trips unchanged.
     """
     scores: dict[str, float] = {}
-    order: list[str] = []
+    first_seen: dict[str, int] = {}
     for ranking in ranked_ids:
         for rank, point_id in enumerate(ranking):
             if point_id not in scores:
                 scores[point_id] = 0.0
-                order.append(point_id)
+                first_seen[point_id] = len(first_seen)
             scores[point_id] += 1.0 / (k + rank + 1)
-    return sorted(order, key=lambda point_id: (-scores[point_id], order.index(point_id)))
+    return sorted(first_seen, key=lambda point_id: (-scores[point_id], first_seen[point_id]))
 
 
 def fuse_candidates(

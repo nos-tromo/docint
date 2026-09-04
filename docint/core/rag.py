@@ -3895,7 +3895,7 @@ class RAG:
             int: ``VISUAL_ANSWER_MAX_IMAGES``, or its default when the image
             service has not been constructed yet.
         """
-        return max(1, int(self._image_config_value("visual_answer_max_images", DEFAULT_VISUAL_ANSWER_MAX_IMAGES)))
+        return max(0, int(self._image_config_value("visual_answer_max_images", DEFAULT_VISUAL_ANSWER_MAX_IMAGES)))
 
     def _ensure_visual_indexes_once(self, collection: str) -> None:
         """Ensure the companion's filter and search indexes once per process.
@@ -4140,7 +4140,12 @@ class RAG:
                     # Ranking happens here, not in Qdrant, so the scroll draws
                     # deeper than the cut it feeds.
                     limit=max(1, top_k * 4),
-                    with_payload=qdrant_models.PayloadSelectorExclude(exclude=list(BLOB_PAYLOAD_KEYS)),
+                    # The ranker counts hits in ``search_text``, so that one blob
+                    # key must come back; ``rank_keyword_candidates`` strips it
+                    # again before a candidate is built.
+                    with_payload=qdrant_models.PayloadSelectorExclude(
+                        exclude=[key for key in BLOB_PAYLOAD_KEYS if key != "search_text"]
+                    ),
                     with_vectors=False,
                 )
             except Exception as exc:
@@ -6076,6 +6081,7 @@ class RAG:
         synthesizer._max_images = max_images
         synthesizer._legend_template = self.visual_image_legend_prompt
         synthesizer._attached = []
+        synthesizer._stamped = []
         return synthesizer
 
     def _fetch_companion_thumbnails(self, point_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
@@ -7487,7 +7493,7 @@ class RAG:
             normalized["retrieval_mode"] = "scoped"
             normalized["scoped_chunk_count"] = len(list(scoped_node_ids))
         normalized["retrieval_target"] = retrieval_target
-        if retrieval_target == "visual" and normalized.get("visual") is None:
+        if retrieval_target == "visual" and not scoped_node_ids and normalized.get("visual") is None:
             # A visual turn that showed the model nothing answered from
             # captions alone. Reported as zero, never as absent: absent is
             # what every non-visual turn looks like.
@@ -7599,7 +7605,7 @@ class RAG:
             normalized["retrieval_mode"] = "scoped"
             normalized["scoped_chunk_count"] = len(list(scoped_node_ids))
         normalized["retrieval_target"] = retrieval_target
-        if retrieval_target == "visual" and normalized.get("visual") is None:
+        if retrieval_target == "visual" and not scoped_node_ids and normalized.get("visual") is None:
             # A visual turn that showed the model nothing answered from
             # captions alone. Reported as zero, never as absent: absent is
             # what every non-visual turn looks like.

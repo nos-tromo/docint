@@ -657,3 +657,28 @@ def test_an_image_citation_persists_a_hash_the_store_can_resolve(
 
     history = session_manager.get_session_history("image-session", owner=None)
     assert [s["file_hash"] for s in history[1]["sources"]] == ["clip-hash", "pic-hash"]
+
+
+def test_a_scoped_visual_turn_is_not_reported_as_degraded(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned scope outranks the Images target, so no pixels were attempted.
+
+    Stamping ``images_attached: 0`` here made the SPA flag a healthy scoped
+    answer as one whose imagery could not be loaded.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    scoped_engine = MagicMock()
+    scoped_engine.query.return_value = MagicMock()
+    session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {"response": "Hi", "sources": []}  # type: ignore[attr-defined]
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    response = session_manager.chat("hello", scoped_node_ids=["c1"], retrieval_target="visual")
+
+    assert response["retrieval_target"] == "visual"
+    assert "visual" not in response

@@ -333,3 +333,74 @@ def test_the_image_settings_are_read_before_the_image_service_exists(
 
     rag.build_query_engine(retrieval_target="visual")
     assert engine_capture["response_synthesizer"]["visual"] is True
+
+
+def test_the_keyword_lane_gets_the_text_it_ranks_by(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scroll must return ``search_text``: the ranker counts hits in it.
+
+    Excluding every blob key stripped the one the ranker reads, so every
+    candidate scored zero and the lane came back empty on every visual turn.
+    """
+    rag = _rag(monkeypatch)
+
+    def scroll(**kwargs: Any) -> tuple[list[Any], None]:
+        """Honour the payload selector the way Qdrant does."""
+        excluded = set(kwargs["with_payload"].exclude)
+        payload = {"image_id": "img-1", "search_text": "a red tractor in a field", "thumbnail_b64": "QUJD"}
+        point = types.SimpleNamespace(id="pt-1", payload={k: v for k, v in payload.items() if k not in excluded})
+        return [point], None
+
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(scroll=scroll))
+
+    lane = rag._visual_keyword_candidates(qdrant_filter=None, top_k=5)
+    candidates = lane("which picture shows the red tractor")
+
+    assert [candidate.point_id for candidate in candidates] == ["pt-1"]
+    assert candidates[0].keyword_hits > 0
+    assert "search_text" not in candidates[0].payload
+
+
+def test_a_scoped_visual_turn_is_not_reported_as_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pinned scope outranks the target, so no imagery was ever attempted."""
+    rag = _rag(monkeypatch)
+    monkeypatch.setattr(
+        RAG,
+        "build_query_engine",
+        lambda self, **kwargs: types.SimpleNamespace(query=lambda _q: Response(response="", source_nodes=[])),
+    )
+    monkeypatch.setattr(RAG, "_normalize_response_data", lambda self, *args, **kwargs: {"response": ""})
+    monkeypatch.setattr(RAG, "_resolve_runtime_retrieval_settings", lambda self, **kwargs: _RETRIEVAL_SETTINGS)
+
+    result = rag.run_query("what is at the gate", retrieval_target="visual", scoped_node_ids=["c1"])
+
+    assert result["retrieval_target"] == "visual"
+    assert "visual" not in result
+
+
+def test_zero_answer_images_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator may keep the visual target while attaching no pixels."""
+    monkeypatch.setenv("VISUAL_ANSWER_MAX_IMAGES", "0")
+    rag = _rag(monkeypatch)
+
+    assert rag._visual_answer_max_images() == 0
+
+
+def test_the_visual_synthesizer_starts_with_nothing_stamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both attachment lists exist before the first synthesis, not just one."""
+    rag = _rag(monkeypatch)
+
+    class _Synth:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+    monkeypatch.setattr(rag_module, "VisualStreamingCompactAndRefine", _Synth)
+    monkeypatch.setattr(rag_module, "VisualStreamingRefine", _Synth)
+    monkeypatch.setattr(RAG, "_resolve_chat_response_mode", lambda self: types.SimpleNamespace(value="compact"))
+    monkeypatch.setattr(RAG, "post_retrieval_text_model", property(lambda self: object()))
+    monkeypatch.setattr(RAG, "_build_grounded_text_qa_template", lambda self, **kwargs: None)
+    monkeypatch.setattr(RAG, "_build_grounded_refine_template", lambda self, **kwargs: None)
+
+    synth = rag._build_response_synthesizer(streaming=True, social_table=False, visual=True)
+
+    assert synth._attached == []  # type: ignore[attr-defined]
+    assert synth._stamped == []  # type: ignore[attr-defined]
