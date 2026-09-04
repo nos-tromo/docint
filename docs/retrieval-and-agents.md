@@ -294,6 +294,16 @@ fetched the answer is written from the captions alone and reports
 `visual: {"images_attached": 0}` — a degraded turn the SPA flags rather than
 presenting as an ordinary one.
 
+**A model that refuses the pictures degrades the same way.** The inference
+endpoint caps how many images one prompt may carry (vLLM's
+`--limit-mm-per-prompt`, `CHAT_LIMIT_MM_PER_PROMPT` on the vllm-service chat
+container) and knows nothing of `VISUAL_ANSWER_MAX_IMAGES`, so the two can
+disagree on any deployment. When the call is refused, the turn is answered
+from the captions and reports `images_attached: 0` rather than failing. Set
+the two knobs to agree — raise the endpoint's limit to answer from several
+pictures at once, or lower `VISUAL_ANSWER_MAX_IMAGES` to what it accepts, so
+the model actually sees the evidence it is citing.
+
 **Its postprocessor chain is shorter, and deliberately.** Parent-context
 expansion reads a docstore that holds no companion nodes; the social
 diversity cap would collapse a clip's consecutive keyframes, which is the

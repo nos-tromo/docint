@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Any, Literal, get_args
 
 from llama_index.core.retrievers import BaseRetriever
@@ -483,12 +484,15 @@ class VisualImagesMixin:
         _max_images: How many images may be attached.
         _legend_template: Locale template mapping images to citations.
         _attached: ``(citation_index, mime, base64)`` for this synthesis.
+        _stamped: The node metadata dicts marked as shown to the model, so
+            the mark can be taken back if the attachment is refused.
     """
 
     _fetch_thumbnails: ThumbnailFetcher
     _max_images: int
     _legend_template: str
     _attached: list[tuple[int, str, str]]
+    _stamped: list[dict[str, Any]]
 
     def _collect_images(self, nodes: Sequence[NodeWithScore]) -> None:
         """Resolve and stamp the images this synthesis will attach.
@@ -497,6 +501,7 @@ class VisualImagesMixin:
             nodes (Sequence[NodeWithScore]): The postprocessed evidence set.
         """
         self._attached = []
+        self._stamped = []
         selected = select_answer_images(nodes, max_images=self._max_images)
         if not selected:
             return
@@ -519,6 +524,35 @@ class VisualImagesMixin:
                 # Lifted off the nodes and out of the response by
                 # ``RAG._normalize_response_data``, the way the rerank stamp is.
                 metadata[VISUAL_IMAGES_ATTACHED_KEY] = True
+                self._stamped.append(metadata)
+
+    def _drop_attached_images(self, reason: Exception) -> None:
+        """Give up on the imagery and answer from the captions instead.
+
+        A model can refuse a prompt carrying pictures — most often because
+        the endpoint caps how many it accepts (vLLM's
+        ``--limit-mm-per-prompt``, which the deployment sets independently of
+        ``VISUAL_ANSWER_MAX_IMAGES``), sometimes because it has no vision
+        tower at all. Failing the turn over that would lose an answer the
+        captions alone could have carried, so this is the same degradation a
+        thumbnail-fetch outage already takes.
+
+        The stamps go with them: a turn reports how many images the model
+        actually saw, and leaving them on would report pictures it never got.
+
+        Args:
+            reason (Exception): What the model said, for the operator's log.
+        """
+        logger.warning(
+            "Visual answer refused with {} image(s) attached: {}. Answering from captions alone. "
+            "Lower VISUAL_ANSWER_MAX_IMAGES to what the endpoint accepts, or raise the endpoint's own limit.",
+            len(self._attached),
+            reason,
+        )
+        self._attached = []
+        for metadata in self._stamped:
+            metadata.pop(VISUAL_IMAGES_ATTACHED_KEY, None)
+        self._stamped = []
 
     def synthesize(self, query: Any, nodes: Sequence[NodeWithScore], *args: Any, **kwargs: Any) -> Any:
         """Attach imagery, then synthesize as usual.
@@ -608,9 +642,26 @@ class VisualImagesMixin:
 
         llm = self._llm  # type: ignore[attr-defined]
         messages = self._messages_with_images(prompt, {**program_kwargs, **response_kwargs})
+        # Every call below is retried without the imagery on any fault, which
+        # is why the catch can be broad without hiding an outage: a dead
+        # endpoint fails the retry too and the error still reaches the caller.
         if self._streaming:  # type: ignore[attr-defined]
-            return stream_chat_response_to_tokens(llm.stream_chat(messages))
-        return llm.chat(messages).message.content or ""
+            tokens = stream_chat_response_to_tokens(llm.stream_chat(messages))
+            try:
+                # A streaming client sends the request on the first pull, not
+                # on the call, so the refusal arrives here rather than above.
+                first = next(tokens)
+            except StopIteration:
+                return iter(())
+            except Exception as exc:
+                self._drop_attached_images(exc)
+                return super()._update_response(program, program_kwargs, response_kwargs)  # type: ignore[misc]
+            return chain([first], tokens)
+        try:
+            return llm.chat(messages).message.content or ""
+        except Exception as exc:
+            self._drop_attached_images(exc)
+            return super()._update_response(program, program_kwargs, response_kwargs)  # type: ignore[misc]
 
     async def _aupdate_response(
         self,
@@ -640,5 +691,9 @@ class VisualImagesMixin:
 
         llm = self._llm  # type: ignore[attr-defined]
         messages = self._messages_with_images(prompt, {**program_kwargs, **response_kwargs})
-        response = await llm.achat(messages)
+        try:
+            response = await llm.achat(messages)
+        except Exception as exc:
+            self._drop_attached_images(exc)
+            return await super()._aupdate_response(program, program_kwargs, response_kwargs)  # type: ignore[misc]
         return response.message.content or ""

@@ -12,6 +12,7 @@ import pytest
 from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRole, TextBlock
 from llama_index.core.schema import NodeWithScore, TextNode
 from llama_index.llms.openai.utils import to_openai_message_dict
+from typing_extensions import override
 
 from docint.core.retrieval.visual import (
     VISUAL_IMAGE_TOKEN_ESTIMATE,
@@ -375,3 +376,136 @@ def test_a_node_without_a_citation_number_falls_back_to_its_position() -> None:
 def test_the_image_budget_covers_every_attachment_and_the_legend() -> None:
     """The caption context has to fit beside the pixels, not instead of them."""
     assert image_token_reserve(3) > 3 * VISUAL_IMAGE_TOKEN_ESTIMATE
+
+
+class _RefusingLLM(_LLM):
+    """LLM stand-in that refuses any prompt carrying images.
+
+    The shape a deployment produces when the endpoint's own images-per-prompt
+    cap (vLLM's ``--limit-mm-per-prompt``) is lower than
+    ``VISUAL_ANSWER_MAX_IMAGES``.
+    """
+
+    @staticmethod
+    def _refuse_if_images(messages: list[ChatMessage]) -> None:
+        """Raise the way the endpoint does when images are attached.
+
+        Args:
+            messages (list[ChatMessage]): The rendered messages.
+
+        Raises:
+            ValueError: When any message carries an image block.
+        """
+        if any(isinstance(block, ImageBlock) for message in messages for block in (message.blocks or [])):
+            raise ValueError("At most 1 image(s) may be provided in one prompt.")
+
+    @override
+    def chat(self, messages: list[ChatMessage]) -> Any:
+        """Refuse an image prompt, else answer.
+
+        Args:
+            messages (list[ChatMessage]): The rendered messages.
+
+        Returns:
+            Any: The upstream stand-in's answer.
+        """
+        self._refuse_if_images(messages)
+        return super().chat(messages)
+
+    @override
+    def stream_chat(self, messages: list[ChatMessage]) -> Any:
+        """Refuse an image prompt on the first pull, else stream.
+
+        A streaming client sends the request when the generator is first
+        advanced, not when it is created, which is where the refusal lands.
+
+        Args:
+            messages (list[ChatMessage]): The rendered messages.
+
+        Returns:
+            Any: A generator of chat responses.
+        """
+        streamed = super().stream_chat(messages)
+
+        def _gen() -> Any:
+            """Refuse, then yield what the parent would.
+
+            Yields:
+                Any: A chat response carrying a delta.
+            """
+            self._refuse_if_images(messages)
+            yield from streamed
+
+        return _gen()
+
+
+def test_a_refused_attachment_answers_from_captions_instead_of_failing() -> None:
+    """A model that will not take the pictures must not lose the answer.
+
+    The endpoint's images-per-prompt cap is set independently of
+    ``VISUAL_ANSWER_MAX_IMAGES``, so the two can disagree on any deployment.
+    Failing the turn would throw away an answer the captions could carry.
+    """
+    synth = _Synth()
+    synth._llm = _RefusingLLM()
+    node = _image_node("point-1")
+    synth.synthesize(None, [node])
+    assert synth._attached
+
+    answer = synth._update_response(_Program(), {}, {})
+
+    assert answer == "upstream"
+    # The turn reports what the model saw, which is now nothing.
+    assert synth._attached == []
+    assert VISUAL_IMAGES_ATTACHED_KEY not in node.node.metadata
+
+
+def test_a_refused_attachment_degrades_the_stream_too() -> None:
+    """The streaming path refuses on the first pull, not on the call."""
+    synth = _Synth(streaming=True)
+    synth._llm = _RefusingLLM()
+    node = _image_node("point-1")
+    synth.synthesize(None, [node])
+
+    result = synth._update_response(_Program(), {}, {})
+
+    assert result == "upstream"
+    assert synth._attached == []
+    assert VISUAL_IMAGES_ATTACHED_KEY not in node.node.metadata
+
+
+def test_a_streamed_answer_keeps_its_first_token() -> None:
+    """The token pulled to detect a refusal must still reach the reader."""
+    synth = _Synth(streaming=True)
+    synth.synthesize(None, [_image_node("point-1")])
+
+    tokens = list(synth._update_response(_Program(), {}, {}))
+
+    assert "".join(tokens) == "answer"
+
+
+@pytest.mark.anyio
+async def test_a_refused_attachment_degrades_the_async_path_too() -> None:
+    """The async path takes the same degradation as the sync one."""
+    synth = _Synth()
+
+    async def _achat(_messages: list[ChatMessage]) -> Any:
+        """Refuse the way the endpoint does.
+
+        Args:
+            _messages (list[ChatMessage]): Unused.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("At most 1 image(s) may be provided in one prompt.")
+
+    synth._llm = cast(Any, type("L", (_LLM,), {"achat": staticmethod(_achat)})())
+    node = _image_node("point-1")
+    await synth.asynthesize(None, [node])
+
+    answer = await synth._aupdate_response(_Program(), {}, {})
+
+    assert answer == "upstream"
+    assert synth._attached == []
+    assert VISUAL_IMAGES_ATTACHED_KEY not in node.node.metadata

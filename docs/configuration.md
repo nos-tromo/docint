@@ -470,7 +470,7 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 | `KEYFRAME_OCR_ENABLED` | `false` | Read video keyframes too. Off by default: a clip contributes many frames and only slides tend to carry text. |
 | `IMAGE_OCR_MAX_IMAGE_DIM` | `1536` | Longest side of an image sent to be read. |
 | `VISUAL_RETRIEVE_TOP_K` | `24` | Candidate depth for the `visual` retrieval target, where imagery is the whole evidence set rather than a lane beside the text. |
-| `VISUAL_ANSWER_MAX_IMAGES` | `6` | How many stored thumbnails a visual answer attaches to the generation call. Each costs roughly 600 prompt tokens, which is taken off the caption context. |
+| `VISUAL_ANSWER_MAX_IMAGES` | `6` | How many stored thumbnails a visual answer attaches to the generation call. Each costs roughly 600 prompt tokens, which is taken off the caption context. Must not exceed the inference endpoint's own images-per-prompt limit (vLLM's `--limit-mm-per-prompt`); above it the model refuses and the turn degrades to a caption-only answer. |
 
 Images retrieve as ordinary sources: `IMAGE_RETRIEVE_TOP_K` CLIP candidates join
 the text hits *before* ranking, so the shared reranker scores both modalities in
