@@ -13,6 +13,7 @@ from docint.utils.env_cfg import (
     load_hate_speech_env,
     load_ingestion_env,
     load_model_env,
+    load_ner_client_env,
     load_openai_env,
     load_path_env,
     load_retrieval_env,
@@ -473,6 +474,25 @@ def test_load_model_env_preserves_explicit_ner_override(
     cfg = load_model_env()
 
     assert cfg.ner_model == "gliner-community/gliner_large-v2.5"
+
+
+def test_load_ner_client_env_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``NER_LABELS`` parses no-proxy style; unset and blank both mean "unset".
+
+    ``None`` is the only way the caller can tell "the operator said nothing"
+    from a real selection, so an empty parse must not surface as ``[]``.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.delenv("NER_LABELS", raising=False)
+    assert load_ner_client_env().labels is None
+
+    monkeypatch.setenv("NER_LABELS", " , ")
+    assert load_ner_client_env().labels is None
+
+    monkeypatch.setenv("NER_LABELS", "person, loc ,date")
+    assert load_ner_client_env().labels == ["person", "loc", "date"]
 
 
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

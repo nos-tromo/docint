@@ -537,8 +537,27 @@ sparse, rerank and OCR clients, these do **not** inherit `OPENAI_API_BASE` /
 |---|---|---|
 | `NER_API_BASE` | `http://vllm-router:4000` | Base URL of the GLiNER service. For the `gliner-only` deployment shape (no router), set `http://gliner-only:8000`. |
 | `NER_API_KEY` | *unset* | Sent as `Authorization: Bearer …` when set. The router enforces auth (use the master key); the `gliner-only` shape has none, so leave it unset there. |
+| `NER_LABELS` | *unset* | Comma-separated entity labels, `no_proxy` style (`person,loc,date,group`). Replaces the built-in set rather than extending it. |
 | `NER_THRESHOLD` | `0.3` | GLiNER confidence floor below which a span is discarded. |
 | `NER_TIMEOUT` | `30.0` | Per-request HTTP timeout in seconds. |
+
+The built-in set is `bank_account`, `date`, `event`, `fac`, `group`, `lang`,
+`loc`, `mail`, `money`, `org`, `person`, `phone`, `time`, `weapon`
+(`DEFAULT_NER_LABELS` in `docint/utils/ner_client.py`). GLiNER is zero-shot, so
+a label needs no training — any short noun phrase works, including a multi-word
+one (`person,bank account,vessel name`). Labels are sent verbatim apart from
+surrounding whitespace and become the entity `type` stored in the payload and
+shown in the Analysis screens and the entity graph, so their spelling is what
+investigators see.
+
+`NER_LABELS=` (empty or whitespace-only) falls back to the built-in set: an
+empty label list is a valid GLiNER request that extracts nothing, so it would
+disable extraction silently. Use `NER_ENABLED=false` to turn extraction off.
+
+Like every other ingestion-time enrichment, this applies to **newly ingested**
+chunks only — there is no payload migration, so a collection gains (or loses) a
+label by being re-ingested. Changing the set mid-collection leaves the earlier
+chunks carrying the earlier types.
 
 ## Hate-speech detection — `HateSpeechConfig`
 

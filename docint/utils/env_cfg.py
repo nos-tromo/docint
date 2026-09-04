@@ -1290,6 +1290,7 @@ class NERClientConfig:
     api_key: str | None
     threshold: float
     timeout: float
+    labels: list[str] | None = None
 
 
 def load_ner_client_env(
@@ -1322,14 +1323,27 @@ def load_ner_client_env(
           case to avoid hidden coupling between the two env vars.
         - ``threshold``: GLiNER confidence cutoff passed per request.
         - ``timeout``: Per-request HTTP timeout in seconds.
+        - ``labels``: Candidate entity labels from ``NER_LABELS``, a
+          comma-separated list in the style of ``no_proxy``
+          (``person,loc,date,group``). ``None`` when the operator set
+          nothing, which is what makes the caller fall back to
+          :data:`docint.utils.ner_client.DEFAULT_NER_LABELS`. An empty or
+          whitespace-only value resolves to ``None`` too: an empty label
+          list is a perfectly valid GLiNER request that extracts nothing,
+          so it must never reach the wire — turning extraction off is
+          ``NER_ENABLED=false``. Labels pass through verbatim apart from
+          surrounding whitespace, since GLiNER is zero-shot and echoes the
+          label back as the entity type docint stores and displays.
     """
     raw_key = os.getenv("NER_API_KEY")
     api_key = raw_key.strip() if raw_key and raw_key.strip() else None
+    labels = [label for label in (raw.strip() for raw in os.getenv("NER_LABELS", "").split(",")) if label]
     return NERClientConfig(
         api_base=os.getenv("NER_API_BASE", default_api_base).rstrip("/"),
         api_key=api_key,
         threshold=float(os.getenv("NER_THRESHOLD", default_threshold)),
         timeout=float(os.getenv("NER_TIMEOUT", default_timeout)),
+        labels=labels or None,
     )
 
 
