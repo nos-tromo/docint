@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 from llama_index.core import Response
+from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 
 import docint.core.rag as rag_module
 from docint.core.rag import RAG
@@ -74,6 +75,7 @@ def test_the_visual_chain_keeps_only_what_means_something_without_text(
     Parent context reads a docstore with no companion nodes in it, the
     diversity cap would collapse a clip's consecutive keyframes, and
     link-following would pull posting prose into a set meant to be pixels.
+    The relevance floor is gone too — see the regression test below.
     """
     rag = _rag(monkeypatch)
 
@@ -82,9 +84,36 @@ def test_the_visual_chain_keeps_only_what_means_something_without_text(
     names = [type(processor).__name__ for processor in engine_capture["node_postprocessors"]]
     assert names == [
         "LazyRerankerPostprocessor",
-        "ImageRelevanceFloorPostprocessor",
         "CitationNumberingPostprocessor",
     ]
+
+
+def test_a_low_scoring_image_still_answers_a_visual_turn(
+    monkeypatch: pytest.MonkeyPatch, engine_capture: dict[str, Any]
+) -> None:
+    """A question about the imagery must not empty its own evidence set.
+
+    The image relevance floor sits on a cross-encoder score, which asks
+    whether a passage answers the question. A question phrased *about* the
+    pictures scores the correct image far below the floor calibrated for the
+    ``all`` target, so applying it here answered every visual turn from
+    nothing.
+    """
+    rag = _rag(monkeypatch)
+    floor = rag._image_relevance_floor()
+    nodes = [
+        NodeWithScore(
+            node=TextNode(text="Ein grüner Baum auf einem Hügel.", metadata={rag_module.IMAGE_LANE_METADATA_KEY: True}),
+            score=floor / 10,
+        )
+    ]
+
+    rag.build_query_engine(retrieval_target="visual")
+
+    survivors = nodes
+    for processor in engine_capture["node_postprocessors"][1:]:
+        survivors = processor.postprocess_nodes(survivors, QueryBundle("Was wird in den Dokumenten dargestellt?"))
+    assert len(survivors) == 1
 
 
 def test_the_visual_rerank_keeps_at_least_the_images_the_answer_may_see(

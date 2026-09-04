@@ -239,7 +239,8 @@ Settings that shape the lane:
   caption must reach. The floor sits on the reranker, never on raw CLIP
   similarity, which is not comparable across queries: an unrelated query and a
   matching one both land in the same narrow CLIP band. Raise it if unrelated
-  images still appear; lower it if relevant ones are missing.
+  images still appear; lower it if relevant ones are missing. It applies to the
+  `all` target only — see the visual target below.
 
 If the rerank endpoint is down, images surface ungated rather than vanishing —
 a degraded ranking is more useful than a silently emptied lane. Full defaults
@@ -259,10 +260,19 @@ the response and the final SSE frame. It is a separate field from
 |---|---|---|
 | `all` (default) | Text chunks and image captions, fused | The full postprocessor chain |
 | `documents` | Text chunks only | The full chain, image lane never built |
-| `visual` | The `_images` companion only | Rerank, relevance floor, numbering |
+| `visual` | The `_images` companion only | Rerank, numbering |
 
 A pinned scope outranks the target: hand-picked chunks are hand-picked
 whatever the target says.
+
+**The visual target applies no relevance floor.** `IMAGE_RERANK_MIN_SCORE`
+protects a *text* answer from a merely-nearest image, and its threshold sits on
+a cross-encoder score answering "does this passage answer this question". A
+question about the imagery — "what is shown in the documents?", the shape this
+target invites — scores the correct image in the same band as an unrelated one,
+so the floor emptied the evidence set and the turn answered from nothing. Here
+the rerank's top-n already bounds the set, and the model is shown the pixels, so
+it can say that none of the images shows the thing asked about.
 
 **The visual target retrieves in two lanes.** CLIP similarity finds imagery
 whose caption never names the thing asked about, and a keyword pass over the

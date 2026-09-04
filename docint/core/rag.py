@@ -5914,13 +5914,27 @@ class RAG:
         if retrieval_target == "visual":
             # Stored imagery is the whole evidence set, so the chain keeps only
             # what still means something without text chunks beside it: the
-            # rerank (which scores captions), the relevance floor sitting on
-            # those scores, and the numbering. Parent-context expansion reads a
-            # docstore holding no companion nodes; the social diversity cap
-            # would collapse a clip's consecutive keyframes, which is the
-            # opposite of what a "when does X appear" question needs; and
-            # link-following would pull posting text into a set that is meant
-            # to be pixels.
+            # rerank (which orders captions) and the numbering. Parent-context
+            # expansion reads a docstore holding no companion nodes; the social
+            # diversity cap would collapse a clip's consecutive keyframes, which
+            # is the opposite of what a "when does X appear" question needs; and
+            # link-following would pull posting text into a set that is meant to
+            # be pixels.
+            #
+            # The image relevance floor is absent for the same reason, and the
+            # reason is not that it is merely redundant here. It guards the
+            # ``all`` target, where a merely-nearest image must not take a slot
+            # from a text answer. Its threshold sits on a cross-encoder score,
+            # which answers "does this passage answer this question" — so a
+            # question *about* the imagery ("what is shown in the documents?"),
+            # which is the shape this target invites, scores the correct image
+            # in the same band as an unrelated one (measured: 0.003-0.004 for
+            # the right picture, against 0.96 for a query phrased as a caption).
+            # Applied here it emptied the evidence set and every visual turn
+            # answered from nothing. There is also nothing left for it to
+            # protect: the rerank's top-n already bounds the set, and the model
+            # is shown the pixels, so it can say "none of these shows X" far
+            # better than a caption cross-encoder can decide it in advance.
             max_images = self._visual_answer_max_images()
             return RetrieverQueryEngine.from_args(
                 retriever=self._build_visual_retriever(
@@ -5934,7 +5948,6 @@ class RAG:
                     # without this the rerank would cut the evidence below the
                     # number of images the answer is allowed to look at.
                     LazyRerankerPostprocessor(rag=self, top_n=max(self.rerank_top_n, max_images)),
-                    ImageRelevanceFloorPostprocessor(min_score=self._image_relevance_floor()),
                     CitationNumberingPostprocessor(),
                 ],
                 response_synthesizer=self._build_response_synthesizer(
