@@ -60,7 +60,8 @@ def build_remote_ner_extractor(
 
     Args:
         labels (list[str] | None): Candidate entity labels to extract. Falls
-            back to :data:`DEFAULT_NER_LABELS` when ``None`` or empty.
+            back to the operator's ``NER_LABELS``, then to
+            :data:`DEFAULT_NER_LABELS`, when ``None`` or empty.
         cfg (NERClientConfig | None): Override client configuration. When
             ``None``, reads from the environment via
             :func:`docint.utils.env_cfg.load_ner_client_env`.
@@ -74,14 +75,15 @@ def build_remote_ner_extractor(
         warning and returns ``([], [])`` — matching the existing fail-safe
         behavior of the ingestion pipeline.
     """
-    effective_labels = list(labels) if labels else list(DEFAULT_NER_LABELS)
     effective_cfg = cfg if cfg is not None else load_ner_client_env()
+    effective_labels = list(labels or effective_cfg.labels or DEFAULT_NER_LABELS)
     client = _build_client(effective_cfg)
     logger.info(
-        "Remote NER extractor ready: api_base={} auth={} threshold={}",
+        "Remote NER extractor ready: api_base={} auth={} threshold={} labels={}",
         effective_cfg.api_base,
         "bearer" if effective_cfg.api_key else "none",
         effective_cfg.threshold,
+        ",".join(effective_labels),
     )
 
     def _extract(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

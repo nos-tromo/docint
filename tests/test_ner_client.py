@@ -16,7 +16,7 @@ from docint.utils.ner_client import (
 @pytest.fixture(autouse=True)
 def _reset_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Clear NER_* env vars so each test starts from a known baseline."""
-    for key in ("NER_API_BASE", "NER_API_KEY", "NER_THRESHOLD", "NER_TIMEOUT"):
+    for key in ("NER_API_BASE", "NER_API_KEY", "NER_LABELS", "NER_THRESHOLD", "NER_TIMEOUT"):
         monkeypatch.delenv(key, raising=False)
     yield
 
@@ -205,3 +205,59 @@ def test_remote_ner_extractor_uses_explicit_cfg(monkeypatch: pytest.MonkeyPatch)
 
     assert captured["url"] == "http://explicit-host:9000/gliner"
     assert captured["body"] == {"text": "test", "labels": ["person"], "threshold": 0.7}
+
+
+def _capture_labels(monkeypatch: pytest.MonkeyPatch, captured: dict[str, object]) -> None:
+    """Install a transport that records the posted request body."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"entities": []})
+
+    _install_mock_transport(monkeypatch, httpx.MockTransport(_handler))
+
+
+def test_ner_labels_env_overrides_the_default_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NER_LABELS replaces DEFAULT_NER_LABELS, no-proxy style."""
+    captured: dict[str, object] = {}
+    _capture_labels(monkeypatch, captured)
+    monkeypatch.setenv("NER_LABELS", "person, bank account , ,crypto_wallet")
+
+    build_remote_ner_extractor()("test")
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    # Surrounding whitespace and empty segments go; the labels themselves are
+    # passed through verbatim, since GLiNER echoes them back as entity types.
+    assert body["labels"] == ["person", "bank account", "crypto_wallet"]
+
+
+def test_blank_ner_labels_falls_back_to_the_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A whitespace-only NER_LABELS must not send an empty label list.
+
+    An empty list is a valid GLiNER request that extracts nothing at all, so
+    it would silently disable extraction; ``NER_ENABLED=false`` is the knob
+    for that.
+    """
+    captured: dict[str, object] = {}
+    _capture_labels(monkeypatch, captured)
+    monkeypatch.setenv("NER_LABELS", " , ")
+
+    build_remote_ner_extractor()("test")
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["labels"] == DEFAULT_NER_LABELS
+
+
+def test_explicit_labels_argument_beats_the_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller-supplied label list outranks NER_LABELS."""
+    captured: dict[str, object] = {}
+    _capture_labels(monkeypatch, captured)
+    monkeypatch.setenv("NER_LABELS", "from_env")
+
+    build_remote_ner_extractor(labels=["from_caller"])("test")
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["labels"] == ["from_caller"]
