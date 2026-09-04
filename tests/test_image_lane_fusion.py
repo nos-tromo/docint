@@ -320,3 +320,33 @@ def test_the_lane_runs_unfiltered_when_no_filters_are_in_play() -> None:
     lane = rag._build_image_lane(metadata_filter_rules=None, metadata_filters_active=False)
 
     assert lane is not None
+
+
+def test_the_floor_cuts_after_it_gates_not_before() -> None:
+    """A sub-floor image must not hold a slot a text hit would have taken.
+
+    Measured on a live collection: for a question nothing matched, three
+    image captions scored ~0.003 against the text chunks' ~0.001, took every
+    slot of a top-5 cut, and were then dropped by the floor — the turn
+    answered from one source while a dozen text chunks waited behind the cut.
+    """
+    nodes = [
+        _image_node("img-1", 0.003),
+        _image_node("img-2", 0.003),
+        _image_node("img-3", 0.002),
+        _text_node("txt-1", "first chunk", 0.001),
+        _text_node("txt-2", "second chunk", 0.0009),
+    ]
+
+    kept = ImageRelevanceFloorPostprocessor(min_score=0.05, top_n=2)._postprocess_nodes(nodes)
+
+    assert [node.node.node_id for node in kept] == ["txt-1", "txt-2"]
+
+
+def test_the_floor_leaves_the_set_uncut_without_a_top_n() -> None:
+    """The cut is opt-in: the visual chain does its own."""
+    nodes = [_image_node("img-1", 0.9), _text_node("txt-1", "chunk", 0.5)]
+
+    kept = ImageRelevanceFloorPostprocessor(min_score=0.05)._postprocess_nodes(nodes)
+
+    assert [node.node.node_id for node in kept] == ["img-1", "txt-1"]

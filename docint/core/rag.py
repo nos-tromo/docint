@@ -1430,6 +1430,12 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             for key in ("entities", "relations"):
                 if not metadata.get(key) and fallback_meta.get(key):
                     metadata[key] = copy.deepcopy(fallback_meta[key])
+            # The rerank stamp rides on the retrieved sub-node; a promoted
+            # parent that drops it makes a reranked turn report `rerank=none`,
+            # which is how the UI announces a reranker outage.
+            for key in (RERANK_APPLIED_KEY, RERANK_ERROR_KEY):
+                if key not in metadata and key in fallback_meta:
+                    metadata[key] = fallback_meta[key]
 
         # Narrow ``origin`` to a known-safe sub-key set so a future reader
         # that adds deployment-internal paths / tenant IDs / usernames to
@@ -1837,10 +1843,14 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
             ``None`` keeps the reranker's own ``rerank_top_n``. The visual
             target raises it, because the default cut is smaller than the
             number of images the answer may look at.
+        keep_all (bool): Score and order every candidate without cutting,
+            leaving the cut to a later postprocessor. The reranker scores the
+            whole set either way — ``top_n`` only slices it.
     """
 
     rag: Any
     top_n: int | None = None
+    keep_all: bool = False
 
     @override
     @classmethod
@@ -1871,8 +1881,9 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
                 nodes as produced by the underlying postprocessor.
         """
         reranker = self.rag.reranker
-        if self.top_n is not None and getattr(reranker, "top_n", None) != self.top_n:
-            reranker = reranker.model_copy(update={"top_n": self.top_n})
+        top_n = max(1, len(nodes)) if self.keep_all else self.top_n
+        if top_n is not None and getattr(reranker, "top_n", None) != top_n:
+            reranker = reranker.model_copy(update={"top_n": top_n})
         return cast(list[NodeWithScore], reranker._postprocess_nodes(nodes, query_bundle))
 
 
@@ -2083,11 +2094,20 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     Text nodes pass through untouched: their relevance is the reranker's and
     the top-n cut's business, not this floor's.
 
+    It also owns the top-n cut for the chain it sits in, because the order is
+    load-bearing: cutting first let three sub-floor image captions take slots
+    on a query nothing matched (every score ~0.003), and the floor then
+    emptied them — the turn answered from one source while a dozen text
+    chunks waited behind the cut.
+
     Attributes:
         min_score: The reranker score an image caption must reach.
+        top_n: How many nodes survive, applied after the floor. ``None``
+            leaves the set uncut.
     """
 
     min_score: float = 0.05
+    top_n: int | None = None
 
     @override
     @classmethod
@@ -2112,14 +2132,14 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
             list[NodeWithScore]: The input minus sub-floor image nodes.
         """
         if not any(node.node.metadata.get(IMAGE_LANE_METADATA_KEY) for node in nodes):
-            return nodes
+            return self._cut(nodes)
         # ``VLLMRerankPostprocessor`` swallows its own transport errors and
         # returns the nodes untouched, so a wholly unscored set means the
         # rerank degraded -- not that nothing is relevant. Gating on that would
         # blank the image lane for as long as the endpoint is down.
         if all(node.score is None for node in nodes):
             logger.warning("Rerank returned no scores; surfacing image sources ungated.")
-            return nodes
+            return self._cut(nodes)
 
         kept: list[NodeWithScore] = []
         for node in nodes:
@@ -2128,7 +2148,19 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
                 continue
             if node.score is not None and float(node.score) >= self.min_score:
                 kept.append(node)
-        return kept
+        return self._cut(kept)
+
+    def _cut(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
+        """Trim the floored set to ``top_n``.
+
+        Args:
+            nodes (list[NodeWithScore]): Nodes that cleared the floor.
+
+        Returns:
+            list[NodeWithScore]: The first ``top_n`` nodes, or all of them
+            when no cut is configured.
+        """
+        return nodes if self.top_n is None else nodes[: max(1, int(self.top_n))]
 
 
 class CitationNumberingPostprocessor(BaseNodePostprocessor):
@@ -5938,10 +5970,13 @@ class RAG:
             retrieval_options=retrieval_options,
         )
         node_postprocessors: list[BaseNodePostprocessor] = [
-            LazyRerankerPostprocessor(rag=self),
+            # The reranker scores without cutting; the floor below owns the
+            # cut, so a sub-floor image can never hold a slot a text hit
+            # would have taken.
+            LazyRerankerPostprocessor(rag=self, keep_all=True),
             # Directly after the rerank, where image captions and text chunks
             # first carry comparable scores.
-            ImageRelevanceFloorPostprocessor(min_score=self._image_relevance_floor()),
+            ImageRelevanceFloorPostprocessor(min_score=self._image_relevance_floor(), top_n=self.rerank_top_n),
         ]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
             usable_tokens, per_hit_floor = self._compute_parent_context_budget(

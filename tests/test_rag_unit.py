@@ -2341,6 +2341,32 @@ def test_vllm_reranker_success_marks_nodes_as_reranked(monkeypatch: pytest.Monke
     assert rag_module.RERANK_ERROR_KEY not in reranked[0].node.metadata
 
 
+def test_the_lazy_reranker_can_score_without_cutting() -> None:
+    """``keep_all`` leaves the cut to the floor that runs after it."""
+    captured: dict[str, Any] = {}
+
+    class _Reranker:
+        top_n = 5
+
+        def model_copy(self, update: dict[str, Any]) -> Any:
+            """Record the override and answer like the real reranker does."""
+            captured.update(update)
+            return self
+
+        def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
+            """Return the nodes untouched."""
+            return nodes
+
+    rag = RAG(qdrant_collection="test")
+    rag._reranker = cast(Any, _Reranker())
+    nodes = [NodeWithScore(node=TextNode(text=f"n{i}", id_=f"n{i}"), score=0.1) for i in range(12)]
+
+    kept = rag_module.LazyRerankerPostprocessor(rag=rag, keep_all=True)._postprocess_nodes(nodes, None)
+
+    assert captured["top_n"] == 12
+    assert len(kept) == 12
+
+
 def test_normalize_response_reports_rerank_outcome_and_strips_the_stamp() -> None:
     """The response says whether sources were re-ranked; the stamp never leaks into a source."""
     from llama_index.core.base.response.schema import Response
@@ -2657,6 +2683,35 @@ def test_parent_context_postprocessor_promotes_parent_nodes() -> None:
     assert len(processed) == 1
     assert processed[0].node.get_content() == "Parent context"
     assert processed[0].score == pytest.approx(0.77)
+
+
+def test_parent_context_carries_the_rerank_stamp_onto_the_parent() -> None:
+    """A promoted parent must keep the stamp, or a reranked turn reads as degraded.
+
+    The stamp rides on the retrieved sub-node, which the promotion replaces;
+    losing it made every parent-expanded turn report ``rerank=none``, which is
+    how the UI announces a reranker outage.
+    """
+    parent = TextNode(text="Parent context", id_="parent-1", metadata={"filename": "a.txt"})
+    child = TextNode(
+        text="Child match",
+        id_="child-1",
+        metadata={
+            "hier.parent_id": "parent-1",
+            "docint_hier_type": "fine",
+            rag_module.RERANK_APPLIED_KEY: True,
+        },
+    )
+
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=types.SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: parent if node_id == "parent-1" else None
+        )
+    )
+
+    processed = postprocessor._postprocess_nodes([NodeWithScore(node=child, score=0.77)])
+
+    assert processed[0].node.metadata[rag_module.RERANK_APPLIED_KEY] is True
 
 
 def test_parent_context_carries_child_ner_onto_bare_parent() -> None:
