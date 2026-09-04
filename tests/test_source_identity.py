@@ -123,3 +123,69 @@ def test_a_stamped_transcript_segment_names_its_clip_directly() -> None:
     src = RAG._source_from_payload(collection="uabc__docs", payload=payload)
 
     assert src["filename"] == "clip.mp4"
+
+
+def _retrieve_stub(companion_payload: dict[str, Any]) -> Any:
+    """Return a ``qdrant_client`` stand-in that holds one point, in ``_images`` only.
+
+    Args:
+        companion_payload (dict[str, Any]): Payload of the companion point.
+
+    Returns:
+        Any: Client stand-in whose ``retrieve`` answers by collection name.
+    """
+    point = _Node("pt-img-1", "", companion_payload)
+    point.payload = companion_payload  # type: ignore[attr-defined]
+
+    def retrieve(collection_name: str, ids: list[str]) -> list[Any]:
+        """Answer only for the companion collection."""
+        return [point] if collection_name.endswith("_images") else []
+
+    client = type("Client", (), {})()
+    client.retrieve = retrieve  # type: ignore[attr-defined]
+    return client
+
+
+def test_a_cited_image_is_rehydrated_from_the_companion() -> None:
+    """A session revisit resolves an image citation the main collection never held.
+
+    The cited node id is an ``_images`` point; looking it up in the main
+    collection alone rehydrated every picture as an empty source, so the
+    citation card had nothing to expand.
+    """
+    rag = RAG(qdrant_collection="uabc__docs")
+    rag._qdrant_client = _retrieve_stub(
+        {
+            "image_id": "img-hash",
+            "source_type": "social_media",
+            "source_doc_id": "posting-1",
+            "posting_uuid": "posting-1",
+            "file_name": "pic.png",
+            "llm_description": "A harbour at dusk.",
+            "reference_metadata": {"type": "image", "posting_author": "someone"},
+        }
+    )
+
+    src = rag.get_source_by_node_id("pt-img-1", score=0.4)
+
+    assert src is not None
+    assert src["id"] == "pt-img-1"
+    assert "harbour" in src["text"]
+    assert src["reference_metadata"]["posting_author"] == "someone"
+    assert src["file_hash"] == "img-hash"
+    assert src["filename"] == "pic.png"
+
+
+def test_a_rehydrated_chunk_keeps_the_node_id_it_was_cited_by() -> None:
+    """A Qdrant payload carries no ``node_id``; the citation's own id fills it."""
+    rag = RAG(qdrant_collection="uabc__docs")
+    client = _retrieve_stub({})
+    chunk = _Node("pt-1", "", {"file_name": "a.pdf", "file_hash": "h1", "text": "body"})
+    chunk.payload = chunk.metadata  # type: ignore[attr-defined]
+    client.retrieve = lambda collection_name, ids: [chunk] if collection_name == "uabc__docs" else []  # type: ignore[attr-defined]
+    rag._qdrant_client = client
+
+    src = rag.get_source_by_node_id("pt-1")
+
+    assert src is not None
+    assert src["id"] == "pt-1"

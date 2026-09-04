@@ -258,3 +258,59 @@ def build_search_filter(
     )
     conditions.append(not_coarse_condition())
     return merge_qdrant_filters(base_filter, conditions)
+
+
+def build_any_keyword_filter(
+    keywords: Sequence[str],
+    *,
+    text_keys: Sequence[str] = (SEARCH_TEXT_FIELD,),
+    min_match: int,
+    base_filter: models.Filter | None = None,
+) -> models.Filter | None:
+    """Compile keywords into a filter satisfied by *some* of them.
+
+    :func:`build_search_filter` ANDs every keyword, which is right for a
+    search box: the user typed the terms they want. It is wrong for a chat
+    question, which is a sentence — demanding that a one-line caption contain
+    every content word of "which vehicles appear at the roadblock" matches
+    nothing at all.
+
+    So the conditions go into ``should`` under a ``min_should`` count, and the
+    caller ranks the survivors by how many keywords they actually matched. A
+    point matching all of them still ranks first; a point matching half is a
+    candidate rather than a silent miss.
+
+    Args:
+        keywords (Sequence[str]): Keywords to match, in query order.
+        text_keys (Sequence[str]): Payload keys matched with ``MatchText``.
+        min_match (int): How many conditions a point must satisfy. Clamped to
+            at least one and at most the number of conditions built.
+        base_filter (models.Filter | None): Filter ANDed with the keyword
+            conditions, so a request's own filters still constrain the lane.
+
+    Returns:
+        models.Filter | None: The compiled filter, or ``None`` when there are
+            no keywords or no keys to match them against — a keyword-less
+            lane must never degrade into an unfiltered scan.
+    """
+    if not keywords or not text_keys:
+        return None
+
+    conditions: list[Any] = [
+        models.FieldCondition(key=key, match=models.MatchText(text=keyword))
+        for key in text_keys
+        for keyword in keywords
+    ]
+    if not conditions:
+        return None
+
+    # ``min_should`` is a nested filter rather than a flat condition:
+    # ``merge_qdrant_filters`` composes ``must``/``must_not`` clauses and
+    # would drop a ``min_should`` spliced in beside them.
+    keyword_filter = models.Filter(
+        min_should=models.MinShould(
+            conditions=conditions,
+            min_count=max(1, min(int(min_match), len(conditions))),
+        )
+    )
+    return merge_qdrant_filters(base_filter, [keyword_filter])

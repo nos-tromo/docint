@@ -54,6 +54,7 @@ from docint.utils.env_cfg import (
     load_graphrag_env,
     load_hate_speech_env,
     load_host_env,
+    load_image_ingestion_config,
     load_ingestion_env,
     load_language_env,
     load_model_env,
@@ -79,6 +80,7 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.indices.prompt_helper import PromptHelper
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
@@ -96,9 +98,6 @@ from llama_index.core.schema import (
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.core.storage.kvstore.types import BaseKVStore
 from llama_index.core.vector_stores.types import (
-    FilterCondition,
-    FilterOperator,
-    MetadataFilter,
     MetadataFilters,
     VectorStoreQueryMode,
 )
@@ -152,7 +151,20 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
-from docint.core.retrieval_filters import matches_metadata_filters, merge_qdrant_filters
+from docint.core.retrieval.visual import (
+    BLOB_PAYLOAD_KEYS,
+    DEFAULT_RETRIEVAL_TARGET,
+    VISUAL_IMAGES_ATTACHED_KEY,
+    RetrievalTarget,
+    VisualCandidate,
+    VisualImagesMixin,
+    VisualRetriever,
+    ensure_visual_filter_indexes,
+    image_token_reserve,
+    rank_keyword_candidates,
+    visual_min_match,
+)
+from docint.core.retrieval_filters import build_qdrant_filter, matches_metadata_filters, merge_qdrant_filters
 from docint.core.search.fields import (
     IMAGE_LANE_FIELDS,
     SEARCH_FIELDS,
@@ -162,9 +174,11 @@ from docint.core.search.fields import (
     search_field_spec,
 )
 from docint.core.search.fulltext import (
+    build_any_keyword_filter,
     build_scan_filter,
     build_search_filter,
     matches_any_phrase,
+    not_coarse_condition,
     parse_keywords,
 )
 from docint.core.search.index import (
@@ -186,7 +200,7 @@ from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
-from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_name
+from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_hash, source_file_name
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.duration import format_elapsed
@@ -227,6 +241,13 @@ HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
 # neither instance state nor a context variable would reach the response.
 # ``_normalize_response_data`` lifts the stamp into ``response["rerank"]``
 # and strips it before a node becomes a source.
+DEFAULT_VISUAL_IMAGE_LEGEND_PROMPT = (
+    "The images below are the sources you were given, attached as pictures so you can see "
+    "them rather than only read their descriptions.\n\n{image_legend}\n\n"
+    "Answer from what the images actually show, and cite the source number listed for each "
+    "one. Never describe an image that is not attached."
+)
+
 RERANK_APPLIED_KEY = "docint_rerank_applied"
 RERANK_ERROR_KEY = "docint_rerank_error"
 
@@ -247,6 +268,8 @@ DEFAULT_IMAGE_RERANK_MIN_SCORE = 0.05
 # CLIP candidates the image lane draws before the rerank ranks them against
 # the text hits.
 DEFAULT_IMAGE_RETRIEVE_TOP_K = 5
+DEFAULT_VISUAL_RETRIEVE_TOP_K = 24
+DEFAULT_VISUAL_ANSWER_MAX_IMAGES = 6
 
 # Fallback tie-break preamble used when the locale prompt file is absent.
 # The canonical templates live in ``prompts/{en,de}/entity_tiebreak.txt``.
@@ -1407,6 +1430,12 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             for key in ("entities", "relations"):
                 if not metadata.get(key) and fallback_meta.get(key):
                     metadata[key] = copy.deepcopy(fallback_meta[key])
+            # The rerank stamp rides on the retrieved sub-node; a promoted
+            # parent that drops it makes a reranked turn report `rerank=none`,
+            # which is how the UI announces a reranker outage.
+            for key in (RERANK_APPLIED_KEY, RERANK_ERROR_KEY):
+                if key not in metadata and key in fallback_meta:
+                    metadata[key] = fallback_meta[key]
 
         # Narrow ``origin`` to a known-safe sub-key set so a future reader
         # that adds deployment-internal paths / tenant IDs / usernames to
@@ -1810,9 +1839,18 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
             ``RAG`` is defined later in this module and Pydantic's
             field validation would otherwise trip on the forward
             reference.
+        top_n (int | None): Override for how many nodes survive the rerank.
+            ``None`` keeps the reranker's own ``rerank_top_n``. The visual
+            target raises it, because the default cut is smaller than the
+            number of images the answer may look at.
+        keep_all (bool): Score and order every candidate without cutting,
+            leaving the cut to a later postprocessor. The reranker scores the
+            whole set either way — ``top_n`` only slices it.
     """
 
     rag: Any
+    top_n: int | None = None
+    keep_all: bool = False
 
     @override
     @classmethod
@@ -1842,7 +1880,11 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
             list[NodeWithScore]: Reranked (and typically top-n trimmed)
                 nodes as produced by the underlying postprocessor.
         """
-        return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
+        reranker = self.rag.reranker
+        top_n = max(1, len(nodes)) if self.keep_all else self.top_n
+        if top_n is not None and getattr(reranker, "top_n", None) != top_n:
+            reranker = reranker.model_copy(update={"top_n": top_n})
+        return cast(list[NodeWithScore], reranker._postprocess_nodes(nodes, query_bundle))
 
 
 def _as_qdrant_point_id(node_id: str) -> str | int:
@@ -2052,11 +2094,20 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     Text nodes pass through untouched: their relevance is the reranker's and
     the top-n cut's business, not this floor's.
 
+    It also owns the top-n cut for the chain it sits in, because the order is
+    load-bearing: cutting first let three sub-floor image captions take slots
+    on a query nothing matched (every score ~0.003), and the floor then
+    emptied them — the turn answered from one source while a dozen text
+    chunks waited behind the cut.
+
     Attributes:
         min_score: The reranker score an image caption must reach.
+        top_n: How many nodes survive, applied after the floor. ``None``
+            leaves the set uncut.
     """
 
     min_score: float = 0.05
+    top_n: int | None = None
 
     @override
     @classmethod
@@ -2081,14 +2132,14 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
             list[NodeWithScore]: The input minus sub-floor image nodes.
         """
         if not any(node.node.metadata.get(IMAGE_LANE_METADATA_KEY) for node in nodes):
-            return nodes
+            return self._cut(nodes)
         # ``VLLMRerankPostprocessor`` swallows its own transport errors and
         # returns the nodes untouched, so a wholly unscored set means the
         # rerank degraded -- not that nothing is relevant. Gating on that would
         # blank the image lane for as long as the endpoint is down.
         if all(node.score is None for node in nodes):
             logger.warning("Rerank returned no scores; surfacing image sources ungated.")
-            return nodes
+            return self._cut(nodes)
 
         kept: list[NodeWithScore] = []
         for node in nodes:
@@ -2097,7 +2148,19 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
                 continue
             if node.score is not None and float(node.score) >= self.min_score:
                 kept.append(node)
-        return kept
+        return self._cut(kept)
+
+    def _cut(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
+        """Trim the floored set to ``top_n``.
+
+        Args:
+            nodes (list[NodeWithScore]): Nodes that cleared the floor.
+
+        Returns:
+            list[NodeWithScore]: The first ``top_n`` nodes, or all of them
+            when no cut is configured.
+        """
+        return nodes if self.top_n is None else nodes[: max(1, int(self.top_n))]
 
 
 class CitationNumberingPostprocessor(BaseNodePostprocessor):
@@ -2224,6 +2287,14 @@ class StreamingRefine(_StreamingRefineMixin, Refine):
 
 class StreamingCompactAndRefine(_StreamingRefineMixin, CompactAndRefine):
     """``CompactAndRefine`` that streams plain-text answers token by token."""
+
+
+class VisualStreamingRefine(VisualImagesMixin, StreamingRefine):
+    """``StreamingRefine`` that also shows the model the retrieved imagery."""
+
+
+class VisualStreamingCompactAndRefine(VisualImagesMixin, StreamingCompactAndRefine):
+    """``StreamingCompactAndRefine`` that also shows the model the imagery."""
 
 
 def _vllm_service_root(api_base: str) -> str:
@@ -2680,6 +2751,7 @@ class RAG:
     conversation_summary_prompt_path: Path | None = field(default=None, init=False)
     rewrite_retrieval_prompt_path: Path | None = field(default=None, init=False)
     grounded_text_qa_prompt_path: Path | None = field(default=None, init=False)
+    visual_image_legend_prompt_path: Path | None = field(default=None, init=False)
     grounded_refine_prompt_path: Path | None = field(default=None, init=False)
     grounded_collection_summary_prompt_path: Path | None = field(default=None, init=False)
     summary_map_prompt_path: Path | None = field(default=None, init=False)
@@ -2688,6 +2760,7 @@ class RAG:
     conversation_summary_prompt: str = field(default="", init=False)
     rewrite_retrieval_prompt: str = field(default="", init=False)
     grounded_text_qa_prompt: str = field(default="", init=False)
+    visual_image_legend_prompt: str = field(default="", init=False)
     grounded_refine_prompt: str = field(default="", init=False)
     grounded_collection_summary_prompt: str = field(default="", init=False)
     summary_map_prompt: str = field(default="", init=False)
@@ -2725,6 +2798,7 @@ class RAG:
         default_factory=OrderedDict, init=False, repr=False
     )
     _field_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
+    _visual_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
@@ -2867,6 +2941,7 @@ class RAG:
             self.conversation_summary_prompt_path = self.prompt_dir / "conversation_summary.txt"
             self.rewrite_retrieval_prompt_path = self.prompt_dir / "rewrite_retrieval.txt"
             self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
+            self.visual_image_legend_prompt_path = self.prompt_dir / "visual_image_legend.txt"
             self.grounded_refine_prompt_path = self.prompt_dir / "grounded_refine.txt"
             self.grounded_collection_summary_prompt_path = self.prompt_dir / "grounded_collection_summary.txt"
             self.summary_map_prompt_path = self.prompt_dir / "summary_map.txt"
@@ -2894,6 +2969,10 @@ class RAG:
         self.grounded_refine_prompt = self._load_prompt_text(
             self.grounded_refine_prompt_path,
             default=DEFAULT_GROUNDED_REFINE_PROMPT,
+        )
+        self.visual_image_legend_prompt = self._load_prompt_text(
+            self.visual_image_legend_prompt_path,
+            default=DEFAULT_VISUAL_IMAGE_LEGEND_PROMPT,
         )
         self.grounded_collection_summary_prompt = self._load_prompt_text(
             self.grounded_collection_summary_prompt_path,
@@ -3820,19 +3899,56 @@ class RAG:
 
         The service owns the loaded ``ImageIngestionConfig``, but it is
         constructed lazily on first retrieval — and the query engine is built
-        before that.
+        before that. Falling back to the *hardcoded* default there silently
+        discarded the operator's setting for exactly one turn per process: the
+        first visual turn attached six thumbnails to an endpoint configured to
+        accept one, whatever ``VISUAL_ANSWER_MAX_IMAGES`` said, and every later
+        turn honoured it. So load the settings from the environment instead,
+        which is where the service would have read them anyway.
 
         Args:
             name (str): Config field name.
-            default (Any): Value to use when the service is not built yet.
+            default (Any): Value to use when the setting does not exist.
 
         Returns:
             Any: The configured value, or ``default``.
         """
         config = getattr(self._image_ingestion_service, "img_ingestion_config", None)
         if config is None:
-            return default
+            config = load_image_ingestion_config()
         return getattr(config, name, default)
+
+    def _visual_answer_max_images(self) -> int:
+        """Return how many stored thumbnails a visual answer may look at.
+
+        Returns:
+            int: ``VISUAL_ANSWER_MAX_IMAGES``, or its default when the image
+            service has not been constructed yet.
+        """
+        return max(0, int(self._image_config_value("visual_answer_max_images", DEFAULT_VISUAL_ANSWER_MAX_IMAGES)))
+
+    def _ensure_visual_indexes_once(self, collection: str) -> None:
+        """Ensure the companion's filter and search indexes once per process.
+
+        The visual target filters and keyword-matches the ``_images``
+        companion, which collections ingested before this feature carry
+        neither index for. Both helpers are idempotent, so this only saves
+        round-trips; both are fail-soft, because an unindexed companion still
+        answers correctly, only slower.
+
+        Args:
+            collection (str): Physical main collection name — the cache key,
+                even though the indexes land on its companion.
+        """
+        if collection in self._visual_indexes_ensured:
+            return
+        companion = image_companion_name(collection)
+        if not self._collection_exists(companion):
+            return
+        ok = ensure_visual_filter_indexes(self.qdrant_client, companion)
+        ok = ensure_search_index(self.qdrant_client, companion) and ok
+        if ok:
+            self._visual_indexes_ensured.add(collection)
 
     def _image_relevance_floor(self) -> float:
         """Return the reranker score an image caption must reach to surface.
@@ -3849,6 +3965,7 @@ class RAG:
         *,
         top_k: int,
         metadata_filter_rules: Sequence[Any] | None = None,
+        qdrant_filter: Any | None = None,
     ) -> list[NodeWithScore]:
         """Retrieve image captions as retrieval nodes.
 
@@ -3865,8 +3982,11 @@ class RAG:
             query (str): The user's original query, untranslated.
             top_k (int): How many CLIP candidates to draw.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
-                filters, applied in memory (the companion collection is not
-                queried through the vector-store filter path).
+                filters, applied in memory as a second pass over the (already
+                narrowed) candidates.
+            qdrant_filter (Any | None): Optional compiled native filter the
+                companion collection applies itself, so the top-k cut happens
+                over matching points rather than over the whole collection.
 
         Returns:
             list[NodeWithScore]: Caption nodes carrying the image payload as
@@ -3890,6 +4010,9 @@ class RAG:
                 query_text=self._image_query_for_clip(query),
                 top_k=top_k,
                 source_collection=self.qdrant_collection,
+                # Only when there is one, so an unfiltered turn calls exactly
+                # the signature it always did.
+                **({"qdrant_filter": qdrant_filter} if qdrant_filter is not None else {}),
             )
         except Exception as exc:
             logger.warning("Image source retrieval failed: {}", exc)
@@ -3915,6 +4038,194 @@ class RAG:
 
             nodes.append(self._image_caption_node(payload, caption))
         return nodes
+
+    def _visual_candidate_node(self, candidate: VisualCandidate) -> NodeWithScore | None:
+        """Turn one fused visual candidate into a citation node.
+
+        Reuses :meth:`_image_caption_node` so a visual turn's sources are
+        shaped exactly like the image lane's — same identity keys, same
+        LLM-visible metadata whitelist, same citation plumbing.
+
+        Args:
+            candidate (VisualCandidate): The fused candidate.
+
+        Returns:
+            NodeWithScore | None: The caption node, or ``None`` when the
+            candidate carries no caption a reader or a reranker could judge.
+        """
+        payload = {**candidate.payload, "node_id": candidate.point_id, "score": candidate.clip_score}
+        caption = RAG._image_caption_text(payload)
+        if not caption:
+            return None
+        return self._image_caption_node(payload, caption)
+
+    def _visual_clip_candidates(
+        self,
+        *,
+        qdrant_filter: Any | None,
+        top_k: int,
+    ) -> Callable[[str], list[VisualCandidate]]:
+        """Build the visual target's CLIP lane.
+
+        Args:
+            qdrant_filter (Any | None): Native filter the companion applies.
+            top_k (int): How many candidates to draw.
+
+        Returns:
+            Callable[[str], list[VisualCandidate]]: The lane.
+        """
+
+        def _lane(query: str) -> list[VisualCandidate]:
+            """Draw CLIP candidates for ``query``.
+
+            Args:
+                query (str): The user's original query.
+
+            Returns:
+                list[VisualCandidate]: Candidates, best first; empty on any
+                fault, which leaves the keyword lane to answer alone.
+            """
+            if self._image_ingestion_service is None:
+                self._image_ingestion_service = ImageIngestionService()
+            try:
+                matches = self._image_ingestion_service.query_similar_images_by_text(
+                    query_text=self._image_query_for_clip(query),
+                    top_k=top_k,
+                    source_collection=self.qdrant_collection,
+                    qdrant_filter=qdrant_filter,
+                )
+            except Exception as exc:
+                logger.warning("Visual CLIP candidates failed: {}", exc)
+                return []
+            candidates: list[VisualCandidate] = []
+            for payload in matches:
+                point_id = str(payload.get("node_id") or payload.get("image_id") or "").strip()
+                if not point_id:
+                    continue
+                score = payload.get("score")
+                candidates.append(
+                    VisualCandidate(
+                        point_id=point_id,
+                        payload={key: value for key, value in payload.items() if key not in BLOB_PAYLOAD_KEYS},
+                        clip_score=float(score) if isinstance(score, (int, float)) else None,
+                    )
+                )
+            return candidates
+
+        return _lane
+
+    def _visual_keyword_candidates(
+        self,
+        *,
+        qdrant_filter: Any | None,
+        top_k: int,
+    ) -> Callable[[str], list[VisualCandidate]]:
+        """Build the visual target's keyword lane.
+
+        The lane matches the query's keywords against the companion's indexed
+        caption, tag and OCR text. It runs on the **original** query, not the
+        English rendering the CLIP tower needs: the stored text is in the
+        corpus's own language, so translating first would search for the
+        wrong words.
+
+        Args:
+            qdrant_filter (Any | None): Native filter ANDed with the keywords.
+            top_k (int): How many ranked candidates to keep.
+
+        Returns:
+            Callable[[str], list[VisualCandidate]]: The lane.
+        """
+
+        def _lane(query: str) -> list[VisualCandidate]:
+            """Draw keyword candidates for ``query``.
+
+            Args:
+                query (str): The user's original query.
+
+            Returns:
+                list[VisualCandidate]: Candidates, best first; empty when the
+                query yields no usable keywords or the scroll fails, which
+                leaves the CLIP lane to answer alone.
+            """
+            try:
+                keywords = parse_keywords(query)
+            except Exception:
+                return []
+            if not keywords:
+                return []
+            companion = image_companion_name(self.qdrant_collection)
+            if not self._collection_exists(companion):
+                return []
+            keyword_filter = build_any_keyword_filter(
+                keywords,
+                min_match=visual_min_match(len(keywords)),
+                base_filter=qdrant_filter,
+            )
+            if keyword_filter is None:
+                return []
+            try:
+                points, _ = self.qdrant_client.scroll(
+                    collection_name=companion,
+                    scroll_filter=keyword_filter,
+                    # Ranking happens here, not in Qdrant, so the scroll draws
+                    # deeper than the cut it feeds.
+                    limit=max(1, top_k * 4),
+                    # The ranker counts hits in ``search_text``, so that one blob
+                    # key must come back; ``rank_keyword_candidates`` strips it
+                    # again before a candidate is built.
+                    with_payload=qdrant_models.PayloadSelectorExclude(
+                        exclude=[key for key in BLOB_PAYLOAD_KEYS if key != "search_text"]
+                    ),
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning("Visual keyword candidates failed: {}", exc)
+                return []
+            return rank_keyword_candidates(points, keywords)[:top_k]
+
+        return _lane
+
+    def _build_visual_retriever(
+        self,
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        vector_store_kwargs: dict[str, Any] | None,
+    ) -> VisualRetriever:
+        """Build the retriever for the visual target.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): Raw request filters.
+            metadata_filters_active (bool): Whether filters are in play.
+            vector_store_kwargs (dict[str, Any] | None): Native query kwargs,
+                carrying the request's compiled filter when it has one.
+
+        Returns:
+            VisualRetriever: The two-lane retriever over the image companion.
+
+        Raises:
+            ValueError: When the request declared filters that reached the
+                retriever as neither raw rules nor a compiled filter.
+                Unreachable from the API, where both derive from the same
+                payload — but answering a filtered visual question from
+                unfiltered imagery is exactly the silent wrong answer this
+                target exists to avoid, so it is loud instead.
+        """
+        qdrant_filter = (vector_store_kwargs or {}).get("qdrant_filters")
+        if qdrant_filter is None and metadata_filter_rules:
+            qdrant_filter = build_qdrant_filter(metadata_filter_rules)
+        if metadata_filters_active and not metadata_filter_rules and qdrant_filter is None:
+            logger.error("ValueError: Visual retrieval asked for filters that reached neither lane.")
+            raise ValueError("Metadata filters are active but none reached the visual retriever.")
+
+        self._ensure_visual_indexes_once(self.qdrant_collection)
+        top_k = max(1, int(self._image_config_value("visual_retrieve_top_k", DEFAULT_VISUAL_RETRIEVE_TOP_K)))
+        return VisualRetriever(
+            clip_lane=self._visual_clip_candidates(qdrant_filter=qdrant_filter, top_k=top_k),
+            keyword_lane=self._visual_keyword_candidates(qdrant_filter=qdrant_filter, top_k=top_k),
+            make_node=self._visual_candidate_node,
+            limit=top_k,
+        )
 
     def _image_caption_node(self, payload: dict[str, Any], caption: str) -> NodeWithScore:
         """Wrap one image payload as a retrieval node.
@@ -4654,14 +4965,10 @@ class RAG:
             or payload.get("file_format")
         )
         source_kind = payload.get("source") or payload.get("source_type") or payload.get("reader")
-        # ``source_doc_id`` is the image companion's link back to the file the
-        # image was extracted from; it is what makes the preview link resolve.
-        file_hash = (
-            origin.get("file_hash")
-            or payload.get("file_hash")
-            or payload.get("source_doc_id")
-            or RAG._extract_file_hash(payload)
-        )
+        # ``source_file_hash`` knows the image companion's keys (a keyframe's
+        # clip, a still image's own hash, a figure's document); it is what
+        # makes the preview link resolve.
+        file_hash = origin.get("file_hash") or source_file_hash(payload) or RAG._extract_file_hash(payload)
 
         page = (
             payload.get("page")
@@ -4904,9 +5211,14 @@ class RAG:
         except Exception:
             payload = None
 
-        if payload is None:
+        # A cited image lives only in the ``_images`` companion -- the docstore
+        # holds no node for it -- so a session revisit that looked in the main
+        # collection alone rehydrated every picture as an empty source.
+        for collection in (self.qdrant_collection, f"{self.qdrant_collection}_images"):
+            if payload is not None:
+                break
             try:
-                recs = self.qdrant_client.retrieve(collection_name=self.qdrant_collection, ids=[node_id])
+                recs = self.qdrant_client.retrieve(collection_name=collection, ids=[node_id])
                 if recs:
                     candidate = getattr(recs[0], "payload", None)
                     if isinstance(candidate, dict):
@@ -4920,6 +5232,7 @@ class RAG:
             collection=self.qdrant_collection,
             payload=payload,
             score=score,
+            node_id=node_id,
         )
 
     def _get_existing_file_hashes(self) -> set[str]:
@@ -5186,34 +5499,6 @@ class RAG:
         self._parent_context_support_cache[collection] = supported
         return supported
 
-    @staticmethod
-    def _merge_metadata_filters(
-        base_filters: MetadataFilters | None,
-        extra_filters: list[MetadataFilter],
-    ) -> MetadataFilters | None:
-        """Merge request-scoped filters with internal retrieval filters.
-
-        Args:
-            base_filters (MetadataFilters | None): Original filters from the query engine, or None.
-            extra_filters (list[MetadataFilter]): Additional filters that must be applied for
-                retrieval, such as parent-context scoping.
-
-        Returns:
-            MetadataFilters | None: ``base_filters`` AND ``extra_filters`` combined, or None if
-                neither produces any filter.
-        """
-        if not extra_filters:
-            return base_filters
-        if base_filters is None:
-            return MetadataFilters(
-                filters=cast(list[MetadataFilter | MetadataFilters], extra_filters),
-                condition=FilterCondition.AND,
-            )
-        return MetadataFilters(
-            filters=[*base_filters.filters, *extra_filters],
-            condition=FilterCondition.AND,
-        )
-
     def _resolve_vector_store_query_mode(
         self,
         raw_mode: str | None = None,
@@ -5439,6 +5724,7 @@ class RAG:
         retrieval_options: dict[str, Any] | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         metadata_filters_active: bool = False,
+        include_images: bool = True,
     ) -> Any:
         """Build a retriever, optionally scoped by metadata filters.
 
@@ -5454,6 +5740,8 @@ class RAG:
                 metadata filters at all. Together with ``metadata_filter_rules``
                 it decides whether the image lane can run — see
                 :meth:`_build_image_lane`.
+            include_images (bool): Whether the image lane may join the text
+                retriever. ``False`` for the ``documents`` target.
         """
         if self.index is None:
             logger.error("RuntimeError: Index is not initialized.")
@@ -5463,55 +5751,52 @@ class RAG:
             similarity_top_k=similarity_top_k,
             retrieval_options=retrieval_options,
         )
-        # The internal condition is expressed twice — once per filter
-        # representation — because either may be the one that executes:
-        # QdrantVectorStore.query uses ``qdrant_filters`` *instead of* the
-        # LlamaIndex filters when both are supplied.
-        internal_filters: list[MetadataFilter] = []
-        internal_conditions: list[qdrant_models.FieldCondition] = []
+        internal_conditions: list[qdrant_models.Filter] = []
         if retrieval_settings["parent_context_enabled"]:
-            internal_filters.append(
-                MetadataFilter(
-                    key="docint_hier_type",
-                    value="fine",
-                    operator=FilterOperator.EQ,
-                )
-            )
-            internal_conditions.append(
-                qdrant_models.FieldCondition(
-                    key="docint_hier_type",
-                    match=qdrant_models.MatchValue(value="fine"),
-                )
-            )
-
-        merged_filters = self._merge_metadata_filters(metadata_filters, internal_filters)
+            # Keep the coarse parents out of retrieval, expressed as "not
+            # coarse" rather than "is fine": only the hierarchical readers tag
+            # their chunks, so a transcript segment or a table row next to one
+            # PDF carries no tag at all, and requiring ``fine`` made every such
+            # chunk unretrievable the moment a single tagged point existed.
+            # This has to be the *native* filter: llama-index renders a ``NE``
+            # metadata filter as Qdrant ``MatchExcept``, which only matches
+            # points that carry the key, so an untagged chunk would still be
+            # dropped.
+            internal_conditions.append(not_coarse_condition())
 
         retriever_kwargs: dict[str, Any] = {
             "similarity_top_k": retrieval_settings["similarity_top_k"],
             "vector_store_query_mode": retrieval_settings["vector_store_query_mode"],
         }
-        if merged_filters is not None:
-            retriever_kwargs["filters"] = merged_filters
+        if metadata_filters is not None:
+            retriever_kwargs["filters"] = metadata_filters
         if retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.HYBRID:
             retriever_kwargs["alpha"] = retrieval_settings["alpha"]
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
             retriever_kwargs["hybrid_top_k"] = retrieval_settings["hybrid_top_k"]
         elif retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.SPARSE:
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
-        if vector_store_kwargs:
-            # Copy before mutating: the caller owns this dict and may reuse it
-            # across the text and image lanes of the same request.
-            native_kwargs = dict(vector_store_kwargs)
-            if internal_conditions and native_kwargs.get("qdrant_filters") is not None:
-                native_kwargs["qdrant_filters"] = merge_qdrant_filters(
-                    native_kwargs["qdrant_filters"],
-                    internal_conditions,
-                )
+        # Copy before mutating: the caller owns this dict and may reuse it
+        # across the text and image lanes of the same request.
+        # ``QdrantVectorStore.query`` uses ``qdrant_filters`` *instead of* the
+        # LlamaIndex ``MetadataFilters`` when both are supplied; every caller
+        # compiles its rules into both, so the native filter is the one that
+        # counts and the internal condition is merged into it.
+        native_kwargs = dict(vector_store_kwargs or {})
+        if internal_conditions:
+            native_kwargs["qdrant_filters"] = merge_qdrant_filters(
+                native_kwargs.get("qdrant_filters"),
+                internal_conditions,
+            )
+        if native_kwargs:
             retriever_kwargs["vector_store_kwargs"] = native_kwargs
         text_retriever = self.index.as_retriever(**retriever_kwargs)
+        if not include_images:
+            return text_retriever
         image_lane = self._build_image_lane(
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
+            qdrant_filter=(vector_store_kwargs or {}).get("qdrant_filters"),
         )
         if image_lane is None:
             return text_retriever
@@ -5522,27 +5807,38 @@ class RAG:
         *,
         metadata_filter_rules: Sequence[Any] | None,
         metadata_filters_active: bool,
+        qdrant_filter: Any | None = None,
     ) -> Callable[[str], list[NodeWithScore]] | None:
         """Build the image half of the retriever, or decline to.
 
         The lane stands down when the request carries metadata filters that
-        did not reach the runtime as raw rules: image candidates are filtered
-        in memory, so without the rules the only honest options are unfiltered
-        images or none, and none is the safe one.
+        reached the runtime as neither raw rules nor a compiled Qdrant filter:
+        the only honest options are then unfiltered images or none, and none
+        is the safe one.
+
+        A compiled filter is applied by the companion collection itself, so
+        the candidates come back already narrowed. Without it the filtering
+        happened after the top-k cut, which is why a filtered query used to
+        return no imagery at all: five unfiltered candidates rarely survive a
+        clip or time-range rule.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): Raw request filters.
             metadata_filters_active (bool): Whether filters are in play.
+            qdrant_filter (Any | None): The request's compiled native filter,
+                applied by the companion collection.
 
         Returns:
             Callable[[str], list[NodeWithScore]] | None: The lane, or ``None``
             when images must not participate in this request.
         """
         image_filter_rules = metadata_filter_rules if metadata_filters_active else None
-        if metadata_filters_active and not image_filter_rules:
+        if metadata_filters_active and not image_filter_rules and qdrant_filter is None:
             return None
 
         top_k = max(1, int(self._image_config_value("retrieve_top_k", DEFAULT_IMAGE_RETRIEVE_TOP_K)))
+        if qdrant_filter is not None:
+            self._ensure_visual_indexes_once(self.qdrant_collection)
 
         def _lane(query: str) -> list[NodeWithScore]:
             """Retrieve image caption nodes for ``query``.
@@ -5557,6 +5853,7 @@ class RAG:
                 query,
                 top_k=top_k,
                 metadata_filter_rules=image_filter_rules,
+                qdrant_filter=qdrant_filter,
             )
 
         return _lane
@@ -5571,6 +5868,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None = None,
         metadata_filters_active: bool = False,
         scoped_node_ids: Sequence[str] | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> RetrieverQueryEngine:
         """Construct a query engine for the current index.
 
@@ -5586,8 +5884,15 @@ class RAG:
             metadata_filters_active (bool): Whether this request carries
                 metadata filters at all.
             scoped_node_ids (Sequence[str] | None): When set, answer from
-                exactly these chunks instead of retrieving. Selects the
-                scoped engine, which drops every ranking postprocessor.
+                exactly these chunks instead of retrieving.
+            retrieval_target (RetrievalTarget): Which evidence may answer the
+                query: ``all`` fuses text and imagery, ``documents`` drops the
+                image lane, ``visual`` answers from the image companion alone.
+                A scope outranks it — hand-picked chunks are hand-picked
+                whatever the target says.
+
+        Returns:
+            RetrieverQueryEngine: The engine for this turn's target.
         """
         if self.index is None:
             self.create_index()
@@ -5614,14 +5919,64 @@ class RAG:
             )
 
         profile = self._infer_collection_profile()
+
+        if retrieval_target == "visual":
+            # Stored imagery is the whole evidence set, so the chain keeps only
+            # what still means something without text chunks beside it: the
+            # rerank (which orders captions) and the numbering. Parent-context
+            # expansion reads a docstore holding no companion nodes; the social
+            # diversity cap would collapse a clip's consecutive keyframes, which
+            # is the opposite of what a "when does X appear" question needs; and
+            # link-following would pull posting text into a set that is meant to
+            # be pixels.
+            #
+            # The image relevance floor is absent for the same reason, and the
+            # reason is not that it is merely redundant here. It guards the
+            # ``all`` target, where a merely-nearest image must not take a slot
+            # from a text answer. Its threshold sits on a cross-encoder score,
+            # which answers "does this passage answer this question" — so a
+            # question *about* the imagery ("what is shown in the documents?"),
+            # which is the shape this target invites, scores the correct image
+            # in the same band as an unrelated one (measured: 0.003-0.004 for
+            # the right picture, against 0.96 for a query phrased as a caption).
+            # Applied here it emptied the evidence set and every visual turn
+            # answered from nothing. There is also nothing left for it to
+            # protect: the rerank's top-n already bounds the set, and the model
+            # is shown the pixels, so it can say "none of these shows X" far
+            # better than a caption cross-encoder can decide it in advance.
+            max_images = self._visual_answer_max_images()
+            return RetrieverQueryEngine.from_args(
+                retriever=self._build_visual_retriever(
+                    metadata_filter_rules=metadata_filter_rules,
+                    metadata_filters_active=metadata_filters_active,
+                    vector_store_kwargs=vector_store_kwargs,
+                ),
+                llm=self.post_retrieval_text_model,
+                node_postprocessors=[
+                    # The default top-n is smaller than the attach cap, so
+                    # without this the rerank would cut the evidence below the
+                    # number of images the answer is allowed to look at.
+                    LazyRerankerPostprocessor(rag=self, top_n=max(self.rerank_top_n, max_images)),
+                    CitationNumberingPostprocessor(),
+                ],
+                response_synthesizer=self._build_response_synthesizer(
+                    streaming=streaming,
+                    social_table=bool(profile.get("is_social_table")),
+                    visual=True,
+                ),
+            )
+
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
         node_postprocessors: list[BaseNodePostprocessor] = [
-            LazyRerankerPostprocessor(rag=self),
+            # The reranker scores without cutting; the floor below owns the
+            # cut, so a sub-floor image can never hold a slot a text hit
+            # would have taken.
+            LazyRerankerPostprocessor(rag=self, keep_all=True),
             # Directly after the rerank, where image captions and text chunks
             # first carry comparable scores.
-            ImageRelevanceFloorPostprocessor(min_score=self._image_relevance_floor()),
+            ImageRelevanceFloorPostprocessor(min_score=self._image_relevance_floor(), top_n=self.rerank_top_n),
         ]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
             usable_tokens, per_hit_floor = self._compute_parent_context_budget(
@@ -5660,6 +6015,7 @@ class RAG:
                 retrieval_options=retrieval_options,
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=metadata_filters_active,
+                include_images=retrieval_target != "documents",
             ),
             llm=self.post_retrieval_text_model,
             node_postprocessors=node_postprocessors,
@@ -5669,7 +6025,13 @@ class RAG:
             ),
         )
 
-    def _build_response_synthesizer(self, *, streaming: bool, social_table: bool) -> BaseSynthesizer:
+    def _build_response_synthesizer(
+        self,
+        *,
+        streaming: bool,
+        social_table: bool,
+        visual: bool = False,
+    ) -> BaseSynthesizer:
         """Build the chat/query response synthesizer for the resolved mode.
 
         Constructed explicitly (rather than through ``from_args``'s
@@ -5683,19 +6045,83 @@ class RAG:
             streaming (bool): Whether the synthesizer should stream tokens.
             social_table (bool): Whether the active collection is a social
                 table, selecting the social prompt variants.
+            visual (bool): Whether the turn answers from imagery, in which
+                case the stored thumbnails of the top sources are attached to
+                each synthesis call and the context window is shortened to
+                pay for them.
 
         Returns:
             BaseSynthesizer: A :class:`StreamingCompactAndRefine` for compact
-                mode, else a :class:`StreamingRefine`.
+                mode, else a :class:`StreamingRefine`; the visual variants of
+                either when ``visual`` is set.
         """
         response_mode = self._resolve_chat_response_mode()
-        synthesizer_cls = StreamingCompactAndRefine if response_mode == ResponseMode.COMPACT else StreamingRefine
-        return synthesizer_cls(
-            llm=self.post_retrieval_text_model,
-            streaming=streaming,
-            text_qa_template=self._build_grounded_text_qa_template(social_table=social_table),
-            refine_template=self._build_grounded_refine_template(social_table=social_table),
+        compact = response_mode == ResponseMode.COMPACT
+        kwargs: dict[str, Any] = {
+            "llm": self.post_retrieval_text_model,
+            "streaming": streaming,
+            "text_qa_template": self._build_grounded_text_qa_template(social_table=social_table),
+            "refine_template": self._build_grounded_refine_template(social_table=social_table),
+        }
+        if not visual:
+            synthesizer_cls = StreamingCompactAndRefine if compact else StreamingRefine
+            return synthesizer_cls(**kwargs)
+
+        max_images = self._visual_answer_max_images()
+        # The caption context has to fit *beside* the pixels, so the window
+        # the packer works from is the real one minus what the images cost.
+        window = max(
+            1024, int(self.openai_ctx_window * self.parent_context_safety_margin) - image_token_reserve(max_images)
         )
+        kwargs["prompt_helper"] = PromptHelper(context_window=window, num_output=self.openai_num_output)
+        visual_cls = VisualStreamingCompactAndRefine if compact else VisualStreamingRefine
+        synthesizer = visual_cls(**kwargs)
+        synthesizer._fetch_thumbnails = self._fetch_companion_thumbnails
+        synthesizer._max_images = max_images
+        synthesizer._legend_template = self.visual_image_legend_prompt
+        synthesizer._attached = []
+        synthesizer._stamped = []
+        return synthesizer
+
+    def _fetch_companion_thumbnails(self, point_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
+        """Fetch stored thumbnails for the sources an answer will look at.
+
+        Read by point id rather than carried on the retrieved nodes: the
+        thumbnail is payload-only (see ``_stamp_thumbnail``), and a node's
+        metadata reaches the citation panel and the persisted turn, where
+        pixels do not belong.
+
+        Args:
+            point_ids (Sequence[str]): Companion point ids, in citation order.
+
+        Returns:
+            dict[str, tuple[str, str]]: ``point_id -> (mime, base64)`` for
+            every id whose point carries a thumbnail. Empty on any outage —
+            the answer is then written from the captions alone and reports
+            ``visual.images_attached`` accordingly.
+        """
+        wanted = [point_id for point_id in point_ids if point_id]
+        if not wanted:
+            return {}
+        companion = image_companion_name(self.qdrant_collection)
+        try:
+            records = self.qdrant_client.retrieve(
+                collection_name=companion,
+                ids=[_as_qdrant_point_id(point_id) for point_id in wanted],
+                with_payload=["thumbnail_b64", "thumbnail_mime"],
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Visual thumbnail fetch failed for '{}': {}", companion, exc)
+            return {}
+        found: dict[str, tuple[str, str]] = {}
+        for record in records or []:
+            payload = dict(getattr(record, "payload", None) or {})
+            data = str(payload.get("thumbnail_b64") or "")
+            if not data:
+                continue
+            found[str(getattr(record, "id", ""))] = (str(payload.get("thumbnail_mime") or "image/jpeg"), data)
+        return found
 
     def _source_from_node_with_score(self, nws: Any) -> dict[str, Any] | None:
         """Normalize one ``NodeWithScore`` item into a source dictionary.
@@ -5846,6 +6272,7 @@ class RAG:
         # before they become sources, so a degraded turn is reported and the
         # stamp never reaches a client or a persisted turn.
         rerank: dict[str, Any] | None = None
+        images_attached = 0
         sources: list[dict[str, Any]] = []
         for nws in source_nodes:
             metadata = getattr(getattr(nws, "node", None), "metadata", None)
@@ -5854,6 +6281,10 @@ class RAG:
                 error = metadata.pop(RERANK_ERROR_KEY, None)
                 if rerank is None or (rerank["applied"] and not applied):
                     rerank = {"applied": applied, "error": None if applied else str(error or "unknown")}
+            # Same lift as the rerank stamp above: report what the model was
+            # shown, and keep the marker off the client and the persisted turn.
+            if isinstance(metadata, dict) and metadata.pop(VISUAL_IMAGES_ATTACHED_KEY, None):
+                images_attached += 1
             normalized = self._source_from_node_with_score(nws)
             if normalized is not None:
                 sources.append(normalized)
@@ -5889,6 +6320,7 @@ class RAG:
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
             "rerank": rerank,
+            "visual": {"images_attached": images_attached} if images_attached else None,
         }
 
     def _load_collection_ner_sources(
@@ -6960,6 +7392,7 @@ class RAG:
         vector_store_kwargs: dict[str, Any] | None = None,
         retrieval_options: dict[str, Any] | None = None,
         scoped_node_ids: Sequence[str] | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
 
@@ -6975,6 +7408,8 @@ class RAG:
                 retrieval overrides.
             scoped_node_ids (Sequence[str] | None): When set, answer from
                 exactly these chunks instead of retrieving.
+            retrieval_target (RetrievalTarget): Which evidence may answer the
+                query. See :mod:`docint.core.retrieval.visual`.
 
         Returns:
             dict[str, Any]: The query results.
@@ -6995,9 +7430,18 @@ class RAG:
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                 scoped_node_ids=scoped_node_ids,
+                retrieval_target=retrieval_target,
             )
             # A scope must never reuse the cached engine: that one retrieves.
-            if scoped_node_ids or metadata_filters is not None or vector_store_kwargs or retrieval_options
+            # Neither may a non-default target: the cached engine is the
+            # ``all`` one, and reusing it would answer a visual turn from text.
+            if (
+                scoped_node_ids
+                or metadata_filters is not None
+                or vector_store_kwargs
+                or retrieval_options
+                or retrieval_target != DEFAULT_RETRIEVAL_TARGET
+            )
             else self.query_engine
         )
         if engine is None:
@@ -7047,6 +7491,12 @@ class RAG:
             # looked like one.
             normalized["retrieval_mode"] = "scoped"
             normalized["scoped_chunk_count"] = len(list(scoped_node_ids))
+        normalized["retrieval_target"] = retrieval_target
+        if retrieval_target == "visual" and not scoped_node_ids and normalized.get("visual") is None:
+            # A visual turn that showed the model nothing answered from
+            # captions alone. Reported as zero, never as absent: absent is
+            # what every non-visual turn looks like.
+            normalized["visual"] = {"images_attached": 0}
         return normalized
 
     async def run_query_async(
@@ -7058,6 +7508,7 @@ class RAG:
         vector_store_kwargs: dict[str, Any] | None = None,
         retrieval_options: dict[str, Any] | None = None,
         scoped_node_ids: Sequence[str] | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection asynchronously.
 
@@ -7073,6 +7524,8 @@ class RAG:
                 retrieval overrides.
             scoped_node_ids (Sequence[str] | None): When set, answer from
                 exactly these chunks instead of retrieving.
+            retrieval_target (RetrievalTarget): Which evidence may answer the
+                query. See :mod:`docint.core.retrieval.visual`.
 
         Returns:
             dict[str, Any]: The query results.
@@ -7093,9 +7546,18 @@ class RAG:
                 metadata_filter_rules=metadata_filter_rules,
                 metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                 scoped_node_ids=scoped_node_ids,
+                retrieval_target=retrieval_target,
             )
             # A scope must never reuse the cached engine: that one retrieves.
-            if scoped_node_ids or metadata_filters is not None or vector_store_kwargs or retrieval_options
+            # Neither may a non-default target: the cached engine is the
+            # ``all`` one, and reusing it would answer a visual turn from text.
+            if (
+                scoped_node_ids
+                or metadata_filters is not None
+                or vector_store_kwargs
+                or retrieval_options
+                or retrieval_target != DEFAULT_RETRIEVAL_TARGET
+            )
             else self.query_engine
         )
         if engine is None:
@@ -7141,6 +7603,12 @@ class RAG:
             # See run_query: report what actually happened.
             normalized["retrieval_mode"] = "scoped"
             normalized["scoped_chunk_count"] = len(list(scoped_node_ids))
+        normalized["retrieval_target"] = retrieval_target
+        if retrieval_target == "visual" and not scoped_node_ids and normalized.get("visual") is None:
+            # A visual turn that showed the model nothing answered from
+            # captions alone. Reported as zero, never as absent: absent is
+            # what every non-visual turn looks like.
+            normalized["visual"] = {"images_attached": 0}
         return normalized
 
     # --- Session integration ---
@@ -7296,6 +7764,7 @@ class RAG:
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -7324,6 +7793,8 @@ class RAG:
             replace_turn_idx (int | None): Forwarded to
                 :meth:`docint.core.state.session_manager.SessionManager.chat`;
                 overwrites that turn instead of appending one.
+            retrieval_target (RetrievalTarget): Which evidence may answer the
+                turn. See :mod:`docint.core.retrieval.visual`.
 
         Returns:
             dict[str, Any]: The chat response data, including ``turn_idx``.
@@ -7340,6 +7811,7 @@ class RAG:
             skip_query_rewrite=skip_query_rewrite,
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
+            retrieval_target=retrieval_target,
         )
 
     def stream_chat(
@@ -7356,6 +7828,7 @@ class RAG:
         skip_query_rewrite: bool | None = None,
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -7384,6 +7857,8 @@ class RAG:
             replace_turn_idx (int | None): Forwarded to
                 :meth:`docint.core.state.session_manager.SessionManager.stream_chat`;
                 overwrites that turn instead of appending one.
+            retrieval_target (RetrievalTarget): Which evidence may answer the
+                turn. See :mod:`docint.core.retrieval.visual`.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -7400,6 +7875,7 @@ class RAG:
             skip_query_rewrite=skip_query_rewrite,
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
+            retrieval_target=retrieval_target,
         )
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:

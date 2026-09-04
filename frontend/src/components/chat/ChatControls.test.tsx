@@ -110,4 +110,46 @@ describe('ChatControls', () => {
     expect(on).not.toBe(off)
     void container
   })
+
+  it('names the retrieval target, defaulting to everything', () => {
+    render(<ChatControls />)
+
+    // Three values, one icon button: like the two toggles beside it, the
+    // setting is only legible if the accessible name spells it out.
+    expect(screen.getByRole('button', { name: /answer from/i })).toHaveAccessibleName(/everything/i)
+  })
+
+  it('steps through the targets and records each, since they decide what an answer is made of', async () => {
+    render(<ChatControls />)
+    const target = () => screen.getByRole('button', { name: /answer from/i })
+
+    await userEvent.click(target())
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('documents')
+    expect(target()).toHaveAccessibleName(/documents/i)
+
+    await userEvent.click(target())
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('visual')
+    expect(target()).toHaveAccessibleName(/images/i)
+
+    // Wraps, so the default is reachable without a dropdown to reopen.
+    await userEvent.click(target())
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+  })
+
+  it('draws a different icon for each target', async () => {
+    // Same rule as the two toggles: the value has to survive a glance without
+    // a hover, so each target has its own drawing rather than one tinted icon.
+    render(<ChatControls />)
+    const icon = () =>
+      screen.getByRole('button', { name: /answer from/i }).querySelector('svg')?.innerHTML
+
+    const all = icon()
+    await userEvent.click(screen.getByRole('button', { name: /answer from/i }))
+    const documents = icon()
+    await userEvent.click(screen.getByRole('button', { name: /answer from/i }))
+    const visual = icon()
+
+    expect(all).toBeTruthy()
+    expect(new Set([all, documents, visual]).size).toBe(3)
+  })
 })

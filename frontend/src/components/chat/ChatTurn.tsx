@@ -64,6 +64,18 @@ function scopeWasDropped(turn: ChatTurnData): boolean {
   return turn.meta.retrieval_mode !== 'scoped'
 }
 
+/** Whether a visual turn answered without ever seeing the pictures.
+ *
+ *  The point of the visual target is that the model looks at the imagery, so
+ *  a turn where the thumbnails could not be fetched answered from captions
+ *  alone — a degraded turn the transcript must not present as a normal one,
+ *  exactly like a skipped rerank.
+ */
+function visualPixelsMissing(turn: ChatTurnData): boolean {
+  if (!turn.done || !turn.meta) return false
+  return turn.meta.retrieval_target === 'visual' && turn.meta.visual?.images_attached === 0
+}
+
 function dedupeSources(sources: Source[]): Source[] {
   // Image-only ingests emit a text-source plus an image-source for the
   // same file; the image-source often lacks file_hash, so its preview
@@ -181,6 +193,16 @@ export function ChatTurn({
           >
             <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
             {t('chat.rerank_not_applied')}
+          </div>
+        )}
+        {visualPixelsMissing(turn) && (
+          <div
+            className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
+            data-testid="visual-pixels-missing"
+            role="alert"
+          >
+            <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
+            {t('chat.visual_pixels_missing')}
           </div>
         )}
         {turn.meta && <ValidationBanner v={turn.meta} />}

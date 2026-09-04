@@ -1504,6 +1504,7 @@ class ImageIngestionService:
         top_k: int = 5,
         *,
         source_collection: str | None = None,
+        qdrant_filter: models.Filter | None = None,
     ) -> list[dict[str, Any]]:
         """Return image records similar to a text query via CLIP text embeddings.
 
@@ -1519,6 +1520,10 @@ class ImageIngestionService:
             query_text (str): The input text query to find similar images for.
             top_k (int): The number of similar images to return.
             source_collection (str | None): Optional source collection to resolve the target collection.
+            qdrant_filter (models.Filter | None): Optional native filter the
+                collection applies before the top-k cut, so a filtered query
+                ranks over matching points instead of narrowing an already
+                truncated list.
 
         Returns:
             list[dict[str, Any]]: Payload dicts for the similar images, each carrying a
@@ -1545,7 +1550,13 @@ class ImageIngestionService:
         from llama_index.core.vector_stores.types import VectorStoreQuery
 
         vector_store = self._get_vector_store(target_collection)
-        result = vector_store.query(VectorStoreQuery(query_embedding=query_embedding, similarity_top_k=top_k))
+        # ``qdrant_filters`` is the seam QdrantVectorStore.query offers for a
+        # native filter; it becomes the query's ``query_filter``.
+        native_kwargs = {"qdrant_filters": qdrant_filter} if qdrant_filter is not None else {}
+        result = vector_store.query(
+            VectorStoreQuery(query_embedding=query_embedding, similarity_top_k=top_k),
+            **native_kwargs,
+        )
         output: list[dict[str, Any]] = []
         nodes = result.nodes or []
         similarities = result.similarities or []

@@ -64,14 +64,33 @@ hate-speech-only, custom field/operator/value rules) via
 mismatches, and an optional `GraphDebugPanel`. Cancellation uses an
 `AbortController`.
 
-The metadata-filter disclosure and the retrieval-mode toggle hold the right
-edge of the Chat header row (`src/components/chat/ChatControls.tsx`): they
+The metadata-filter disclosure, the retrieval-mode toggle and the
+**Answer from** control hold the right edge of the Chat header row
+(`src/components/chat/ChatControls.tsx`): they
 govern what any answer retrieves against, so they belong to the chat rather
 than to the search panel, which owns only the query field and the hits. Each
 hit is a tile that scopes the chat when clicked, and the panel's collapsed
-rail is a bare toggle that tints while a scope is live. Icon-only controls draw from
+rail is a bare toggle that tints while a scope is live. Icon-only controls draw
+from `@infra/ui` or, for what no other app could use,
 `src/components/common/icons.tsx`; never a text glyph, whose shape is
 whatever font the viewer's browser happens to pick.
+
+**Answer from** chooses which evidence the next answer may come from:
+Everything (the default), Documents, or Images. It is one icon button that
+steps through the three, drawn as stacked layers, a page, or a picture — the
+setting has three values rather than two, but it is changed rarely, and a
+labelled dropdown in a row of icon controls reads as a different kind of
+control altogether. Hovering it names the current target in full ("Answer
+from: Images"), the way the two toggles beside it name their states. The
+choice matters because it changes what an answer is *made of* — under Images
+the model is shown the stored pictures themselves, not only their
+descriptions. Choosing Images
+also grows the filter panel a group of its own (kind of imagery, clip or file
+name, and a time range written the way a player shows it, `m:ss`); those
+presets stay hidden under the other targets, where a keyframe-time rule would
+match nothing and silently empty the answer. A visual turn that could not
+load its pictures says so above the sources, the same way a skipped rerank
+does.
 
 A **Search in** picker under the query field chooses what the keywords
 match: Text (the chunk body, the default), Author, Network or UUID. The

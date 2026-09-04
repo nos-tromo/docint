@@ -222,8 +222,10 @@ collection summary alongside its document's text.
 What the model sees of an image is what was stored for it at ingest time: its
 caption and tags, and — where a document OCR model is configured — the text
 printed *inside* it (see
-[ingestion.md](ingestion.md#images--imagespy)). No pixels are sent at query
-time, and no vision call happens on the chat path.
+[ingestion.md](ingestion.md#images--imagespy)). Under the `all` and
+`documents` targets no pixels are sent at query time and no vision call
+happens on the chat path; the `visual` target is the exception and attaches
+the stored thumbnails itself (see [Retrieval targets](#retrieval-targets)).
 
 Settings that shape the lane:
 
@@ -237,12 +239,85 @@ Settings that shape the lane:
   caption must reach. The floor sits on the reranker, never on raw CLIP
   similarity, which is not comparable across queries: an unrelated query and a
   matching one both land in the same narrow CLIP band. Raise it if unrelated
-  images still appear; lower it if relevant ones are missing.
+  images still appear; lower it if relevant ones are missing. It applies to the
+  `all` target only — see the visual target below.
 
 If the rerank endpoint is down, images surface ungated rather than vanishing —
 a degraded ranking is more useful than a silently emptied lane. Full defaults
 and rationale:
 [configuration.md](configuration.md#image-ingestion--imageingestionconfig).
+
+## Retrieval targets
+
+A turn carries a **retrieval target** saying which evidence may answer it,
+sent as `retrieval_target` on `/query` and `/stream_query` and echoed back on
+the response and the final SSE frame. It is a separate field from
+`retrieval_mode`, which is session routing on the request (`session` /
+`stateless`) and a different vocabulary on the response (`scoped`,
+`rewrite_*`).
+
+| Target | Retrieves | Chain |
+|---|---|---|
+| `all` (default) | Text chunks and image captions, fused | The full postprocessor chain |
+| `documents` | Text chunks only | The full chain, image lane never built |
+| `visual` | The `_images` companion only | Rerank, numbering |
+
+A pinned scope outranks the target: hand-picked chunks are hand-picked
+whatever the target says.
+
+**The visual target applies no relevance floor.** `IMAGE_RERANK_MIN_SCORE`
+protects a *text* answer from a merely-nearest image, and its threshold sits on
+a cross-encoder score answering "does this passage answer this question". A
+question about the imagery — "what is shown in the documents?", the shape this
+target invites — scores the correct image in the same band as an unrelated one,
+so the floor emptied the evidence set and the turn answered from nothing. Here
+the rerank's top-n already bounds the set, and the model is shown the pixels, so
+it can say that none of the images shows the thing asked about.
+
+**The visual target retrieves in two lanes.** CLIP similarity finds imagery
+whose caption never names the thing asked about, and a keyword pass over the
+companion's indexed caption/tag/OCR text finds the literal terms CLIP's
+English-only text tower is weak at. The keyword pass runs on the *original*
+query (the stored text is in the corpus's own language) and requires half its
+keywords rather than all of them — a question carries more words than a
+one-line caption can hold. The two rankings are fused by reciprocal rank, and
+either lane failing degrades the turn rather than ending it: a dead CLIP
+endpoint leaves keyword-only, a rejected scroll leaves CLIP-only.
+
+**It answers from the pictures, not only their captions.** After ranking, the
+stored 768px thumbnails of the top sources (`VISUAL_ANSWER_MAX_IMAGES`,
+default 6) are attached to the same synthesis call as image parts, with a
+legend tying each to its citation number. The context window is shortened by
+what they cost, so the captions still fit beside them. This is the only place
+in docint where a chat turn sends pixels. When the thumbnails cannot be
+fetched the answer is written from the captions alone and reports
+`visual: {"images_attached": 0}` — a degraded turn the SPA flags rather than
+presenting as an ordinary one.
+
+**A model that refuses the pictures degrades the same way.** The inference
+endpoint caps how many images one prompt may carry (vLLM's
+`--limit-mm-per-prompt`, `CHAT_LIMIT_MM_PER_PROMPT` on the vllm-service chat
+container) and knows nothing of `VISUAL_ANSWER_MAX_IMAGES`, so the two can
+disagree on any deployment. When the call is refused, the turn is answered
+from the captions and reports `images_attached: 0` rather than failing. Set
+the two knobs to agree — raise the endpoint's limit to answer from several
+pictures at once, or lower `VISUAL_ANSWER_MAX_IMAGES` to what it accepts, so
+the model actually sees the evidence it is citing.
+
+**Its postprocessor chain is shorter, and deliberately.** Parent-context
+expansion reads a docstore that holds no companion nodes; the social
+diversity cap would collapse a clip's consecutive keyframes, which is the
+opposite of what a "when does X appear" question needs; and link-following
+would pull posting prose into a set that is meant to be imagery.
+
+**Filters reach the companion collection itself.** Request filters used to
+apply in memory, after the top-k cut, so a clip or time-range rule usually
+left no imagery at all; the compiled Qdrant filter is now handed to the
+companion, which applies it before ranking. This fixes the `all` target too.
+The SPA's visual presets (kind of imagery, clip name, time range) compile to
+`source_type`, `source_file` and `keyframe_time_sec` rules, and the
+companion's indexes for those keys are created at ingest and backported on
+the first visual query.
 
 ## Graph-assisted retrieval
 

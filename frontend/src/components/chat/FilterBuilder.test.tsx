@@ -153,3 +153,52 @@ describe('FilterBuilder custom rules', () => {
     expect(screen.getByRole('combobox', { name: 'Operator' })).toHaveTextContent('contains')
   })
 })
+
+describe('FilterBuilder visual presets', () => {
+  it('hides them unless the turn answers from imagery', () => {
+    // A keyframe-time rule against a text chunk matches nothing, so offering
+    // these on a document turn would invite a filter that silently empties
+    // the answer.
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.setState({ filterEnabled: true, retrievalTarget: 'documents' })
+
+    render(<FilterBuilder />)
+
+    expect(screen.queryByTestId('visual-filters')).toBeNull()
+  })
+
+  it('offers clip, time range and kind of imagery under the visual target', () => {
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.setState({ filterEnabled: true, retrievalTarget: 'visual' })
+
+    render(<FilterBuilder />)
+
+    expect(screen.getByTestId('visual-filters')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: /kind of image/i })).toBeInTheDocument()
+    expect(screen.getByText(/clip or file name/i)).toBeInTheDocument()
+    expect(screen.getByText(/from \(m:ss\)/i)).toBeInTheDocument()
+  })
+
+  it('marks a time bound it cannot read, rather than dropping it silently', async () => {
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.setState({ filterEnabled: true, retrievalTarget: 'visual' })
+
+    render(<FilterBuilder />)
+    const from = screen.getByPlaceholderText('0:00')
+    await userEvent.type(from, 'half past')
+
+    expect(from).toHaveAttribute('aria-invalid', 'true')
+  })
+
+  it('accepts a bound it can read', async () => {
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.setState({ filterEnabled: true, retrievalTarget: 'visual' })
+
+    render(<FilterBuilder />)
+    const from = screen.getByPlaceholderText('0:00')
+    await userEvent.type(from, '1:30')
+
+    expect(from).toHaveAttribute('aria-invalid', 'false')
+    expect(useChatFiltersStore.getState().visualTimeFrom).toBe('1:30')
+  })
+})

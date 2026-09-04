@@ -347,6 +347,8 @@ def test_stream_chat_includes_final_response_when_no_tokens(
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact",
             "rerank": None,
+            "retrieval_target": "all",
+            "visual": None,
             "turn_idx": 0,
         }
     ]
@@ -616,3 +618,67 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     assert "Tell me about Alice" in rewrite_context
     assert "Alice posted about launch" in rewrite_context
     engine.query.assert_called_once_with("What did Alice post?")
+
+
+def test_an_image_citation_persists_a_hash_the_store_can_resolve(
+    session_manager: SessionManager,
+) -> None:
+    """An ``_images`` node carries no ``file_hash``; the row must not store null.
+
+    A keyframe names the clip it was cut from and a still image names its own
+    content hash — the same rule the live source uses — otherwise the session
+    ZIP silently skips every picture the answer cited.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    keyframe = MagicMock()
+    keyframe.node_id = "kf-1"
+    keyframe.metadata = {
+        "filename": "clip.mp4",
+        "image_id": "frame-hash",
+        "media_file_hash": "clip-hash",
+        "source_doc_id": "posting-1",
+        "posting_uuid": "posting-1",
+    }
+    still = MagicMock()
+    still.node_id = "img-1"
+    still.metadata = {
+        "filename": "pic.png",
+        "image_id": "pic-hash",
+        "source_doc_id": "posting-1",
+        "posting_uuid": "posting-1",
+    }
+    resp_mock.source_nodes = [MagicMock(node=keyframe, score=0.5), MagicMock(node=still, score=0.4)]
+
+    session_manager._persist_turn("image-session", "hello", resp_mock, {"response": "Hi"})
+
+    history = session_manager.get_session_history("image-session", owner=None)
+    assert [s["file_hash"] for s in history[1]["sources"]] == ["clip-hash", "pic-hash"]
+
+
+def test_a_scoped_visual_turn_is_not_reported_as_degraded(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned scope outranks the Images target, so no pixels were attempted.
+
+    Stamping ``images_attached: 0`` here made the SPA flag a healthy scoped
+    answer as one whose imagery could not be loaded.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    scoped_engine = MagicMock()
+    scoped_engine.query.return_value = MagicMock()
+    session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
+    session_manager.rag._normalize_response_data.return_value = {"response": "Hi", "sources": []}  # type: ignore[attr-defined]
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    response = session_manager.chat("hello", scoped_node_ids=["c1"], retrieval_target="visual")
+
+    assert response["retrieval_target"] == "visual"
+    assert "visual" not in response

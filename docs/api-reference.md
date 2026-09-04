@@ -169,6 +169,7 @@ Request (`QueryIn`):
   "session_id": null,
   "metadata_filters": [],
   "retrieval_mode": "session",
+  "retrieval_target": "all",
   "reasoning": null
 }
 ```
@@ -181,6 +182,13 @@ Request (`QueryIn`):
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
   `RAG.run_query()` directly.
+- `retrieval_target` — which evidence may answer the turn: `all` (default,
+  documents and imagery fused), `documents` (no image lane), or `visual` (the
+  `{collection}_images` companion alone, the one path that sends the stored
+  thumbnails to the model). Orthogonal to `retrieval_mode` above, which is
+  session routing. A pinned scope outranks it. A value outside the three is
+  rejected with 422. See
+  [retrieval-and-agents.md](retrieval-and-agents.md#retrieval-targets).
 - `metadata_filters` — list of `MetadataFilterIn` objects with
   `{field, fields, operator, value, values}`. Supported operators: `eq`, `neq`,
   `gt`, `gte`, `lt`, `lte`, `in`, `contains`, `mime_match`, `date_after`,
@@ -192,7 +200,11 @@ Request (`QueryIn`):
   `reference_metadata.posting_timestamp`. A rule naming neither is rejected
   with 422.
 
-Response (`QueryOut`):
+Response (`QueryOut`). `retrieval_target` echoes what answered the turn, and
+`visual` reports what a visual turn put in front of the model
+(`{"images_attached": n}`; `0` means the thumbnails could not be fetched and
+the answer came from stored captions alone). `visual` is `null` on any other
+target.
 
 ```json
 {
@@ -203,6 +215,8 @@ Response (`QueryOut`):
   "retrieval_query": "...",
   "coverage_unit": null,
   "retrieval_mode": "session",
+  "retrieval_target": "all",
+  "visual": null,
   "validation_checked": true,
   "validation_mismatch": false,
   "validation_reason": null
