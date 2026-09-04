@@ -23,9 +23,8 @@ and the node builder all arrive as callables.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from itertools import chain
 from typing import Any, Literal, get_args
 
 from llama_index.core.retrievers import BaseRetriever
@@ -461,6 +460,25 @@ def render_legend(template: str, images: Sequence[tuple[int, str, str]]) -> str:
     return lines
 
 
+def _stream_from(buffered: Sequence[str], rest: Iterator[str]) -> Iterator[str]:
+    """Re-emit tokens already pulled, then the rest of the stream.
+
+    A generator, deliberately. The synthesizer accepts a string or a
+    :class:`collections.abc.Generator` and rejects every other iterable, so an
+    ``itertools.chain`` — an iterator with no ``send``/``throw``/``close`` —
+    fails the whole turn at ``_prepare_response_output`` rather than streaming.
+
+    Args:
+        buffered (Sequence[str]): Tokens already taken off the stream.
+        rest (Iterator[str]): What is left of it.
+
+    Yields:
+        str: Each token, buffered ones first.
+    """
+    yield from buffered
+    yield from rest
+
+
 class VisualImagesMixin:
     """Put the retrieved imagery itself in front of the model.
 
@@ -650,13 +668,13 @@ class VisualImagesMixin:
             try:
                 # A streaming client sends the request on the first pull, not
                 # on the call, so the refusal arrives here rather than above.
-                first = next(tokens)
+                buffered: list[str] = [next(tokens)]
             except StopIteration:
-                return iter(())
+                buffered = []
             except Exception as exc:
                 self._drop_attached_images(exc)
                 return super()._update_response(program, program_kwargs, response_kwargs)  # type: ignore[misc]
-            return chain([first], tokens)
+            return _stream_from(buffered, tokens)
         try:
             return llm.chat(messages).message.content or ""
         except Exception as exc:

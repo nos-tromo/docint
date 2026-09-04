@@ -6,6 +6,7 @@ stored thumbnails to the same synthesis call — and must do so without letting
 those pixels leak onto a node, into ``sources``, or into a persisted turn.
 """
 
+from collections.abc import Generator
 from typing import Any, cast
 
 import pytest
@@ -475,13 +476,33 @@ def test_a_refused_attachment_degrades_the_stream_too() -> None:
 
 
 def test_a_streamed_answer_keeps_its_first_token() -> None:
-    """The token pulled to detect a refusal must still reach the reader."""
+    """The token pulled to detect a refusal must still reach the reader.
+
+    And it must come back as a *generator*: the synthesizer's
+    ``_prepare_response_output`` takes a string or a
+    ``collections.abc.Generator`` and fails the turn on any other iterable, so
+    asserting only that the tokens are right would pass on an
+    ``itertools.chain`` that cannot be streamed. The type is the contract.
+    """
     synth = _Synth(streaming=True)
     synth.synthesize(None, [_image_node("point-1")])
 
-    tokens = list(synth._update_response(_Program(), {}, {}))
+    streamed = synth._update_response(_Program(), {}, {})
 
-    assert "".join(tokens) == "answer"
+    assert isinstance(streamed, Generator)
+    assert "".join(streamed) == "answer"
+
+
+def test_an_empty_stream_is_still_a_generator() -> None:
+    """A model that streams nothing must not fail the turn on its type."""
+    synth = _Synth(streaming=True)
+    synth._llm = cast(Any, type("L", (_LLM,), {"stream_chat": lambda self, messages: iter(())})())
+    synth.synthesize(None, [_image_node("point-1")])
+
+    streamed = synth._update_response(_Program(), {}, {})
+
+    assert isinstance(streamed, Generator)
+    assert "".join(streamed) == ""
 
 
 @pytest.mark.anyio
