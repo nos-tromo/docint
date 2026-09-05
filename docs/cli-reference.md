@@ -14,7 +14,7 @@ you run `uv sync`.
 | `query` | `docint.cli.query:main` | Run batch chat queries and collection-level exports. |
 | `query-eval` | `docint.cli.eval:main` | Corpus retrieval evaluation across retrieval modes. |
 | `verify` | `docint.cli.verify:main` | Check Qdrant ↔ docstore consistency (optionally repair). |
-| `load-models` | `docint.utils.model_cfg:main` | Pre-download model assets into the local caches. |
+| `load-models` | `docint.utils.model_cfg:main` | Cache the embedding tokenizer for offline token counting. |
 
 All commands respect the environment settings from `.env` /
 `docint/utils/env_cfg.py`. See [configuration.md](configuration.md) for
@@ -273,22 +273,25 @@ store and SQLite KV docstore are in sync, reporting drift — KV-only
 orphans, Qdrant-only orphans, and broken hierarchical parents. With
 `--repair` it removes the KV-only orphans.
 
-## `load-models` — cache pre-population
+## `load-models` — embedding-tokenizer cache
 
 ```bash
 uv run load-models
 ```
 
-Source: `docint/utils/model_cfg.py:main`. Downloads the Docling models
-(RapidOCR, layout, table structure, picture classifier, code/formula),
-the CLIP image encoder, GLiNER weights, and any Hugging Face models
-referenced by `ModelConfig`. Only the assets that are actually needed by
-the current `INFERENCE_PROVIDER` are fetched.
+Source: `docint/utils/model_cfg.py:main`. Caches the tokenizer files of
+`EMBED_TOKENIZER_REPO` (default `BAAI/bge-m3`, ~21 MB) so the pre-embed
+re-chunker can count tokens exactly, offline. The download is restricted
+to `TOKENIZER_PATTERNS` — the repo's model weights are never fetched,
+because every model call docint makes (chat, embedding, rerank, NER,
+CLIP, sparse) is an HTTP request to vllm-service, which holds its own
+weights. A snapshot already in the cache is left alone, and an empty
+`EMBED_TOKENIZER_REPO` (the `openai` provider, which tokenizes
+server-side) makes the command a no-op.
 
-Run this once on a fresh machine (or a new cache volume) to avoid
-blocking the first backend startup on network downloads. It is also run at
-container startup when `PRELOAD_MODELS=true` is set (see the backend
-Dockerfile's entrypoint).
+**This is for `uv run` development hosts only.** The Docker image runs it
+in the builder stage and ships the result at `/app/hf-hub`, so a
+container downloads nothing at startup.
 
 ## Exit codes and logging
 

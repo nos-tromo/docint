@@ -50,7 +50,7 @@ instead of being silently truncated.
 
 ### Token counting strategy
 
-When `EMBED_TOKENIZER_REPO` is non-empty and the tokenizer snapshot exists in the HF cache (via `uv run load-models`), the pre-embed re-chunker uses the embedding model's authoritative tokenizer to count tokens. This is accurate across languages and domains (e.g. CJK, German compounds, transcripts with timestamps).
+When `EMBED_TOKENIZER_REPO` is non-empty and the tokenizer snapshot exists in the HF cache (baked into the image at build time; `uv run load-models` on a development host), the pre-embed re-chunker uses the embedding model's authoritative tokenizer to count tokens. This is accurate across languages and domains (e.g. CJK, German compounds, transcripts with timestamps).
 
 When the snapshot is missing or `EMBED_TOKENIZER_REPO` is empty (e.g. OpenAI provider), the re-chunker falls back to the `EMBED_CHAR_TOKEN_RATIO` heuristic and emits a WARNING at RAG init. The char-ratio approach is inherently biased toward English and significantly under-counts token budgets for multilingual or token-dense content.
 
@@ -77,7 +77,7 @@ identifiers, with provider-specific fallbacks.
 | Variable | Default (by provider) | Description |
 |---|---|---|
 | `EMBED_MODEL` | `bge-m3` (ollama) / `BAAI/bge-m3` (vllm) / `text-embedding-3-small` (openai) | Dense text embedding model. |
-| `EMBED_TOKENIZER_REPO` | `BAAI/bge-m3` (ollama / vllm) / `""` (openai) | Hugging Face repository ID of the tokenizer used for offline token counting at ingestion time. Empty string for providers (e.g. `openai`) where the embedding endpoint handles tokenization. Snapshot must be in the HF cache; run `uv run load-models` to populate it. |
+| `EMBED_TOKENIZER_REPO` | `BAAI/bge-m3` (ollama / vllm) / `""` (openai) | Hugging Face repository ID of the tokenizer used for offline token counting at ingestion time. Empty string for providers (e.g. `openai`) where the embedding endpoint handles tokenization. The image bakes the snapshot at build time (same-named build arg); on a `uv run` host, populate it with `uv run load-models`. |
 | `SPARSE_MODEL` | `BAAI/bge-m3` | Sparse retrieval model. Same value on every provider — sparse encoding is always a remote call (`RemoteSparseEncoder`), so there is no per-provider default to pick. |
 | `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |

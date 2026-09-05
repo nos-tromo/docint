@@ -68,15 +68,12 @@ the frontend port is published for local development.
   | `SESSIONS_DB_PATH` | `/var/lib/docint/sessions/sessions.sqlite3` |
   | `NO_PROXY` / `no_proxy` | `backend,qdrant,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8` (plus `EXTRA_NO_PROXY`) |
 
-- Mounts the `docling-cache`, `huggingface-cache`, `sessions-storage`, and
+- Mounts the `docling-cache`, `sessions-storage`, and
   `source-preview-cache` volumes.
 - Attaches to the `docint-net` network, to `inference-net` with the alias
   `docint-backend` (to reach the vLLM router), and to `data-net` with the
   alias `docint-backend` (to reach the `data-plane` project's Qdrant at
   `http://qdrant:6333`).
-- Set `PRELOAD_MODELS=true` to run `load-models` at container start before
-  `uvicorn` (warms the HF / Docling caches); otherwise it starts `uvicorn`
-  directly.
 
 ### `frontend`
 
@@ -136,8 +133,6 @@ idempotently before the stack starts.
 | Volume | Scope | Purpose |
 |---|---|---|
 | `docling-cache` | external | Docling model cache. |
-| `huggingface-cache` | external | HF Hub cache (embedding, reranker, NER, image models). |
-| `ollama-cache` | external | Ollama model cache, used when Ollama is co-deployed. |
 | `sessions-storage` | external | SQLite session database. |
 | `source-preview-cache` | external | Raw source files staged for `/sources/preview`. |
 
@@ -182,9 +177,11 @@ Multi-stage build, CPU-only:
    runtime libraries (`libmagic1`, `libgl1`), copies the prebuilt
    virtualenv and app source, exposes `8000`, and sets the entrypoint to
    `uvicorn docint.core.api:app --host 0.0.0.0 --port 8000`.
-3. **Optional model preload** — the entrypoint runs `load-models` before
-   `uvicorn` when `PRELOAD_MODELS=true` is set at runtime, warming the
-   HF / Docling caches on first start.
+3. **Baked embedding tokenizer** — the builder runs `load-models` to
+   cache the `EMBED_TOKENIZER_REPO` tokenizer files (~21 MB) under
+   `/app/hf-hub`, which the runtime reads via `HF_HUB_CACHE` with
+   `local_files_only=True`. Nothing is downloaded at run time. Override
+   the repo with the `EMBED_TOKENIZER_REPO` build arg.
 
 ### `docker/Dockerfile.frontend`
 
@@ -218,15 +215,12 @@ of network, proxy, and runtime overrides are Compose-specific:
 | `DOCINT_HOST_PORT` | Host port for the React SPA under `make up-dev` (default `8080`). |
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | Per-request upload cap nginx enforces on the frontend (default `1g`); the backend reads the same value to advertise it to the SPA (which batches large uploads under it). Raise only for single files larger than the default. |
 | `DOCINT_API_MAX_BODY_SIZE` | Per-request cap nginx enforces on the JSON API locations (default `64m`), sized for the report batch add. Frontend-only — nothing advertises it. Raise it alongside `REPORT_BATCH_MAX_ITEMS` when a section's findings run into the tens of thousands. |
-| `PRELOAD_MODELS` | When `true`, the backend runs `load-models` at startup before `uvicorn`. |
 
 If you use an outbound proxy, put the proxy variables in `.env` too, so
 Compose, image builds, and containers all use the same values.
 
-First startup may take a while because model assets are downloaded into the
-shared cache volumes. Pre-warm them with `make volumes` plus
-`PRELOAD_MODELS=true` (or `uv run load-models` on the host) to move that cost
-off the first request.
+The backend downloads nothing at startup: the only local model asset is the
+embedding tokenizer, baked into the image at build time.
 
 ## Session persistence
 
@@ -291,8 +285,8 @@ VISION_MODEL=qwen3.5:9b
 EMBED_MODEL=bge-m3
 ```
 
-Mount the `ollama-cache` volume on the Ollama container so downloaded
-models are shared across Docint and Ollama.
+Give the Ollama container its own model-cache volume; docint holds no
+model weights of its own.
 
 ### Embedding throughput with Ollama
 
@@ -413,8 +407,8 @@ make down      # stop + remove containers (never touches data-plane state)
 docker compose --env-file .env -f docker/compose.yaml down --volumes
 ```
 
-Note that the `external` volumes (`docling-cache`, `huggingface-cache`,
-`ollama-cache`, `sessions-storage`, `source-preview-cache`) are **not**
+Note that the `external` volumes (`docling-cache`, `sessions-storage`,
+`source-preview-cache`, `pipeline-storage`) are **not**
 removed by `--volumes` — so `down -v` no longer destroys staged source
 files or the SQLite session database. Delete them explicitly with
 `docker volume rm` if you want a clean slate.
