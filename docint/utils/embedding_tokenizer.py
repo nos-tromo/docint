@@ -71,7 +71,8 @@ def build_embedding_token_counter(
     resolved = resolve_hf_cache_path(cache_dir, repo_id)
     if resolved is None:
         logger.warning(
-            "Embedding tokenizer cache not found for {} at {} — run `uv run load-models` to populate it.",
+            "Embedding tokenizer cache not found for {} at {} — the container image bakes it at build time; "
+            "on a `uv run` host, run `uv run load-models` to populate it.",
             repo_id,
             cache_dir,
         )

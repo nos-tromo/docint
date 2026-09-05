@@ -1,6 +1,6 @@
 [project]
 name = "docint"
-version = "2.4.0"
+version = "2.4.1"
 description = "Proof of concept RAG application"
 authors = [
   { name = "nos-tromo" }
@@ -9,14 +9,6 @@ requires-python = ">=3.11,<3.12"
 license = "Apache-2.0"
 dependencies = [
   "cryptography>=50.0.1",
-  # docling-slim = docling WITHOUT the [standard] extra, whose docling-ibm-models
-  # dependency drags in torch + the full NVIDIA CUDA stack (~4.5 GB) that this
-  # CPU-only, remote-inference image must not ship. The extras docint actually
-  # uses are declared directly below: docling-core[chunking] (DoclingNodeParser),
-  # docling-parse (also the PDF pipeline's text/geometry backbone, see
-  # core/readers/documents/parse.py) + rtree + scipy (imported eagerly by
-  # docling.document modules),
-  # python-docx (docling's DOCX backend), openpyxl (pandas read_excel).
   "docling-core[chunking]>=2.92.0",
   "docling-parse>=7.16.0",
   "docling-slim>=2.123.1",
@@ -32,7 +24,6 @@ dependencies = [
   "loguru>=0.7.3",
   "markdown-it-py>=4.2.0",
   "numpy>=2.3.5",
-  "ollama>=0.6.2",
   "openai>=2.53.0",
   "openpyxl>=3.1.5",
   "pandas>=3.0.5",
@@ -114,11 +105,5 @@ ignore-missing-imports = ["*"]
 
 [tool.uv]
 package = true
-# The lock is resolved for Linux only. docling-core[chunking] caps transformers
-# <5.9 on darwin but allows <6.0 everywhere else, so a lock that also covers
-# macOS forks the resolution and keeps the CVE-2026-9856 version (5.8.1) in
-# uv.lock forever. docint runs on Debian-slim in Docker and CI runs on Linux;
-# `uv sync` on macOS will refuse this lock. See docs/development.md.
 environments = ["sys_platform == 'linux'"]
-# nltk >=3.10.3 refuses hardlinked data files (st_nlink>1); see docs/development.md.
 link-mode = "copy"

@@ -50,7 +50,7 @@ cd frontend && pnpm build
 # CLI tools
 uv run ingest --help
 uv run query --help
-uv run load-models          # pre-download model assets
+uv run load-models          # cache the embedding tokenizer (host dev only)
 
 # Docker — single CPU image, no profile toggle.
 make network   # create the external inference-net + data-net + edge-net (one-time)

@@ -2897,8 +2897,8 @@ class RAG:
             )
 
         # --- Offline embedding tokenizer (authoritative token counts) ---
-        # Loaded once per RAG instance from the HF cache populated by
-        # `uv run load-models`. When the snapshot is missing the counter
+        # Loaded once per RAG instance from the HF cache the image bakes at
+        # build time (`uv run load-models`). When the snapshot is missing the counter
         # is None and the char-ratio estimator takes over; that degraded
         # state is logged loudly so operators see it in every session.
         self._embed_token_counter = build_embedding_token_counter(
@@ -2910,7 +2910,8 @@ class RAG:
                 "No embedding tokenizer loaded (repo={!r}, cache={}) — "
                 "falling back to char/token ratio {} on a {}-token window "
                 "with safety margin {}. Multilingual corpora may overflow the "
-                "provider budget; run `uv run load-models` to populate the cache.",
+                "provider budget; the container image bakes the tokenizer at "
+                "build time, so on a `uv run` host run `uv run load-models`.",
                 self.model_config.embed_tokenizer_repo,
                 self.path_config.hf_hub_cache,
                 self.embed_char_token_ratio,

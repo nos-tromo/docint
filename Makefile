@@ -13,7 +13,7 @@
 
 REPO     := docint
 NETWORKS := inference-net data-net edge-net
-VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache pipeline-storage
+VOLUMES  := docling-cache sessions-storage source-preview-cache pipeline-storage
 include make/common.mk
 
 .PHONY: help resolve health search-index search-index-all extract

@@ -57,10 +57,10 @@ extra context a new user needs to understand what they just started.
    make volumes    # external cache + state volumes
    ```
 
-   `make volumes` creates `docling-cache`, `huggingface-cache`,
-   `ollama-cache`, `sessions-storage`, and `source-preview-cache` so model
-   artifacts and backend state persist across container rebuilds and are
-   not destroyed by `docker compose down -v`.
+   `make volumes` creates `docling-cache`, `sessions-storage`,
+   `source-preview-cache`, and `pipeline-storage` so backend state persists
+   across container rebuilds and is not destroyed by
+   `docker compose down -v`.
 
 3. **Build and start the stack:**
 
@@ -113,18 +113,17 @@ without going through Docker.
    A single environment — no `--extra` flags. docint ships no GPU code, so
    there is no `cpu`/`cuda` split.
 
-4. **(Optional) pre-download model assets:**
+4. **Cache the embedding tokenizer:**
 
    ```bash
    uv run load-models
    ```
 
-   This populates the Hugging Face and Docling caches so the first backend
-   startup does not block on downloads. Sparse and dense embedding are both
-   remote calls to `vllm-service`, not local models — but dense's *tokenizer*
-   (`BAAI/bge-m3`) is still cached locally here, for accurate token counting
-   during pre-embed re-chunking; without it, that step degrades to a
-   char-ratio heuristic with a warning.
+   All inference is a remote call to `vllm-service`, so the tokenizer
+   (`BAAI/bge-m3`, ~21 MB of tokenizer files) is the only model asset held
+   locally. It gives exact token counts during pre-embed re-chunking;
+   without it that step degrades to a char-ratio heuristic with a warning.
+   Only `uv run` hosts need this — the Docker image bakes it at build time.
 
 5. **Start the backend:**
 
