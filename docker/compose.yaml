@@ -43,7 +43,7 @@ services:
   # root container fixes ownership before the backend starts; it reuses
   # the backend image so the airgap bundle needs no extra image. The
   # find form only touches wrong-owner entries, so a boot over an
-  # already-owned multi-GB huggingface-cache writes nothing.
+  # already-owned volume writes nothing.
   ##########################################################
   volume-permissions:
     image: docint-backend:${DOCINT_VERSION:-latest}
@@ -67,13 +67,11 @@ services:
       - >-
         find /var/lib/docint/sessions /var/lib/docint/sources
         /var/lib/docint/pipeline /home/app/.cache/docling
-        /home/app/.cache/huggingface/hub
         -xdev ! -user 10001 -exec chown -h 10001:10001 {} +
         &&
         find /cleanup/media-tmp -xdev -mindepth 1 -delete
     volumes:
       - docling-cache:/home/app/.cache/docling
-      - huggingface-cache:/home/app/.cache/huggingface/hub
       - sessions-storage:/var/lib/docint/sessions
       - source-preview-cache:/var/lib/docint/sources
       - pipeline-storage:/var/lib/docint/pipeline
@@ -93,6 +91,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
+      args:
+        # Baked into the image at build time; the runtime never downloads it.
+        EMBED_TOKENIZER_REPO: ${EMBED_TOKENIZER_REPO:-BAAI/bge-m3}
     logging: *default-logging
     # Uploads spool through /tmp (starlette) before landing in
     # QDRANT_SRC_DIR, so /tmp must hold whole request bodies (up to
@@ -119,8 +120,6 @@ services:
       PIPELINE_ARTIFACTS_DIR: /var/lib/docint/pipeline/artifacts
       RESULTS_PATH: /var/lib/docint/pipeline/results
       EXTRACT_DIR: /var/lib/docint/pipeline/extracts
-      # Explicit (matches the volume mount) rather than derived from $HOME.
-      HF_HUB_CACHE: /home/app/.cache/huggingface/hub
       # Same value nginx enforces (frontend service, below). The backend only
       # advertises it via GET /config so the SPA sizes upload batches to stay
       # under nginx's client_max_body_size; it does not enforce it here.
@@ -128,7 +127,6 @@ services:
     env_file: *env-file
     volumes:
       - docling-cache:/home/app/.cache/docling
-      - huggingface-cache:/home/app/.cache/huggingface/hub
       - sessions-storage:/var/lib/docint/sessions
       - source-preview-cache:/var/lib/docint/sources
       - pipeline-storage:/var/lib/docint/pipeline
@@ -203,10 +201,6 @@ services:
 ##########################################################
 volumes:
   docling-cache:
-    external: true
-  huggingface-cache:
-    external: true
-  ollama-cache:
     external: true
   sessions-storage:
     external: true
