@@ -8,171 +8,137 @@ import pytest
 from docint.utils import model_cfg as model_cfg_module
 
 
-def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """VLLM should skip provider-side local model provisioning.
+def _configs(
+    monkeypatch: pytest.MonkeyPatch,
+    cache_dir: Path,
+    repo_id: str,
+) -> None:
+    """Stub the two env_cfg loaders ``main()`` reads.
 
     Args:
-        tmp_path: Temporary cache root.
         monkeypatch: Pytest monkeypatch fixture.
+        cache_dir: Value for ``PathConfig.hf_hub_cache``.
+        repo_id: Value for ``ModelConfig.embed_tokenizer_repo``.
     """
-    calls: list[tuple[str, str]] = []
-
-    path_config = SimpleNamespace(
-        hf_hub_cache=tmp_path / "hf",
-    )
-    path_config.__dataclass_fields__ = {
-        "hf_hub_cache": object(),
-    }
-
-    model_config = SimpleNamespace(
-        image_embed_model="openai/clip-vit-base-patch32",
-        ner_model="gliner-community/gliner_large-v2.5",
-        sparse_model="Qdrant/all_miniLM_L6_v2_with_attentions",
-        rerank_model="BAAI/bge-reranker-v2-m3",
-        embed_model="BAAI/bge-m3",
-        text_model="Qwen/Qwen3.5-2B",
-        vision_model="Qwen/Qwen3.5-2B",
-    )
-    model_config.__dataclass_fields__ = {
-        "image_embed_model": object(),
-        "ner_model": object(),
-        "sparse_model": object(),
-        "rerank_model": object(),
-        "embed_model": object(),
-        "text_model": object(),
-        "vision_model": object(),
-    }
-
     monkeypatch.setattr(
         model_cfg_module,
         "load_path_env",
-        lambda: path_config,
+        lambda: SimpleNamespace(hf_hub_cache=cache_dir),
     )
     monkeypatch.setattr(
         model_cfg_module,
         "load_model_env",
-        lambda: model_config,
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_openai_env",
-        lambda: SimpleNamespace(inference_provider="vllm", api_base="http://vllm-router:9000/v1"),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_hf_model",
-        lambda model_id, cache_folder, kw, trust_remote_code=False: calls.append((kw, model_id)),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_ollama_model",
-        lambda *args, **kwargs: calls.append(("ollama", "called")),
+        lambda: SimpleNamespace(embed_tokenizer_repo=repo_id),
     )
 
-    model_cfg_module.main()
 
-    # Sparse embedding is remote (vllm-service), so the sparse model is
-    # never downloaded or run locally — no ("sparse", ...) call to assert.
-    assert ("rerank", "BAAI/bge-reranker-v2-m3") in calls
-    assert ("embedding", "BAAI/bge-m3") in calls
-    assert ("text", "Qwen/Qwen3.5-2B") in calls
-    assert ("vision", "Qwen/Qwen3.5-2B") in calls
-    assert ("ollama", "called") not in calls
+def test_main_downloads_only_the_tokenizer_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cache miss fetches the tokenizer files, never the weights.
 
-
-def test_load_models_populates_embed_tokenizer_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``main()`` must pre-warm the HF cache for the embed tokenizer repo.
-
-    Operators set ``EMBED_TOKENIZER_REPO=BAAI/bge-m3`` so the
-    ingestion path can load the tokenizer with
-    ``local_files_only=True``. ``load-models`` is the only moment
-    we are online, so the snapshot has to be fetched here. The
-    contract: ``load_hf_model`` is called with
-    ``model_id=<embed_tokenizer_repo>``, ``kw="embed-tokenizer"``,
-    and ``cache_folder=path_config.hf_hub_cache`` regardless of the
-    provider (ollama/vllm/openai) — the tokenizer ships with the
-    worker, not the provider.
+    The bge-m3 repo carries ~2.5 GB of weights docint never loads —
+    every model call is remote — so the download must be restricted to
+    ``TOKENIZER_PATTERNS``.
 
     Args:
         tmp_path: Temporary cache root.
         monkeypatch: Pytest monkeypatch fixture.
     """
-    calls: list[tuple[str, str]] = []
-
-    path_config = SimpleNamespace(hf_hub_cache=tmp_path / "hf")
-    path_config.__dataclass_fields__ = {"hf_hub_cache": object()}
-
-    model_config = SimpleNamespace(
-        image_embed_model="openai/clip-vit-base-patch32",
-        ner_model="gliner-community/gliner_large-v2.5",
-        sparse_model="Qdrant/all_miniLM_L6_v2_with_attentions",
-        rerank_model="BAAI/bge-reranker-v2-m3",
-        embed_model="bge-m3",
-        text_model="gpt-oss:20b",
-        vision_model="qwen3.5:9b",
-        embed_tokenizer_repo="BAAI/bge-m3",
-    )
-    model_config.__dataclass_fields__ = {
-        "image_embed_model": object(),
-        "ner_model": object(),
-        "sparse_model": object(),
-        "rerank_model": object(),
-        "embed_model": object(),
-        "text_model": object(),
-        "vision_model": object(),
-        "embed_tokenizer_repo": object(),
-    }
-
-    monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
-    monkeypatch.setenv("EMBED_TOKENIZER_REPO", "BAAI/bge-m3")
-
-    monkeypatch.setattr(model_cfg_module, "load_path_env", lambda: path_config)
-    monkeypatch.setattr(model_cfg_module, "load_model_env", lambda: model_config)
+    downloads: list[dict[str, object]] = []
+    cache_dir = tmp_path / "hf"
+    _configs(monkeypatch, cache_dir, "BAAI/bge-m3")
+    monkeypatch.setattr(model_cfg_module, "resolve_hf_cache_path", lambda cache_dir, repo_id: None)
     monkeypatch.setattr(
         model_cfg_module,
-        "load_openai_env",
-        lambda: SimpleNamespace(inference_provider="ollama", api_base="http://localhost:11434/v1"),
-    )
-    captured_hf_calls: list[dict[str, object]] = []
-
-    def _fake_load_hf_model(
-        model_id: str,
-        cache_folder: Path,
-        kw: str,
-        trust_remote_code: bool = False,
-    ) -> None:
-        """Record every ``load_hf_model`` invocation.
-
-        Args:
-            model_id: HF repo id.
-            cache_folder: HF hub cache root.
-            kw: Keyword describing the asset class (e.g. "sparse",
-                "rerank", "embed-tokenizer").
-            trust_remote_code: Forwarded trust_remote_code flag.
-        """
-        captured_hf_calls.append(
-            {
-                "model_id": model_id,
-                "cache_folder": cache_folder,
-                "kw": kw,
-                "trust_remote_code": trust_remote_code,
-            }
-        )
-        calls.append((kw, model_id))
-
-    monkeypatch.setattr(model_cfg_module, "load_hf_model", _fake_load_hf_model)
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_ollama_model",
-        lambda *args, **kwargs: calls.append(("ollama", "called")),
+        "snapshot_download",
+        lambda **kwargs: downloads.append(kwargs),
     )
 
     model_cfg_module.main()
 
-    embed_tokenizer_calls = [c for c in captured_hf_calls if c["kw"] == "embed-tokenizer"]
-    assert embed_tokenizer_calls, (
-        "load_hf_model must be called with kw='embed-tokenizer' when EMBED_TOKENIZER_REPO is set"
+    assert len(downloads) == 1
+    call = downloads[0]
+    assert call["repo_id"] == "BAAI/bge-m3"
+    assert call["cache_dir"] == cache_dir
+    patterns = model_cfg_module.TOKENIZER_PATTERNS
+    assert call["allow_patterns"] == list(patterns)
+    assert "tokenizer*" in patterns
+    assert not any(p.endswith(".safetensors") or p == "*" for p in patterns)
+
+
+def test_main_skips_a_cached_tokenizer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resolved snapshot short-circuits the download.
+
+    Args:
+        tmp_path: Temporary cache root.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    downloads: list[dict[str, object]] = []
+    snapshot = tmp_path / "hf" / "models--BAAI--bge-m3" / "snapshots" / "abc123"
+    _configs(monkeypatch, tmp_path / "hf", "BAAI/bge-m3")
+    monkeypatch.setattr(model_cfg_module, "resolve_hf_cache_path", lambda cache_dir, repo_id: snapshot)
+    monkeypatch.setattr(
+        model_cfg_module,
+        "snapshot_download",
+        lambda **kwargs: downloads.append(kwargs),
     )
-    call = embed_tokenizer_calls[0]
-    assert call["model_id"] == "BAAI/bge-m3"
-    assert call["cache_folder"] == path_config.hf_hub_cache
+
+    model_cfg_module.main()
+
+    assert downloads == []
+
+
+def test_main_is_a_noop_without_a_tokenizer_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty repo id means the provider tokenizes server-side.
+
+    ``load_model_env`` empties ``embed_tokenizer_repo`` for the openai
+    provider, so there is nothing to cache and nothing to resolve.
+
+    Args:
+        tmp_path: Temporary cache root.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    downloads: list[dict[str, object]] = []
+    _configs(monkeypatch, tmp_path / "hf", "")
+
+    def _fail(**kwargs: object) -> None:
+        """Fail the test if the cache is consulted.
+
+        Args:
+            **kwargs: Ignored.
+        """
+        raise AssertionError("resolve_hf_cache_path must not be called for an empty repo id")
+
+    monkeypatch.setattr(model_cfg_module, "resolve_hf_cache_path", _fail)
+    monkeypatch.setattr(
+        model_cfg_module,
+        "snapshot_download",
+        lambda **kwargs: downloads.append(kwargs),
+    )
+
+    model_cfg_module.main()
+
+    assert downloads == []
+
+
+def test_load_embed_tokenizer_passes_the_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The download lands in the configured hub cache root.
+
+    The Dockerfile builds the image with ``HF_HUB_CACHE=/app/hf-hub``
+    and the runtime reads from the same root, so the cache directory
+    must come from ``PathConfig`` rather than the HF default.
+
+    Args:
+        tmp_path: Temporary cache root.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    downloads: list[dict[str, object]] = []
+    monkeypatch.setattr(model_cfg_module, "resolve_hf_cache_path", lambda cache_dir, repo_id: None)
+    monkeypatch.setattr(
+        model_cfg_module,
+        "snapshot_download",
+        lambda **kwargs: downloads.append(kwargs),
+    )
+
+    model_cfg_module.load_embed_tokenizer(repo_id="BAAI/bge-m3", cache_folder=tmp_path / "hub")
+
+    assert downloads[0]["cache_dir"] == tmp_path / "hub"
