@@ -27,12 +27,7 @@ COPY . /app
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv sync --locked --no-dev
 
-# Bake the embedding tokenizer into the image (~21 MB, tokenizer files only).
-# It is the one model asset docint holds locally — everything else is an HTTP
-# call to vllm-service — and the runtime reads it with local_files_only=True.
-# Baking it keeps the airgap rule (nothing is fetched at run time) and removes
-# the operator's preload step. The cache mount means a source change replays
-# this from disk instead of the network.
+# Bake the embedding tokenizer into the image (~21 MB, tokenizer files only)
 ARG EMBED_TOKENIZER_REPO=BAAI/bge-m3
 RUN --mount=type=cache,target=/root/.cache/huggingface \
     EMBED_TOKENIZER_REPO=${EMBED_TOKENIZER_REPO} \
@@ -63,10 +58,7 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root runtime user (deploy ADR 0001). /app stays root-owned and
-# read-only to the app user; runtime writes go to the /var/lib/docint
-# volumes, the /home/app/.cache volumes, and /tmp (tmpfs). HOME matters:
-# HF/docling cache defaults derive from it.
+# Non-root runtime user (deploy ADR 0001). /app stays root-owned and read-only to the app user
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --create-home --home-dir /home/app \
        --shell /usr/sbin/nologin app
