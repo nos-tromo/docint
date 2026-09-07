@@ -937,17 +937,9 @@ class DocumentIngestionPipeline:
             collection are configured; otherwise a no-op stub. Callers must
             ``close()`` the returned object.
         """
-        from docint.core.storage.ingest_manifest import IngestManifest, NullIngestManifest
-        from docint.utils.env_cfg import load_ingestion_env, load_path_env
+        from docint.core.storage.ingest_manifest import open_ingest_manifest
 
-        try:
-            sources_root = load_path_env().qdrant_sources
-            if load_ingestion_env().ingest_manifest_enabled and sources_root and self.target_collection:
-                target = self.target_collection
-                return IngestManifest(sources_root / target / f"{target}_ingest_manifest.db")
-        except Exception as exc:  # pragma: no cover - fail-soft guard
-            logger.debug("Manifest unavailable: {}", exc)
-        return NullIngestManifest()
+        return open_ingest_manifest(self.target_collection)
 
     def _run_social_linker(self) -> None:
         """Run the social linker; record consumed paths + transcript Documents.

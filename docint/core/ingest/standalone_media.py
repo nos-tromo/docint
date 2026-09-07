@@ -17,7 +17,41 @@ from loguru import logger
 from docint.core.ingest.media_transcribe import MediaClip, MediaTranscribeResult
 from docint.utils.hashing import compute_file_hash
 
-__all__ = ["StandaloneMediaIngestor"]
+__all__ = ["StandaloneMediaIngestor", "standalone_clip"]
+
+
+def standalone_clip(path: Path, media_hash: str | None = None) -> MediaClip:
+    """Build the clip a loose audio/video file gets: anchored to its own hash.
+
+    Args:
+        path (Path): The media file.
+        media_hash (str | None): Its content hash when already known; read
+            from disk otherwise.
+
+    Returns:
+        MediaClip: Clip with file identity and no posting link field.
+    """
+    media_hash = media_hash or compute_file_hash(path)
+    return MediaClip(
+        path=path,
+        source_doc_id=media_hash,
+        media_hash=media_hash,
+        keyframe_source_type="video_keyframe",
+        keyframe_link_field=None,
+        keyframe_extra_metadata={
+            "media_file_hash": media_hash,
+            "source_file": path.name,
+            "source_path": str(path),
+        },
+        transcript_extra_info={
+            "filename": path.name,
+            "file_name": path.name,
+            "file_path": str(path),
+            "source_file": path.name,
+            "file_hash": media_hash,
+            "media_file_hash": media_hash,
+        },
+    )
 
 
 class StandaloneMediaIngestor:
@@ -80,30 +114,6 @@ class StandaloneMediaIngestor:
             )
             return MediaTranscribeResult()
 
-        clips: list[MediaClip] = []
-        for path in media_files:
-            media_hash = compute_file_hash(path)
-            clips.append(
-                MediaClip(
-                    path=path,
-                    source_doc_id=media_hash,
-                    media_hash=media_hash,
-                    keyframe_source_type="video_keyframe",
-                    keyframe_link_field=None,
-                    keyframe_extra_metadata={
-                        "media_file_hash": media_hash,
-                        "source_file": path.name,
-                        "source_path": str(path),
-                    },
-                    transcript_extra_info={
-                        "filename": path.name,
-                        "file_name": path.name,
-                        "file_path": str(path),
-                        "source_file": path.name,
-                        "file_hash": media_hash,
-                        "media_file_hash": media_hash,
-                    },
-                )
-            )
+        clips = [standalone_clip(path) for path in media_files]
         logger.info("Standalone media: transcribing {} audio/video file(s).", len(clips))
         return self._transcriber.run(clips)
