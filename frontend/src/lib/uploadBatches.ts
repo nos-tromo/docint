@@ -1,6 +1,14 @@
 /**
+ * Most file parts one `/ingest/upload` request may carry: the backend reads
+ * the multipart body with Starlette's default `max_files=1000`, and a request
+ * over that is rejected as a bare HTTP 400 regardless of its byte size.
+ */
+export const MAX_FILES_PER_BATCH = 1000
+
+/**
  * Split a flat list of files into sequentially-uploadable batches whose total
- * size each stays at or under `budgetBytes`.
+ * size each stays at or under `budgetBytes` and whose file count stays at or
+ * under `MAX_FILES_PER_BATCH`.
  *
  * The Ingest view POSTs one multipart request per batch to `/ingest/upload`;
  * nginx caps each *request* body at `client_max_body_size`, so packing files
@@ -10,7 +18,8 @@
  * (files already saved by an earlier batch are skipped, not re-ingested).
  *
  * Packing is greedy and order-preserving: files accumulate into the current
- * batch until the next file would exceed the budget, then a new batch starts.
+ * batch until the next file would exceed the byte budget or the file-count
+ * cap, then a new batch starts.
  * A single file larger than the budget gets its own solo batch (it cannot be
  * split here); if it also exceeds the hard server limit the caller surfaces the
  * resulting 413 for that one file without losing the other batches.
@@ -29,10 +38,14 @@ export function planUploadBatches(files: File[], budgetBytes: number): File[][] 
 
   for (const file of files) {
     const size = Number.isFinite(file.size) && file.size > 0 ? file.size : 0
-    // Flush the current batch when adding this file would overflow the budget —
-    // unless the batch is empty, in which case a lone oversize file must still
-    // go somewhere (its own solo batch) rather than producing an empty batch.
-    if (current.length > 0 && currentBytes + size > budgetBytes) {
+    // Flush the current batch when adding this file would overflow the byte
+    // budget or the file-count cap — unless the batch is empty, in which case a
+    // lone oversize file must still go somewhere (its own solo batch) rather
+    // than producing an empty batch.
+    if (
+      current.length > 0 &&
+      (currentBytes + size > budgetBytes || current.length >= MAX_FILES_PER_BATCH)
+    ) {
       batches.push(current)
       current = []
       currentBytes = 0
