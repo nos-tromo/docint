@@ -902,6 +902,10 @@ since ingestion is idempotent by file hash. The batch size the SPA picks comes
 from `max_upload_bytes` on `GET /config`, which mirrors
 `DOCINT_CLIENT_MAX_BODY_SIZE` — the nginx per-request cap. The total upload is
 therefore not bounded by that cap; only a *single* file larger than it is.
+Each batch also holds at most 1000 files: the backend reads the multipart body
+with Starlette's default `max_files=1000`, and a request carrying more file
+parts is rejected as HTTP 400 whatever its byte size, so the SPA splits a
+selection of many small files by count as well as by bytes.
 
 ### `POST /ingest/finalize`
 

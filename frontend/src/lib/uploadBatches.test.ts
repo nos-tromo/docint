@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { planUploadBatches } from './uploadBatches'
+import { MAX_FILES_PER_BATCH, planUploadBatches } from './uploadBatches'
 
 /** Build a File whose reported `size` is `size` bytes (no real allocation). */
 function fileOfSize(name: string, size: number): File {
@@ -45,6 +45,15 @@ describe('planUploadBatches', () => {
   it('treats a file exactly at the budget as fitting, then splits the next', () => {
     const files = [fileOfSize('a', 1000), fileOfSize('b', 1)]
     expect(names(planUploadBatches(files, 1000))).toEqual([['a'], ['b']])
+  })
+
+  it('caps a batch at MAX_FILES_PER_BATCH even when the byte budget has room', () => {
+    // Starlette's multipart parser rejects a request with more than 1000 file
+    // parts as HTTP 400, whatever its byte size.
+    const files = Array.from({ length: 2500 }, (_, i) => fileOfSize(`f${i}`, 1))
+    const batches = planUploadBatches(files, Number.MAX_SAFE_INTEGER)
+    expect(batches.map((b) => b.length)).toEqual([MAX_FILES_PER_BATCH, MAX_FILES_PER_BATCH, 500])
+    expect(batches.flat().map((f) => f.name)).toEqual(files.map((f) => f.name))
   })
 
   it('returns an empty array for no files', () => {
