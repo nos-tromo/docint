@@ -11,6 +11,7 @@ carried on each :class:`MediaClip`, not baked into the engine.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,7 @@ from llama_index.core import Document
 from loguru import logger
 
 from docint.core.ingest.images_service import IngestContext
+from docint.core.ingest.preprocess import preprocess_key, run_all
 from docint.core.readers.json import CustomJSONReader
 from docint.core.summary.units import TRANSIENT_TRANSCRIPT_SUFFIX
 from docint.utils.hashing import compute_file_hash
@@ -73,6 +75,11 @@ class MediaTranscriber:
     manifest: Any = None
     keyframe_dedup_cosine: float = 0.95
     nextext_max_concurrency: int = 4
+    # The preprocessing pool: keyframe sets are captioned through it across
+    # clips, and a clip the pool is already transcribing is waited on rather
+    # than fetched twice. ``None`` runs everything on the calling thread — the
+    # shape a task already on a pool worker must use.
+    pool: Any = None
 
     def run(self, clips: list[MediaClip]) -> MediaTranscribeResult:
         """Transcribe + keyframe every clip, returning consumed paths + Documents.
@@ -104,6 +111,8 @@ class MediaTranscriber:
         for clip in clips:
             media_hash = clip.media_hash or compute_file_hash(clip.path)
             hashes[clip.path] = media_hash
+            if self.pool is not None:
+                self.pool.join(preprocess_key("media", collection, media_hash))
             hit = self.manifest.get_nextext_transcript(collection, media_hash) if self.manifest else None
             if hit is not None:
                 cached[clip.path] = hit.encode("utf-8")
@@ -122,11 +131,9 @@ class MediaTranscriber:
                     except Exception as exc:  # defensive: a raised call must not abort the batch
                         logger.warning("Nextext call raised for {!r}: {}", clip.path.name, exc)
                         outcomes[clip.path] = NextextResult(status="error", error=str(exc))
-        # Phase 3 (serial): ingest each clip's transcript + keyframes.
-        for clip in clips:
-            if clip.path in cached:
-                self._ingest_transcript(clip, cached[clip.path], result)
-                continue
+        # Phase 3: cache the transcripts, caption the keyframes (across clips,
+        # through the pool), then ingest each clip's transcript in order.
+        for clip in to_fetch:
             outcome = outcomes[clip.path]
             if outcome.transcript_jsonl is not None and self.manifest is not None:
                 self.manifest.cache_nextext_transcript(
@@ -139,20 +146,72 @@ class MediaTranscriber:
                     clip.path.name,
                     outcome.status,
                 )
-            if outcome.keyframes:
-                self.image_service.ingest_keyframe_set(
-                    [frame.jpeg for frame in outcome.keyframes],
-                    frame_times=[frame.time_sec for frame in outcome.keyframes],
-                    context=context,
-                    source_doc_id=clip.source_doc_id,
-                    extra_metadata=clip.keyframe_extra_metadata,
-                    dedup_cosine=self.keyframe_dedup_cosine,
-                    keyframe_source_type=clip.keyframe_source_type,
-                    link_field=clip.keyframe_link_field,
+        run_all(
+            self.pool,
+            [
+                (
+                    preprocess_key("keyframes", collection, hashes[clip.path]),
+                    self._keyframe_task(clip, context, outcome),
                 )
-            if outcome.transcript_jsonl:
-                self._ingest_transcript(clip, outcome.transcript_jsonl, result)
+                for clip in to_fetch
+                if (outcome := outcomes[clip.path]).keyframes
+            ],
+        )
+        for clip in clips:
+            if clip.path in cached:
+                self._ingest_transcript(clip, cached[clip.path], result)
+                self._relink_cached_keyframes(clip, context, hashes[clip.path])
+                continue
+            if outcomes[clip.path].transcript_jsonl:
+                self._ingest_transcript(clip, outcomes[clip.path].transcript_jsonl or b"", result)
         return result
+
+    def _keyframe_task(self, clip: MediaClip, context: IngestContext, outcome: NextextResult) -> Callable[[], Any]:
+        """The keyframe ingestion of one clip, as a zero-argument task."""
+
+        def task() -> Any:
+            return self.image_service.ingest_keyframe_set(
+                [frame.jpeg for frame in outcome.keyframes],
+                frame_times=[frame.time_sec for frame in outcome.keyframes],
+                context=context,
+                source_doc_id=clip.source_doc_id,
+                extra_metadata=clip.keyframe_extra_metadata,
+                dedup_cosine=self.keyframe_dedup_cosine,
+                keyframe_source_type=clip.keyframe_source_type,
+                link_field=clip.keyframe_link_field,
+            )
+
+        return task
+
+    def _relink_cached_keyframes(self, clip: MediaClip, context: IngestContext, media_hash: str) -> None:
+        """Attach a cached clip's file-identity keyframes to the posting now claiming it.
+
+        A transcript cache hit ingests no keyframes: they were stored when the
+        transcript was — by an earlier run of this collection, or by the
+        preprocessing pool before any export named the posting. Only a linked
+        clip has anything to add; a standalone clip's frames already carry
+        their identity.
+
+        Args:
+            clip (MediaClip): The cached clip.
+            context (IngestContext): Collection-resolution context.
+            media_hash (str): The clip's content hash.
+        """
+        if not clip.keyframe_link_field:
+            return
+        relink = getattr(self.image_service, "relink_keyframes", None)
+        if not callable(relink):
+            return
+        relinked = relink(
+            context=context,
+            media_hash=media_hash,
+            source_doc_id=clip.source_doc_id,
+            extra_metadata=clip.keyframe_extra_metadata,
+            keyframe_source_type=clip.keyframe_source_type,
+            link_field=clip.keyframe_link_field,
+        )
+        if relinked:
+            logger.info("Relinked {} cached keyframe(s) of '{}' to their posting.", relinked, clip.path.name)
 
     def _ingest_transcript(self, clip: MediaClip, transcript: bytes, result: MediaTranscribeResult) -> None:
         """Parse transcript JSONL into segment Documents stamped with the clip identity.

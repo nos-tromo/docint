@@ -105,6 +105,38 @@ def test_submit_failure_is_logged_not_raised(pool: PreprocessPool, loguru_caplog
     assert "upload-time failure" in loguru_caplog.text
 
 
+def test_join_waits_for_an_in_flight_task_and_swallows_its_failure(pool: PreprocessPool) -> None:
+    """A caller about to read a cache waits for whoever is filling it; a miss is theirs to handle."""
+    release = threading.Event()
+    finished: list[int] = []
+
+    def slow() -> None:
+        release.wait(timeout=5)
+        finished.append(1)
+        raise RuntimeError("cache stays cold")
+
+    pool.submit("k", slow)
+    threading.Timer(0.05, release.set).start()
+
+    pool.join("k")
+    assert finished == [1]
+    pool.join("never-submitted")
+
+
+def test_run_all_never_runs_a_finished_task_twice(pool: PreprocessPool) -> None:
+    """A fast task evicted before its turn is read from its future, not re-keyed and re-run."""
+    calls: list[str] = []
+
+    def task(name: str) -> Any:
+        return lambda: calls.append(name) or name
+
+    results = preprocess.run_all(pool, [("a", task("a")), ("b", task("b"))])
+    pool.wait_idle(timeout=5)
+
+    assert results == ["a", "b"]
+    assert sorted(calls) == ["a", "b"]
+
+
 def test_key_carries_kind_collection_and_hash() -> None:
     """Keys are namespaced so a PDF and an image of the same bytes never collide."""
     assert preprocess_key("pdf", "u1__docs", "abc") == "pdf:u1__docs:abc"
@@ -178,6 +210,39 @@ def test_submit_file_hashes_when_not_given(tmp_path: Path, routed: dict[str, lis
     submit_file(path, "col", pool=pool)
 
     assert pool.keys[0].startswith("pdf:col:") and len(pool.keys[0]) == len("pdf:col:") + 64
+
+
+def test_prefetch_batch_submits_every_heavy_file_the_collection_lacks(
+    tmp_path: Path, routed: dict[str, list[Path]]
+) -> None:
+    """A PDF already ingested is skipped; a table is never even hashed; the rest is submitted."""
+    from docint.utils.hashing import compute_file_hash
+
+    files = {name: tmp_path / name for name in ("a.pdf", "b.png", "c.mp4", "d.csv")}
+    for path in files.values():
+        path.write_bytes(path.name.encode())
+    pool = _RecordingPool()
+
+    submitted = preprocess.prefetch_batch(tmp_path, "col", skip_hashes={compute_file_hash(files["a.pdf"])}, pool=pool)
+
+    assert submitted == 2
+    assert routed["pdf"] == []
+    assert routed["image"] == [files["b.png"]]
+    assert routed["media"] == [files["c.mp4"]]
+
+
+def test_the_shared_pool_is_rebuilt_after_shutdown() -> None:
+    """The lifespan stops the pool; the next caller must get a working one, not a stopped one."""
+    first = preprocess.get_preprocess_pool()
+    assert preprocess.get_preprocess_pool() is first
+
+    preprocess.shutdown_preprocess_pool()
+    second = preprocess.get_preprocess_pool()
+    try:
+        assert second is not first
+        assert second.run("k", lambda: 1) == 1
+    finally:
+        preprocess.shutdown_preprocess_pool()
 
 
 def test_submit_file_skips_media_when_nextext_is_off(

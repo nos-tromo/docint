@@ -138,6 +138,7 @@ from docint.core.entities.store import EntityStore
 from docint.core.extract.store import ExtractStore
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.ingest.preprocess import prefetch_batch
 from docint.core.ingest.streaming_executor import overlapped
 from docint.core.ner import (
     EntityMergeMode,
@@ -6945,6 +6946,12 @@ class RAG:
         manifest_started: set[str] = set()
         manifest_in_flight: set[str] = set()
         image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+        # Every heavy per-file stage the lanes below need is submitted now, so
+        # PDFs, images and clips are processed across files at once while each
+        # lane still joins them in its own order (core/ingest/preprocess.py).
+        prefetch_batch(
+            prepared_dir, self.qdrant_collection, skip_hashes=existing_hashes, image_service=image_ingestion_service
+        )
         core_pdf_reader = CorePDFPipelineReader(
             data_dir=prepared_dir,
             entity_extractor=pipeline.entity_extractor,
@@ -7215,6 +7222,12 @@ class RAG:
         manifest_started: set[str] = set()
         manifest_in_flight: set[str] = set()
         image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+        # Every heavy per-file stage the lanes below need is submitted now, so
+        # PDFs, images and clips are processed across files at once while each
+        # lane still joins them in its own order (core/ingest/preprocess.py).
+        prefetch_batch(
+            prepared_dir, self.qdrant_collection, skip_hashes=existing_hashes, image_service=image_ingestion_service
+        )
         core_pdf_reader = CorePDFPipelineReader(
             data_dir=prepared_dir,
             entity_extractor=pipeline.entity_extractor,

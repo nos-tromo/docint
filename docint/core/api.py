@@ -55,6 +55,7 @@ from docint.core.extract.gather import scroll_collection
 from docint.core.extract.store import ExtractStore
 from docint.core.extract.units import Unit, partition, resolve_target
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
+from docint.core.ingest.preprocess import shutdown_preprocess_pool, submit_file
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
@@ -76,6 +77,7 @@ from docint.utils.env_cfg import (
     load_frontend_env,
     load_hate_speech_env,
     load_host_env,
+    load_ingestion_env,
     load_language_env,
     load_metrics_env,
     load_ner_env,
@@ -154,6 +156,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await to_thread.run_sync(rag.reconcile_quantization)
     yield
     await job_manager.stop()
+    shutdown_preprocess_pool()
 
 
 app = FastAPI(title="Document Intelligence", lifespan=_lifespan)
@@ -4755,6 +4758,14 @@ async def ingest_upload(
                 staged_bytes += bytes_written
                 # We calculate hash but don't store the file index anymore
                 file_hash = compute_file_hash(dest)
+                if load_ingestion_env().ingest_preprocess_on_upload:
+                    # The file's heavy stage (PDF layout/OCR, image caption,
+                    # transcription) starts now, while the rest of the batch is
+                    # still uploading; the finalize job joins it or finds it done.
+                    try:
+                        submit_file(dest, physical, file_hash=file_hash)
+                    except Exception as exc:
+                        logger.warning("Preprocess submit skipped for '{}': {}", filename, exc)
                 yield _format_sse(
                     "file_saved",
                     {

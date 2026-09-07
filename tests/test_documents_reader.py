@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from llama_index.core.schema import TextNode
 
 from docint.core.readers.documents import CorePDFPipelineReader
@@ -252,3 +253,49 @@ def test_enrich_nodes_flat_collection_ners_every_node(tmp_path: Path) -> None:
     reader._enrich_nodes(nodes)
 
     assert nodes and all(n.metadata.get("entities") for n in nodes)
+
+
+def test_build_submits_every_pdf_before_joining_the_first(
+    tmp_path: Path, recording_pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page pipelines of a batch run through the pool at once; the yield order stays by file."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from docint.core.readers.documents import reader as reader_module
+    from docint.core.readers.documents.models import DocumentManifest
+    from docint.utils.hashing import compute_file_hash
+
+    artifacts = tmp_path / "artifacts"
+    pdfs = []
+    for name in ("a.pdf", "b.pdf"):
+        path = tmp_path / name
+        path.write_bytes(b"%PDF-1.4\n" + name.encode())
+        pdfs.append(path)
+    hashes = [compute_file_hash(p) for p in pdfs]
+    processed: list[str] = []
+
+    class _FakeOrchestrator:
+        config = SimpleNamespace(artifacts_dir=str(artifacts))
+
+        def process(self, path: Path) -> DocumentManifest:
+            doc_id = compute_file_hash(path)
+            processed.append(path.name)
+            (artifacts / doc_id).mkdir(parents=True, exist_ok=True)
+            (artifacts / doc_id / "chunks.jsonl").write_text(
+                _json.dumps({"chunk_id": "c1", "text": f"text of {path.name}", "page_range": [0]}) + "\n"
+            )
+            manifest = DocumentManifest(doc_id=doc_id, file_path=str(path), file_name=path.name, pipeline_version="t")
+            manifest.status = "completed"
+            return manifest
+
+    monkeypatch.setattr(reader_module, "DocumentPipelineOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(reader_module, "get_preprocess_pool", lambda: recording_pool)
+
+    reader = CorePDFPipelineReader(data_dir=tmp_path, source_collection="col")
+    emitted = list(reader.build(existing_hashes=set()))
+
+    assert [doc_id for _, _, doc_id in emitted] == hashes
+    assert processed == ["a.pdf", "b.pdf"]
+    # Both submitted before either is joined, and each exactly once.
+    assert recording_pool.keys == [f"pdf:col:{h}" for h in hashes]

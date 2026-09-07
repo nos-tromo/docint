@@ -19,6 +19,7 @@ from docint.core.ingest.images_service import (
     ImageIngestionService,
     IngestContext,
 )
+from docint.core.ingest.preprocess import get_preprocess_pool, preprocess_key
 from docint.core.readers.documents.orchestrator import DocumentPipelineOrchestrator
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.hashing import compute_file_hash
@@ -231,6 +232,31 @@ class CorePDFPipelineReader:
             return candidate
         return None
 
+    def _pdf_task(self, pdf_path: Path, artifacts_dir: Path) -> Callable[[], Any]:
+        """The unit of work for one PDF: its page pipeline, then its figures.
+
+        Shares the preprocessing pool's ``pdf`` key with
+        ``preprocess.preprocess_pdf`` — both are idempotent, so whichever runs
+        first does the work and the other joins it.
+
+        Args:
+            pdf_path (Path): The PDF.
+            artifacts_dir (Path): The pipeline artifacts root.
+
+        Returns:
+            Callable[[], Any]: Zero-argument task returning the ``DocumentManifest``.
+        """
+
+        def task() -> Any:
+            manifest = DocumentPipelineOrchestrator().process(pdf_path)
+            if manifest.status == "completed":
+                # Always attempt image ingestion — even when no text chunks
+                # were produced (e.g. screenshot PDFs).
+                self._ingest_pipeline_images(file_path=pdf_path, doc_id=manifest.doc_id, artifacts_dir=artifacts_dir)
+            return manifest
+
+        return task
+
     def _ingest_pipeline_images(
         self,
         *,
@@ -377,10 +403,15 @@ class CorePDFPipelineReader:
         if not pdf_files:
             return
 
-        orchestrator = DocumentPipelineOrchestrator()
-        artifacts_dir = Path(orchestrator.config.artifacts_dir)
+        artifacts_dir = Path(DocumentPipelineOrchestrator().config.artifacts_dir)
         emitted_hashes: set[str] = set()
+        collection = self.source_collection or ""
 
+        # Every PDF's page pipeline is keyed by its hash and submitted before
+        # the first is joined, so the documents are read in parallel (and a
+        # file the upload handler already submitted is simply waited on) while
+        # this loop still emits them in order.
+        pending: list[tuple[int, Path, str]] = []
         for index, pdf_path in enumerate(pdf_files, start=1):
             file_hash = compute_file_hash(pdf_path)
             self.discovered_hashes.add(file_hash)
@@ -390,12 +421,23 @@ class CorePDFPipelineReader:
                 if progress_callback:
                     progress_callback(f"Skipping already ingested PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
                 continue
+            pending.append((index, pdf_path, file_hash))
 
+        pool = get_preprocess_pool()
+        # The futures are kept rather than re-keyed on the way back: a task
+        # that finished before its turn has been evicted, and ``run`` would
+        # start it again.
+        futures = [
+            pool.submit(preprocess_key("pdf", collection, file_hash), self._pdf_task(pdf_path, artifacts_dir))
+            for _, pdf_path, file_hash in pending
+        ]
+
+        for (index, pdf_path, _file_hash), future in zip(pending, futures, strict=True):
             if progress_callback:
                 progress_callback(f"Core pipeline processing PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
 
             try:
-                manifest = orchestrator.process(pdf_path)
+                manifest = future.result()
             except Exception as exc:
                 logger.warning(
                     "Core pipeline failed for {}: {}",
@@ -420,14 +462,6 @@ class CorePDFPipelineReader:
                 pipeline_version=manifest.pipeline_version,
                 chunks=chunks,
                 hierarchical_node_parser=self.hierarchical_node_parser,
-            )
-
-            # Always attempt image ingestion — even when no text chunks
-            # were produced (e.g. screenshot PDFs).
-            self._ingest_pipeline_images(
-                file_path=pdf_path,
-                doc_id=manifest.doc_id,
-                artifacts_dir=artifacts_dir,
             )
 
             if not nodes:

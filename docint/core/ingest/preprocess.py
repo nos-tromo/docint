@@ -49,10 +49,13 @@ __all__ = [
     "IMAGE_EXTENSIONS",
     "PreprocessPool",
     "get_preprocess_pool",
+    "prefetch_batch",
     "preprocess_image",
     "preprocess_key",
     "preprocess_media",
     "preprocess_pdf",
+    "run_all",
+    "shutdown_preprocess_pool",
     "standalone_image_asset",
     "submit_file",
 ]
@@ -107,6 +110,25 @@ class PreprocessPool:
         """
         return self.submit(key, fn).result()
 
+    def join(self, key: str) -> None:
+        """Wait for the task running under *key*, if any; a failure is theirs to report.
+
+        For a caller about to consult a cache another task is filling: an
+        in-flight task means the answer is seconds away, so waiting beats
+        doing the work twice.
+
+        Args:
+            key (str): Dedupe key, from :func:`preprocess_key`.
+        """
+        with self._lock:
+            future = self._futures.get(key)
+        if future is None:
+            return
+        try:
+            future.result()
+        except Exception:
+            return
+
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Block until no task is in flight.
 
@@ -138,6 +160,26 @@ class PreprocessPool:
             logger.debug("Preprocess task '{}' done.", key)
 
 
+def run_all(pool: PreprocessPool | None, jobs: list[tuple[str, Callable[[], T]]]) -> list[T]:
+    """Run keyed jobs through *pool* — all submitted first, results in order — or inline.
+
+    Args:
+        pool (PreprocessPool | None): The pool, or ``None`` to run the jobs
+            one after another on the calling thread (a task already on a pool
+            worker must not wait on the pool it occupies).
+        jobs (list[tuple[str, Callable[[], T]]]): ``(key, task)`` pairs.
+
+    Returns:
+        list[T]: One result per job, in the order given.
+    """
+    if pool is None:
+        return [task() for _, task in jobs]
+    # Keep the futures: a task that finishes before its turn is evicted, and
+    # re-keying it through ``run`` would run it a second time.
+    futures = [pool.submit(key, task) for key, task in jobs]
+    return [future.result() for future in futures]
+
+
 _pool: PreprocessPool | None = None
 _pool_lock = threading.Lock()
 _service: ImageIngestionService | None = None
@@ -154,6 +196,63 @@ def get_preprocess_pool() -> PreprocessPool:
         if _pool is None:
             _pool = PreprocessPool(load_ingestion_env().ingest_preprocess_workers)
         return _pool
+
+
+def shutdown_preprocess_pool() -> None:
+    """Stop the shared pool; the next ``get_preprocess_pool`` builds a fresh one.
+
+    Called from the API lifespan so a queued upload-time task cannot hold the
+    process open. Resetting the singleton rather than keeping a stopped one
+    is what lets a test client's lifespan run more than once per process.
+    """
+    global _pool
+    with _pool_lock:
+        pool, _pool = _pool, None
+    if pool is not None:
+        pool.shutdown()
+
+
+def prefetch_batch(
+    batch_dir: Path,
+    collection: str,
+    *,
+    skip_hashes: set[str],
+    image_service: ImageIngestionService | None = None,
+    pool: PreprocessPool | None = None,
+) -> int:
+    """Submit every file in a batch that has a heavy stage, before the lanes read them.
+
+    Called once at the top of an ingest run, so the PDF lane, the social and
+    standalone media passes and the image sweep — which still consume files
+    in their own order — find that order's work already running or done. A
+    file the collection already holds is skipped; a clip is not, since its
+    identity is its transcript's hash and the transcript cache makes a
+    repeat cheap.
+
+    Args:
+        batch_dir (Path): The staged batch tree.
+        collection (str): Physical collection name.
+        skip_hashes (set[str]): File hashes the collection already holds.
+        image_service (ImageIngestionService | None): Service for the image
+            stages; the shared one when ``None``.
+        pool (PreprocessPool | None): Pool to submit to; the shared one when ``None``.
+
+    Returns:
+        int: How many files were submitted.
+    """
+    heavy = {".pdf", *IMAGE_EXTENSIONS, *(ext.lower() for ext in load_ingestion_env().media_filetypes)}
+    submitted = 0
+    for path in sorted(candidate for candidate in batch_dir.rglob("*") if candidate.is_file()):
+        if path.suffix.lower() not in heavy:
+            continue
+        file_hash = compute_file_hash(path)
+        if file_hash in skip_hashes:
+            continue
+        if submit_file(path, collection, pool=pool, file_hash=file_hash, image_service=image_service) is not None:
+            submitted += 1
+    if submitted:
+        logger.info("Preprocess prefetch | collection={!r} files={}", collection, submitted)
+    return submitted
 
 
 def _image_service(image_service: ImageIngestionService | None) -> ImageIngestionService:
