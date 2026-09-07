@@ -46,6 +46,43 @@ double-write, because file hashes are only recorded after a run's final node
 batch. Entity resolution runs as a stage inside the job, so it no longer
 depends on a client staying attached.
 
+### Per-file preprocessing
+
+Three stages of an ingest cost minutes per file, and each is idempotent by
+the file's content hash: a PDF's layout/OCR pass (artifacts under
+`PIPELINE_ARTIFACTS_DIR`, skipped when a completed manifest exists), an
+image's caption/OCR/CLIP point (looked up in `{collection}_images` before any
+model call), and a clip's Nextext transcript (cached in the ingest manifest).
+Because each checks its own cache first, the work can start the moment a file
+lands on disk, and the job later finds it done.
+
+`docint/core/ingest/preprocess.py` holds the one bounded pool that runs them
+(`INGEST_PREPROCESS_WORKERS`, default `4`), keyed by `kind:collection:hash` so
+a file is never processed twice at once. Two callers feed it:
+
+- `POST /ingest/upload` submits each file as soon as it is saved
+  (`INGEST_PREPROCESS_ON_UPLOAD`, default `true`), so PDFs are read, images
+  captioned and clips transcribed while the rest of the batch is still
+  uploading — before finalize is ever clicked.
+- The job submits every file in the batch up front, then the PDF lane, the
+  social and standalone media passes and the image sweep join those tasks in
+  their existing order. A file the upload already submitted is waited on;
+  one it never saw runs now. The CLI and `POST /ingest` get the same
+  parallelism, since the job-side prefetch needs no upload.
+
+The pool holds no results — the caches are the memory, and a failed task is
+tried again by whichever lane next needs the file — and a backend restart
+loses only what was in flight. Chunking, NER, hate-speech detection, embedding
+and entity resolution are unchanged and still run inside the job.
+
+An image or keyframe stored before a social export's manifest arrived carries
+no posting link, so the linker's cache hit **re-upserts** such a point with
+the posting's identity (top-level `posting_uuid`, `source_type`, the
+`posting_*` reference fields) reusing the stored vector, caption and OCR
+text; a cached clip claimed by a posting has its keyframes relinked the same
+way (`relink_keyframes`). Two postings sharing one image keep today's
+first-wins rule with the second recorded under `occurrences`.
+
 ## Supported file types
 
 The default list lives in `load_ingestion_env()` in
@@ -392,8 +429,10 @@ It is built by `RAG._build_ingestion_pipeline()` and takes:
 - a hate-speech detector when `ENABLE_HATE_SPEECH_DETECTION=true`,
 - a progress callback (used by `/ingest/upload` to stream events).
 
-The pipeline iterates files in `INGESTION_BATCH_SIZE` batches. For each
-batch:
+The pipeline iterates files in `INGESTION_BATCH_SIZE` batches, reading each
+file's heavy stage from the preprocessing pool (see
+[Per-file preprocessing](#per-file-preprocessing)) rather than running it
+inline. For each batch:
 
 1. The file extension selects a reader (see above).
 2. The reader produces one or more LlamaIndex `Document` objects with
@@ -402,8 +441,8 @@ batch:
    produces fine child nodes and optional coarse parent nodes.
 4. NER runs in parallel on each fine chunk (when enabled) and annotates
    the chunk metadata with entities and relations.
-5. Hate-speech detection runs per chunk (when enabled) and sets a
-   `hate_speech_detected` flag in metadata.
+5. Hate-speech detection runs per chunk (when enabled) and stores the
+   parsed verdict under a `hate_speech` key in metadata.
 6. Chunks are embedded with the dense model (`EMBED_MODEL`) and, for
    hybrid collections, the sparse model (`SPARSE_MODEL`).
 7. Embeddings and nodes are upserted to Qdrant and to the SQLite-backed
