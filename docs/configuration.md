@@ -371,7 +371,6 @@ page-level PDF pipeline in `docint/core/readers/documents/`.
 | `PIPELINE_VERSION` | `3.4.0` | Semver marker written into pipeline artifacts. |
 | `PIPELINE_TEXT_COVERAGE_THRESHOLD` | `0.01` | Chars-per-area threshold used to classify a page as scanned. |
 | `PIPELINE_MAX_RETRIES` | `2` | Retry budget per page stage. |
-| `PIPELINE_MAX_WORKERS` | `4` | Parallel workers per document. |
 | `PIPELINE_FORCE_REPROCESS` | `false` | Ignore cached artifacts. |
 | `PIPELINE_OCR_ENABLED` | `true` | Read pages that have no text layer of their own through the OCR engine. |
 | `PIPELINE_OCR_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request timeout for an OCR call. Set it only to give OCR a *tighter* budget than the rest of the app — an OCR model takes a minute or two per page where a chat model takes seconds, so a fixed low value cuts every page off mid-flight and surfaces as `Request timed out`. |
@@ -427,7 +426,7 @@ sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 | `DOCSTORE_RETRY_BACKOFF_MAX_SECONDS` | `2.0` | Max retry backoff. |
 | `INGEST_FAIL_FAST` | `false` | Abort the run on the first file that fails instead of skipping it. |
 | `INGEST_MANIFEST_ENABLED` | `true` | SQLite ingest manifest. Also caches Nextext transcripts by media-file hash, so re-ingesting an unchanged clip skips the round-trip entirely. |
-| `INGEST_PIPELINE_OVERLAP_ENABLED` | `false` | Overlap reading and embedding stages instead of running them in sequence. |
+| `INGEST_PIPELINE_OVERLAP_ENABLED` | `true` | Overlap reading and embedding stages instead of running them in sequence. |
 | `INGEST_QUEUE_MAX_SIZE` | `4` | Documents buffered between the reader and the embedder when overlap is on. |
 | `STREAMING_READERS_ENABLED` | `true` | Readers yield documents as they parse rather than materialising a whole file first, which bounds peak memory on large CSV/JSONL files. |
 | `MEDIA_FILETYPES` | see below | Audio/video extensions the standalone media pre-pass claims, comma-separated; a leading dot is added if omitted and entries are lowercased. These route through Nextext, **not** the generic reader whitelist. Default: `.mp4,.mov,.mkv,.webm,.avi,.m4v,.mpg,.mpeg,.mp3,.m4a,.wav,.flac,.aac,.ogg,.opus,.wma`. |

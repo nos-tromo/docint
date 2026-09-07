@@ -902,6 +902,8 @@ class IngestionConfig:
     ingest_pipeline_overlap_enabled: bool
     streaming_readers_enabled: bool
     ingest_queue_max_size: int
+    ingest_preprocess_workers: int
+    ingest_preprocess_on_upload: bool
     docstore_max_retries: int
     docstore_retry_backoff_max_seconds: float
     docstore_retry_backoff_seconds: float
@@ -946,9 +948,11 @@ def load_ingestion_env(
     default_ingest_benchmark_enabled: bool = False,
     default_ingest_fail_fast: bool = False,
     default_ingest_manifest_enabled: bool = True,
-    default_ingest_pipeline_overlap_enabled: bool = False,
+    default_ingest_pipeline_overlap_enabled: bool = True,
     default_streaming_readers_enabled: bool = True,
     default_ingest_queue_max_size: int = 4,
+    default_ingest_preprocess_workers: int = 4,
+    default_ingest_preprocess_on_upload: bool = True,
     default_docstore_max_retries: int = 3,
     default_docstore_retry_backoff_seconds: float = 0.25,
     default_docstore_retry_backoff_max_seconds: float = 2.0,
@@ -983,11 +987,17 @@ def load_ingestion_env(
             failed file ingestions in a SQLite manifest for resume
             visibility. Set to ``false`` to disable the manifest writes
             (returns the no-op stub from :class:`NullIngestManifest`).
-        - ingest_pipeline_overlap_enabled (bool): When true, run the
-            streaming pipeline producer on a background thread so
-            enrichment overlaps with persistence. Default false until
-            canary measurement confirms throughput gains; flip via
-            ``INGEST_PIPELINE_OVERLAP_ENABLED=true``.
+        - ingest_pipeline_overlap_enabled (bool): When true (the default),
+            run the streaming pipeline producer on a background thread so
+            enrichment overlaps with persistence; ``false`` runs it inline.
+        - ingest_preprocess_workers (int): Worker threads in the per-file
+            preprocessing pool (``core/ingest/preprocess.py``) that runs the
+            heavy, hash-idempotent stages — PDF layout/OCR, image caption/OCR/
+            CLIP, Nextext transcription — across files at once. Floored at 1.
+        - ingest_preprocess_on_upload (bool): When true (the default), an
+            uploaded file is submitted to that pool as soon as it is saved, so
+            its heavy stage runs while the rest of the batch is still uploading
+            and the finalize job finds the work done.
         - streaming_readers_enabled (bool): When true, dispatch to each
             reader's ``iter_documents()`` generator directly instead of
             routing through ``SimpleDirectoryReader.load_file()``. Reduces
@@ -1083,6 +1093,14 @@ def load_ingestion_env(
             1,
             int(os.getenv("INGEST_QUEUE_MAX_SIZE", default_ingest_queue_max_size)),
         ),
+        ingest_preprocess_workers=max(
+            1,
+            int(os.getenv("INGEST_PREPROCESS_WORKERS", default_ingest_preprocess_workers)),
+        ),
+        ingest_preprocess_on_upload=str(
+            os.getenv("INGEST_PREPROCESS_ON_UPLOAD", default_ingest_preprocess_on_upload)
+        ).lower()
+        in {"true", "1", "yes"},
         docstore_max_retries=max(
             0,
             int(os.getenv("DOCSTORE_MAX_RETRIES", default_docstore_max_retries)),
@@ -2022,7 +2040,6 @@ class PipelineConfig:
     artifacts_dir: str
     max_retries: int
     force_reprocess: bool
-    max_workers: int
     # The OCR lane: pages with no text of their own are read by the OCR model
     # (docint/core/ocr). One engine serves both the pages and the table
     # regions below, so these are its settings, not a per-caller set.
@@ -2072,7 +2089,6 @@ def load_pipeline_config(
     default_artifacts_dir: str | None = None,
     default_max_retries: int = 2,
     default_force_reprocess: bool = False,
-    default_max_workers: int = 4,
     default_enable_ocr: bool = True,
     default_ocr_timeout: float | None = None,
     default_ocr_max_retries: int = 1,
@@ -2092,7 +2108,6 @@ def load_pipeline_config(
             the value from ``load_path_env().artifacts``.
         default_max_retries (int): Default maximum retry attempts per page stage.
         default_force_reprocess (bool): Default flag to force reprocessing of pages.
-        default_max_workers (int): Default maximum parallel workers for document processing.
         default_enable_ocr (bool): Default flag for the OCR lane — pages that need OCR are
             read by the OCR model (``OCR_MODEL``, else the general vision model).
         default_ocr_timeout (float | None): Default per-request timeout in seconds. ``None``
@@ -2118,7 +2133,6 @@ def load_pipeline_config(
         - artifacts_dir (str): Root directory for artifact output.
         - max_retries (int): Maximum retry attempts per stage on a given page.
         - force_reprocess (bool): When True, ignore existing artifacts and reprocess.
-        - max_workers (int): Maximum parallel workers for document-level processing.
         - enable_ocr (bool): When True, pages with no text layer are read by the OCR model.
         - ocr_timeout (float): Per-request timeout in seconds for OCR calls. Defaults to the
             global ``OPENAI_TIMEOUT``; set ``PIPELINE_OCR_TIMEOUT`` to give OCR its own budget.
@@ -2151,7 +2165,6 @@ def load_pipeline_config(
         max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
         force_reprocess=str(os.getenv("PIPELINE_FORCE_REPROCESS", default_force_reprocess)).lower()
         in {"true", "1", "yes"},
-        max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
         enable_ocr=os.getenv("PIPELINE_OCR_ENABLED", str(default_enable_ocr).lower()).lower() in {"true", "1", "yes"},
         ocr_timeout=ocr_timeout,
         ocr_max_retries=int(os.getenv("PIPELINE_OCR_MAX_RETRIES", default_ocr_max_retries)),

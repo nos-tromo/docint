@@ -289,7 +289,7 @@ endpoint and its per-document failure budget.
 
 Tuning lives in [`PipelineConfig`](configuration.md#pipeline--pipelineconfig).
 Key knobs: `PIPELINE_TEXT_COVERAGE_THRESHOLD`, `PIPELINE_OCR_ENABLED`,
-`PIPELINE_MAX_WORKERS`, `PIPELINE_FORCE_REPROCESS`, `PIPELINE_OCR_*`,
+`PIPELINE_FORCE_REPROCESS`, `PIPELINE_OCR_*`,
 `PIPELINE_TABLE_OCR`.
 
 ### Reading pixels — `core/ocr/`
