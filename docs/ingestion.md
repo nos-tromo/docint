@@ -14,6 +14,12 @@ through every stage, from file triage to Qdrant persistence.
 | `POST /ingest/finalize` | `docint/core/api.py` (`ingest_finalize`) | Queues one server-owned job over the staged batches. The SPA's path. |
 | SPA Ingest page | `frontend/src/routes/Ingest.tsx` | Uploads in batches, then finalizes once; lists every owned job (`frontend/src/components/ingest/IngestJobList.tsx`) and consumes `GET /ingest/jobs/events`. |
 
+A collection name may not contain `#`, `?`, `/`, `\`, `%` or a control
+character; every entry point answers `400` naming the offending characters.
+qdrant-client formats the name into the request path unencoded, so such a
+name would silently address a different collection (`Test #549` created and
+queried `Test `). Spaces, brackets and non-ASCII letters are fine.
+
 All of them end up calling `RAG.ingest_docs()` in `docint/core/rag.py`,
 which owns the whole pipeline.
 

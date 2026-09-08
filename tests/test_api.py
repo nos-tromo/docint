@@ -2989,6 +2989,23 @@ def test_ingest_missing_directory(monkeypatch: pytest.MonkeyPatch, client: TestC
     assert response.json()["detail"] == "Server storage is not available."
 
 
+def test_ingest_refuses_a_collection_name_qdrant_cannot_address(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """The batch path applies the same name rule as the upload path, before the pipeline runs."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: data_dir)
+    monkeypatch.setattr(
+        api_module.ingest_module, "ingest_docs", lambda *a, **k: pytest.fail("ingest must not run for a refused name")
+    )
+
+    response = client.post("/ingest", json={"collection": "Test #549"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Collection name contains characters that cannot be used: '#'."
+
+
 def test_ingest_sync_generic_exception_propagates_as_500(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:

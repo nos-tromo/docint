@@ -8,6 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from docint.core.state.collection_owner_manager import InvalidCollectionNameError
+
 
 def redact_validation_errors(errors: Sequence[Any]) -> list[dict[str, Any]]:
     """Strip submitted values out of pydantic validation errors.
@@ -53,6 +55,12 @@ def install_error_handlers(app: FastAPI) -> None:
             redact_validation_errors(exc.errors()),
         )
         return JSONResponse(status_code=422, content={"detail": "Invalid request."})
+
+    @app.exception_handler(InvalidCollectionNameError)
+    async def _handle_invalid_collection_name(request: Request, exc: InvalidCollectionNameError) -> JSONResponse:
+        # The message names only the rejected characters, never the name.
+        logger.warning("Rejected collection name on {} {}: {}", request.method, request.url.path, exc)
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:

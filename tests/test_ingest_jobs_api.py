@@ -334,6 +334,29 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
     assert result == {"empty": False, "resolution": None, "stats": None}
 
 
+def test_upload_refuses_a_collection_name_qdrant_cannot_address(client: TestClient, tmp_path: Path) -> None:
+    """A ``#`` in the name would truncate every Qdrant URL; the upload is refused before any byte is staged."""
+    res = client.post(
+        "/ingest/upload",
+        data={"collection": "Test #549"},
+        files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Collection name contains characters that cannot be used: '#'."
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_finalize_refuses_a_collection_name_qdrant_cannot_address(client: TestClient) -> None:
+    """Finalize applies the same rule, so no job is ever queued for such a name."""
+    res = client.post("/ingest/finalize", json={"collection": "a/b"}, headers=_headers())
+
+    assert res.status_code == 400
+    assert "'/'" in res.json()["detail"]
+    assert client.get("/ingest/jobs", headers=_headers()).json()["jobs"] == []
+
+
 def _upload_two(client: TestClient) -> None:
     client.post(
         "/ingest/upload",

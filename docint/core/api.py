@@ -67,6 +67,7 @@ from docint.core.retrieval_filters import (
 from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, field_indexes_ready
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.search.index import search_index_status
+from docint.core.state.collection_owner_manager import validate_collection_name
 from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
@@ -435,6 +436,29 @@ def _apply_turn_scope(session_id: str, owner: str | None, requested: Sequence[st
     if ids != list(sessions.get_scope(session_id, owner)):
         sessions.set_scope(session_id, owner, ids)
     return ids
+
+
+def _require_collection_name(raw: str, *, context: str) -> str:
+    """Return the trimmed logical collection name a request may ingest into.
+
+    Args:
+        raw (str): The name as submitted.
+        context (str): Which entry point is asking, for the log line.
+
+    Returns:
+        str: The trimmed name.
+
+    Raises:
+        HTTPException: 400 when the name is blank.
+        InvalidCollectionNameError: When the name cannot be addressed as a
+            Qdrant collection (answered as 400 by the global handler).
+    """
+    name = raw.strip()
+    if not name:
+        logger.error("HTTPException: Collection name required for {}", context)
+        raise HTTPException(status_code=400, detail="Collection name required")
+    validate_collection_name(name)
+    return name
 
 
 def _resolve_qdrant_src_dir() -> Path:
@@ -4047,10 +4071,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
         HTTPException: 400 if the collection name is missing or the data
             directory does not exist; 500 for any unexpected backend error.
     """
-    name = payload.collection.strip()
-    if not name:
-        logger.error("HTTPException: Collection name required")
-        raise HTTPException(status_code=400, detail="Collection name required")
+    name = _require_collection_name(payload.collection, context="ingest")
 
     principal = resolve_principal(request)
     physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
@@ -4696,10 +4717,7 @@ async def ingest_upload(
         HTTPException: If the collection name is missing or no files are provided.
         HTTPException: If an error occurs during file upload.
     """
-    name = collection.strip()
-    if not name:
-        logger.error("HTTPException: Collection name required for upload")
-        raise HTTPException(status_code=400, detail="Collection name required")
+    name = _require_collection_name(collection, context="upload")
     if not files:
         logger.error("HTTPException: At least one file is required for upload")
         raise HTTPException(status_code=400, detail="At least one file is required")
@@ -4832,10 +4850,7 @@ async def ingest_finalize(
             ``job_id``) when that collection already has a job in flight.
     """
     principal = resolve_principal(request)
-    name = payload.collection.strip()
-    if not name:
-        logger.error("HTTPException: Collection name required for finalize")
-        raise HTTPException(status_code=400, detail="Collection name required")
+    name = _require_collection_name(payload.collection, context="finalize")
     physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
 
     # create_if_idle() checks for an in-flight job and creates one only if
