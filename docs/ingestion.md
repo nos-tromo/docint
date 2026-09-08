@@ -62,9 +62,14 @@ model call), and a clip's Nextext transcript (cached in the ingest manifest).
 Because each checks its own cache first, the work can start the moment a file
 lands on disk, and the job later finds it done.
 
-`docint/core/ingest/preprocess.py` holds the one bounded pool that runs them
-(`INGEST_PREPROCESS_WORKERS`, default `4`), keyed by `kind:collection:hash` so
-a file is never processed twice at once. Two callers feed it:
+`docint/core/ingest/preprocess.py` holds the one pool that runs them, keyed by
+`kind:collection:hash` so a file is never processed twice at once. It has two
+executors, because the stages wait on two different services: images, PDF
+pages and keyframes share `INGEST_PREPROCESS_WORKERS` (default `4`) against
+the vision/OCR endpoint, while clips run on their own `NEXTEXT_MAX_CONCURRENCY`
+workers — a clip holds its slot for the whole Nextext round trip, and a single
+queue let a few hundred images uploaded first starve Nextext entirely. Two
+callers feed it:
 
 - `POST /ingest/upload` submits each file as soon as it is saved
   (`INGEST_PREPROCESS_ON_UPLOAD`, default `true`), so PDFs are read, images

@@ -119,7 +119,10 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   and `00:19` on the card. `started_at` keeps its own meaning (worker slot
   acquired) for queue-depth analysis.
 - `docint/core/ingest/preprocess.py` — **Per-file preprocessing pool**: the
-  one bounded `ThreadPoolExecutor` (`INGEST_PREPROCESS_WORKERS`) that runs the
+  one registry over two bounded executors (`INGEST_PREPROCESS_WORKERS` for
+  the vision/OCR stages, `NEXTEXT_MAX_CONCURRENCY` for `media` keys — a clip
+  holds its slot for a whole Nextext round trip, and one FIFO queue let a few
+  hundred images uploaded first starve Nextext) that runs the
   three heavy, hash-idempotent per-file stages across files at once — a PDF's
   page pipeline plus its figures, an image's caption/OCR/CLIP point, a clip's
   Nextext transcript plus keyframes — keyed `kind:collection:hash` so a file

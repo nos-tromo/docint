@@ -137,6 +137,20 @@ def test_run_all_never_runs_a_finished_task_twice(pool: PreprocessPool) -> None:
     assert sorted(calls) == ["a", "b"]
 
 
+def test_a_clip_is_not_queued_behind_the_image_backlog() -> None:
+    """Media keys run on their own executor, so a blocked image queue never starves Nextext."""
+    pool = PreprocessPool(max_workers=1, media_workers=1)
+    release = threading.Event()
+    try:
+        pool.submit("image:c:1", release.wait)
+        pool.submit("image:c:2", release.wait)  # queued behind the first on the only vision worker
+
+        assert pool.submit("media:c:3", lambda: "transcribed").result(timeout=5) == "transcribed"
+    finally:
+        release.set()
+        pool.shutdown()
+
+
 def test_key_carries_kind_collection_and_hash() -> None:
     """Keys are namespaced so a PDF and an image of the same bytes never collide."""
     assert preprocess_key("pdf", "u1__docs", "abc") == "pdf:u1__docs:abc"

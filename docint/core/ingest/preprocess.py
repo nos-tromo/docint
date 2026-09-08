@@ -62,15 +62,28 @@ __all__ = [
 
 
 class PreprocessPool:
-    """Bounded thread pool that runs at most one task per key at a time.
+    """Bounded thread pools that run at most one task per key at a time.
+
+    Two executors behind one registry, because the stages wait on two
+    different services: a clip holds a slot for its whole Nextext round trip
+    (minutes), while images and PDF pages queue on the vision/OCR endpoint.
+    A single FIFO pool let a few hundred images uploaded first starve Nextext
+    entirely, so ``media`` keys get their own executor and the rest share one.
 
     Args:
-        max_workers (int): Worker threads; floored at one.
+        max_workers (int): Worker threads for the vision/OCR stages; floored at one.
+        media_workers (int | None): Worker threads for Nextext clips; defaults
+            to ``max_workers``.
     """
 
-    def __init__(self, max_workers: int) -> None:
-        """Create the executor and the in-flight registry."""
-        self._executor = ThreadPoolExecutor(max_workers=max(1, max_workers), thread_name_prefix="docint-preprocess")
+    def __init__(self, max_workers: int, *, media_workers: int | None = None) -> None:
+        """Create the executors and the in-flight registry."""
+        self._executors: dict[str, ThreadPoolExecutor] = {
+            "": ThreadPoolExecutor(max_workers=max(1, max_workers), thread_name_prefix="docint-preprocess"),
+            "media": ThreadPoolExecutor(
+                max_workers=max(1, media_workers or max_workers), thread_name_prefix="docint-preprocess-media"
+            ),
+        }
         self._futures: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)
@@ -89,7 +102,7 @@ class PreprocessPool:
             existing = self._futures.get(key)
             if existing is not None:
                 return existing
-            future: Future[T] = self._executor.submit(fn)
+            future: Future[T] = self._executor_for(key).submit(fn)
             self._futures[key] = future
         future.add_done_callback(lambda done, key=key: self._evict(key, done))
         return future
@@ -143,7 +156,13 @@ class PreprocessPool:
 
     def shutdown(self) -> None:
         """Stop accepting work and drop queued tasks; running ones finish on their own."""
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        for executor in self._executors.values():
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _executor_for(self, key: str) -> ThreadPoolExecutor:
+        """Pick the executor by the key's kind prefix (``media`` or everything else)."""
+        kind = key.partition(":")[0]
+        return self._executors.get(kind, self._executors[""])
 
     def _evict(self, key: str, future: Future[Any]) -> None:
         """Forget a finished key and log a failure once, on the thread that saw it."""
@@ -194,7 +213,10 @@ def get_preprocess_pool() -> PreprocessPool:
     global _pool
     with _pool_lock:
         if _pool is None:
-            _pool = PreprocessPool(load_ingestion_env().ingest_preprocess_workers)
+            _pool = PreprocessPool(
+                load_ingestion_env().ingest_preprocess_workers,
+                media_workers=load_nextext_env().nextext_max_concurrency,
+            )
         return _pool
 
 
