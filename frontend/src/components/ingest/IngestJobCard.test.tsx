@@ -5,6 +5,7 @@ import type { ReactElement } from 'react'
 import { IngestJobCard } from './IngestJobCard'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useIngestRunStore } from '@/stores/ingestRun'
+import { deriveIngestStatus } from '@/lib/ingestStatus'
 
 function renderIn(ui: ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -54,11 +55,15 @@ describe('IngestJobCard', () => {
   })
 
   it('counts the upload leg that produced this job', async () => {
-    useIngestRunStore.getState().trackJob('job-1', 'mydocs', [
-      { event: 'start', data: { collection: 'mydocs', files: ['a.txt', 'b.txt'] }, receivedAt: 1 },
-      { event: 'file_saved', data: { filename: 'a.txt' }, receivedAt: 2 },
-      { event: 'file_saved', data: { filename: 'b.txt' }, receivedAt: 3 }
-    ])
+    useIngestRunStore.getState().trackJob(
+      'job-1',
+      'mydocs',
+      deriveIngestStatus([
+        { event: 'start', data: { collection: 'mydocs', files: ['a.txt', 'b.txt'] }, receivedAt: 1 },
+        { event: 'file_saved', data: { filename: 'a.txt' }, receivedAt: 2 },
+        { event: 'file_saved', data: { filename: 'b.txt' }, receivedAt: 3 }
+      ])
+    )
     useIngestRunStore.getState().markJobHandled('job-1')
     useIngestJobsStore.getState().appendEvent('job-1', {
       event: 'ingestion_started',

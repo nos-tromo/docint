@@ -226,6 +226,9 @@ export const en = {
   'ingest.title': 'Ingest',
   'ingest.caption': 'Upload and index documents',
   'ingest.drop_empty': 'Nothing to add — that drop contained no files.',
+  'ingest.clear_files': 'Clear selection',
+  'ingest.files_too_many':
+    'Too many files to list one by one. Clear the selection to start over.',
   'ingest.button': 'Ingest',
   'ingest.busy': 'Ingesting…',
   'ingest.status_idle': 'Idle',

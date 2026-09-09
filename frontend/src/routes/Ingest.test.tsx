@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -6,6 +6,20 @@ import type { ReactElement } from 'react'
 import { Ingest } from './Ingest'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { deriveIngestStatus } from '@/lib/ingestStatus'
+
+/** Counts how often `@infra/ui`'s `FileList` actually renders. */
+const spy = vi.hoisted(() => ({ fileListRenders: 0 }))
+vi.mock('@infra/ui', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@infra/ui')>()
+  return {
+    ...actual,
+    FileList: (props: Parameters<typeof actual.FileList>[0]) => {
+      spy.fileListRenders += 1
+      return actual.FileList(props)
+    }
+  }
+})
 
 function jsonRes(body: unknown) {
   return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
@@ -368,14 +382,48 @@ describe('Ingest — several runs at once', () => {
 
     useIngestRunStore.setState({
       uploading: true,
-      uploadEvents: [
+      uploadStatus: deriveIngestStatus([
         { event: 'start', data: { collection: 'other', files: ['b.txt'] }, receivedAt: Date.now() },
         { event: 'upload_progress', data: { filename: 'b.txt', bytes_written: 5 }, receivedAt: Date.now() }
-      ]
+      ])
     })
 
     await waitFor(() => expect(screen.getByText('Uploading')).toBeInTheDocument())
     expect(screen.getByText('Complete')).toBeInTheDocument()
+  })
+
+  it('summarises a folder-sized selection instead of listing every file', async () => {
+    const many = Array.from({ length: 1_200 }, (_, i) => new File(['x'], `f${i}.txt`))
+    useIngestRunStore.getState().addFiles(many)
+
+    renderIn(<Ingest />)
+
+    expect(await screen.findByText(/1200 files/)).toBeInTheDocument()
+    expect(screen.getByText(/Too many files to list/)).toBeInTheDocument()
+    // Rendering a row per file is what hung the browser on a folder-sized
+    // batch; the count and the total size are what the user actually needs.
+    expect(screen.queryByText('f0.txt')).not.toBeInTheDocument()
+  })
+
+  it('does not rebuild the file list as upload frames arrive', async () => {
+    useIngestRunStore.getState().addFiles([new File(['x'], 'a.txt')])
+    renderIn(<Ingest />)
+    await screen.findByText('a.txt')
+    const before = spy.fileListRenders
+
+    // One upload frame. The screen re-renders for it; the rows must not.
+    act(() => {
+      useIngestRunStore.setState({
+        uploading: true,
+        uploadStatus: deriveIngestStatus([
+          { event: 'start', data: { collection: 'mydocs', files: ['a.txt'] }, receivedAt: 1 },
+          { event: 'upload_progress', data: { filename: 'a.txt', bytes_written: 5 }, receivedAt: 2 }
+        ])
+      })
+    })
+    await waitFor(() => expect(screen.getByText('Uploading')).toBeInTheDocument())
+
+    expect(spy.fileListRenders).toBe(before)
   })
 
   it('renders one card per tracked job, newest first', async () => {

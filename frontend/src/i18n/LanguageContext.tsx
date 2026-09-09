@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect } from 'react'
+import { createContext, useCallback, useContext, useEffect } from 'react'
 import { Spinner } from '@infra/ui'
 import { useConfig } from '@/hooks/useConfig'
 import { catalogs, format } from './index'
@@ -36,7 +36,14 @@ export function useT(): (
   vars?: Record<string, string | number>,
 ) => string {
   const lang = useContext(LanguageContext)
-  return (key, vars) => format(catalogs[lang][key], vars)
+  // Stable per language, not per render: callers memoise on `t`, and a fresh
+  // function each render silently voids those memos. The ingest screen's file
+  // list is the case that mattered — it rebuilt every row on every upload
+  // progress frame, which is what hung the browser on a folder-sized batch.
+  return useCallback(
+    (key, vars) => format(catalogs[lang][key], vars),
+    [lang]
+  )
 }
 
 export { LanguageContext }

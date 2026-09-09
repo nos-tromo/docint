@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useIngestRunStore } from './ingestRun'
 import { useIngestJobsStore } from './ingestJobs'
 import { defaultT } from '@/i18n/defaultT'
+import { emptyStatus } from '@/lib/ingestStatus'
 
 // A `vi.fn()` wrapper (not a fixed factory) so individual tests can override
 // the upload outcome per-call with `mockImplementationOnce` — needed to
@@ -43,10 +44,11 @@ describe('useIngestRunStore', () => {
     s.addFiles([file('a.txt')])
     await useIngestRunStore.getState().start(1000, defaultT)
 
-    // The upload leg's events move to the job they produced, so `uploadEvents`
+    // The upload leg's status moves to the job it produced, so `uploadStatus`
     // only ever describes the upload currently in flight.
-    expect(useIngestRunStore.getState().uploadEventsByJob['job-1']).toHaveLength(2)
-    expect(useIngestRunStore.getState().uploadEvents).toEqual([])
+    const leg = useIngestRunStore.getState().uploadStatusByJob['job-1']
+    expect(leg).toMatchObject({ totalFiles: 1, filesSaved: 1, collection: 'mydocs' })
+    expect(useIngestRunStore.getState().uploadStatus).toEqual(emptyStatus())
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
       { job_id: 'job-1', collection: 'mydocs' }
     ])
@@ -245,7 +247,7 @@ describe('useIngestRunStore — tracking several jobs', () => {
     useIngestRunStore.getState().addFiles([file('b.txt')])
     await useIngestRunStore.getState().start(1000, defaultT)
 
-    const byJob = useIngestRunStore.getState().uploadEventsByJob
+    const byJob = useIngestRunStore.getState().uploadStatusByJob
     expect(Object.keys(byJob).sort()).toEqual(['job-1', 'job-2'])
   })
 
@@ -256,22 +258,19 @@ describe('useIngestRunStore — tracking several jobs', () => {
     expect(useIngestRunStore.getState().trackedJobs).toHaveLength(1)
   })
 
-  it('untracks one job and drops only its upload events', () => {
+  it('untracks one job and drops only its upload status', () => {
     const s = useIngestRunStore.getState()
     s.trackJob('job-1', 'first')
     s.trackJob('job-2', 'second')
     useIngestRunStore.setState({
-      uploadEventsByJob: {
-        'job-1': [{ event: 'start', data: {}, receivedAt: 0 }],
-        'job-2': [{ event: 'start', data: {}, receivedAt: 0 }]
-      }
+      uploadStatusByJob: { 'job-1': emptyStatus(), 'job-2': emptyStatus() }
     })
     s.untrackJob('job-1')
 
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
       { job_id: 'job-2', collection: 'second' }
     ])
-    expect(Object.keys(useIngestRunStore.getState().uploadEventsByJob)).toEqual(['job-2'])
+    expect(Object.keys(useIngestRunStore.getState().uploadStatusByJob)).toEqual(['job-2'])
   })
 
   it('records handled jobs without losing the earlier ones', () => {

@@ -48,7 +48,7 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
   const t = useT()
   const qc = useQueryClient()
   const jobEvents = useIngestJobsStore(selectJobEvents(jobId))
-  const uploadEvents = useIngestRunStore((s) => s.uploadEventsByJob[jobId])
+  const uploadStatus = useIngestRunStore((s) => s.uploadStatusByJob[jobId])
   const handled = useIngestRunStore((s) => s.handledJobIds.includes(jobId))
 
   // Queried directly by job id rather than inferred from the list snapshot —
@@ -73,8 +73,10 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
     // The upload leg belongs to the job it produced (stores/ingestRun.ts), so
     // the card's timeline spans both legs — the same log the single-card view
     // merged, now scoped to one job instead of "whichever job is active".
-    const merged = uploadEvents ? [...uploadEvents, ...jobEvents] : jobEvents
-    const derived = deriveIngestStatus(merged)
+    // The job's frames fold onto the upload leg's finished status, which is
+    // the same sequential reduction the two concatenated event logs used to
+    // produce — the leg is just carried as a status now, not as its frames.
+    const derived = deriveIngestStatus(jobEvents, undefined, uploadStatus)
     // A reattached log has no synthetic upload `start` frame, so the elapsed
     // timer has no client anchor — fall back to the server snapshot's
     // `run_started_at`/`finished_at` (already fetched by `jobQuery`).
@@ -93,7 +95,7 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
     // and rendering nothing is how a run vanishes from view.
     const phase = PHASE_BY_STATUS[jobQuery.data?.status ?? '']
     return phase ? { ...named, phase } : named
-  }, [uploadEvents, jobEvents, jobQuery.data, collection])
+  }, [uploadStatus, jobEvents, jobQuery.data, collection])
 
   useIngestCompletion(jobId, jobEvents, collection)
 

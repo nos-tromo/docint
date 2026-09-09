@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware'
 import { mergeFiles } from '@infra/ui'
 import { streamIngestUploadBatched, type BatchFailure } from '@/api/ingest'
 import { createIngestJob } from '@/api/jobs'
+import { applyIngestEvent, emptyStatus, type IngestStatus } from '@/lib/ingestStatus'
 import type { IngestEvent } from '@/api/types'
 import type { Strings } from '@/i18n'
 
@@ -66,15 +67,22 @@ export interface IngestRunState {
    */
   handledJobIds: string[]
   /**
-   * The upload leg's events, filed under the job that leg produced, so each
-   * job's card can still report what it saved. Transient: a reload loses them
-   * and the card falls back to the server's own progress.
+   * The upload leg's finished status, filed under the job that leg produced,
+   * so each job's card can still report what it saved. Transient: a reload
+   * loses it and the card falls back to the server's own progress.
    */
-  uploadEventsByJob: Record<string, IngestEvent[]>
+  uploadStatusByJob: Record<string, IngestStatus>
   files: File[]
-  /** Events of the upload currently in flight; moved to `uploadEventsByJob`
-   *  the moment that upload's job is queued. */
-  uploadEvents: IngestEvent[]
+  /**
+   * The status of the upload currently in flight; moved to
+   * `uploadStatusByJob` the moment that upload's job is queued.
+   *
+   * A folded status rather than the events that produced it: the upload leg
+   * emits one frame per megabyte plus one per file, so keeping the array and
+   * re-reducing it per frame was quadratic — tens of thousands of frames for
+   * a folder-sized batch, which is enough to hang the tab.
+   */
+  uploadStatus: IngestStatus
   failedFiles: string[]
   warnings: string[]
   uploading: boolean
@@ -112,17 +120,17 @@ export interface IngestRunState {
    *
    * @param jobId - The server's job id.
    * @param collection - The collection it was queued against.
-   * @param uploadEvents - The upload leg that produced it, if any.
+   * @param uploadStatus - The upload leg that produced it, if any.
    */
-  trackJob: (jobId: string, collection: string, uploadEvents?: IngestEvent[]) => void
-  /** Forget a job: drop it from the list along with its upload events. */
+  trackJob: (jobId: string, collection: string, uploadStatus?: IngestStatus) => void
+  /** Forget a job: drop it from the list along with its upload status. */
   untrackJob: (jobId: string) => void
   reset: () => void
 }
 
 const transient = {
   files: [] as File[],
-  uploadEvents: [] as IngestEvent[],
+  uploadStatus: emptyStatus(),
   failedFiles: [] as string[],
   warnings: [] as string[],
   uploading: false,
@@ -137,7 +145,7 @@ export const useIngestRunStore = create<IngestRunState>()(
       hate: false,
       trackedJobs: [],
       handledJobIds: [],
-      uploadEventsByJob: {},
+      uploadStatusByJob: {},
       ...transient,
       setCollection: (collection) => set({ collection }),
       setNer: (ner) => set({ ner }),
@@ -151,23 +159,23 @@ export const useIngestRunStore = create<IngestRunState>()(
             ? s
             : { handledJobIds: [...s.handledJobIds, jobId].slice(-MAX_HANDLED_JOBS) }
         ),
-      trackJob: (jobId, collection, uploadEvents) =>
+      trackJob: (jobId, collection, uploadStatus) =>
         set((s) => ({
           trackedJobs: [
             { job_id: jobId, collection },
             ...s.trackedJobs.filter((j) => j.job_id !== jobId)
           ],
-          uploadEventsByJob: uploadEvents
-            ? { ...s.uploadEventsByJob, [jobId]: uploadEvents }
-            : s.uploadEventsByJob
+          uploadStatusByJob: uploadStatus
+            ? { ...s.uploadStatusByJob, [jobId]: uploadStatus }
+            : s.uploadStatusByJob
         })),
       untrackJob: (jobId) =>
         set((s) => {
-          const uploadEventsByJob = { ...s.uploadEventsByJob }
-          delete uploadEventsByJob[jobId]
+          const uploadStatusByJob = { ...s.uploadStatusByJob }
+          delete uploadStatusByJob[jobId]
           return {
             trackedJobs: s.trackedJobs.filter((j) => j.job_id !== jobId),
-            uploadEventsByJob
+            uploadStatusByJob
           }
         }),
       reset: () =>
@@ -177,13 +185,19 @@ export const useIngestRunStore = create<IngestRunState>()(
           hate: false,
           trackedJobs: [],
           handledJobIds: [],
-          uploadEventsByJob: {},
+          uploadStatusByJob: {},
           ...transient
         }),
       start: async (limitBytes, t) => {
         const { collection, files, ner, hate, uploading } = get()
         if (!collection || files.length === 0 || uploading) return
-        set({ uploading: true, error: null, warnings: [], uploadEvents: [], failedFiles: [] })
+        set({ uploading: true, error: null, warnings: [], uploadStatus: emptyStatus(), failedFiles: [] })
+
+        // Built once, up front: the per-file upload bar needs each picked
+        // file's size, and rebuilding this map per frame would undo the point
+        // of folding each frame in constant time.
+        const fileSizes: Record<string, number> = {}
+        for (const f of files) fileSizes[f.webkitRelativePath || f.name] = f.size
 
         let anySaved = false
         let failures: BatchFailure[] = []
@@ -194,7 +208,7 @@ export const useIngestRunStore = create<IngestRunState>()(
           while (!next.done) {
             const ev = next.value
             lastEvent = ev
-            set((s) => ({ uploadEvents: [...s.uploadEvents, ev] }))
+            set((s) => ({ uploadStatus: applyIngestEvent(s.uploadStatus, ev, fileSizes) }))
             if (ev.event === 'warning') {
               const message = (ev.data as { message?: unknown }).message
               if (typeof message === 'string') set((s) => ({ warnings: [...s.warnings, message] }))
@@ -211,8 +225,8 @@ export const useIngestRunStore = create<IngestRunState>()(
         }
 
         if (!anySaved) {
-          // The generator's own terminal `error` event (already appended to
-          // `uploadEvents` above) already picked the more actionable message
+          // The generator's own terminal `error` event (already folded into
+          // `uploadStatus` above) already picked the more actionable message
           // — e.g. distinguishing "every file is over the size limit" from a
           // generic rejection. Reuse it instead of recomputing a duplicate,
           // less-specific message here, which is how the two drifted apart.
@@ -229,8 +243,8 @@ export const useIngestRunStore = create<IngestRunState>()(
           // instant `deriveIngestStatus` anchors the card's timer to — so the
           // duration the server ends up logging and echoing back covers the
           // upload leg the user was already watching tick.
-          const uploadEvents = get().uploadEvents
-          const runStartedAt = uploadEvents[0]?.receivedAt
+          const uploadStatus = get().uploadStatus
+          const runStartedAt = uploadStatus.startedAt
           const { job_id } = await createIngestJob({
             collection,
             ner,
@@ -239,13 +253,13 @@ export const useIngestRunStore = create<IngestRunState>()(
               runStartedAt === undefined ? undefined : Date.now() - runStartedAt
           })
           // The upload leg belongs to the job it produced from here on, so
-          // `uploadEvents` is free to describe the *next* upload. Without the
+          // `uploadStatus` is free to describe the *next* upload. Without the
           // handover a second run in the same tab would fold the previous
           // run's log into its own card.
-          get().trackJob(job_id, collection, uploadEvents)
+          get().trackJob(job_id, collection, uploadStatus)
           set({
             uploading: false,
-            uploadEvents: [],
+            uploadStatus: emptyStatus(),
             files: [],
             failedFiles: failures.flatMap((f) => f.files)
           })

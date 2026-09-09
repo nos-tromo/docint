@@ -235,6 +235,9 @@ export const de: Strings = {
   'ingest.title': 'Datenimport',
   'ingest.caption': 'Dokumente hochladen und indexieren',
   'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
+  'ingest.clear_files': 'Auswahl leeren',
+  'ingest.files_too_many':
+    'Zu viele Dateien für eine Einzelauflistung. Zum Neubeginn die Auswahl leeren.',
   'ingest.button': 'Importieren',
   'ingest.busy': 'Wird importiert…',
   'ingest.status_idle': 'Inaktiv',

@@ -82,6 +82,9 @@ export interface ParsedProgress {
   taskKey?: string
 }
 
+/** Warnings kept per run, matching `MAX_RETAINED_WARNINGS` in `core/jobs.py`. */
+const MAX_RETAINED_WARNINGS = 100
+
 const RE_STAGE = /^Core pipeline processing PDF \((\d+)\/(\d+)\): (.+)$/
 const RE_INDEXED = /^Core pipeline indexed (\d+) chunks: (.+)$/
 const RE_ENTITIES = /^Extracting entities:\s*(\d+)\/(\d+) chunks processed$/
@@ -241,6 +244,49 @@ function numOf(v: unknown): number | undefined {
 }
 
 /**
+ * The status of a run that has produced no events yet.
+ *
+ * Returns:
+ *   A fresh idle `IngestStatus`; callers own it and may fold events into it.
+ */
+export function emptyStatus(): IngestStatus {
+  return {
+    phase: 'idle',
+    totalFiles: 0,
+    filesSaved: 0,
+    tasks: [],
+    indexed: 0,
+    totalChunks: 0,
+    warnings: []
+  }
+}
+
+/**
+ * Fold one event into a status, returning a new snapshot.
+ *
+ * This is what lets a live upload be accounted for in constant time per
+ * frame. Keeping the events instead and re-reducing the whole array on each
+ * arrival is quadratic, and the upload leg emits one frame per megabyte plus
+ * one per file — tens of thousands for a folder-sized batch.
+ *
+ * Args:
+ *   previous: The status so far; never mutated.
+ *   ev: The event to apply.
+ *   fileSizes: Optional map of filename to size in bytes (from `File.size`)
+ *     used to display per-file upload bars.
+ *
+ * Returns:
+ *   A new `IngestStatus` with the event applied.
+ */
+export function applyIngestEvent(
+  previous: IngestStatus,
+  ev: IngestEvent,
+  fileSizes?: Record<string, number>
+): IngestStatus {
+  return deriveIngestStatus([ev], fileSizes, previous)
+}
+
+/**
  * Reduce a list of SSE ingest events into a single status snapshot.
  *
  * The reducer is intentionally tolerant: unknown progress messages are
@@ -251,23 +297,20 @@ function numOf(v: unknown): number | undefined {
  *   events: All ingest events seen so far, in arrival order.
  *   fileSizes: Optional map of filename to size in bytes (from `File.size`)
  *     used to display per-file upload bars.
+ *   initial: Status to fold onto, copied rather than mutated. Defaults to a
+ *     fresh idle status. The job card passes the upload leg's finished status
+ *     here so a card's timeline still spans both legs now that the leg is
+ *     carried as a status rather than as its events.
  *
  * Returns:
  *   The derived `IngestStatus` snapshot.
  */
 export function deriveIngestStatus(
   events: IngestEvent[],
-  fileSizes?: Record<string, number>
+  fileSizes?: Record<string, number>,
+  initial?: IngestStatus
 ): IngestStatus {
-  const status: IngestStatus = {
-    phase: 'idle',
-    totalFiles: 0,
-    filesSaved: 0,
-    tasks: [],
-    indexed: 0,
-    totalChunks: 0,
-    warnings: []
-  }
+  const status: IngestStatus = initial ? { ...initial } : emptyStatus()
 
   for (const ev of events) {
     const d = dataOf(ev)
@@ -367,7 +410,12 @@ export function deriveIngestStatus(
         // reader-unsupported batch, a failed post-ingest entity resolution)
         // and the run can emit several — accumulate rather than overwrite.
         const message = strOf(d.message)
-        if (message) status.warnings = [...status.warnings, message]
+        // Bounded like the server's own retained-warning list: a run that
+        // warns per failed batch can emit thousands, and every one of them
+        // would otherwise be kept and re-rendered for the rest of the run.
+        if (message && status.warnings.length < MAX_RETAINED_WARNINGS) {
+          status.warnings = [...status.warnings, message]
+        }
         break
       }
       case 'ingestion_complete': {
