@@ -1,4 +1,4 @@
-ARG NODE_IMAGE=docker.io/library/node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
+ARG NODE_IMAGE=docker.io/library/node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 # nginx-unprivileged: runs as uid 101, listens on 8080, pid/temp under /tmp
 # (deploy ADR 0001 non-root mandate); templates/envsubst mechanism intact.
 ARG NGINX_IMAGE=docker.io/nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
