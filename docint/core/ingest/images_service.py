@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -51,6 +52,26 @@ RETRY_BACKOFF_SECONDS: float = 2.0
 # base64-encoded into a report snapshot), against ~4KB at the 320px this used
 # to be. Promote to env_cfg knobs if a deployment ever needs to tune them.
 _THUMBNAIL_MAX_DIM: int = 768
+
+# The one identity a content hash cannot derive: which posting an image or
+# keyframe belongs to. A point written without it takes the first one offered.
+_LINK_FIELD = "posting_uuid"
+
+# Payload keys the store derives or that are written payload-only, never
+# carried on the node handed to the vector store (see ``_stamp_thumbnail``).
+_DERIVED_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "_node_content",
+        "_node_type",
+        "document_id",
+        "doc_id",
+        "ref_doc_id",
+        "search_text",
+        "thumbnail_b64",
+        "thumbnail_mime",
+        "thumbnail_max_dim",
+    }
+)
 _THUMBNAIL_JPEG_QUALITY: int = 70
 
 
@@ -459,6 +480,9 @@ class ImageIngestionService:
     _tagging_backend_error: str | None = field(default=None, init=False, repr=False)
     _ocr_engine: DocumentOcrEngine | None = field(default=None, init=False, repr=False)
     _ocr_engine_built: bool = field(default=False, init=False, repr=False)
+    # One service is shared by every preprocessing thread; the lazily built
+    # backends and the companion collection must be built exactly once.
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Lazily construct a Qdrant client when one wasn't injected."""
@@ -495,19 +519,20 @@ class ImageIngestionService:
         """
         if self.vector_store is not None:
             return self.vector_store
-        cached = self._vector_stores.get(collection_name)
-        if cached is not None:
-            return cached
-        if self.qdrant_client is None:
-            raise RuntimeError("Qdrant client is not initialized.")
-        vector_store = QdrantVectorStore(
-            collection_name=collection_name,
-            client=self.qdrant_client,
-            enable_hybrid=False,
-            dense_vector_name=self.img_ingestion_config.vector_name,
-        )
-        self._vector_stores[collection_name] = vector_store
-        return vector_store
+        with self._lock:
+            cached = self._vector_stores.get(collection_name)
+            if cached is not None:
+                return cached
+            if self.qdrant_client is None:
+                raise RuntimeError("Qdrant client is not initialized.")
+            vector_store = QdrantVectorStore(
+                collection_name=collection_name,
+                client=self.qdrant_client,
+                enable_hybrid=False,
+                dense_vector_name=self.img_ingestion_config.vector_name,
+            )
+            self._vector_stores[collection_name] = vector_store
+            return vector_store
 
     def _get_embedding_backend(self) -> ImageEmbeddingBackend | None:
         """Resolve the configured embedding backend lazily.
@@ -517,22 +542,25 @@ class ImageIngestionService:
         """
         if self.embedding_backend is not None:
             return self.embedding_backend
-        if self._embedding_backend_error is not None:
-            return None
-        if not self.img_ingestion_config.embedding_enabled:
-            return None
-        try:
-            self.embedding_backend = RemoteCLIPBackend()
-        except Exception as exc:
-            self._embedding_backend_error = str(exc)
-            if self.img_ingestion_config.fail_on_embedding_error:
-                raise
-            logger.warning(
-                "Remote CLIP backend unavailable (continuing without image vectors): {}",
-                exc,
-            )
-            return None
-        return self.embedding_backend
+        with self._lock:
+            if self.embedding_backend is not None:
+                return self.embedding_backend
+            if self._embedding_backend_error is not None:
+                return None
+            if not self.img_ingestion_config.embedding_enabled:
+                return None
+            try:
+                self.embedding_backend = RemoteCLIPBackend()
+            except Exception as exc:
+                self._embedding_backend_error = str(exc)
+                if self.img_ingestion_config.fail_on_embedding_error:
+                    raise
+                logger.warning(
+                    "Remote CLIP backend unavailable (continuing without image vectors): {}",
+                    exc,
+                )
+                return None
+            return self.embedding_backend
 
     def _get_tagging_backend(self) -> ImageTaggingBackend | None:
         """Resolve the configured image-tagging backend lazily.
@@ -542,24 +570,27 @@ class ImageIngestionService:
         """
         if self.tagging_backend is not None:
             return self.tagging_backend
-        if self._tagging_backend_error is not None:
-            return None
-        if not self.img_ingestion_config.tagging_enabled:
-            return None
-        try:
-            self.tagging_backend = VisionJSONTagger(
-                max_image_dimension=self.img_ingestion_config.tagging_max_image_dimension,
-            )
-        except Exception as exc:
-            self._tagging_backend_error = str(exc)
-            if self.img_ingestion_config.fail_on_tagging_error:
-                raise
-            logger.warning(
-                "Image tagging backend unavailable (continuing without tags): {}",
-                exc,
-            )
-            return None
-        return self.tagging_backend
+        with self._lock:
+            if self.tagging_backend is not None:
+                return self.tagging_backend
+            if self._tagging_backend_error is not None:
+                return None
+            if not self.img_ingestion_config.tagging_enabled:
+                return None
+            try:
+                self.tagging_backend = VisionJSONTagger(
+                    max_image_dimension=self.img_ingestion_config.tagging_max_image_dimension,
+                )
+            except Exception as exc:
+                self._tagging_backend_error = str(exc)
+                if self.img_ingestion_config.fail_on_tagging_error:
+                    raise
+                logger.warning(
+                    "Image tagging backend unavailable (continuing without tags): {}",
+                    exc,
+                )
+                return None
+            return self.tagging_backend
 
     def _get_ocr_engine(self) -> DocumentOcrEngine | None:
         """Return the OCR engine, building it on first use.
@@ -572,10 +603,14 @@ class ImageIngestionService:
             return None
         # Built once and kept: the engine holds no document handle on this
         # path, only a client worth reusing across a batch of images.
-        if not self._ocr_engine_built:
-            self._ocr_engine_built = True
-            self._ocr_engine = build_engine(max_image_dimension=self.img_ingestion_config.ocr_max_dimension)
-        return self._ocr_engine
+        # ponytail: its failure budget is shared by every preprocessing thread,
+        # so a burst of simultaneous timeouts trips it sooner; give each thread
+        # its own engine if that ever bites.
+        with self._lock:
+            if not self._ocr_engine_built:
+                self._ocr_engine_built = True
+                self._ocr_engine = build_engine(max_image_dimension=self.img_ingestion_config.ocr_max_dimension)
+            return self._ocr_engine
 
     def _read_image_text(self, image_bytes: bytes, *, context: str) -> str:
         """Read the text printed inside an image.
@@ -917,6 +952,216 @@ class ImageIngestionService:
             node_content=payload.get("_node_content"),
         )
 
+    @staticmethod
+    def _identity_payload(asset: ImageAsset, context: IngestContext) -> dict[str, Any]:
+        """The payload fields that say where an image came from, not what it shows.
+
+        One derivation for a fresh write and for re-stamping a cached point
+        with a later, stronger identity (``_relink_point``).
+
+        Args:
+            asset (ImageAsset): The asset being ingested.
+            context (IngestContext): Collection-resolution context.
+
+        Returns:
+            dict[str, Any]: Source fields, file name fields, and the asset's
+            ``extra_metadata`` merged on top.
+        """
+        payload: dict[str, Any] = {
+            "source_type": asset.source_type,
+            "source_collection": context.source_collection,
+            "source_doc_id": asset.source_doc_id,
+            "source_path": asset.source_path or (str(asset.image_path) if asset.image_path else None),
+            "page_number": asset.page_number,
+            "bbox": asset.bbox,
+        }
+        if asset.image_path:
+            payload["file_path"] = str(asset.image_path)
+            payload["file_name"] = asset.image_path.name
+            payload["filename"] = asset.image_path.name
+        if asset.extra_metadata:
+            payload.update(asset.extra_metadata)
+        return payload
+
+    @staticmethod
+    def _node_text(ocr_text: Any, description: Any, tags: Any) -> str:
+        """Compose an image node's text: its own words, then the caption, then the tags.
+
+        The words a picture carries come before the caption's paraphrase of
+        them: they are what a reader searched for, and what the reranker can
+        match exactly rather than approximately.
+
+        Args:
+            ocr_text (Any): The text read out of the image, if any.
+            description (Any): The caption.
+            tags (Any): The tag list.
+
+        Returns:
+            str: The node text.
+        """
+        parts = [str(ocr_text or "").strip(), str(description or "").strip()]
+        tag_list: list[str] = [str(tag) for tag in tags] if isinstance(tags, list) else []
+        if tag_list:
+            parts.append("Tags: " + ", ".join(tag_list))
+        return "\n\n".join(part for part in parts if part).strip()
+
+    @staticmethod
+    def _link_value(asset: ImageAsset) -> str | None:
+        """Return the posting the asset is linked to, if any."""
+        value = (asset.extra_metadata or {}).get(_LINK_FIELD)
+        return str(value) if value else None
+
+    def _stored_vector(self, *, collection_name: str, point_id: str) -> list[float] | None:
+        """Fetch a point's stored dense vector, so a re-upsert costs no embed call."""
+        if self.qdrant_client is None:
+            return None
+        try:
+            points = self.qdrant_client.retrieve(
+                collection_name=collection_name, ids=[point_id], with_payload=False, with_vectors=True
+            )
+        except Exception as exc:
+            logger.debug("Vector fetch for point '{}' failed: {}", point_id, exc)
+            return None
+        if not points:
+            return None
+        vector = getattr(points[0], "vector", None)
+        if isinstance(vector, dict):
+            vector = vector.get(self.img_ingestion_config.vector_name)
+        return [float(v) for v in vector] if isinstance(vector, list) and vector else None
+
+    def _relink_point(
+        self,
+        *,
+        collection_name: str,
+        point_id: str,
+        payload: dict[str, Any],
+        identity: dict[str, Any],
+    ) -> bool:
+        """Re-upsert a cached point under a new identity, reusing its stored model outputs.
+
+        A payload-only write would not do: retrieval rebuilds the node from
+        ``_node_content``, which is only rewritten by a full upsert. The vector,
+        caption, tags, OCR text and thumbnail are taken from the point as stored,
+        so no model is called.
+
+        Args:
+            collection_name (str): Companion collection holding the point.
+            point_id (str): The point to rewrite.
+            payload (dict[str, Any]): Its payload as stored.
+            identity (dict[str, Any]): The fields to overlay.
+
+        Returns:
+            bool: ``True`` when the point was rewritten; ``False`` when its
+            vector could not be read or the write failed, in which case the
+            caller falls back to recording an occurrence.
+        """
+        vector = self._stored_vector(collection_name=collection_name, point_id=point_id)
+        if vector is None:
+            logger.warning("Cannot relink image point '{}': stored vector unavailable.", point_id)
+            return False
+        merged = {key: value for key, value in payload.items() if key not in _DERIVED_PAYLOAD_KEYS}
+        merged.update(identity)
+        node_text = self._node_text(merged.get("ocr_text"), merged.get("llm_description"), merged.get("llm_tags"))
+        mime_type = merged.get("mime_type")
+        node = ImageNode(
+            id_=point_id,
+            text=node_text,
+            metadata=merged,
+            image_path=merged.get("file_path"),
+            image_mimetype=str(mime_type) if mime_type else None,
+            embedding=vector,
+        )
+        try:
+            self._get_vector_store(collection_name).add([node])
+            self._write_image_search_text(collection_name, point_id, node_text)
+            thumbnail = {
+                key: payload[key] for key in ("thumbnail_b64", "thumbnail_mime", "thumbnail_max_dim") if key in payload
+            }
+            if thumbnail:
+                self._stamp_thumbnail(collection_name=collection_name, point_id=point_id, fields=thumbnail)
+        except Exception as exc:
+            logger.warning("Relinking image point '{}' failed: {}", point_id, exc)
+            return False
+        return True
+
+    def _points_by_field(self, *, collection_name: str, key: str, value: Any) -> list[tuple[str, dict[str, Any]]]:
+        """Scroll every point whose payload field *key* equals *value*."""
+        if self.qdrant_client is None:
+            return []
+        found: list[tuple[str, dict[str, Any]]] = []
+        offset: Any = None
+        try:
+            while True:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=models.Filter(
+                        must=[models.FieldCondition(key=key, match=models.MatchValue(value=value))]
+                    ),
+                    limit=256,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset,
+                )
+                found.extend((str(getattr(p, "id", "")), dict(getattr(p, "payload", {}) or {})) for p in points)
+                if offset is None or not points:
+                    return found
+        except Exception as exc:
+            logger.debug("Scroll by {}={!r} in '{}' failed: {}", key, value, collection_name, exc)
+            return found
+
+    def relink_keyframes(
+        self,
+        *,
+        context: IngestContext,
+        media_hash: str,
+        source_doc_id: str | None,
+        extra_metadata: dict[str, Any] | None,
+        keyframe_source_type: str,
+        link_field: str | None,
+    ) -> int:
+        """Give a clip's file-identity keyframes the posting that now claims the clip.
+
+        The preprocessing pool stores a clip's keyframes under the clip's own
+        hash before any export names its posting; the transcript cache hit
+        that follows ingests no frames at all, so this is how those frames
+        join the posting. Frames already linked are left alone.
+
+        Args:
+            context (IngestContext): Collection-resolution context.
+            media_hash (str): The clip's content hash (``media_file_hash`` on the frames).
+            source_doc_id (str | None): The posting UUID.
+            extra_metadata (dict[str, Any] | None): The clip's keyframe metadata.
+            keyframe_source_type (str): ``source_type`` to stamp.
+            link_field (str | None): Payload key that receives ``source_doc_id``.
+
+        Returns:
+            int: How many frames were relinked.
+        """
+        if not link_field:
+            return 0
+        try:
+            target_collection = self._resolve_collection_name(context.source_collection)
+        except Exception as exc:
+            logger.warning("Keyframe relink skipped: {}", exc)
+            return 0
+        identity: dict[str, Any] = {
+            "source_type": keyframe_source_type,
+            "source_doc_id": source_doc_id,
+            link_field: source_doc_id,
+            **(extra_metadata or {}),
+        }
+        relinked = 0
+        for point_id, payload in self._points_by_field(
+            collection_name=target_collection, key="media_file_hash", value=media_hash
+        ):
+            if payload.get(link_field):
+                continue
+            if self._relink_point(
+                collection_name=target_collection, point_id=point_id, payload=payload, identity=identity
+            ):
+                relinked += 1
+        return relinked
+
     def _ensure_collection(self, *, collection_name: str, vector_dim: int) -> None:
         """Create or validate the image collection and vector schema.
 
@@ -924,6 +1169,13 @@ class ImageIngestionService:
             collection_name (str): The name of the collection to create or validate.
             vector_dim (int): The expected dimensionality of the image embedding vectors.
         """
+        if self.qdrant_client is None:
+            return
+        with self._lock:
+            self._ensure_collection_locked(collection_name=collection_name, vector_dim=vector_dim)
+
+    def _ensure_collection_locked(self, *, collection_name: str, vector_dim: int) -> None:
+        """Create or validate the image collection; caller holds ``_lock``."""
         if self.qdrant_client is None:
             return
         try:
@@ -1113,12 +1365,33 @@ class ImageIngestionService:
             )
             if existing is not None:
                 existing_point_id, existing_payload = existing
-                self._append_occurrence(
-                    collection_name=target_collection,
-                    point_id=existing_point_id,
-                    payload=existing_payload,
-                    occurrence=occurrence,
-                )
+                relinked = False
+                if self._link_value(asset) and not existing_payload.get(_LINK_FIELD):
+                    # A point written loose — by the preprocessing pool before
+                    # the export's manifest arrived, or from a copy elsewhere
+                    # in the batch — takes the posting's identity the first
+                    # time an export claims it. Top level, not an occurrence:
+                    # that is the field posting grouping, the uuid search and
+                    # the extract joins read.
+                    occurrences = [occ for occ in (existing_payload.get("occurrences") or []) if isinstance(occ, dict)]
+                    if occurrence not in occurrences:
+                        occurrences.append(occurrence)
+                    identity = {**self._identity_payload(asset, context), "occurrences": occurrences}
+                    relinked = self._relink_point(
+                        collection_name=target_collection,
+                        point_id=existing_point_id,
+                        payload=existing_payload,
+                        identity=identity,
+                    )
+                    if relinked:
+                        existing_payload = {**existing_payload, **identity}
+                if not relinked:
+                    self._append_occurrence(
+                        collection_name=target_collection,
+                        point_id=existing_point_id,
+                        payload=existing_payload,
+                        occurrence=occurrence,
+                    )
                 self._backfill_thumbnail(
                     collection_name=target_collection,
                     point_id=existing_point_id,
@@ -1186,12 +1459,6 @@ class ImageIngestionService:
         thumbnail = self._thumbnail_fields(image_bytes)
         image_payload: dict[str, Any] = {
             "image_id": image_id,
-            "source_type": asset.source_type,
-            "source_collection": context.source_collection,
-            "source_doc_id": asset.source_doc_id,
-            "source_path": asset.source_path or (str(asset.image_path) if asset.image_path else None),
-            "page_number": asset.page_number,
-            "bbox": asset.bbox,
             "mime_type": mime_type,
             "mimetype": mime_type,
             "file_type": mime_type,
@@ -1204,23 +1471,12 @@ class ImageIngestionService:
             "vector_name": self.img_ingestion_config.vector_name,
             "image_collection": target_collection,
             "occurrences": [occurrence],
+            **self._identity_payload(asset, context),
         }
-        if asset.image_path:
-            image_payload["file_path"] = str(asset.image_path)
-            image_payload["file_name"] = asset.image_path.name
-            image_payload["filename"] = asset.image_path.name
-        if asset.extra_metadata:
-            image_payload.update(asset.extra_metadata)
         if tag_error:
             image_payload["tagging_error"] = tag_error
 
-        # The words a page carries come before the caption's paraphrase of
-        # it: they are what a reader searched for, and what the reranker can
-        # match exactly rather than approximately.
-        text_parts = [ocr_text.strip(), description.strip()]
-        if tags:
-            text_parts.append("Tags: " + ", ".join(tags))
-        node_text = "\n\n".join([part for part in text_parts if part]).strip()
+        node_text = self._node_text(ocr_text, description, tags)
 
         image_node = ImageNode(
             id_=point_id,
@@ -1390,10 +1646,7 @@ class ImageIngestionService:
                 frame_ocr = self._read_image_text(frame_bytes, context=f"keyframe {image_id[:12]}")
             else:
                 frame_ocr = ""
-            text_parts = [frame_ocr.strip(), description.strip()]
-            if tags:
-                text_parts.append("Tags: " + ", ".join(tags))
-            node_text = "\n\n".join(part for part in text_parts if part).strip()
+            node_text = self._node_text(frame_ocr, description, tags)
             width, height = self._image_size(frame_bytes)
             payload: dict[str, Any] = {
                 "image_id": image_id,

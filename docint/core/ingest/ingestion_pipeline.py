@@ -24,6 +24,7 @@ from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
 from docint.core.ingest.images_service import ImageIngestionService
+from docint.core.ingest.preprocess import IMAGE_EXTENSIONS, get_preprocess_pool, submit_file
 from docint.core.ingest.standalone_media import StandaloneMediaIngestor
 from docint.core.readers.docx import DocxReader
 from docint.core.readers.images import ImageReader
@@ -333,6 +334,7 @@ class DocumentIngestionPipeline:
 
         if existing_hashes:
             self._filter_input_files(existing_hashes)
+        self._prefetch_images()
 
         current_docs: list[Document] = []
         files_processed = 0
@@ -398,6 +400,34 @@ class DocumentIngestionPipeline:
             processed_nodes += len(node_batch)
             completed_hashes = file_hashes if batch_idx == len(node_batches) - 1 else set()
             yield docs if batch_idx == 0 else [], node_batch, completed_hashes
+
+    def _prefetch_images(self, pool: Any = None) -> int:
+        """Submit every image the sweep will read to the preprocessing pool.
+
+        The sweep reads files one at a time; submitting the images first lets
+        their caption/OCR/CLIP calls run across files while it does, so each
+        ``ImageReader`` call becomes a join. Images the social linker claimed
+        are its own to link and are skipped.
+
+        Args:
+            pool (Any): Pool to submit to; the shared one when ``None``.
+
+        Returns:
+            int: How many images were submitted.
+        """
+        if self.dir_reader is None or not self.target_collection:
+            return 0
+        pool = pool or get_preprocess_pool()
+        service = self.image_ingestion_service
+        submitted = 0
+        for input_file in self.dir_reader.input_files:
+            path = Path(input_file)
+            if path.suffix.lower() not in IMAGE_EXTENSIONS or path in self.social_link_consumed:
+                continue
+            file_hash = self.file_hash_cache.get(str(path))
+            if submit_file(path, self.target_collection, pool=pool, file_hash=file_hash, image_service=service):
+                submitted += 1
+        return submitted
 
     def _iter_loaded_documents(self) -> Iterable[list[Document]]:
         """Yield loaded documents from the configured directory reader.
@@ -860,6 +890,7 @@ class DocumentIngestionPipeline:
         image_reader = ImageReader(
             image_ingestion_service=(self.image_ingestion_service or ImageIngestionService()),
             source_collection=self.target_collection,
+            pool=get_preprocess_pool(),
         )
         table_reader = TableReader(
             text_cols=self.table_text_cols,
@@ -937,17 +968,9 @@ class DocumentIngestionPipeline:
             collection are configured; otherwise a no-op stub. Callers must
             ``close()`` the returned object.
         """
-        from docint.core.storage.ingest_manifest import IngestManifest, NullIngestManifest
-        from docint.utils.env_cfg import load_ingestion_env, load_path_env
+        from docint.core.storage.ingest_manifest import open_ingest_manifest
 
-        try:
-            sources_root = load_path_env().qdrant_sources
-            if load_ingestion_env().ingest_manifest_enabled and sources_root and self.target_collection:
-                target = self.target_collection
-                return IngestManifest(sources_root / target / f"{target}_ingest_manifest.db")
-        except Exception as exc:  # pragma: no cover - fail-soft guard
-            logger.debug("Manifest unavailable: {}", exc)
-        return NullIngestManifest()
+        return open_ingest_manifest(self.target_collection)
 
     def _run_social_linker(self) -> None:
         """Run the social linker; record consumed paths + transcript Documents.
@@ -974,6 +997,7 @@ class DocumentIngestionPipeline:
                 album_tolerance_s=ingestion_cfg.social_album_tolerance_s,
                 timestamp_link_enabled=ingestion_cfg.social_timestamp_link_enabled,
                 text_link_enabled=ingestion_cfg.social_text_link_enabled,
+                pool=get_preprocess_pool(),
             ).run(self.data_dir)
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)
@@ -1006,6 +1030,7 @@ class DocumentIngestionPipeline:
                 manifest=manifest,
                 keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
                 nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
+                pool=get_preprocess_pool(),
             )
             result = StandaloneMediaIngestor(
                 transcriber,

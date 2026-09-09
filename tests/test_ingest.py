@@ -1463,3 +1463,28 @@ def test_streaming_reader_dispatch_falls_back_when_disabled(
     assert load_file_calls[0] == csv_file
     assert len(result) == 1
     assert result[0][0].text == "from-load-file"
+
+
+def test_prefetch_submits_the_sweeps_images_but_not_the_linkers(
+    tmp_path: Path, recording_pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every image the sweep will read is submitted up front, with the hash already computed."""
+    pipeline, _ = _make_pipeline(tmp_path, lambda text: ([], []))
+    loose, claimed, other = tmp_path / "a.png", tmp_path / "b.jpg", tmp_path / "c.txt"
+    for path in (loose, claimed, other):
+        path.write_bytes(path.name.encode())
+    pipeline.target_collection = "col"
+    pipeline.dir_reader = cast(Any, SimpleNamespace(input_files=[loose, claimed, other]))
+    pipeline.social_link_consumed = {claimed}
+    pipeline.file_hash_cache[str(loose)] = "known-hash"
+    submitted: list[tuple[Path, str, str | None]] = []
+    monkeypatch.setattr(
+        pipeline_module,
+        "submit_file",
+        lambda path, collection, *, pool, file_hash=None, image_service=None: (
+            submitted.append((path, collection, file_hash)) or object()
+        ),
+    )
+
+    assert pipeline._prefetch_images(pool=recording_pool) == 1
+    assert submitted == [(loose, "col", "known-hash")]

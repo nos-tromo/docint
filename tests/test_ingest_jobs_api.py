@@ -334,6 +334,93 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
     assert result == {"empty": False, "resolution": None, "stats": None}
 
 
+def test_upload_refuses_a_collection_name_qdrant_cannot_address(client: TestClient, tmp_path: Path) -> None:
+    """A ``#`` in the name would truncate every Qdrant URL; the upload is refused before any byte is staged."""
+    res = client.post(
+        "/ingest/upload",
+        data={"collection": "Test #549"},
+        files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Collection name contains characters that cannot be used: '#'."
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_finalize_refuses_a_collection_name_qdrant_cannot_address(client: TestClient) -> None:
+    """Finalize applies the same rule, so no job is ever queued for such a name."""
+    res = client.post("/ingest/finalize", json={"collection": "a/b"}, headers=_headers())
+
+    assert res.status_code == 400
+    assert "'/'" in res.json()["detail"]
+    assert client.get("/ingest/jobs", headers=_headers()).json()["jobs"] == []
+
+
+def _upload_two(client: TestClient) -> None:
+    client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files=[
+            ("files", ("a.pdf", b"%PDF-1.4", "application/pdf")),
+            ("files", ("b.png", b"png-bytes", "image/png")),
+        ],
+        headers=_headers(),
+    )
+
+
+def test_upload_submits_each_saved_file_for_preprocessing(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every saved file starts its heavy stage at once, under the owner-namespaced collection."""
+    monkeypatch.delenv("INGEST_PREPROCESS_ON_UPLOAD", raising=False)
+    submitted: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(
+        api_module,
+        "submit_file",
+        lambda path, collection, *, file_hash=None, **kwargs: submitted.append((path.name, collection, file_hash)),
+    )
+
+    _upload_two(client)
+
+    assert [name for name, _, _ in submitted] == ["a.pdf", "b.png"]
+    assert all(collection != "mydocs" and collection.endswith("__mydocs") for _, collection, _ in submitted)
+    assert all(len(file_hash or "") == 64 for _, _, file_hash in submitted)
+
+
+def test_upload_preprocessing_can_be_switched_off(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the switch off, uploading only stages bytes, as it always did."""
+    monkeypatch.setenv("INGEST_PREPROCESS_ON_UPLOAD", "false")
+    submitted: list[str] = []
+    monkeypatch.setattr(api_module, "submit_file", lambda path, collection, **kwargs: submitted.append(path.name))
+
+    _upload_two(client)
+
+    assert submitted == []
+
+
+def test_a_failing_preprocess_submit_does_not_fail_the_upload(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, loguru_caplog: Any
+) -> None:
+    """Staging the bytes is the upload's job; a pool refusal is a warning, not a save failure."""
+    monkeypatch.delenv("INGEST_PREPROCESS_ON_UPLOAD", raising=False)
+
+    def refuse(path: Path, collection: str, **kwargs: Any) -> None:
+        raise RuntimeError("pool is shut down")
+
+    monkeypatch.setattr(api_module, "submit_file", refuse)
+
+    res = client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 200
+    assert "file_saved" in res.text
+    assert "upload_complete" in res.text
+    assert "Preprocess submit skipped" in loguru_caplog.text
+
+
 def test_run_job_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     """_run_job routes a summary-kind state to _run_summary_job and everything else to _run_ingest_job."""
     calls: list[str] = []

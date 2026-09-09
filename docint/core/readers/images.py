@@ -12,10 +12,10 @@ from loguru import logger
 from typing_extensions import override
 
 from docint.core.ingest.images_service import (
-    ImageAsset,
     ImageIngestionService,
     IngestContext,
 )
+from docint.core.ingest.preprocess import preprocess_key, standalone_image_asset
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -26,6 +26,9 @@ class ImageReader(BaseReader):
 
     image_ingestion_service: ImageIngestionService = field(default_factory=ImageIngestionService)
     source_collection: str | None = None
+    # The preprocessing pool, when the caller wants in-flight work joined
+    # rather than repeated; ``None`` ingests on the calling thread.
+    pool: Any = None
 
     def _enrich_document(
         self,
@@ -114,18 +117,17 @@ class ImageReader(BaseReader):
         if file_hash is None:
             file_hash = compute_file_hash(file_path)
 
-        image_bytes = file_path.read_bytes()
-        mime_type = get_mimetype(file_path)
+        context = IngestContext(source_collection=self.source_collection)
 
-        record = self.image_ingestion_service.ingest_image(
-            ImageAsset(
-                source_type="standalone",
-                image_path=file_path,
-                image_bytes=image_bytes,
-                source_path=str(file_path),
-                mime_type=mime_type,
-            ),
-            context=IngestContext(source_collection=self.source_collection),
+        def ingest() -> Any:
+            return self.image_ingestion_service.ingest_image(standalone_image_asset(file_path), context=context)
+
+        # Join the pool's task for this file when one is in flight (the upload
+        # handler or the pipeline's prefetch submitted it); run it here otherwise.
+        record = (
+            self.pool.run(preprocess_key("image", self.source_collection or "", file_hash), ingest)
+            if self.pool is not None
+            else ingest()
         )
         # A screenshot or a photographed page says more in its own words than
         # in a caption of them, so those come first — the same order the image

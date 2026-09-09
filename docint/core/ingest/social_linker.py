@@ -625,12 +625,14 @@ def is_image(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Routing layer (SocialLinker + SocialLinkResult) — Task 10
 # ---------------------------------------------------------------------------
+from collections.abc import Callable  # noqa: E402
 from typing import Any  # noqa: E402
 
 from llama_index.core import Document  # noqa: E402
 
 from docint.core.ingest.images_service import ImageAsset, IngestContext  # noqa: E402
 from docint.core.ingest.media_transcribe import MediaClip, MediaTranscriber  # noqa: E402
+from docint.core.ingest.preprocess import preprocess_key, run_all  # noqa: E402
 from docint.core.readers.tables import TableReader, is_media_manifest  # noqa: E402
 from docint.utils.hashing import compute_file_hash  # noqa: E402
 
@@ -787,6 +789,10 @@ class SocialLinker:
     album_tolerance_s: float = _DEFAULT_ALBUM_TOLERANCE_S
     timestamp_link_enabled: bool = True
     text_link_enabled: bool = True
+    # The preprocessing pool: images are linked through it across the export,
+    # and one the pool is still storing loose is waited on first. ``None``
+    # runs inline.
+    pool: Any = None
 
     def _find_tables(self, data_dir: Path) -> tuple[Path | None, Path | None]:
         """Locate the postings table and media manifest anywhere in the tree.
@@ -858,7 +864,9 @@ class SocialLinker:
 
         result.consumed_paths.add(media_csv)
         context = IngestContext(source_collection=self.target_collection)
+        collection = self.target_collection or ""
         clips: list[MediaClip] = []
+        image_jobs: list[tuple[str, Callable[[], Any]]] = []
         for link in links:
             posting_ref = posting_references.get(link.posting_id, {})
             link_ids = {
@@ -868,20 +876,18 @@ class SocialLinker:
             }
             if is_image(link.path):
                 result.consumed_paths.add(link.path)
-                self.image_service.ingest_image(
-                    ImageAsset.from_path(
-                        path=link.path,
-                        source_type="social_media",
-                        source_doc_id=link.posting_uuid,
-                        extra_metadata={
-                            **link_ids,
-                            "source_type": "social_media",
-                            **posting_ref,
-                            "reference_metadata": {"type": "image", **link_ids, **posting_ref},
-                        },
-                    ),
-                    context=context,
+                asset = ImageAsset.from_path(
+                    path=link.path,
+                    source_type="social_media",
+                    source_doc_id=link.posting_uuid,
+                    extra_metadata={
+                        **link_ids,
+                        "source_type": "social_media",
+                        **posting_ref,
+                        "reference_metadata": {"type": "image", **link_ids, **posting_ref},
+                    },
                 )
+                image_jobs.append(self._image_job(asset, context, collection, link.posting_uuid))
             else:
                 # The clip's own name and hash, stamped on every artifact cut
                 # from it: without them a keyframe names no file at all and a
@@ -925,6 +931,7 @@ class SocialLinker:
                         },
                     )
                 )
+        run_all(self.pool, image_jobs)
         sub = MediaTranscriber(
             image_service=self.image_service,
             nextext_client=self.nextext_client,
@@ -932,7 +939,41 @@ class SocialLinker:
             manifest=self.manifest,
             keyframe_dedup_cosine=self.keyframe_dedup_cosine,
             nextext_max_concurrency=self.nextext_max_concurrency,
+            pool=self.pool,
         ).run(clips)
         result.consumed_paths |= sub.consumed_paths
         result.transcript_documents.extend(sub.transcript_documents)
         return result
+
+    def _image_job(
+        self, asset: ImageAsset, context: IngestContext, collection: str, posting_uuid: str
+    ) -> tuple[str, Callable[[], Any]]:
+        """One linked image as a keyed task: wait for any loose copy in flight, then link it.
+
+        The key names the posting as well as the bytes, so it never collides
+        with the pool's standalone task for the same file — which is joined,
+        not replaced, since a loose point must still be *relinked* by the
+        social call that follows. Joining from a pool worker is safe only
+        because every ``image:`` task is submitted before any link task (by
+        the upload hook or the job's prefetch) and the executor is FIFO, so
+        the joined task is never queued behind the one waiting on it.
+
+        Args:
+            asset (ImageAsset): The social asset for the image.
+            context (IngestContext): Collection-resolution context.
+            collection (str): Physical collection name.
+            posting_uuid (str): The posting the image belongs to.
+
+        Returns:
+            tuple[str, Callable[[], Any]]: ``(key, task)`` for ``run_all``.
+        """
+        if self.pool is None:
+            return "", lambda: self.image_service.ingest_image(asset, context=context)
+        file_hash = compute_file_hash(asset.image_path) if asset.image_path else ""
+        pool = self.pool
+
+        def task() -> Any:
+            pool.join(preprocess_key("image", collection, file_hash))
+            return self.image_service.ingest_image(asset, context=context)
+
+        return preprocess_key("image-link", collection, f"{file_hash}:{posting_uuid}"), task

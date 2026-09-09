@@ -25,13 +25,63 @@ if TYPE_CHECKING:
     from docint.core.rag import RAG
 
 
+#: Characters a logical name may not carry. qdrant-client formats the
+#: collection name straight into the request path with no percent-encoding,
+#: so ``#`` (URL fragment), ``?`` (query), ``/`` (segment), ``%`` (escape) and
+#: ``\`` each change which collection a request addresses — a name with ``#``
+#: silently created and queried its own prefix. Spaces, brackets and unicode
+#: are fine: Qdrant accepts them and existing collections use them.
+_FORBIDDEN_NAME_CHARS: frozenset[str] = frozenset("#?/\\%")
+
+
+class InvalidCollectionNameError(ValueError):
+    """A logical collection name that cannot be addressed as a Qdrant collection.
+
+    Attributes:
+        offending (list[str]): The characters that were rejected, sorted;
+            empty when the name itself was blank.
+    """
+
+    def __init__(self, offending: list[str]) -> None:
+        """Build the client-facing message from the rejected characters."""
+        self.offending = offending
+        if offending:
+            shown = ", ".join(repr(char) for char in offending)
+            message = f"Collection name contains characters that cannot be used: {shown}."
+        else:
+            message = "Collection name must not be empty."
+        super().__init__(message)
+
+
+def validate_collection_name(logical: str) -> str:
+    """Refuse a logical name that would not survive the trip to Qdrant.
+
+    Args:
+        logical (str): The user-visible collection name.
+
+    Returns:
+        str: The same name, when it is usable.
+
+    Raises:
+        InvalidCollectionNameError: For a blank name or one carrying a
+            character from ``_FORBIDDEN_NAME_CHARS`` or a control character.
+    """
+    if not logical or not logical.strip():
+        raise InvalidCollectionNameError([])
+    offending = sorted({char for char in logical if char in _FORBIDDEN_NAME_CHARS or ord(char) < 32 or char == "\x7f"})
+    if offending:
+        raise InvalidCollectionNameError(offending)
+    return logical
+
+
 def physical_collection_name(owner: str | None, logical: str) -> str:
     """Compute the per-owner physical Qdrant name for a logical collection.
 
     Deterministic, so the same ``(owner, logical)`` always maps to the same
     physical name. The owner is hashed (not embedded verbatim) so arbitrary
     principal strings (emails, header values) can never produce an invalid
-    Qdrant collection name.
+    Qdrant collection name; the logical name is embedded verbatim, so it is
+    validated here — the one place a physical name is minted.
 
     Args:
         owner (str | None): The owning principal.
@@ -39,7 +89,12 @@ def physical_collection_name(owner: str | None, logical: str) -> str:
 
     Returns:
         str: The namespaced physical collection name, ``u{owner_hash}__{logical}``.
+
+    Raises:
+        InvalidCollectionNameError: When ``logical`` cannot be addressed in a
+            Qdrant request URL (see :func:`validate_collection_name`).
     """
+    validate_collection_name(logical)
     slug = hashlib.sha256((owner or "").encode("utf-8")).hexdigest()[:12]
     return f"u{slug}__{logical}"
 

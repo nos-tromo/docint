@@ -804,3 +804,24 @@ def test_a_transcript_segment_keeps_the_transcript_hash(tmp_path: Path) -> None:
     segment = result.transcript_documents[0].metadata
     assert segment["media_file_hash"]
     assert segment["file_hash"] != segment["media_file_hash"]
+
+
+def test_linked_images_go_through_the_pool_after_joining_their_loose_task(tmp_path: Path, recording_pool: Any) -> None:
+    """Each linked image is a pool task keyed by posting that first waits for the file's loose task.
+
+    The pool may already be storing the same file loose (the upload handler
+    submitted it before the manifest arrived); the social call must run after
+    that, not instead of it, so the loose point is relinked rather than lost.
+    """
+    _write_export(tmp_path)
+    service = _FakeImageService()
+
+    SocialLinker(
+        image_service=service, nextext_client=_CountingNextext(), target_collection="c", pool=recording_pool
+    ).run(tmp_path)
+
+    assert service.images, "the export's image was linked"
+    link_keys = [key for key in recording_pool.keys if key.startswith("image-link:c:")]
+    assert len(link_keys) == len(service.images)  # submitted once per image, joined by future
+    assert all(key.count(":") == 3 for key in link_keys)  # kind:collection:hash:posting
+    assert len([j for j in recording_pool.joins if j.startswith("image:c:")]) == len(service.images)

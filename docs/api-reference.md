@@ -891,6 +891,10 @@ form field, saves them into that collection's batch directory, and streams
 save progress as SSE. It does **not** ingest — the caller runs one ingestion
 pass afterwards via `/ingest/finalize`.
 
+A `collection` containing `#`, `?`, `/`, `\`, `%` or a control character is
+refused with `400` before anything is staged (`detail` names the characters);
+the same rule applies to `/ingest/finalize` and `POST /ingest`.
+
 Splitting a large selection across several upload batches means ingestion
 happens once over the whole staged directory, instead of once per batch
 (which would re-initialise the pipeline's models per batch and hard-fail on

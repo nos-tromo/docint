@@ -86,7 +86,6 @@ def pipeline_config(tmp_path: Path) -> PipelineConfig:
         artifacts_dir=str(tmp_path / "artifacts"),
         max_retries=1,
         force_reprocess=True,
-        max_workers=1,
         enable_ocr=False,
         ocr_timeout=60.0,
         ocr_max_retries=1,
@@ -208,7 +207,6 @@ class TestPipelineConfig:
             "PIPELINE_VERSION",
             "PIPELINE_MAX_RETRIES",
             "PIPELINE_FORCE_REPROCESS",
-            "PIPELINE_MAX_WORKERS",
         ]:
             monkeypatch.delenv(key, raising=False)
 
@@ -217,7 +215,7 @@ class TestPipelineConfig:
         assert cfg.pipeline_version == "3.4.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
-        assert cfg.max_workers == 4
+        assert not hasattr(cfg, "max_workers")
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variables should override default config values."""
@@ -1493,7 +1491,6 @@ class TestOrchestrator:
             artifacts_dir=pipeline_config.artifacts_dir,
             max_retries=pipeline_config.max_retries,
             force_reprocess=False,
-            max_workers=pipeline_config.max_workers,
             enable_ocr=False,
             ocr_timeout=60.0,
             ocr_max_retries=1,
@@ -1635,7 +1632,6 @@ class TestOrchestrator:
             artifacts_dir=str(tmp_path / "artifacts"),
             max_retries=1,
             force_reprocess=True,
-            max_workers=1,
             enable_ocr=False,
             ocr_timeout=60.0,
             ocr_max_retries=1,

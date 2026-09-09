@@ -111,6 +111,74 @@ def _hermetic_hybrid_env() -> Iterator[None]:
     mp.undo()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_preprocess() -> Iterator[None]:
+    """Keep the preprocessing pool from doing real work behind a test.
+
+    Uploading a ``.jpg`` through the API, or ingesting a directory holding a
+    PDF, would otherwise submit a real caption/OCR/layout task to a pool
+    worker that then fails against no model endpoint and logs after the
+    test's capture has closed. Tests of the hook and the prefetch re-enable
+    them explicitly. A private ``MonkeyPatch`` for the same fixture-ordering
+    reason as :func:`_hermetic_hybrid_env`.
+
+    Yields:
+        None.
+    """
+    mp = pytest.MonkeyPatch()
+    mp.setenv("INGEST_PREPROCESS_ON_UPLOAD", "false")
+    mp.setattr("docint.core.rag.prefetch_batch", lambda *args, **kwargs: 0)
+    yield
+    mp.undo()
+
+
+@pytest.fixture
+def recording_pool() -> Any:
+    """A preprocessing pool double that runs every task inline and records the keys.
+
+    Returns:
+        A ``PreprocessPool`` subclass instance with ``keys`` (every submitted
+        or run key, in order) and ``joins`` (every key waited on).
+    """
+    from typing_extensions import override
+
+    from docint.core.ingest.preprocess import PreprocessPool
+
+    class RecordingPool(PreprocessPool):
+        """Inline, ordered stand-in for the real pool."""
+
+        def __init__(self) -> None:
+            """Start with empty logs and no executor."""
+            self.keys: list[str] = []
+            self.joins: list[str] = []
+            self.results: dict[str, Any] = {}
+
+        @override
+        def submit(self, key: str, fn: Any) -> Any:
+            """Run *fn* now (once per key) and return a future-like holding its value."""
+            self.keys.append(key)
+            if key not in self.results:
+                self.results[key] = fn()
+            value = self.results[key]
+            return types.SimpleNamespace(result=lambda timeout=None: value)
+
+        @override
+        def run(self, key: str, fn: Any) -> Any:
+            """Return the value ``submit`` computed for *key*, running *fn* if it never did."""
+            return self.submit(key, fn).result()
+
+        @override
+        def join(self, key: str) -> None:
+            """Record the key waited on."""
+            self.joins.append(key)
+
+        @override
+        def shutdown(self) -> None:
+            """Nothing to stop."""
+
+    return RecordingPool()
+
+
 @pytest.fixture
 def loguru_caplog(caplog: LogCaptureFixture) -> Iterator[LogCaptureFixture]:
     """Bridge loguru WARNING records into ``caplog`` for the duration of a test.

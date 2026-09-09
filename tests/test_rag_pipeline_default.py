@@ -302,9 +302,20 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
         lambda client, collection_name: True,
     )
 
+    prefetched: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        rag_module,
+        "prefetch_batch",
+        lambda batch_dir, collection, *, skip_hashes, image_service=None, pool=None: (
+            prefetched.append((batch_dir, collection, set(skip_hashes))) or 0
+        ),
+    )
+
     rag = RAG(qdrant_collection="test")
     rag.ingest_docs(tmp_path, build_query_engine=False)
 
+    # The batch is submitted to the preprocessing pool before either lane reads it.
+    assert prefetched == [(tmp_path, "test", set())]
     assert fake_pipeline.seen_hashes is not None
     assert "pdf-hash-1" in fake_pipeline.seen_hashes
 

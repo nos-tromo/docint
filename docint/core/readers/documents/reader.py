@@ -19,6 +19,7 @@ from docint.core.ingest.images_service import (
     ImageIngestionService,
     IngestContext,
 )
+from docint.core.ingest.preprocess import get_preprocess_pool, preprocess_key
 from docint.core.readers.documents.orchestrator import DocumentPipelineOrchestrator
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.hashing import compute_file_hash
@@ -231,6 +232,31 @@ class CorePDFPipelineReader:
             return candidate
         return None
 
+    def _pdf_task(self, pdf_path: Path, artifacts_dir: Path) -> Callable[[], Any]:
+        """The unit of work for one PDF: its page pipeline, then its figures.
+
+        Shares the preprocessing pool's ``pdf`` key with
+        ``preprocess.preprocess_pdf`` — both are idempotent, so whichever runs
+        first does the work and the other joins it.
+
+        Args:
+            pdf_path (Path): The PDF.
+            artifacts_dir (Path): The pipeline artifacts root.
+
+        Returns:
+            Callable[[], Any]: Zero-argument task returning the ``DocumentManifest``.
+        """
+
+        def task() -> Any:
+            manifest = DocumentPipelineOrchestrator().process(pdf_path)
+            if manifest.status == "completed":
+                # Always attempt image ingestion — even when no text chunks
+                # were produced (e.g. screenshot PDFs).
+                self._ingest_pipeline_images(file_path=pdf_path, doc_id=manifest.doc_id, artifacts_dir=artifacts_dir)
+            return manifest
+
+        return task
+
     def _ingest_pipeline_images(
         self,
         *,
@@ -241,95 +267,12 @@ class CorePDFPipelineReader:
         """Ingest extracted document images through the shared image service."""
         if self.image_ingestion_service is None:
             return
-
-        rows = self._load_pipeline_images(doc_id, artifacts_dir)
-        if not rows:
-            return
-
-        total = 0
-        stored = 0
-        cached = 0
-        failed = 0
-
-        for row in rows:
-            image_path_raw = row.get("image_path")
-            if not isinstance(image_path_raw, str) or not image_path_raw.strip():
-                continue
-            image_path = self._resolve_pipeline_image_path(
-                image_path_raw,
-                artifacts_dir=artifacts_dir,
-                doc_id=doc_id,
-            )
-            if image_path is None:
-                logger.warning(
-                    "Extracted image path not found for doc {}: {}",
-                    doc_id[:12],
-                    image_path_raw,
-                )
-                continue
-
-            page_idx = row.get("page_index")
-            page_number: int | None = None
-            if isinstance(page_idx, int):
-                # Pipeline uses zero-based page indices.
-                page_number = page_idx + 1
-
-            bbox_raw = row.get("bbox")
-            bbox: dict[str, float] | None = None
-            if isinstance(bbox_raw, dict):
-                try:
-                    bbox = {
-                        "x0": float(bbox_raw["x0"]),
-                        "y0": float(bbox_raw["y0"]),
-                        "x1": float(bbox_raw["x1"]),
-                        "y1": float(bbox_raw["y1"]),
-                    }
-                except Exception:
-                    bbox = None
-
-            extra_metadata: dict[str, Any] = {
-                "pipeline_image_id": row.get("image_id"),
-            }
-            details = row.get("metadata")
-            if isinstance(details, dict):
-                if "block_id" in details:
-                    extra_metadata["pipeline_block_id"] = details.get("block_id")
-                if "confidence" in details:
-                    extra_metadata["pipeline_confidence"] = details.get("confidence")
-
-            total += 1
-            record = self.image_ingestion_service.ingest_image(
-                ImageAsset.from_path(
-                    path=image_path,
-                    source_type="document",
-                    source_doc_id=doc_id,
-                    source_path=str(file_path),
-                    page_number=page_number,
-                    bbox=bbox,
-                    extra_metadata=extra_metadata,
-                ),
-                context=IngestContext(source_collection=self.source_collection),
-            )
-            if record.status == "stored":
-                stored += 1
-            elif record.status == "cached":
-                cached += 1
-            else:
-                failed += 1
-                logger.warning(
-                    "Image ingest failed for doc {} image {}: {}",
-                    doc_id[:12],
-                    row.get("image_id"),
-                    record.error or record.status,
-                )
-
-        logger.info(
-            "Core pipeline image ingestion for {}: total={} stored={} cached={} failed={}",
-            file_path.name,
-            total,
-            stored,
-            cached,
-            failed,
+        ingest_pipeline_images(
+            self.image_ingestion_service,
+            self.source_collection,
+            file_path=file_path,
+            doc_id=doc_id,
+            artifacts_dir=artifacts_dir,
         )
 
     @staticmethod
@@ -460,10 +403,15 @@ class CorePDFPipelineReader:
         if not pdf_files:
             return
 
-        orchestrator = DocumentPipelineOrchestrator()
-        artifacts_dir = Path(orchestrator.config.artifacts_dir)
+        artifacts_dir = Path(DocumentPipelineOrchestrator().config.artifacts_dir)
         emitted_hashes: set[str] = set()
+        collection = self.source_collection or ""
 
+        # Every PDF's page pipeline is keyed by its hash and submitted before
+        # the first is joined, so the documents are read in parallel (and a
+        # file the upload handler already submitted is simply waited on) while
+        # this loop still emits them in order.
+        pending: list[tuple[int, Path, str]] = []
         for index, pdf_path in enumerate(pdf_files, start=1):
             file_hash = compute_file_hash(pdf_path)
             self.discovered_hashes.add(file_hash)
@@ -473,12 +421,23 @@ class CorePDFPipelineReader:
                 if progress_callback:
                     progress_callback(f"Skipping already ingested PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
                 continue
+            pending.append((index, pdf_path, file_hash))
 
+        pool = get_preprocess_pool()
+        # The futures are kept rather than re-keyed on the way back: a task
+        # that finished before its turn has been evicted, and ``run`` would
+        # start it again.
+        futures = [
+            pool.submit(preprocess_key("pdf", collection, file_hash), self._pdf_task(pdf_path, artifacts_dir))
+            for _, pdf_path, file_hash in pending
+        ]
+
+        for (index, pdf_path, _file_hash), future in zip(pending, futures, strict=True):
             if progress_callback:
                 progress_callback(f"Core pipeline processing PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
 
             try:
-                manifest = orchestrator.process(pdf_path)
+                manifest = future.result()
             except Exception as exc:
                 logger.warning(
                     "Core pipeline failed for {}: {}",
@@ -505,14 +464,6 @@ class CorePDFPipelineReader:
                 hierarchical_node_parser=self.hierarchical_node_parser,
             )
 
-            # Always attempt image ingestion — even when no text chunks
-            # were produced (e.g. screenshot PDFs).
-            self._ingest_pipeline_images(
-                file_path=pdf_path,
-                doc_id=manifest.doc_id,
-                artifacts_dir=artifacts_dir,
-            )
-
             if not nodes:
                 logger.warning(
                     "Core pipeline produced no text chunks for {} (images_found={})",
@@ -531,3 +482,115 @@ class CorePDFPipelineReader:
             if progress_callback:
                 progress_callback(f"Core pipeline indexed {len(nodes)} chunks: {pdf_path.name}")
             yield docs, nodes, manifest.doc_id
+
+
+def ingest_pipeline_images(
+    image_service: ImageIngestionService,
+    source_collection: str | None,
+    *,
+    file_path: Path,
+    doc_id: str,
+    artifacts_dir: Path,
+) -> None:
+    """Ingest the figures the page pipeline extracted for one document.
+
+    Module-level so the preprocessing pool can run it right after the page
+    pipeline, on the same worker thread, without a reader instance.
+
+    Args:
+        image_service (ImageIngestionService): The shared image service.
+        source_collection (str | None): The collection the document is
+            ingested into (its ``_images`` companion takes the figures).
+        file_path (Path): The source PDF.
+        doc_id (str): The document's content hash.
+        artifacts_dir (Path): The pipeline artifacts root.
+    """
+    rows = CorePDFPipelineReader._load_pipeline_images(doc_id, artifacts_dir)
+    if not rows:
+        return
+
+    total = 0
+    stored = 0
+    cached = 0
+    failed = 0
+
+    for row in rows:
+        image_path_raw = row.get("image_path")
+        if not isinstance(image_path_raw, str) or not image_path_raw.strip():
+            continue
+        image_path = CorePDFPipelineReader._resolve_pipeline_image_path(
+            image_path_raw,
+            artifacts_dir=artifacts_dir,
+            doc_id=doc_id,
+        )
+        if image_path is None:
+            logger.warning(
+                "Extracted image path not found for doc {}: {}",
+                doc_id[:12],
+                image_path_raw,
+            )
+            continue
+
+        page_idx = row.get("page_index")
+        page_number: int | None = None
+        if isinstance(page_idx, int):
+            # Pipeline uses zero-based page indices.
+            page_number = page_idx + 1
+
+        bbox_raw = row.get("bbox")
+        bbox: dict[str, float] | None = None
+        if isinstance(bbox_raw, dict):
+            try:
+                bbox = {
+                    "x0": float(bbox_raw["x0"]),
+                    "y0": float(bbox_raw["y0"]),
+                    "x1": float(bbox_raw["x1"]),
+                    "y1": float(bbox_raw["y1"]),
+                }
+            except Exception:
+                bbox = None
+
+        extra_metadata: dict[str, Any] = {
+            "pipeline_image_id": row.get("image_id"),
+        }
+        details = row.get("metadata")
+        if isinstance(details, dict):
+            if "block_id" in details:
+                extra_metadata["pipeline_block_id"] = details.get("block_id")
+            if "confidence" in details:
+                extra_metadata["pipeline_confidence"] = details.get("confidence")
+
+        total += 1
+        record = image_service.ingest_image(
+            ImageAsset.from_path(
+                path=image_path,
+                source_type="document",
+                source_doc_id=doc_id,
+                source_path=str(file_path),
+                page_number=page_number,
+                bbox=bbox,
+                extra_metadata=extra_metadata,
+            ),
+            context=IngestContext(source_collection=source_collection),
+        )
+        if record.status == "stored":
+            stored += 1
+        elif record.status == "cached":
+            cached += 1
+        else:
+            failed += 1
+            logger.warning(
+                "Image ingest failed for doc {} image {}: {}",
+                doc_id[:12],
+                row.get("image_id"),
+                record.error or record.status,
+            )
+
+    logger.info(
+        "Core pipeline image ingestion for {}: total={} stored={} cached={} failed={}",
+        file_path.name,
+        total,
+        stored,
+        cached,
+        failed,
+    )

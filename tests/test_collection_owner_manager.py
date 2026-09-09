@@ -14,7 +14,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from docint.core.state.base import Base
-from docint.core.state.collection_owner_manager import CollectionOwnerManager
+from docint.core.state.collection_owner_manager import (
+    CollectionOwnerManager,
+    InvalidCollectionNameError,
+    physical_collection_name,
+)
 
 
 class _Stub:
@@ -115,3 +119,41 @@ def test_list_all_returns_every_owner_sorted(mgr: CollectionOwnerManager) -> Non
         ("bob", "zeta"),
         ("operator", "legacy-docs"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("logical", "offending"),
+    [
+        ("2026-05-03 amanahMaz [media] - Test #549", ["#"]),
+        ("a/b", ["/"]),
+        ("x?y", ["?"]),
+        ("50%", ["%"]),
+        ("back\\slash", ["\\"]),
+        ("tab\there", ["\t"]),
+        ("a#b/c", ["#", "/"]),
+    ],
+)
+def test_a_name_that_breaks_the_qdrant_url_is_refused(
+    mgr: CollectionOwnerManager, logical: str, offending: list[str]
+) -> None:
+    """qdrant-client formats the name into the URL path unencoded, so these would address another collection."""
+    with pytest.raises(InvalidCollectionNameError) as excinfo:
+        physical_collection_name("alice", logical)
+    assert excinfo.value.offending == offending
+    assert "cannot be used" in str(excinfo.value)
+    with pytest.raises(InvalidCollectionNameError):
+        mgr.register("alice", logical)
+    assert mgr.list_for("alice") == []
+
+
+@pytest.mark.parametrize("logical", ["", "   "])
+def test_a_blank_name_is_refused(logical: str) -> None:
+    """A blank logical name would mint a physical name that is only the owner prefix."""
+    with pytest.raises(InvalidCollectionNameError, match="must not be empty"):
+        physical_collection_name("alice", logical)
+
+
+def test_spaces_brackets_and_unicode_stay_allowed(mgr: CollectionOwnerManager) -> None:
+    """Existing collections carry these, and Qdrant addresses them fine."""
+    physical = mgr.register("alice", "2026-05-03 amanahMaz [media] - Test 549 ü")
+    assert physical.endswith("__2026-05-03 amanahMaz [media] - Test 549 ü")

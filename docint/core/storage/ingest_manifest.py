@@ -485,3 +485,30 @@ class NullIngestManifest:
 
     def close(self) -> None:
         """No-op."""
+
+
+def open_ingest_manifest(collection: str | None) -> IngestManifest | NullIngestManifest:
+    """Open the manifest for *collection*, or the no-op stub.
+
+    The manifest lives beside the collection's staged sources
+    (``{QDRANT_SRC_DIR}/{collection}/{collection}_ingest_manifest.db``). The
+    stub is returned when the manifest is disabled, no sources root is
+    configured, or the collection is unnamed. Callers must ``close()`` the
+    returned object.
+
+    Args:
+        collection (str | None): Physical collection name.
+
+    Returns:
+        IngestManifest | NullIngestManifest: A manifest keyed by
+        ``(collection, file_hash)``, or the no-op stub.
+    """
+    from docint.utils.env_cfg import load_ingestion_env, load_path_env
+
+    try:
+        sources_root = load_path_env().qdrant_sources
+        if load_ingestion_env().ingest_manifest_enabled and sources_root and collection:
+            return IngestManifest(sources_root / collection / f"{collection}_ingest_manifest.db")
+    except Exception as exc:  # pragma: no cover - fail-soft guard
+        logger.debug("Manifest unavailable: {}", exc)
+    return NullIngestManifest()

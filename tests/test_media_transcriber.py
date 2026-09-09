@@ -334,3 +334,101 @@ def test_isolates_a_failed_clip_in_a_batch(tmp_path: Path) -> None:
     assert len(images.keyframe_calls) == 2
     assert len(result.transcript_documents) == 2
     assert any("did not process" in line and failing_path.name in line for line in lines)
+
+
+def test_keyframes_run_through_the_pool_after_joining_the_clips_prefetch(tmp_path: Path, recording_pool: Any) -> None:
+    """A clip's keyframes are captioned as a pool task, and a prefetch of the clip is waited on first."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    nextext = _FakeNextext(
+        NextextResult(
+            status="completed",
+            transcript_jsonl=b'{"text":"hello","start_seconds":0,"end_seconds":1}\n',
+            keyframes=[NextextKeyframe(jpeg=b"f0", index=0, time_sec=0.0)],
+        )
+    )
+    images = _FakeImages()
+
+    result = MediaTranscriber(images, nextext, target_collection="c", pool=recording_pool).run([_clip(clip)])
+
+    assert recording_pool.joins == ["media:c:hash-1"]
+    assert "keyframes:c:hash-1" in recording_pool.keys
+    assert len(images.keyframe_calls) == 1
+    assert len(result.transcript_documents) == 1
+
+
+class _RelinkingImages(_FakeImages):
+    """Image-service stub that also records keyframe relink requests."""
+
+    def __init__(self) -> None:
+        """Start with empty call logs."""
+        super().__init__()
+        self.relink_calls: list[dict[str, Any]] = []
+
+    def relink_keyframes(self, **kwargs: Any) -> int:
+        """Record the request and report one frame relinked.
+
+        Args:
+            **kwargs: The relink arguments, recorded verbatim.
+
+        Returns:
+            Always 1.
+        """
+        self.relink_calls.append(kwargs)
+        return 1
+
+
+class _CachedManifest:
+    """Manifest stub that always reports a cached transcript."""
+
+    def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+        """Return a fixed cached transcript.
+
+        Args:
+            collection: Ignored.
+            file_hash: Ignored.
+
+        Returns:
+            One cached segment.
+        """
+        return '{"text":"cached","start_seconds":0,"end_seconds":1}\n'
+
+
+def test_cache_hit_relinks_the_keyframes_of_a_linked_clip(tmp_path: Path) -> None:
+    """A cached clip claimed by a posting hands its stored keyframes to that posting."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    linked = MediaClip(
+        path=clip,
+        source_doc_id="u1",
+        media_hash="hash-1",
+        keyframe_source_type="social_media_keyframe",
+        keyframe_link_field="posting_uuid",
+        keyframe_extra_metadata={"media_file_hash": "hash-1", "posting_uuid": "u1"},
+        transcript_extra_info={"source_file": clip.name},
+    )
+    images = _RelinkingImages()
+    nextext = _FakeNextext(NextextResult(status="error"))
+
+    MediaTranscriber(images, nextext, target_collection="c", manifest=_CachedManifest()).run([linked])
+
+    assert nextext.calls == []
+    assert len(images.relink_calls) == 1
+    call = images.relink_calls[0]
+    assert call["media_hash"] == "hash-1"
+    assert call["source_doc_id"] == "u1"
+    assert call["link_field"] == "posting_uuid"
+    assert call["keyframe_source_type"] == "social_media_keyframe"
+
+
+def test_cache_hit_of_a_standalone_clip_relinks_nothing(tmp_path: Path) -> None:
+    """A clip with no posting has nothing to hand its frames to."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    images = _RelinkingImages()
+
+    MediaTranscriber(
+        images, _FakeNextext(NextextResult(status="error")), target_collection="c", manifest=_CachedManifest()
+    ).run([_clip(clip)])
+
+    assert images.relink_calls == []

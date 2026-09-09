@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
+import time
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -14,7 +16,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
+from typing_extensions import override
 
+from docint.core.ingest import images_service as images_service_module
 from docint.core.ingest.images_service import (
     ImageAsset,
     ImageIngestionConfig,
@@ -95,9 +99,10 @@ class FakeQdrantClient:
     """In-memory qdrant client double for image ingestion tests."""
 
     def __init__(self) -> None:
-        """Initialise empty collection and record stores."""
+        """Initialise empty collection, record and vector stores."""
         self.collections: dict[str, Any] = {}
         self.records: dict[str, dict[str, Any]] = {}
+        self.vectors: dict[str, list[float]] = {}
 
     def get_collection(self, collection_name: str) -> Any:
         """Return collection metadata or raise if it does not exist.
@@ -135,33 +140,62 @@ class FakeQdrantClient:
         limit: int,
         with_payload: bool,
         with_vectors: bool,
+        offset: Any = None,
     ) -> tuple[list[Any], None]:
-        """Search records by ``image_id`` filter, returning at most one match.
+        """Search records by the filter's first field condition.
 
         Args:
             collection_name: Ignored (single-collection fake).
             scroll_filter: Filter object with a ``must`` list of conditions.
-            limit: Ignored.
+            limit: Maximum records returned.
             with_payload: Ignored.
             with_vectors: Ignored.
+            offset: Ignored (every match fits one page).
 
         Returns:
             A tuple of (matching records list, ``None`` cursor).
         """
-        del collection_name, limit, with_payload, with_vectors
-        image_id: str | None = None
-        must = getattr(scroll_filter, "must", []) or []
-        for cond in must:
-            if getattr(cond, "key", "") == "image_id":
-                match = getattr(cond, "match", None)
-                image_id = getattr(match, "value", None)
+        del collection_name, with_payload, with_vectors, offset
+        key: str | None = None
+        value: Any = None
+        for cond in getattr(scroll_filter, "must", []) or []:
+            key = getattr(cond, "key", None)
+            value = getattr(getattr(cond, "match", None), "value", None)
+            if key:
                 break
-        if not image_id:
+        if not key or value is None:
             return [], None
-        for point_id, payload in self.records.items():
-            if payload.get("image_id") == image_id:
-                return [SimpleNamespace(id=point_id, payload=dict(payload))], None
-        return [], None
+        matches = [
+            SimpleNamespace(id=point_id, payload=dict(payload))
+            for point_id, payload in self.records.items()
+            if payload.get(key) == value
+        ]
+        return matches[:limit], None
+
+    def retrieve(
+        self,
+        collection_name: str,
+        ids: list[str],
+        with_payload: bool = True,
+        with_vectors: bool = False,
+    ) -> list[Any]:
+        """Return the stored records (and vectors) for *ids*.
+
+        Args:
+            collection_name: Ignored.
+            ids: Point ids to fetch.
+            with_payload: Ignored.
+            with_vectors: Ignored; the vector is always attached.
+
+        Returns:
+            One record per known id, carrying ``vector`` as a named-vector dict.
+        """
+        del collection_name, with_payload, with_vectors
+        return [
+            SimpleNamespace(id=pid, payload=dict(self.records[pid]), vector={"image-dense": self.vectors.get(pid)})
+            for pid in ids
+            if pid in self.records
+        ]
 
     def set_payload(self, collection_name: str, payload: dict[str, Any], points: list[str]) -> None:
         """Merge *payload* into the stored record for each point.
@@ -204,6 +238,8 @@ class FakeVectorStore:
         for node in nodes:
             point_id = str(node.node_id)
             self.client.records[point_id] = dict(node.metadata)
+            if node.embedding is not None:
+                self.client.vectors[point_id] = list(node.embedding)
             ids.append(point_id)
         return ids
 
@@ -1328,3 +1364,194 @@ def test_the_tagger_reads_its_prompt_at_construction(monkeypatch: pytest.MonkeyP
     """Read per instance, so a locale set after import still takes effect."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
     assert "Deutsch" in VisionJSONTagger().prompt_template
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing: a cache hit that carries a posting link, and thread safety
+# ---------------------------------------------------------------------------
+
+
+class _CountingTagger(FakeTaggingBackend):
+    """Tagger that counts how often the model was asked."""
+
+    def __init__(self) -> None:
+        """Start at zero calls."""
+        self.calls = 0
+
+    @override
+    def describe_and_tag(self, image_bytes: bytes, mime_type: str) -> tuple[str, list[str]]:
+        """Count the call, then answer like the fake.
+
+        Args:
+            image_bytes: Raw image bytes.
+            mime_type: The image's MIME type.
+
+        Returns:
+            The fake's fixed description and tags.
+        """
+        self.calls += 1
+        return super().describe_and_tag(image_bytes, mime_type)
+
+
+def _social_asset(path: Path, posting_uuid: str) -> ImageAsset:
+    """An asset the social linker would build for *path* under *posting_uuid*."""
+    return ImageAsset.from_path(
+        path=path,
+        source_type="social_media",
+        source_doc_id=posting_uuid,
+        extra_metadata={
+            "posting_uuid": posting_uuid,
+            "posting_id": "P",
+            "media_id": "M",
+            "source_type": "social_media",
+            "posting_author": "someone",
+            "reference_metadata": {"type": "image", "posting_uuid": posting_uuid},
+        },
+    )
+
+
+def test_a_linked_asset_relinks_an_unlinked_cached_point(tmp_path: Path) -> None:
+    """An image pre-processed loose takes the posting's identity when an export claims it.
+
+    The pool stores an uploaded image before its manifest arrives, so the
+    linker's cache hit must rewrite the point — top level, not merely an
+    occurrence — and reuse the stored caption rather than paying the model again.
+    """
+    service, client, vector_store = _build_service()
+    tagger = _CountingTagger()
+    service.tagging_backend = tagger
+    image_bytes = _make_png_bytes(color=(7, 8, 9))
+    loose = tmp_path / "loose.png"
+    loose.write_bytes(image_bytes)
+    social = tmp_path / "social.png"
+    social.write_bytes(image_bytes)
+    ctx = IngestContext(source_collection="att-4")
+
+    first = service.ingest_image(
+        ImageAsset.from_path(path=loose, source_type="standalone", source_path=str(loose)), context=ctx
+    )
+    second = service.ingest_image(_social_asset(social, "u1"), context=ctx)
+
+    assert first.status == "stored"
+    assert second.status == "cached"
+    assert tagger.calls == 1
+    assert len(vector_store.add_calls) == 2
+    payload = client.records[first.point_id or ""]
+    assert payload["posting_uuid"] == "u1"
+    assert payload["source_type"] == "social_media"
+    assert payload["source_doc_id"] == "u1"
+    assert payload["posting_author"] == "someone"
+    assert payload["source_path"] == str(social)
+    assert payload["llm_description"] == first.llm_description
+    assert payload["thumbnail_b64"]
+    assert len(payload["occurrences"]) == 2
+    assert client.vectors[first.point_id or ""] == FakeEmbeddingBackend().embed(image_bytes)
+    assert second.payload["posting_uuid"] == "u1"
+
+
+def test_relink_keyframes_attaches_file_identity_frames_to_a_posting() -> None:
+    """Keyframes stored under the clip's own hash are re-stamped when a posting claims the clip."""
+    service, client, _vector_store = _build_service()
+    ctx = IngestContext(source_collection="att-5")
+    frame = _make_png_bytes(color=(10, 0, 0))
+    stored = service.ingest_keyframe_set(
+        [frame],
+        context=ctx,
+        source_doc_id="mh",
+        extra_metadata={"media_file_hash": "mh", "source_file": "clip.mp4"},
+        keyframe_source_type="video_keyframe",
+        link_field=None,
+    )
+    assert len(stored) == 1
+    point_id = stored[0].point_id or ""
+    assert "posting_uuid" not in client.records[point_id]
+
+    relinked = service.relink_keyframes(
+        context=ctx,
+        media_hash="mh",
+        source_doc_id="u9",
+        extra_metadata={
+            "posting_uuid": "u9",
+            "media_file_hash": "mh",
+            "source_file": "clip.mp4",
+            "posting_author": "a",
+        },
+        keyframe_source_type="social_media_keyframe",
+        link_field="posting_uuid",
+    )
+
+    assert relinked == 1
+    payload = client.records[point_id]
+    assert payload["posting_uuid"] == "u9"
+    assert payload["source_doc_id"] == "u9"
+    assert payload["source_type"] == "social_media_keyframe"
+    assert payload["posting_author"] == "a"
+    assert payload["keyframe_index"] == 0
+    assert payload["thumbnail_b64"]
+    # Already linked: a second posting does not steal the frame.
+    assert (
+        service.relink_keyframes(
+            context=ctx,
+            media_hash="mh",
+            source_doc_id="u10",
+            extra_metadata={"posting_uuid": "u10"},
+            keyframe_source_type="social_media_keyframe",
+            link_field="posting_uuid",
+        )
+        == 0
+    )
+    assert client.records[point_id]["posting_uuid"] == "u9"
+
+
+def test_lazy_backends_are_built_once_under_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eight threads racing the first embed call construct one backend, not eight."""
+    built: list[int] = []
+
+    class _SlowBackend(FakeEmbeddingBackend):
+        def __init__(self) -> None:
+            time.sleep(0.05)
+            built.append(1)
+
+    monkeypatch.setattr(images_service_module, "RemoteCLIPBackend", _SlowBackend)
+    service, _client, _vector_store = _build_service()
+    service.embedding_backend = None
+    barrier = threading.Barrier(8)
+
+    def go() -> None:
+        barrier.wait(timeout=5)
+        service._get_embedding_backend()
+
+    threads = [threading.Thread(target=go) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert built == [1]
+
+
+def test_the_companion_collection_is_created_once_under_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Racing writers must not both try to create the ``_images`` collection."""
+    service, client, _vector_store = _build_service()
+    created: list[int] = []
+    original = client.create_collection
+
+    def slow_create(collection_name: str, vectors_config: dict[str, Any], **kwargs: Any) -> None:
+        time.sleep(0.05)
+        created.append(1)
+        original(collection_name, vectors_config, **kwargs)
+
+    monkeypatch.setattr(client, "create_collection", slow_create)
+    barrier = threading.Barrier(6)
+
+    def go() -> None:
+        barrier.wait(timeout=5)
+        service._ensure_collection(collection_name="racy-images", vector_dim=3)
+
+    threads = [threading.Thread(target=go) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert created == [1]
