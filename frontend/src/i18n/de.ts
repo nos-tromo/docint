@@ -236,6 +236,11 @@ export const de: Strings = {
   'ingest.caption': 'Dokumente hochladen und indexieren',
   'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
   'ingest.clear_files': 'Auswahl leeren',
+  'ingest.staged_title': 'Bereits hochgeladen nach „{collection}“',
+  'ingest.staged_idle': 'Diese Dateien liegen auf dem Server, es läuft aber keine Verarbeitung dafür.',
+  'ingest.staged_preprocessing':
+    'Der Server liest diese Dateien noch: {running} laufend, {queued} wartend.',
+  'ingest.staged_ingest': 'Diese Dateien verarbeiten',
   'ingest.files_too_many':
     'Zu viele Dateien für eine Einzelauflistung. Zum Neubeginn die Auswahl leeren.',
   'ingest.button': 'Importieren',

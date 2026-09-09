@@ -16,7 +16,12 @@ import pytest
 from typing_extensions import override
 
 from docint.core.ingest import preprocess
-from docint.core.ingest.preprocess import PreprocessPool, preprocess_key, submit_file
+from docint.core.ingest.preprocess import (
+    PreprocessPool,
+    collection_of_key,
+    preprocess_key,
+    submit_file,
+)
 
 
 @pytest.fixture
@@ -142,10 +147,10 @@ def test_a_clip_is_not_queued_behind_the_image_backlog() -> None:
     pool = PreprocessPool(max_workers=1, media_workers=1)
     release = threading.Event()
     try:
-        pool.submit("image:c:1", release.wait)
-        pool.submit("image:c:2", release.wait)  # queued behind the first on the only vision worker
+        pool.submit("image#c#1", release.wait)
+        pool.submit("image#c#2", release.wait)  # queued behind the first on the only vision worker
 
-        assert pool.submit("media:c:3", lambda: "transcribed").result(timeout=5) == "transcribed"
+        assert pool.submit("media#c#3", lambda: "transcribed").result(timeout=5) == "transcribed"
     finally:
         release.set()
         pool.shutdown()
@@ -153,7 +158,36 @@ def test_a_clip_is_not_queued_behind_the_image_backlog() -> None:
 
 def test_key_carries_kind_collection_and_hash() -> None:
     """Keys are namespaced so a PDF and an image of the same bytes never collide."""
-    assert preprocess_key("pdf", "u1__docs", "abc") == "pdf:u1__docs:abc"
+    assert preprocess_key("pdf", "u1__docs", "abc") == "pdf#u1__docs#abc"
+
+
+def test_a_key_names_its_collection_even_when_the_name_carries_a_colon() -> None:
+    """The separator has to be one no collection name can contain, or the count is wrong.
+
+    A colon is legal in a collection name and the linker puts one inside its
+    own last key component, so ``#`` — which ``validate_collection_name``
+    refuses — is what makes a key parseable.
+    """
+    assert collection_of_key(preprocess_key("pdf", "u1__a:b", "abc")) == "u1__a:b"
+    assert collection_of_key(preprocess_key("image-link", "u1__docs", "abc:posting-1")) == "u1__docs"
+    assert collection_of_key("not-a-pool-key") is None
+
+
+def test_inflight_counts_only_the_collection_asked_about(pool: PreprocessPool) -> None:
+    """The staged card is per-collection, so one owner's work must never show on another's."""
+    release = threading.Event()
+    pool.submit(preprocess_key("image", "mine", "1"), release.wait)
+    pool.submit(preprocess_key("image", "mine", "2"), release.wait)
+    pool.submit(preprocess_key("image", "theirs", "3"), release.wait)
+    try:
+        # Two workers, so one of "mine" runs and one waits.
+        running, queued = pool.inflight("mine")
+        assert running + queued == 2
+        assert pool.inflight("nobody") == (0, 0)
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+    assert pool.inflight("mine") == (0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +246,7 @@ def test_submit_file_routes_by_extension(tmp_path: Path, routed: dict[str, list[
     assert routed["pdf"] == [files["a.pdf"]]
     assert routed["image"] == [files["b.PNG"]]
     assert routed["media"] == [files["c.mp4"]]
-    assert pool.keys == ["pdf:col:h-a.pdf", "image:col:h-b.PNG", "media:col:h-c.mp4"]
+    assert pool.keys == ["pdf#col#h-a.pdf", "image#col#h-b.PNG", "media#col#h-c.mp4"]
 
 
 def test_submit_file_hashes_when_not_given(tmp_path: Path, routed: dict[str, list[Path]]) -> None:
@@ -223,7 +257,7 @@ def test_submit_file_hashes_when_not_given(tmp_path: Path, routed: dict[str, lis
 
     submit_file(path, "col", pool=pool)
 
-    assert pool.keys[0].startswith("pdf:col:") and len(pool.keys[0]) == len("pdf:col:") + 64
+    assert pool.keys[0].startswith("pdf#col#") and len(pool.keys[0]) == len("pdf#col#") + 64
 
 
 def test_prefetch_batch_submits_every_heavy_file_the_collection_lacks(

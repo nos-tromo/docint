@@ -63,7 +63,10 @@ Because each checks its own cache first, the work can start the moment a file
 lands on disk, and the job later finds it done.
 
 `docint/core/ingest/preprocess.py` holds the one pool that runs them, keyed by
-`kind:collection:hash` so a file is never processed twice at once. It has two
+`kind#collection#hash` so a file is never processed twice at once. The `#` is
+what makes a key parseable back into its collection: a collection name may
+contain a colon, and the social linker's key carries one inside its last
+component, but no name may contain `#` (see [Entry points](#entry-points)). It has two
 executors, because the stages wait on two different services: images, PDF
 pages and keyframes share `INGEST_PREPROCESS_WORKERS` (default `4`) against
 the vision/OCR endpoint, while clips run on their own `NEXTEXT_MAX_CONCURRENCY`
@@ -85,6 +88,33 @@ The pool holds no results — the caches are the memory, and a failed task is
 tried again by whichever lane next needs the file — and a backend restart
 loses only what was in flight. Chunking, NER, hate-speech detection, embedding
 and entity resolution are unchanged and still run inside the job.
+
+Upload-time preprocessing belongs to no job, so it needs its own narration.
+Per-task lines are DEBUG; at INFO the pool reports one throttled line per
+collection (`LOG_PROGRESS_INTERVAL_S`) and one more when that collection's
+queue drains:
+
+```
+Preprocess | collection='u507…__field-notes' done=1000 running=0 queued=0
+```
+
+The drain line is the one that matters: without it a finished batch and a
+stalled one look identical from the log, because in both cases the model
+calls simply stop appearing.
+
+### A staged batch nobody finalized
+
+Uploading stages bytes; `POST /ingest/finalize` queues the job. A browser that
+dies in between leaves a staged batch that no job describes, so nothing on
+screen accounted for it — while the server went on preprocessing the files.
+
+`GET /ingest/staged?collection=<logical>` reports what is on disk for a
+collection and what the pool still holds for it, and the Ingest screen shows
+that as a card with an **Ingest these files** button whenever the browser has
+nothing better to say about the collection (no picked selection, no upload in
+flight, no job it queued itself). Finalizing over a staged batch is safe at
+any time: ingestion is idempotent by file hash, so files already ingested are
+skipped and only the remainder costs anything.
 
 An image or keyframe stored before a social export's manifest arrived carries
 no posting link, so the linker's cache hit **re-upserts** such a point with

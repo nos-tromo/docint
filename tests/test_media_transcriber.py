@@ -351,8 +351,8 @@ def test_keyframes_run_through_the_pool_after_joining_the_clips_prefetch(tmp_pat
 
     result = MediaTranscriber(images, nextext, target_collection="c", pool=recording_pool).run([_clip(clip)])
 
-    assert recording_pool.joins == ["media:c:hash-1"]
-    assert "keyframes:c:hash-1" in recording_pool.keys
+    assert recording_pool.joins == ["media#c#hash-1"]
+    assert "keyframes#c#hash-1" in recording_pool.keys
     assert len(images.keyframe_calls) == 1
     assert len(result.transcript_documents) == 1
 

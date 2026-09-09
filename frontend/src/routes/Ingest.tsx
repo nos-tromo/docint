@@ -10,6 +10,8 @@ import { useConfig } from '@/hooks/useConfig'
 import { Dropzone } from '@/components/ingest/Dropzone'
 import { IngestionStatus } from '@/components/ingest/IngestionStatus'
 import { IngestJobList } from '@/components/ingest/IngestJobList'
+import { IngestStagedCard } from '@/components/ingest/IngestStagedCard'
+import { useDebounced } from '@/hooks/useDebounced'
 import { formatBytes } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -70,6 +72,17 @@ export function Ingest() {
   const uploadStatus = run.uploadStatus
 
   const busy = run.uploading
+
+  // Files already on the server are only worth reporting when nothing else
+  // in this browser describes them better: a picked selection, an upload in
+  // flight, or a job this browser queued each says more than the staged card
+  // can. Debounced because the name is typed.
+  const stagedCollection = useDebounced(run.collection.trim())
+  const showStaged =
+    !busy &&
+    run.files.length === 0 &&
+    stagedCollection.length > 0 &&
+    !run.trackedJobs.some((j) => j.collection === stagedCollection)
 
   // Memoised on the selection alone. An upload emits thousands of progress
   // frames and each one re-renders this screen; without the memo every frame
@@ -186,6 +199,8 @@ export function Ingest() {
         </Card>
 
         <div className="min-w-0 space-y-4">
+          {showStaged && <IngestStagedCard collection={stagedCollection} />}
+
           {uploadStatus.warnings.length > 0 && (
             <ul className="text-sm text-[var(--status-amber-fg)] space-y-1" role="alert">
               {uploadStatus.warnings.map((w, i) => (

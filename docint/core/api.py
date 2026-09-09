@@ -55,7 +55,7 @@ from docint.core.extract.gather import scroll_collection
 from docint.core.extract.store import ExtractStore
 from docint.core.extract.units import Unit, partition, resolve_target
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
-from docint.core.ingest.preprocess import shutdown_preprocess_pool, submit_file
+from docint.core.ingest.preprocess import get_preprocess_pool, shutdown_preprocess_pool, submit_file
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
@@ -90,7 +90,7 @@ from docint.utils.env_cfg import (
     set_offline_env,
 )
 from docint.utils.hashing import compute_file_hash
-from docint.utils.logfmt import format_bytes
+from docint.utils.logfmt import describe_inputs, format_bytes
 from docint.utils.logger_cfg import init_logger
 from docint.utils.openai_cfg import EmbeddingEndpointError
 from docint.utils.translate_client import translate
@@ -1087,6 +1087,27 @@ class IngestFinalizeIn(IngestIn):
     """
 
     upload_elapsed_ms: float | None = Field(default=None, ge=0)
+
+
+class StagedPreprocessOut(BaseModel):
+    """How much of a staged batch the preprocessing pool still has in hand."""
+
+    running: int
+    queued: int
+
+
+class StagedBatchOut(BaseModel):
+    """What is staged on the server for a collection, ingested or not.
+
+    An upload that never reached ``POST /ingest/finalize`` — a closed tab, a
+    hung browser — leaves its files staged with no job to describe them, and
+    the ingest screen had no way to know they were there.
+    """
+
+    collection: str
+    files: int
+    bytes: int
+    preprocess: StagedPreprocessOut
 
 
 class IngestOut(BaseModel):
@@ -4778,7 +4799,7 @@ async def ingest_upload(
                 # Off the loop: hashing reads the whole file back, so a large
                 # one stalls every other request — the jobs SSE ping loop
                 # included — for as long as it takes.
-                file_hash = await to_thread.run_sync(compute_file_hash, dest)
+                file_hash = await to_thread.run_sync(partial(compute_file_hash, dest))
                 if load_ingestion_env().ingest_preprocess_on_upload:
                     # The file's heavy stage (PDF layout/OCR, image caption,
                     # transcription) starts now, while the rest of the batch is
@@ -5066,6 +5087,41 @@ async def export_source_extract(
         logger.exception("PDF export engine unavailable")
         raise HTTPException(status_code=503, detail="PDF export is not available.") from exc
     return Response(content=body, media_type=media_type, headers=_download_headers(f"{name}-{source_id[:12]}", fmt))
+
+
+@app.get("/ingest/staged", tags=["Ingestion"], response_model=StagedBatchOut)
+async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
+    """Report the files staged for a collection and the preprocessing still running.
+
+    This is how a run that lost its client becomes visible again. The upload
+    stages files and ``POST /ingest/finalize`` queues the job, so a browser
+    that dies in between leaves bytes on disk that no job, and therefore no
+    screen, accounts for. Finalizing over them is safe at any time: ingestion
+    is idempotent by file hash.
+
+    Args:
+        request (Request): The incoming request, for principal resolution.
+        collection (str): The caller's logical collection name.
+
+    Returns:
+        StagedBatchOut: File count, total bytes, and the pool's own counts.
+
+    Raises:
+        HTTPException: 400 for a blank or unusable name; 404 when the caller
+            does not own the collection.
+    """
+    principal = resolve_principal(request)
+    name = _require_collection_name(collection, context="staged")
+    physical = _require_owned_collection(name, principal)
+    batch_dir = _resolve_qdrant_src_dir() / physical
+    inventory = await to_thread.run_sync(describe_inputs, batch_dir, 0)
+    running, queued = get_preprocess_pool().inflight(physical)
+    return StagedBatchOut(
+        collection=name,
+        files=inventory.total_files,
+        bytes=inventory.total_bytes,
+        preprocess=StagedPreprocessOut(running=running, queued=queued),
+    )
 
 
 @app.get("/ingest/jobs", tags=["Ingestion"])

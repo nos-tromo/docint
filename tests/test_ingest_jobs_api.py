@@ -335,6 +335,33 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
     assert result == {"empty": False, "resolution": None, "stats": None}
 
 
+def test_staged_reports_the_files_no_job_accounts_for(client: TestClient) -> None:
+    """An upload that never reached finalize leaves bytes on disk and no job to describe them.
+
+    This endpoint is how the ingest screen finds them again, so a hung or
+    closed browser no longer loses the run silently.
+    """
+    _stage(client, "mydocs")
+
+    res = client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers())
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "collection": "mydocs",
+        "files": 1,
+        "bytes": len(b"hello"),
+        "preprocess": {"running": 0, "queued": 0},
+    }
+
+
+def test_staged_is_owner_scoped(client: TestClient) -> None:
+    """A staged batch is as private as the collection it belongs to."""
+    _stage(client, "mydocs", user="alice")
+
+    assert client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers("alice")).status_code == 200
+    assert client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers("bob")).status_code == 404
+
+
 def test_upload_hashes_off_the_event_loop(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Hashing reads the whole file back, so on the loop it stalls every other request.
 

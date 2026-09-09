@@ -47,6 +47,27 @@ export async function createIngestJob(
   }
 }
 
+/** What the server has staged for a collection, and what it is still reading. */
+export interface StagedBatch {
+  collection: string
+  files: number
+  bytes: number
+  preprocess: { running: number; queued: number }
+}
+
+/**
+ * Ask what is staged for a collection.
+ *
+ * Uploading stages bytes and finalizing queues the job, so a browser that
+ * dies between the two leaves files no job accounts for — and, before this,
+ * nothing on screen to say so.
+ *
+ * @param collection - The caller's logical collection name.
+ * @returns The staged file count, total size, and preprocessing counts.
+ */
+export const getStagedBatch = (collection: string) =>
+  apiGet<StagedBatch>('/ingest/staged', { collection })
+
 /** List the caller's jobs, newest first. Powers reload re-discovery. */
 export const listIngestJobs = () => apiGet<{ jobs: IngestJobSnapshot[] }>('/ingest/jobs')
 

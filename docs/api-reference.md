@@ -77,6 +77,7 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `POST` | `/agent/chat/stream` | `Agent` | Streaming orchestrator variant (SSE tokens). |
 | `POST` | `/ingest/upload` | `Ingestion` | Stage files into a collection's batch directory (upload only, no ingestion). |
 | `POST` | `/ingest/finalize` | `Ingestion` | Queue one ingest job over the staged batches; `202 {job_id}`. |
+| `GET` | `/ingest/staged` | `Ingestion` | What is staged on disk for a collection, and the preprocessing still running for it. |
 | `GET`  | `/ingest/jobs/events` | `Ingestion` | Owner-multiplexed SSE stream of job events, with collapsed replay on connect. |
 | `GET`  | `/ingest/jobs` | `Ingestion` | List the caller's jobs, newest first. |
 | `GET`  | `/ingest/jobs/{job_id}` | `Ingestion` | Snapshot of one owned job. |
@@ -894,6 +895,21 @@ pass afterwards via `/ingest/finalize`.
 A `collection` containing `#`, `?`, `/`, `\`, `%` or a control character is
 refused with `400` before anything is staged (`detail` names the characters);
 the same rule applies to `/ingest/finalize` and `POST /ingest`.
+
+### `GET /ingest/staged`
+
+`?collection=<logical>`. Answers with the batch directory's file count and
+total size plus the preprocessing pool's own counts for that collection:
+
+```json
+{"collection": "field-notes", "files": 1000, "bytes": 105906176,
+ "preprocess": {"running": 4, "queued": 812}}
+```
+
+Owner-scoped like every collection endpoint: another principal's collection
+`404`s. This is how a run whose browser died between upload and finalize
+becomes visible again — see
+[Per-file preprocessing](ingestion.md#a-staged-batch-nobody-finalized).
 
 Splitting a large selection across several upload batches means ingestion
 happens once over the whole staged directory, instead of once per batch

@@ -227,6 +227,11 @@ export const en = {
   'ingest.caption': 'Upload and index documents',
   'ingest.drop_empty': 'Nothing to add — that drop contained no files.',
   'ingest.clear_files': 'Clear selection',
+  'ingest.staged_title': 'Already uploaded to “{collection}”',
+  'ingest.staged_idle': 'These files are on the server but no ingestion is running for them.',
+  'ingest.staged_preprocessing':
+    'The server is still reading these files: {running} in progress, {queued} waiting.',
+  'ingest.staged_ingest': 'Ingest these files',
   'ingest.files_too_many':
     'Too many files to list one by one. Clear the selection to start over.',
   'ingest.button': 'Ingest',

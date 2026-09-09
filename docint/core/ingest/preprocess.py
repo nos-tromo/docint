@@ -25,6 +25,7 @@ not close an import cycle.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -33,7 +34,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from loguru import logger
 
 from docint.core.ingest.images_service import ImageAsset, ImageIngestionService, IngestContext
-from docint.utils.env_cfg import load_ingestion_env, load_nextext_env
+from docint.utils.env_cfg import load_ingestion_env, load_logging_env, load_nextext_env
 from docint.utils.hashing import compute_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -48,6 +49,7 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif"})
 __all__ = [
     "IMAGE_EXTENSIONS",
     "PreprocessPool",
+    "collection_of_key",
     "get_preprocess_pool",
     "prefetch_batch",
     "preprocess_image",
@@ -87,6 +89,10 @@ class PreprocessPool:
         self._futures: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)
+        # Per-collection progress narration; see :meth:`_note_progress`.
+        self._done: dict[str, int] = {}
+        self._last_log: dict[str, float] = {}
+        self._log_interval_s = load_logging_env().progress_interval_s
 
     def submit(self, key: str, fn: Callable[[], T]) -> Future[T]:
         """Start *fn* under *key*, or return the future already running it.
@@ -161,8 +167,30 @@ class PreprocessPool:
 
     def _executor_for(self, key: str) -> ThreadPoolExecutor:
         """Pick the executor by the key's kind prefix (``media`` or everything else)."""
-        kind = key.partition(":")[0]
+        kind = key.partition("#")[0]
         return self._executors.get(kind, self._executors[""])
+
+    def inflight(self, collection: str) -> tuple[int, int]:
+        """Count one collection's preprocessing tasks.
+
+        What the ingest screen shows for a staged batch nobody has finalized:
+        without it, an upload that never reached a job leaves the user with no
+        sign that the server is still reading their files.
+
+        Args:
+            collection (str): Physical collection name.
+
+        Returns:
+            tuple[int, int]: ``(running, queued)``.
+        """
+        with self._lock:
+            return self._inflight_locked(collection)
+
+    def _inflight_locked(self, collection: str) -> tuple[int, int]:
+        """Count ``(running, queued)`` for *collection*; caller holds the lock."""
+        futures = [f for key, f in self._futures.items() if collection_of_key(key) == collection]
+        running = sum(1 for f in futures if f.running())
+        return running, len(futures) - running
 
     def _evict(self, key: str, future: Future[Any]) -> None:
         """Forget a finished key and log a failure once, on the thread that saw it."""
@@ -177,6 +205,39 @@ class PreprocessPool:
             logger.warning("Preprocess task '{}' failed: {}", key, exc)
         else:
             logger.debug("Preprocess task '{}' done.", key)
+        self._note_progress(key)
+
+    def _note_progress(self, key: str) -> None:
+        """Report a collection's preprocessing at INFO, throttled, and when it drains.
+
+        Upload-time preprocessing belongs to no job, so nothing else narrates
+        it: the per-task lines are DEBUG, and a batch finishing looked exactly
+        like one stalling — the model calls simply stopped appearing. The
+        drain line is the one that answers which happened.
+        """
+        collection = collection_of_key(key)
+        if collection is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            self._done[collection] = self._done.get(collection, 0) + 1
+            done = self._done[collection]
+            running, queued = self._inflight_locked(collection)
+            drained = running == 0 and queued == 0
+            due = drained or now - self._last_log.get(collection, 0.0) >= self._log_interval_s
+            if due:
+                self._last_log[collection] = now
+            if drained:
+                self._done.pop(collection, None)
+                self._last_log.pop(collection, None)
+        if due:
+            logger.info(
+                "Preprocess | collection={!r} done={} running={} queued={}",
+                collection,
+                done,
+                running,
+                queued,
+            )
 
 
 def run_all(pool: PreprocessPool | None, jobs: list[tuple[str, Callable[[], T]]]) -> list[T]:
@@ -291,6 +352,12 @@ def _image_service(image_service: ImageIngestionService | None) -> ImageIngestio
 def preprocess_key(kind: str, collection: str, file_hash: str) -> str:
     """Build the pool key for one file's heavy stage.
 
+    Separated by ``#`` rather than ``:`` so the collection can be read back
+    out of a key exactly: a collection name may contain a colon, and the
+    social linker's key carries a colon inside its last component, but no
+    collection name may contain ``#`` (``validate_collection_name`` refuses
+    it, because qdrant-client would drop everything after one in a URL).
+
     Args:
         kind (str): ``pdf``, ``image`` or ``media`` — the same bytes mean
             different work under different extensions.
@@ -298,9 +365,23 @@ def preprocess_key(kind: str, collection: str, file_hash: str) -> str:
         file_hash (str): The file's content hash.
 
     Returns:
-        str: ``"{kind}:{collection}:{file_hash}"``.
+        str: ``"{kind}#{collection}#{file_hash}"``.
     """
-    return f"{kind}:{collection}:{file_hash}"
+    return f"{kind}#{collection}#{file_hash}"
+
+
+def collection_of_key(key: str) -> str | None:
+    """Read the collection back out of a pool key.
+
+    Args:
+        key (str): A key from :func:`preprocess_key`.
+
+    Returns:
+        str | None: The physical collection, or ``None`` for a key that did
+        not come from :func:`preprocess_key`.
+    """
+    parts = key.split("#", 2)
+    return parts[1] if len(parts) == 3 else None
 
 
 def standalone_image_asset(path: Path) -> ImageAsset:

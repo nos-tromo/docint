@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from docint.core.ingest.images_service import IngestContext
+from docint.core.ingest.preprocess import collection_of_key
 from docint.core.ingest.social_linker import SocialLinker
 from docint.utils.nextext_client import NextextKeyframe, NextextResult
 
@@ -821,7 +822,10 @@ def test_linked_images_go_through_the_pool_after_joining_their_loose_task(tmp_pa
     ).run(tmp_path)
 
     assert service.images, "the export's image was linked"
-    link_keys = [key for key in recording_pool.keys if key.startswith("image-link:c:")]
+    link_keys = [key for key in recording_pool.keys if key.startswith("image-link#c#")]
     assert len(link_keys) == len(service.images)  # submitted once per image, joined by future
-    assert all(key.count(":") == 3 for key in link_keys)  # kind:collection:hash:posting
-    assert len([j for j in recording_pool.joins if j.startswith("image:c:")]) == len(service.images)
+    # kind#collection#hash:posting — the posting rides inside the last
+    # component, which is why the key's own separator has to be one no
+    # collection name can contain.
+    assert all(collection_of_key(key) == "c" for key in link_keys)
+    assert len([j for j in recording_pool.joins if j.startswith("image#c#")]) == len(service.images)
