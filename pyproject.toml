@@ -43,7 +43,7 @@ dependencies = [
   "striprtf>=0.0.33",
   "transformers>=5.10.0",  # CVE-2026-9856; docling-core's <5.9 cap is darwin-only, see [tool.uv] environments
   "uvicorn>=0.52.4",
-  "weasyprint>=69.0",
+  "weasyprint>=70.0",
 ]
 
 [project.urls]
