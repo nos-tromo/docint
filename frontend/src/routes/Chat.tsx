@@ -464,6 +464,9 @@ export function Chat() {
           >
             {state.turns.map((t, i) => (
               <ChatTurn
+                // The transcript is append-only and turns carry no id; the index is
+                // already load-bearing here, passed down as turnIdx.
+                // eslint-disable-next-line @eslint-react/no-array-index-key
                 key={i}
                 turn={t}
                 sessionId={t.meta?.session_id ?? currentSessionId ?? undefined}

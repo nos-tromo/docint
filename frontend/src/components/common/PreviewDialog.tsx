@@ -48,19 +48,22 @@ function useTextPreview(url: string | null): TextPreviewState {
 
   useEffect(() => {
     if (!url) return
-    let cancelled = false
+    // Abort rather than just ignore: a superseded preview should stop occupying
+    // a connection, not run to completion with its result thrown away.
+    const controller = new AbortController()
     setResult({ state: 'loading', text: '' })
-    fetch(url)
+    fetch(url, { signal: controller.signal })
       .then(async (resp) => {
         if (!resp.ok) throw new Error(String(resp.status))
         const text = await resp.text()
-        if (!cancelled) setResult({ state: 'ready', text })
+        if (!controller.signal.aborted) setResult({ state: 'ready', text })
       })
       .catch(() => {
-        if (!cancelled) setResult({ state: 'error', text: '' })
+        // An abort means this effect was superseded, not that the preview failed.
+        if (!controller.signal.aborted) setResult({ state: 'error', text: '' })
       })
     return () => {
-      cancelled = true
+      controller.abort()
     }
   }, [url])
 

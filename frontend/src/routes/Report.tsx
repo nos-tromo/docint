@@ -211,8 +211,8 @@ function EvidenceStrip({ figures, t }: { figures: EvidenceFigure[]; t: Translate
   if (figures.length === 0) return null
   return (
     <div className="flex flex-wrap gap-3">
-      {figures.map(({ thumb, caption, filename }, index) => (
-        <figure key={index} className="max-w-[12rem] space-y-1">
+      {figures.map(({ thumb, caption, filename }) => (
+        <figure key={filename} className="max-w-[12rem] space-y-1">
           {/* Enlarged from the frozen bytes the snapshot carries, never from
               the source store: a report is meant to outlive the collection it
               was drawn from, so its evidence must not need one. */}
