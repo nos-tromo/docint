@@ -89,3 +89,15 @@ export const getIngestJob = (id: string) => apiGet<IngestJobSnapshot>(`/ingest/j
 
 /** Dismiss a finished job. Rejects with 409 while it is still running. */
 export const dismissIngestJob = (id: string) => apiDelete<{ ok: boolean }>(`/ingest/jobs/${id}`)
+
+/**
+ * Ask a running job to stop.
+ *
+ * Resolving means the request was accepted, not that the job has stopped: a
+ * worker thread cannot be killed, so the run ends at its next progress
+ * checkpoint and one in-flight model call finishes first. Watch for the
+ * terminal `ingestion_cancelled` frame. Rejects with 404 (unknown) or 409
+ * (already finished).
+ */
+export const cancelIngestJob = (id: string) =>
+  apiPost<{ ok: boolean }>(`/ingest/jobs/${id}/cancel`, {})

@@ -27,7 +27,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -51,6 +51,7 @@ __all__ = [
     "PreprocessPool",
     "collection_of_key",
     "get_preprocess_pool",
+    "join_future",
     "prefetch_batch",
     "preprocess_image",
     "preprocess_key",
@@ -192,6 +193,25 @@ class PreprocessPool:
         running = sum(1 for f in futures if f.running())
         return running, len(futures) - running
 
+    def cancel_collection(self, collection: str) -> int:
+        """Drop one collection's not-yet-started tasks.
+
+        What an aborted run reclaims. A task already running holds a worker
+        until its model call returns — nothing can take that back — but the
+        queue behind it is often the bulk of a large batch, and leaving it to
+        run would keep an abandoned collection captioning images for hours.
+
+        Args:
+            collection (str): Physical collection name.
+
+        Returns:
+            int: How many queued tasks were cancelled.
+        """
+        with self._lock:
+            futures = [f for key, f in self._futures.items() if collection_of_key(key) == collection]
+        # Outside the lock: ``cancel`` fires the done callback, which takes it.
+        return sum(1 for future in futures if future.cancel())
+
     def _evict(self, key: str, future: Future[Any]) -> None:
         """Forget a finished key and log a failure once, on the thread that saw it."""
         with self._idle:
@@ -240,6 +260,34 @@ class PreprocessPool:
             )
 
 
+def join_future(future: Future[T]) -> T:
+    """Wait for a pool task, reporting a cancelled one as a cancelled job.
+
+    The one place that translation happens. ``Future.result()`` raises
+    ``concurrent.futures.CancelledError``, which is a ``BaseException``: every
+    ``except Exception`` between here and the job runner misses it, so it
+    would surface as a task cancellation of the whole ASGI request rather
+    than as the abort somebody asked for.
+
+    Args:
+        future (Future[T]): The pool future to wait on.
+
+    Returns:
+        T: The task's result.
+
+    Raises:
+        JobCancelled: When the task was cancelled by
+            :meth:`PreprocessPool.cancel_collection`.
+        Exception: Whatever the task itself raised.
+    """
+    from docint.core.jobs import JobCancelled
+
+    try:
+        return future.result()
+    except CancelledError as exc:
+        raise JobCancelled("preprocessing cancelled") from exc
+
+
 def run_all(
     pool: PreprocessPool | None,
     jobs: list[tuple[str, Callable[[], T]]],
@@ -277,7 +325,7 @@ def run_all(
         # finished. Exceptions stay with the ordered pass, which raises them.
         for done, _ in enumerate(as_completed(futures), start=1):
             on_done(done, len(futures))
-    return [future.result() for future in futures]
+    return [join_future(future) for future in futures]
 
 
 _pool: PreprocessPool | None = None

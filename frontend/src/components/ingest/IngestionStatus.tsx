@@ -94,6 +94,15 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     pulse: false,
     tone: 'emerald'
   },
+  // Neutral, not red: nothing failed. The run stopped because it was told to.
+  cancelled: {
+    border: 'border-border',
+    pill: 'bg-muted-foreground',
+    label: 'text-muted-foreground',
+    textKey: 'ingest.status_cancelled',
+    pulse: false,
+    tone: 'sky'
+  },
   error: {
     border: 'border-red-700',
     pill: 'bg-red-400',
@@ -181,6 +190,7 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
       {status.phase === 'uploading' && <UploadingBody status={status} />}
       {status.phase === 'processing' && <ProcessingBody status={status} />}
       {status.phase === 'complete' && <CompleteBody status={status} />}
+      {status.phase === 'cancelled' && <CancelledBody status={status} />}
       {status.phase === 'error' && <ErrorBody status={status} />}
     </div>
   )
@@ -375,6 +385,21 @@ function CompleteBody({ status }: { status: IngestStatus }) {
   return (
     <div className="mt-3 text-sm text-[var(--status-emerald-fg)] tabular-nums">
       {summary}
+    </div>
+  )
+}
+
+// What a stopped run leaves behind is worth stating: files indexed before the
+// abort stay indexed, and a re-run skips them by hash rather than redoing
+// them. Without that, "cancelled" reads as "everything was lost".
+function CancelledBody({ status }: { status: IngestStatus }) {
+  const t = useT()
+  const fileCount = Math.max(status.indexed, status.filesSaved)
+  return (
+    <div className="mt-3 text-sm text-muted-foreground">
+      {fileCount > 0
+        ? t('ingest.cancelled_partial', { count: fileCount })
+        : t('ingest.cancelled_none')}
     </div>
   )
 }

@@ -67,6 +67,7 @@ KIND_EVENTS: dict[str, dict[str, str]] = {
         "started": "ingestion_started",
         "progress": "ingestion_progress",
         "complete": "ingestion_complete",
+        "cancelled": "ingestion_cancelled",
         "failed_code": "ingestion_failed",
         "failed_message": "Ingestion failed.",
     },
@@ -74,6 +75,7 @@ KIND_EVENTS: dict[str, dict[str, str]] = {
         "started": "summary_started",
         "progress": "summary_progress",
         "complete": "summary_completed",
+        "cancelled": "summary_cancelled",
         "failed_code": "summary_failed",
         "failed_message": "Summary generation failed.",
     },
@@ -81,6 +83,7 @@ KIND_EVENTS: dict[str, dict[str, str]] = {
         "started": "extract_started",
         "progress": "extract_progress",
         "complete": "extract_completed",
+        "cancelled": "extract_cancelled",
         "failed_code": "extract_failed",
         "failed_message": "Extract failed.",
     },
@@ -91,7 +94,17 @@ STARTED_EVENTS: frozenset[str] = frozenset({"ingestion_started", "summary_starte
 #: SSE event names, across all kinds, carrying a collapsed-to-latest progress update.
 PROGRESS_EVENTS: frozenset[str] = frozenset({"ingestion_progress", "summary_progress", "extract_progress"})
 #: SSE event names, across all kinds, that end a run.
-TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "summary_completed", "extract_completed", "error"})
+TERMINAL_EVENTS: frozenset[str] = frozenset(
+    {
+        "ingestion_complete",
+        "summary_completed",
+        "extract_completed",
+        "ingestion_cancelled",
+        "summary_cancelled",
+        "extract_cancelled",
+        "error",
+    }
+)
 
 
 #: Upper bound on a caller-reported upload lead. A day is far longer than any
@@ -188,6 +201,19 @@ def format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+class JobCancelled(Exception):
+    """Raised inside a runner when its job has been asked to stop.
+
+    Part of the runner contract, like :data:`JobRunner` itself. A worker
+    thread cannot be killed and ``anyio.to_thread.run_sync`` defers an
+    asyncio cancel until the thread returns on its own, so stopping a run is
+    cooperative: the progress callback raises this at the run's next
+    checkpoint, and every stage that reports progress is one. A runner must
+    let it through — catching it turns an abort into a run that finishes with
+    everything after the abort marked failed.
+    """
+
+
 class JobStatus(StrEnum):
     """Lifecycle state of a job (ingest or summary)."""
 
@@ -195,9 +221,10 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
-TERMINAL_STATUSES: frozenset[JobStatus] = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
+TERMINAL_STATUSES: frozenset[JobStatus] = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 
 
 @dataclass
@@ -235,6 +262,11 @@ class IngestJobState:
     hate_speech: bool | None = None
     resolve: bool = False
     status: JobStatus = JobStatus.QUEUED
+    #: Set by :meth:`IngestJobManager.request_cancel`. Read by the progress
+    #: callback, which raises :class:`JobCancelled` at the run's next
+    #: checkpoint — the run keeps ``RUNNING`` until it actually gets there,
+    #: which for an in-flight model call can be minutes.
+    cancel_requested: bool = False
     message: str | None = None
     error: str | None = None
     empty: bool = False
@@ -371,6 +403,10 @@ class IngestJobState:
             "collection": self.logical_name,
             "kind": self.kind,
             "status": self.status.value,
+            # A run that has been asked to stop is still ``running`` until it
+            # reaches a checkpoint, so the client needs this to say
+            # "stopping…" rather than repeat the request.
+            "cancel_requested": self.cancel_requested,
             "message": self.message,
             "error": self.error,
             "empty": self.empty,
@@ -811,6 +847,38 @@ class IngestJobManager:
             del self._jobs[job_id]
         return True
 
+    async def request_cancel(self, job_id: str, owner: str) -> IngestJobState | None:
+        """Ask an owned, unfinished job to stop, and return it.
+
+        Only sets the flag. The run stops at its next checkpoint — every
+        stage that reports progress is one — because a worker thread cannot
+        be killed and ``anyio.to_thread.run_sync`` defers an asyncio cancel
+        until the thread returns anyway. One in-flight model call finishes
+        first, which for a Nextext clip is minutes.
+
+        Idempotent: asking twice is not an error, and the second request is
+        indistinguishable from the first.
+
+        Args:
+            job_id (str): Job identifier.
+            owner (str): Resolved principal.
+
+        Returns:
+            IngestJobState | None: The job now marked for cancellation, or
+            ``None`` when it is unknown, owned by someone else, or already
+            finished. Those are deliberately indistinguishable to the caller
+            beyond what the route reports, so cross-owner probing cannot be
+            told from a job that simply finished first.
+        """
+        async with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None or state.owner != owner:
+                return None
+            if state.status in TERMINAL_STATUSES:
+                return None
+            state.cancel_requested = True
+            return state
+
     async def subscribe_owner(self, owner: str) -> AsyncGenerator[str, None]:
         """Yield SSE frames for every job this owner has, over one connection.
 
@@ -1087,10 +1155,22 @@ class IngestJobManager:
                 line lands when the event happened rather than a loop
                 iteration later. loguru's sink is thread-safe.
 
+                This is also where a cancellation lands. Every stage that
+                reports progress calls here, so checking the flag first turns
+                each of them into a checkpoint without the runner knowing
+                anything about cancellation. The raise comes before the tee:
+                the frame being reported is work the run is abandoning, and
+                logging it would say the stage got further than it did.
+
                 Args:
                     event_name (str): SSE event name.
                     payload (dict[str, Any]): JSON-serializable payload.
+
+                Raises:
+                    JobCancelled: When this job has been asked to stop.
                 """
+                if state.cancel_requested:
+                    raise JobCancelled(state.job_id)
                 _tee(event_name, payload)
                 frame = _frame(event_name, payload)
                 loop.call_soon_threadsafe(self._dispatch, state, event_name, frame)
@@ -1109,6 +1189,25 @@ class IngestJobManager:
             self._log_run_banner(state, inventory)
             try:
                 result = await to_thread.run_sync(self._runner, state, _push)
+            except JobCancelled:
+                # Caught ahead of the generic handler: an abort is not a
+                # failure, and reporting it as one would send an operator
+                # looking for a fault that is not there.
+                for line in throttle.flush():
+                    _log(line)
+                state.duration_s = state.elapsed_s()
+                logger.info(
+                    "{} job cancelled | {}",
+                    state.kind.capitalize(),
+                    _summary_fields(state, None, failed=True),
+                )
+                state.status = JobStatus.CANCELLED
+                state.finished_at = _utcnow()
+                _emit(
+                    names["cancelled"],
+                    {"collection": state.logical_name, "duration_ms": state.duration_ms},
+                )
+                return
             except Exception:
                 # Release a held tick first: how far a stage got before it
                 # died is the most useful line in a failed run.

@@ -8,6 +8,7 @@ decides which heavy stage a staged file gets.
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -163,6 +164,50 @@ def test_run_all_reports_inline_jobs_too(pool: PreprocessPool) -> None:
     preprocess.run_all(None, [("a", lambda: 1), ("b", lambda: 2)], on_done=lambda d, t: seen.append((d, t)))
 
     assert seen == [(1, 2), (2, 2)]
+
+
+def test_cancel_collection_drops_the_queue_but_not_the_running_task() -> None:
+    """What an aborted run reclaims: nothing can take back a call already in flight."""
+    pool = PreprocessPool(max_workers=1, media_workers=1)
+    release = threading.Event()
+    ran: list[str] = []
+    try:
+        pool.submit("image#c#1", lambda: ran.append("first") or release.wait(timeout=5))
+        while not pool._futures["image#c#1"].running():
+            time.sleep(0.01)
+        queued = pool.submit("image#c#2", lambda: ran.append("second"))
+        other = pool.submit("image#other#3", lambda: ran.append("other"))
+
+        assert pool.cancel_collection("c") == 1
+        assert queued.cancelled()
+        assert not other.cancelled()
+        release.set()
+        pool.wait_idle(timeout=5)
+    finally:
+        pool.shutdown()
+
+    assert "second" not in ran
+    assert "first" in ran
+
+
+def test_a_cancelled_task_is_reported_as_a_cancelled_job() -> None:
+    """`CancelledError` is a BaseException, so every `except Exception` on the way out misses it."""
+    from docint.core.jobs import JobCancelled
+
+    pool = PreprocessPool(max_workers=1)
+    release = threading.Event()
+    try:
+        pool.submit("image#c#1", lambda: release.wait(timeout=5))
+        while not pool._futures["image#c#1"].running():
+            time.sleep(0.01)
+        future = pool.submit("image#c#2", lambda: None)
+        assert pool.cancel_collection("c") == 1
+
+        with pytest.raises(JobCancelled):
+            preprocess.join_future(future)
+    finally:
+        release.set()
+        pool.shutdown()
 
 
 def test_a_clip_is_not_queued_behind_the_image_backlog() -> None:

@@ -52,6 +52,42 @@ double-write, because file hashes are only recorded after a run's final node
 batch. Entity resolution runs as a stage inside the job, so it no longer
 depends on a client staying attached.
 
+### Stopping a run
+
+`POST /ingest/jobs/{job_id}/cancel` asks a queued or running job to stop
+(`202`; `404` unknown, `409` already finished). The Ingest screen's **Abort**
+button calls it behind a confirmation.
+
+**It is cooperative, and therefore not instant.** A worker thread cannot be
+killed, and `anyio.to_thread.run_sync` defers an asyncio cancel until the
+thread returns on its own, so the endpoint only sets a flag. The pushed
+progress callback checks it and raises `JobCancelled` — which makes *every
+stage that reports progress* a checkpoint: per chunk while enriching, per
+docstore batch while persisting, per file on the PDF lane, per clip on the
+media lane. One in-flight model call finishes first: an OCR page can be
+minutes, a Nextext clip up to `NEXTEXT_POLL_MAX_SECONDS`.
+
+What the abort reclaims immediately is the queue: `PreprocessPool.
+cancel_collection` cancels that collection's not-yet-started tasks, which on
+a large batch is the bulk of the remaining work. A task already running keeps
+its worker until its call returns.
+
+The run lands in a `cancelled` terminal state with an `ingestion_cancelled`
+frame — **not** an error. Nothing failed, and reporting a fault sends an
+operator looking for one that is not there. Two rules make that hold:
+
+- `_handle_batch_failure` re-raises `JobCancelled` regardless of
+  `INGEST_FAIL_FAST`. Swallowed there (the default configuration) an abort
+  would become a run that "completed" with every remaining file marked
+  failed in the manifest.
+- `preprocess.join_future` converts a cancelled task's
+  `concurrent.futures.CancelledError` — a `BaseException` every
+  `except Exception` on the way out would miss — into `JobCancelled`, and the
+  pre-passes' fail-soft guards let it through rather than logging it as a
+  skipped stage.
+
+Files indexed before the abort stay indexed; a re-run skips them by hash.
+
 ### Per-file preprocessing
 
 Three stages of an ingest cost minutes per file, and each is idempotent by

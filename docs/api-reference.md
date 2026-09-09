@@ -81,6 +81,7 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `GET`  | `/ingest/jobs/events` | `Ingestion` | Owner-multiplexed SSE stream of job events, with collapsed replay on connect. |
 | `GET`  | `/ingest/jobs` | `Ingestion` | List the caller's jobs, newest first. |
 | `GET`  | `/ingest/jobs/{job_id}` | `Ingestion` | Snapshot of one owned job. |
+| `POST` | `/ingest/jobs/{job_id}/cancel` | `Ingestion` | Ask a running job to stop; `202` (409 once finished). |
 | `DELETE` | `/ingest/jobs/{job_id}` | `Ingestion` | Dismiss a finished job (409 while running). |
 | `POST` | `/ingest` | `Ingestion` | Ingest the configured `DATA_PATH` directly (CLI/batch path). |
 | `GET`  | `/sources/preview` | `Sources` | Return a preview of a source file staged under `QDRANT_SRC_DIR`. |
@@ -988,7 +989,20 @@ collection name is deliberately excluded — callers only ever see their own
 logical name.
 
 A `404` here is how a client detects an **interrupted** run: the backend
-restarted while the job was in flight.
+restarted while the job was in flight. `cancel_requested` tells a job that
+has been asked to stop from one merely running — it stays `running` until it
+reaches a checkpoint.
+
+### `POST /ingest/jobs/{job_id}/cancel`
+
+Asks a queued or running job to stop. `202` (the request was accepted, not
+the job stopped), `404` unknown or cross-owner, `409` already finished.
+
+Cancellation is cooperative: the run ends at its next progress checkpoint and
+one in-flight model call finishes first, so watch for the terminal
+`ingestion_cancelled` frame rather than assuming the `202` ended anything.
+The collection's not-yet-started preprocessing is cancelled outright. See
+[ingestion.md](ingestion.md) § Stopping a run.
 
 ### `DELETE /ingest/jobs/{job_id}`
 

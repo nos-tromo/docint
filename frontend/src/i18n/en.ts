@@ -249,7 +249,15 @@ export const en = {
   'ingest.status_uploading': 'Uploading',
   'ingest.status_processing': 'Processing',
   'ingest.status_complete': 'Complete',
+  'ingest.status_cancelled': 'Stopped',
   'ingest.status_failed': 'Failed',
+  'ingest.abort': 'Abort',
+  'ingest.abort_stopping': 'Stopping…',
+  'ingest.abort_confirm':
+    'Stop this ingestion? Everything indexed so far is kept, but the rest of the batch will not be processed. The run stops at its next step, so a file already being read finishes first.',
+  'ingest.cancelled_partial':
+    'Stopped. {count} files were indexed before it stopped and are kept — a new run for this collection skips them.',
+  'ingest.cancelled_none': 'Stopped before anything was indexed.',
   'ingest.saving_file': 'Saving file {current} of {total}',
   'ingest.uploading_files': 'Uploading files',
   'ingest.files_saved_of': '{saved} of {total} files saved',

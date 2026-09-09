@@ -8,6 +8,9 @@ export type IngestPhase =
   | 'queued'
   | 'processing'
   | 'complete'
+  // Stopped on request. Its own phase rather than an error: nothing went
+  // wrong, and reporting a fault sends an operator looking for one.
+  | 'cancelled'
   | 'error'
 
 export interface IngestTask {
@@ -439,6 +442,16 @@ export function deriveIngestStatus(
       }
       case 'ingestion_complete': {
         status.phase = 'complete'
+        status.collection = strOf(d.collection) ?? status.collection
+        status.uploadingFile = undefined
+        status.uploadingBytes = undefined
+        status.uploadingTotalBytes = undefined
+        status.finishedAt = ev.receivedAt
+        status.durationMs = numOf(d.duration_ms) ?? status.durationMs
+        break
+      }
+      case 'ingestion_cancelled': {
+        status.phase = 'cancelled'
         status.collection = strOf(d.collection) ?? status.collection
         status.uploadingFile = undefined
         status.uploadingBytes = undefined

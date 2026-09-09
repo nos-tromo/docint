@@ -563,6 +563,78 @@ describe('Ingest — several runs at once', () => {
     expect(screen.getByText('second')).toBeInTheDocument()
   })
 
+  it('aborts a running job, but only behind a confirmation', async () => {
+    // The abort throws away however many hours the run has spent; it is not
+    // a click to make by accident.
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+    const declined = vi.fn(() => false)
+    vi.stubGlobal('confirm', declined)
+
+    renderIn(<Ingest />)
+    const abort = await screen.findByRole('button', { name: /^abort$/i })
+    abort.click()
+
+    await waitFor(() => expect(declined).toHaveBeenCalled())
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/cancel'))).toBe(false)
+
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    abort.click()
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([u]) => String(u).includes('/ingest/jobs/job-1/cancel'))
+      ).toBe(true)
+    )
+    vi.unstubAllGlobals()
+  })
+
+  it('offers no abort once a job has finished', async () => {
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    finishedJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    await screen.findByText('Complete')
+
+    expect(screen.queryByRole('button', { name: /^abort$/i })).not.toBeInTheDocument()
+  })
+
+  it('reports a stopped run as stopped, not as a failure', async () => {
+    // Nothing went wrong; showing an error sends an operator looking for a
+    // fault that is not there.
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-1', {
+      event: 'ingestion_cancelled',
+      data: { job_id: 'job-1', collection: 'first', duration_ms: 5000 },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+
+    expect(await screen.findByText('Stopped')).toBeInTheDocument()
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument()
+    // Terminal, so it can be cleared away like any other finished run.
+    expect(screen.getByRole('button', { name: /dismiss/i })).toBeInTheDocument()
+  })
+
   it('clears every finished job at once and leaves the running one', async () => {
     track('job-1', 'first')
     track('job-2', 'second')

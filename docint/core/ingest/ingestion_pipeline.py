@@ -26,6 +26,7 @@ from loguru import logger
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.preprocess import IMAGE_EXTENSIONS, get_preprocess_pool, submit_file
 from docint.core.ingest.standalone_media import StandaloneMediaIngestor
+from docint.core.jobs import JobCancelled
 from docint.core.readers.docx import DocxReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
@@ -1009,6 +1010,10 @@ class DocumentIngestionPipeline:
                 pool=get_preprocess_pool(),
                 progress_callback=self.progress_callback,
             ).run(self.data_dir)
+        except JobCancelled:
+            # The run was abandoned; fail-soft is for a bad export, not for
+            # an abort, which must not be reported as a skipped pre-pass.
+            raise
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)
             return
@@ -1048,6 +1053,8 @@ class DocumentIngestionPipeline:
                 media_filetypes=set(load_ingestion_env().media_filetypes),
                 nextext_enabled=nextext_cfg.enabled,
             ).run(self.data_dir, self.social_link_consumed)
+        except JobCancelled:
+            raise
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Standalone media ingestion skipped due to error: {}", exc)
             return

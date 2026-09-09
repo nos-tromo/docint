@@ -5243,6 +5243,55 @@ async def get_ingest_job(
     return state.snapshot()
 
 
+@app.post("/ingest/jobs/{job_id}/cancel", status_code=202, tags=["Ingestion"])
+async def cancel_ingest_job(
+    job_id: str,
+    request: Request,
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
+    """Ask a running job to stop, and drop the preprocessing queued behind it.
+
+    Cooperative and therefore not instant. A worker thread cannot be killed,
+    so the run stops at its next progress checkpoint — per chunk while
+    enriching, per docstore batch while persisting, per file on the PDF lane,
+    per clip on the media lane. One in-flight model call finishes first, which
+    for a Nextext clip can be minutes. The job's own preprocessing tasks that
+    have not started yet are cancelled outright, which on a large batch is the
+    bulk of the remaining work.
+
+    202 rather than 200: what comes back is an accepted request, not a stopped
+    job. Clients watch for the terminal ``ingestion_cancelled`` frame.
+
+    Args:
+        job_id (str): Job identifier.
+        request (Request): The incoming request, for principal resolution.
+        jobs (IngestJobManager): The ingest job registry.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}``.
+
+    Raises:
+        HTTPException: 404 when unknown or cross-owner; 409 when the job has
+            already finished, so there is nothing to stop.
+    """
+    principal = resolve_principal(request)
+    state = await jobs.get(job_id, principal.effective_owner)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    cancelled = await jobs.request_cancel(job_id, principal.effective_owner)
+    if cancelled is None:
+        raise HTTPException(status_code=409, detail="Job has already finished")
+    dropped = get_preprocess_pool().cancel_collection(cancelled.physical)
+    logger.info(
+        "{} job cancel requested | job_id={} collection={!r} preprocess_dropped={}",
+        cancelled.kind.capitalize(),
+        job_id,
+        cancelled.logical_name,
+        dropped,
+    )
+    return {"ok": True}
+
+
 @app.delete("/ingest/jobs/{job_id}", tags=["Ingestion"])
 async def delete_ingest_job(
     job_id: str,

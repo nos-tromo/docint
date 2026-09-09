@@ -258,7 +258,15 @@ export const de: Strings = {
   'ingest.status_uploading': 'Wird hochgeladen',
   'ingest.status_processing': 'Wird verarbeitet',
   'ingest.status_complete': 'Abgeschlossen',
+  'ingest.status_cancelled': 'Abgebrochen',
   'ingest.status_failed': 'Fehlgeschlagen',
+  'ingest.abort': 'Abbrechen',
+  'ingest.abort_stopping': 'Wird abgebrochen…',
+  'ingest.abort_confirm':
+    'Diesen Import abbrechen? Alles bisher Indexierte bleibt erhalten, der Rest des Datenbestands wird nicht mehr verarbeitet. Der Lauf endet beim nächsten Schritt, eine bereits laufende Dateiverarbeitung wird noch abgeschlossen.',
+  'ingest.cancelled_partial':
+    'Abgebrochen. {count} Dateien wurden vorher indexiert und bleiben erhalten — ein neuer Lauf für diese Sammlung überspringt sie.',
+  'ingest.cancelled_none': 'Abgebrochen, bevor etwas indexiert wurde.',
   'ingest.saving_file': 'Datei {current} von {total} wird gespeichert',
   'ingest.uploading_files': 'Dateien werden hochgeladen',
   'ingest.files_saved_of': '{saved} von {total} Dateien gespeichert',

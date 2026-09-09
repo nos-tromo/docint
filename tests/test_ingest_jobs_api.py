@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Generator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -75,7 +76,7 @@ def _await_terminal(client: TestClient, job_id: str, user: str = "alice") -> dic
     snapshot: dict[str, Any] = {}
     for _ in range(200):
         snapshot = client.get(f"/ingest/jobs/{job_id}", headers=_headers(user)).json()
-        if snapshot["status"] in {"completed", "failed"}:
+        if snapshot["status"] in {"completed", "failed", "cancelled"}:
             return snapshot
         time.sleep(0.01)
     raise AssertionError(f"job did not finish; last snapshot={snapshot}")
@@ -218,6 +219,52 @@ def test_delete_409s_while_running(make_client: Callable[..., TestClient]) -> No
 
     assert client.delete(f"/ingest/jobs/{job_id}", headers=_headers()).status_code == 409
     gate.set()
+
+
+def test_cancel_stops_a_running_job_and_drops_its_queued_preprocessing(
+    make_client: Callable[..., TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Abort is the only way out of a run that would otherwise take hours.
+
+    Cancelling also drops the collection's not-yet-started preprocessing:
+    a running task holds its worker until its model call returns, but the
+    queue behind it is the bulk of a large batch.
+    """
+    gate = threading.Event()
+    cancelled: list[str] = []
+
+    def _blocking(state: Any, push: Any) -> dict[str, Any]:
+        gate.wait(timeout=5)
+        push("ingestion_progress", {"message": "working"})
+        return {"empty": False, "resolution": None}
+
+    monkeypatch.setattr(
+        api_module,
+        "get_preprocess_pool",
+        lambda: SimpleNamespace(cancel_collection=lambda name: cancelled.append(name) or 7),
+    )
+    client = make_client(runner=_blocking)
+    _stage(client, "mydocs")
+    job_id = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers()).json()["job_id"]
+
+    res = client.post(f"/ingest/jobs/{job_id}/cancel", headers=_headers())
+    gate.set()
+
+    assert res.status_code == 202
+    assert cancelled and cancelled[0].endswith("mydocs")
+    snapshot = _await_terminal(client, job_id)
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["error"] is None
+
+
+def test_cancel_is_404_cross_owner_and_409_once_finished(client: TestClient) -> None:
+    """Existence never leaks, and a finished run has nothing to stop."""
+    _stage(client, "mydocs", user="alice")
+    job_id = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers("alice")).json()["job_id"]
+
+    assert client.post(f"/ingest/jobs/{job_id}/cancel", headers=_headers("bob")).status_code == 404
+    _await_terminal(client, job_id)
+    assert client.post(f"/ingest/jobs/{job_id}/cancel", headers=_headers("alice")).status_code == 409
 
 
 def test_job_manager_is_injectable(client: TestClient) -> None:

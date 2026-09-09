@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { Button, Card } from '@infra/ui'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '@/api/client'
-import { createIngestJob, dismissIngestJob, getIngestJob } from '@/api/jobs'
+import { cancelIngestJob, createIngestJob, dismissIngestJob, getIngestJob } from '@/api/jobs'
 import { ingestJobsKey } from '@/hooks/useIngestJobs'
 import { useIngestCompletion } from '@/hooks/useIngestCompletion'
 import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
@@ -24,6 +24,7 @@ const PHASE_BY_STATUS: Record<string, IngestStatus['phase'] | undefined> = {
   queued: 'queued',
   running: 'processing',
   completed: 'complete',
+  cancelled: 'cancelled',
   failed: 'error'
 }
 
@@ -154,7 +155,21 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
     }
   })
 
-  const dismissable = status.phase === 'complete' || status.phase === 'error'
+  // Cancelling is cooperative, so the job stays `running` until it reaches a
+  // checkpoint. The server reports it has been asked to stop, which is what
+  // keeps the button from inviting a second, pointless request — and the
+  // mutation's own pending state covers the gap before the snapshot refreshes.
+  const cancelMutation = useMutation({
+    mutationFn: () => cancelIngestJob(jobId),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['ingest-job', jobId] })
+    }
+  })
+
+  const abortable = status.phase === 'queued' || status.phase === 'processing'
+  const stopping = cancelMutation.isPending || jobQuery.data?.cancel_requested === true
+  const dismissable =
+    status.phase === 'complete' || status.phase === 'error' || status.phase === 'cancelled'
 
   return (
     <div className="space-y-2">
@@ -195,6 +210,22 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
         status.phase !== 'idle' && (
           <>
             <IngestionStatus status={status} />
+            {abortable && (
+              <Button
+                variant="secondary"
+                disabled={stopping}
+                onClick={() => {
+                  // `window.confirm` is this codebase's confirmation (see
+                  // Sidebar.tsx, Report.tsx). Aborting throws away however
+                  // many hours the run has already spent, so it is not a
+                  // click to make by accident.
+                  if (!window.confirm(t('ingest.abort_confirm'))) return
+                  cancelMutation.mutate()
+                }}
+              >
+                {stopping ? t('ingest.abort_stopping') : t('ingest.abort')}
+              </Button>
+            )}
             {dismissable && (
               <Button
                 variant="secondary"
