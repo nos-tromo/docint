@@ -47,11 +47,23 @@ export async function createIngestJob(
   }
 }
 
+/** One file already on the server, as a re-picking client recognises it. */
+export interface StagedFile {
+  /** Path relative to the batch directory — the upload's own `webkitRelativePath`. */
+  name: string
+  bytes: number
+}
+
 /** What the server has staged for a collection, and what it is still reading. */
 export interface StagedBatch {
   collection: string
   files: number
   bytes: number
+  /** Transfers cut off mid-file. Counted, never staged, never ingested. */
+  partial: number
+  entries: StagedFile[]
+  /** True when more files are staged than `entries` lists. */
+  entries_truncated: boolean
   preprocess: { running: number; queued: number }
 }
 
@@ -60,10 +72,11 @@ export interface StagedBatch {
  *
  * Uploading stages bytes and finalizing queues the job, so a browser that
  * dies between the two leaves files no job accounts for — and, before this,
- * nothing on screen to say so.
+ * nothing on screen to say so. The named entries are what let a re-picked
+ * folder finish an interrupted upload instead of re-sending it whole.
  *
  * @param collection - The caller's logical collection name.
- * @returns The staged file count, total size, and preprocessing counts.
+ * @returns The staged file count, total size, names, and preprocessing counts.
  */
 export const getStagedBatch = (collection: string) =>
   apiGet<StagedBatch>('/ingest/staged', { collection })

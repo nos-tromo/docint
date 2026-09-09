@@ -1,9 +1,6 @@
-import { useQueryClient } from '@tanstack/react-query'
-import { useMutation, useQuery } from '@tanstack/react-query'
-import { Banner, Button, Card } from '@infra/ui'
-import { createIngestJob, getStagedBatch } from '@/api/jobs'
-import { ingestJobsKey } from '@/hooks/useIngestJobs'
-import { useIngestRunStore } from '@/stores/ingestRun'
+import { useQuery } from '@tanstack/react-query'
+import { Card, WarningIcon } from '@infra/ui'
+import { getStagedBatch } from '@/api/jobs'
 import { formatBytes } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -16,20 +13,24 @@ interface IngestStagedCardProps {
 }
 
 /**
- * The files already on the server for a collection, and a way to ingest them.
+ * What an interrupted upload left on the server, and how to finish it.
  *
  * An upload stages bytes; `POST /ingest/finalize` queues the job. A browser
  * that dies in between — a closed tab, a hung page — leaves a staged batch
  * that no job describes, so every screen showed nothing while the server went
- * on reading the files. This card is what makes that state visible and
- * actionable: finalizing over a staged batch is safe at any time, since
- * ingestion is idempotent by file hash.
+ * on reading the files.
+ *
+ * This card reports that state; it does not offer to ingest it. The only way
+ * to reach it is an upload that stopped early, so what is on disk is a
+ * fraction of what the user picked, and the client no longer knows what the
+ * whole was — an ingest started here would silently index an arbitrary subset.
+ * The recovery is to finish the upload: picking the same folder again sends
+ * only the files listed nowhere here (see `filesNotYetStaged`).
  *
  * @param collection - The collection to describe.
  */
 export function IngestStagedCard({ collection }: IngestStagedCardProps) {
   const t = useT()
-  const qc = useQueryClient()
 
   const staged = useQuery({
     queryKey: ['ingest-staged', collection],
@@ -44,18 +45,6 @@ export function IngestStagedCard({ collection }: IngestStagedCardProps) {
     }
   })
 
-  const finalize = useMutation({
-    mutationFn: async () => {
-      const { ner, hate } = useIngestRunStore.getState()
-      return createIngestJob({ collection, ner, hate_speech: hate })
-    },
-    onSuccess: ({ job_id }) => {
-      useIngestRunStore.getState().trackJob(job_id, collection)
-      void qc.invalidateQueries({ queryKey: ingestJobsKey })
-      void qc.invalidateQueries({ queryKey: ['ingest-staged', collection] })
-    }
-  })
-
   const data = staged.data
   if (!data || data.files === 0) return null
 
@@ -63,9 +52,10 @@ export function IngestStagedCard({ collection }: IngestStagedCardProps) {
   const working = running + queued > 0
 
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3 border-[var(--status-amber-fg)]/40">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-sm text-foreground">
+        <span className="flex items-center gap-2 text-sm text-[var(--status-amber-fg)]">
+          <WarningIcon className="size-4 shrink-0" />
           {t('ingest.staged_title', { collection })}
         </span>
         <span className="tabular-nums text-xs text-muted-foreground">
@@ -73,22 +63,17 @@ export function IngestStagedCard({ collection }: IngestStagedCardProps) {
         </span>
       </div>
 
+      <p className="text-sm text-[var(--status-amber-fg)]">{t('ingest.staged_incomplete')}</p>
+
+      {data.partial > 0 && (
+        <p className="text-xs text-muted-foreground">{t('ingest.staged_partial')}</p>
+      )}
+
       <p className="text-xs text-muted-foreground">
         {working
           ? t('ingest.staged_preprocessing', { running, queued })
           : t('ingest.staged_idle')}
       </p>
-
-      <Button
-        variant="secondary"
-        className="w-full"
-        onClick={() => finalize.mutate()}
-        disabled={finalize.isPending}
-      >
-        {finalize.isPending ? t('ingest.busy') : t('ingest.staged_ingest')}
-      </Button>
-
-      {finalize.isError && <Banner variant="danger">{t('ingest.failed_default')}</Banner>}
     </Card>
   )
 }

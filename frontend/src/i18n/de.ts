@@ -236,11 +236,19 @@ export const de: Strings = {
   'ingest.caption': 'Dokumente hochladen und indexieren',
   'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
   'ingest.clear_files': 'Auswahl leeren',
-  'ingest.staged_title': 'Bereits hochgeladen nach „{collection}“',
+  'ingest.staged_title': 'Abgebrochener Upload nach „{collection}“',
   'ingest.staged_idle': 'Diese Dateien liegen auf dem Server, es läuft aber keine Verarbeitung dafür.',
   'ingest.staged_preprocessing':
     'Der Server liest diese Dateien noch: {running} laufend, {queued} wartend.',
-  'ingest.staged_ingest': 'Diese Dateien verarbeiten',
+  'ingest.staged_incomplete':
+    'Dieser Upload wurde nie abgeschlossen, der Datenbestand ist daher vermutlich unvollständig. Denselben Ordner erneut auswählen und den Import starten: Alles hier Aufgeführte wird übersprungen, es werden nur die fehlenden Dateien gesendet.',
+  'ingest.staged_partial':
+    'Eine Übertragung wurde mitten in der Datei abgebrochen. Diese Datei wurde verworfen und wird erneut gesendet.',
+  'ingest.upload_dont_leave_title': 'Diesen Tab nicht neu laden oder schließen',
+  'ingest.upload_dont_leave':
+    'Der Upload läuft in diesem Tab. Beim Verlassen bricht er an Ort und Stelle ab — die Seite kann ihn nicht selbst fortsetzen, da sie nach einem Neuladen nicht erneut auf die Dateien zugreifen kann. Sollte es doch passieren: denselben Ordner nochmals auswählen, bereits übertragene Dateien werden nicht erneut gesendet.',
+  'ingest.upload_resumed':
+    '{count} Dateien lagen bereits auf dem Server und wurden nicht erneut gesendet.',
   'ingest.files_too_many':
     'Zu viele Dateien für eine Einzelauflistung. Zum Neubeginn die Auswahl leeren.',
   'ingest.button': 'Importieren',

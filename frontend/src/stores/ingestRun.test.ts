@@ -13,10 +13,22 @@ vi.mock('@/api/ingest', () => ({
 }))
 
 const createIngestJob = vi.fn()
+const getStagedBatch = vi.fn()
 vi.mock('@/api/jobs', () => ({
   createIngestJob: (...args: unknown[]) => createIngestJob(...args),
+  getStagedBatch: (...args: unknown[]) => getStagedBatch(...args),
   INGEST_JOB_EVENTS_PATH: '/ingest/jobs/events'
 }))
+
+const stagedBatch = (entries: { name: string; bytes: number }[]) => ({
+  collection: 'mydocs',
+  files: entries.length,
+  bytes: entries.reduce((n, e) => n + e.bytes, 0),
+  partial: 0,
+  entries,
+  entries_truncated: false,
+  preprocess: { running: 0, queued: 0 }
+})
 
 const file = (name: string) => new File(['x'], name, { type: 'text/plain' })
 
@@ -26,6 +38,9 @@ beforeEach(() => {
 
   createIngestJob.mockReset()
   createIngestJob.mockResolvedValue({ job_id: 'job-1', adopted: false })
+
+  getStagedBatch.mockReset()
+  getStagedBatch.mockResolvedValue(stagedBatch([]))
 
   streamIngestUploadBatched.mockReset()
   // Default: a clean single-file, single-batch success. Tests exercising a
@@ -312,5 +327,74 @@ describe('useIngestRunStore — tracking several jobs', () => {
     ])
     expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-0'])
     expect(useIngestRunStore.getState().ner).toBe(true)
+  })
+})
+
+describe('useIngestRunStore — finishing an interrupted upload', () => {
+  it('sends only the files the server does not already hold', async () => {
+    // A reload cannot resume the transfer — the page cannot read the picked
+    // files again — so the recovery is picking the folder once more. That is
+    // only bearable if the gigabytes that already arrived are not re-sent.
+    getStagedBatch.mockResolvedValue(stagedBatch([{ name: 'a.txt', bytes: 1 }]))
+    const s = useIngestRunStore.getState()
+    s.setCollection('mydocs')
+    s.addFiles([file('a.txt'), file('b.txt')])
+
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    const sent = streamIngestUploadBatched.mock.calls[0][1] as File[]
+    expect(sent.map((f) => f.name)).toEqual(['b.txt'])
+    expect(useIngestRunStore.getState().alreadyStaged).toBe(1)
+  })
+
+  it('re-sends a file the user has replaced since', async () => {
+    // Name alone would skip it, and the new version would never be indexed.
+    getStagedBatch.mockResolvedValue(stagedBatch([{ name: 'a.txt', bytes: 999 }]))
+    const s = useIngestRunStore.getState()
+    s.setCollection('mydocs')
+    s.addFiles([file('a.txt')])
+
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    const sent = streamIngestUploadBatched.mock.calls[0][1] as File[]
+    expect(sent.map((f) => f.name)).toEqual(['a.txt'])
+  })
+
+  it('queues the job without uploading when every file already arrived', async () => {
+    // Exactly what a reload leaves behind when the transfer finished but
+    // finalize never ran — the state the staged card reports.
+    getStagedBatch.mockResolvedValue(stagedBatch([{ name: 'a.txt', bytes: 1 }]))
+    const s = useIngestRunStore.getState()
+    s.setCollection('mydocs')
+    s.addFiles([file('a.txt')])
+
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    expect(streamIngestUploadBatched).not.toHaveBeenCalled()
+    expect(createIngestJob).toHaveBeenCalledWith({
+      collection: 'mydocs',
+      ner: false,
+      hate_speech: false
+    })
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-1', collection: 'mydocs' }
+    ])
+    expect(useIngestRunStore.getState().files).toEqual([])
+  })
+
+  it('uploads everything when the server cannot say what it holds', async () => {
+    // Fail-soft: the skip is an optimisation over what always happened, and
+    // an unanswerable question must not stop a run.
+    getStagedBatch.mockRejectedValue(new Error('down'))
+    const s = useIngestRunStore.getState()
+    s.setCollection('mydocs')
+    s.addFiles([file('a.txt')])
+
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    expect((streamIngestUploadBatched.mock.calls[0][1] as File[]).map((f) => f.name)).toEqual([
+      'a.txt'
+    ])
+    expect(useIngestRunStore.getState().alreadyStaged).toBe(0)
   })
 })

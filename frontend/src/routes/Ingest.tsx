@@ -12,6 +12,7 @@ import { IngestionStatus } from '@/components/ingest/IngestionStatus'
 import { IngestJobList } from '@/components/ingest/IngestJobList'
 import { IngestStagedCard } from '@/components/ingest/IngestStagedCard'
 import { useDebounced } from '@/hooks/useDebounced'
+import { useUnloadGuard } from '@/hooks/useUnloadGuard'
 import { formatBytes } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -72,6 +73,12 @@ export function Ingest() {
   const uploadStatus = run.uploadStatus
 
   const busy = run.uploading
+
+  // The transfer lives in this tab and cannot be resumed from a reloaded
+  // page, which cannot read the picked files again. The browser's own prompt
+  // is the only thing that still prevents the loss; the banner below says
+  // what the prompt is not allowed to.
+  useUnloadGuard(busy)
 
   // Files already on the server are only worth reporting when nothing else
   // in this browser describes them better: a picked selection, an upload in
@@ -199,6 +206,19 @@ export function Ingest() {
         </Card>
 
         <div className="min-w-0 space-y-4">
+          {busy && (
+            <Banner variant="danger" role="alert">
+              <p className="font-semibold">{t('ingest.upload_dont_leave_title')}</p>
+              <p className="mt-1">{t('ingest.upload_dont_leave')}</p>
+            </Banner>
+          )}
+
+          {run.alreadyStaged > 0 && (
+            <p className="text-sm text-muted-foreground">
+              {t('ingest.upload_resumed', { count: run.alreadyStaged })}
+            </p>
+          )}
+
           {showStaged && <IngestStagedCard collection={stagedCollection} />}
 
           {uploadStatus.warnings.length > 0 && (

@@ -227,11 +227,19 @@ export const en = {
   'ingest.caption': 'Upload and index documents',
   'ingest.drop_empty': 'Nothing to add — that drop contained no files.',
   'ingest.clear_files': 'Clear selection',
-  'ingest.staged_title': 'Already uploaded to “{collection}”',
+  'ingest.staged_title': 'Interrupted upload to “{collection}”',
   'ingest.staged_idle': 'These files are on the server but no ingestion is running for them.',
   'ingest.staged_preprocessing':
     'The server is still reading these files: {running} in progress, {queued} waiting.',
-  'ingest.staged_ingest': 'Ingest these files',
+  'ingest.staged_incomplete':
+    'This upload never finished, so the batch is probably incomplete. Pick the same folder again and start the ingest: everything listed here is skipped, only the missing files are sent.',
+  'ingest.staged_partial':
+    'One transfer was cut off mid-file. That file was discarded and will be sent again.',
+  'ingest.upload_dont_leave_title': 'Do not reload or close this tab',
+  'ingest.upload_dont_leave':
+    'The upload is running in this tab. Leaving stops it where it stands — the page cannot resume on its own, because it cannot read your files again after a reload. If it does happen, pick the same folder once more: files that already arrived are not sent twice.',
+  'ingest.upload_resumed':
+    '{count} files were already on the server and were not sent again.',
   'ingest.files_too_many':
     'Too many files to list one by one. Clear the selection to start over.',
   'ingest.button': 'Ingest',

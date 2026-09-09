@@ -102,19 +102,43 @@ The drain line is the one that matters: without it a finished batch and a
 stalled one look identical from the log, because in both cases the model
 calls simply stop appearing.
 
-### A staged batch nobody finalized
+### An upload interrupted before finalize
 
 Uploading stages bytes; `POST /ingest/finalize` queues the job. A browser that
 dies in between leaves a staged batch that no job describes, so nothing on
 screen accounted for it — while the server went on preprocessing the files.
 
-`GET /ingest/staged?collection=<logical>` reports what is on disk for a
-collection and what the pool still holds for it, and the Ingest screen shows
-that as a card with an **Ingest these files** button whenever the browser has
-nothing better to say about the collection (no picked selection, no upload in
-flight, no job it queued itself). Finalizing over a staged batch is safe at
-any time: ingestion is idempotent by file hash, so files already ingested are
-skipped and only the remainder costs anything.
+**Leaving the page during an upload is destructive and cannot be made
+otherwise.** The transfer runs in the tab, and a reloaded page cannot re-read
+the user's files — the File System Access API is not available to it. So the
+Ingest screen registers a `beforeunload` guard while uploading (the browser's
+own confirm prompt, whose wording no page may set) and carries a warning of
+its own saying what the prompt cannot.
+
+What the server does provide is a way to *finish* an interrupted upload
+instead of repeating it:
+
+- **A file is staged whole or not at all.** `ingest_upload` writes to
+  `<name>.part` and renames onto the final name after the last chunk, so an
+  aborted request leaves only a `.part`. `describe_inputs` counts those as
+  `partial` and excludes them from everything else — written straight to its
+  final path, a truncated file is indistinguishable from a whole one, and the
+  run banner, the staged report and the readers all counted it as an input.
+- **`GET /ingest/staged?collection=<logical>`** reports what is on disk, what
+  the pool still holds, how many transfers were cut off, and the staged
+  relative paths with their sizes (up to `STAGED_NAME_LIMIT`).
+- **Re-picking the same folder resumes.** `stores/ingestRun.ts::start` asks
+  that endpoint first and uploads only the files the server does not already
+  hold, matching on name *and* size so a file the user has since replaced is
+  still sent. When it holds all of them — an upload that finished but never
+  finalized — the job is queued with no transfer at all. The lookup is
+  fail-soft: an unanswerable question uploads everything, as before.
+
+The Ingest screen's staged card reports that state; it does **not** offer to
+ingest it. The only way to reach a staged-but-unfinalized batch is an upload
+that stopped early, so what is on disk is an arbitrary fraction of what the
+user picked and the client no longer knows what the whole was. A button there
+silently indexed that fraction.
 
 An image or keyframe stored before a social export's manifest arrived carries
 no posting link, so the linker's cache hit **re-upserts** such a point with

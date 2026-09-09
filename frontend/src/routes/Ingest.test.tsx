@@ -426,6 +426,57 @@ describe('Ingest — several runs at once', () => {
     expect(spy.fileListRenders).toBe(before)
   })
 
+  it('warns loudly against leaving while an upload is running', async () => {
+    // A reload stops the transfer where it stands and the page cannot resume
+    // it — it can no longer read the picked files. The browser's own prompt
+    // may carry no wording of ours, so the screen has to say it.
+    renderIn(<Ingest />)
+    expect(screen.queryByText(/Do not reload/i)).not.toBeInTheDocument()
+
+    act(() => {
+      useIngestRunStore.setState({ uploading: true })
+    })
+
+    expect(await screen.findByText(/Do not reload or close this tab/i)).toBeInTheDocument()
+  })
+
+  it('asks the browser to confirm a reload only while uploading', async () => {
+    const added: string[] = []
+    const removed: string[] = []
+    const addSpy = vi
+      .spyOn(window, 'addEventListener')
+      .mockImplementation(((type: string) => void added.push(type)) as typeof window.addEventListener)
+    const removeSpy = vi
+      .spyOn(window, 'removeEventListener')
+      .mockImplementation(((type: string) => void removed.push(type)) as typeof window.removeEventListener)
+
+    renderIn(<Ingest />)
+    expect(added).not.toContain('beforeunload')
+
+    act(() => {
+      useIngestRunStore.setState({ uploading: true })
+    })
+    await waitFor(() => expect(added).toContain('beforeunload'))
+
+    act(() => {
+      useIngestRunStore.setState({ uploading: false })
+    })
+    await waitFor(() => expect(removed).toContain('beforeunload'))
+
+    addSpy.mockRestore()
+    removeSpy.mockRestore()
+  })
+
+  it('says how much of a re-picked folder the server already had', async () => {
+    renderIn(<Ingest />)
+
+    act(() => {
+      useIngestRunStore.setState({ alreadyStaged: 812 })
+    })
+
+    expect(await screen.findByText(/812 files were already on the server/i)).toBeInTheDocument()
+  })
+
   it('renders one card per tracked job, newest first', async () => {
     track('job-1', 'first')
     track('job-2', 'second')
