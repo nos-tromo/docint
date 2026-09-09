@@ -62,6 +62,14 @@ describe('isFinishedCard', () => {
     expect(isFinishedCard(entry, {})).toBe(true)
   })
 
+  it('counts a run stopped before this tab attached', () => {
+    // Its terminal frame went to whichever browser stopped it; here the
+    // snapshot is the only account, and a card nothing counts as finished
+    // cannot be cleared with the rest.
+    const entry = { jobId: 'job-1', collection: 'x', listItem: snapshot('job-1', { status: 'cancelled' }) }
+    expect(isFinishedCard(entry, {})).toBe(true)
+  })
+
   it('leaves a running job alone', () => {
     const entry = { jobId: 'job-1', collection: 'x', listItem: snapshot('job-1') }
     expect(isFinishedCard(entry, {})).toBe(false)
