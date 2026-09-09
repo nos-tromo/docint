@@ -1488,3 +1488,62 @@ def test_prefetch_submits_the_sweeps_images_but_not_the_linkers(
 
     assert pipeline._prefetch_images(pool=recording_pool) == 1
     assert submitted == [(loose, "col", "known-hash")]
+
+
+def _sweep_pipeline(tmp_path: Path, files: list[Path]) -> tuple[DocumentIngestionPipeline, list[str]]:
+    """A pipeline whose generic sweep reads *files* through a no-op streaming reader.
+
+    Args:
+        tmp_path (Path): The batch directory.
+        files (list[Path]): The reader's input files.
+
+    Returns:
+        tuple[DocumentIngestionPipeline, list[str]]: The pipeline and the list
+        its progress callback appends to.
+    """
+    reported: list[str] = []
+    pipeline, _ = _make_pipeline(tmp_path, lambda text: ([], []))
+    pipeline.progress_callback = reported.append
+    pipeline.streaming_readers_enabled = True
+    pipeline.dir_reader = cast(
+        Any,
+        SimpleNamespace(
+            input_files=files,
+            file_extractor={".png": SimpleNamespace(iter_documents=lambda path, extra_info=None: [])},
+            file_metadata=lambda name: {},
+            _exclude_metadata=lambda docs: docs,
+        ),
+    )
+    return pipeline, reported
+
+
+def test_generic_sweep_reports_how_many_files_it_has_read(tmp_path: Path) -> None:
+    """The sweep is where a batch of images spends its hours, and it said nothing at all.
+
+    With no counter the ingest card had no stage and no task to render, so it
+    showed "Working…" for the whole run — the state a 12k-file batch sat in.
+    """
+    files = [tmp_path / "a.png", tmp_path / "b.png", tmp_path / "claimed.png"]
+    for path in files:
+        path.write_bytes(b"x")
+    pipeline, reported = _sweep_pipeline(tmp_path, files)
+    pipeline.social_link_consumed = {files[2]}
+
+    list(pipeline._iter_loaded_documents())
+
+    # The claimed file is the linker's, so it is neither read nor counted.
+    assert reported == ["Reading files: 1/2 files read", "Reading files: 2/2 files read"]
+
+
+def test_generic_sweep_progress_names_no_file(tmp_path: Path) -> None:
+    """The log throttle keys on the digit-masked message, so a filename would defeat it.
+
+    One line per file is tolerable at PDF counts and not at 12k images.
+    """
+    path = tmp_path / "unmistakable-name.png"
+    path.write_bytes(b"x")
+    pipeline, reported = _sweep_pipeline(tmp_path, [path])
+
+    list(pipeline._iter_loaded_documents())
+
+    assert reported and all("unmistakable-name" not in line for line in reported)

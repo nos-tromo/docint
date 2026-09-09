@@ -5,6 +5,7 @@ import sys
 import time
 import types
 from collections.abc import Iterator
+from concurrent.futures import Future
 from typing import Any
 
 import pytest
@@ -155,12 +156,18 @@ def recording_pool() -> Any:
 
         @override
         def submit(self, key: str, fn: Any) -> Any:
-            """Run *fn* now (once per key) and return a future-like holding its value."""
+            """Run *fn* now (once per key) and return a settled future holding its value.
+
+            A real :class:`~concurrent.futures.Future`, not a stand-in:
+            ``run_all`` passes what this returns to ``as_completed``, which
+            only accepts the real thing.
+            """
             self.keys.append(key)
             if key not in self.results:
                 self.results[key] = fn()
-            value = self.results[key]
-            return types.SimpleNamespace(result=lambda timeout=None: value)
+            future: Future[Any] = Future()
+            future.set_result(self.results[key])
+            return future
 
         @override
         def run(self, key: str, fn: Any) -> Any:

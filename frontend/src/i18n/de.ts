@@ -540,6 +540,10 @@ export const de: Strings = {
   // ingest stage/task label mapping (LABEL_KEY-style, mirrors hate.category_*)
   'ingest.stage_processing_pdfs': 'PDFs werden verarbeitet',
   'ingest.task_hate_detection': 'Hatespeech-Erkennung',
+  'ingest.task_reading_files': 'Dateien werden gelesen',
+  'ingest.task_transcribing_media': 'Audio und Video werden transkribiert',
+  'ingest.task_linking_images': 'Bilder werden Beiträgen zugeordnet',
+  'ingest.task_embedding': 'Einbettung und Speicherung',
   'ingest.stage_progress': '{current} von {total}',
 
   // document-format unit words (documentFormat.ts)

@@ -432,3 +432,30 @@ def test_cache_hit_of_a_standalone_clip_relinks_nothing(tmp_path: Path) -> None:
     ).run([_clip(clip)])
 
     assert images.relink_calls == []
+
+
+def test_reports_one_counter_per_clip(tmp_path: Path) -> None:
+    """A clip is minutes of Nextext, so a batch of them is the run's longest silence.
+
+    Both a cache hit and a round trip count: the bar measures transcripts in
+    hand, not calls made.
+    """
+    clips = []
+    for name in ("a.mp4", "b.mp4"):
+        path = tmp_path / name
+        path.write_bytes(b"x")
+        clips.append(_clip(path))
+    reported: list[str] = []
+
+    MediaTranscriber(
+        _FakeImages(),
+        _FakeNextext(NextextResult(status="error")),
+        target_collection="c",
+        manifest=None,
+        progress_callback=reported.append,
+    ).run(clips)
+
+    assert reported == [
+        "Transcribing media: 1/2 clips processed",
+        "Transcribing media: 2/2 clips processed",
+    ]

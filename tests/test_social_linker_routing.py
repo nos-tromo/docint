@@ -829,3 +829,20 @@ def test_linked_images_go_through_the_pool_after_joining_their_loose_task(tmp_pa
     # collection name can contain.
     assert all(collection_of_key(key) == "c" for key in link_keys)
     assert len([j for j in recording_pool.joins if j.startswith("image#c#")]) == len(service.images)
+
+
+def test_linked_images_report_their_own_progress(tmp_path: Path, recording_pool: Any) -> None:
+    """An export of a few thousand images spent this whole pass saying nothing."""
+    _write_export(tmp_path)
+    reported: list[str] = []
+
+    SocialLinker(
+        image_service=_FakeImageService(),
+        nextext_client=_CountingNextext(),
+        target_collection="c",
+        pool=recording_pool,
+        progress_callback=reported.append,
+    ).run(tmp_path)
+
+    linked = [line for line in reported if line.startswith("Linking images:")]
+    assert linked and linked[-1].endswith(f"{len(linked)}/{len(linked)} images linked")

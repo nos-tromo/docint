@@ -87,8 +87,24 @@ const MAX_RETAINED_WARNINGS = 100
 
 const RE_STAGE = /^Core pipeline processing PDF \((\d+)\/(\d+)\): (.+)$/
 const RE_INDEXED = /^Core pipeline indexed (\d+) chunks: (.+)$/
-const RE_ENTITIES = /^Extracting entities:\s*(\d+)\/(\d+) chunks processed$/
-const RE_HATE = /^Detecting hate speech:\s*(\d+)\/(\d+) chunks processed$/
+
+/**
+ * Every counted stage the backend reports, in the order they are tried.
+ *
+ * All of them share one message shape — `Label: n/total unit processed` — and
+ * all render through the same task bars, so adding a stage is adding a line
+ * here. Before this only the two enrichment counters were recognised, and a
+ * batch of images or social media (which reaches neither) left the card on
+ * "Working…" for the length of the run.
+ */
+const TASK_PATTERNS: readonly { re: RegExp; key: string; label: string }[] = [
+  { re: /^Extracting entities:\s*(\d+)\/(\d+) chunks processed$/, key: 'entities', label: 'Entities' },
+  { re: /^Detecting hate speech:\s*(\d+)\/(\d+) chunks processed$/, key: 'hate', label: 'Hate detection' },
+  { re: /^Reading files:\s*(\d+)\/(\d+) files read$/, key: 'reading', label: 'Reading files' },
+  { re: /^Transcribing media:\s*(\d+)\/(\d+) clips processed$/, key: 'media', label: 'Transcribing media' },
+  { re: /^Linking images:\s*(\d+)\/(\d+) images linked$/, key: 'images', label: 'Linking images' },
+  { re: /^Embedding and storing:\s*(\d+)\/(\d+) batches processed$/, key: 'embedding', label: 'Embedding' }
+]
 
 /**
  * Parse a free-form `ingestion_progress.message` payload into a structured
@@ -129,25 +145,16 @@ export function parseProgressMessage(message: string): ParsedProgress {
     }
   }
 
-  const entities = trimmed.match(RE_ENTITIES)
-  if (entities) {
-    return {
-      kind: 'task',
-      taskKey: 'entities',
-      label: 'Entities',
-      current: Number(entities[1]),
-      total: Number(entities[2])
-    }
-  }
-
-  const hate = trimmed.match(RE_HATE)
-  if (hate) {
-    return {
-      kind: 'task',
-      taskKey: 'hate',
-      label: 'Hate detection',
-      current: Number(hate[1]),
-      total: Number(hate[2])
+  for (const { re, key, label } of TASK_PATTERNS) {
+    const counter = trimmed.match(re)
+    if (counter) {
+      return {
+        kind: 'task',
+        taskKey: key,
+        label,
+        current: Number(counter[1]),
+        total: Number(counter[2])
+      }
     }
   }
 
@@ -187,29 +194,34 @@ export function progressKind(ev: IngestEvent): string | null {
 }
 
 /**
- * Return whether a progress event is one of the enrichment counters
- * (`Extracting entities` / `Detecting hate speech`), the only frames the
- * backend emits interleaved (both stages run from one pool).
+ * Return whether a progress event is one of the counted stages.
+ *
+ * Counters interleave — the two enrichment stages run from one pool, and a
+ * run reports reading, transcription and embedding beside them — so each has
+ * to collapse into its own trailing entry rather than only into the frame
+ * directly behind it. Scoped to counters and nothing else: a per-file frame
+ * carries a filename, and merging two of those by digit-masking alone would
+ * lose one.
  *
  * @param ev - The event to classify.
- * @returns True for an enrichment counter frame.
+ * @returns True for a counter frame.
  */
-function isEnrichmentCounter(ev: IngestEvent): boolean {
+function isCounterFrame(ev: IngestEvent): boolean {
   const message = (ev.data as { message?: unknown })?.message
   if (typeof message !== 'string') return false
-  return RE_ENTITIES.test(message) || RE_HATE.test(message)
+  return parseProgressMessage(message).kind === 'task'
 }
 
 /**
  * Append an event to a log, collapsing a repeat of the previous progress kind
- * in place. The interleaving enrichment counters (entities / hate speech, the
- * only frames the backend alternates) additionally collapse into their most
- * recent same-kind entry within the trailing run of counter frames, so an
- * alternating stream stays at one entry per counter. Any other frame — and
- * any non-progress entry — bounds that scan, which keeps appends O(1) and
- * prevents digit-masking from merging distinct per-file frames (e.g.
- * `indexed 12 chunks: report_v1.pdf` / `indexed 30 chunks: report_v2.pdf`).
- * Keeps the log bounded on long ingests.
+ * in place. Counter frames (entities, hate speech, reading, transcription,
+ * image linking, embedding — every stage the backend reports as `n/total`)
+ * additionally collapse into their most recent same-kind entry within the
+ * trailing run of counter frames, so several interleaving counters stay at
+ * one entry each. Any other frame — and any non-progress entry — bounds that
+ * scan, which keeps appends O(1) and prevents digit-masking from merging
+ * distinct per-file frames (e.g. `indexed 12 chunks: report_v1.pdf` /
+ * `indexed 30 chunks: report_v2.pdf`). Keeps the log bounded on long ingests.
  *
  * @param events - The existing log.
  * @param next - The event to append.
@@ -218,14 +230,14 @@ function isEnrichmentCounter(ev: IngestEvent): boolean {
 export function appendCollapsedEvent(events: IngestEvent[], next: IngestEvent): IngestEvent[] {
   const nextKind = progressKind(next)
   if (nextKind) {
-    const scanAcrossCounters = isEnrichmentCounter(next)
+    const scanAcrossCounters = isCounterFrame(next)
     for (let i = events.length - 1; i >= 0; i -= 1) {
       if (progressKind(events[i]) === nextKind) {
         const out = events.slice()
         out[i] = next
         return out
       }
-      if (!scanAcrossCounters || !isEnrichmentCounter(events[i])) break
+      if (!scanAcrossCounters || !isCounterFrame(events[i])) break
     }
   }
   return [...events, next]
@@ -358,6 +370,13 @@ export function deriveIngestStatus(
       case 'ingestion_started': {
         status.phase = 'processing'
         status.collection = strOf(d.collection) ?? status.collection
+        // The server's own count of what is staged. A client that attached
+        // late — a reload, a second tab — never saw the upload leg, so this
+        // is the only total it can have; assigned rather than accumulated,
+        // since it counts the whole batch on disk and the upload leg counted
+        // the same files.
+        const total = numOf(d.total_files)
+        if (total !== undefined) status.totalFiles = total
         status.uploadingFile = undefined
         status.uploadingBytes = undefined
         status.uploadingTotalBytes = undefined

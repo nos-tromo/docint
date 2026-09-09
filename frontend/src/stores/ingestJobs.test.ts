@@ -49,6 +49,27 @@ describe('useIngestJobsStore', () => {
     )
   })
 
+  it('collapses every counted stage, not only the two enrichment ones', () => {
+    // A run reports reading, transcription, linking and embedding beside
+    // entities and hate speech. Collapsing scoped to the enrichment pair
+    // appended one entry per tick for all the others — and every append
+    // re-scans the whole log.
+    const { appendEvent } = useIngestJobsStore.getState()
+    for (let i = 1; i <= 20; i += 1) {
+      appendEvent('job-1', ev(`Reading files: ${i}/20 files read`))
+      appendEvent('job-1', ev(`Transcribing media: ${i}/20 clips processed`))
+      appendEvent('job-1', ev(`Extracting entities: ${i}/20 chunks processed`))
+    }
+
+    const events = useIngestJobsStore.getState().events['job-1']
+    expect(events).toHaveLength(3)
+    expect(events.map((e) => (e.data as { message: string }).message)).toEqual([
+      'Reading files: 20/20 files read',
+      'Transcribing media: 20/20 clips processed',
+      'Extracting entities: 20/20 chunks processed'
+    ])
+  })
+
   it('does not merge per-file frames whose names differ only in digits', () => {
     // Digit masking gives "indexed 12 chunks: report_v1.pdf" and
     // "indexed 30 chunks: report_v2.pdf" the same kind, but they are distinct

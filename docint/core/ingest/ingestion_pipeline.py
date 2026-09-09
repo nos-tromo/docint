@@ -438,6 +438,13 @@ class DocumentIngestionPipeline:
         produces the ``.jsonl`` transcripts consumed here instead), so this
         method simply iterates the reader's accepted input files.
 
+        Reports one counter per file read. This sweep is where an image batch
+        spends its hours — every picture is a caption, an OCR read and a CLIP
+        embedding — and it emitted nothing at all, so the card said "Working…"
+        for the whole run. The message deliberately carries **no filename**:
+        the log throttle keys on the digit-masked message, so a varying name
+        would defeat it and log a line per file.
+
         Yields:
             list[Document]: The loaded documents for each processed file.
         """
@@ -446,9 +453,9 @@ class DocumentIngestionPipeline:
         # Documents, yielded through the shared tail below.
         if self.dir_reader is not None:
             dir_reader = self.dir_reader
-            for input_file in dir_reader.input_files:
-                if Path(input_file) in self.social_link_consumed:
-                    continue
+            pending = [f for f in dir_reader.input_files if Path(f) not in self.social_link_consumed]
+            total_files = len(pending)
+            for read, input_file in enumerate(pending, start=1):
                 ext = input_file.suffix.lower()
                 reader = dir_reader.file_extractor.get(ext) if dir_reader.file_extractor else None
                 if self.streaming_readers_enabled and reader is not None and hasattr(reader, "iter_documents"):
@@ -465,6 +472,8 @@ class DocumentIngestionPipeline:
                         raise_on_error=dir_reader.raise_on_error,
                         fs=dir_reader.fs,
                     )
+                if self.progress_callback:
+                    self.progress_callback(f"Reading files: {read}/{total_files} files read")
                 if docs:
                     yield dir_reader._exclude_metadata(docs)
         if self.social_link_documents:
@@ -998,6 +1007,7 @@ class DocumentIngestionPipeline:
                 timestamp_link_enabled=ingestion_cfg.social_timestamp_link_enabled,
                 text_link_enabled=ingestion_cfg.social_text_link_enabled,
                 pool=get_preprocess_pool(),
+                progress_callback=self.progress_callback,
             ).run(self.data_dir)
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)
@@ -1031,6 +1041,7 @@ class DocumentIngestionPipeline:
                 keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
                 nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
                 pool=get_preprocess_pool(),
+                progress_callback=self.progress_callback,
             )
             result = StandaloneMediaIngestor(
                 transcriber,

@@ -142,6 +142,29 @@ def test_run_all_never_runs_a_finished_task_twice(pool: PreprocessPool) -> None:
     assert sorted(calls) == ["a", "b"]
 
 
+def test_run_all_reports_each_job_as_it_finishes(pool: PreprocessPool) -> None:
+    """A stage that runs for hours has to be able to say how far it has got."""
+    seen: list[tuple[int, int]] = []
+
+    results = preprocess.run_all(
+        pool,
+        [(name, lambda name=name: name) for name in ("a", "b", "c")],
+        on_done=lambda done, total: seen.append((done, total)),
+    )
+
+    assert results == ["a", "b", "c"]
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_run_all_reports_inline_jobs_too(pool: PreprocessPool) -> None:
+    """A task already on a pool worker runs its own jobs inline, and still reports them."""
+    seen: list[tuple[int, int]] = []
+
+    preprocess.run_all(None, [("a", lambda: 1), ("b", lambda: 2)], on_done=lambda d, t: seen.append((d, t)))
+
+    assert seen == [(1, 2), (2, 2)]
+
+
 def test_a_clip_is_not_queued_behind_the_image_backlog() -> None:
     """Media keys run on their own executor, so a blocked image queue never starves Nextext."""
     pool = PreprocessPool(max_workers=1, media_workers=1)

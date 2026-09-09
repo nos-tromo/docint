@@ -670,6 +670,31 @@ a timestamp, so no client clock is trusted, and it is clamped server-side.
 Deriving a second duration on the client is what previously let one run
 report two numbers a second apart.
 
+### What a run reports while it runs
+
+Every long stage reports a counter in one shape — `Label: n/total unit
+processed` — and the SPA renders each as its own bar:
+
+| Message | Stage |
+| --- | --- |
+| `Reading files: n/total files read` | The generic sweep: every document, image and table the readers open. An image batch spends its hours here. |
+| `Transcribing media: n/total clips processed` | Nextext round trips, cache hits included (`MediaTranscriber`). |
+| `Linking images: n/total images linked` | A social export's images, stored and stamped with their posting. |
+| `Extracting entities: n/total chunks processed` | NER. |
+| `Detecting hate speech: n/total chunks processed` | Hate-speech detection. |
+| `Embedding and storing: n/total batches processed` | The persist lane. |
+
+The shape is what the SPA parses (`lib/ingestStatus.ts`, `TASK_PATTERNS`),
+so adding a stage is adding a counter on the server and a line there.
+**These messages deliberately carry no filename**: the log throttle keys on
+the digit-masked message, so a varying name defeats it and logs one line per
+file — tolerable at PDF counts, not at 12k images. The per-PDF and per-file
+messages that do name a file predate this and stay as they are.
+
+The denominator every bar needs after a browser reload rides on the
+`ingestion_started` frame as `total_files`, counted from the staged batch:
+the upload leg's own total lives only in the browser that did the uploading.
+
 ### Progress and the throttle
 
 The pipeline reports progress per chunk, which is written for a client

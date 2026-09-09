@@ -50,6 +50,7 @@ from docint.utils.env_cfg import (
     load_summary_concurrency,
 )
 from docint.utils.logfmt import (
+    InputInventory,
     ProgressLogThrottle,
     describe_inputs,
     format_by_type,
@@ -877,7 +878,29 @@ class IngestJobManager:
             # owner's finished-job backlog is trimmed exactly once per run.
             await self._prune_terminal(state.owner)
 
-    async def _log_run_banner(self, state: IngestJobState) -> None:
+    async def _inventory(self, state: IngestJobState) -> InputInventory | None:
+        """Inventory a job's staged batch, or ``None`` when it has none.
+
+        The walk runs on a worker thread: ``_run`` is on the event loop, and a
+        network-backed volume must not stall it. Failure is swallowed — this
+        feeds a log line and a progress denominator, neither of which may be
+        able to fail a run.
+
+        Args:
+            state (IngestJobState): The job about to execute.
+
+        Returns:
+            InputInventory | None: What is staged, or ``None`` when there is
+            no batch directory or the walk failed.
+        """
+        if state.batch_dir is None:
+            return None
+        try:
+            return await to_thread.run_sync(describe_inputs, state.batch_dir, INPUT_LIST_LIMIT)
+        except Exception:
+            return None
+
+    def _log_run_banner(self, state: IngestJobState, inventory: InputInventory | None) -> None:
         """Log what a run is about to do, before it starts doing it.
 
         Until now nothing marked a run's beginning in the log at all — the
@@ -889,24 +912,12 @@ class IngestJobManager:
         Every line carries the full ``job_id``, so one ``grep`` reconstructs
         a run even when ``DOCINT_INGEST_CONCURRENCY`` lets two interleave.
 
-        The inventory walk runs on a worker thread: ``_run`` is on the event
-        loop, and a network-backed volume must not stall it. Failure is
-        swallowed — a banner is a log line and must not be able to fail a
-        run.
-
         Args:
             state (IngestJobState): The job about to execute.
+            inventory (InputInventory | None): What is staged, from
+                :meth:`_inventory`; ``None`` when there is nothing to describe.
         """
         label = state.kind.capitalize()
-        try:
-            inventory = (
-                None
-                if state.batch_dir is None
-                else await to_thread.run_sync(describe_inputs, state.batch_dir, INPUT_LIST_LIMIT)
-            )
-        except Exception:
-            inventory = None
-
         if inventory is None:
             logger.info(
                 "{} job started | job_id={} collection={!r}",
@@ -1086,8 +1097,16 @@ class IngestJobManager:
 
             throttle = ProgressLogThrottle(load_logging_env().progress_interval_s)
             names = KIND_EVENTS[state.kind]
-            _emit(names["started"], {"collection": state.logical_name})
-            await self._log_run_banner(state)
+            # The file count rides the started frame because a client that
+            # attaches late — a reload, another tab — has no other source for
+            # it: the upload leg's own total lives in the browser that did the
+            # uploading. Without a denominator every counter renders bare.
+            inventory = await self._inventory(state)
+            started: dict[str, Any] = {"collection": state.logical_name}
+            if inventory is not None:
+                started["total_files"] = inventory.total_files
+            _emit(names["started"], started)
+            self._log_run_banner(state, inventory)
             try:
                 result = await to_thread.run_sync(self._runner, state, _push)
             except Exception:

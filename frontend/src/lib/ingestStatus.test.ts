@@ -61,6 +61,40 @@ describe('parseProgressMessage', () => {
     })
   })
 
+  it('parses every counted stage a run reports, not only enrichment', () => {
+    // These are the stages a large image or social batch actually spends its
+    // hours in. Unparsed, they left the card on "Working…" for the whole run.
+    expect(parseProgressMessage('Reading files: 4000/12000 files read')).toEqual({
+      kind: 'task',
+      taskKey: 'reading',
+      label: 'Reading files',
+      current: 4000,
+      total: 12000
+    })
+    expect(parseProgressMessage('Transcribing media: 3/40 clips processed')).toEqual({
+      kind: 'task',
+      taskKey: 'media',
+      label: 'Transcribing media',
+      current: 3,
+      total: 40
+    })
+    expect(parseProgressMessage('Linking images: 90/500 images linked')).toEqual({
+      kind: 'task',
+      taskKey: 'images',
+      label: 'Linking images',
+      current: 90,
+      total: 500
+    })
+    // Emitted by the backend since before any of this, and discarded here.
+    expect(parseProgressMessage('Embedding and storing: 2/9 batches processed')).toEqual({
+      kind: 'task',
+      taskKey: 'embedding',
+      label: 'Embedding',
+      current: 2,
+      total: 9
+    })
+  })
+
   it('returns kind=unknown for unparseable input without throwing', () => {
     expect(() => parseProgressMessage('utterly unknown payload')).not.toThrow()
     expect(parseProgressMessage('utterly unknown payload')).toEqual({
@@ -288,6 +322,16 @@ describe('deriveIngestStatus', () => {
     expect(status.phase).toBe('processing')
     expect(status.uploadingFile).toBeUndefined()
     expect(status.uploadingBytes).toBeUndefined()
+  })
+
+  it('takes the file total from the started frame, so a reattached client has one', () => {
+    // A reload loses the upload leg's own count: the files were picked in a
+    // browser session that is gone. The server counts what is staged and puts
+    // it on the frame every client receives.
+    const status = deriveIngestStatus([
+      { event: 'ingestion_started', data: { collection: 'c', total_files: 12_000 } }
+    ])
+    expect(status.totalFiles).toBe(12_000)
   })
 
   it('captures stage info from "processing PDF" progress', () => {

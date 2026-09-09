@@ -282,6 +282,56 @@ async def test_run_banner_names_every_staged_file_with_size_and_type(
 
 
 @pytest.mark.anyio
+async def test_started_frame_carries_the_staged_file_count(tmp_path: Path) -> None:
+    """A client that attached late has no other source for the run's denominator.
+
+    The upload leg's own total lives in the browser that did the uploading, so
+    after a reload every progress bar would render against nothing.
+    """
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (tmp_path / name).write_bytes(b"x")
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path,
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    await _drain(manager, state)
+
+    started = next(frame for frame in state.history() if "ingestion_started" in frame)
+    assert '"total_files": 3' in started
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_started_frame_omits_the_count_when_there_is_no_batch(tmp_path: Path) -> None:
+    """A summary or extract job stages nothing; claiming zero files would be a lie."""
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=None,
+        hybrid=None,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+        kind="summary",
+    )
+    await _drain(manager, state)
+
+    started = next(frame for frame in state.history() if "summary_started" in frame)
+    assert "total_files" not in started
+    await manager.stop()
+
+
+@pytest.mark.anyio
 async def test_run_banner_truncates_a_large_batch_but_says_so(
     loguru_caplog_info: LogCaptureFixture,
     tmp_path: Path,

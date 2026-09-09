@@ -27,7 +27,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -240,7 +240,12 @@ class PreprocessPool:
             )
 
 
-def run_all(pool: PreprocessPool | None, jobs: list[tuple[str, Callable[[], T]]]) -> list[T]:
+def run_all(
+    pool: PreprocessPool | None,
+    jobs: list[tuple[str, Callable[[], T]]],
+    *,
+    on_done: Callable[[int, int], None] | None = None,
+) -> list[T]:
     """Run keyed jobs through *pool* — all submitted first, results in order — or inline.
 
     Args:
@@ -248,15 +253,30 @@ def run_all(pool: PreprocessPool | None, jobs: list[tuple[str, Callable[[], T]]]
             one after another on the calling thread (a task already on a pool
             worker must not wait on the pool it occupies).
         jobs (list[tuple[str, Callable[[], T]]]): ``(key, task)`` pairs.
+        on_done (Callable[[int, int], None] | None): Called on the calling
+            thread with ``(completed, total)`` as each job finishes, in
+            completion order. This is how a stage that would otherwise run
+            silently for hours reports itself; it may raise to abort the run.
 
     Returns:
         list[T]: One result per job, in the order given.
     """
     if pool is None:
-        return [task() for _, task in jobs]
+        results: list[T] = []
+        for index, (_, task) in enumerate(jobs, start=1):
+            results.append(task())
+            if on_done is not None:
+                on_done(index, len(jobs))
+        return results
     # Keep the futures: a task that finishes before its turn is evicted, and
     # re-keying it through ``run`` would run it a second time.
     futures = [pool.submit(key, task) for key, task in jobs]
+    if on_done is not None:
+        # Completion order, not submission order: the ordered join below would
+        # hold the counter at zero while everything after the first job
+        # finished. Exceptions stay with the ordered pass, which raises them.
+        for done, _ in enumerate(as_completed(futures), start=1):
+            on_done(done, len(futures))
     return [future.result() for future in futures]
 
 

@@ -528,6 +528,10 @@ export const en = {
   // ingest stage/task label mapping (LABEL_KEY-style, mirrors hate.category_*)
   'ingest.stage_processing_pdfs': 'Processing PDFs',
   'ingest.task_hate_detection': 'Hate detection',
+  'ingest.task_reading_files': 'Reading files',
+  'ingest.task_transcribing_media': 'Transcribing audio and video',
+  'ingest.task_linking_images': 'Linking images to posts',
+  'ingest.task_embedding': 'Embedding and storing',
   'ingest.stage_progress': '{current} of {total}',
 
   // document-format unit words (documentFormat.ts)
