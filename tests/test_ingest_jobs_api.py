@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -332,6 +333,39 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
     # ``stats`` is None here only because the stubbed ingest_docs returns
     # nothing; a real run carries the counters the summary line reports.
     assert result == {"empty": False, "resolution": None, "stats": None}
+
+
+def test_upload_hashes_off_the_event_loop(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hashing reads the whole file back, so on the loop it stalls every other request.
+
+    An 18 GB batch spends minutes that way, and the jobs SSE stream is one of
+    the things that goes quiet while it does.
+    """
+    threads: dict[str, str] = {}
+    real_dest = api_module._safe_relative_dest
+    real_hash = api_module.compute_file_hash
+
+    def record_handler_thread(batch_dir: Path, raw_name: str) -> Path:
+        threads["handler"] = threading.current_thread().name
+        return real_dest(batch_dir, raw_name)
+
+    def record_hash_thread(path: Path) -> str:
+        threads["hash"] = threading.current_thread().name
+        return real_hash(path)
+
+    monkeypatch.setattr(api_module, "_safe_relative_dest", record_handler_thread)
+    monkeypatch.setattr(api_module, "compute_file_hash", record_hash_thread)
+
+    res = client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 200
+    assert "file_saved" in res.text
+    assert threads["hash"] != threads["handler"]
 
 
 def test_upload_refuses_a_collection_name_qdrant_cannot_address(client: TestClient, tmp_path: Path) -> None:

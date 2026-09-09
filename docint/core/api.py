@@ -4774,8 +4774,11 @@ async def ingest_upload(
                         )
 
                 staged_bytes += bytes_written
-                # We calculate hash but don't store the file index anymore
-                file_hash = compute_file_hash(dest)
+                # We calculate hash but don't store the file index anymore.
+                # Off the loop: hashing reads the whole file back, so a large
+                # one stalls every other request — the jobs SSE ping loop
+                # included — for as long as it takes.
+                file_hash = await to_thread.run_sync(compute_file_hash, dest)
                 if load_ingestion_env().ingest_preprocess_on_upload:
                     # The file's heavy stage (PDF layout/OCR, image caption,
                     # transcription) starts now, while the rest of the batch is
