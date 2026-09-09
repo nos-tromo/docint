@@ -78,7 +78,7 @@ the frontend port is published for local development.
 ### `frontend`
 
 - Built from `docker/Dockerfile.frontend`: a multi-stage build that
-  compiles the React SPA with pnpm (`node:20-alpine`) and serves the
+  compiles the React SPA with pnpm (`node:22-alpine`) and serves the
   static bundle via nginx (`nginx:1.27-alpine`) on container port `80`.
 - nginx reverse-proxies API routes to the backend at `backend:8000` over
   `docint-net`, so the backend is never host-published — in dev the SPA is
@@ -185,7 +185,7 @@ Multi-stage build, CPU-only:
 
 ### `docker/Dockerfile.frontend`
 
-Multi-stage build: compiles the React SPA with pnpm on `node:20-alpine`,
+Multi-stage build: compiles the React SPA with pnpm on `node:22-alpine`,
 then serves the static bundle via `nginx:1.27-alpine` on port `80`. nginx
 also reverse-proxies API routes to the backend and honors
 `DOCINT_CLIENT_MAX_BODY_SIZE` for the upload-size limit. The image carries

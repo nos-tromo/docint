@@ -185,8 +185,12 @@ export const useIngestRunStore = create<IngestRunState>()(
         if (!collection || files.length === 0 || uploading) return
         set({ uploading: true, error: null, warnings: [], uploadEvents: [], failedFiles: [] })
 
-        let anySaved = false
-        let failures: BatchFailure[] = []
+        // Both are assigned from the generator's return value below. The catch
+        // returns, so nothing downstream can observe an initial value — and
+        // `no-useless-assignment` (new in eslint:recommended under ESLint 10)
+        // reports one if given.
+        let anySaved: boolean
+        let failures: BatchFailure[]
         let lastEvent: IngestEvent | null = null
         try {
           const stream = streamIngestUploadBatched(collection, files, limitBytes, undefined, t)
