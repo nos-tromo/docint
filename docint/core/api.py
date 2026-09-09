@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import os
 import time
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -90,7 +91,7 @@ from docint.utils.env_cfg import (
     set_offline_env,
 )
 from docint.utils.hashing import compute_file_hash
-from docint.utils.logfmt import describe_inputs, format_bytes
+from docint.utils.logfmt import PARTIAL_UPLOAD_SUFFIX, describe_inputs, format_bytes
 from docint.utils.logger_cfg import init_logger
 from docint.utils.openai_cfg import EmbeddingEndpointError
 from docint.utils.translate_client import translate
@@ -1089,6 +1090,25 @@ class IngestFinalizeIn(IngestIn):
     upload_elapsed_ms: float | None = Field(default=None, ge=0)
 
 
+#: Most staged files ``GET /ingest/staged`` names individually. They exist so
+#: a client can skip what already arrived, so the cost of the cap is only
+#: re-sending some of them — an overwrite, never a wrong result. Sized above
+#: the largest batches seen in practice (~12k files ≈ 500 KB of JSON).
+STAGED_NAME_LIMIT = 50_000
+
+
+class StagedFileOut(BaseModel):
+    """One staged file, as a re-picking client needs to recognise it.
+
+    The size is what makes the recognition safe: a client skips a file it
+    already sent, and name alone would also skip one the user has since
+    replaced.
+    """
+
+    name: str
+    bytes: int
+
+
 class StagedPreprocessOut(BaseModel):
     """How much of a staged batch the preprocessing pool still has in hand."""
 
@@ -1102,11 +1122,19 @@ class StagedBatchOut(BaseModel):
     An upload that never reached ``POST /ingest/finalize`` — a closed tab, a
     hung browser — leaves its files staged with no job to describe them, and
     the ingest screen had no way to know they were there.
+
+    ``entries`` carries the staged relative paths and sizes so a client
+    re-picking the same folder can skip what already arrived; ``partial``
+    counts transfers cut off mid-file, which are staged under a ``.part``
+    name and are not part of ``files``, ``bytes`` or ``entries``.
     """
 
     collection: str
     files: int
     bytes: int
+    partial: int
+    entries: list[StagedFileOut]
+    entries_truncated: bool
     preprocess: StagedPreprocessOut
 
 
@@ -4780,9 +4808,15 @@ async def ingest_upload(
             dest = _safe_relative_dest(batch_dir, upload.filename or "upload")
             dest.parent.mkdir(parents=True, exist_ok=True)
             filename = str(dest.relative_to(batch_dir))
+            # Bytes land beside the final name and are renamed onto it once
+            # the last chunk is in, so a cut-off upload leaves a `.part`
+            # nothing counts as an input. Written straight to `dest`, a
+            # truncated file is indistinguishable from a whole one, and the
+            # staged-batch report called it staged.
+            partial_dest = dest.with_name(dest.name + PARTIAL_UPLOAD_SUFFIX)
             bytes_written = 0
             try:
-                with dest.open("wb") as buffer:
+                with partial_dest.open("wb") as buffer:
                     while True:
                         chunk = await upload.read(1024 * 1024)
                         if not chunk:
@@ -4794,6 +4828,7 @@ async def ingest_upload(
                             {"filename": filename, "bytes_written": bytes_written},
                         )
 
+                os.replace(partial_dest, dest)
                 staged_bytes += bytes_written
                 # We calculate hash but don't store the file index anymore.
                 # Off the loop: hashing reads the whole file back, so a large
@@ -4817,6 +4852,7 @@ async def ingest_upload(
                     },
                 )
             except Exception as exc:
+                partial_dest.unlink(missing_ok=True)
                 logger.opt(exception=exc).error("Error saving uploaded file {}", filename)
                 # `filename` travels as a structured field (client-supplied
                 # name, echoed) so the SPA can validate it against its own
@@ -5096,15 +5132,18 @@ async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
     This is how a run that lost its client becomes visible again. The upload
     stages files and ``POST /ingest/finalize`` queues the job, so a browser
     that dies in between leaves bytes on disk that no job, and therefore no
-    screen, accounts for. Finalizing over them is safe at any time: ingestion
-    is idempotent by file hash.
+    screen, accounts for. The staged names come back with the counts so the
+    client can finish the interrupted upload instead of re-sending it whole:
+    a page cannot re-read the user's files after a reload, but it can skip
+    every file that already arrived once the folder is picked again.
 
     Args:
         request (Request): The incoming request, for principal resolution.
         collection (str): The caller's logical collection name.
 
     Returns:
-        StagedBatchOut: File count, total bytes, and the pool's own counts.
+        StagedBatchOut: File count, total bytes, cut-off transfers, the
+        staged relative paths, and the pool's own counts.
 
     Raises:
         HTTPException: 400 for a blank or unusable name; 404 when the caller
@@ -5114,12 +5153,15 @@ async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
     name = _require_collection_name(collection, context="staged")
     physical = _require_owned_collection(name, principal)
     batch_dir = _resolve_qdrant_src_dir() / physical
-    inventory = await to_thread.run_sync(describe_inputs, batch_dir, 0)
+    inventory = await to_thread.run_sync(describe_inputs, batch_dir, STAGED_NAME_LIMIT)
     running, queued = get_preprocess_pool().inflight(physical)
     return StagedBatchOut(
         collection=name,
         files=inventory.total_files,
         bytes=inventory.total_bytes,
+        partial=inventory.partial,
+        entries=[StagedFileOut(name=f.name, bytes=f.size_bytes) for f in inventory.files],
+        entries_truncated=inventory.omitted > 0,
         preprocess=StagedPreprocessOut(running=running, queued=queued),
     )
 

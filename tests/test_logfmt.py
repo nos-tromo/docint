@@ -168,6 +168,27 @@ def test_describe_inputs_caps_the_listing_but_not_the_totals(tmp_path: Path) -> 
     assert inventory.total_bytes == 1000
 
 
+def test_describe_inputs_counts_partial_uploads_apart_from_the_inputs(tmp_path: Path) -> None:
+    """A `.part` file is an upload cut off mid-transfer, so it is truncated.
+
+    Counted as an input it makes an interrupted batch look complete, which
+    is what let a reload-during-upload pass for a finished one.
+
+    Args:
+        tmp_path (Path): Temporary batch directory.
+    """
+    (tmp_path / "whole.pdf").write_bytes(b"x" * 100)
+    (tmp_path / "cut-off.pdf.part").write_bytes(b"x" * 40)
+
+    inventory = describe_inputs(tmp_path)
+
+    assert inventory.partial == 1
+    assert inventory.total_files == 1
+    assert inventory.total_bytes == 100
+    assert [f.name for f in inventory.files] == ["whole.pdf"]
+    assert inventory.by_type == (("pdf", 1),)
+
+
 def test_describe_inputs_on_a_missing_directory_is_empty_not_an_error(tmp_path: Path) -> None:
     """A banner is a log line; it must never be able to fail a run.
 

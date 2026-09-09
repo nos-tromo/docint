@@ -350,8 +350,80 @@ def test_staged_reports_the_files_no_job_accounts_for(client: TestClient) -> Non
         "collection": "mydocs",
         "files": 1,
         "bytes": len(b"hello"),
+        "partial": 0,
+        "entries": [{"name": "sample.txt", "bytes": len(b"hello")}],
+        "entries_truncated": False,
         "preprocess": {"running": 0, "queued": 0},
     }
+
+
+def test_staged_names_let_a_re_picked_folder_skip_what_arrived(client: TestClient) -> None:
+    """The names are what turns a reload from re-sending 18 GB into finishing the upload.
+
+    A page cannot re-read the user's files after a reload, so the only
+    recovery is picking the folder again — and that is only bearable if the
+    client can tell which files it no longer has to send.
+    """
+    client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files=[
+            ("files", ("shoot/a.txt", b"a", "text/plain")),
+            ("files", ("shoot/nested/b.txt", b"bb", "text/plain")),
+        ],
+        headers=_headers(),
+    )
+
+    body = client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers()).json()
+
+    assert sorted(e["name"] for e in body["entries"]) == ["shoot/a.txt", "shoot/nested/b.txt"]
+    assert {e["name"]: e["bytes"] for e in body["entries"]}["shoot/a.txt"] == 1
+    assert body["entries_truncated"] is False
+
+
+def test_staged_reports_a_cut_off_transfer_and_never_counts_it(client: TestClient, tmp_path: Path) -> None:
+    """A truncated file is not an input, and calling it one is how a partial batch passed as complete."""
+    _stage(client, "mydocs")
+    batch_dir = next(p for p in tmp_path.rglob("*") if p.is_dir() and (p / "sample.txt").exists())
+    (batch_dir / "cut-off.pdf.part").write_bytes(b"%PDF-1.4 truncated")
+
+    body = client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers()).json()
+
+    assert body["partial"] == 1
+    assert body["files"] == 1
+    assert body["bytes"] == len(b"hello")
+    assert [e["name"] for e in body["entries"]] == ["sample.txt"]
+
+
+def test_upload_stages_bytes_under_a_part_name_until_the_last_chunk(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Written straight to its final path, an aborted upload leaves a truncated file.
+
+    Nothing downstream can tell one from a whole file, which is how a
+    reload-during-upload came to look like a complete batch.
+    """
+    seen: list[list[str]] = []
+    real_hash = api_module.compute_file_hash
+
+    def record_names(path: Path) -> str:
+        seen.append(sorted(p.name for p in path.parent.iterdir()))
+        return real_hash(path)
+
+    monkeypatch.setattr(api_module, "compute_file_hash", record_names)
+
+    res = client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 200
+    # By hashing time the rename has happened: the `.part` exists only while
+    # bytes are still arriving.
+    assert seen == [["a.pdf"]]
+    assert not list(tmp_path.rglob("*.part"))
 
 
 def test_staged_is_owner_scoped(client: TestClient) -> None:
