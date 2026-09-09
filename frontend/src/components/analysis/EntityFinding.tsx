@@ -138,9 +138,9 @@ export function EntityFinding({
         )}
         {mentions.length > 0 && (
           <ul className="flex flex-wrap gap-1" aria-label={t('entities.matched_mentions_aria')}>
-            {mentions.map((m, i) => (
+            {mentions.map((m) => (
               <li
-                key={i}
+                key={`${m.text}\u0000${m.type ?? ''}`}
                 className="inline-flex items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]"
               >
                 <span>{m.text}</span>
@@ -166,10 +166,15 @@ export function EntityFinding({
               {translationState.translation ??
                 segments.map((seg, i) =>
                   seg.highlight ? (
-                    <mark key={i} className="bg-yellow-300 text-zinc-950 rounded px-0.5">
+                    <mark
+                      // eslint-disable-next-line @eslint-react/no-array-index-key
+                      key={i}
+                      className="bg-yellow-300 text-zinc-950 rounded px-0.5"
+                    >
                       {seg.text}
                     </mark>
                   ) : (
+                    // eslint-disable-next-line @eslint-react/no-array-index-key
                     <span key={i}>{seg.text}</span>
                   )
                 )}

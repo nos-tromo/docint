@@ -71,7 +71,7 @@ export function EntityGraph({
   // ids are local component state, never sent upstream. A fresh `nodes` array
   // (new fetch, top-K change, merge-mode switch) resets it, so removal never
   // outlives the payload it was applied to.
-  const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(new Set())
+  const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(() => new Set())
   const [prevNodes, setPrevNodes] = useState(nodes)
   if (nodes !== prevNodes) {
     setPrevNodes(nodes)

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect } from 'react'
+import { createContext, use, useEffect } from 'react'
 import { Spinner } from '@infra/ui'
 import { useConfig } from '@/hooks/useConfig'
 import { catalogs, format } from './index'
@@ -24,18 +24,18 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
       </div>
     )
   }
-  return <LanguageContext.Provider value={language}>{children}</LanguageContext.Provider>
+  return <LanguageContext value={language}>{children}</LanguageContext>
 }
 
 export function useLang(): Lang {
-  return useContext(LanguageContext)
+  return use(LanguageContext)
 }
 
 export function useT(): (
   key: keyof Strings,
   vars?: Record<string, string | number>,
 ) => string {
-  const lang = useContext(LanguageContext)
+  const lang = use(LanguageContext)
   return (key, vars) => format(catalogs[lang][key], vars)
 }
 

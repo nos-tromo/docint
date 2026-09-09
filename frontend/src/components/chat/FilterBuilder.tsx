@@ -44,7 +44,7 @@ export function FilterBuilder() {
   const open = useSearchUiStore((state) => state.filtersOpen)
   const setOpen = useSearchUiStore((state) => state.setFiltersOpen)
   const activeCount = s.buildPayload().length
-  const root = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!open) return
@@ -53,7 +53,7 @@ export function FilterBuilder() {
     // clicked underneath reacts. Anything inside the root — trigger included —
     // is left to its own handler.
     const onPointerDown = (e: PointerEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false)
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
     }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
@@ -67,7 +67,7 @@ export function FilterBuilder() {
   }, [open, setOpen])
 
   return (
-    <div className="relative" ref={root}>
+    <div className="relative" ref={rootRef}>
       {/* One list, shared by every custom-rule field input below via `list`.
           Suggests the known reference-metadata filter paths (e.g.
           `reference_metadata.author_id`) without replacing free text — a

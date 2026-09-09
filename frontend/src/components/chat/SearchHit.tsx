@@ -41,10 +41,17 @@ function Highlighted({ text, keywords }: { text: string; keywords: string[] }) {
     <>
       {segments.map((segment, i) =>
         segment.highlight ? (
-          <mark key={i} className="rounded bg-yellow-200/70 px-0.5 text-foreground dark:bg-yellow-500/30">
+          <mark
+            // Highlight runs are positional slices of one immutable string; they never
+            // reorder and hold no state, so the index is the identity.
+            // eslint-disable-next-line @eslint-react/no-array-index-key
+            key={i}
+            className="rounded bg-yellow-200/70 px-0.5 text-foreground dark:bg-yellow-500/30"
+          >
             {segment.text}
           </mark>
         ) : (
+          // eslint-disable-next-line @eslint-react/no-array-index-key
           <span key={i}>{segment.text}</span>
         )
       )}
