@@ -20,9 +20,9 @@ function renderAnalysisInLanguage(lang: 'en' | 'de') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
-      <LanguageContext.Provider value={lang}>
+      <LanguageContext value={lang}>
         <Analysis />
-      </LanguageContext.Provider>
+      </LanguageContext>
     </QueryClientProvider>
   )
 }

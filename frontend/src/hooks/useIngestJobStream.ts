@@ -44,6 +44,9 @@ export function useIngestJobStream(): void {
   const retryNonce = useIngestJobsStore((s) => s.retryNonce)
   useEffect(() => {
     const controller = new AbortController()
+    // Set while the loop sleeps between reconnects; clears the pending timer and
+    // resolves the wait so cleanup need not outlive it.
+    let cancelReconnectWait: (() => void) | undefined
     let cancelled = false
     let reconnects = 0
     // Non-reactive access: this hook is a producer and must not re-render on
@@ -74,7 +77,14 @@ export function useIngestJobStream(): void {
           setStreamLost(true)
           return
         }
-        await new Promise((resolve) => setTimeout(resolve, ingestStreamConfig.reconnectDelayMs))
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, ingestStreamConfig.reconnectDelayMs)
+          cancelReconnectWait = () => {
+            clearTimeout(timer)
+            resolve()
+          }
+        })
+        cancelReconnectWait = undefined
       }
     }
 
@@ -82,6 +92,7 @@ export function useIngestJobStream(): void {
     return () => {
       cancelled = true
       controller.abort()
+      cancelReconnectWait?.()
     }
   }, [retryNonce])
 }

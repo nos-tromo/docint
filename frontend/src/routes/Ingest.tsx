@@ -224,6 +224,9 @@ export function Ingest() {
           {uploadStatus.warnings.length > 0 && (
             <ul className="text-sm text-[var(--status-amber-fg)] space-y-1" role="alert">
               {uploadStatus.warnings.map((w, i) => (
+                // Warnings are plain strings that may legitimately repeat, appended in
+                // order and holding no state — the index is the identity.
+                // eslint-disable-next-line @eslint-react/no-array-index-key
                 <li key={i}>{w}</li>
               ))}
             </ul>

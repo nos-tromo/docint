@@ -242,7 +242,9 @@ export const useIngestRunStore = create<IngestRunState>()(
         // user re-picks the folder, and every file that arrived the first
         // time costs nothing. Fail-soft — if the question cannot be
         // answered, upload everything, which is what always happened before.
-        let pending = files
+        // No initialiser, for the same reason as `anySaved` below: both
+        // branches assign, so `no-useless-assignment` reports one if given.
+        let pending: File[]
         try {
           const staged = await getStagedBatch(collection)
           pending = filesNotYetStaged(files, staged.entries)
@@ -272,8 +274,12 @@ export const useIngestRunStore = create<IngestRunState>()(
         const fileSizes: Record<string, number> = {}
         for (const f of pending) fileSizes[uploadName(f)] = f.size
 
-        let anySaved = false
-        let failures: BatchFailure[] = []
+        // Both are assigned from the generator's return value below. The catch
+        // returns, so nothing downstream can observe an initial value — and
+        // `no-useless-assignment` (new in eslint:recommended under ESLint 10)
+        // reports one if given.
+        let anySaved: boolean
+        let failures: BatchFailure[]
         let lastEvent: IngestEvent | null = null
         try {
           const stream = streamIngestUploadBatched(collection, pending, limitBytes, undefined, t)
