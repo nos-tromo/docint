@@ -549,9 +549,9 @@ export const de: Strings = {
   'ingest.stage_processing_pdfs': 'PDFs werden verarbeitet',
   'ingest.task_hate_detection': 'Hatespeech-Erkennung',
   'ingest.task_reading_files': 'Dateien werden gelesen',
-  'ingest.task_transcribing_media': 'Audio und Video werden transkribiert',
-  'ingest.task_linking_images': 'Bilder werden Beiträgen zugeordnet',
-  'ingest.task_embedding': 'Einbettung und Speicherung',
+  'ingest.task_transcribing_media': 'Audio und Video wird transkribiert',
+  'ingest.task_linking_images': 'Bilder werden Postings zugeordnet',
+  'ingest.task_embedding': 'Embeddings und Speicherung',
   'ingest.stage_progress': '{current} von {total}',
 
   // document-format unit words (documentFormat.ts)
