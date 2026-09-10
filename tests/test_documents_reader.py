@@ -298,4 +298,4 @@ def test_build_submits_every_pdf_before_joining_the_first(
     assert [doc_id for _, _, doc_id in emitted] == hashes
     assert processed == ["a.pdf", "b.pdf"]
     # Both submitted before either is joined, and each exactly once.
-    assert recording_pool.keys == [f"pdf:col:{h}" for h in hashes]
+    assert recording_pool.keys == [f"pdf#col#{h}" for h in hashes]

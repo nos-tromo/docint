@@ -121,6 +121,9 @@ const TERMINAL_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_complete',
   'summary_completed',
   'extract_completed',
+  'ingestion_cancelled',
+  'summary_cancelled',
+  'extract_cancelled',
   'error'
 ])
 

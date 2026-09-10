@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { mergeFiles } from '@infra/ui'
 import { streamIngestUploadBatched, type BatchFailure } from '@/api/ingest'
-import { createIngestJob } from '@/api/jobs'
+import { createIngestJob, getStagedBatch } from '@/api/jobs'
+import { applyIngestEvent, emptyStatus, type IngestStatus } from '@/lib/ingestStatus'
 import type { IngestEvent } from '@/api/types'
 import type { Strings } from '@/i18n'
 
@@ -29,6 +30,32 @@ export interface TrackedJob {
  * server has forgotten the job too.
  */
 const MAX_HANDLED_JOBS = 50
+
+/** The upload's own name for a file — the multipart filename it is sent as. */
+const uploadName = (f: File): string => f.webkitRelativePath || f.name
+
+/**
+ * Drop the files the server already holds, byte for byte.
+ *
+ * This is what makes an interrupted upload finishable. A reloaded page cannot
+ * re-read the user's files, so the only recovery is picking the folder again
+ * — bearable only if the 18 GB that already arrived is not sent a second
+ * time. Size is compared as well as name, so a file the user has since
+ * replaced is still uploaded.
+ *
+ * @param files - The picked selection.
+ * @param staged - What `GET /ingest/staged` reports for the collection.
+ * @returns Only the files the server does not already have.
+ */
+export function filesNotYetStaged(files: File[], staged: { name: string; bytes: number }[]): File[] {
+  // Keys are only ever compared whole, never split, and the size is always a
+  // decimal number — so no two distinct (name, size) pairs can join to the
+  // same string, whatever the name contains. The separator is printable on
+  // purpose: this line held a raw NUL for four commits, which reads as a
+  // space in every terminal and turned the whole file binary to git.
+  const have = new Set(staged.map((e) => `${e.name}|${e.bytes}`))
+  return files.filter((f) => !have.has(`${uploadName(f)}|${f.size}`))
+}
 
 /**
  * The ingest run controller: owns a run from picked files through to a queued
@@ -66,16 +93,29 @@ export interface IngestRunState {
    */
   handledJobIds: string[]
   /**
-   * The upload leg's events, filed under the job that leg produced, so each
-   * job's card can still report what it saved. Transient: a reload loses them
-   * and the card falls back to the server's own progress.
+   * The upload leg's finished status, filed under the job that leg produced,
+   * so each job's card can still report what it saved. Transient: a reload
+   * loses it and the card falls back to the server's own progress.
    */
-  uploadEventsByJob: Record<string, IngestEvent[]>
+  uploadStatusByJob: Record<string, IngestStatus>
   files: File[]
-  /** Events of the upload currently in flight; moved to `uploadEventsByJob`
-   *  the moment that upload's job is queued. */
-  uploadEvents: IngestEvent[]
+  /**
+   * The status of the upload currently in flight; moved to
+   * `uploadStatusByJob` the moment that upload's job is queued.
+   *
+   * A folded status rather than the events that produced it: the upload leg
+   * emits one frame per megabyte plus one per file, so keeping the array and
+   * re-reducing it per frame was quadratic — tens of thousands of frames for
+   * a folder-sized batch, which is enough to hang the tab.
+   */
+  uploadStatus: IngestStatus
   failedFiles: string[]
+  /**
+   * How many of the picked files the server already held, and so were not
+   * sent again. Non-zero means this run finished an earlier, interrupted
+   * upload rather than starting a fresh one.
+   */
+  alreadyStaged: number
   warnings: string[]
   uploading: boolean
   error: string | null
@@ -92,6 +132,10 @@ export interface IngestRunState {
    * No-ops (without touching `error`) when there is no collection, no files,
    * or a run is already in flight — re-entrant callers (e.g. a double click)
    * are safe.
+   *
+   * Files the server already holds are not sent again, so re-picking a folder
+   * finishes an interrupted upload instead of repeating it; when it holds all
+   * of them, the job is queued without uploading anything.
    *
    * @param limitBytes - The server's per-request upload ceiling, forwarded to
    *   `streamIngestUploadBatched`.
@@ -112,18 +156,19 @@ export interface IngestRunState {
    *
    * @param jobId - The server's job id.
    * @param collection - The collection it was queued against.
-   * @param uploadEvents - The upload leg that produced it, if any.
+   * @param uploadStatus - The upload leg that produced it, if any.
    */
-  trackJob: (jobId: string, collection: string, uploadEvents?: IngestEvent[]) => void
-  /** Forget a job: drop it from the list along with its upload events. */
+  trackJob: (jobId: string, collection: string, uploadStatus?: IngestStatus) => void
+  /** Forget a job: drop it from the list along with its upload status. */
   untrackJob: (jobId: string) => void
   reset: () => void
 }
 
 const transient = {
   files: [] as File[],
-  uploadEvents: [] as IngestEvent[],
+  uploadStatus: emptyStatus(),
   failedFiles: [] as string[],
+  alreadyStaged: 0,
   warnings: [] as string[],
   uploading: false,
   error: null as string | null
@@ -137,7 +182,7 @@ export const useIngestRunStore = create<IngestRunState>()(
       hate: false,
       trackedJobs: [],
       handledJobIds: [],
-      uploadEventsByJob: {},
+      uploadStatusByJob: {},
       ...transient,
       setCollection: (collection) => set({ collection }),
       setNer: (ner) => set({ ner }),
@@ -151,23 +196,23 @@ export const useIngestRunStore = create<IngestRunState>()(
             ? s
             : { handledJobIds: [...s.handledJobIds, jobId].slice(-MAX_HANDLED_JOBS) }
         ),
-      trackJob: (jobId, collection, uploadEvents) =>
+      trackJob: (jobId, collection, uploadStatus) =>
         set((s) => ({
           trackedJobs: [
             { job_id: jobId, collection },
             ...s.trackedJobs.filter((j) => j.job_id !== jobId)
           ],
-          uploadEventsByJob: uploadEvents
-            ? { ...s.uploadEventsByJob, [jobId]: uploadEvents }
-            : s.uploadEventsByJob
+          uploadStatusByJob: uploadStatus
+            ? { ...s.uploadStatusByJob, [jobId]: uploadStatus }
+            : s.uploadStatusByJob
         })),
       untrackJob: (jobId) =>
         set((s) => {
-          const uploadEventsByJob = { ...s.uploadEventsByJob }
-          delete uploadEventsByJob[jobId]
+          const uploadStatusByJob = { ...s.uploadStatusByJob }
+          delete uploadStatusByJob[jobId]
           return {
             trackedJobs: s.trackedJobs.filter((j) => j.job_id !== jobId),
-            uploadEventsByJob
+            uploadStatusByJob
           }
         }),
       reset: () =>
@@ -177,13 +222,57 @@ export const useIngestRunStore = create<IngestRunState>()(
           hate: false,
           trackedJobs: [],
           handledJobIds: [],
-          uploadEventsByJob: {},
+          uploadStatusByJob: {},
           ...transient
         }),
       start: async (limitBytes, t) => {
         const { collection, files, ner, hate, uploading } = get()
         if (!collection || files.length === 0 || uploading) return
-        set({ uploading: true, error: null, warnings: [], uploadEvents: [], failedFiles: [] })
+        set({
+          uploading: true,
+          error: null,
+          warnings: [],
+          uploadStatus: emptyStatus(),
+          failedFiles: [],
+          alreadyStaged: 0
+        })
+
+        // Ask what the server already holds and send only the rest. An
+        // interrupted upload is finished this way rather than repeated: the
+        // user re-picks the folder, and every file that arrived the first
+        // time costs nothing. Fail-soft — if the question cannot be
+        // answered, upload everything, which is what always happened before.
+        // No initialiser, for the same reason as `anySaved` below: both
+        // branches assign, so `no-useless-assignment` reports one if given.
+        let pending: File[]
+        try {
+          const staged = await getStagedBatch(collection)
+          pending = filesNotYetStaged(files, staged.entries)
+        } catch {
+          pending = files
+        }
+        const alreadyStaged = files.length - pending.length
+        set({ alreadyStaged })
+
+        if (pending.length === 0) {
+          // Everything is already on the server — the exact state a reload
+          // mid-upload leaves behind once the transfer finished but finalize
+          // never ran. Queue the job over the staged batch directly.
+          try {
+            const { job_id } = await createIngestJob({ collection, ner, hate_speech: hate })
+            get().trackJob(job_id, collection)
+            set({ uploading: false, uploadStatus: emptyStatus(), files: [], failedFiles: [] })
+          } catch {
+            set({ uploading: false, error: t('ingest.failed_default') })
+          }
+          return
+        }
+
+        // Built once, up front: the per-file upload bar needs each picked
+        // file's size, and rebuilding this map per frame would undo the point
+        // of folding each frame in constant time.
+        const fileSizes: Record<string, number> = {}
+        for (const f of pending) fileSizes[uploadName(f)] = f.size
 
         // Both are assigned from the generator's return value below. The catch
         // returns, so nothing downstream can observe an initial value — and
@@ -193,12 +282,12 @@ export const useIngestRunStore = create<IngestRunState>()(
         let failures: BatchFailure[]
         let lastEvent: IngestEvent | null = null
         try {
-          const stream = streamIngestUploadBatched(collection, files, limitBytes, undefined, t)
+          const stream = streamIngestUploadBatched(collection, pending, limitBytes, undefined, t)
           let next = await stream.next()
           while (!next.done) {
             const ev = next.value
             lastEvent = ev
-            set((s) => ({ uploadEvents: [...s.uploadEvents, ev] }))
+            set((s) => ({ uploadStatus: applyIngestEvent(s.uploadStatus, ev, fileSizes) }))
             if (ev.event === 'warning') {
               const message = (ev.data as { message?: unknown }).message
               if (typeof message === 'string') set((s) => ({ warnings: [...s.warnings, message] }))
@@ -215,8 +304,8 @@ export const useIngestRunStore = create<IngestRunState>()(
         }
 
         if (!anySaved) {
-          // The generator's own terminal `error` event (already appended to
-          // `uploadEvents` above) already picked the more actionable message
+          // The generator's own terminal `error` event (already folded into
+          // `uploadStatus` above) already picked the more actionable message
           // — e.g. distinguishing "every file is over the size limit" from a
           // generic rejection. Reuse it instead of recomputing a duplicate,
           // less-specific message here, which is how the two drifted apart.
@@ -233,8 +322,8 @@ export const useIngestRunStore = create<IngestRunState>()(
           // instant `deriveIngestStatus` anchors the card's timer to — so the
           // duration the server ends up logging and echoing back covers the
           // upload leg the user was already watching tick.
-          const uploadEvents = get().uploadEvents
-          const runStartedAt = uploadEvents[0]?.receivedAt
+          const uploadStatus = get().uploadStatus
+          const runStartedAt = uploadStatus.startedAt
           const { job_id } = await createIngestJob({
             collection,
             ner,
@@ -243,13 +332,13 @@ export const useIngestRunStore = create<IngestRunState>()(
               runStartedAt === undefined ? undefined : Date.now() - runStartedAt
           })
           // The upload leg belongs to the job it produced from here on, so
-          // `uploadEvents` is free to describe the *next* upload. Without the
+          // `uploadStatus` is free to describe the *next* upload. Without the
           // handover a second run in the same tab would fold the previous
           // run's log into its own card.
-          get().trackJob(job_id, collection, uploadEvents)
+          get().trackJob(job_id, collection, uploadStatus)
           set({
             uploading: false,
-            uploadEvents: [],
+            uploadStatus: emptyStatus(),
             files: [],
             failedFiles: failures.flatMap((f) => f.files)
           })

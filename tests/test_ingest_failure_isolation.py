@@ -25,6 +25,7 @@ import pytest
 from llama_index.core.schema import TextNode
 from loguru import logger as _loguru_logger
 
+from docint.core.jobs import JobCancelled
 from docint.core.rag import RAG
 from docint.utils.retry import (
     is_hard_ingest_error,
@@ -317,3 +318,34 @@ def test_skip_and_continue_async_path(caplog: pytest.LogCaptureFixture, monkeypa
     assert "failed_ingest_batch" in combined
     assert "Async ingest finished with 1 failed batch" in combined
     _ = persist_calls  # unused for the async path
+
+
+def test_a_cancellation_is_never_skipped_as_a_bad_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip-and-continue is for a bad batch, and an abort is not one.
+
+    Swallowed here it would turn an abort into a run that "completed" with
+    every remaining file marked failed in the manifest — worse than the abort
+    the user asked for, and reported as a success.
+    """
+    yields: list[tuple[list[Any], list[TextNode], set[str]]] = [
+        ([], [_node("ok-1", "h1", "ok-1")], {"h1"}),
+        ([], [_node("stop", "h2", "cancel-me")], set()),
+        ([], [_node("ok-3", "h3", "ok-3")], {"h3"}),
+    ]
+    # fail_fast stays off: that is the configuration a deployment runs, and
+    # the one where the swallow happened.
+    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(monkeypatch, yields, fail_fast=False)
+
+    def _cancel(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
+        persist_calls.append(list(nodes))
+        if any(getattr(n, "node_id", "") == "cancel-me" for n in nodes):
+            raise JobCancelled("job-1")
+
+    monkeypatch.setattr(RAG, "_persist_node_batches", _cancel)
+
+    with pytest.raises(JobCancelled):
+        rag.ingest_docs(Path("/tmp/_unused"), build_query_engine=False)
+
+    # The batch after the abort never ran.
+    assert len(persist_calls) == 2
+    assert fake.closed is True

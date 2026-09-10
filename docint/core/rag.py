@@ -140,6 +140,7 @@ from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.ingest.preprocess import prefetch_batch
 from docint.core.ingest.streaming_executor import overlapped
+from docint.core.jobs import JobCancelled
 from docint.core.ner import (
     EntityMergeMode,
     aggregate_ner_sources,
@@ -6970,8 +6971,17 @@ class RAG:
             mode); otherwise logs the failure with a structured marker,
             marks every in-flight file hash failed in the manifest, and
             records the failure for the end-of-run summary.
+
+            A cancellation is never a batch failure and always propagates:
+            swallowed here it would turn an abort into a run that "completed"
+            with every remaining file marked failed in the manifest, which is
+            a far worse outcome than the abort the user asked for.
+
+            Raises:
+                BaseException: ``exc`` itself, when it is a
+                    :class:`~docint.core.jobs.JobCancelled` or fail-fast is on.
             """
-            if self.ingest_fail_fast:
+            if isinstance(exc, JobCancelled) or self.ingest_fail_fast:
                 raise exc
             failed_for_batch = set(in_flight)
             for fh in failed_for_batch:

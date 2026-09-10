@@ -793,6 +793,9 @@ class SocialLinker:
     # and one the pool is still storing loose is waited on first. ``None``
     # runs inline.
     pool: Any = None
+    # The job's progress channel; an export of a few thousand images spends
+    # this whole pass saying nothing otherwise.
+    progress_callback: Callable[[str], None] | None = None
 
     def _find_tables(self, data_dir: Path) -> tuple[Path | None, Path | None]:
         """Locate the postings table and media manifest anywhere in the tree.
@@ -931,7 +934,7 @@ class SocialLinker:
                         },
                     )
                 )
-        run_all(self.pool, image_jobs)
+        run_all(self.pool, image_jobs, on_done=self._image_progress)
         sub = MediaTranscriber(
             image_service=self.image_service,
             nextext_client=self.nextext_client,
@@ -940,10 +943,16 @@ class SocialLinker:
             keyframe_dedup_cosine=self.keyframe_dedup_cosine,
             nextext_max_concurrency=self.nextext_max_concurrency,
             pool=self.pool,
+            progress_callback=self.progress_callback,
         ).run(clips)
         result.consumed_paths |= sub.consumed_paths
         result.transcript_documents.extend(sub.transcript_documents)
         return result
+
+    def _image_progress(self, done: int, total: int) -> None:
+        """Report how many of the export's linked images have been stored."""
+        if self.progress_callback:
+            self.progress_callback(f"Linking images: {done}/{total} images linked")
 
     def _image_job(
         self, asset: ImageAsset, context: IngestContext, collection: str, posting_uuid: str

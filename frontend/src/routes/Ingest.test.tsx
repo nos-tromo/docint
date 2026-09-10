@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -6,6 +6,20 @@ import type { ReactElement } from 'react'
 import { Ingest } from './Ingest'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { deriveIngestStatus } from '@/lib/ingestStatus'
+
+/** Counts how often `@infra/ui`'s `FileList` actually renders. */
+const spy = vi.hoisted(() => ({ fileListRenders: 0 }))
+vi.mock('@infra/ui', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@infra/ui')>()
+  return {
+    ...actual,
+    FileList: (props: Parameters<typeof actual.FileList>[0]) => {
+      spy.fileListRenders += 1
+      return actual.FileList(props)
+    }
+  }
+})
 
 function jsonRes(body: unknown) {
   return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
@@ -368,14 +382,99 @@ describe('Ingest — several runs at once', () => {
 
     useIngestRunStore.setState({
       uploading: true,
-      uploadEvents: [
+      uploadStatus: deriveIngestStatus([
         { event: 'start', data: { collection: 'other', files: ['b.txt'] }, receivedAt: Date.now() },
         { event: 'upload_progress', data: { filename: 'b.txt', bytes_written: 5 }, receivedAt: Date.now() }
-      ]
+      ])
     })
 
     await waitFor(() => expect(screen.getByText('Uploading')).toBeInTheDocument())
     expect(screen.getByText('Complete')).toBeInTheDocument()
+  })
+
+  it('summarises a folder-sized selection instead of listing every file', async () => {
+    const many = Array.from({ length: 1_200 }, (_, i) => new File(['x'], `f${i}.txt`))
+    useIngestRunStore.getState().addFiles(many)
+
+    renderIn(<Ingest />)
+
+    expect(await screen.findByText(/1200 files/)).toBeInTheDocument()
+    expect(screen.getByText(/Too many files to list/)).toBeInTheDocument()
+    // Rendering a row per file is what hung the browser on a folder-sized
+    // batch; the count and the total size are what the user actually needs.
+    expect(screen.queryByText('f0.txt')).not.toBeInTheDocument()
+  })
+
+  it('does not rebuild the file list as upload frames arrive', async () => {
+    useIngestRunStore.getState().addFiles([new File(['x'], 'a.txt')])
+    renderIn(<Ingest />)
+    await screen.findByText('a.txt')
+    const before = spy.fileListRenders
+
+    // One upload frame. The screen re-renders for it; the rows must not.
+    act(() => {
+      useIngestRunStore.setState({
+        uploading: true,
+        uploadStatus: deriveIngestStatus([
+          { event: 'start', data: { collection: 'mydocs', files: ['a.txt'] }, receivedAt: 1 },
+          { event: 'upload_progress', data: { filename: 'a.txt', bytes_written: 5 }, receivedAt: 2 }
+        ])
+      })
+    })
+    await waitFor(() => expect(screen.getByText('Uploading')).toBeInTheDocument())
+
+    expect(spy.fileListRenders).toBe(before)
+  })
+
+  it('warns loudly against leaving while an upload is running', async () => {
+    // A reload stops the transfer where it stands and the page cannot resume
+    // it — it can no longer read the picked files. The browser's own prompt
+    // may carry no wording of ours, so the screen has to say it.
+    renderIn(<Ingest />)
+    expect(screen.queryByText(/Do not reload/i)).not.toBeInTheDocument()
+
+    act(() => {
+      useIngestRunStore.setState({ uploading: true })
+    })
+
+    expect(await screen.findByText(/Do not reload or close this tab/i)).toBeInTheDocument()
+  })
+
+  it('asks the browser to confirm a reload only while uploading', async () => {
+    const added: string[] = []
+    const removed: string[] = []
+    const addSpy = vi
+      .spyOn(window, 'addEventListener')
+      .mockImplementation(((type: string) => void added.push(type)) as typeof window.addEventListener)
+    const removeSpy = vi
+      .spyOn(window, 'removeEventListener')
+      .mockImplementation(((type: string) => void removed.push(type)) as typeof window.removeEventListener)
+
+    renderIn(<Ingest />)
+    expect(added).not.toContain('beforeunload')
+
+    act(() => {
+      useIngestRunStore.setState({ uploading: true })
+    })
+    await waitFor(() => expect(added).toContain('beforeunload'))
+
+    act(() => {
+      useIngestRunStore.setState({ uploading: false })
+    })
+    await waitFor(() => expect(removed).toContain('beforeunload'))
+
+    addSpy.mockRestore()
+    removeSpy.mockRestore()
+  })
+
+  it('says how much of a re-picked folder the server already had', async () => {
+    renderIn(<Ingest />)
+
+    act(() => {
+      useIngestRunStore.setState({ alreadyStaged: 812 })
+    })
+
+    expect(await screen.findByText(/812 files were already on the server/i)).toBeInTheDocument()
   })
 
   it('renders one card per tracked job, newest first', async () => {
@@ -462,6 +561,78 @@ describe('Ingest — several runs at once', () => {
       expect(useIngestRunStore.getState().trackedJobs.map((j) => j.job_id)).toEqual(['job-2'])
     )
     expect(screen.getByText('second')).toBeInTheDocument()
+  })
+
+  it('aborts a running job, but only behind a confirmation', async () => {
+    // The abort throws away however many hours the run has spent; it is not
+    // a click to make by accident.
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+    const declined = vi.fn(() => false)
+    vi.stubGlobal('confirm', declined)
+
+    renderIn(<Ingest />)
+    const abort = await screen.findByRole('button', { name: /^abort$/i })
+    abort.click()
+
+    await waitFor(() => expect(declined).toHaveBeenCalled())
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/cancel'))).toBe(false)
+
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    abort.click()
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([u]) => String(u).includes('/ingest/jobs/job-1/cancel'))
+      ).toBe(true)
+    )
+    vi.unstubAllGlobals()
+  })
+
+  it('offers no abort once a job has finished', async () => {
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    finishedJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    await screen.findByText('Complete')
+
+    expect(screen.queryByRole('button', { name: /^abort$/i })).not.toBeInTheDocument()
+  })
+
+  it('reports a stopped run as stopped, not as a failure', async () => {
+    // Nothing went wrong; showing an error sends an operator looking for a
+    // fault that is not there.
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-1', {
+      event: 'ingestion_cancelled',
+      data: { job_id: 'job-1', collection: 'first', duration_ms: 5000 },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+
+    expect(await screen.findByText('Stopped')).toBeInTheDocument()
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument()
+    // Terminal, so it can be cleared away like any other finished run.
+    expect(screen.getByRole('button', { name: /dismiss/i })).toBeInTheDocument()
   })
 
   it('clears every finished job at once and leaves the running one', async () => {

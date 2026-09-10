@@ -47,6 +47,40 @@ export async function createIngestJob(
   }
 }
 
+/** One file already on the server, as a re-picking client recognises it. */
+export interface StagedFile {
+  /** Path relative to the batch directory — the upload's own `webkitRelativePath`. */
+  name: string
+  bytes: number
+}
+
+/** What the server has staged for a collection, and what it is still reading. */
+export interface StagedBatch {
+  collection: string
+  files: number
+  bytes: number
+  /** Transfers cut off mid-file. Counted, never staged, never ingested. */
+  partial: number
+  entries: StagedFile[]
+  /** True when more files are staged than `entries` lists. */
+  entries_truncated: boolean
+  preprocess: { running: number; queued: number }
+}
+
+/**
+ * Ask what is staged for a collection.
+ *
+ * Uploading stages bytes and finalizing queues the job, so a browser that
+ * dies between the two leaves files no job accounts for — and, before this,
+ * nothing on screen to say so. The named entries are what let a re-picked
+ * folder finish an interrupted upload instead of re-sending it whole.
+ *
+ * @param collection - The caller's logical collection name.
+ * @returns The staged file count, total size, names, and preprocessing counts.
+ */
+export const getStagedBatch = (collection: string) =>
+  apiGet<StagedBatch>('/ingest/staged', { collection })
+
 /** List the caller's jobs, newest first. Powers reload re-discovery. */
 export const listIngestJobs = () => apiGet<{ jobs: IngestJobSnapshot[] }>('/ingest/jobs')
 
@@ -55,3 +89,15 @@ export const getIngestJob = (id: string) => apiGet<IngestJobSnapshot>(`/ingest/j
 
 /** Dismiss a finished job. Rejects with 409 while it is still running. */
 export const dismissIngestJob = (id: string) => apiDelete<{ ok: boolean }>(`/ingest/jobs/${id}`)
+
+/**
+ * Ask a running job to stop.
+ *
+ * Resolving means the request was accepted, not that the job has stopped: a
+ * worker thread cannot be killed, so the run ends at its next progress
+ * checkpoint and one in-flight model call finishes first. Watch for the
+ * terminal `ingestion_cancelled` frame. Rejects with 404 (unknown) or 409
+ * (already finished).
+ */
+export const cancelIngestJob = (id: string) =>
+  apiPost<{ ok: boolean }>(`/ingest/jobs/${id}/cancel`, {})

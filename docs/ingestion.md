@@ -52,6 +52,42 @@ double-write, because file hashes are only recorded after a run's final node
 batch. Entity resolution runs as a stage inside the job, so it no longer
 depends on a client staying attached.
 
+### Stopping a run
+
+`POST /ingest/jobs/{job_id}/cancel` asks a queued or running job to stop
+(`202`; `404` unknown, `409` already finished). The Ingest screen's **Abort**
+button calls it behind a confirmation.
+
+**It is cooperative, and therefore not instant.** A worker thread cannot be
+killed, and `anyio.to_thread.run_sync` defers an asyncio cancel until the
+thread returns on its own, so the endpoint only sets a flag. The pushed
+progress callback checks it and raises `JobCancelled` — which makes *every
+stage that reports progress* a checkpoint: per chunk while enriching, per
+docstore batch while persisting, per file on the PDF lane, per clip on the
+media lane. One in-flight model call finishes first: an OCR page can be
+minutes, a Nextext clip up to `NEXTEXT_POLL_MAX_SECONDS`.
+
+What the abort reclaims immediately is the queue: `PreprocessPool.
+cancel_collection` cancels that collection's not-yet-started tasks, which on
+a large batch is the bulk of the remaining work. A task already running keeps
+its worker until its call returns.
+
+The run lands in a `cancelled` terminal state with an `ingestion_cancelled`
+frame — **not** an error. Nothing failed, and reporting a fault sends an
+operator looking for one that is not there. Two rules make that hold:
+
+- `_handle_batch_failure` re-raises `JobCancelled` regardless of
+  `INGEST_FAIL_FAST`. Swallowed there (the default configuration) an abort
+  would become a run that "completed" with every remaining file marked
+  failed in the manifest.
+- `preprocess.join_future` converts a cancelled task's
+  `concurrent.futures.CancelledError` — a `BaseException` every
+  `except Exception` on the way out would miss — into `JobCancelled`, and the
+  pre-passes' fail-soft guards let it through rather than logging it as a
+  skipped stage.
+
+Files indexed before the abort stay indexed; a re-run skips them by hash.
+
 ### Per-file preprocessing
 
 Three stages of an ingest cost minutes per file, and each is idempotent by
@@ -63,7 +99,10 @@ Because each checks its own cache first, the work can start the moment a file
 lands on disk, and the job later finds it done.
 
 `docint/core/ingest/preprocess.py` holds the one pool that runs them, keyed by
-`kind:collection:hash` so a file is never processed twice at once. It has two
+`kind#collection#hash` so a file is never processed twice at once. The `#` is
+what makes a key parseable back into its collection: a collection name may
+contain a colon, and the social linker's key carries one inside its last
+component, but no name may contain `#` (see [Entry points](#entry-points)). It has two
 executors, because the stages wait on two different services: images, PDF
 pages and keyframes share `INGEST_PREPROCESS_WORKERS` (default `4`) against
 the vision/OCR endpoint, while clips run on their own `NEXTEXT_MAX_CONCURRENCY`
@@ -85,6 +124,57 @@ The pool holds no results — the caches are the memory, and a failed task is
 tried again by whichever lane next needs the file — and a backend restart
 loses only what was in flight. Chunking, NER, hate-speech detection, embedding
 and entity resolution are unchanged and still run inside the job.
+
+Upload-time preprocessing belongs to no job, so it needs its own narration.
+Per-task lines are DEBUG; at INFO the pool reports one throttled line per
+collection (`LOG_PROGRESS_INTERVAL_S`) and one more when that collection's
+queue drains:
+
+```
+Preprocess | collection='u507…__field-notes' done=1000 running=0 queued=0
+```
+
+The drain line is the one that matters: without it a finished batch and a
+stalled one look identical from the log, because in both cases the model
+calls simply stop appearing.
+
+### An upload interrupted before finalize
+
+Uploading stages bytes; `POST /ingest/finalize` queues the job. A browser that
+dies in between leaves a staged batch that no job describes, so nothing on
+screen accounted for it — while the server went on preprocessing the files.
+
+**Leaving the page during an upload is destructive and cannot be made
+otherwise.** The transfer runs in the tab, and a reloaded page cannot re-read
+the user's files — the File System Access API is not available to it. So the
+Ingest screen registers a `beforeunload` guard while uploading (the browser's
+own confirm prompt, whose wording no page may set) and carries a warning of
+its own saying what the prompt cannot.
+
+What the server does provide is a way to *finish* an interrupted upload
+instead of repeating it:
+
+- **A file is staged whole or not at all.** `ingest_upload` writes to
+  `<name>.part` and renames onto the final name after the last chunk, so an
+  aborted request leaves only a `.part`. `describe_inputs` counts those as
+  `partial` and excludes them from everything else — written straight to its
+  final path, a truncated file is indistinguishable from a whole one, and the
+  run banner, the staged report and the readers all counted it as an input.
+- **`GET /ingest/staged?collection=<logical>`** reports what is on disk, what
+  the pool still holds, how many transfers were cut off, and the staged
+  relative paths with their sizes (up to `STAGED_NAME_LIMIT`).
+- **Re-picking the same folder resumes.** `stores/ingestRun.ts::start` asks
+  that endpoint first and uploads only the files the server does not already
+  hold, matching on name *and* size so a file the user has since replaced is
+  still sent. When it holds all of them — an upload that finished but never
+  finalized — the job is queued with no transfer at all. The lookup is
+  fail-soft: an unanswerable question uploads everything, as before.
+
+The Ingest screen's staged card reports that state; it does **not** offer to
+ingest it. The only way to reach a staged-but-unfinalized batch is an upload
+that stopped early, so what is on disk is an arbitrary fraction of what the
+user picked and the client no longer knows what the whole was. A button there
+silently indexed that fraction.
 
 An image or keyframe stored before a social export's manifest arrived carries
 no posting link, so the linker's cache hit **re-upserts** such a point with
@@ -615,6 +705,31 @@ upload happens before the job exists, the SPA reports how long it took as
 a timestamp, so no client clock is trusted, and it is clamped server-side.
 Deriving a second duration on the client is what previously let one run
 report two numbers a second apart.
+
+### What a run reports while it runs
+
+Every long stage reports a counter in one shape — `Label: n/total unit
+processed` — and the SPA renders each as its own bar:
+
+| Message | Stage |
+| --- | --- |
+| `Reading files: n/total files read` | The generic sweep: every document, image and table the readers open. An image batch spends its hours here. |
+| `Transcribing media: n/total clips processed` | Nextext round trips, cache hits included (`MediaTranscriber`). |
+| `Linking images: n/total images linked` | A social export's images, stored and stamped with their posting. |
+| `Extracting entities: n/total chunks processed` | NER. |
+| `Detecting hate speech: n/total chunks processed` | Hate-speech detection. |
+| `Embedding and storing: n/total batches processed` | The persist lane. |
+
+The shape is what the SPA parses (`lib/ingestStatus.ts`, `TASK_PATTERNS`),
+so adding a stage is adding a counter on the server and a line there.
+**These messages deliberately carry no filename**: the log throttle keys on
+the digit-masked message, so a varying name defeats it and logs one line per
+file — tolerable at PDF counts, not at 12k images. The per-PDF and per-file
+messages that do name a file predate this and stay as they are.
+
+The denominator every bar needs after a browser reload rides on the
+`ingestion_started` frame as `total_files`, counted from the staged batch:
+the upload leg's own total lives only in the browser that did the uploading.
 
 ### Progress and the throttle
 

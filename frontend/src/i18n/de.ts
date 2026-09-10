@@ -235,6 +235,22 @@ export const de: Strings = {
   'ingest.title': 'Datenimport',
   'ingest.caption': 'Dokumente hochladen und indexieren',
   'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
+  'ingest.clear_files': 'Auswahl leeren',
+  'ingest.staged_title': 'Abgebrochener Upload nach „{collection}“',
+  'ingest.staged_idle': 'Diese Dateien liegen auf dem Server, es läuft aber keine Verarbeitung dafür.',
+  'ingest.staged_preprocessing':
+    'Der Server liest diese Dateien noch: {running} laufend, {queued} wartend.',
+  'ingest.staged_incomplete':
+    'Dieser Upload wurde nie abgeschlossen, der Datenbestand ist daher vermutlich unvollständig. Denselben Ordner erneut auswählen und den Import starten: Alles hier Aufgeführte wird übersprungen, es werden nur die fehlenden Dateien gesendet.',
+  'ingest.staged_partial':
+    'Eine Übertragung wurde mitten in der Datei abgebrochen. Diese Datei wurde verworfen und wird erneut gesendet.',
+  'ingest.upload_dont_leave_title': 'Diesen Tab nicht neu laden oder schließen',
+  'ingest.upload_dont_leave':
+    'Der Upload läuft in diesem Tab. Beim Verlassen bricht er an Ort und Stelle ab — die Seite kann ihn nicht selbst fortsetzen, da sie nach einem Neuladen nicht erneut auf die Dateien zugreifen kann. Sollte es doch passieren: denselben Ordner nochmals auswählen, bereits übertragene Dateien werden nicht erneut gesendet.',
+  'ingest.upload_resumed':
+    '{count} Dateien lagen bereits auf dem Server und wurden nicht erneut gesendet.',
+  'ingest.files_too_many':
+    'Zu viele Dateien für eine Einzelauflistung. Zum Neubeginn die Auswahl leeren.',
   'ingest.button': 'Importieren',
   'ingest.busy': 'Wird importiert…',
   'ingest.status_idle': 'Inaktiv',
@@ -242,7 +258,15 @@ export const de: Strings = {
   'ingest.status_uploading': 'Wird hochgeladen',
   'ingest.status_processing': 'Wird verarbeitet',
   'ingest.status_complete': 'Abgeschlossen',
+  'ingest.status_cancelled': 'Abgebrochen',
   'ingest.status_failed': 'Fehlgeschlagen',
+  'ingest.abort': 'Abbrechen',
+  'ingest.abort_stopping': 'Wird abgebrochen…',
+  'ingest.abort_confirm':
+    'Diesen Import abbrechen? Alles bisher Indexierte bleibt erhalten, der Rest des Datenbestands wird nicht mehr verarbeitet. Der Lauf endet beim nächsten Schritt, eine bereits laufende Dateiverarbeitung wird noch abgeschlossen.',
+  'ingest.cancelled_partial':
+    'Abgebrochen. {count} Dateien wurden vorher indexiert und bleiben erhalten — ein neuer Lauf für diese Sammlung überspringt sie.',
+  'ingest.cancelled_none': 'Abgebrochen, bevor etwas indexiert wurde.',
   'ingest.saving_file': 'Datei {current} von {total} wird gespeichert',
   'ingest.uploading_files': 'Dateien werden hochgeladen',
   'ingest.files_saved_of': '{saved} von {total} Dateien gespeichert',
@@ -524,6 +548,10 @@ export const de: Strings = {
   // ingest stage/task label mapping (LABEL_KEY-style, mirrors hate.category_*)
   'ingest.stage_processing_pdfs': 'PDFs werden verarbeitet',
   'ingest.task_hate_detection': 'Hatespeech-Erkennung',
+  'ingest.task_reading_files': 'Dateien werden gelesen',
+  'ingest.task_transcribing_media': 'Audio und Video wird transkribiert',
+  'ingest.task_linking_images': 'Bilder werden Postings zugeordnet',
+  'ingest.task_embedding': 'Embeddings und Speicherung',
   'ingest.stage_progress': '{current} von {total}',
 
   // document-format unit words (documentFormat.ts)

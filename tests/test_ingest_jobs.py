@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -16,6 +17,7 @@ from _pytest.logging import LogCaptureFixture
 import docint.core.jobs as jobs_module
 from docint.core.jobs import (
     MAX_UPLOAD_LEAD_S,
+    TERMINAL_STATUSES,
     IngestJobManager,
     IngestJobState,
     JobStatus,
@@ -134,7 +136,7 @@ async def _create(manager: IngestJobManager, *, owner: str = "alice", physical: 
 async def _drain(manager: IngestJobManager, state: IngestJobState) -> None:
     """Wait for a job to reach a terminal status."""
     for _ in range(200):
-        if state.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+        if state.status in TERMINAL_STATUSES:
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"job did not finish; status={state.status}")
@@ -278,6 +280,56 @@ async def test_run_banner_names_every_staged_file_with_size_and_type(
     assert "hybrid=true ner=true hate_speech=false resolve=true" in combined
     assert "file='annual-report.pdf' type=pdf bytes=2.0 KB" in combined
     assert "file='meeting-notes.docx' type=docx bytes=512 B" in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_started_frame_carries_the_staged_file_count(tmp_path: Path) -> None:
+    """A client that attached late has no other source for the run's denominator.
+
+    The upload leg's own total lives in the browser that did the uploading, so
+    after a reload every progress bar would render against nothing.
+    """
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (tmp_path / name).write_bytes(b"x")
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path,
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    await _drain(manager, state)
+
+    started = next(frame for frame in state.history() if "ingestion_started" in frame)
+    assert '"total_files": 3' in started
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_started_frame_omits_the_count_when_there_is_no_batch(tmp_path: Path) -> None:
+    """A summary or extract job stages nothing; claiming zero files would be a lie."""
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=None,
+        hybrid=None,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+        kind="summary",
+    )
+    await _drain(manager, state)
+
+    started = next(frame for frame in state.history() if "summary_started" in frame)
+    assert "total_files" not in started
     await manager.stop()
 
 
@@ -1209,4 +1261,93 @@ async def test_create_if_idle_carries_the_extract_options_onto_the_job() -> None
     assert state.reference_number == "AZ-12/26"
     assert state.operator == "A. Analyst"
     await _drain(manager, state)
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_run_stops_at_its_next_checkpoint() -> None:
+    """A worker thread cannot be killed, so stopping is cooperative.
+
+    Every stage that reports progress is a checkpoint: the pushed callback
+    raises, and the runner is required to let that through.
+    """
+    ticks: list[int] = []
+    cancel_now = threading.Event()
+    requested = threading.Event()
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        for i in range(100):
+            if i == 3:
+                cancel_now.set()
+                requested.wait(timeout=5)
+            push("ingestion_progress", {"message": f"Reading files: {i}/100 files read"})
+            ticks.append(i)
+        return {"empty": False, "resolution": None}
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    while not cancel_now.is_set():
+        await asyncio.sleep(0.01)
+    assert await manager.request_cancel(state.job_id, "alice") is state
+    requested.set()
+    await _drain(manager, state)
+
+    assert state.status is JobStatus.CANCELLED
+    # The tick that raised never reached its body, so the run stopped there.
+    assert ticks == [0, 1, 2]
+    # An abort is not a failure, and reporting it as one sends an operator
+    # looking for a fault that is not there.
+    assert state.error is None
+    assert state.duration_ms is not None
+    assert _events(state.history())[-1] == "ingestion_cancelled"
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_cancelling_is_refused_for_a_finished_job() -> None:
+    """There is nothing to stop, and saying otherwise would leave a client waiting."""
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    assert await manager.request_cancel(state.job_id, "alice") is None
+    assert state.status is JobStatus.COMPLETED
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_cancelling_someone_elses_job_does_nothing() -> None:
+    """Cross-owner is indistinguishable from unknown, as everywhere else in the registry."""
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await _create(manager)
+
+    assert await manager.request_cancel(state.job_id, "bob") is None
+    assert await manager.request_cancel("no-such-job", "alice") is None
+    await _drain(manager, state)
+    assert state.status is JobStatus.COMPLETED
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_job_can_be_dismissed_like_any_finished_one() -> None:
+    """Cancelled is terminal, so the registry treats it as finished throughout."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        started.set()
+        release.wait(timeout=5)
+        push("ingestion_progress", {"message": "working"})
+        return {"empty": False, "resolution": None}
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    while not started.is_set():
+        await asyncio.sleep(0.01)
+    await manager.request_cancel(state.job_id, "alice")
+    release.set()
+    await _drain(manager, state)
+
+    assert state.status is JobStatus.CANCELLED
+    assert await manager.remove(state.job_id, "alice") is True
     await manager.stop()

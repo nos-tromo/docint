@@ -30,6 +30,11 @@ _BYTE_UNITS: tuple[str, ...] = ("KB", "MB", "GB", "TB")
 #: Extension reported for a file that has none.
 _UNKNOWN_KIND = "none"
 
+#: Suffix an upload in flight carries until its last chunk lands. A file
+#: still wearing it was cut off mid-transfer, so it is truncated: counted,
+#: never inventoried.
+PARTIAL_UPLOAD_SUFFIX = ".part"
+
 #: Matches the first ``n/m`` counter in a progress message.
 _COUNTER_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
@@ -93,6 +98,9 @@ class InputInventory:
         by_type: ``(extension, count)`` pairs, most frequent first, over
             every file found.
         omitted: How many files the cap left out.
+        partial: How many uploads were cut off mid-transfer. These are
+            excluded from every other field — a truncated file is not one
+            of the inputs.
     """
 
     files: tuple[InputFile, ...]
@@ -100,6 +108,7 @@ class InputInventory:
     total_bytes: int
     by_type: tuple[tuple[str, int], ...]
     omitted: int
+    partial: int = 0
 
 
 def _iter_files(root: Path) -> Iterator[os.DirEntry[str]]:
@@ -140,6 +149,10 @@ def describe_inputs(root: Path, limit: int = 50) -> InputInventory:
     big anything is — nothing else computes a size, so the banner cannot
     borrow one. One ``stat`` per file is the whole cost.
 
+    Uploads still in flight (``*.part``) are reported as ``partial`` and left
+    out of everything else: a truncated file is not an input, and counting it
+    as one is what let a cut-off upload look like a complete batch.
+
     Args:
         root (Path): The job's batch directory.
         limit (int, optional): Most files to list individually. Totals and
@@ -151,9 +164,13 @@ def describe_inputs(root: Path, limit: int = 50) -> InputInventory:
     """
     found: list[InputFile] = []
     total_bytes = 0
+    partial = 0
     kinds: Counter[str] = Counter()
 
     for entry in _iter_files(root):
+        if entry.name.endswith(PARTIAL_UPLOAD_SUFFIX):
+            partial += 1
+            continue
         try:
             size = entry.stat(follow_symlinks=False).st_size
         except OSError:
@@ -172,6 +189,7 @@ def describe_inputs(root: Path, limit: int = 50) -> InputInventory:
         total_bytes=total_bytes,
         by_type=tuple(kinds.most_common()),
         omitted=max(0, len(found) - capped),
+        partial=partial,
     )
 
 

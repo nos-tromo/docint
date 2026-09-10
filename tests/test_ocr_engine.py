@@ -437,6 +437,34 @@ class TestEngineFailurePolicy:
             create.assert_not_called()
         assert engine.stats.pages_skipped == 1
 
+    def test_the_pause_lifts_instead_of_stopping_ocr_for_the_process(self) -> None:
+        """One engine now serves every image of every run, so the budget must never be a one-way switch.
+
+        It used to be: the image service keeps its engine for the life of the
+        process, so a few timeouts in a row silently ended OCR for every later
+        file until a restart. Pausing costs a minute; stopping cost a run.
+        """
+        engine, _ = _engine("dots-studio/dots.mocr")
+        clock = {"now": 1_000.0}
+        with (
+            patch("docint.core.ocr.engine.time.sleep"),
+            patch("docint.core.ocr.engine.time.monotonic", side_effect=lambda: clock["now"]),
+        ):
+            with patch.object(engine._client.chat.completions, "create", side_effect=_timeout()):
+                for _ in range(3):
+                    engine.read_page(0)
+            assert engine.disabled is True
+
+            # Inside the cooldown the endpoint is left alone.
+            with patch.object(engine._client.chat.completions, "create") as create:
+                assert engine.read_page(0) == []
+                create.assert_not_called()
+
+            clock["now"] += engine._UNRESPONSIVE_COOLDOWN_SECONDS + 1
+            assert engine.disabled is False
+            with patch.object(engine._client.chat.completions, "create", return_value=_response(DOTS_PAGE)):
+                assert len(engine.read_page(0)) == 9
+
     def test_rejections_do_not_reset_the_budget(self) -> None:
         """An unreachable endpoint interleaved with rejections is still unreachable."""
         engine, _ = _engine("dots-studio/dots.mocr")

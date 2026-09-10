@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Generator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -74,7 +76,7 @@ def _await_terminal(client: TestClient, job_id: str, user: str = "alice") -> dic
     snapshot: dict[str, Any] = {}
     for _ in range(200):
         snapshot = client.get(f"/ingest/jobs/{job_id}", headers=_headers(user)).json()
-        if snapshot["status"] in {"completed", "failed"}:
+        if snapshot["status"] in {"completed", "failed", "cancelled"}:
             return snapshot
         time.sleep(0.01)
     raise AssertionError(f"job did not finish; last snapshot={snapshot}")
@@ -219,6 +221,52 @@ def test_delete_409s_while_running(make_client: Callable[..., TestClient]) -> No
     gate.set()
 
 
+def test_cancel_stops_a_running_job_and_drops_its_queued_preprocessing(
+    make_client: Callable[..., TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Abort is the only way out of a run that would otherwise take hours.
+
+    Cancelling also drops the collection's not-yet-started preprocessing:
+    a running task holds its worker until its model call returns, but the
+    queue behind it is the bulk of a large batch.
+    """
+    gate = threading.Event()
+    cancelled: list[str] = []
+
+    def _blocking(state: Any, push: Any) -> dict[str, Any]:
+        gate.wait(timeout=5)
+        push("ingestion_progress", {"message": "working"})
+        return {"empty": False, "resolution": None}
+
+    monkeypatch.setattr(
+        api_module,
+        "get_preprocess_pool",
+        lambda: SimpleNamespace(cancel_collection=lambda name: cancelled.append(name) or 7),
+    )
+    client = make_client(runner=_blocking)
+    _stage(client, "mydocs")
+    job_id = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers()).json()["job_id"]
+
+    res = client.post(f"/ingest/jobs/{job_id}/cancel", headers=_headers())
+    gate.set()
+
+    assert res.status_code == 202
+    assert cancelled and cancelled[0].endswith("mydocs")
+    snapshot = _await_terminal(client, job_id)
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["error"] is None
+
+
+def test_cancel_is_404_cross_owner_and_409_once_finished(client: TestClient) -> None:
+    """Existence never leaks, and a finished run has nothing to stop."""
+    _stage(client, "mydocs", user="alice")
+    job_id = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers("alice")).json()["job_id"]
+
+    assert client.post(f"/ingest/jobs/{job_id}/cancel", headers=_headers("bob")).status_code == 404
+    _await_terminal(client, job_id)
+    assert client.post(f"/ingest/jobs/{job_id}/cancel", headers=_headers("alice")).status_code == 409
+
+
 def test_job_manager_is_injectable(client: TestClient) -> None:
     """Endpoints use the injected manager, never the application's own.
 
@@ -332,6 +380,138 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
     # ``stats`` is None here only because the stubbed ingest_docs returns
     # nothing; a real run carries the counters the summary line reports.
     assert result == {"empty": False, "resolution": None, "stats": None}
+
+
+def test_staged_reports_the_files_no_job_accounts_for(client: TestClient) -> None:
+    """An upload that never reached finalize leaves bytes on disk and no job to describe them.
+
+    This endpoint is how the ingest screen finds them again, so a hung or
+    closed browser no longer loses the run silently.
+    """
+    _stage(client, "mydocs")
+
+    res = client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers())
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "collection": "mydocs",
+        "files": 1,
+        "bytes": len(b"hello"),
+        "partial": 0,
+        "entries": [{"name": "sample.txt", "bytes": len(b"hello")}],
+        "entries_truncated": False,
+        "preprocess": {"running": 0, "queued": 0},
+    }
+
+
+def test_staged_names_let_a_re_picked_folder_skip_what_arrived(client: TestClient) -> None:
+    """The names are what turns a reload from re-sending 18 GB into finishing the upload.
+
+    A page cannot re-read the user's files after a reload, so the only
+    recovery is picking the folder again — and that is only bearable if the
+    client can tell which files it no longer has to send.
+    """
+    client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files=[
+            ("files", ("shoot/a.txt", b"a", "text/plain")),
+            ("files", ("shoot/nested/b.txt", b"bb", "text/plain")),
+        ],
+        headers=_headers(),
+    )
+
+    body = client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers()).json()
+
+    assert sorted(e["name"] for e in body["entries"]) == ["shoot/a.txt", "shoot/nested/b.txt"]
+    assert {e["name"]: e["bytes"] for e in body["entries"]}["shoot/a.txt"] == 1
+    assert body["entries_truncated"] is False
+
+
+def test_staged_reports_a_cut_off_transfer_and_never_counts_it(client: TestClient, tmp_path: Path) -> None:
+    """A truncated file is not an input, and calling it one is how a partial batch passed as complete."""
+    _stage(client, "mydocs")
+    batch_dir = next(p for p in tmp_path.rglob("*") if p.is_dir() and (p / "sample.txt").exists())
+    (batch_dir / "cut-off.pdf.part").write_bytes(b"%PDF-1.4 truncated")
+
+    body = client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers()).json()
+
+    assert body["partial"] == 1
+    assert body["files"] == 1
+    assert body["bytes"] == len(b"hello")
+    assert [e["name"] for e in body["entries"]] == ["sample.txt"]
+
+
+def test_upload_stages_bytes_under_a_part_name_until_the_last_chunk(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Written straight to its final path, an aborted upload leaves a truncated file.
+
+    Nothing downstream can tell one from a whole file, which is how a
+    reload-during-upload came to look like a complete batch.
+    """
+    seen: list[list[str]] = []
+    real_hash = api_module.compute_file_hash
+
+    def record_names(path: Path) -> str:
+        seen.append(sorted(p.name for p in path.parent.iterdir()))
+        return real_hash(path)
+
+    monkeypatch.setattr(api_module, "compute_file_hash", record_names)
+
+    res = client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 200
+    # By hashing time the rename has happened: the `.part` exists only while
+    # bytes are still arriving.
+    assert seen == [["a.pdf"]]
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_staged_is_owner_scoped(client: TestClient) -> None:
+    """A staged batch is as private as the collection it belongs to."""
+    _stage(client, "mydocs", user="alice")
+
+    assert client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers("alice")).status_code == 200
+    assert client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers("bob")).status_code == 404
+
+
+def test_upload_hashes_off_the_event_loop(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hashing reads the whole file back, so on the loop it stalls every other request.
+
+    An 18 GB batch spends minutes that way, and the jobs SSE stream is one of
+    the things that goes quiet while it does.
+    """
+    threads: dict[str, str] = {}
+    real_dest = api_module._safe_relative_dest
+    real_hash = api_module.compute_file_hash
+
+    def record_handler_thread(batch_dir: Path, raw_name: str) -> Path:
+        threads["handler"] = threading.current_thread().name
+        return real_dest(batch_dir, raw_name)
+
+    def record_hash_thread(path: Path) -> str:
+        threads["hash"] = threading.current_thread().name
+        return real_hash(path)
+
+    monkeypatch.setattr(api_module, "_safe_relative_dest", record_handler_thread)
+    monkeypatch.setattr(api_module, "compute_file_hash", record_hash_thread)
+
+    res = client.post(
+        "/ingest/upload",
+        data={"collection": "mydocs"},
+        files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=_headers(),
+    )
+
+    assert res.status_code == 200
+    assert "file_saved" in res.text
+    assert threads["hash"] != threads["handler"]
 
 
 def test_upload_refuses_a_collection_name_qdrant_cannot_address(client: TestClient, tmp_path: Path) -> None:

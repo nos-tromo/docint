@@ -16,6 +16,7 @@ whatever they had when a read returns nothing.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -111,8 +112,14 @@ class DocumentOcrEngine:
     _DEFAULT_MAX_PIXELS: int = 2_007_040
     _DEFAULT_MAX_TOKENS: int = 4096
     # Consecutive calls nothing answered at all before the engine stops
-    # calling the endpoint for the rest of the document.
+    # calling the endpoint.
     _MAX_CONSECUTIVE_FAILURES: int = 3
+    # How long it stays off afterwards. This was once a one-way switch, back
+    # when an engine served a single document; the image service keeps one for
+    # the life of the process, so a brief upstream outage silently stopped OCR
+    # for every later image until a restart. A cooldown costs a minute of
+    # reading and recovers on its own.
+    _UNRESPONSIVE_COOLDOWN_SECONDS: float = 60.0
     # Pause before a retry. Upstream rejections arrive in bursts lasting a few
     # seconds; retrying immediately lands inside the same burst, which is what
     # made a transient blip cost whole pages.
@@ -170,7 +177,19 @@ class DocumentOcrEngine:
         )
         self.stats = OcrStats()
         self._consecutive_failures = 0
-        self.disabled = False
+        self._disabled_until = 0.0
+        # The image service shares one engine across the preprocessing pool's
+        # worker threads, so the budget is written from several at once.
+        self._budget_lock = threading.Lock()
+
+    @property
+    def disabled(self) -> bool:
+        """Whether the endpoint is in a cooldown after going unresponsive.
+
+        Returns:
+            bool: ``True`` while calls are paused; it clears itself.
+        """
+        return time.monotonic() < self._disabled_until
 
     @property
     def reads_layout(self) -> bool:
@@ -316,7 +335,7 @@ class DocumentOcrEngine:
         """
         if self.disabled:
             self.stats.pages_skipped += 1
-            logger.debug("OCR disabled for this document; skipping {}", context)
+            logger.debug("OCR is paused after an unresponsive endpoint; skipping {}", context)
             return []
 
         active = limits or self.limits
@@ -344,7 +363,8 @@ class DocumentOcrEngine:
         if not responded:
             self._note_failure(context, reachable=reachable)
             return []
-        self._consecutive_failures = 0
+        with self._budget_lock:
+            self._consecutive_failures = 0
 
         if not (answer and answer.strip()):
             escalation = self.family.escalate(base, sent, active, context=context)
@@ -457,18 +477,25 @@ class DocumentOcrEngine:
             # interleaved with rejections is still unreachable.
             logger.warning("OCR endpoint rejected {}; skipping it and continuing", context)
             return
-        self._consecutive_failures += 1
+        with self._budget_lock:
+            self._consecutive_failures += 1
+            failures = self._consecutive_failures
+            tripped = failures >= self._MAX_CONSECUTIVE_FAILURES
+            if tripped:
+                self._disabled_until = time.monotonic() + self._UNRESPONSIVE_COOLDOWN_SECONDS
+                # Reset so the cooldown, not a stale count, decides the next pause.
+                self._consecutive_failures = 0
         logger.warning(
             "OCR got no response for {} ({}/{} consecutive failures)",
             context,
-            self._consecutive_failures,
+            failures,
             self._MAX_CONSECUTIVE_FAILURES,
         )
-        if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
-            self.disabled = True
+        if tripped:
             logger.error(
-                "OCR endpoint unresponsive after {} consecutive calls; disabling OCR for the rest of this document",
-                self._consecutive_failures,
+                "OCR endpoint unresponsive after {} consecutive calls; pausing OCR for {:.0f}s",
+                failures,
+                self._UNRESPONSIVE_COOLDOWN_SECONDS,
             )
 
     @classmethod

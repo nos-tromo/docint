@@ -62,5 +62,9 @@ export function isFinishedCard(
 ): boolean {
   if (terminal[entry.jobId]) return true
   const status = entry.listItem?.status
-  return status === 'completed' || status === 'failed'
+  // `cancelled` matters here for the reattach case only: a run stopped in
+  // this browser leaves a terminal frame above, but one stopped before this
+  // tab attached is known solely by its snapshot — and a card nothing counts
+  // as finished cannot be cleared with the rest.
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
 }

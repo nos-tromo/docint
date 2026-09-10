@@ -556,6 +556,7 @@ export interface IngestEvent {
     | 'ingestion_started'
     | 'ingestion_progress'
     | 'ingestion_complete'
+    | 'ingestion_cancelled'
     | 'warning'
     | 'error'
     // The owner-multiplexed `/ingest/jobs/events` stream is multiplexed
@@ -566,9 +567,11 @@ export interface IngestEvent {
     | 'summary_started'
     | 'summary_progress'
     | 'summary_completed'
+    | 'summary_cancelled'
     | 'extract_started'
     | 'extract_progress'
     | 'extract_completed'
+    | 'extract_cancelled'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was
@@ -628,7 +631,12 @@ export type SummarizeResult = SummaryResponse | SummaryJobQueued
 export interface IngestJobSnapshot {
   job_id: string
   collection: string
-  status: 'queued' | 'running' | 'completed' | 'failed'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  /**
+   * Whether this job has been asked to stop. It stays `running` until it
+   * reaches a checkpoint, so this is what tells "stopping" from "running".
+   */
+  cancel_requested?: boolean
   message: string | null
   error: string | null
   empty: boolean

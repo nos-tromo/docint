@@ -19,7 +19,8 @@ from docint.core.ingest.images_service import (
     ImageIngestionService,
     IngestContext,
 )
-from docint.core.ingest.preprocess import get_preprocess_pool, preprocess_key
+from docint.core.ingest.preprocess import get_preprocess_pool, join_future, preprocess_key
+from docint.core.jobs import JobCancelled
 from docint.core.readers.documents.orchestrator import DocumentPipelineOrchestrator
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.hashing import compute_file_hash
@@ -437,7 +438,11 @@ class CorePDFPipelineReader:
                 progress_callback(f"Core pipeline processing PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
 
             try:
-                manifest = future.result()
+                manifest = join_future(future)
+            except JobCancelled:
+                # An abandoned run, not a bad PDF: swallowed here it would
+                # log every remaining file as a pipeline failure and finish.
+                raise
             except Exception as exc:
                 logger.warning(
                     "Core pipeline failed for {}: {}",

@@ -77,9 +77,11 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `POST` | `/agent/chat/stream` | `Agent` | Streaming orchestrator variant (SSE tokens). |
 | `POST` | `/ingest/upload` | `Ingestion` | Stage files into a collection's batch directory (upload only, no ingestion). |
 | `POST` | `/ingest/finalize` | `Ingestion` | Queue one ingest job over the staged batches; `202 {job_id}`. |
+| `GET` | `/ingest/staged` | `Ingestion` | What is staged on disk for a collection, and the preprocessing still running for it. |
 | `GET`  | `/ingest/jobs/events` | `Ingestion` | Owner-multiplexed SSE stream of job events, with collapsed replay on connect. |
 | `GET`  | `/ingest/jobs` | `Ingestion` | List the caller's jobs, newest first. |
 | `GET`  | `/ingest/jobs/{job_id}` | `Ingestion` | Snapshot of one owned job. |
+| `POST` | `/ingest/jobs/{job_id}/cancel` | `Ingestion` | Ask a running job to stop; `202` (409 once finished). |
 | `DELETE` | `/ingest/jobs/{job_id}` | `Ingestion` | Dismiss a finished job (409 while running). |
 | `POST` | `/ingest` | `Ingestion` | Ingest the configured `DATA_PATH` directly (CLI/batch path). |
 | `GET`  | `/sources/preview` | `Sources` | Return a preview of a source file staged under `QDRANT_SRC_DIR`. |
@@ -895,6 +897,21 @@ A `collection` containing `#`, `?`, `/`, `\`, `%` or a control character is
 refused with `400` before anything is staged (`detail` names the characters);
 the same rule applies to `/ingest/finalize` and `POST /ingest`.
 
+### `GET /ingest/staged`
+
+`?collection=<logical>`. Answers with the batch directory's file count and
+total size plus the preprocessing pool's own counts for that collection:
+
+```json
+{"collection": "field-notes", "files": 1000, "bytes": 105906176,
+ "preprocess": {"running": 4, "queued": 812}}
+```
+
+Owner-scoped like every collection endpoint: another principal's collection
+`404`s. This is how a run whose browser died between upload and finalize
+becomes visible again — see
+[Per-file preprocessing](ingestion.md#a-staged-batch-nobody-finalized).
+
 Splitting a large selection across several upload batches means ingestion
 happens once over the whole staged directory, instead of once per batch
 (which would re-initialise the pipeline's models per batch and hard-fail on
@@ -972,7 +989,20 @@ collection name is deliberately excluded — callers only ever see their own
 logical name.
 
 A `404` here is how a client detects an **interrupted** run: the backend
-restarted while the job was in flight.
+restarted while the job was in flight. `cancel_requested` tells a job that
+has been asked to stop from one merely running — it stays `running` until it
+reaches a checkpoint.
+
+### `POST /ingest/jobs/{job_id}/cancel`
+
+Asks a queued or running job to stop. `202` (the request was accepted, not
+the job stopped), `404` unknown or cross-owner, `409` already finished.
+
+Cancellation is cooperative: the run ends at its next progress checkpoint and
+one in-flight model call finishes first, so watch for the terminal
+`ingestion_cancelled` frame rather than assuming the `202` ended anything.
+The collection's not-yet-started preprocessing is cancelled outright. See
+[ingestion.md](ingestion.md) § Stopping a run.
 
 ### `DELETE /ingest/jobs/{job_id}`
 

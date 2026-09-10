@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import os
 import time
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -55,7 +56,7 @@ from docint.core.extract.gather import scroll_collection
 from docint.core.extract.store import ExtractStore
 from docint.core.extract.units import Unit, partition, resolve_target
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
-from docint.core.ingest.preprocess import shutdown_preprocess_pool, submit_file
+from docint.core.ingest.preprocess import get_preprocess_pool, shutdown_preprocess_pool, submit_file
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
@@ -90,7 +91,7 @@ from docint.utils.env_cfg import (
     set_offline_env,
 )
 from docint.utils.hashing import compute_file_hash
-from docint.utils.logfmt import format_bytes
+from docint.utils.logfmt import PARTIAL_UPLOAD_SUFFIX, describe_inputs, format_bytes
 from docint.utils.logger_cfg import init_logger
 from docint.utils.openai_cfg import EmbeddingEndpointError
 from docint.utils.translate_client import translate
@@ -1087,6 +1088,54 @@ class IngestFinalizeIn(IngestIn):
     """
 
     upload_elapsed_ms: float | None = Field(default=None, ge=0)
+
+
+#: Most staged files ``GET /ingest/staged`` names individually. They exist so
+#: a client can skip what already arrived, so the cost of the cap is only
+#: re-sending some of them — an overwrite, never a wrong result. Sized above
+#: the largest batches seen in practice (~12k files ≈ 500 KB of JSON).
+STAGED_NAME_LIMIT = 50_000
+
+
+class StagedFileOut(BaseModel):
+    """One staged file, as a re-picking client needs to recognise it.
+
+    The size is what makes the recognition safe: a client skips a file it
+    already sent, and name alone would also skip one the user has since
+    replaced.
+    """
+
+    name: str
+    bytes: int
+
+
+class StagedPreprocessOut(BaseModel):
+    """How much of a staged batch the preprocessing pool still has in hand."""
+
+    running: int
+    queued: int
+
+
+class StagedBatchOut(BaseModel):
+    """What is staged on the server for a collection, ingested or not.
+
+    An upload that never reached ``POST /ingest/finalize`` — a closed tab, a
+    hung browser — leaves its files staged with no job to describe them, and
+    the ingest screen had no way to know they were there.
+
+    ``entries`` carries the staged relative paths and sizes so a client
+    re-picking the same folder can skip what already arrived; ``partial``
+    counts transfers cut off mid-file, which are staged under a ``.part``
+    name and are not part of ``files``, ``bytes`` or ``entries``.
+    """
+
+    collection: str
+    files: int
+    bytes: int
+    partial: int
+    entries: list[StagedFileOut]
+    entries_truncated: bool
+    preprocess: StagedPreprocessOut
 
 
 class IngestOut(BaseModel):
@@ -4759,9 +4808,15 @@ async def ingest_upload(
             dest = _safe_relative_dest(batch_dir, upload.filename or "upload")
             dest.parent.mkdir(parents=True, exist_ok=True)
             filename = str(dest.relative_to(batch_dir))
+            # Bytes land beside the final name and are renamed onto it once
+            # the last chunk is in, so a cut-off upload leaves a `.part`
+            # nothing counts as an input. Written straight to `dest`, a
+            # truncated file is indistinguishable from a whole one, and the
+            # staged-batch report called it staged.
+            partial_dest = dest.with_name(dest.name + PARTIAL_UPLOAD_SUFFIX)
             bytes_written = 0
             try:
-                with dest.open("wb") as buffer:
+                with partial_dest.open("wb") as buffer:
                     while True:
                         chunk = await upload.read(1024 * 1024)
                         if not chunk:
@@ -4773,9 +4828,13 @@ async def ingest_upload(
                             {"filename": filename, "bytes_written": bytes_written},
                         )
 
+                os.replace(partial_dest, dest)
                 staged_bytes += bytes_written
-                # We calculate hash but don't store the file index anymore
-                file_hash = compute_file_hash(dest)
+                # We calculate hash but don't store the file index anymore.
+                # Off the loop: hashing reads the whole file back, so a large
+                # one stalls every other request — the jobs SSE ping loop
+                # included — for as long as it takes.
+                file_hash = await to_thread.run_sync(partial(compute_file_hash, dest))
                 if load_ingestion_env().ingest_preprocess_on_upload:
                     # The file's heavy stage (PDF layout/OCR, image caption,
                     # transcription) starts now, while the rest of the batch is
@@ -4793,6 +4852,7 @@ async def ingest_upload(
                     },
                 )
             except Exception as exc:
+                partial_dest.unlink(missing_ok=True)
                 logger.opt(exception=exc).error("Error saving uploaded file {}", filename)
                 # `filename` travels as a structured field (client-supplied
                 # name, echoed) so the SPA can validate it against its own
@@ -5065,6 +5125,47 @@ async def export_source_extract(
     return Response(content=body, media_type=media_type, headers=_download_headers(f"{name}-{source_id[:12]}", fmt))
 
 
+@app.get("/ingest/staged", tags=["Ingestion"], response_model=StagedBatchOut)
+async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
+    """Report the files staged for a collection and the preprocessing still running.
+
+    This is how a run that lost its client becomes visible again. The upload
+    stages files and ``POST /ingest/finalize`` queues the job, so a browser
+    that dies in between leaves bytes on disk that no job, and therefore no
+    screen, accounts for. The staged names come back with the counts so the
+    client can finish the interrupted upload instead of re-sending it whole:
+    a page cannot re-read the user's files after a reload, but it can skip
+    every file that already arrived once the folder is picked again.
+
+    Args:
+        request (Request): The incoming request, for principal resolution.
+        collection (str): The caller's logical collection name.
+
+    Returns:
+        StagedBatchOut: File count, total bytes, cut-off transfers, the
+        staged relative paths, and the pool's own counts.
+
+    Raises:
+        HTTPException: 400 for a blank or unusable name; 404 when the caller
+            does not own the collection.
+    """
+    principal = resolve_principal(request)
+    name = _require_collection_name(collection, context="staged")
+    physical = _require_owned_collection(name, principal)
+    batch_dir = _resolve_qdrant_src_dir() / physical
+    inventory = await to_thread.run_sync(describe_inputs, batch_dir, STAGED_NAME_LIMIT)
+    running, queued = get_preprocess_pool().inflight(physical)
+    return StagedBatchOut(
+        collection=name,
+        files=inventory.total_files,
+        bytes=inventory.total_bytes,
+        partial=inventory.partial,
+        entries=[StagedFileOut(name=f.name, bytes=f.size_bytes) for f in inventory.files],
+        entries_truncated=inventory.omitted > 0,
+        preprocess=StagedPreprocessOut(running=running, queued=queued),
+    )
+
+
 @app.get("/ingest/jobs", tags=["Ingestion"])
 async def list_ingest_jobs(
     request: Request,
@@ -5140,6 +5241,55 @@ async def get_ingest_job(
     if state is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return state.snapshot()
+
+
+@app.post("/ingest/jobs/{job_id}/cancel", status_code=202, tags=["Ingestion"])
+async def cancel_ingest_job(
+    job_id: str,
+    request: Request,
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
+    """Ask a running job to stop, and drop the preprocessing queued behind it.
+
+    Cooperative and therefore not instant. A worker thread cannot be killed,
+    so the run stops at its next progress checkpoint — per chunk while
+    enriching, per docstore batch while persisting, per file on the PDF lane,
+    per clip on the media lane. One in-flight model call finishes first, which
+    for a Nextext clip can be minutes. The job's own preprocessing tasks that
+    have not started yet are cancelled outright, which on a large batch is the
+    bulk of the remaining work.
+
+    202 rather than 200: what comes back is an accepted request, not a stopped
+    job. Clients watch for the terminal ``ingestion_cancelled`` frame.
+
+    Args:
+        job_id (str): Job identifier.
+        request (Request): The incoming request, for principal resolution.
+        jobs (IngestJobManager): The ingest job registry.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}``.
+
+    Raises:
+        HTTPException: 404 when unknown or cross-owner; 409 when the job has
+            already finished, so there is nothing to stop.
+    """
+    principal = resolve_principal(request)
+    state = await jobs.get(job_id, principal.effective_owner)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    cancelled = await jobs.request_cancel(job_id, principal.effective_owner)
+    if cancelled is None:
+        raise HTTPException(status_code=409, detail="Job has already finished")
+    dropped = get_preprocess_pool().cancel_collection(cancelled.physical)
+    logger.info(
+        "{} job cancel requested | job_id={} collection={!r} preprocess_dropped={}",
+        cancelled.kind.capitalize(),
+        job_id,
+        cancelled.logical_name,
+        dropped,
+    )
+    return {"ok": True}
 
 
 @app.delete("/ingest/jobs/{job_id}", tags=["Ingestion"])

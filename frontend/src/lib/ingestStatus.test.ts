@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IngestEvent } from '@/api/types'
 import {
+  applyIngestEvent,
   deriveIngestStatus,
+  emptyStatus,
   formatBytes,
   formatDuration,
   parseProgressMessage,
@@ -56,6 +58,40 @@ describe('parseProgressMessage', () => {
       label: 'Hate detection',
       current: 150,
       total: 703
+    })
+  })
+
+  it('parses every counted stage a run reports, not only enrichment', () => {
+    // These are the stages a large image or social batch actually spends its
+    // hours in. Unparsed, they left the card on "Working…" for the whole run.
+    expect(parseProgressMessage('Reading files: 4000/12000 files read')).toEqual({
+      kind: 'task',
+      taskKey: 'reading',
+      label: 'Reading files',
+      current: 4000,
+      total: 12000
+    })
+    expect(parseProgressMessage('Transcribing media: 3/40 clips processed')).toEqual({
+      kind: 'task',
+      taskKey: 'media',
+      label: 'Transcribing media',
+      current: 3,
+      total: 40
+    })
+    expect(parseProgressMessage('Linking images: 90/500 images linked')).toEqual({
+      kind: 'task',
+      taskKey: 'images',
+      label: 'Linking images',
+      current: 90,
+      total: 500
+    })
+    // Emitted by the backend since before any of this, and discarded here.
+    expect(parseProgressMessage('Embedding and storing: 2/9 batches processed')).toEqual({
+      kind: 'task',
+      taskKey: 'embedding',
+      label: 'Embedding',
+      current: 2,
+      total: 9
     })
   })
 
@@ -286,6 +322,16 @@ describe('deriveIngestStatus', () => {
     expect(status.phase).toBe('processing')
     expect(status.uploadingFile).toBeUndefined()
     expect(status.uploadingBytes).toBeUndefined()
+  })
+
+  it('takes the file total from the started frame, so a reattached client has one', () => {
+    // A reload loses the upload leg's own count: the files were picked in a
+    // browser session that is gone. The server counts what is staged and puts
+    // it on the frame every client receives.
+    const status = deriveIngestStatus([
+      { event: 'ingestion_started', data: { collection: 'c', total_files: 12_000 } }
+    ])
+    expect(status.totalFiles).toBe(12_000)
   })
 
   it('captures stage info from "processing PDF" progress', () => {
@@ -562,5 +608,62 @@ describe('deriveIngestStatus error message capture', () => {
     ])
     expect(status.phase).toBe('error')
     expect(status.errorMessage).toBe('Upload failed: every batch was rejected.')
+  })
+})
+
+describe('applyIngestEvent', () => {
+  const events: IngestEvent[] = [
+    { event: 'start', data: { collection: 'c1', files: ['a.txt', 'b.txt'] }, receivedAt: 1 },
+    { event: 'upload_progress', data: { filename: 'a.txt', bytes_written: 3 }, receivedAt: 2 },
+    { event: 'file_saved', data: { filename: 'a.txt' }, receivedAt: 3 },
+    { event: 'warning', data: { message: 'one file held no text' }, receivedAt: 4 },
+    { event: 'ingestion_started', data: { collection: 'c1' }, receivedAt: 5 },
+    {
+      event: 'ingestion_progress',
+      data: { message: 'Extracting entities: 2/9 chunks processed' },
+      receivedAt: 6
+    }
+  ]
+
+  it('folds events one at a time into the same status the reducer derives', () => {
+    const folded = events.reduce((acc, ev) => applyIngestEvent(acc, ev), emptyStatus())
+    expect(folded).toEqual(deriveIngestStatus(events))
+  })
+
+  it('leaves the status it was handed untouched', () => {
+    const before = emptyStatus()
+    applyIngestEvent(before, { event: 'file_saved', data: { filename: 'a.txt' }, receivedAt: 1 })
+    expect(before).toEqual(emptyStatus())
+  })
+
+  it('folds a folder-sized upload in linear time', () => {
+    // The upload leg emits one frame per megabyte plus one per file, so an
+    // 18 GB batch is tens of thousands of frames. Re-reducing the whole event
+    // log per frame — what the run store used to do — is quadratic and hangs
+    // the tab; this bound fails long before it would finish that way.
+    let status = emptyStatus()
+    const startedAt = performance.now()
+    for (let i = 0; i < 30_000; i += 1) {
+      status = applyIngestEvent(status, {
+        event: 'upload_progress',
+        data: { filename: 'big.bin', bytes_written: i },
+        receivedAt: i
+      })
+    }
+    expect(status.uploadingBytes).toBe(29_999)
+    expect(performance.now() - startedAt).toBeLessThan(3_000)
+  })
+
+  it('stops retaining warnings once the cap is reached', () => {
+    let status = emptyStatus()
+    for (let i = 0; i < 150; i += 1) {
+      status = applyIngestEvent(status, {
+        event: 'warning',
+        data: { message: `warning ${i}` },
+        receivedAt: i
+      })
+    }
+    expect(status.warnings).toHaveLength(100)
+    expect(status.warnings[0]).toBe('warning 0')
   })
 })
