@@ -2744,6 +2744,7 @@ class RAG:
     docstore_retry_backoff_seconds: float = field(default=0.25, init=False)
     docstore_retry_backoff_max_seconds: float = field(default=2.0, init=False)
     qdrant_host: str | None = field(default=None, init=False)
+    qdrant_api_key: str | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
     # --- Prompt config ---
@@ -2822,6 +2823,7 @@ class RAG:
         """
         # --- Host config ---
         self.qdrant_host = self.host_config.qdrant_host
+        self.qdrant_api_key = self.host_config.qdrant_api_key
 
         # --- Ingestion config ---
         self.docstore_batch_size = self.ingestion_config.docstore_batch_size
@@ -3420,7 +3422,7 @@ class RAG:
             QdrantClient: The initialized Qdrant client.
         """
         if self._qdrant_client is None:
-            self._qdrant_client = QdrantClient(url=self.qdrant_host)
+            self._qdrant_client = QdrantClient(url=self.qdrant_host, api_key=self.qdrant_api_key)
             logger.info(
                 "Qdrant client initialized: {}",
                 self.qdrant_host,
@@ -3435,7 +3437,7 @@ class RAG:
             AsyncQdrantClient: The initialized Qdrant async client.
         """
         if self._qdrant_aclient is None:
-            self._qdrant_aclient = AsyncQdrantClient(url=self.qdrant_host)
+            self._qdrant_aclient = AsyncQdrantClient(url=self.qdrant_host, api_key=self.qdrant_api_key)
             logger.info(
                 "Qdrant async client initialized: {}",
                 self.qdrant_host,
