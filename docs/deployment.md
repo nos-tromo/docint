@@ -64,6 +64,7 @@ the frontend port is published for local development.
   | Variable | Value |
   |---|---|
   | `QDRANT_HOST` | `http://qdrant:6333` |
+  | `QDRANT_API_KEY` | from `.env`, optional — must match data-plane's `QDRANT__SERVICE__API_KEY` |
   | `QDRANT_SRC_DIR` | `/var/lib/docint/sources` |
   | `SESSIONS_DB_PATH` | `/var/lib/docint/sessions/sessions.sqlite3` |
   | `NO_PROXY` / `no_proxy` | `backend,qdrant,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8` (plus `EXTRA_NO_PROXY`) |
@@ -122,6 +123,13 @@ nos-tromo stack over the shared `data-net` network.
 
   Use `make up-dev` when running docint's Python services outside Docker
   so the host can reach Qdrant at `http://localhost:6333`.
+
+When data-plane enables Qdrant's API key (`QDRANT__SERVICE__API_KEY` in its
+`.env`), set the identical value as `QDRANT_API_KEY` in this project's `.env`.
+The startup probe and `make health` use `/readyz`, which Qdrant serves without
+authentication, so a mismatched key is not caught there — it surfaces as a
+`401` on the first ingest or query. Check `make logs S=backend` after
+enabling it.
 
 ## Volumes
 
