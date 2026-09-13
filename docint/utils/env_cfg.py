@@ -523,6 +523,7 @@ class HostConfig:
     backend_host: str
     backend_public_host: str
     qdrant_host: str
+    qdrant_api_key: str | None
     cors_allowed_origins: str
 
 
@@ -543,13 +544,17 @@ def load_host_env(
         - backend_host (str): The backend host URL.
         - backend_public_host (str): The public backend host URL. Required to enable document preview features
             in the Docker environment.
-        - qdrant_host (str): The Qdrant host URL.
+        - qdrant_host (str): The Qdrant REST URL.
+        - qdrant_api_key (str | None): Qdrant API key sent as the ``api-key`` header; ``None`` when
+            ``QDRANT_API_KEY`` is unset or blank, i.e. the server runs without authentication.
         - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
     """
+    qdrant_api_key = os.getenv("QDRANT_API_KEY", "").strip() or None
     return HostConfig(
         backend_host=os.getenv("BACKEND_HOST", default_backend_host),
         backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", default_backend_host),
         qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
+        qdrant_api_key=qdrant_api_key,
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
     )
 
