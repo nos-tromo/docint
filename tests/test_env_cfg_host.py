@@ -30,7 +30,7 @@ def test_qdrant_api_key_is_read_and_stripped(monkeypatch: pytest.MonkeyPatch) ->
     assert load_host_env().qdrant_api_key == "change-me-qdrant-key"
 
 
-def test_qdrant_host_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_qdrant_host_unaffected_when_key_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that qdrant_host is unaffected by qdrant_api_key changes."""
     monkeypatch.setenv("QDRANT_HOST", "http://qdrant:6333")
     monkeypatch.delenv("QDRANT_API_KEY", raising=False)

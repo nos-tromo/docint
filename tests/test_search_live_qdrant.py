@@ -31,7 +31,7 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 def _reachable() -> bool:
     """Return whether a Qdrant server answers at ``QDRANT_URL``."""
     try:
-        QdrantClient(url=QDRANT_URL, timeout=2).get_collections()
+        QdrantClient(url=QDRANT_URL, timeout=2, api_key=os.getenv("QDRANT_API_KEY") or None).get_collections()
     except Exception:
         return False
     return True
@@ -43,7 +43,7 @@ pytestmark = pytest.mark.skipif(not _reachable(), reason="no Qdrant reachable")
 @pytest.fixture
 def collection() -> Iterator[tuple[QdrantClient, str]]:
     """Create a throwaway collection with the search index, then drop it."""
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = QdrantClient(url=QDRANT_URL, timeout=30, api_key=os.getenv("QDRANT_API_KEY") or None)
     name = f"zz_test_search_{uuid.uuid4().hex[:8]}"
     client.create_collection(
         name,

@@ -2,7 +2,7 @@
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
@@ -523,7 +523,7 @@ class HostConfig:
     backend_host: str
     backend_public_host: str
     qdrant_host: str
-    qdrant_api_key: str | None
+    qdrant_api_key: str | None = field(repr=False)
     cors_allowed_origins: str
 
 
