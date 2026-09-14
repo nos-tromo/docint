@@ -335,18 +335,38 @@ def test_run_summary_job_builds_and_reports_progress(monkeypatch: pytest.MonkeyP
     progress_events = [p for ev, p in pushed if ev == "summary_progress"]
     assert progress_events[-1]["mapped"] == 2
     assert progress_events[-1]["total_units"] == 2
+    # The message is what the ingest card parses into a bar, so its shape is
+    # the contract, not a log string: see ``lib/ingestStatus.ts``.
+    assert [p["message"] for p in progress_events] == [
+        "Summarizing collection: 1/2 units processed",
+        "Summarizing collection: 2/2 units processed",
+    ]
 
 
 def test_ingest_job_runs_summary_stage_after_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     """_run_ingest_job calls build_tree_summary when SUMMARY_ON_INGEST is on."""
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
     built: list[int] = []
-    monkeypatch.setattr(api_module.rag, "build_tree_summary", lambda progress=None: built.append(1) or {})
+
+    def fake_build(progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+        assert progress is not None
+        progress(1, 2)
+        progress(2, 2)
+        built.append(1)
+        return {}
+
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", fake_build)
+    pushed: list[tuple[str, dict[str, Any]]] = []
     state = _make_state(kind="ingest", resolve=False)
 
-    api_module._run_ingest_job(state, lambda ev, p: None)
+    api_module._run_ingest_job(state, lambda ev, p: pushed.append((ev, p)))
 
     assert built
+    # The summary is the longest tail of a run; unparseable, its counter left
+    # the ingest card on "Working..." for the whole stage.
+    messages = [p["message"] for ev, p in pushed if ev == "ingestion_progress"]
+    assert "Summarizing collection: 1/2 units processed" in messages
+    assert messages[-1] == "Summarizing collection: 2/2 units processed"
 
 
 def test_ingest_summary_stage_failure_is_warning_not_job_failure(monkeypatch: pytest.MonkeyPatch) -> None:

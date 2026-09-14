@@ -541,6 +541,7 @@ export const en = {
   'ingest.task_transcribing_media': 'Transcribing audio and video',
   'ingest.task_linking_images': 'Linking images to posts',
   'ingest.task_embedding': 'Embedding and storing',
+  'ingest.task_summary': 'Summarizing collection',
   'ingest.stage_progress': '{current} of {total}',
 
   // document-format unit words (documentFormat.ts)

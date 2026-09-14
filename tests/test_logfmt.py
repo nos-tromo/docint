@@ -239,7 +239,7 @@ def test_distinct_stages_keep_distinct_keys() -> None:
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        ("Summarizing 12/412", (12, 412)),
+        ("Summarizing collection: 12/412 units processed", (12, 412)),
         ("Extracting entities: 840/2000 chunks processed", (840, 2000)),
         ("Core pipeline processing PDF (1/3): a.pdf", (1, 3)),
         ("Core pipeline indexed 240 chunks: a.pdf", None),

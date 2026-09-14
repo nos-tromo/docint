@@ -4315,6 +4315,31 @@ def _auto_resolve_requested(ner: bool | None) -> bool:
     return ner_effective and load_resolution_env().auto_resolve
 
 
+def _summary_progress_payload(mapped: int, total: int) -> dict[str, Any]:
+    """Build the progress frame for one resolved tree-summary unit.
+
+    The message is in the counter shape every other long ingest stage
+    reports (``Label: n/total unit processed``), which is what
+    ``lib/ingestStatus.ts`` parses into a bar — without it the summary,
+    the longest tail of a run, left the ingest card on "Working...". The
+    structured keys ride along for the Summary panel, which reads them
+    instead of the message. Shared by both callers so the two can never
+    describe the same build differently.
+
+    Args:
+        mapped (int): Units resolved so far (cache hits included).
+        total (int): Units the build will resolve.
+
+    Returns:
+        dict[str, Any]: The event payload to push.
+    """
+    return {
+        "message": f"Summarizing collection: {mapped}/{total} units processed",
+        "mapped": mapped,
+        "total_units": total,
+    }
+
+
 def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """Execute one ingest job: pipeline, then optional entity resolution.
 
@@ -4411,10 +4436,7 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         try:
             with rag.collection_scope(state.physical):
                 rag.build_tree_summary(
-                    progress=lambda mapped, total: push(
-                        "ingestion_progress",
-                        {"message": f"Summarizing {mapped}/{total}", "mapped": mapped, "total_units": total},
-                    )
+                    progress=lambda mapped, total: push("ingestion_progress", _summary_progress_payload(mapped, total))
                 )
         except Exception:
             logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
@@ -4451,10 +4473,7 @@ def _run_summary_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """
 
     def _progress(mapped: int, total: int) -> None:
-        push(
-            "summary_progress",
-            {"message": f"Summarizing {mapped}/{total}", "mapped": mapped, "total_units": total},
-        )
+        push("summary_progress", _summary_progress_payload(mapped, total))
 
     with rag.collection_scope(state.physical):
         payload = rag.build_tree_summary(progress=_progress)

@@ -93,6 +93,15 @@ describe('parseProgressMessage', () => {
       current: 2,
       total: 9
     })
+    // The post-ingest tree summary: minutes of map-reduce over the whole
+    // collection, which used to show as "Working…" for its entire length.
+    expect(parseProgressMessage('Summarizing collection: 12/412 units processed')).toEqual({
+      kind: 'task',
+      taskKey: 'summary',
+      label: 'Summarizing collection',
+      current: 12,
+      total: 412
+    })
   })
 
   it('returns kind=unknown for unparseable input without throwing', () => {
