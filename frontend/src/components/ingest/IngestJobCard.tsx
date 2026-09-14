@@ -147,7 +147,12 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
   const rerunMutation = useMutation({
     mutationFn: () => {
       const run = useIngestRunStore.getState()
-      return createIngestJob({ collection, ner: run.ner, hate_speech: run.hate })
+      return createIngestJob({
+        collection,
+        ner: run.ner,
+        hate_speech: run.hate,
+        summary: run.summary
+      })
     },
     onSuccess: ({ job_id }) => {
       useIngestRunStore.getState().trackJob(job_id, collection)

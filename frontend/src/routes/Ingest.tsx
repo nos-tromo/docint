@@ -59,9 +59,10 @@ export function Ingest() {
   const [seeded, setSeeded] = useState(false)
   useEffect(() => {
     if (seeded || !ingestDefaults) return
-    const { setNer, setHate } = useIngestRunStore.getState()
+    const { setNer, setHate, setSummary } = useIngestRunStore.getState()
     setNer(ingestDefaults.ner)
     setHate(ingestDefaults.hate_speech)
+    setSummary(ingestDefaults.summary)
     setSeeded(true)
   }, [seeded, ingestDefaults])
 
@@ -165,7 +166,7 @@ export function Ingest() {
               hunted for in checkbox marks. `flex-1` shares the span evenly;
               the minimum width makes them wrap instead of crush on a narrow
               screen or in a long-worded locale. The fieldset carries the one
-              `disabled` for both. */}
+              `disabled` for all three. */}
           <fieldset className="flex flex-wrap gap-2" disabled={busy}>
             <ToggleButton
               className="min-w-32 flex-1"
@@ -180,6 +181,13 @@ export function Ingest() {
               onClick={() => run.setHate(!run.hate)}
             >
               {t('ingest.opt_hate')}
+            </ToggleButton>
+            <ToggleButton
+              className="min-w-32 flex-1"
+              pressed={run.summary}
+              onClick={() => run.setSummary(!run.summary)}
+            >
+              {t('ingest.opt_summary')}
             </ToggleButton>
           </fieldset>
 

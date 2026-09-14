@@ -9,6 +9,11 @@ export interface CreateIngestJobPayload {
   ner?: boolean
   hate_speech?: boolean
   /**
+   * Whether the run rebuilds the collection summary when it finishes.
+   * Omitted means the deployment's own `SUMMARY_ON_INGEST` decides.
+   */
+  summary?: boolean
+  /**
    * How long this run spent uploading, in ms. The run starts when the user
    * hits ingest, but the job only exists from here on, so the client reports
    * the leg the server never saw and the backend folds it into the one

@@ -1064,6 +1064,7 @@ class IngestDefaultsOut(BaseModel):
 
     ner: bool
     hate_speech: bool
+    summary: bool
 
 
 class IngestIn(BaseModel):
@@ -1073,6 +1074,7 @@ class IngestIn(BaseModel):
     hybrid: bool | None = None
     ner: bool | None = None
     hate_speech: bool | None = None
+    summary: bool | None = None
 
 
 class IngestFinalizeIn(IngestIn):
@@ -1384,15 +1386,17 @@ def get_ingest_defaults() -> dict[str, bool]:
     """Return the deployment's default enrichment toggles for the ingest UI.
 
     Served without a principal dependency (like ``/config``) so the SPA can
-    seed its checkboxes; the values mirror ``NER_ENABLED`` and
-    ``ENABLE_HATE_SPEECH_DETECTION``.
+    seed its toggles; the values mirror ``NER_ENABLED``,
+    ``ENABLE_HATE_SPEECH_DETECTION`` and ``SUMMARY_ON_INGEST``.
 
     Returns:
-        dict[str, bool]: ``ner`` and ``hate_speech`` deployment defaults.
+        dict[str, bool]: ``ner``, ``hate_speech`` and ``summary`` deployment
+        defaults.
     """
     return {
         "ner": load_ner_env().enabled,
         "hate_speech": load_hate_speech_env().enabled,
+        "summary": load_summary_env().on_ingest,
     }
 
 
@@ -4397,7 +4401,12 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
                 "entities_touched": summary.entities_touched,
             }
 
-    if load_summary_env().on_ingest:
+    # A per-request override of ``SUMMARY_ON_INGEST``: the rebuild maps the
+    # whole collection, not just this run's files, so it is the longest tail
+    # of a run and the one stage worth skipping for a batch nobody will
+    # summarize. ``None`` keeps the deployment default.
+    summary_requested = load_summary_env().on_ingest if state.summary is None else state.summary
+    if summary_requested:
         push("ingestion_progress", {"message": "Building collection summary..."})
         try:
             with rag.collection_scope(state.physical):
@@ -4410,6 +4419,11 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         except Exception:
             logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
             push("warning", {"message": "Collection summary generation failed."})
+    else:
+        # Said out loud: a skipped summary and one that silently vanished
+        # leave an identical run otherwise, and the collection's cached
+        # summary is stale either way (ingest_docs bumped its revision).
+        push("ingestion_progress", {"message": "Collection summary skipped."})
 
     # ``stats`` rides the result dict as a plain mapping of ints so
     # ``core/jobs.py`` can render it on the run-summary line without
@@ -4925,6 +4939,7 @@ async def ingest_finalize(
         hybrid=payload.hybrid,
         ner=payload.ner,
         hate_speech=payload.hate_speech,
+        summary=payload.summary,
         resolve=_auto_resolve_requested(payload.ner),
         upload_lead_s=(payload.upload_elapsed_ms or 0.0) / 1000.0,
     )

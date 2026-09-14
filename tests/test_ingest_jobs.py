@@ -277,9 +277,41 @@ async def test_run_banner_names_every_staged_file_with_size_and_type(
     combined = "\n".join(loguru_caplog_info.messages)
     assert f"Ingest job started | job_id={state.job_id} collection='field-notes' files=2" in combined
     assert "bytes=2.5 KB" in combined
-    assert "hybrid=true ner=true hate_speech=false resolve=true" in combined
+    assert "hybrid=true ner=true hate_speech=false summary=default resolve=true" in combined
     assert "file='annual-report.pdf' type=pdf bytes=2.0 KB" in combined
     assert "file='meeting-notes.docx' type=docx bytes=512 B" in combined
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_run_banner_distinguishes_an_off_summary_from_an_unspecified_one(
+    loguru_caplog_info: LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """A run that skipped the summary must say so, not read as the default.
+
+    The summary rebuild is the longest tail of an ingest, so "this run chose
+    not to" and "this deployment does not" are different answers to why a
+    run ended where it did.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        tmp_path (Path): Temporary batch directory.
+    """
+    (tmp_path / "notes.txt").write_bytes(b"x" * 16)
+
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(
+        owner="alice",
+        logical_name="field-notes",
+        physical="u000000000000__field-notes",
+        batch_dir=tmp_path,
+        summary=False,
+    )
+    await _drain(manager, state)
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert "hybrid=default ner=default hate_speech=default summary=false resolve=false" in combined
     await manager.stop()
 
 
