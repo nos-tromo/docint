@@ -98,7 +98,8 @@ beforeEach(() => {
     const u = typeof input === 'string' ? input : input.toString()
     if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
     if (u.includes('/collections/list')) return jsonRes([])
-    if (u.includes('/config/ingest-defaults')) return jsonRes({ ner: false, hate_speech: false })
+    if (u.includes('/config/ingest-defaults'))
+      return jsonRes({ ner: false, hate_speech: false, summary: true })
     if (u.includes('/ingest/finalize')) return jsonRes({ job_id: 'job-2' })
     if (u.includes('/ingest/jobs/')) {
       const id = u.split('/ingest/jobs/')[1]?.split('?')[0]
@@ -147,18 +148,28 @@ describe('Ingest', () => {
 
   it('renders the enrichment options as toggle buttons that flip the run store', async () => {
     renderIn(<Ingest />)
-    // Wait for the deployment-defaults seed (`ner`/`hate` both false here).
+    // Wait for the deployment-defaults seed (`ner`/`hate` false, `summary`
+    // true here — each toggle starts at what this deployment configured).
     const ner = await screen.findByRole('button', { name: 'Entities' })
     const hate = screen.getByRole('button', { name: 'Hate speech' })
+    const summary = screen.getByRole('button', { name: 'Summary' })
     await waitFor(() => expect(ner).toHaveAttribute('aria-pressed', 'false'))
     expect(hate).toHaveAttribute('aria-pressed', 'false')
+    await waitFor(() => expect(summary).toHaveAttribute('aria-pressed', 'true'))
 
     ner.click()
     await waitFor(() => expect(ner).toHaveAttribute('aria-pressed', 'true'))
     expect(useIngestRunStore.getState().ner).toBe(true)
-    // The other option is untouched — each toggle owns exactly one flag.
+    // The other options are untouched — each toggle owns exactly one flag.
     expect(hate).toHaveAttribute('aria-pressed', 'false')
     expect(useIngestRunStore.getState().hate).toBe(false)
+    expect(summary).toHaveAttribute('aria-pressed', 'true')
+
+    // The summary rebuild is the one stage a long run is worth skipping, so
+    // it must be switchable off and reach the request that way.
+    summary.click()
+    await waitFor(() => expect(summary).toHaveAttribute('aria-pressed', 'false'))
+    expect(useIngestRunStore.getState().summary).toBe(false)
   })
 
   it('renders live progress for the active job and never flashes the interrupted banner', async () => {
@@ -694,7 +705,12 @@ describe('Ingest — interrupted run', () => {
 
     const finalizeCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ingest/finalize'))!
     const body = JSON.parse((finalizeCall[1] as RequestInit).body as string)
-    expect(body).toEqual({ collection: 'mydocs', ner: true, hate_speech: false })
+    expect(body).toEqual({
+      collection: 'mydocs',
+      ner: true,
+      hate_speech: false,
+      summary: true
+    })
   })
 
   it('re-runs against the job\'s captured collection, not an edited live form field', async () => {

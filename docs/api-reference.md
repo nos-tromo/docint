@@ -103,9 +103,10 @@ without a principal. Returns six fields (`FrontendConfigOut`):
 ### `GET /config/ingest-defaults`
 
 The deployment's default enrichment toggles, so the ingest screen can seed
-its checkboxes. Unauthenticated like `/config`. Returns
-`IngestDefaultsOut` — `{"ner": bool, "hate_speech": bool}`, mirroring
-`NER_ENABLED` and `ENABLE_HATE_SPEECH_DETECTION`.
+its toggle buttons. Unauthenticated like `/config`. Returns
+`IngestDefaultsOut` — `{"ner": bool, "hate_speech": bool, "summary": bool}`,
+mirroring `NER_ENABLED`, `ENABLE_HATE_SPEECH_DETECTION` and
+`SUMMARY_ON_INGEST`.
 
 ### `GET /version`
 
@@ -938,9 +939,14 @@ Queues an ingest job over a collection's already-staged batches. Returns
 ```
 
 Request (`IngestIn`) carries the logical collection name and the run's
-enrichment options (`hybrid`, `ner`, `hate_speech`). Entity resolution runs
-as a stage *inside* the job, so it no longer depends on a client staying
-attached.
+enrichment options (`hybrid`, `ner`, `hate_speech`, `summary`). Each is a
+tri-state override: omitted (or `null`) keeps the deployment default, so a
+client that says nothing is never read as having asked for a stage off.
+`summary` gates the collection-summary rebuild that tails the job — the
+per-run override of `SUMMARY_ON_INGEST`, and the one stage worth skipping on
+a long batch, since the rebuild maps the whole collection rather than just
+this run's files. Entity resolution runs as a stage *inside* the job, so it
+no longer depends on a client staying attached.
 
 | Status | Meaning |
 |---|---|

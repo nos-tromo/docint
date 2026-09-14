@@ -327,6 +327,9 @@ describe('useIngestRunStore — tracking several jobs', () => {
     ])
     expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-0'])
     expect(useIngestRunStore.getState().ner).toBe(true)
+    // v1 predates the summary toggle; it carries over as on, the same value
+    // a fresh store starts at, never as an accidental opt-out.
+    expect(useIngestRunStore.getState().summary).toBe(true)
   })
 })
 
@@ -374,7 +377,8 @@ describe('useIngestRunStore — finishing an interrupted upload', () => {
     expect(createIngestJob).toHaveBeenCalledWith({
       collection: 'mydocs',
       ner: false,
-      hate_speech: false
+      hate_speech: false,
+      summary: true
     })
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
       { job_id: 'job-1', collection: 'mydocs' }

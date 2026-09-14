@@ -14,6 +14,7 @@ interface PersistedIngestRun {
   collection: string
   ner: boolean
   hate: boolean
+  summary: boolean
   trackedJobs: TrackedJob[]
   handledJobIds: string[]
 }
@@ -77,6 +78,12 @@ export interface IngestRunState {
   ner: boolean
   hate: boolean
   /**
+   * Whether this run rebuilds the collection summary when it finishes. The
+   * rebuild maps the whole collection, not just this run's files, so it is
+   * the longest tail of a long ingest and the one stage worth skipping.
+   */
+  summary: boolean
+  /**
    * Jobs this browser queued, newest first. Persisted, and kept even after a
    * job finishes: it is the only way to tell a job the server has forgotten
    * (an interrupted run, worth offering a re-run for) from one that never
@@ -122,6 +129,7 @@ export interface IngestRunState {
   setCollection: (v: string) => void
   setNer: (v: boolean) => void
   setHate: (v: boolean) => void
+  setSummary: (v: boolean) => void
   addFiles: (v: File[]) => void
   removeFile: (i: number) => void
   clearFiles: () => void
@@ -180,6 +188,10 @@ export const useIngestRunStore = create<IngestRunState>()(
       collection: '',
       ner: false,
       hate: false,
+      // Starts on, matching SUMMARY_ON_INGEST's own default: the seed from
+      // `/config/ingest-defaults` overwrites it, and a failed defaults fetch
+      // must not silently drop a stage the deployment asked for.
+      summary: true,
       trackedJobs: [],
       handledJobIds: [],
       uploadStatusByJob: {},
@@ -187,6 +199,7 @@ export const useIngestRunStore = create<IngestRunState>()(
       setCollection: (collection) => set({ collection }),
       setNer: (ner) => set({ ner }),
       setHate: (hate) => set({ hate }),
+      setSummary: (summary) => set({ summary }),
       addFiles: (v) => set((s) => ({ files: mergeFiles(s.files, v) })),
       removeFile: (i) => set((s) => ({ files: s.files.filter((_, idx) => idx !== i) })),
       clearFiles: () => set({ files: [] }),
@@ -220,13 +233,14 @@ export const useIngestRunStore = create<IngestRunState>()(
           collection: '',
           ner: false,
           hate: false,
+          summary: true,
           trackedJobs: [],
           handledJobIds: [],
           uploadStatusByJob: {},
           ...transient
         }),
       start: async (limitBytes, t) => {
-        const { collection, files, ner, hate, uploading } = get()
+        const { collection, files, ner, hate, summary, uploading } = get()
         if (!collection || files.length === 0 || uploading) return
         set({
           uploading: true,
@@ -259,7 +273,12 @@ export const useIngestRunStore = create<IngestRunState>()(
           // mid-upload leaves behind once the transfer finished but finalize
           // never ran. Queue the job over the staged batch directly.
           try {
-            const { job_id } = await createIngestJob({ collection, ner, hate_speech: hate })
+            const { job_id } = await createIngestJob({
+              collection,
+              ner,
+              hate_speech: hate,
+              summary
+            })
             get().trackJob(job_id, collection)
             set({ uploading: false, uploadStatus: emptyStatus(), files: [], failedFiles: [] })
           } catch {
@@ -328,6 +347,7 @@ export const useIngestRunStore = create<IngestRunState>()(
             collection,
             ner,
             hate_speech: hate,
+            summary,
             upload_elapsed_ms:
               runStartedAt === undefined ? undefined : Date.now() - runStartedAt
           })
@@ -359,6 +379,7 @@ export const useIngestRunStore = create<IngestRunState>()(
         collection: s.collection,
         ner: s.ner,
         hate: s.hate,
+        summary: s.summary,
         trackedJobs: s.trackedJobs,
         handledJobIds: s.handledJobIds
       }),
@@ -377,6 +398,7 @@ export const useIngestRunStore = create<IngestRunState>()(
           collection,
           ner: old.ner === true,
           hate: old.hate === true,
+          summary: true,
           trackedJobs: jobId ? [{ job_id: jobId, collection: jobCollection }] : [],
           handledJobIds: handled
         }

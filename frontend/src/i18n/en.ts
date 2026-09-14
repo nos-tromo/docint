@@ -270,6 +270,7 @@ export const en = {
   'ingest.save_failed_file': 'Upload failed: “{filename}” could not be saved.',
   'ingest.opt_ner': 'Entities',
   'ingest.opt_hate': 'Hate speech',
+  'ingest.opt_summary': 'Summary',
 
   // inspector orphans
   'inspector.file_types': 'File types',

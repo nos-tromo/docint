@@ -18,6 +18,7 @@ import docint.core.api as api_module
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core.entities.resolution import ResolutionSummary
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.jobs import IngestJobState
 
 
 @pytest.fixture(autouse=True)
@@ -127,9 +128,13 @@ def test_ingest_defaults_endpoint_reflects_env(monkeypatch: pytest.MonkeyPatch, 
     """GET /config/ingest-defaults mirrors the deployment env defaults."""
     monkeypatch.setenv("NER_ENABLED", "true")
     monkeypatch.setenv("ENABLE_HATE_SPEECH_DETECTION", "false")
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
     resp = client.get("/config/ingest-defaults")
     assert resp.status_code == 200
-    assert resp.json() == {"ner": True, "hate_speech": False}
+    assert resp.json() == {"ner": True, "hate_speech": False, "summary": False}
+
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "true")
+    assert client.get("/config/ingest-defaults").json()["summary"] is True
 
 
 def test_ingest_finalize_forwards_flags(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
@@ -294,3 +299,121 @@ def test_ingest_finalize_without_resolve_skips_resolution(
     snapshot = _stage_then_finalize(client, "no-auto-col", {"ner": False})
     assert snapshot["status"] == "completed"
     assert calls == []
+
+
+# --- the summary stage's per-request override ---------------------------------
+
+
+def _summary_job_state(tmp_path: Path, summary: bool | None) -> Any:
+    """Build an ingest job state whose only interesting field is ``summary``.
+
+    Args:
+        tmp_path: Directory standing in for the staged batch.
+        summary: The per-request summary override under test.
+
+    Returns:
+        IngestJobState: A state the ingest runner can execute directly.
+    """
+    return IngestJobState(
+        job_id="job-1",
+        owner="test-operator",
+        logical_name="sum-col",
+        physical="u000000000000__sum-col",
+        batch_dir=tmp_path,
+        summary=summary,
+    )
+
+
+def _run_job_recording_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_ingest: str, summary: bool | None
+) -> tuple[list[bool], list[str]]:
+    """Run the ingest job runner and record whether it summarized.
+
+    Args:
+        monkeypatch: Fixture used to stub the pipeline and the summary build.
+        tmp_path: Staged batch directory.
+        on_ingest: Value for the ``SUMMARY_ON_INGEST`` deployment default.
+        summary: The per-request override carried by the job.
+
+    Returns:
+        tuple[list[bool], list[str]]: Summary-build calls, and the messages
+        pushed to the client.
+    """
+    monkeypatch.setenv("SUMMARY_ON_INGEST", on_ingest)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    builds: list[bool] = []
+    monkeypatch.setattr(
+        type(api_module.rag),
+        "build_tree_summary",
+        lambda self, *, progress=None: builds.append(True),
+    )
+    messages: list[str] = []
+    api_module._run_ingest_job(
+        _summary_job_state(tmp_path, summary),
+        lambda event, payload: messages.append(str(payload.get("message", ""))),
+    )
+    return builds, messages
+
+
+def test_summary_override_skips_the_rebuild(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """summary=False wins over SUMMARY_ON_INGEST=true, and says so.
+
+    The rebuild maps the whole collection, so a run that skips it must not
+    look like one whose summary silently vanished.
+    """
+    builds, messages = _run_job_recording_summary(monkeypatch, tmp_path, on_ingest="true", summary=False)
+    assert builds == []
+    assert "Collection summary skipped." in messages
+
+
+def test_summary_override_forces_the_rebuild(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """summary=True wins over SUMMARY_ON_INGEST=false."""
+    builds, messages = _run_job_recording_summary(monkeypatch, tmp_path, on_ingest="false", summary=True)
+    assert builds == [True]
+    assert "Building collection summary..." in messages
+
+
+def test_absent_summary_override_follows_the_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An unspecified override leaves SUMMARY_ON_INGEST deciding, both ways."""
+    assert _run_job_recording_summary(monkeypatch, tmp_path, on_ingest="true", summary=None)[0] == [True]
+    assert _run_job_recording_summary(monkeypatch, tmp_path, on_ingest="false", summary=None)[0] == []
+
+
+def test_ingest_finalize_forwards_summary_flag(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """POST /ingest/finalize threads an explicit summary flag onto the job."""
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    recorded: list[bool | None] = []
+    original = api_module._run_ingest_job
+    monkeypatch.setattr(
+        api_module,
+        "_run_ingest_job",
+        lambda state, push: (recorded.append(state.summary), original(state, push))[1],
+    )
+
+    assert _stage_then_finalize(client, "sum-flag-col", {"summary": False})["status"] == "completed"
+    assert recorded == [False]
+
+
+def test_ingest_finalize_leaves_summary_unspecified_by_default(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """No summary field in the request must reach the job as ``None``.
+
+    ``None`` is what keeps ``SUMMARY_ON_INGEST`` in charge; a client that
+    says nothing must never be read as having asked for the summary off.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    recorded: list[bool | None] = []
+    original = api_module._run_ingest_job
+    monkeypatch.setattr(
+        api_module,
+        "_run_ingest_job",
+        lambda state, push: (recorded.append(state.summary), original(state, push))[1],
+    )
+
+    assert _stage_then_finalize(client, "sum-default-col")["status"] == "completed"
+    assert recorded == [None]

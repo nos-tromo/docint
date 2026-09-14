@@ -118,9 +118,13 @@ a blank query, where it exports the whole filtered collection.
 Drag-and-drop upload (`src/components/ingest/Dropzone.tsx`) into a selected
 or newly-created collection. Streams the multipart upload plus SSE progress
 events (`src/components/ingest/IngestionStatus.tsx`) for per-file and
-per-stage status. The entity-extraction and hate-speech enrichment options
-are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount from
-`GET /config/ingest-defaults`.
+per-stage status. The entity-extraction, hate-speech and collection-summary
+options are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount
+from `GET /config/ingest-defaults`. **Summary** gates the collection-summary
+rebuild that runs when the ingest finishes; it maps the whole collection, so
+on a long batch it is the longest part of the run and switching it off is
+what makes the job end at the last document. The summary can still be built
+later, on demand, from the Analysis screen's Summary tab.
 
 Below the form, every ingest job the caller owns is listed newest first, one
 card each (`src/components/ingest/IngestJobList.tsx`): queued runs waiting on

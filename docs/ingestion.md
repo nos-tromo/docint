@@ -669,15 +669,15 @@ $ docker logs docint-backend-1 | grep 3d9f1c72e84b41a6b0d5c7f29ae61b30
 Four shapes, in order (invented filenames):
 
 ```
-Ingest job started | job_id=3d9f1c… collection='field-notes' files=3 bytes=18.0 MB by_type=pdf:1,docx:1,csv:1 hybrid=true ner=true hate_speech=false resolve=true
+Ingest job started | job_id=3d9f1c… collection='field-notes' files=3 bytes=18.0 MB by_type=pdf:1,docx:1,csv:1 hybrid=true ner=true hate_speech=false summary=default resolve=true
 Ingest input 1/3 | job_id=3d9f1c… file='annual-report-2024.pdf' type=pdf bytes=8.0 MB
 Job 3d9f1c… (ingest) progress: Core pipeline processing PDF (1/3): annual-report-2024.pdf
 Job 3d9f1c… (ingest) progress: Extracting entities: 840/2000 chunks processed
 Ingest job completed | job_id=3d9f1c… collection='field-notes' duration=14:22 duration_ms=862431 files_processed=3 files_skipped=1 files_failed=0 docs=3 nodes=1284 entities_minted=214 entities_attached=57 empty=false
 ```
 
-`hybrid`, `ner` and `hate_speech` are per-request **overrides**, so each has
-three values rather than two: `true`, `false`, and `default` — the last meaning
+`hybrid`, `ner`, `hate_speech` and `summary` are per-request **overrides**, so
+each has three values rather than two: `true`, `false`, and `default` — the last meaning
 the request specified nothing and the configured default applies. `resolve` is
 a plain flag and is only ever `true` or `false`.
 
