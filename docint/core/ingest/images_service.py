@@ -487,7 +487,8 @@ class ImageIngestionService:
     def __post_init__(self) -> None:
         """Lazily construct a Qdrant client when one wasn't injected."""
         if self.qdrant_client is None:
-            self.qdrant_client = QdrantClient(url=load_host_env().qdrant_host)
+            host = load_host_env()
+            self.qdrant_client = QdrantClient(url=host.qdrant_host, api_key=host.qdrant_api_key)
 
     def _resolve_collection_name(self, source_collection: str | None = None) -> str:
         """Resolve target image collection name from configured template.

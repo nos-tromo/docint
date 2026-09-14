@@ -107,13 +107,14 @@ engine, against the same endpoint, under the same budget.
 
 ## Host endpoints — `HostConfig`
 
-Loaded by `load_host_env()` (`env_cfg.py:522`).
+Loaded by `load_host_env()` (`env_cfg.py:530`).
 
 | Variable | Default | Description |
 |---|---|---|
 | `BACKEND_HOST` | `http://localhost:8000` | Internal backend URL used by the frontend container. |
-| `BACKEND_PUBLIC_HOST` | `http://localhost:8000` | External URL used for document preview links. It does **not** inherit `BACKEND_HOST`: `env_cfg.py:544` falls back to the same literal default as `BACKEND_HOST` does, not to whatever `BACKEND_HOST` was set to. Setting only `BACKEND_HOST` in production therefore leaves preview links pointing at localhost. Set both. |
+| `BACKEND_PUBLIC_HOST` | `http://localhost:8000` | External URL used for document preview links. It does **not** inherit `BACKEND_HOST`: `env_cfg.py:555` falls back to the same literal default as `BACKEND_HOST` does, not to whatever `BACKEND_HOST` was set to. Setting only `BACKEND_HOST` in production therefore leaves preview links pointing at localhost. Set both. |
 | `QDRANT_HOST` | `http://localhost:6333` | Qdrant REST URL. |
+| `QDRANT_API_KEY` | *(unset)* | Sent as the `api-key` header on every Qdrant request. Set it to the same value as data-plane's `QDRANT__SERVICE__API_KEY`; leave unset when Qdrant runs without auth. `qdrant-client` warns on first use that the key travels over plain HTTP — expected on `data-net`, which never leaves the Docker bridge. |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated CORS origins (the Vite dev server). |
 
 ## Vector quantization — `QdrantQuantizationConfig`

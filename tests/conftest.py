@@ -106,6 +106,7 @@ def _hermetic_hybrid_env() -> Iterator[None]:
         "SPARSE_MODEL",
         "EMBED_API_BASE",
         "OPENAI_API_KEY",
+        "QDRANT_API_KEY",
     ):
         mp.delenv(name, raising=False)
     yield
