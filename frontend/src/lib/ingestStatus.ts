@@ -106,7 +106,12 @@ const TASK_PATTERNS: readonly { re: RegExp; key: string; label: string }[] = [
   { re: /^Reading files:\s*(\d+)\/(\d+) files read$/, key: 'reading', label: 'Reading files' },
   { re: /^Transcribing media:\s*(\d+)\/(\d+) clips processed$/, key: 'media', label: 'Transcribing media' },
   { re: /^Linking images:\s*(\d+)\/(\d+) images linked$/, key: 'images', label: 'Linking images' },
-  { re: /^Embedding and storing:\s*(\d+)\/(\d+) batches processed$/, key: 'embedding', label: 'Embedding' }
+  { re: /^Embedding and storing:\s*(\d+)\/(\d+) batches processed$/, key: 'embedding', label: 'Embedding' },
+  {
+    re: /^Summarizing collection:\s*(\d+)\/(\d+) units processed$/,
+    key: 'summary',
+    label: 'Summarizing collection'
+  }
 ]
 
 /**

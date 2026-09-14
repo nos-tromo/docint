@@ -553,6 +553,7 @@ export const de: Strings = {
   'ingest.task_transcribing_media': 'Audio und Video wird transkribiert',
   'ingest.task_linking_images': 'Bilder werden Postings zugeordnet',
   'ingest.task_embedding': 'Embeddings und Speicherung',
+  'ingest.task_summary': 'Sammlung wird zusammengefasst',
   'ingest.stage_progress': '{current} von {total}',
 
   // document-format unit words (documentFormat.ts)

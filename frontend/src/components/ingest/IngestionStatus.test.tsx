@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { IngestionStatus } from './IngestionStatus'
 import type { IngestStatus } from '@/lib/ingestStatus'
+import { LanguageContext } from '@/i18n/LanguageContext'
 
 function errorStatus(overrides: Partial<IngestStatus> = {}): IngestStatus {
   return {
@@ -133,5 +134,34 @@ describe('IngestionStatus markers are drawn, never typed', () => {
     )
     expect(container.querySelector('svg')).not.toBeNull()
     expect(container.textContent).not.toMatch(/[✓✗⏱]/)
+  })
+})
+
+describe('IngestionStatus task bars', () => {
+  // The label a counter carries joins to the catalog by string, and an
+  // unmapped one falls back to the raw English silently. Asserting in German
+  // is what separates a real mapping from that fallback — under `en` the two
+  // read identically. The summary is the long tail of a run, so its bar is
+  // the one an operator watches longest.
+  it('renders the summary counter through the catalog, not its raw label', () => {
+    render(
+      <LanguageContext value="de">
+        <IngestionStatus
+          status={
+            {
+              phase: 'processing',
+              totalFiles: 1,
+              filesSaved: 1,
+              indexed: 0,
+              totalChunks: 0,
+              tasks: [{ key: 'summary', label: 'Summarizing collection', current: 12, total: 412 }],
+            } as IngestStatus
+          }
+        />
+      </LanguageContext>
+    )
+    expect(screen.getByText('Sammlung wird zusammengefasst')).toBeInTheDocument()
+    expect(screen.getByText('12/412')).toBeInTheDocument()
+    expect(screen.queryByText('Summarizing collection')).not.toBeInTheDocument()
   })
 })

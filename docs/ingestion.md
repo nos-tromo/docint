@@ -719,6 +719,7 @@ processed` — and the SPA renders each as its own bar:
 | `Extracting entities: n/total chunks processed` | NER. |
 | `Detecting hate speech: n/total chunks processed` | Hate-speech detection. |
 | `Embedding and storing: n/total batches processed` | The persist lane. |
+| `Summarizing collection: n/total units processed` | The post-ingest tree summary: one unit per document (or social author-hour bucket), cache hits included. Its reduce-fold tiers and final synthesis run after `N/N` and are not counted. |
 
 The shape is what the SPA parses (`lib/ingestStatus.ts`, `TASK_PATTERNS`),
 so adding a stage is adding a counter on the server and a line there.
