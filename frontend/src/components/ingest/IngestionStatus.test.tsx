@@ -160,7 +160,7 @@ describe('IngestionStatus task bars', () => {
         />
       </LanguageContext>
     )
-    expect(screen.getByText('Sammlung wird zusammengefasst')).toBeInTheDocument()
+    expect(screen.getByText('Zusammenfassung')).toBeInTheDocument()
     expect(screen.getByText('12/412')).toBeInTheDocument()
     expect(screen.queryByText('Summarizing collection')).not.toBeInTheDocument()
   })
