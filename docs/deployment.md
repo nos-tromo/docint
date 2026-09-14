@@ -168,15 +168,17 @@ docker network create edge-net
 
 Multi-stage build, CPU-only:
 
-1. **Builder stage** — starts from the `uv` base image pinned by the
-   `UV_IMAGE` build arg (default `ghcr.io/astral-sh/uv:…-python3.11-…`),
-   installs build dependencies (`build-essential`, `python3-dev`,
-   `zlib1g-dev`), and assembles the virtualenv with `uv sync --locked`
-   from `pyproject.toml` / `uv.lock`.
-2. **Runtime stage** — starts from the same `uv` base, installs only the
-   runtime libraries (`libmagic1`, `libgl1`), copies the prebuilt
-   virtualenv and app source, exposes `8000`, and sets the entrypoint to
-   `uvicorn docint.core.api:app --host 0.0.0.0 --port 8000`.
+1. **Builder stage** — starts from the digest-pinned
+   `python:3.11-slim-trixie` image with the `uv` binary copied in from
+   `ghcr.io/astral-sh/uv` (both pins live on the `FROM` lines and are
+   Dependabot-bumped), installs build dependencies (`build-essential`,
+   `python3-dev`, `zlib1g-dev`), and assembles the virtualenv with
+   `uv sync --locked` from `pyproject.toml` / `uv.lock`.
+2. **Runtime stage** — starts from the same `python:3.11-slim-trixie`
+   digest (no `uv`), installs only the runtime libraries (`libmagic1`,
+   WeasyPrint's pango/harfbuzz/fontconfig stack and fonts), copies the
+   prebuilt virtualenv and app source, exposes `8000`, and sets the
+   entrypoint to `uvicorn docint.core.api:app --host 0.0.0.0 --port 8000`.
 3. **Baked embedding tokenizer** — the builder runs `load-models` to
    cache the `EMBED_TOKENIZER_REPO` tokenizer files (~21 MB) under
    `/app/hf-hub`, which the runtime reads via `HF_HUB_CACHE` with
