@@ -543,6 +543,12 @@ export const en = {
   'ingest.task_embedding': 'Embedding and storing',
   'ingest.task_summary': 'Summarizing collection',
   'ingest.stage_progress': '{current} of {total}',
+  'ingest.preprocess_pdf': 'Reading PDFs',
+  'ingest.preprocess_ocr_pages': 'Recognizing scanned pages',
+  'ingest.preprocess_image': 'Describing images',
+  'ingest.preprocess_media': 'Transcribing clips',
+  'ingest.preprocess_keyframes': 'Describing keyframes',
+  'ingest.preprocess_failed': '{count} failed',
 
   // document-format unit words (documentFormat.ts)
   'documentFormat.unit_pg': 'pg',

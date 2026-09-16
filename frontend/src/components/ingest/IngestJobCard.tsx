@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '@/api/client'
 import { cancelIngestJob, createIngestJob, dismissIngestJob, getIngestJob } from '@/api/jobs'
 import { ingestJobsKey } from '@/hooks/useIngestJobs'
+import { usePreprocessProgress } from '@/hooks/usePreprocessProgress'
 import { useIngestCompletion } from '@/hooks/useIngestCompletion'
 import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
 import { useIngestRunStore } from '@/stores/ingestRun'
@@ -97,6 +98,10 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
     const phase = PHASE_BY_STATUS[jobQuery.data?.status ?? '']
     return phase ? { ...named, phase } : named
   }, [uploadStatus, jobEvents, jobQuery.data, collection])
+
+  // Polled rather than folded from the stream: the pool's work belongs to the
+  // collection, not to this job, and it carries on through finalize.
+  const preprocess = usePreprocessProgress(collection, status.phase)
 
   useIngestCompletion(jobId, jobEvents, collection)
 
@@ -217,7 +222,7 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
       ) : (
         status.phase !== 'idle' && (
           <>
-            <IngestionStatus status={status} />
+            <IngestionStatus status={preprocess ? { ...status, preprocess } : status} />
             {abortable && (
               <Button
                 variant="secondary"

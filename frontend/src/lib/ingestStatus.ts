@@ -1,4 +1,5 @@
 import type { IngestEvent, IngestJobSnapshot } from '@/api/types'
+import type { PreprocessStage } from '@/api/jobs'
 
 export type IngestPhase =
   | 'idle'
@@ -39,6 +40,14 @@ export interface IngestStatus {
   uploadingTotalBytes?: number
   stage?: IngestStageInfo
   tasks: IngestTask[]
+  /**
+   * What the preprocessing pool has done for this collection, polled from
+   * `GET /ingest/staged` and merged in at render time — never written by the
+   * reducer. The work starts as each file is saved, so it has no job id to
+   * ride an event on, and a job card re-derives `tasks` from its frames on
+   * every render, which would drop anything folded in from elsewhere.
+   */
+  preprocess?: PreprocessStage[]
   /** Number of files fully indexed by the core pipeline. */
   indexed: number
   /** Total chunks observed across "indexed N chunks" messages. */
@@ -72,6 +81,27 @@ export interface IngestStatus {
    * client's own delta is the only measurement there is.
    */
   durationMs?: number
+}
+
+/** Preprocessing stages in the order they are rendered. */
+export const PREPROCESS_STAGE_ORDER = ['pdf', 'ocr_pages', 'image', 'media', 'keyframes'] as const
+
+/**
+ * The stages worth drawing a bar for, in one fixed order.
+ *
+ * A stage with nothing asked of it has no bar: an audio-only batch never
+ * reads a page, and a bar stuck at 0/0 says only that the reader is confused.
+ *
+ * @param stages - The tally as the server reported it.
+ * @returns Stages with work in them, ordered.
+ */
+export function visiblePreprocessStages(stages?: PreprocessStage[]): PreprocessStage[] {
+  if (!stages) return []
+  const rank = (stage: string) => {
+    const index = PREPROCESS_STAGE_ORDER.indexOf(stage as (typeof PREPROCESS_STAGE_ORDER)[number])
+    return index === -1 ? PREPROCESS_STAGE_ORDER.length : index
+  }
+  return stages.filter((s) => s.total > 0).sort((a, b) => rank(a.stage) - rank(b.stage))
 }
 
 export type ProgressKind = 'stage' | 'indexed' | 'task' | 'unknown'

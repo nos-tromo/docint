@@ -3,9 +3,8 @@ import { Card, WarningIcon } from '@infra/ui'
 import { getStagedBatch } from '@/api/jobs'
 import { formatBytes } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
-
-/** How often to re-ask while the server is still preprocessing the batch. */
-const PREPROCESS_POLL_INTERVAL_MS = 5_000
+import { PREPROCESS_POLL_INTERVAL_MS, preprocessQueryKey } from '@/hooks/usePreprocessProgress'
+import { BarList, preprocessBarItems } from './ProgressBars'
 
 interface IngestStagedCardProps {
   /** The logical collection whose staged batch to describe. */
@@ -33,8 +32,10 @@ export function IngestStagedCard({ collection }: IngestStagedCardProps) {
   const t = useT()
 
   const staged = useQuery({
-    queryKey: ['ingest-staged', collection],
-    queryFn: () => getStagedBatch(collection),
+    // The same key the live run polls, so one request serves both and the
+    // card is already filled when a reload lands on it.
+    queryKey: preprocessQueryKey(collection),
+    queryFn: () => getStagedBatch(collection, { includeEntries: false }),
     enabled: collection.length > 0,
     retry: false,
     // Only while the pool still holds work: a settled batch changes only when
@@ -50,6 +51,7 @@ export function IngestStagedCard({ collection }: IngestStagedCardProps) {
 
   const { running, queued } = data.preprocess
   const working = running + queued > 0
+  const stages = preprocessBarItems(data.preprocess.stages, t)
 
   return (
     <Card className="space-y-3 border-[var(--status-amber-fg)]/40">
@@ -74,6 +76,8 @@ export function IngestStagedCard({ collection }: IngestStagedCardProps) {
           ? t('ingest.staged_preprocessing', { running, queued })
           : t('ingest.staged_idle')}
       </p>
+
+      {stages.length > 0 && <BarList items={stages} />}
     </Card>
   )
 }

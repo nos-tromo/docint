@@ -34,6 +34,8 @@ function renderIn(ui: ReactElement) {
   )
 }
 
+let stagedFiles = 0
+let stagedStages: unknown[] = []
 let fetchMock: ReturnType<typeof vi.fn>
 /** Job ids the mocked `/ingest/jobs/{id}` endpoint currently reports as
  *  known (resolves 200). Tests populate this to mark a job as *not*
@@ -89,6 +91,8 @@ function notFoundRes() {
 beforeEach(() => {
   useIngestRunStore.getState().reset()
   useIngestJobsStore.getState().clear()
+  stagedFiles = 0
+  stagedStages = []
   knownJobIds = new Set()
   queuedJobIds = new Set()
   finishedJobIds = new Set()
@@ -101,6 +105,16 @@ beforeEach(() => {
     if (u.includes('/config/ingest-defaults'))
       return jsonRes({ ner: false, hate_speech: false, summary: true })
     if (u.includes('/ingest/finalize')) return jsonRes({ job_id: 'job-2' })
+    if (u.includes('/ingest/staged'))
+      return jsonRes({
+        collection: 'mydocs',
+        files: stagedFiles,
+        bytes: 9,
+        partial: 0,
+        entries: [],
+        entries_truncated: true,
+        preprocess: { running: 1, queued: 0, stages: stagedStages }
+      })
     if (u.includes('/ingest/jobs/')) {
       const id = u.split('/ingest/jobs/')[1]?.split('?')[0]
       if (!id || !knownJobIds.has(id)) return notFoundRes()
@@ -763,4 +777,43 @@ describe('Ingest — interrupted run', () => {
       timeout: 6000
     })
   }, 10000)
+})
+
+describe('Ingest preprocessing progress', () => {
+  it('shows what the server is reading while the upload is still running', async () => {
+    // The reason the feature exists: on a large batch the server spends the
+    // whole upload reading files, and the upload bar said nothing about it.
+    stagedStages = [{ stage: 'ocr_pages', done: 12, total: 40, failed: 0 }]
+    useIngestRunStore.setState({
+      collection: 'mydocs',
+      uploading: true,
+      uploadStatus: deriveIngestStatus([
+        { event: 'start', data: { collection: 'mydocs', files: ['a.pdf'] }, receivedAt: Date.now() },
+        {
+          event: 'upload_progress',
+          data: { filename: 'a.pdf', bytes_written: 5 },
+          receivedAt: Date.now()
+        }
+      ])
+    })
+
+    renderIn(<Ingest />)
+
+    expect(await screen.findByText('Recognizing scanned pages')).toBeInTheDocument()
+    expect(screen.getByText('12/40')).toBeInTheDocument()
+  })
+
+  it('asks nothing of the server before a run starts', async () => {
+    useIngestRunStore.setState({ collection: 'mydocs' })
+
+    renderIn(<Ingest />)
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    // The staged card asks its own question when the screen is idle; the run
+    // poll must not add a second one on top of an idle screen.
+    const stagedCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes('/ingest/staged')
+    )
+    expect(stagedCalls.length).toBeLessThanOrEqual(1)
+  })
 })
