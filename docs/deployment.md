@@ -79,8 +79,9 @@ the frontend port is published for local development.
 ### `frontend`
 
 - Built from `docker/Dockerfile.frontend`: a multi-stage build that
-  compiles the React SPA with pnpm (`node:22-alpine`) and serves the
-  static bundle via nginx (`nginx:1.27-alpine`) on container port `80`.
+  compiles the React SPA with pnpm (on the current `node:*-alpine`) and
+  serves the static bundle via nginx (`nginxinc/nginx-unprivileged:*-alpine`)
+  on container port `80`.
 - nginx reverse-proxies API routes to the backend at `backend:8000` over
   `docint-net`, so the backend is never host-published — in dev the SPA is
   the only host-exposed surface.
@@ -182,7 +183,9 @@ Multi-stage build, CPU-only:
 1. **Builder stage** — starts from the digest-pinned
    `python:3.11-slim-trixie` image with the `uv` binary copied in from
    `ghcr.io/astral-sh/uv` (both pins live on the `FROM` lines and are
-   Dependabot-bumped), installs build dependencies (`build-essential`,
+   Dependabot-bumped — the Python one digest-only, since `requires-python`
+   fixes the 3.11 line and `.github/dependabot.yml` ignores its minor/major
+   bumps), installs build dependencies (`build-essential`,
    `python3-dev`, `zlib1g-dev`), and assembles the virtualenv with
    `uv sync --locked` from `pyproject.toml` / `uv.lock`.
 2. **Runtime stage** — starts from the same `python:3.11-slim-trixie`
@@ -198,8 +201,10 @@ Multi-stage build, CPU-only:
 
 ### `docker/Dockerfile.frontend`
 
-Multi-stage build: compiles the React SPA with pnpm on `node:22-alpine`,
-then serves the static bundle via `nginx:1.27-alpine` on port `80`. nginx
+Multi-stage build: compiles the React SPA with pnpm on the current
+`node:*-alpine` (pnpm is installed with `npm install -g pnpm@<pin>` — Node ≥25
+images ship no Corepack), then serves the static bundle via
+`nginxinc/nginx-unprivileged:*-alpine` on port `80`. nginx
 also reverse-proxies API routes to the backend and honors
 `DOCINT_CLIENT_MAX_BODY_SIZE` for the upload-size limit. The image carries
 no Python or ML dependencies.
