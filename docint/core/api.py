@@ -1111,11 +1111,33 @@ class StagedFileOut(BaseModel):
     bytes: int
 
 
+class StagedStageOut(BaseModel):
+    """One preprocessing stage's tally for a collection.
+
+    ``stage`` is protocol, English in every locale: ``pdf``, ``image`` and
+    ``media`` count files, ``ocr_pages`` the scanned pages inside PDFs and
+    ``keyframes`` the frames inside clips. ``failed`` counts files whose task
+    raised and are waiting for whichever lane next needs them — without it a
+    stage stuck at 3/10 reads as merely slow.
+    """
+
+    stage: str
+    done: int
+    total: int
+    failed: int
+
+
 class StagedPreprocessOut(BaseModel):
-    """How much of a staged batch the preprocessing pool still has in hand."""
+    """How much of a staged batch the preprocessing pool still has in hand.
+
+    ``running``/``queued`` count tasks; ``stages`` says how far each kind of
+    work has got, which is what a progress bar needs — a clip or a scanned PDF
+    is a single queued task for minutes at a time.
+    """
 
     running: int
     queued: int
+    stages: list[StagedStageOut] = Field(default_factory=list)
 
 
 class StagedBatchOut(BaseModel):
@@ -4582,7 +4604,15 @@ def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         return _run_summary_job(state, push)
     if state.kind == "extract":
         return _run_extract_job(state, push)
-    return _run_ingest_job(state, push)
+    try:
+        return _run_ingest_job(state, push)
+    finally:
+        # The job's end is the one per-collection boundary the batch has: a
+        # staged batch is kept after a run (hash dedup makes a re-run cheap),
+        # so without this the next upload's bars would start at the last
+        # run's totals. Files still in flight are kept — they belong to
+        # whatever asked for them next.
+        get_preprocess_pool().forget_collection(state.physical)
 
 
 job_manager = IngestJobManager(runner=_run_job)
@@ -5160,7 +5190,7 @@ async def export_source_extract(
 
 
 @app.get("/ingest/staged", tags=["Ingestion"], response_model=StagedBatchOut)
-async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
+async def staged_batch(request: Request, collection: str, include_entries: bool = True) -> StagedBatchOut:
     """Report the files staged for a collection and the preprocessing still running.
 
     This is how a run that lost its client becomes visible again. The upload
@@ -5174,6 +5204,10 @@ async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
     Args:
         request (Request): The incoming request, for principal resolution.
         collection (str): The caller's logical collection name.
+        include_entries (bool): Whether to list the staged names. A client
+            polling the preprocessing tally wants the counts alone — the names
+            are several hundred kilobytes for a folder-sized batch, and only a
+            re-picked folder has any use for them.
 
     Returns:
         StagedBatchOut: File count, total bytes, cut-off transfers, the
@@ -5187,8 +5221,9 @@ async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
     name = _require_collection_name(collection, context="staged")
     physical = _require_owned_collection(name, principal)
     batch_dir = _resolve_qdrant_src_dir() / physical
-    inventory = await to_thread.run_sync(describe_inputs, batch_dir, STAGED_NAME_LIMIT)
-    running, queued = get_preprocess_pool().inflight(physical)
+    inventory = await to_thread.run_sync(describe_inputs, batch_dir, STAGED_NAME_LIMIT if include_entries else 0)
+    pool = get_preprocess_pool()
+    running, queued = pool.inflight(physical)
     return StagedBatchOut(
         collection=name,
         files=inventory.total_files,
@@ -5196,7 +5231,14 @@ async def staged_batch(request: Request, collection: str) -> StagedBatchOut:
         partial=inventory.partial,
         entries=[StagedFileOut(name=f.name, bytes=f.size_bytes) for f in inventory.files],
         entries_truncated=inventory.omitted > 0,
-        preprocess=StagedPreprocessOut(running=running, queued=queued),
+        preprocess=StagedPreprocessOut(
+            running=running,
+            queued=queued,
+            stages=[
+                StagedStageOut(stage=s.stage, done=s.done, total=s.total, failed=s.failed)
+                for s in pool.progress.snapshot(physical)
+            ],
+        ),
     )
 
 

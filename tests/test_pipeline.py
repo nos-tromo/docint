@@ -1847,3 +1847,93 @@ class TestOrchestrator:
         result = orch._run_with_retry("test-stage", flaky_fn)
         assert result == "success"
         assert call_count == 2
+
+    def test_a_digital_pdf_reports_no_pages_to_read(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """Only a scanned page is OCR work, so a digital PDF must not draw a bar at all."""
+        pdf_file = tmp_path / "digital.pdf"
+        pdf_file.write_bytes(build_pdf([table_page()]))
+        seen: list[tuple[int, int]] = []
+
+        DocumentPipelineOrchestrator(config=pipeline_config).process(
+            pdf_file, page_progress=lambda done, total: seen.append((done, total))
+        )
+
+        assert seen
+        assert {total for _, total in seen} == {0}
+
+    def test_scanned_pages_are_reported_one_at_a_time(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
+        """A scan is minutes per page inside one task; without this the file's bar never moves."""
+        pipeline_config = replace(pipeline_config, enable_ocr=True)
+        pdf_file = tmp_path / "scan.pdf"
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])] * 2))
+        engine = self._ocr_engine(
+            pages={
+                index: [OcrBlock(category=OcrCategory.TEXT, bbox=OcrBox(50, 500, 560, 690), text="Read.")]
+                for index in (0, 1)
+            }
+        )
+        seen: list[tuple[int, int]] = []
+
+        with patch("docint.core.readers.documents.orchestrator.build_engine", return_value=engine):
+            manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(
+                pdf_file, page_progress=lambda done, total: seen.append((done, total))
+            )
+
+        assert manifest.pages_ocr == 2
+        assert seen[0] == (0, 2)
+        assert seen[-1] == (2, 2)
+        assert [done for done, _ in seen] == sorted(done for done, _ in seen)
+        assert (1, 2) in seen
+
+    def test_a_page_nothing_could_read_still_counts_as_read_through(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """The bar measures work left, not pages recovered — an unreadable page is done with."""
+        pipeline_config = replace(pipeline_config, enable_ocr=False)
+        pdf_file = tmp_path / "scan.pdf"
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
+        seen: list[tuple[int, int]] = []
+
+        with patch("docint.core.readers.documents.orchestrator.build_engine") as build:
+            DocumentPipelineOrchestrator(config=pipeline_config).process(
+                pdf_file, page_progress=lambda done, total: seen.append((done, total))
+            )
+
+        build.assert_not_called()
+        assert seen[-1] == (1, 1)
+
+    def test_a_cached_document_reports_its_pages_without_reading_them(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """A re-run is a cache hit in milliseconds; its bar has to land full, not empty."""
+        pipeline_config = replace(pipeline_config, enable_ocr=True, force_reprocess=False)
+        pdf_file = tmp_path / "scan.pdf"
+        pdf_file.write_bytes(build_pdf([PageSpec(images=[ImageBox(x=0, y=0, w=612, h=792)])]))
+        engine = self._ocr_engine(
+            pages={0: [OcrBlock(category=OcrCategory.TEXT, bbox=OcrBox(50, 500, 560, 690), text="Read.")]}
+        )
+        seen: list[tuple[int, int]] = []
+
+        with patch("docint.core.readers.documents.orchestrator.build_engine", return_value=engine):
+            DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file)
+            with patch("docint.core.readers.documents.orchestrator.build_engine") as build:
+                DocumentPipelineOrchestrator(config=pipeline_config).process(
+                    pdf_file, page_progress=lambda done, total: seen.append((done, total))
+                )
+
+        build.assert_not_called()
+        assert seen == [(1, 1)]
+
+    def test_a_failing_progress_callback_does_not_fail_the_document(
+        self, pipeline_config: PipelineConfig, tmp_path: Path
+    ) -> None:
+        """A line about the work must never be able to end the work."""
+        pdf_file = tmp_path / "digital.pdf"
+        pdf_file.write_bytes(build_pdf([table_page()]))
+
+        def boom(done: int, total: int) -> None:
+            raise RuntimeError("nobody is listening")
+
+        manifest = DocumentPipelineOrchestrator(config=pipeline_config).process(pdf_file, page_progress=boom)
+
+        assert manifest.status == "completed"

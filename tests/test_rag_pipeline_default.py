@@ -78,11 +78,12 @@ def test_reader_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch, tmp_path:
             """Initialise with a stub artifacts directory."""
             self.config = SimpleNamespace(artifacts_dir=str(tmp_path / "artifacts"))
 
-        def process(self, file_path: str | Path) -> SimpleNamespace:
+        def process(self, file_path: str | Path, *, page_progress: Any = None) -> SimpleNamespace:
             """Raise if called; existing hashes should prevent invocation.
 
             Args:
                 file_path: Path to the PDF file.
+                page_progress: Scanned-page progress sink (unused).
 
             Returns:
                 Never returns.
@@ -375,11 +376,12 @@ def test_reader_yields_and_ingests_images_when_no_text_chunks(monkeypatch: pytes
             """Initialise with a stub artifacts directory."""
             self.config = SimpleNamespace(artifacts_dir=str(artifacts_dir))
 
-        def process(self, _fp: Any) -> SimpleNamespace:
+        def process(self, _fp: Any, *, page_progress: Any = None) -> SimpleNamespace:
             """Return the pre-built manifest.
 
             Args:
                 _fp: File path (unused).
+                page_progress: Scanned-page progress sink (unused).
 
             Returns:
                 A ``SimpleNamespace`` manifest.

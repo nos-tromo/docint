@@ -944,6 +944,7 @@ class SocialLinker:
             nextext_max_concurrency=self.nextext_max_concurrency,
             pool=self.pool,
             progress_callback=self.progress_callback,
+            preprocess_progress=self.pool.progress if self.pool is not None else None,
         ).run(clips)
         result.consumed_paths |= sub.consumed_paths
         result.transcript_documents.extend(sub.transcript_documents)

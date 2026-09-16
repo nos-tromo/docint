@@ -233,23 +233,28 @@ class CorePDFPipelineReader:
             return candidate
         return None
 
-    def _pdf_task(self, pdf_path: Path, artifacts_dir: Path) -> Callable[[], Any]:
+    def _pdf_task(
+        self, pdf_path: Path, artifacts_dir: Path, *, page_progress: Callable[[int, int], None] | None = None
+    ) -> Callable[[], Any]:
         """The unit of work for one PDF: its page pipeline, then its figures.
 
         Shares the preprocessing pool's ``pdf`` key with
         ``preprocess.preprocess_pdf`` — both are idempotent, so whichever runs
-        first does the work and the other joins it.
+        first does the work and the other joins it, and both report their
+        scanned pages the same way.
 
         Args:
             pdf_path (Path): The PDF.
             artifacts_dir (Path): The pipeline artifacts root.
+            page_progress (Callable[[int, int], None] | None): Sink for this
+                document's ``(pages read, pages needing OCR)``.
 
         Returns:
             Callable[[], Any]: Zero-argument task returning the ``DocumentManifest``.
         """
 
         def task() -> Any:
-            manifest = DocumentPipelineOrchestrator().process(pdf_path)
+            manifest = DocumentPipelineOrchestrator().process(pdf_path, page_progress=page_progress)
             if manifest.status == "completed":
                 # Always attempt image ingestion — even when no text chunks
                 # were produced (e.g. screenshot PDFs).
@@ -429,7 +434,14 @@ class CorePDFPipelineReader:
         # that finished before its turn has been evicted, and ``run`` would
         # start it again.
         futures = [
-            pool.submit(preprocess_key("pdf", collection, file_hash), self._pdf_task(pdf_path, artifacts_dir))
+            pool.submit(
+                preprocess_key("pdf", collection, file_hash),
+                self._pdf_task(
+                    pdf_path,
+                    artifacts_dir,
+                    page_progress=pool.progress.unit_reporter(collection, "ocr_pages", file_hash),
+                ),
+            )
             for _, pdf_path, file_hash in pending
         ]
 

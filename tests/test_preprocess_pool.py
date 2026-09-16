@@ -19,6 +19,8 @@ from typing_extensions import override
 from docint.core.ingest import preprocess
 from docint.core.ingest.preprocess import (
     PreprocessPool,
+    PreprocessProgress,
+    StageProgress,
     collection_of_key,
     preprocess_key,
     submit_file,
@@ -267,8 +269,9 @@ class _RecordingPool(PreprocessPool):
     """Pool double that records keys and runs tasks inline."""
 
     def __init__(self) -> None:
-        """Start with no submissions and no executor."""
+        """Start with no submissions, no executor and an empty tally."""
         self.keys: list[str] = []
+        self.progress = PreprocessProgress()
 
     @override
     def submit(self, key: str, fn: Any) -> Any:
@@ -287,21 +290,23 @@ class _RecordingPool(PreprocessPool):
 
 
 @pytest.fixture
-def routed(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Path]]:
+def routed(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     """Replace the three task builders with recorders and enable Nextext."""
-    seen: dict[str, list[Path]] = {"pdf": [], "image": [], "media": []}
+    seen: dict[str, list[Any]] = {"pdf": [], "image": [], "media": []}
     for kind in seen:
         monkeypatch.setattr(
             preprocess,
             f"preprocess_{kind}",
-            lambda path, collection, *, image_service=None, kind=kind: seen[kind].append(path),
+            lambda path, collection, *, image_service=None, progress=None, file_hash=None, kind=kind: seen[kind].append(
+                (path, progress, file_hash)
+            ),
         )
     monkeypatch.setattr(preprocess, "load_nextext_env", lambda: SimpleNamespace(enabled=True))
     monkeypatch.setattr(preprocess, "load_ingestion_env", lambda: SimpleNamespace(media_filetypes=[".mp4"]))
     return seen
 
 
-def test_submit_file_routes_by_extension(tmp_path: Path, routed: dict[str, list[Path]]) -> None:
+def test_submit_file_routes_by_extension(tmp_path: Path, routed: dict[str, list[Any]]) -> None:
     """A PDF, an image and a clip each reach their own stage; anything else is skipped."""
     pool = _RecordingPool()
     files = {name: tmp_path / name for name in ("a.pdf", "b.PNG", "c.mp4", "d.txt")}
@@ -311,13 +316,13 @@ def test_submit_file_routes_by_extension(tmp_path: Path, routed: dict[str, list[
     futures = {name: submit_file(path, "col", pool=pool, file_hash=f"h-{name}") for name, path in files.items()}
 
     assert futures["d.txt"] is None
-    assert routed["pdf"] == [files["a.pdf"]]
-    assert routed["image"] == [files["b.PNG"]]
-    assert routed["media"] == [files["c.mp4"]]
+    assert [call[0] for call in routed["pdf"]] == [files["a.pdf"]]
+    assert [call[0] for call in routed["image"]] == [files["b.PNG"]]
+    assert [call[0] for call in routed["media"]] == [files["c.mp4"]]
     assert pool.keys == ["pdf#col#h-a.pdf", "image#col#h-b.PNG", "media#col#h-c.mp4"]
 
 
-def test_submit_file_hashes_when_not_given(tmp_path: Path, routed: dict[str, list[Path]]) -> None:
+def test_submit_file_hashes_when_not_given(tmp_path: Path, routed: dict[str, list[Any]]) -> None:
     """The upload handler passes the hash it already computed; other callers get it read."""
     path = tmp_path / "a.pdf"
     path.write_bytes(b"pdf")
@@ -329,7 +334,7 @@ def test_submit_file_hashes_when_not_given(tmp_path: Path, routed: dict[str, lis
 
 
 def test_prefetch_batch_submits_every_heavy_file_the_collection_lacks(
-    tmp_path: Path, routed: dict[str, list[Path]]
+    tmp_path: Path, routed: dict[str, list[Any]]
 ) -> None:
     """A PDF already ingested is skipped; a table is never even hashed; the rest is submitted."""
     from docint.utils.hashing import compute_file_hash
@@ -343,8 +348,8 @@ def test_prefetch_batch_submits_every_heavy_file_the_collection_lacks(
 
     assert submitted == 2
     assert routed["pdf"] == []
-    assert routed["image"] == [files["b.png"]]
-    assert routed["media"] == [files["c.mp4"]]
+    assert [call[0] for call in routed["image"]] == [files["b.png"]]
+    assert [call[0] for call in routed["media"]] == [files["c.mp4"]]
 
 
 def test_the_shared_pool_is_rebuilt_after_shutdown() -> None:
@@ -362,7 +367,7 @@ def test_the_shared_pool_is_rebuilt_after_shutdown() -> None:
 
 
 def test_submit_file_skips_media_when_nextext_is_off(
-    tmp_path: Path, routed: dict[str, list[Path]], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, routed: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without Nextext a clip has no stage to run; the job warns about it later."""
     monkeypatch.setattr(preprocess, "load_nextext_env", lambda: SimpleNamespace(enabled=False))
@@ -371,3 +376,230 @@ def test_submit_file_skips_media_when_nextext_is_off(
 
     assert submit_file(path, "col", pool=_RecordingPool(), file_hash="h") is None
     assert routed["media"] == []
+
+
+# ---------------------------------------------------------------------------
+# Per-stage progress tally
+# ---------------------------------------------------------------------------
+
+
+def test_report_keeps_the_furthest_progress_and_the_latest_total() -> None:
+    """A re-report never walks a bar backwards; the total is whatever was measured last."""
+    progress = PreprocessProgress()
+
+    progress.report("c", "ocr_pages", "h", 5, 10)
+    progress.report("c", "ocr_pages", "h", 2, 10)  # a retry starting the file over
+
+    assert progress.snapshot("c") == [StageProgress("ocr_pages", 5, 10, 0)]
+
+    progress.report("c", "ocr_pages", "h", 6, 12)
+
+    assert progress.snapshot("c") == [StageProgress("ocr_pages", 6, 12, 0)]
+
+
+def test_unit_reporter_ticks_one_files_inner_stage() -> None:
+    """What the orchestrator and the transcriber are handed: a file's own (done, total)."""
+    progress = PreprocessProgress()
+
+    tick = progress.unit_reporter("c", "ocr_pages", "h")
+    tick(0, 3)
+    tick(2, 3)
+
+    assert progress.snapshot("c") == [StageProgress("ocr_pages", 2, 3, 0)]
+
+
+def test_snapshot_lists_stages_in_one_order_and_hides_untouched_ones() -> None:
+    """A stage nothing was asked of has no bar; the rest always read in the same order."""
+    progress = PreprocessProgress()
+    progress.report("c", "media", "m", 0, 1)
+    progress.report("c", "pdf", "p", 1, 1)
+    progress.report("c", "keyframes", "k", 2, 8)
+
+    assert [stage.stage for stage in progress.snapshot("c")] == ["pdf", "media", "keyframes"]
+
+
+def test_a_file_is_counted_the_moment_it_is_submitted(pool: PreprocessPool) -> None:
+    """The bar has to appear when the work starts, not when it finishes."""
+    release = threading.Event()
+
+    pool.submit(preprocess_key("image", "c", "h"), release.wait)
+    try:
+        assert pool.progress.snapshot("c") == [StageProgress("image", 0, 1, 0)]
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+
+    assert pool.progress.snapshot("c") == [StageProgress("image", 1, 1, 0)]
+
+
+def test_a_failed_file_stays_outstanding_until_a_retry_succeeds(pool: PreprocessPool) -> None:
+    """The pool holds no results, so a failure is work still to do — and worth naming."""
+    attempts: list[int] = []
+
+    def task() -> str:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("no endpoint")
+        return "ok"
+
+    key = preprocess_key("pdf", "c", "h")
+    with pytest.raises(RuntimeError):
+        pool.run(key, task)
+
+    assert pool.progress.snapshot("c") == [StageProgress("pdf", 0, 1, 1)]
+
+    assert pool.run(key, task) == "ok"
+    assert pool.progress.snapshot("c") == [StageProgress("pdf", 1, 1, 0)]
+
+
+def test_a_cancelled_file_is_un_asked(pool: PreprocessPool) -> None:
+    """An aborted run's queue is work nobody is waiting for; leaving it in the total strands the bar."""
+    release = threading.Event()
+    running = preprocess_key("image", "c", "1")
+    pool.submit(running, release.wait)
+    pool.submit(preprocess_key("image", "c", "2"), release.wait)
+    while not pool._futures[running].running():
+        time.sleep(0.01)
+    queued = pool.submit(preprocess_key("image", "c", "3"), lambda: None)
+    try:
+        assert pool.progress.snapshot("c") == [StageProgress("image", 0, 3, 0)]
+
+        assert pool.cancel_collection("c") == 1
+        assert queued.cancelled()
+        assert pool.progress.snapshot("c") == [StageProgress("image", 0, 2, 0)]
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+
+
+def test_resubmitting_a_finished_file_does_not_reset_it(pool: PreprocessPool) -> None:
+    """The job's prefetch re-submits every staged file; a cache hit must not reopen a finished bar."""
+    key = preprocess_key("pdf", "c", "h")
+
+    assert pool.submit(key, lambda: "first").result(timeout=5) == "first"
+    pool.wait_idle(timeout=5)
+    assert pool.submit(key, lambda: "second").result(timeout=5) == "second"
+    pool.wait_idle(timeout=5)
+
+    assert pool.progress.snapshot("c") == [StageProgress("pdf", 1, 1, 0)]
+
+
+def test_a_link_or_keyframe_key_is_not_counted_as_a_file(pool: PreprocessPool) -> None:
+    """Both re-read a file another key already counted, so counting them again inflates the total."""
+    pool.submit(preprocess_key("image-link", "c", "h:posting-1"), lambda: None)
+    pool.submit(preprocess_key("keyframes", "c", "h"), lambda: None)
+    pool.wait_idle(timeout=5)
+
+    assert pool.progress.snapshot("c") == []
+
+
+def test_the_tally_is_counted_per_collection(pool: PreprocessPool) -> None:
+    """One owner's batch must never show on another's card."""
+    pool.submit(preprocess_key("image", "mine", "1"), lambda: None).result(timeout=5)
+    pool.submit(preprocess_key("image", "theirs", "2"), lambda: None).result(timeout=5)
+    pool.wait_idle(timeout=5)
+
+    assert pool.progress.snapshot("mine") == [StageProgress("image", 1, 1, 0)]
+    assert pool.progress.snapshot("nobody") == []
+
+
+def test_forget_collection_keeps_what_is_still_in_flight(pool: PreprocessPool) -> None:
+    """A job ends the batch it consumed — but not an upload that overlapped its end."""
+    release = threading.Event()
+    pool.submit(preprocess_key("image", "c", "done"), lambda: "ok").result(timeout=5)
+    pool.submit(preprocess_key("image", "c", "busy"), release.wait)
+    try:
+        pool.forget_collection("c")
+
+        assert pool.progress.snapshot("c") == [StageProgress("image", 0, 1, 0)]
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+
+
+def test_the_progress_line_carries_the_per_stage_tally(pool: PreprocessPool, loguru_caplog_info: Any) -> None:
+    """An operator watching the log gets the same breakdown the card shows."""
+    pool.submit(preprocess_key("image", "c", "h"), lambda: None)
+    pool.wait_idle(timeout=5)
+
+    assert "stages=image:1/1" in loguru_caplog_info.text
+    assert "failed=" not in loguru_caplog_info.text
+
+
+def test_the_progress_line_names_failures_only_when_there_are_any(
+    pool: PreprocessPool, loguru_caplog_info: Any
+) -> None:
+    """A stage stuck at 3/10 reads as slow; only the failure count says it is not."""
+
+    def task() -> None:
+        raise RuntimeError("no endpoint")
+
+    pool.submit(preprocess_key("image", "c", "h"), task)
+    pool.wait_idle(timeout=5)
+
+    assert "stages=image:0/1 failed=1" in loguru_caplog_info.text
+
+
+def test_preprocess_pdf_reports_its_pages_to_the_tally(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scan's pages are the only thing that moves while its one file task runs."""
+    progress = PreprocessProgress()
+
+    class _Orchestrator:
+        """Orchestrator double that reports two of five pages read."""
+
+        config = SimpleNamespace(artifacts_dir="/artifacts")
+
+        def process(self, path: Path, *, page_progress: Any = None) -> Any:
+            """Report progress for *path* and return a manifest that ingests no figures."""
+            assert page_progress is not None
+            page_progress(2, 5)
+            return SimpleNamespace(status="failed", doc_id="doc")
+
+    monkeypatch.setattr("docint.core.readers.documents.orchestrator.DocumentPipelineOrchestrator", _Orchestrator)
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"pdf")
+
+    preprocess.preprocess_pdf(path, "col", progress=progress, file_hash="h")
+
+    assert progress.snapshot("col") == [StageProgress("ocr_pages", 2, 5, 0)]
+
+
+def test_submit_file_hands_the_task_the_pools_own_tally(tmp_path: Path, routed: dict[str, list[Any]]) -> None:
+    """Whichever pool a caller passes is the one its files report into."""
+    pool = _RecordingPool()
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"pdf")
+
+    submit_file(path, "col", pool=pool, file_hash="h")
+
+    assert routed["pdf"] == [(path, pool.progress, "h")]
+
+
+def test_preprocess_media_hands_the_transcriber_the_tally(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upload-time transcription belongs to no job, so the tally is all a client can read."""
+    progress = PreprocessProgress()
+    captured: dict[str, Any] = {}
+
+    class _Transcriber:
+        """Transcriber double that records how it was built."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Record the constructor keywords."""
+            captured.update(kwargs)
+
+        def run(self, clips: list[Any]) -> str:
+            """Return a stand-in result."""
+            return "transcribed"
+
+    monkeypatch.setattr("docint.core.ingest.media_transcribe.MediaTranscriber", _Transcriber)
+    monkeypatch.setattr("docint.utils.nextext_client.NextextClient", lambda cfg: object())
+    monkeypatch.setattr(
+        "docint.core.storage.ingest_manifest.open_ingest_manifest",
+        lambda collection: SimpleNamespace(close=lambda: None),
+    )
+    path = tmp_path / "c.mp4"
+    path.write_bytes(b"video")
+
+    preprocess.preprocess_media(path, "col", progress=progress, file_hash="h")
+
+    assert captured["preprocess_progress"] is progress

@@ -45,6 +45,25 @@ from docint.utils.env_cfg import PipelineConfig, load_ingestion_env, load_pipeli
 from docint.utils.hashing import compute_file_hash
 
 
+def _notify(sink: Callable[[int, int], None] | None, done: int, total: int) -> None:
+    """Report ``(done, total)`` to *sink*, swallowing whatever it raises.
+
+    A line about the work must never be able to end the work: the sink is the
+    caller's, and a document is minutes of reading to throw away.
+
+    Args:
+        sink (Callable[[int, int], None] | None): The progress sink, if any.
+        done (int): Pages resolved so far.
+        total (int): Pages this document needs read.
+    """
+    if sink is None:
+        return
+    try:
+        sink(done, total)
+    except Exception as exc:  # defensive: progress must not fail the document
+        logger.debug("Page progress callback failed: {}", exc)
+
+
 class _OcrLane:
     """The document's OCR engine, built on first use and closed once.
 
@@ -118,11 +137,17 @@ class DocumentPipelineOrchestrator:
     # Public API
     # ------------------------------------------------------------------
 
-    def process(self, file_path: str | Path) -> DocumentManifest:
+    def process(
+        self, file_path: str | Path, *, page_progress: Callable[[int, int], None] | None = None
+    ) -> DocumentManifest:
         """Run the full pipeline on *file_path* and return the manifest.
 
         Args:
             file_path (str | Path): Path to a PDF file.
+            page_progress (Callable[[int, int], None] | None): Sink for
+                ``(pages read, pages needing OCR)``. A scan is minutes per
+                page inside a single task, so this is the only thing that can
+                say how far one document has got while it is still running.
 
         Returns:
             DocumentManifest: A ``DocumentManifest`` summarising the processing outcome.
@@ -144,6 +169,7 @@ class DocumentPipelineOrchestrator:
                     file_path.name,
                     self.config.pipeline_version,
                 )
+                _notify(page_progress, existing.pages_ocr, existing.pages_ocr)
                 return existing
 
         start = time.monotonic()
@@ -168,7 +194,9 @@ class DocumentPipelineOrchestrator:
             return manifest
 
         try:
-            return self._process_parsed(file_path, doc_id, manifest, parsed, artifacts_dir, start)
+            return self._process_parsed(
+                file_path, doc_id, manifest, parsed, artifacts_dir, start, page_progress=page_progress
+            )
         finally:
             parsed.close()
 
@@ -180,6 +208,8 @@ class DocumentPipelineOrchestrator:
         parsed: ParsedPdf,
         artifacts_dir: Path,
         start: float,
+        *,
+        page_progress: Callable[[int, int], None] | None = None,
     ) -> DocumentManifest:
         """Run stages 1-6 over an open document handle and return the manifest.
 
@@ -190,6 +220,8 @@ class DocumentPipelineOrchestrator:
             parsed (ParsedPdf): Open docling-parse handle shared by the stages.
             artifacts_dir (Path): Artifacts root.
             start (float): ``time.monotonic()`` at the start of processing.
+            page_progress (Callable[[int, int], None] | None): Sink for
+                ``(pages read, pages needing OCR)``.
 
         Returns:
             DocumentManifest: The completed manifest.
@@ -198,7 +230,9 @@ class DocumentPipelineOrchestrator:
         # and the tables after them — so a dead endpoint is discovered once.
         ocr_lane = _OcrLane(file_path, self.config)
         try:
-            return self._run_stages(file_path, doc_id, manifest, parsed, artifacts_dir, start, ocr_lane)
+            return self._run_stages(
+                file_path, doc_id, manifest, parsed, artifacts_dir, start, ocr_lane, page_progress=page_progress
+            )
         finally:
             ocr_lane.close()
 
@@ -211,6 +245,8 @@ class DocumentPipelineOrchestrator:
         artifacts_dir: Path,
         start: float,
         ocr_lane: _OcrLane,
+        *,
+        page_progress: Callable[[int, int], None] | None = None,
     ) -> DocumentManifest:
         """Run the stages over an open document handle and an OCR lane.
 
@@ -222,6 +258,8 @@ class DocumentPipelineOrchestrator:
             artifacts_dir (Path): Artifacts root.
             start (float): ``time.monotonic()`` at the start of processing.
             ocr_lane (_OcrLane): The document's lazily-built OCR engine.
+            page_progress (Callable[[int, int], None] | None): Sink for
+                ``(pages read, pages needing OCR)``.
 
         Returns:
             DocumentManifest: The completed manifest.
@@ -238,6 +276,9 @@ class DocumentPipelineOrchestrator:
         manifest.pages_total = len(pages)
         manifest.pages_ocr = sum(1 for p in pages if p.needs_ocr)
         manifest.pages_failed = sum(1 for p in pages if p.status == "failed")
+        # Triage is the first stage that knows how much reading this document
+        # needs, and the bar has to exist before the reading starts.
+        _notify(page_progress, 0, manifest.pages_ocr)
 
         # --- Stage 2: Layout analysis ---
         layout: dict[int, list[LayoutBlock]] = {}
@@ -293,7 +334,11 @@ class DocumentPipelineOrchestrator:
         # for. What comes back is the page's layout — headings, text, tables
         # with cells, figures, furniture — so scanned pages flow through the
         # same chunker and artifacts as digital ones.
-        self._read_scanned_pages(ocr_lane, doc_id, pages, layout, page_texts, manifest, artifacts_dir)
+        self._read_scanned_pages(
+            ocr_lane, doc_id, pages, layout, page_texts, manifest, artifacts_dir, page_progress=page_progress
+        )
+        # Whatever happened to the individual pages, none is still to read.
+        _notify(page_progress, manifest.pages_ocr, manifest.pages_ocr)
 
         for page_text in page_texts.values():
             save_page_text(doc_id, page_text, artifacts_dir)
@@ -399,6 +444,8 @@ class DocumentPipelineOrchestrator:
             layout (dict[int, list[LayoutBlock]]): Layout blocks per page (mutated).
             manifest (DocumentManifest): Manifest to record counters on.
             artifacts_dir (Path): Artifacts root (layout artifacts are re-saved).
+            page_progress (Callable[[int, int], None] | None): Sink for
+                ``(pages read, pages needing OCR)``, ticked per page.
         """
         if not self.config.enable_table_ocr:
             return
@@ -474,6 +521,8 @@ class DocumentPipelineOrchestrator:
         page_texts: dict[int, PageText],
         manifest: DocumentManifest,
         artifacts_dir: Path,
+        *,
+        page_progress: Callable[[int, int], None] | None = None,
     ) -> None:
         """Read pages with no text of their own through the OCR engine, in place.
 
@@ -485,6 +534,9 @@ class DocumentPipelineOrchestrator:
             page_texts (dict[int, PageText]): Page texts so far (mutated).
             manifest (DocumentManifest): Manifest to record counters on.
             artifacts_dir (Path): Artifacts root (layout artifacts are re-saved).
+            page_progress (Callable[[int, int], None] | None): Sink for
+                ``(pages resolved, pages needing OCR)``, ticked per page —
+                read, failed or skipped, a page is no longer outstanding.
         """
         if not self.config.enable_ocr:
             return
@@ -503,14 +555,16 @@ class DocumentPipelineOrchestrator:
             return
 
         read = failed = skipped = 0
+        resolved = max(0, manifest.pages_ocr - len(candidates))
         for page_info in candidates:
             if engine.disabled:
                 skipped += 1
-                continue
-            if self._read_one_scanned_page(engine, page_info, doc_id, layout, page_texts, artifacts_dir):
+            elif self._read_one_scanned_page(engine, page_info, doc_id, layout, page_texts, artifacts_dir):
                 read += 1
             else:
                 failed += 1
+            # Read, failed or skipped, the page is no longer work outstanding.
+            _notify(page_progress, resolved + read + failed + skipped, manifest.pages_ocr)
 
         manifest.pages_ocr_read = read
         manifest.pages_ocr_failed = failed

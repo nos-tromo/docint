@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 from llama_index.core.schema import TextNode
 
+from docint.core.ingest.preprocess import StageProgress
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 
@@ -278,7 +279,7 @@ def test_build_submits_every_pdf_before_joining_the_first(
     class _FakeOrchestrator:
         config = SimpleNamespace(artifacts_dir=str(artifacts))
 
-        def process(self, path: Path) -> DocumentManifest:
+        def process(self, path: Path, *, page_progress: Any = None) -> DocumentManifest:
             doc_id = compute_file_hash(path)
             processed.append(path.name)
             (artifacts / doc_id).mkdir(parents=True, exist_ok=True)
@@ -299,3 +300,49 @@ def test_build_submits_every_pdf_before_joining_the_first(
     assert processed == ["a.pdf", "b.pdf"]
     # Both submitted before either is joined, and each exactly once.
     assert recording_pool.keys == [f"pdf#col#{h}" for h in hashes]
+
+
+def test_the_pdf_lane_reports_its_pages_to_the_pools_tally(
+    tmp_path: Path, recording_pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job reads PDFs through the same pool the upload does, so it must report the same way.
+
+    A batch the upload never reached — the CLI, a re-run after a restart —
+    otherwise shows a file bar and nothing else while each scan is read.
+    """
+    import json as _json
+    from types import SimpleNamespace
+
+    from docint.core.readers.documents import reader as reader_module
+    from docint.core.readers.documents.models import DocumentManifest
+    from docint.utils.hashing import compute_file_hash
+
+    artifacts = tmp_path / "artifacts"
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"%PDF-1.4\nscan")
+
+    class _FakeOrchestrator:
+        """Orchestrator double that reports two of four pages read."""
+
+        config = SimpleNamespace(artifacts_dir=str(artifacts))
+
+        def process(self, path: Path, *, page_progress: Any = None) -> DocumentManifest:
+            """Report page progress, write a chunk, and return a completed manifest."""
+            assert page_progress is not None
+            page_progress(2, 4)
+            doc_id = compute_file_hash(path)
+            (artifacts / doc_id).mkdir(parents=True, exist_ok=True)
+            (artifacts / doc_id / "chunks.jsonl").write_text(
+                _json.dumps({"chunk_id": "c1", "text": "scanned text", "page_range": [0]}) + "\n"
+            )
+            manifest = DocumentManifest(doc_id=doc_id, file_path=str(path), file_name=path.name, pipeline_version="t")
+            manifest.status = "completed"
+            return manifest
+
+    monkeypatch.setattr(reader_module, "DocumentPipelineOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(reader_module, "get_preprocess_pool", lambda: recording_pool)
+
+    reader = CorePDFPipelineReader(data_dir=tmp_path, source_collection="col")
+    list(reader.build(existing_hashes=set()))
+
+    assert recording_pool.progress.snapshot("col") == [StageProgress("ocr_pages", 2, 4, 0)]
