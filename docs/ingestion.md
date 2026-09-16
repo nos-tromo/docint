@@ -131,12 +131,14 @@ collection (`LOG_PROGRESS_INTERVAL_S`) and one more when that collection's
 queue drains:
 
 ```
-Preprocess | collection='u507…__field-notes' done=1000 running=0 queued=0
+Preprocess | collection='u507…__field-notes' done=1000 running=0 queued=0 stages=pdf:4/4,ocr_pages:112/112,image:996/996
 ```
 
 The drain line is the one that matters: without it a finished batch and a
 stalled one look identical from the log, because in both cases the model
-calls simply stop appearing.
+calls simply stop appearing. `stages=` carries the same per-stage tally the
+ingest screen draws (see [Preprocessing progress](#preprocessing-progress)),
+and ` failed=N` is appended only when something failed.
 
 ### An upload interrupted before finalize
 
@@ -161,8 +163,11 @@ instead of repeating it:
   final path, a truncated file is indistinguishable from a whole one, and the
   run banner, the staged report and the readers all counted it as an input.
 - **`GET /ingest/staged?collection=<logical>`** reports what is on disk, what
-  the pool still holds, how many transfers were cut off, and the staged
-  relative paths with their sizes (up to `STAGED_NAME_LIMIT`).
+  the pool still holds and how far each of its stages has got, how many
+  transfers were cut off, and the staged relative paths with their sizes (up
+  to `STAGED_NAME_LIMIT`). `include_entries=false` leaves the names out, which
+  is what the progress poll asks for — a folder-sized batch lists tens of
+  thousands of them, and only a re-picked folder has any use for the list.
 - **Re-picking the same folder resumes.** `stores/ingestRun.ts::start` asks
   that endpoint first and uploads only the files the server does not already
   hold, matching on name *and* size so a file the user has since replaced is
@@ -731,6 +736,42 @@ messages that do name a file predate this and stay as they are.
 The denominator every bar needs after a browser reload rides on the
 `ingestion_started` frame as `total_files`, counted from the staged batch:
 the upload leg's own total lives only in the browser that did the uploading.
+
+### Preprocessing progress
+
+The counters above belong to a job. The heavy per-file stages do not: they
+start as each file is saved, which on a large batch is the whole upload, and
+run under no job at all until one is finalized. So they are **pulled, not
+pushed** — the pool keeps a tally per collection, `GET /ingest/staged` reports
+it, and the ingest screen polls it every five seconds while a run is live.
+There is no job id to hang an event on, and a browser that reloads mid-upload
+has nothing to re-attach to; a snapshot every few seconds is enough against
+work measured in minutes per file.
+
+| Stage | Counts | Reported by |
+| --- | --- | --- |
+| `pdf` | Files | The pool, as it submits and finishes each PDF. |
+| `ocr_pages` | Scanned pages | The document orchestrator, per page read, failed or skipped. A digital PDF needs none, so the stage stays hidden. |
+| `image` | Files | The pool. One image is one call, so the file is the whole story. |
+| `media` | Clips | The pool. |
+| `keyframes` | Frames | The image service, per frame — a clip's frames are the only thing that moves once Nextext has answered. |
+
+Two of these hide inside a single task, which is why they report their own
+units: a 30-page scan and a long clip are each one queued task for the better
+part of an hour, and a file bar alone would sit at 0/1 throughout.
+
+Every stage is the same primitive — a per-file `(done, total)` that only moves
+forward. That is what makes the job's `prefetch_batch` harmless: it re-submits
+every staged file, and one the upload already finished re-reports `(0, 1)`
+without reopening a finished bar. A task that raised is counted `failed` and
+stays outstanding until whichever lane next needs the file retries it, because
+a stage stuck at 3/10 and one failing read identically otherwise.
+
+**The denominator is work asked of the pool, never a count of what is on
+disk.** Staged files outlive the run that ingested them (hash dedup makes a
+re-run cheap), so the batch directory accumulates. The job's end is the one
+boundary the batch has, so that is where the tally is dropped — keeping
+whatever is still in flight, which belongs to whatever asked for it next.
 
 ### Progress and the throttle
 
