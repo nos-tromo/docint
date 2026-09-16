@@ -426,7 +426,7 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "docling-core", extras = ["chunking"], specifier = ">=2.96.0" },
-    { name = "docling-parse", specifier = ">=7.19.0" },
+    { name = "docling-parse", specifier = ">=7.19.1" },
     { name = "docling-slim", specifier = ">=2.126.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "fastparquet", specifier = ">=2026.5.0" },
@@ -520,17 +520,17 @@ chunking = [
 
 [[package]]
 name = "docling-parse"
-version = "7.19.0"
+version = "7.19.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docling-core" },
     { name = "pillow" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7d/cb/c56e8453ea26607196f55f391d51f58d97181beeb67c6e44ea8e25882a9d/docling_parse-7.19.0.tar.gz", hash = "sha256:73c0f371a2c244637efda7e149c5543ef881356f629e8edc429b2ac48fff6773", size = 6989139, upload-time = "2026-09-10T11:24:25.563Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/b5/149f0480254b73aa2be0a815d8caa223cba630ee1b0baa0b1332b02e0639/docling_parse-7.19.1.tar.gz", hash = "sha256:265330b0b02595a6656a030fda2f623c89b7a7316672daa607ec6f94faca5b76", size = 6983618, upload-time = "2026-09-11T10:48:35.636Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6a/f3/aaf35cd1425845f237efe62dc6e1e0edf9aecf90f1aca33b203a560c8733/docling_parse-7.19.0-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:003cdce05d511e9e10c113d3cb2aaaa73997ab04ea309f51c0b724fd04fe8fc1", size = 10359880, upload-time = "2026-09-10T11:23:39.953Z" },
-    { url = "https://files.pythonhosted.org/packages/66/6d/f624d87fb210c07e12da757d0239aa6c2aa525e33747a95570a049271d36/docling_parse-7.19.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ac6ca883dc462d98df5c565ff4605fce9fd21d3595cd3a1f0ef92a940cab5e2e", size = 10764302, upload-time = "2026-09-10T11:23:42.001Z" },
+    { url = "https://files.pythonhosted.org/packages/15/77/a41c66455751e30a574e6d794049d9696a5d21a4232a53531bcbaee01dd3/docling_parse-7.19.1-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:521039710ad4481fbac2c130ee7b593f93dc14165982233327a28015ed4f2c79", size = 10359983, upload-time = "2026-09-11T10:47:44.759Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/e2/b019ace79f1a78de0edfab85c12348c826605e4453dbc7c819d690d9f23a/docling_parse-7.19.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f037440ae3e49445609288deab04cc240feada26293f979d95d5a99db70189bb", size = 10764738, upload-time = "2026-09-11T10:47:47.094Z" },
 ]
 
 [[package]]
