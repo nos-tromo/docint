@@ -51,6 +51,17 @@ updates:
     directory: "/docker"
     schedule:
       interval: "weekly"
+    # The backend base image's interpreter line is fixed by requires-python
+    # (">=3.11,<3.12"), uv.lock and the CI matrix, and the builder runs uv with
+    # UV_PYTHON_DOWNLOADS=0, so any other python:* tag fails `uv sync` by
+    # construction. Moving it is a deliberate migration (lockfile, wheels, CI
+    # matrix, Dockerfile, docs), never an automated bump. Digest refreshes
+    # within the 3.11 tag still flow — those are not version updates.
+    ignore:
+      - dependency-name: "library/python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: "github-actions"
     directory: "/"
