@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from docint.core import api as api_module
+from docint.core.ingest.preprocess import PreprocessPool, StageProgress
 from docint.core.jobs import IngestJobManager, IngestJobState, JobRunner
 
 
@@ -420,7 +421,7 @@ def test_staged_reports_the_files_no_job_accounts_for(client: TestClient) -> Non
         "partial": 0,
         "entries": [{"name": "sample.txt", "bytes": len(b"hello")}],
         "entries_truncated": False,
-        "preprocess": {"running": 0, "queued": 0},
+        "preprocess": {"running": 0, "queued": 0, "stages": []},
     }
 
 
@@ -639,3 +640,109 @@ def test_run_job_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     api_module._run_job(_make_state(kind="ingest"), lambda ev, p: None)
 
     assert calls == ["summary", "ingest"]
+
+
+def test_staged_reports_the_pools_per_stage_tally(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bars the ingest screen draws while an upload is still running.
+
+    ``running``/``queued`` say how much is in hand but nothing about how far
+    any of it has got — a 30-page scan is one queued task for the better part
+    of an hour.
+    """
+    _stage(client, "mydocs")
+    physical = next(entry.name for entry in tmp_path.iterdir() if entry.is_dir())
+    pool = PreprocessPool(max_workers=1)
+    pool.progress.report(physical, "pdf", "h1", 1, 1)
+    pool.progress.report(physical, "ocr_pages", "h1", 3, 10)
+    monkeypatch.setattr(api_module, "get_preprocess_pool", lambda: pool)
+
+    try:
+        res = client.get("/ingest/staged", params={"collection": "mydocs"}, headers=_headers())
+    finally:
+        pool.shutdown()
+
+    assert res.json()["preprocess"] == {
+        "running": 0,
+        "queued": 0,
+        "stages": [
+            {"stage": "pdf", "done": 1, "total": 1, "failed": 0},
+            {"stage": "ocr_pages", "done": 3, "total": 10, "failed": 0},
+        ],
+    }
+
+
+def test_staged_can_leave_out_the_names_for_a_progress_poll(client: TestClient) -> None:
+    """A client polling for progress must not pay for the batch's file list every time.
+
+    The names exist so a re-picked folder can skip what arrived; a poll that
+    runs for the length of an ingest wants the counts alone.
+    """
+    _stage(client, "mydocs")
+
+    res = client.get(
+        "/ingest/staged",
+        params={"collection": "mydocs", "include_entries": "false"},
+        headers=_headers(),
+    )
+
+    body = res.json()
+    assert body["files"] == 1
+    assert body["entries"] == []
+    # Honest rather than tidy: more files exist than are listed.
+    assert body["entries_truncated"] is True
+
+
+def test_a_finished_ingest_job_forgets_the_collections_tally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The job's end is the batch boundary: the next upload starts from zero, not from N/N."""
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    pool = PreprocessPool(max_workers=1)
+    monkeypatch.setattr(api_module, "get_preprocess_pool", lambda: pool)
+    state = _make_state(kind="ingest")
+    pool.progress.report(state.physical, "pdf", "h", 1, 1)
+
+    try:
+        api_module._run_job(state, lambda ev, p: None)
+
+        assert pool.progress.snapshot(state.physical) == []
+    finally:
+        pool.shutdown()
+
+
+def test_a_failed_ingest_job_forgets_the_tally_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that died leaves no bars behind for the re-run to inherit."""
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("pipeline died")
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", boom)
+    pool = PreprocessPool(max_workers=1)
+    monkeypatch.setattr(api_module, "get_preprocess_pool", lambda: pool)
+    state = _make_state(kind="ingest")
+    pool.progress.report(state.physical, "image", "h", 0, 4)
+
+    try:
+        with pytest.raises(RuntimeError, match="pipeline died"):
+            api_module._run_job(state, lambda ev, p: None)
+
+        assert pool.progress.snapshot(state.physical) == []
+    finally:
+        pool.shutdown()
+
+
+def test_a_summary_job_leaves_the_tally_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only an ingest consumes a staged batch; a summary rebuild must not clear its bars."""
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", lambda progress=None: {})
+    pool = PreprocessPool(max_workers=1)
+    monkeypatch.setattr(api_module, "get_preprocess_pool", lambda: pool)
+    state = _make_state(kind="summary")
+    pool.progress.report(state.physical, "pdf", "h", 0, 2)
+
+    try:
+        api_module._run_job(state, lambda ev, p: None)
+
+        assert pool.progress.snapshot(state.physical) == [StageProgress("pdf", 0, 2, 0)]
+    finally:
+        pool.shutdown()

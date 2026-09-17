@@ -126,6 +126,14 @@ on a long batch it is the longest part of the run and switching it off is
 what makes the job end at the last document. The summary can still be built
 later, on demand, from the Analysis screen's Summary tab.
 
+While a run is live the card also carries a bar per preprocessing stage —
+PDFs read, scanned pages recognized, images described, clips transcribed,
+keyframes described. That work starts as each file is saved, so the bars
+appear during the upload, long before a job exists, and carry on through it;
+they are polled from `GET /ingest/staged` rather than parsed out of the job's
+messages. The staged card above the form draws the same bars, which is what a
+browser that died mid-upload comes back to.
+
 Below the form, every ingest job the caller owns is listed newest first, one
 card each (`src/components/ingest/IngestJobList.tsx`): queued runs waiting on
 a worker slot, runs in progress, finished runs with their warnings, and

@@ -144,14 +144,15 @@ def recording_pool() -> Any:
     """
     from typing_extensions import override
 
-    from docint.core.ingest.preprocess import PreprocessPool
+    from docint.core.ingest.preprocess import PreprocessPool, PreprocessProgress
 
     class RecordingPool(PreprocessPool):
         """Inline, ordered stand-in for the real pool."""
 
         def __init__(self) -> None:
-            """Start with empty logs and no executor."""
+            """Start with empty logs, no executor and an empty tally."""
             self.keys: list[str] = []
+            self.progress = PreprocessProgress()
             self.joins: list[str] = []
             self.results: dict[str, Any] = {}
 

@@ -1534,6 +1534,7 @@ class ImageIngestionService:
         keyframe_source_type: str = "social_media_keyframe",
         link_field: str | None = "posting_uuid",
         frame_times: Sequence[float | None] | None = None,
+        on_frame: Callable[[int, int], None] | None = None,
     ) -> list[StoredImageRecord]:
         """Embed candidate keyframes, prune near-duplicates, caption survivors.
 
@@ -1570,6 +1571,10 @@ class ImageIngestionService:
                 each frame was sampled from, parallel to ``frames``. Ignored
                 when the lengths disagree — mislabelling a frame is worse than
                 leaving it untimed.
+            on_frame (Callable[[int, int], None] | None): Sink for
+                ``(frames handled, frames given)``. A clip's frames are the
+                only thing that moves while its one task runs, and a pruned
+                frame still cost the embed call that pruned it.
 
         Returns:
             list[StoredImageRecord]: One record per survivor (status ``stored``).
@@ -1597,6 +1602,8 @@ class ImageIngestionService:
         records: list[StoredImageRecord] = []
         tagger = self._get_tagging_backend()
         for frame_index, frame_bytes in enumerate(frames):
+            if on_frame is not None:
+                on_frame(frame_index, len(frames))
             try:
                 embedding = self._run_with_retries(lambda fb=frame_bytes: embedding_backend.embed(fb))
             except Exception as exc:
@@ -1699,6 +1706,8 @@ class ImageIngestionService:
                     ocr_text=frame_ocr,
                 )
             )
+        if on_frame is not None:
+            on_frame(len(frames), len(frames))
         return records
 
     def query_similar_images(

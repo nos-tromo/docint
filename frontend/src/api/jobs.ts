@@ -59,6 +59,20 @@ export interface StagedFile {
   bytes: number
 }
 
+/** One preprocessing stage's tally for a collection.
+ *
+ * `stage` is protocol, English in every locale: `pdf`, `image` and `media`
+ * count files, `ocr_pages` the scanned pages inside PDFs and `keyframes` the
+ * frames inside clips. `failed` counts files whose task raised and are waiting
+ * for whichever lane next needs them.
+ */
+export interface PreprocessStage {
+  stage: string
+  done: number
+  total: number
+  failed: number
+}
+
 /** What the server has staged for a collection, and what it is still reading. */
 export interface StagedBatch {
   collection: string
@@ -69,7 +83,7 @@ export interface StagedBatch {
   entries: StagedFile[]
   /** True when more files are staged than `entries` lists. */
   entries_truncated: boolean
-  preprocess: { running: number; queued: number }
+  preprocess: { running: number; queued: number; stages: PreprocessStage[] }
 }
 
 /**
@@ -81,10 +95,15 @@ export interface StagedBatch {
  * folder finish an interrupted upload instead of re-sending it whole.
  *
  * @param collection - The caller's logical collection name.
+ * @param opts - `includeEntries: false` leaves the names out, which is what a
+ *   progress poll wants: a folder-sized batch lists tens of thousands of them.
  * @returns The staged file count, total size, names, and preprocessing counts.
  */
-export const getStagedBatch = (collection: string) =>
-  apiGet<StagedBatch>('/ingest/staged', { collection })
+export const getStagedBatch = (collection: string, opts?: { includeEntries?: boolean }) =>
+  apiGet<StagedBatch>('/ingest/staged', {
+    collection,
+    include_entries: opts?.includeEntries === false ? false : undefined
+  })
 
 /** List the caller's jobs, newest first. Powers reload re-discovery. */
 export const listIngestJobs = () => apiGet<{ jobs: IngestJobSnapshot[] }>('/ingest/jobs')

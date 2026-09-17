@@ -94,3 +94,53 @@ describe('IngestJobCard', () => {
     await waitFor(() => expect(screen.getByText('quarterly-reports')).toBeInTheDocument())
   })
 })
+
+describe('IngestJobCard preprocess bars', () => {
+  it('keeps reporting the pool the job is still reading through', async () => {
+    // The pool does not stop at finalize — the job's own prefetch re-submits
+    // the batch — so the bars the upload leg showed must carry on here.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        if (url.includes('/ingest/staged')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              collection: 'mydocs',
+              files: 3,
+              bytes: 9,
+              partial: 0,
+              entries: [],
+              entries_truncated: true,
+              preprocess: {
+                running: 1,
+                queued: 0,
+                stages: [{ stage: 'media', done: 1, total: 3, failed: 0 }]
+              }
+            })
+          }
+        }
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: 'not found' }),
+          text: async () => '{"detail":"not found"}'
+        }
+      })
+    )
+    useIngestRunStore.getState().trackJob('job-1', 'mydocs')
+    useIngestRunStore.getState().markJobHandled('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { collection: 'mydocs' },
+      receivedAt: 1
+    })
+
+    renderIn(<IngestJobCard jobId="job-1" collection="mydocs" />)
+
+    expect(await screen.findByText('Transcribing clips')).toBeInTheDocument()
+    expect(screen.getByText('1/3')).toBeInTheDocument()
+  })
+})

@@ -44,6 +44,7 @@ class _FakeImageService:
         keyframe_source_type: str = "social_media_keyframe",
         link_field: str | None = "posting_uuid",
         frame_times: Sequence[float | None] | None = None,
+        on_frame: Any = None,
     ) -> list[Any]:
         """Record the keyframe call and return an empty list.
 
@@ -62,6 +63,8 @@ class _FakeImageService:
             keyframe_source_type: ``source_type`` payload value (recorded, not applied).
             link_field: Payload key aliasing ``source_doc_id`` (recorded, not applied).
             frame_times: Per-frame sampling times (recorded, not applied).
+            on_frame: Per-frame progress sink (accepted, not called — the stub
+                stores nothing, and the task closes the tally either way).
 
         Returns:
             An empty list (no records stored in the stub).
@@ -846,3 +849,21 @@ def test_linked_images_report_their_own_progress(tmp_path: Path, recording_pool:
 
     linked = [line for line in reported if line.startswith("Linking images:")]
     assert linked and linked[-1].endswith(f"{len(linked)}/{len(linked)} images linked")
+
+
+def test_a_linked_clips_keyframes_reach_the_pools_tally(tmp_path: Path) -> None:
+    """A social export's clips run through the same pool, so their frames report the same way."""
+    from docint.core.ingest.preprocess import PreprocessPool, StageProgress
+
+    _write_export(tmp_path)
+    pool = PreprocessPool(max_workers=1)
+    linker = SocialLinker(
+        image_service=_FakeImageService(), nextext_client=_FakeNextext(), target_collection="c", pool=pool
+    )
+
+    try:
+        linker.run(tmp_path)
+
+        assert StageProgress("keyframes", 1, 1, 0) in pool.progress.snapshot("c")
+    finally:
+        pool.shutdown()

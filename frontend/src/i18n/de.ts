@@ -555,6 +555,12 @@ export const de: Strings = {
   'ingest.task_embedding': 'Embeddings und Speicherung',
   'ingest.task_summary': 'Zusammenfassung',
   'ingest.stage_progress': '{current} von {total}',
+  'ingest.preprocess_pdf': 'PDFs werden gelesen',
+  'ingest.preprocess_ocr_pages': 'Gescannte Seiten werden erkannt',
+  'ingest.preprocess_image': 'Bilder werden beschrieben',
+  'ingest.preprocess_media': 'Clips werden transkribiert',
+  'ingest.preprocess_keyframes': 'Keyframes werden beschrieben',
+  'ingest.preprocess_failed': '{count} fehlgeschlagen',
 
   // document-format unit words (documentFormat.ts)
   'documentFormat.unit_pg': 'S.',

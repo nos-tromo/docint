@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -46,9 +47,24 @@ T = TypeVar("T")
 
 IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif"})
 
+#: The stages a collection's preprocessing is reported in, in the order a
+#: client renders them. ``pdf``/``image``/``media`` count files; ``ocr_pages``
+#: counts the scanned pages inside a PDF and ``keyframes`` the frames inside a
+#: clip — a 30-page scan is one file for the better part of an hour, so the
+#: file alone says nothing about how far it has got.
+PROGRESS_STAGES: tuple[str, ...] = ("pdf", "ocr_pages", "image", "media", "keyframes")
+
+#: Pool kinds that are one file each. The other two — ``keyframes`` and
+#: ``image-link`` — re-read a file one of these already counted, so counting
+#: them again would inflate the total.
+_FILE_STAGES: frozenset[str] = frozenset({"pdf", "image", "media"})
+
 __all__ = [
     "IMAGE_EXTENSIONS",
+    "PROGRESS_STAGES",
     "PreprocessPool",
+    "PreprocessProgress",
+    "StageProgress",
     "collection_of_key",
     "get_preprocess_pool",
     "join_future",
@@ -64,6 +80,195 @@ __all__ = [
 ]
 
 
+@dataclass(frozen=True)
+class StageProgress:
+    """One stage's tally for one collection, as a client renders it."""
+
+    stage: str
+    done: int
+    total: int
+    failed: int
+
+
+@dataclass
+class _Unit:
+    """One file's contribution to a stage: how far it has got, and whether it failed."""
+
+    done: int
+    total: int
+    failed: bool = False
+
+
+class PreprocessProgress:
+    """What the pool has been asked to do for a collection, stage by stage.
+
+    The denominator is work *asked of the pool*, never a count of what is on
+    disk: staged files are kept after a job (hash dedup makes a re-run cheap),
+    so the batch directory accumulates and would report a total no run is
+    working through.
+
+    Every stage is the same primitive — a per-file ``(done, total)`` that
+    :meth:`report` moves forward but never back. That is what makes the job's
+    ``prefetch_batch`` safe: it re-submits every staged file, and a file the
+    upload already finished re-reports ``(0, 1)``, which must not reopen a
+    finished bar. A retried file's inner stage is the same story a page at a
+    time.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing asked of any collection."""
+        self._lock = threading.Lock()
+        self._units: dict[tuple[str, str], dict[str, _Unit]] = {}
+
+    def report(self, collection: str, stage: str, item: str, done: int, total: int) -> None:
+        """Record how far one file has got through *stage*.
+
+        Args:
+            collection (str): Physical collection name.
+            stage (str): One of :data:`PROGRESS_STAGES`.
+            item (str): The file's content hash.
+            done (int): Units finished so far; never walks the tally back.
+            total (int): Units this file contributes; replaces what was known.
+        """
+        with self._lock:
+            units = self._units.setdefault((collection, stage), {})
+            unit = units.get(item)
+            if unit is None:
+                units[item] = _Unit(done=done, total=total)
+                return
+            unit.done = max(unit.done, done)
+            unit.total = total
+            unit.failed = False
+
+    def mark_failed(self, collection: str, stage: str, item: str) -> None:
+        """Note that *item* failed, leaving it counted as work still outstanding.
+
+        Args:
+            collection (str): Physical collection name.
+            stage (str): One of :data:`PROGRESS_STAGES`.
+            item (str): The file's content hash.
+        """
+        with self._lock:
+            unit = self._units.get((collection, stage), {}).get(item)
+            if unit is not None:
+                unit.failed = True
+
+    def discard(self, collection: str, stage: str, item: str) -> None:
+        """Un-ask for *item* — what a cancelled task reclaims.
+
+        Args:
+            collection (str): Physical collection name.
+            stage (str): One of :data:`PROGRESS_STAGES`.
+            item (str): The file's content hash.
+        """
+        with self._lock:
+            self._units.get((collection, stage), {}).pop(item, None)
+
+    def unit_reporter(self, collection: str, stage: str, item: str) -> Callable[[int, int], None]:
+        """Bind a ``(done, total)`` sink for one file's inner stage.
+
+        What a long-running task is handed so its pages or frames reach the
+        tally: the caller reports its own progress and knows nothing else.
+
+        Args:
+            collection (str): Physical collection name.
+            stage (str): One of :data:`PROGRESS_STAGES`.
+            item (str): The file's content hash.
+
+        Returns:
+            Callable[[int, int], None]: The bound reporter.
+        """
+
+        def report(done: int, total: int) -> None:
+            """Report this file's progress through the bound stage."""
+            self.report(collection, stage, item, done, total)
+
+        return report
+
+    def snapshot(self, collection: str) -> list[StageProgress]:
+        """Sum one collection's stages, in :data:`PROGRESS_STAGES` order.
+
+        Args:
+            collection (str): Physical collection name.
+
+        Returns:
+            list[StageProgress]: One entry per stage anything was asked of;
+            a stage with no work at all has no bar to draw.
+        """
+        with self._lock:
+            summed: list[StageProgress] = []
+            for stage in PROGRESS_STAGES:
+                units = self._units.get((collection, stage))
+                if not units:
+                    continue
+                total = sum(unit.total for unit in units.values())
+                if total <= 0:
+                    continue
+                summed.append(
+                    StageProgress(
+                        stage=stage,
+                        done=sum(unit.done for unit in units.values()),
+                        total=total,
+                        failed=sum(1 for unit in units.values() if unit.failed),
+                    )
+                )
+            return summed
+
+    def forget(self, collection: str, *, keep_items: frozenset[str] = frozenset()) -> None:
+        """Drop a collection's tally, except the files named in *keep_items*.
+
+        Args:
+            collection (str): Physical collection name.
+            keep_items (frozenset[str]): Hashes to keep — the files still in
+                flight, which belong to whatever asked for them next.
+        """
+        with self._lock:
+            for stage in PROGRESS_STAGES:
+                units = self._units.get((collection, stage))
+                if units is None:
+                    continue
+                kept = {item: unit for item, unit in units.items() if item in keep_items}
+                if kept:
+                    self._units[(collection, stage)] = kept
+                else:
+                    del self._units[(collection, stage)]
+
+
+def _file_stage_of_key(key: str) -> tuple[str, str, str] | None:
+    """Read ``(collection, stage, file_hash)`` out of a one-file pool key.
+
+    Args:
+        key (str): A key from :func:`preprocess_key`.
+
+    Returns:
+        tuple[str, str, str] | None: The triple, or ``None`` for a key that is
+        not one file's own stage.
+    """
+    parts = key.split("#", 2)
+    if len(parts) != 3 or parts[0] not in _FILE_STAGES:
+        return None
+    kind, collection, file_hash = parts
+    return collection, kind, file_hash
+
+
+def _stage_suffix(stages: list[StageProgress]) -> str:
+    """Render the per-stage tally for the pool's INFO line.
+
+    Args:
+        stages (list[StageProgress]): The collection's snapshot.
+
+    Returns:
+        str: ``" stages=pdf:3/10,image:150/800"``, with ``failed=N`` appended
+        only when something failed — a stage stuck at 3/10 reads as slow, and
+        the failure count is the one thing that says it is not.
+    """
+    if not stages:
+        return ""
+    rendered = ",".join(f"{stage.stage}:{stage.done}/{stage.total}" for stage in stages)
+    failed = sum(stage.failed for stage in stages)
+    return f" stages={rendered}" + (f" failed={failed}" if failed else "")
+
+
 class PreprocessPool:
     """Bounded thread pools that run at most one task per key at a time.
 
@@ -77,10 +282,14 @@ class PreprocessPool:
         max_workers (int): Worker threads for the vision/OCR stages; floored at one.
         media_workers (int | None): Worker threads for Nextext clips; defaults
             to ``max_workers``.
+        progress (PreprocessProgress | None): The tally to report into; a
+            fresh one when ``None``.
     """
 
-    def __init__(self, max_workers: int, *, media_workers: int | None = None) -> None:
-        """Create the executors and the in-flight registry."""
+    def __init__(
+        self, max_workers: int, *, media_workers: int | None = None, progress: PreprocessProgress | None = None
+    ) -> None:
+        """Create the executors, the in-flight registry and the per-stage tally."""
         self._executors: dict[str, ThreadPoolExecutor] = {
             "": ThreadPoolExecutor(max_workers=max(1, max_workers), thread_name_prefix="docint-preprocess"),
             "media": ThreadPoolExecutor(
@@ -90,6 +299,7 @@ class PreprocessPool:
         self._futures: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)
+        self.progress = progress or PreprocessProgress()
         # Per-collection progress narration; see :meth:`_note_progress`.
         self._done: dict[str, int] = {}
         self._last_log: dict[str, float] = {}
@@ -111,6 +321,11 @@ class PreprocessPool:
                 return existing
             future: Future[T] = self._executor_for(key).submit(fn)
             self._futures[key] = future
+            # Asked for, not yet done: the bar has to appear when the work
+            # starts, which is the whole point of preprocessing on upload.
+            parsed = _file_stage_of_key(key)
+            if parsed is not None:
+                self.progress.report(*parsed, 0, 1)
         future.add_done_callback(lambda done, key=key: self._evict(key, done))
         return future
 
@@ -212,18 +427,44 @@ class PreprocessPool:
         # Outside the lock: ``cancel`` fires the done callback, which takes it.
         return sum(1 for future in futures if future.cancel())
 
+    def forget_collection(self, collection: str) -> None:
+        """Drop a collection's tally once its job has consumed the batch.
+
+        The job's end is the one per-collection boundary there is: before it,
+        a staged batch nobody finalized is exactly what the tally describes.
+        Files still in flight are kept — an upload that overlapped the job's
+        end belongs to whatever runs next, not to the run that just finished.
+
+        Args:
+            collection (str): Physical collection name.
+        """
+        with self._lock:
+            keep = {
+                parsed[2]
+                for key in self._futures
+                if (parsed := _file_stage_of_key(key)) is not None and parsed[0] == collection
+            }
+        self.progress.forget(collection, keep_items=frozenset(keep))
+
     def _evict(self, key: str, future: Future[Any]) -> None:
         """Forget a finished key and log a failure once, on the thread that saw it."""
         with self._idle:
             if self._futures.get(key) is future:
                 del self._futures[key]
             self._idle.notify_all()
+        parsed = _file_stage_of_key(key)
         if future.cancelled():
+            if parsed is not None:
+                self.progress.discard(*parsed)
             return
         exc = future.exception()
         if exc is not None:
+            if parsed is not None:
+                self.progress.mark_failed(*parsed)
             logger.warning("Preprocess task '{}' failed: {}", key, exc)
         else:
+            if parsed is not None:
+                self.progress.report(*parsed, 1, 1)
             logger.debug("Preprocess task '{}' done.", key)
         self._note_progress(key)
 
@@ -252,11 +493,12 @@ class PreprocessPool:
                 self._last_log.pop(collection, None)
         if due:
             logger.info(
-                "Preprocess | collection={!r} done={} running={} queued={}",
+                "Preprocess | collection={!r} done={} running={} queued={}{}",
                 collection,
                 done,
                 running,
                 queued,
+                _stage_suffix(self.progress.snapshot(collection)),
             )
 
 
@@ -473,7 +715,14 @@ def standalone_image_asset(path: Path) -> ImageAsset:
     )
 
 
-def preprocess_image(path: Path, collection: str, *, image_service: ImageIngestionService | None = None) -> Any:
+def preprocess_image(
+    path: Path,
+    collection: str,
+    *,
+    image_service: ImageIngestionService | None = None,
+    progress: PreprocessProgress | None = None,
+    file_hash: str | None = None,
+) -> Any:
     """Caption, read and embed one image into the collection's ``_images`` companion.
 
     Args:
@@ -481,6 +730,10 @@ def preprocess_image(path: Path, collection: str, *, image_service: ImageIngesti
         collection (str): Physical collection name.
         image_service (ImageIngestionService | None): Service to use; the
             shared one when ``None``.
+        progress (PreprocessProgress | None): Unused — an image is one call,
+            so the file stage the pool counts is the whole story. Accepted so
+            the router can hand every builder the same keywords.
+        file_hash (str | None): Unused, for the same reason.
 
     Returns:
         StoredImageRecord: What the service stored or found cached.
@@ -491,7 +744,12 @@ def preprocess_image(path: Path, collection: str, *, image_service: ImageIngesti
 
 
 def preprocess_pdf(
-    path: Path, collection: str, *, image_service: ImageIngestionService | None = None
+    path: Path,
+    collection: str,
+    *,
+    image_service: ImageIngestionService | None = None,
+    progress: PreprocessProgress | None = None,
+    file_hash: str | None = None,
 ) -> DocumentManifest:
     """Run the page pipeline on one PDF and ingest its figures.
 
@@ -500,6 +758,10 @@ def preprocess_pdf(
         collection (str): Physical collection name (for the figures' companion).
         image_service (ImageIngestionService | None): Service to use; the
             shared one when ``None``.
+        progress (PreprocessProgress | None): Tally to report scanned pages
+            into — a 30-page scan is one task for the better part of an hour.
+        file_hash (str | None): The file's content hash, when the caller has
+            it; it is this document's identity in the tally.
 
     Returns:
         DocumentManifest: The pipeline's manifest for the document.
@@ -508,7 +770,12 @@ def preprocess_pdf(
     from docint.core.readers.documents.reader import ingest_pipeline_images
 
     orchestrator = DocumentPipelineOrchestrator()
-    manifest = orchestrator.process(path)
+    page_progress = (
+        progress.unit_reporter(collection, "ocr_pages", file_hash or compute_file_hash(path))
+        if progress is not None
+        else None
+    )
+    manifest = orchestrator.process(path, page_progress=page_progress)
     if manifest.status == "completed":
         ingest_pipeline_images(
             _image_service(image_service),
@@ -521,7 +788,12 @@ def preprocess_pdf(
 
 
 def preprocess_media(
-    path: Path, collection: str, *, image_service: ImageIngestionService | None = None
+    path: Path,
+    collection: str,
+    *,
+    image_service: ImageIngestionService | None = None,
+    progress: PreprocessProgress | None = None,
+    file_hash: str | None = None,
 ) -> MediaTranscribeResult:
     """Transcribe one clip through Nextext and store its keyframes with file identity.
 
@@ -536,6 +808,12 @@ def preprocess_media(
         collection (str): Physical collection name.
         image_service (ImageIngestionService | None): Service to use; the
             shared one when ``None``.
+        progress (PreprocessProgress | None): Tally to report the clip's
+            keyframes into — upload-time transcription belongs to no job, so
+            nothing else narrates it.
+        file_hash (str | None): Unused — the transcriber hashes the clip
+            itself, and that hash is its identity in the tally. Accepted so
+            the router can hand every builder the same keywords.
 
     Returns:
         MediaTranscribeResult: The transcriber's result.
@@ -555,6 +833,7 @@ def preprocess_media(
             manifest=manifest,
             keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
             nextext_max_concurrency=1,
+            preprocess_progress=progress,
         ).run([standalone_clip(path)])
     finally:
         manifest.close()
@@ -596,5 +875,10 @@ def submit_file(
         kind, task = "media", preprocess_media
     else:
         return None
-    key = preprocess_key(kind, collection, file_hash or compute_file_hash(path))
-    return (pool or get_preprocess_pool()).submit(key, lambda: task(path, collection, image_service=image_service))
+    resolved = pool or get_preprocess_pool()
+    digest = file_hash or compute_file_hash(path)
+    key = preprocess_key(kind, collection, digest)
+    return resolved.submit(
+        key,
+        lambda: task(path, collection, image_service=image_service, progress=resolved.progress, file_hash=digest),
+    )

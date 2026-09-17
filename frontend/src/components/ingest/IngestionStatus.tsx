@@ -10,8 +10,7 @@ import {
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { streamErrorText } from '@/api/errorMessage'
-
-type Tone = 'sky' | 'amber' | 'emerald' | 'red'
+import { Bar, BarList, preprocessBarItems, type Tone } from './ProgressBars'
 
 interface PhaseTheme {
   border: string
@@ -112,34 +111,6 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     pulse: false,
     tone: 'red'
   }
-}
-
-function Bar({
-  value,
-  max,
-  tone
-}: {
-  value: number
-  max: number
-  tone: Tone
-}) {
-  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0
-  const fill =
-    tone === 'sky'
-      ? 'bg-sky-500'
-      : tone === 'amber'
-        ? 'bg-amber-500'
-        : tone === 'emerald'
-          ? 'bg-emerald-500'
-          : 'bg-red-500'
-  return (
-    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-      <div
-        className={cn('h-full transition-[width] duration-300 ease-out', fill)}
-        style={{ width: `${pct}%` }}
-      />
-    </div>
-  )
 }
 
 function useElapsedMs(
@@ -269,6 +240,9 @@ function QueuedBody() {
 function UploadingBody({ status }: { status: IngestStatus }) {
   const t = useT()
   const { uploadingFile, uploadingBytes, uploadingTotalBytes } = status
+  // The server starts reading each file as it lands, so on a large batch this
+  // is most of the run — and all of it happens before a job exists.
+  const preprocess = preprocessBarItems(status.preprocess, t)
   const fileIndex = Math.min(status.filesSaved + 1, Math.max(1, status.totalFiles))
   const bytesText =
     uploadingBytes !== undefined
@@ -304,6 +278,11 @@ function UploadingBody({ status }: { status: IngestStatus }) {
         </div>
       )}
       <Bar value={barValue} max={barMax} tone="sky" />
+      {preprocess.length > 0 && (
+        <div className="border-t border-border pt-3 mt-3">
+          <BarList items={preprocess} />
+        </div>
+      )}
       {status.totalFiles > 0 && (
         <div className="text-xs text-muted-foreground border-t border-border pt-3 mt-3 tabular-nums">
           {t('ingest.files_saved_of', { saved: status.filesSaved, total: status.totalFiles })}
@@ -315,11 +294,13 @@ function UploadingBody({ status }: { status: IngestStatus }) {
 
 function ProcessingBody({ status }: { status: IngestStatus }) {
   const t = useT()
+  const preprocess = preprocessBarItems(status.preprocess, t)
   const hasStage = !!status.stage
   const hasTasks = status.tasks.length > 0
-  const showWorking = !hasStage && !hasTasks
+  const showWorking = !hasStage && !hasTasks && preprocess.length === 0
   return (
     <div className="mt-3 space-y-3">
+      {preprocess.length > 0 && <BarList items={preprocess} />}
       {hasStage && status.stage && (
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between gap-2">
@@ -342,18 +323,15 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
       )}
 
       {hasTasks && (
-        <div className={cn('space-y-2', hasStage && 'border-t border-border pt-3')}>
-          {status.tasks.map((task) => (
-            <div key={task.key} className="space-y-1">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="text-sm text-foreground">{taskLabel(task.label, t)}</span>
-                <span className="tabular-nums text-xs text-muted-foreground">
-                  {task.current}/{task.total}
-                </span>
-              </div>
-              <Bar value={task.current} max={task.total || 1} tone="amber" />
-            </div>
-          ))}
+        <div className={cn((hasStage || preprocess.length > 0) && 'border-t border-border pt-3')}>
+          <BarList
+            items={status.tasks.map((task) => ({
+              key: task.key,
+              label: taskLabel(task.label, t),
+              current: task.current,
+              total: task.total
+            }))}
+          />
         </div>
       )}
 

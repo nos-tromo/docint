@@ -905,8 +905,24 @@ total size plus the preprocessing pool's own counts for that collection:
 
 ```json
 {"collection": "field-notes", "files": 1000, "bytes": 105906176,
- "preprocess": {"running": 4, "queued": 812}}
+ "preprocess": {"running": 4, "queued": 812,
+                "stages": [{"stage": "pdf", "done": 3, "total": 10, "failed": 0},
+                           {"stage": "ocr_pages", "done": 12, "total": 40, "failed": 0}]}}
 ```
+
+`running`/`queued` count tasks; `stages` says how far each kind of work has
+got, which is what a progress bar needs — a clip or a scanned PDF is a single
+queued task for minutes at a time. Stage ids are protocol, English in every
+locale: `pdf`, `image` and `media` count files, `ocr_pages` the scanned pages
+inside PDFs and `keyframes` the frames inside clips; a stage nothing was asked
+of is omitted, and `failed` counts files whose task raised and are waiting for
+whichever lane next needs them. See
+[Preprocessing progress](ingestion.md#preprocessing-progress).
+
+`?include_entries=false` answers with `entries: []` and
+`entries_truncated: true`, for a client polling the tally rather than
+re-picking a folder: a folder-sized batch lists tens of thousands of names,
+and the poll runs for the length of the ingest.
 
 Owner-scoped like every collection endpoint: another principal's collection
 `404`s. This is how a run whose browser died between upload and finalize

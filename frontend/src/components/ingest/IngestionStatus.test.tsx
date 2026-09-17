@@ -165,3 +165,75 @@ describe('IngestionStatus task bars', () => {
     expect(screen.queryByText('Summarizing collection')).not.toBeInTheDocument()
   })
 })
+
+describe('IngestionStatus preprocess bars', () => {
+  function uploading(stages: IngestStatus['preprocess']): IngestStatus {
+    return {
+      phase: 'uploading',
+      totalFiles: 40,
+      filesSaved: 6,
+      indexed: 0,
+      totalChunks: 0,
+      tasks: [],
+      warnings: [],
+      preprocess: stages,
+    } as IngestStatus
+  }
+
+  // The whole point of the feature: the server starts reading a file the
+  // moment it lands, and on a large batch that runs for the entire upload.
+  it('shows what the server is already reading while the upload is still running', () => {
+    render(
+      <LanguageContext value="de">
+        <IngestionStatus
+          status={uploading([
+            { stage: 'pdf', done: 1, total: 4, failed: 0 },
+            { stage: 'ocr_pages', done: 12, total: 40, failed: 0 },
+          ])}
+        />
+      </LanguageContext>
+    )
+
+    // Asserted in German: an unmapped label falls back to the raw stage id,
+    // which under `en` would read the same as a real mapping.
+    expect(screen.getByText('Gescannte Seiten werden erkannt')).toBeInTheDocument()
+    expect(screen.getByText('12/40')).toBeInTheDocument()
+    expect(screen.queryByText('ocr_pages')).not.toBeInTheDocument()
+  })
+
+  it('draws no bar for a stage the batch has no work for', () => {
+    render(<IngestionStatus status={uploading([{ stage: 'media', done: 0, total: 0, failed: 0 }])} />)
+
+    expect(screen.queryByText('Transcribing clips')).not.toBeInTheDocument()
+  })
+
+  it('names failures, since a stalled bar and a failing one read alike', () => {
+    render(<IngestionStatus status={uploading([{ stage: 'image', done: 3, total: 10, failed: 2 }])} />)
+
+    expect(screen.getByText(/2 failed/)).toBeInTheDocument()
+  })
+
+  it('keeps showing them once the run reaches the job', () => {
+    // The pool keeps working through finalize — the job's own prefetch
+    // re-submits the batch — so the bars must not vanish at the hand-over.
+    render(
+      <IngestionStatus
+        status={
+          {
+            phase: 'processing',
+            totalFiles: 40,
+            filesSaved: 40,
+            indexed: 2,
+            totalChunks: 0,
+            tasks: [{ key: 'embedding', label: 'Embedding', current: 1, total: 8 }],
+            warnings: [],
+            preprocess: [{ stage: 'media', done: 1, total: 3, failed: 0 }],
+          } as IngestStatus
+        }
+      />
+    )
+
+    expect(screen.getByText('Transcribing clips')).toBeInTheDocument()
+    expect(screen.getByText('Embedding and storing')).toBeInTheDocument()
+  })
+})

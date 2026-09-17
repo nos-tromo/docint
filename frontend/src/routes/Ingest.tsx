@@ -11,6 +11,7 @@ import { Dropzone } from '@/components/ingest/Dropzone'
 import { IngestionStatus } from '@/components/ingest/IngestionStatus'
 import { IngestJobList } from '@/components/ingest/IngestJobList'
 import { IngestStagedCard } from '@/components/ingest/IngestStagedCard'
+import { usePreprocessProgress } from '@/hooks/usePreprocessProgress'
 import { useDebounced } from '@/hooks/useDebounced'
 import { useUnloadGuard } from '@/hooks/useUnloadGuard'
 import { formatBytes } from '@/lib/ingestStatus'
@@ -72,6 +73,12 @@ export function Ingest() {
   // job, which has no job card to live on. Folded frame by frame in the
   // store, so reading it here costs nothing.
   const uploadStatus = run.uploadStatus
+
+  // What the server is already reading. The heavy per-file stages start as
+  // each file lands, so on a large batch they run for the whole upload — and
+  // they belong to no job yet, which is why they are polled rather than
+  // folded out of the upload stream.
+  const preprocess = usePreprocessProgress(run.collection, uploadStatus.phase)
 
   const busy = run.uploading
 
@@ -240,7 +247,11 @@ export function Ingest() {
             </ul>
           )}
 
-          {uploadStatus.phase !== 'idle' && <IngestionStatus status={uploadStatus} />}
+          {uploadStatus.phase !== 'idle' && (
+            <IngestionStatus
+              status={preprocess ? { ...uploadStatus, preprocess } : uploadStatus}
+            />
+          )}
 
           {streamLost && (
             <div className="space-y-2 text-sm text-[var(--status-amber-fg)]" role="alert">

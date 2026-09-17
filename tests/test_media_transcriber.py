@@ -6,6 +6,7 @@ from typing import Any
 from loguru import logger
 
 from docint.core.ingest.media_transcribe import MediaClip, MediaTranscriber
+from docint.core.ingest.preprocess import PreprocessProgress, StageProgress
 from docint.utils.nextext_client import NextextKeyframe, NextextResult
 
 
@@ -459,3 +460,41 @@ def test_reports_one_counter_per_clip(tmp_path: Path) -> None:
         "Transcribing media: 1/2 clips processed",
         "Transcribing media: 2/2 clips processed",
     ]
+
+
+def test_a_clips_keyframes_are_reported_to_the_tally(tmp_path: Path) -> None:
+    """A clip is one queued task for minutes; its frames are what moves while it runs."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    nextext = _FakeNextext(
+        NextextResult(
+            status="completed",
+            transcript_jsonl=b'{"text":"hello","start_seconds":0,"end_seconds":1}\n',
+            keyframes=[
+                NextextKeyframe(jpeg=b"f0", index=0, time_sec=0.0),
+                NextextKeyframe(jpeg=b"f1", index=1, time_sec=4.5),
+                NextextKeyframe(jpeg=b"f2", index=2, time_sec=9.0),
+            ],
+        )
+    )
+    progress = PreprocessProgress()
+
+    MediaTranscriber(_FakeImages(), nextext, target_collection="c", manifest=None, preprocess_progress=progress).run(
+        [_clip(clip)]
+    )
+
+    assert progress.snapshot("c") == [StageProgress("keyframes", 3, 3, 0)]
+
+
+def test_a_clip_that_nextext_could_not_read_reports_no_keyframes(tmp_path: Path) -> None:
+    """A failed round trip has no frames to draw a bar for; the media stage carries the news."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    nextext = _FakeNextext(NextextResult(status="error", error="nextext unreachable"))
+    progress = PreprocessProgress()
+
+    MediaTranscriber(_FakeImages(), nextext, target_collection="c", manifest=None, preprocess_progress=progress).run(
+        [_clip(clip)]
+    )
+
+    assert progress.snapshot("c") == []

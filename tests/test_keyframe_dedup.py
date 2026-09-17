@@ -210,3 +210,37 @@ def test_cache_by_hash_disabled_retags(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert tagger.calls == 1
     assert records[0].llm_description == "caption 1"
+
+
+def test_every_frame_is_reported_pruned_or_not(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clip's frames are its only visible progress; a pruned one still cost an embed call."""
+    embed = _FakeEmbed([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    svc = _service(monkeypatch, embed, _FakeTagger())
+    seen: list[tuple[int, int]] = []
+
+    svc.ingest_keyframe_set(
+        [b"f0", b"f1", b"f2"],
+        context=IngestContext(source_collection="c"),
+        source_doc_id="uuid-1",
+        dedup_cosine=0.95,
+        on_frame=lambda done, total: seen.append((done, total)),
+    )
+
+    assert seen[0] == (0, 3)
+    assert seen[-1] == (3, 3)
+    assert [done for done, _ in seen] == sorted(done for done, _ in seen)
+
+
+def test_a_clip_with_no_frames_reports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An audio-only clip has no keyframe bar to draw."""
+    svc = _service(monkeypatch, _FakeEmbed([[1.0, 0.0]]), _FakeTagger())
+    seen: list[tuple[int, int]] = []
+
+    svc.ingest_keyframe_set(
+        [],
+        context=IngestContext(source_collection="c"),
+        source_doc_id="uuid-1",
+        on_frame=lambda done, total: seen.append((done, total)),
+    )
+
+    assert seen == []

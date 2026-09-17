@@ -22,6 +22,7 @@ function staged(
     running: number
     queued: number
     partial: number
+    stages: unknown[]
   }> = {}
 ) {
   return {
@@ -31,7 +32,11 @@ function staged(
     partial: over.partial ?? 0,
     entries: [],
     entries_truncated: false,
-    preprocess: { running: over.running ?? 0, queued: over.queued ?? 0 }
+    preprocess: {
+      running: over.running ?? 0,
+      queued: over.queued ?? 0,
+      stages: over.stages ?? []
+    }
   }
 }
 
@@ -87,5 +92,34 @@ describe('IngestStagedCard', () => {
     renderIn(<IngestStagedCard collection="mydocs" />)
 
     expect(await screen.findByText(/cut off mid-file/i)).toBeInTheDocument()
+  })
+})
+
+describe('IngestStagedCard preprocess bars', () => {
+  it('shows how far each stage has got, not just how many tasks are left', async () => {
+    // This card is the only view of a run whose browser died: without the
+    // bars, an hour of OCR and a stalled pool look exactly alike.
+    getStagedBatch.mockResolvedValue(
+      staged({
+        running: 4,
+        queued: 812,
+        stages: [{ stage: 'ocr_pages', done: 12, total: 40, failed: 0 }]
+      })
+    )
+
+    renderIn(<IngestStagedCard collection="mydocs" />)
+
+    expect(await screen.findByText('Recognizing scanned pages')).toBeInTheDocument()
+    expect(screen.getByText('12/40')).toBeInTheDocument()
+  })
+
+  it('asks for the counts without the staged file list', async () => {
+    getStagedBatch.mockResolvedValue(staged())
+
+    renderIn(<IngestStagedCard collection="mydocs" />)
+
+    await waitFor(() =>
+      expect(getStagedBatch).toHaveBeenCalledWith('mydocs', { includeEntries: false })
+    )
   })
 })

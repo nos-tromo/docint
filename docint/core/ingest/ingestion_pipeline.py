@@ -1038,6 +1038,7 @@ class DocumentIngestionPipeline:
         manifest = self._open_ingest_manifest()
         try:
             nextext_cfg = load_nextext_env()
+            pool = get_preprocess_pool()
             transcriber = MediaTranscriber(
                 image_service=self.image_ingestion_service or ImageIngestionService(),
                 nextext_client=NextextClient(nextext_cfg),
@@ -1045,8 +1046,9 @@ class DocumentIngestionPipeline:
                 manifest=manifest,
                 keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
                 nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
-                pool=get_preprocess_pool(),
+                pool=pool,
                 progress_callback=self.progress_callback,
+                preprocess_progress=pool.progress,
             )
             result = StandaloneMediaIngestor(
                 transcriber,

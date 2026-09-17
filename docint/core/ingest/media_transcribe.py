@@ -21,7 +21,7 @@ from llama_index.core import Document
 from loguru import logger
 
 from docint.core.ingest.images_service import IngestContext
-from docint.core.ingest.preprocess import preprocess_key, run_all
+from docint.core.ingest.preprocess import PreprocessProgress, preprocess_key, run_all
 from docint.core.readers.json import CustomJSONReader
 from docint.core.summary.units import TRANSIENT_TRANSCRIPT_SUFFIX
 from docint.utils.hashing import compute_file_hash
@@ -83,6 +83,10 @@ class MediaTranscriber:
     # The job's progress channel. A clip is minutes of Nextext, so a batch of
     # them is the longest stretch an ingest spends saying nothing at all.
     progress_callback: Callable[[str], None] | None = None
+    # The pool's per-stage tally. A clip's keyframes are the only thing that
+    # moves once Nextext has answered, and upload-time work has no job to
+    # narrate it at all.
+    preprocess_progress: PreprocessProgress | None = None
 
     def run(self, clips: list[MediaClip]) -> MediaTranscribeResult:
         """Transcribe + keyframe every clip, returning consumed paths + Documents.
@@ -163,17 +167,22 @@ class MediaTranscriber:
                     clip.path.name,
                     outcome.status,
                 )
-        run_all(
-            self.pool,
-            [
+        keyframe_jobs: list[tuple[str, Callable[[], Any]]] = []
+        for clip in to_fetch:
+            outcome = outcomes[clip.path]
+            if not outcome.keyframes:
+                continue
+            media_hash = hashes[clip.path]
+            # Asked for before any of it runs: the count is only knowable once
+            # Nextext has answered, and the captioning that follows is minutes.
+            self._note_keyframes(media_hash, 0, len(outcome.keyframes))
+            keyframe_jobs.append(
                 (
-                    preprocess_key("keyframes", collection, hashes[clip.path]),
-                    self._keyframe_task(clip, context, outcome),
+                    preprocess_key("keyframes", collection, media_hash),
+                    self._keyframe_task(clip, context, outcome, media_hash),
                 )
-                for clip in to_fetch
-                if (outcome := outcomes[clip.path]).keyframes
-            ],
-        )
+            )
+        run_all(self.pool, keyframe_jobs)
         for clip in clips:
             if clip.path in cached:
                 self._ingest_transcript(clip, cached[clip.path], result)
@@ -183,11 +192,41 @@ class MediaTranscriber:
                 self._ingest_transcript(clip, outcomes[clip.path].transcript_jsonl or b"", result)
         return result
 
-    def _keyframe_task(self, clip: MediaClip, context: IngestContext, outcome: NextextResult) -> Callable[[], Any]:
-        """The keyframe ingestion of one clip, as a zero-argument task."""
+    def _note_keyframes(self, media_hash: str, done: int, total: int) -> None:
+        """Report one clip's keyframe progress, when there is a tally to report into.
+
+        Args:
+            media_hash (str): The clip's content hash — its identity in the tally.
+            done (int): Frames handled so far.
+            total (int): Frames Nextext returned for this clip.
+        """
+        if self.preprocess_progress is not None:
+            self.preprocess_progress.report(self.target_collection or "", "keyframes", media_hash, done, total)
+
+    def _keyframe_task(
+        self, clip: MediaClip, context: IngestContext, outcome: NextextResult, media_hash: str
+    ) -> Callable[[], Any]:
+        """The keyframe ingestion of one clip, as a zero-argument task.
+
+        Args:
+            clip (MediaClip): The clip the frames came from.
+            context (IngestContext): Collection-resolution context.
+            outcome (NextextResult): Nextext's answer, carrying the frames.
+            media_hash (str): The clip's content hash, for the tally.
+
+        Returns:
+            Callable[[], Any]: Zero-argument task returning the stored records.
+        """
+        total = len(outcome.keyframes)
+        on_frame = (
+            self.preprocess_progress.unit_reporter(self.target_collection or "", "keyframes", media_hash)
+            if self.preprocess_progress is not None
+            else None
+        )
 
         def task() -> Any:
-            return self.image_service.ingest_keyframe_set(
+            """Store this clip's keyframes, reporting each one on the way through."""
+            records = self.image_service.ingest_keyframe_set(
                 [frame.jpeg for frame in outcome.keyframes],
                 frame_times=[frame.time_sec for frame in outcome.keyframes],
                 context=context,
@@ -196,7 +235,12 @@ class MediaTranscriber:
                 dedup_cosine=self.keyframe_dedup_cosine,
                 keyframe_source_type=clip.keyframe_source_type,
                 link_field=clip.keyframe_link_field,
+                on_frame=on_frame,
             )
+            # Closed here rather than left to the loop: an image service that
+            # returned early read no frames, and the clip is still finished.
+            self._note_keyframes(media_hash, total, total)
+            return records
 
         return task
 
