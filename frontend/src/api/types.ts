@@ -685,4 +685,28 @@ export interface AppConfig {
   report_batch_max_items?: number
   /** Active UI/response locale, driven by `RESPONSE_LANGUAGE` on the backend. */
   language: 'en' | 'de'
+  /**
+   * `COLLECTION_RETENTION`: `'off'` or the idle window after which a
+   * collection is deleted (`'6m'` … `'24m'`). Optional: a backend predating
+   * retention leaves every deadline surface hidden.
+   */
+  collection_retention?: string
+}
+
+/** One collection's retention clock and deletion date (`GET /collections/retention`). */
+export interface CollectionRetention {
+  name: string
+  /** `null` for the caller's own collections; another owner's name otherwise. */
+  owner: string | null
+  last_activity_at: string | null
+  /** `null` while retention is off, and for a collection that never expires. */
+  expires_at: string | null
+  /** True from 30 days before the deletion date onwards. */
+  warning: boolean
+}
+
+export interface CollectionsRetention {
+  window: string
+  /** Soonest deletion first; collections that never expire last. */
+  collections: CollectionRetention[]
 }

@@ -619,3 +619,66 @@ describe('Sidebar ingest job badge', () => {
     expect(screen.queryByLabelText(/ingestion running|verarbeitung läuft/i)).not.toBeInTheDocument()
   })
 })
+
+describe('Sidebar retention notice', () => {
+  function retentionRow(name: string, expires_at: string, warning: boolean) {
+    return { name, owner: null, last_activity_at: '2026-03-02T09:14:00Z', expires_at, warning }
+  }
+
+  function retentionBackend(window: string, rows = [
+    retentionRow('alt', '2026-10-21T06:45:00Z', true),
+    retentionRow('verwaist', '2026-10-25T06:45:00Z', true),
+    retentionRow('laufend', '2027-03-19T08:00:00Z', false)
+  ]) {
+    return mockFetch({
+      '/collections/retention': { window, collections: rows },
+      '/collections/list': ['alt', 'laufend', 'verwaist'],
+      '/sessions/list': { sessions: [] },
+      '/config': { language: 'en', collection_retention: window }
+    })
+  }
+
+  function calledRetention(fetchMock: ReturnType<typeof mockFetch>) {
+    return fetchMock.mock.calls.some((c) => String(c[0]).includes('/collections/retention'))
+  }
+
+  it('warns about collections about to be deleted and links to the Dashboard that names them', async () => {
+    vi.stubGlobal('fetch', retentionBackend('6m'))
+    renderSidebarAt('/chat')
+
+    const link = await screen.findByRole('link', { name: '2 collections will be deleted within 30 days' })
+    await userEvent.click(link)
+    expect(screen.getByTestId('location-probe')).toHaveTextContent(/^\/$/)
+  })
+
+  it('does not count the active collection, since using it restarts its clock', async () => {
+    useUiStore.setState({ selectedCollection: 'alt', selectedOwner: null })
+    vi.stubGlobal('fetch', retentionBackend('6m'))
+    renderSidebar()
+
+    expect(await screen.findByRole('link', { name: '1 collection will be deleted within 30 days' })).toBeInTheDocument()
+  })
+
+  it('says nothing when no collection is due within 30 days', async () => {
+    const fetchMock = retentionBackend('6m', [retentionRow('laufend', '2027-03-19T08:00:00Z', false)])
+    vi.stubGlobal('fetch', fetchMock)
+    renderSidebar()
+
+    await waitFor(() => expect(calledRetention(fetchMock)).toBe(true))
+    await screen.findByRole('combobox', { name: /select collection/i })
+    expect(screen.queryByRole('link', { name: /will be deleted/i })).not.toBeInTheDocument()
+  })
+
+  it('asks for no deadlines while retention is off', async () => {
+    const fetchMock = retentionBackend('off')
+    vi.stubGlobal('fetch', fetchMock)
+    renderSidebar()
+
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.map((c) => String(c[0]))
+      expect(calls.some((u) => u.includes('/config'))).toBe(true)
+    })
+    expect(screen.queryByRole('link', { name: /will be deleted/i })).not.toBeInTheDocument()
+    expect(calledRetention(fetchMock)).toBe(false)
+  })
+})

@@ -94,6 +94,8 @@ export const en = {
 
   // shared error copy
   'common.owned_by_suffix': ' (owner: {owner})',
+  'common.collections_expiring_one': '{count} collection will be deleted within 30 days',
+  'common.collections_expiring_other': '{count} collections will be deleted within 30 days',
   'common.error_request': 'Something went wrong ({status}). Please try again or contact support.',
   'common.error_unknown': 'Something went wrong. Please try again or contact support.',
   'common.error_network': 'Service unreachable. Please check your connection or try again later.',
@@ -464,6 +466,14 @@ export const en = {
   'dashboard.recent_sessions': 'Recent sessions',
   'dashboard.chart_empty': 'No entities yet.',
   'dashboard.chart_mentions': 'Mentions',
+  'dashboard.retention_title': 'Automatic deletion',
+  'dashboard.retention_rule':
+    'Collections are deleted after {months} months without activity, together with their chat sessions, reports, source files and extracts. Any work in a collection restarts its clock.',
+  'dashboard.retention_due': 'deleted on {date}',
+  'dashboard.retention_never': 'not scheduled',
+  'dashboard.retention_warning': 'Deleted within 30 days',
+  'dashboard.retention_more': '+ {count} more',
+  'dashboard.retention_empty': 'No collections yet.',
 
   // inspector route wrapper
   'inspector.title': 'Documents',
