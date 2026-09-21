@@ -408,6 +408,19 @@ class PreprocessPool:
         running = sum(1 for f in futures if f.running())
         return running, len(futures) - running
 
+    def inflight_hashes(self, kind: str) -> set[str]:
+        """Return the file hashes of one kind of task still queued or running.
+
+        Args:
+            kind (str): The task kind, as in :func:`preprocess_key` (``pdf``, ...).
+
+        Returns:
+            set[str]: Hashes whose files a worker is reading or will read.
+        """
+        prefix = f"{kind}#"
+        with self._lock:
+            return {key.split("#", 2)[2] for key in self._futures if key.startswith(prefix) and key.count("#") >= 2}
+
     def cancel_collection(self, collection: str) -> int:
         """Drop one collection's not-yet-started tasks.
 
@@ -603,6 +616,18 @@ def shutdown_preprocess_pool() -> None:
         pool, _pool = _pool, None
     if pool is not None:
         pool.shutdown()
+
+
+def inflight_pdf_hashes() -> set[str]:
+    """Return the PDFs the shared pool is reading, without starting the pool.
+
+    Returns:
+        set[str]: File hashes of queued or running PDF tasks; empty when no
+        pool exists yet.
+    """
+    with _pool_lock:
+        pool = _pool
+    return pool.inflight_hashes("pdf") if pool is not None else set()
 
 
 def prefetch_batch(

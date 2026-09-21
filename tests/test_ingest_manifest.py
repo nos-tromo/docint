@@ -20,6 +20,7 @@ from docint.core.storage.ingest_manifest import (
     IngestManifest,
     NullIngestManifest,
     _truncate_error,
+    read_manifest_hashes,
 )
 
 
@@ -261,3 +262,26 @@ def test_null_manifest_status_constants_exposed() -> None:
     assert STATUS_IN_PROGRESS == "in_progress"
     assert STATUS_COMPLETED == "completed"
     assert STATUS_FAILED == "failed"
+
+
+def test_read_manifest_hashes_lists_every_status(tmp_path: Path) -> None:
+    """Cleanup must see a file however its run ended: artifacts exist before a run records success."""
+    manifest = IngestManifest(tmp_path / "m.db")
+    try:
+        manifest.mark_started("docs", "running")
+        manifest.mark_started("docs", "done")
+        manifest.mark_completed("docs", "done")
+        manifest.mark_started("docs", "broken")
+        manifest.mark_failed("docs", "broken", "boom")
+    finally:
+        manifest.close()
+
+    assert read_manifest_hashes(tmp_path / "m.db") == {"running", "done", "broken"}
+
+
+def test_read_manifest_hashes_never_creates_what_it_reads(tmp_path: Path) -> None:
+    """Opening the manifest for writing would bring a deleted collection's directory back."""
+    missing = tmp_path / "gone" / "gone_ingest_manifest.db"
+
+    assert read_manifest_hashes(missing) == set()
+    assert not missing.parent.exists()

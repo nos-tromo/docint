@@ -28,6 +28,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 from typing import TypeVar
 
@@ -427,6 +428,26 @@ class IngestManifest:
                 self._conn.close()
             except Exception:  # pragma: no cover - best-effort cleanup
                 logger.exception("IngestManifest close failed at {}", self.db_path)
+
+
+def read_manifest_hashes(db_path: str | Path) -> set[str]:
+    """Return every file hash a collection's manifest records, whatever its status.
+
+    Opened read-only: constructing an :class:`IngestManifest` creates the
+    directory and the schema, which on a collection being deleted would bring
+    its source directory back.
+
+    Args:
+        db_path (str | Path): The collection's ``*_ingest_manifest.db``.
+
+    Returns:
+        set[str]: The recorded hashes; empty when there is no manifest.
+    """
+    path = Path(db_path)
+    if not path.is_file():
+        return set()
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as conn:
+        return {str(row[0]) for row in conn.execute("SELECT file_hash FROM ingest_manifest")}
 
 
 class NullIngestManifest:
