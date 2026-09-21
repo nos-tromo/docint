@@ -33,7 +33,7 @@ from qdrant_client import models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core import rag as rag_module
-from docint.core.rag import RAG, LazyRerankerPostprocessor
+from docint.core.rag import RAG, CollectionCleanupError, LazyRerankerPostprocessor
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -5108,7 +5108,7 @@ def test_delete_collection_attempts_summary_invalidation(
 
     assert bumps == [("target", False)]
     deleted = [str(call.args[0]) for call in rag._qdrant_client.delete_collection.call_args_list]
-    assert deleted == ["target", "target_images", "target_entities"]
+    assert deleted == ["target", "target_images", "target_dockv", "target_entities"]
 
 
 def test_delete_collection_fail_fast_on_primary_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -5415,7 +5415,80 @@ def test_delete_collection_tolerates_secondary_failure(monkeypatch: pytest.Monke
     rag.delete_collection("target")
 
     deleted = [str(call.args[0]) for call in rag._qdrant_client.delete_collection.call_args_list]
-    assert deleted == ["target", "target_images", "target_entities"]
+    assert deleted == ["target", "target_images", "target_dockv", "target_entities"]
+
+
+def test_delete_collection_drops_the_entities_companion_even_when_the_probe_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Qdrant blip during the existence probe must not orphan the hidden companion for good.
+
+    The probe reads an error as "does not exist", and a hidden collection is
+    never listed again, so nothing would ever surface it. Deleting a missing
+    collection is a no-op in Qdrant, so every companion is simply attempted.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_client.collection_exists.side_effect = RuntimeError("qdrant blip")
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+
+    rag.delete_collection("target")
+
+    deleted = [str(call.args[0]) for call in rag._qdrant_client.delete_collection.call_args_list]
+    assert "target_entities" in deleted
+
+
+def test_delete_collection_passes_a_collection_qdrant_already_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A retry after a partial failure must get past the Qdrant step.
+
+    Qdrant answers a delete of a missing collection with ``result: false``
+    rather than an error, which is what lets a retried cascade finish.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_client.delete_collection.return_value = False
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+    (tmp_path / "target").mkdir()
+
+    rag.delete_collection("target")
+
+    assert not (tmp_path / "target").exists()
+
+
+def test_delete_collection_raises_when_the_source_directory_survives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Files left behind must fail the delete, or the caller drops the only record of them.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+    monkeypatch.setattr("docint.core.rag.shutil.rmtree", lambda *args, **kwargs: None)
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "evidence.pdf").write_bytes(b"%PDF")
+
+    with pytest.raises(CollectionCleanupError, match="target"):
+        rag.delete_collection("target")
 
 
 def test_delete_collection_companion_name_does_not_expand(

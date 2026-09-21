@@ -856,6 +856,15 @@ def _attach_posting_group(sources: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sources
 
 
+class CollectionCleanupError(RuntimeError):
+    """A collection's Qdrant data is gone but its source directory survived.
+
+    Raised by :meth:`RAG.delete_collection` so the caller keeps the ownership
+    row and retries: finishing the cascade would drop the only record that
+    those files belong to anyone.
+    """
+
+
 class EmptyIngestionError(Exception):
     """Raised when an ingestion run produced zero documents/nodes for a fresh collection.
 
@@ -6407,15 +6416,22 @@ class RAG:
         fails, the method raises immediately — the SQLite KV file
         (nested under ``{qdrant_src_dir}/{name}/``) and the source
         directory are **not** touched, so the caller can diagnose and
-        retry without losing ground truth.  Failures deleting the
-        supplementary ``{name}_images`` collection are logged and
-        swallowed because they are not load-bearing.
+        retry without losing ground truth.  Failures deleting the hidden
+        companion collections are logged and swallowed because they are
+        not load-bearing.
+
+        Every companion is attempted without asking Qdrant first: deleting a
+        missing collection is a no-op there, while a probe that failed would
+        read as "absent" and orphan a hidden companion nothing lists again.
+        A collection Qdrant already dropped passes the same way, which is
+        what lets a retry after a partial failure finish.
 
         Args:
             name: Name of the collection to delete.
 
         Raises:
             ValueError: If the name is empty.
+            CollectionCleanupError: If the source directory survived.
             Exception: If the primary Qdrant collection delete fails.
         """
         if not name or not name.strip():
@@ -6425,13 +6441,9 @@ class RAG:
         self._bump_summary_revision(target, allow_create=False)
 
         # The primary collection is the only one whose failure is fatal.
-        # The `{target}_images` / `{target}_entities` companions are
-        # supplementary metadata whose absence is tolerated.
         secondary_collections: list[str] = []
         if not target.endswith(HIDDEN_COLLECTION_SUFFIXES):
-            secondary_collections.append(f"{target}_images")
-            if qdrant_collection_exists(self.qdrant_client, f"{target}_entities"):
-                secondary_collections.append(f"{target}_entities")
+            secondary_collections = [f"{target}{suffix}" for suffix in HIDDEN_COLLECTION_SUFFIXES]
 
         # 1. Delete the primary Qdrant collection — fail-fast on error so
         #    we don't proceed to destroy the SQLite KV file / source dir.
@@ -6530,6 +6542,9 @@ class RAG:
             ExtractStore(self.path_config.extracts).delete_collection(target)
         except Exception as e:
             logger.warning("Failed to delete stored extracts for collection '{}': {}", target, e)
+
+        if (self.qdrant_src_dir / target).exists():
+            raise CollectionCleanupError(f"Source directory of collection '{target}' could not be removed.")
 
     def verify_collection(
         self,
