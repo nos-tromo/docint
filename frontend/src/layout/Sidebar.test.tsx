@@ -354,6 +354,37 @@ describe('Sidebar collection selection', () => {
     })
     expect(useUiStore.getState().currentSessionId).toBeNull()
   })
+
+  it("warns that the collection's chat sessions and reports go with it", async () => {
+    vi.stubGlobal('fetch', mockFetch({ '/collections/list': ['alpha'], '/sessions/list': { sessions: [] } }))
+    const confirmMock = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirmMock)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebar()
+    await userEvent.click(await screen.findByLabelText(/delete collection alpha/i))
+
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringMatching(/chat sessions and reports/))
+  })
+
+  it('refreshes the reports after deleting a collection, since they were deleted with it', async () => {
+    vi.stubGlobal('fetch', mockFetch({ '/collections/list': ['alpha'], '/sessions/list': { sessions: [] } }))
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(['reports'], { reports: [] })
+
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Sidebar />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+    await userEvent.click(await screen.findByLabelText(/delete collection alpha/i))
+
+    await waitFor(() => expect(qc.getQueryState(['reports'])?.isInvalidated).toBe(true))
+  })
 })
 
 describe('Sidebar chat draft pruning', () => {

@@ -23,7 +23,8 @@ export const en = {
   'common.select_collection_aria': 'Select collection',
   'common.delete_collection_aria': 'Delete collection {name}',
   'common.delete_collection_title': 'Delete this collection',
-  'common.delete_collection_confirm': 'Delete collection {label}? This cannot be undone.',
+  'common.delete_collection_confirm':
+    'Delete collection {label} with its chat sessions and reports? This cannot be undone.',
   'common.delete_collection_error':
     'Collection {name} could not be deleted. Check that the backend and vector store are reachable, then try again.',
   'common.no_active_collection': 'No active collection — pick one to query.',
