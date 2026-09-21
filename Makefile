@@ -16,7 +16,7 @@ NETWORKS := inference-net data-net edge-net
 VOLUMES  := docling-cache sessions-storage source-preview-cache pipeline-storage
 include make/common.mk
 
-.PHONY: help resolve health search-index search-index-all extract
+.PHONY: help resolve health search-index search-index-all extract retention-report
 
 help:
 	@echo "docint — build-host helpers."
@@ -36,6 +36,7 @@ help:
 	@echo "  make extract    write a collection's data extract to RESULTS_PATH (COLLECTION=<name> optional)"
 	@echo "  make search-index  build the full-text search index (COLLECTION=<name> optional)"
 	@echo "  make search-index-all  build it for every collection on this host (one-time backport)"
+	@echo "  make retention-report  show what COLLECTION_RETENTION deletes, and when (WINDOW=6m optional; read-only)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
 	@echo "  make test       run pytest + vitest (test-backend / test-frontend for one)"
@@ -102,3 +103,15 @@ search-index:
 # rest; the run exits non-zero and names every failure at the end.
 search-index-all:
 	$(COMPOSE) run --rm -T backend search-index-all
+
+# Show every collection's last activity and when retention deletes it — run it
+# before setting COLLECTION_RETENTION. Read-only: deletes nothing and records
+# no window (only the backend's startup does). Pass WINDOW=6m|12m|18m|24m to
+# evaluate a window as if it were switched on now. Runs in a one-off backend
+# container so it reads the same sessions store and Qdrant the API does.
+retention-report:
+	@if [ -n "$(WINDOW)" ]; then \
+		$(COMPOSE) run --rm -T backend retention-report --window "$(WINDOW)"; \
+	else \
+		$(COMPOSE) run --rm -T backend retention-report; \
+	fi
