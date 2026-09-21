@@ -20,13 +20,14 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 
 | Method | Path | Tag | Purpose |
 |---|---|---|---|
-| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale). |
+| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale, retention window). |
 | `GET`  | `/config/ingest-defaults` | `Meta` | Deployment defaults for the ingest UI's enrichment toggles. |
 | `GET`  | `/version` | `Meta` | Running app version. Unauthenticated; the Docker healthcheck's liveness probe. |
 | `GET`  | `/health` | `Meta` | Dependency status (Qdrant reachability). Unauthenticated, always `200`. |
 | `GET`  | `/whoami` | `Meta` | The resolved calling identity, for the SPA header. Principal-gated. |
 | `GET`  | `/metrics` | — | Prometheus counters/histograms for the obs-plane scrape. Added by `Instrumentator` (`api.py:166`), not an `@app` route, and excluded from the OpenAPI schema. |
 | `GET`  | `/collections/list` | `Collections` | List all Qdrant collections. |
+| `GET`  | `/collections/retention` | `Collections` | When each collection is due for deletion for inactivity. Read-only: never postpones a deadline. |
 | `POST` | `/collections/select` | `Collections` | Activate a collection, pre-warms the NER cache. |
 | `DELETE` | `/collections/{name}` | `Collections` | Delete a collection. |
 | `POST` | `/query` | `Query` | Stateless or session-aware query, non-streaming. |
@@ -92,13 +93,15 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 ### `GET /config`
 
 Deploy-time frontend configuration for the SPA, read once on load and served
-without a principal. Returns six fields (`FrontendConfigOut`):
+without a principal. Returns seven fields (`FrontendConfigOut`):
 `graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`,
-`report_batch_max_items` and `language`. They come from `NER_GRAPH_TOP_K`,
-`NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
-`DOCINT_CLIENT_MAX_BODY_SIZE`, `REPORT_BATCH_MAX_ITEMS` and
-`RESPONSE_LANGUAGE` respectively (see
+`report_batch_max_items`, `language` and `collection_retention`. They come
+from `NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
+`DOCINT_CLIENT_MAX_BODY_SIZE`, `REPORT_BATCH_MAX_ITEMS`, `RESPONSE_LANGUAGE`
+and `COLLECTION_RETENTION` respectively (see
 [configuration.md](configuration.md#frontend--frontendconfig)).
+`collection_retention` is `"off"` or the idle window (`"6m"` … `"24m"`); a
+client asks `GET /collections/retention` only when it is not `"off"`.
 
 ### `GET /config/ingest-defaults`
 
@@ -135,6 +138,36 @@ when the gateway is not in front.
 ### `GET /collections/list`
 
 Returns the list of Qdrant collections as `list[str]`.
+
+### `GET /collections/retention`
+
+When each collection is due for deletion under `COLLECTION_RETENTION`
+([retention.md](retention.md)). Principal-gated. Reading it never moves a
+collection's clock — it bypasses the ownership gate that records activity and
+scopes its rows itself. `all=true` works as on `/collections/list`: an admin
+also gets every other owner's collections, a non-admin's flag is ignored.
+
+Response (`CollectionsRetentionOut`), soonest deadline first, collections that
+never expire last:
+
+```json
+{
+  "window": "6m",
+  "collections": [
+    {
+      "name": "projekt-alpha",
+      "owner": null,
+      "last_activity_at": "2026-03-02T09:14:00Z",
+      "expires_at": "2026-10-21T06:45:00Z",
+      "warning": true
+    }
+  ]
+}
+```
+
+`owner` is `null` for the caller's own collections. `expires_at` is `null`
+while retention is off, and for a collection with no recorded activity, which
+never expires. `warning` is true from 30 days before the deadline onwards.
 
 ### `POST /collections/select`
 

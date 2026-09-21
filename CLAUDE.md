@@ -75,6 +75,10 @@ make extract COLLECTION=mydocs  # non-interactive
 make search-index                    # prompts for the collection name
 make search-index COLLECTION=mydocs  # non-interactive
 make search-index-all                # every collection (one-time backport)
+# Read-only: every collection's last activity and when COLLECTION_RETENTION
+# deletes it (docs/retention.md). Moves no clock, records no window.
+make retention-report             # the configured window
+make retention-report WINDOW=6m   # as if 6m were switched on now
 ```
 
 ## Architecture

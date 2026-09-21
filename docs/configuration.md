@@ -736,6 +736,16 @@ extracts described in [extracts.md](extracts.md); the store's location is
 | `EXTRACT_SYNC_MAX_UNITS` | `50` | Units a per-source download may render on the request. Above it the route answers 413 and the caller queues a job. Minimum 1. |
 | `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent extract jobs. Its own semaphore, so a bundle render never consumes an ingest or summary worker slot. |
 
+## Collection retention — `RetentionConfig`
+
+Loaded by `load_retention_env()` (`docint/utils/env_cfg.py`). Deletes
+collections nobody has worked with for the chosen window; the rules, what
+counts as activity and what is deleted are in [retention.md](retention.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `COLLECTION_RETENTION` | `off` | `off`, `6m`, `12m`, `18m` or `24m` — calendar months without activity after which a collection is deleted. Case and surrounding spaces are ignored. Any other value keeps retention **off** and logs a warning; it never falls back to a period. Read at startup, which logs `Collection retention \| window=…`. |
+
 ## Response language — `LanguageConfig`
 
 Loaded by `load_language_env()` in `env_cfg.py`.
