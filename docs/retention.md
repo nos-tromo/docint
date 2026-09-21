@@ -53,7 +53,8 @@ moves on:
 - opening, extending or exporting a report built from the collection.
 
 An admin working in another user's namespace (`?owner=`) counts as activity on
-that user's collection.
+that user's collection. Viewing a collection's data in the app counts as well —
+the Dashboard, for one, reads the selected collection's document count on load.
 
 Looking does not count. Listing collections or chat sessions, reading deadlines
 (`GET /collections/retention`) and the maintenance commands — `search-index`,
@@ -86,6 +87,10 @@ records no window. See [cli-reference.md](cli-reference.md#retention-report--wha
 
 ## Seeing deadlines
 
+- **Dashboard** — an *Automatic deletion* card lists every collection with its
+  deletion date and flags those due within 30 days; the sidebar says how many
+  other collections are due within 30 days and links to it. See
+  [ui-guide.md](ui-guide.md#dashboard-srcroutesdashboardtsx).
 - `GET /collections/retention` — each of the caller's collections with its last
   activity, due date and a `warning` flag; admins pass `all=true` for everyone's.
   See [api-reference.md](api-reference.md#get-collectionsretention).

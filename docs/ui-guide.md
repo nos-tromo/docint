@@ -53,6 +53,21 @@ top-entities chart (`src/components/dashboard/TopEntitiesChart.tsx`) with
 top-k / min-mention filters, and a recent-sessions list. Hooks:
 `useCollections`, `useDocumentsCount`, `useNerStats`, `useSessions`.
 
+While collection retention is on ([retention.md](retention.md)), an
+**Automatic deletion** card (`src/components/dashboard/RetentionCard.tsx`)
+spells out the rule and lists every collection with its deletion date, soonest
+first — the eight soonest, with the rest counted — flagging those due within
+30 days. The collection in use is always freshly active, so the rows that
+matter are the others, which is why the card sits here rather than beside the
+active collection. In the sidebar, a line under the collection picker says how
+many *other* collections are due within 30 days and links here; it is one line
+rather than a marker on each option because the picker's panel sizes to its
+longest label and a date suffix pushed it past the sidebar's edge. Both read
+`GET /collections/retention` through `useCollectionsRetention`
+(`src/hooks/useRetention.ts`), which asks nothing while `/config` reports
+retention `off`. Dates are formatted by `src/lib/formatDate.ts` in UTC, the
+day the server acts on.
+
 ### Chat (`src/routes/Chat.tsx`)
 
 The primary surface. Streams the answer token-by-token from
