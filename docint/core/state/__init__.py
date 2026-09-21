@@ -11,6 +11,16 @@ from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.conversation import Conversation
 from docint.core.state.report import Report
 from docint.core.state.report_item import ReportItem
+from docint.core.state.retention_state import RetentionState
 from docint.core.state.turn import Turn
 
-__all__ = ["Base", "Citation", "CollectionOwnership", "Conversation", "Report", "ReportItem", "Turn"]
+__all__ = [
+    "Base",
+    "Citation",
+    "CollectionOwnership",
+    "Conversation",
+    "Report",
+    "ReportItem",
+    "RetentionState",
+    "Turn",
+]

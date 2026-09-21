@@ -29,6 +29,8 @@ class CollectionOwnership(Base):  # type: ignore[misc]
     owner = Column(String, nullable=True, index=True)
     logical_name = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    # The retention clock (docs/retention.md). NULL never expires.
+    last_activity_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=True)
 
     # One logical name per owner. (NULL owners are distinct under SQLite, which
     # is fine: real principals are non-NULL — NULL only appears in tests.)

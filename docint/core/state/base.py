@@ -1,8 +1,9 @@
 """SQLAlchemy declarative base and session factory for state persistence."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import DateTime, Engine, bindparam, create_engine, inspect, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from docint.utils.env_cfg import load_principal_env
@@ -193,6 +194,39 @@ def _ensure_report_columns(engine: Engine) -> None:
         raise _migration_failure("reports columns", engine, exc) from exc
 
 
+def _ensure_collection_owner_activity_column(engine: Engine) -> None:
+    """Add ``last_activity_at`` to ``collection_owners`` and stamp unstamped rows.
+
+    The column is the retention clock (``docs/retention.md``). Rows without a
+    stamp get the migration time, not ``created_at``: no activity history
+    exists to reconstruct, and a guess that is too old deletes data. This runs
+    on every startup, so a row an older release inserted without the column
+    joins retention from then on.
+
+    The stamp is bound through SQLAlchemy's ``DateTime`` so it is stored in the
+    same form the ORM writes; a plain ``datetime`` parameter would be stored
+    with a ``+00:00`` offset and read back aware beside naive ORM values.
+
+    Args:
+        engine (Engine): The session-store engine.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
+    """
+    try:
+        inspector = inspect(engine)
+        if "collection_owners" not in inspector.get_table_names():
+            return
+        existing = {col["name"] for col in inspector.get_columns("collection_owners")}
+        stamp = text("UPDATE collection_owners SET last_activity_at = :now WHERE last_activity_at IS NULL")
+        with engine.begin() as conn:
+            if "last_activity_at" not in existing:
+                conn.execute(text("ALTER TABLE collection_owners ADD COLUMN last_activity_at DATETIME"))
+            conn.execute(stamp.bindparams(bindparam("now", type_=DateTime())), {"now": datetime.now(UTC)})
+    except Exception as exc:
+        raise _migration_failure("collection_owners activity-column", engine, exc) from exc
+
+
 # --- Session maker ---
 def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     """Creates a new SQLAlchemy session maker.
@@ -213,4 +247,5 @@ def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     # registered via ``docint.core.state.__init__``). Only added *columns* on a
     # pre-existing table need a manual backfill:
     _ensure_report_columns(engine)
+    _ensure_collection_owner_activity_column(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
