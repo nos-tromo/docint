@@ -6448,8 +6448,8 @@ class RAG:
         # 1. Delete the primary Qdrant collection — fail-fast on error so
         #    we don't proceed to destroy the SQLite KV file / source dir.
         try:
-            self.qdrant_client.delete_collection(target)
-            logger.info("Deleted collection '{}' from Qdrant.", target)
+            if self.qdrant_client.delete_collection(target):
+                logger.info("Deleted collection '{}' from Qdrant.", target)
         except Exception:
             logger.error(
                 "Failed to delete primary Qdrant collection '{}'; aborting "
@@ -6483,8 +6483,8 @@ class RAG:
         # 1b. Best-effort delete of supplementary collections.
         for collection_name in secondary_collections:
             try:
-                self.qdrant_client.delete_collection(collection_name)
-                logger.info("Deleted collection '{}' from Qdrant.", collection_name)
+                if self.qdrant_client.delete_collection(collection_name):
+                    logger.info("Deleted collection '{}' from Qdrant.", collection_name)
             except Exception as e:
                 logger.warning(
                     "Failed to delete supplementary collection '{}': {}",

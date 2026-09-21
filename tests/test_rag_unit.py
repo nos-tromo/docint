@@ -21,6 +21,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from llama_index.core import Document
 from llama_index.core.base.response.schema import Response
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
@@ -5467,6 +5468,29 @@ def test_delete_collection_passes_a_collection_qdrant_already_dropped(
     rag.delete_collection("target")
 
     assert not (tmp_path / "target").exists()
+
+
+def test_delete_collection_logs_only_what_qdrant_actually_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, loguru_caplog_info: LogCaptureFixture
+) -> None:
+    """Every companion is attempted, so a missing one must not be reported as deleted.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+        loguru_caplog_info: Captures INFO-level loguru records.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_client.delete_collection.side_effect = lambda name: name in {"target", "target_images"}
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+
+    rag.delete_collection("target")
+
+    deleted = [str(r.msg) for r in loguru_caplog_info.records if "from Qdrant" in str(r.msg)]
+    assert deleted == ["Deleted collection 'target' from Qdrant.", "Deleted collection 'target_images' from Qdrant."]
 
 
 def test_delete_collection_raises_when_the_source_directory_survives(
