@@ -42,6 +42,7 @@ from docint.core.retrieval_filters import (
 )
 from docint.core.search.fields import UnknownSearchFieldError
 from docint.core.search.fulltext import build_scan_filter, not_coarse_condition
+from docint.core.storage.ingest_manifest import IngestManifest
 from docint.utils.embed_chunking import effective_budget, estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
@@ -5513,6 +5514,102 @@ def test_delete_collection_raises_when_the_source_directory_survives(
 
     with pytest.raises(CollectionCleanupError, match="target"):
         rag.delete_collection("target")
+
+
+def _pdf_artifacts(root: Path, sources: dict[str, Path]) -> None:
+    """Artifact directories whose manifests name ``sources``."""
+    for file_hash, source in sources.items():
+        (root / file_hash / "pages").mkdir(parents=True)
+        (root / file_hash / "manifest.json").write_text(json.dumps({"doc_id": file_hash, "file_path": str(source)}))
+
+
+def _ingest_manifest(db_path: Path, collection: str, hashes: list[str]) -> None:
+    """A collection's ingest manifest recording ``hashes``."""
+    manifest = IngestManifest(db_path)
+    try:
+        for file_hash in hashes:
+            manifest.mark_started(collection, file_hash)
+    finally:
+        manifest.close()
+
+
+def _artifact_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RAG:
+    """A RAG whose source store and artifacts root live under ``tmp_path``."""
+    monkeypatch.setenv("PIPELINE_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path / "sources"
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+    return rag
+
+
+def test_delete_collection_removes_the_pdf_artifacts_nothing_else_uses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A deleted collection's page text must not stay on disk; a PDF another collection holds must.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = _artifact_rag(monkeypatch, tmp_path)
+    src, artifacts = tmp_path / "sources", tmp_path / "artifacts"
+    _ingest_manifest(src / "target" / "target_ingest_manifest.db", "target", ["own", "shared"])
+    _ingest_manifest(src / "other" / "other_ingest_manifest.db", "other", ["shared"])
+    _pdf_artifacts(
+        artifacts,
+        {
+            "own": src / "target" / "akte.pdf",
+            "shared": src / "other" / "akte.pdf",
+            "staged": src / "target" / "neu.pdf",
+            "theirs": src / "other" / "fremd.pdf",
+        },
+    )
+
+    rag.delete_collection("target")
+
+    assert sorted(p.name for p in artifacts.iterdir()) == ["shared", "theirs"]
+
+
+def test_delete_collection_keeps_pdf_artifacts_a_worker_is_reading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A PDF being preprocessed right now is written to while the collection goes.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = _artifact_rag(monkeypatch, tmp_path)
+    src, artifacts = tmp_path / "sources", tmp_path / "artifacts"
+    _ingest_manifest(src / "target" / "target_ingest_manifest.db", "target", ["reading"])
+    _pdf_artifacts(artifacts, {"reading": src / "target" / "akte.pdf"})
+    monkeypatch.setattr("docint.core.rag.inflight_pdf_hashes", lambda: {"reading"})
+
+    rag.delete_collection("target")
+
+    assert (artifacts / "reading").exists()
+
+
+def test_delete_collection_keeps_pdf_artifacts_without_a_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With the ingest manifest off nothing says what other collections use, so nothing goes.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = _artifact_rag(monkeypatch, tmp_path)
+    rag.ingest_manifest_enabled = False
+    src, artifacts = tmp_path / "sources", tmp_path / "artifacts"
+    (src / "target").mkdir(parents=True)
+    _pdf_artifacts(artifacts, {"own": src / "target" / "akte.pdf"})
+
+    rag.delete_collection("target")
+
+    assert (artifacts / "own").exists()
 
 
 def test_delete_collection_companion_name_does_not_expand(
