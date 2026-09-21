@@ -96,14 +96,27 @@ in this order:
 2. the source files, and with them the collection's docstore, summary cache,
    ingest manifest and cached transcripts;
 3. stored extracts;
-4. the collection's chat sessions;
-5. the reports built from it — manual deletion removes them too, see
+4. its PDFs' pipeline artifacts (page text, chunks, tables, figures under
+   `PIPELINE_ARTIFACTS_DIR`) that nothing else uses — see below;
+5. the collection's chat sessions;
+6. the reports built from it — manual deletion removes them too, see
    [reports.md](reports.md#when-the-collection-is-deleted);
-6. last, the ownership row.
+7. last, the ownership row.
 
 A failure stops the cascade with the collection still listed, and the next
 attempt finishes it: every step is a no-op on what is already gone. While a
 collection is being deleted, requests that would work on it get `409`.
+
+**PDF artifacts are shared.** They are named by the file's content hash, so two
+collections holding the same PDF share one folder. A folder is removed only when
+no other collection's ingest manifest records the hash, no other collection's
+source files produced it, and no preprocessing worker is reading that PDF right
+now. The collection's own folders are found by its manifest *and* by the source
+path each folder records, which is how an upload that was preprocessed but never
+ingested is found. Removing too much costs only a re-read of that PDF. With
+`INGEST_MANIFEST_ENABLED=false` nothing says what other collections use, so no
+artifact is removed. Unlike the steps above, this one is best-effort: a failure
+is logged and does not stop the delete.
 
 ## Upgrading
 
@@ -148,7 +161,7 @@ records no window. See [cli-reference.md](cli-reference.md#retention-report--wha
   whose collection was deleted before reports joined the cascade — until a new
   collection of the same name is deleted, since reports are matched by owner and
   collection name.
-- **PDF pipeline artifacts** under `PIPELINE_ARTIFACTS_DIR` are keyed by file
-  hash and shared between collections; deleting a collection does not remove
-  them yet.
+- **PDF pipeline artifacts** of collections deleted before artifacts joined the
+  cascade stay under `PIPELINE_ARTIFACTS_DIR`, as do all artifacts while the
+  ingest manifest is off.
 - **A deletion record.** What was deleted is in the backend log only.

@@ -713,7 +713,7 @@ Loaded by `load_path_env()` (`docint/utils/env_cfg.py`). Every path expands `~`.
 | `DATA_PATH` | `~/docint/data` | Root directory for ingestion inputs. Compose pins it to `/var/lib/docint/pipeline/data` (the `pipeline-storage` volume) — the container's `$HOME` is read-only. |
 | `QUERIES_PATH` | `~/docint/queries.txt` | Default query input file for the CLI. |
 | `RESULTS_PATH` | `~/docint/results` | Directory for CLI export artifacts. Compose: `/var/lib/docint/pipeline/results`. |
-| `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. |
+| `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. Deleting a collection removes the artifacts no other collection uses ([retention.md](retention.md#what-is-deleted)). |
 | `QDRANT_SRC_DIR` | `~/docint/qdrant_sources` | Where raw source files are staged for preview. |
 | `EXTRACT_DIR` | `~/docint/extracts` | Where rendered data extracts are stored. Compose: `/var/lib/docint/pipeline/extracts`. |
 | `HF_HUB_CACHE` | `~/.cache/huggingface/hub` | HF Hub cache path. |
