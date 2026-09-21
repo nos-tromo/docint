@@ -10,6 +10,7 @@ import io
 import zipfile
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ import docint.core.api as api_module
 from docint.core.state import report_render
 from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
+from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.report_manager import ReportManager
 
 
@@ -884,3 +886,34 @@ def test_batch_add_survives_companion_scroll_failure(client: TestClient, monkeyp
     assert resp.status_code == 200, resp.text
     assert resp.json()["added"] == 1
     assert "thumbnail" not in client.get(f"/reports/{rid}").json()["items"][0]["snapshot"]
+
+
+def _backdate(mgr: CollectionOwnerManager, owner: str, logical: str, stamp: datetime) -> None:
+    """Set a collection's last activity and forget the in-memory throttle."""
+    with mgr._session_scope() as s:
+        s.query(CollectionOwnership).filter(
+            CollectionOwnership.owner == owner, CollectionOwnership.logical_name == logical
+        ).update({CollectionOwnership.last_activity_at: stamp})
+        s.commit()
+    mgr._touch_due.clear()
+
+
+def test_report_work_moves_its_collections_retention_clock(client: TestClient) -> None:
+    """Building a report from a collection is work on that collection."""
+    mgr = cast(_ReportRAG, api_module.rag)._com
+    mgr.register("test-operator", "docs")
+    rid = _create(client, collection="docs")["id"]
+    long_ago = datetime(2020, 1, 1, tzinfo=UTC)
+    _backdate(mgr, "test-operator", "docs", long_ago)
+
+    assert client.get(f"/reports/{rid}").status_code == 200
+
+    [row] = mgr.list_activity("test-operator")
+    assert row.last_activity_at is not None and row.last_activity_at > long_ago
+
+
+def test_a_report_without_a_collection_touches_no_clock(client: TestClient) -> None:
+    """A report started outside any collection still opens."""
+    rid = _create(client, collection=None)["id"]
+
+    assert client.get(f"/reports/{rid}").status_code == 200
