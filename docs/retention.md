@@ -17,10 +17,6 @@ window is in force:
 Collection retention | window=6m set_at=2026-09-21T06:45:00+00:00
 ```
 
-> **Status.** This release records activity and computes deadlines. The sweep
-> that deletes due collections is not active yet, so the clock has real history
-> behind it before anything is removed.
-
 ## The rule
 
 ```text
@@ -65,6 +61,50 @@ The clock is written at most once an hour per collection, and whether or not
 retention is on — switching it on later finds real history. A failed write never
 fails the request that caused it; the next request a minute later retries.
 
+## The sweep
+
+While retention is on, the backend sweeps once a day, starting five minutes
+after startup. For each collection past its due date it:
+
+1. **skips it if any job is still working on it** — an ingest, a summary, an
+   extract, or upload-time preprocessing. Deleting under a running job would
+   let the job re-create the collection; the next sweep tries again;
+2. **re-reads its clock** and spares it if anyone used it since the sweep
+   started;
+3. **deletes it** with everything connected (below).
+
+A collection that fails to delete is left intact and retried the next day; the
+others still go. Each sweep ends with one line to grep for:
+
+```text
+Retention sweep complete | window=6m scanned=12 expired=2 deleted=2 skipped_busy=0 skipped_active=0 failed=0
+```
+
+and every deletion is logged by name with its last activity. Logs carry
+collection names and counts, never owners or content.
+
+The sweep runs inside the backend, not as a separate command, so the process
+that deletes a collection is the one whose caches hold it. Without a recorded
+window (the startup could not write it) the sweep does not start.
+
+## What is deleted
+
+The same cascade as deleting a collection by hand (`DELETE /collections/{name}`),
+in this order:
+
+1. the Qdrant collection and its hidden companions (`_images`, `_entities`);
+2. the source files, and with them the collection's docstore, summary cache,
+   ingest manifest and cached transcripts;
+3. stored extracts;
+4. the collection's chat sessions;
+5. the reports built from it — manual deletion removes them too, see
+   [reports.md](reports.md#when-the-collection-is-deleted);
+6. last, the ownership row.
+
+A failure stops the cascade with the collection still listed, and the next
+attempt finishes it: every step is a no-op on what is already gone. While a
+collection is being deleted, requests that would work on it get `409`.
+
 ## Upgrading
 
 Collections that existed before this release have no activity history, so the
@@ -100,6 +140,15 @@ records no window. See [cli-reference.md](cli-reference.md#retention-report--wha
 
 ## Not covered
 
-Collections without an ownership row have no clock and are never due. They are
-the ones ingested with the `ingest` CLI, and pre-ownership collections on a host
-that runs without `DOCINT_DEFAULT_IDENTITY`. `make retention-report` names them.
+- **Collections without an ownership row** have no clock and are never due.
+  They are the ones ingested with the `ingest` CLI, and pre-ownership
+  collections on a host that runs without `DOCINT_DEFAULT_IDENTITY`.
+  `make retention-report` names them.
+- **Reports with no collection** are tied to none and are kept. So are reports
+  whose collection was deleted before reports joined the cascade — until a new
+  collection of the same name is deleted, since reports are matched by owner and
+  collection name.
+- **PDF pipeline artifacts** under `PIPELINE_ARTIFACTS_DIR` are keyed by file
+  hash and shared between collections; deleting a collection does not remove
+  them yet.
+- **A deletion record.** What was deleted is in the backend log only.

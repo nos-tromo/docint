@@ -744,7 +744,7 @@ counts as activity and what is deleted are in [retention.md](retention.md).
 
 | Variable | Default | Description |
 |---|---|---|
-| `COLLECTION_RETENTION` | `off` | `off`, `6m`, `12m`, `18m` or `24m` — calendar months without activity after which a collection is deleted. Case and surrounding spaces are ignored. Any other value keeps retention **off** and logs a warning; it never falls back to a period. Read at startup, which logs `Collection retention \| window=…`. |
+| `COLLECTION_RETENTION` | `off` | `off`, `6m`, `12m`, `18m` or `24m` — calendar months without activity after which a collection is deleted. Case and surrounding spaces are ignored. Any other value keeps retention **off** and logs a warning; it never falls back to a period. Read at startup, which logs `Collection retention \| window=…`; while on, a sweep deletes due collections once a day. |
 
 ## Response language — `LanguageConfig`
 

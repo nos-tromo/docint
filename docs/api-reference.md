@@ -188,7 +188,16 @@ engine if needed, and pre-warms the NER cache when `enable_ner` is on.
 
 ### `DELETE /collections/{name}`
 
-Deletes the named Qdrant collection. Returns `{ "ok": true }` on success.
+Deletes the collection and everything connected to it, in this order: the
+Qdrant collection and its hidden companions, the source files (with the
+docstore, summary cache and ingest manifest inside them), stored extracts, the
+collection's chat sessions, the reports built from it, and last the ownership
+row. A failure stops the cascade with the collection still listed, and a retry
+finishes it. Retention runs the same cascade ([retention.md](retention.md)).
+
+Returns `{ "ok": true }`; 404 for a collection the caller does not own; 409
+while the collection is already being deleted — requests that would work on it
+get the same 409 until the cascade ends.
 
 ## Query
 
