@@ -367,6 +367,22 @@ class CollectionOwnerManager:
             )
             return [self._activity(row) for row in rows]
 
+    def get_activity(self, physical: str) -> CollectionActivity | None:
+        """Return one collection's retention clock by its physical name.
+
+        The retention sweep's recheck: it re-reads the clock right before it
+        deletes, so activity after the scan spares the collection.
+
+        Args:
+            physical (str): The Qdrant collection name.
+
+        Returns:
+            CollectionActivity | None: ``None`` when no such collection is owned.
+        """
+        with self._session_scope() as s:
+            row = s.get(CollectionOwnership, physical)
+            return self._activity(row) if row is not None else None
+
     def list_all_activity(self) -> list[CollectionActivity]:
         """Return every collection's retention clock, sorted by owner then name.
 

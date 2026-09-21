@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from docint.core.state.base import Base
+from docint.core.state.report_item import ReportItem
 from docint.core.state.report_manager import ReportManager
 
 
@@ -509,3 +510,38 @@ def test_add_items_backfill_ignores_a_non_dict_translation(report_manager: Repor
     assert result is not None
     assert (result["added"], result["updated"], result["skipped"]) == (0, 0, 1)
     assert "translation" not in _ok(report_manager.get_report(rid, "alice"))["items"][0]["snapshot"]
+
+
+def test_deleting_a_collection_deletes_its_reports_and_their_items(report_manager: ReportManager) -> None:
+    """The collection's reports go with it: nothing derived from a deleted collection is kept."""
+    doomed = report_manager.create_report(title="A", owner="alice", collection_name="docs")["id"]
+    report_manager.add_item(doomed, "alice", **_entity_item("c1"))
+    report_manager.add_item(doomed, "alice", **_entity_item("c2"))
+    other_collection = report_manager.create_report(title="B", owner="alice", collection_name="other")["id"]
+
+    assert report_manager.delete_reports_for_collection("alice", "docs") == 1
+
+    assert report_manager.get_report(doomed, "alice") is None
+    assert report_manager.get_report(other_collection, "alice") is not None
+    with report_manager._session_scope() as s:
+        assert s.query(ReportItem).count() == 0
+
+
+def test_deleting_a_collection_spares_another_owners_same_named_reports(report_manager: ReportManager) -> None:
+    """Report collection names are logical, so the owner is what keeps Bob's ``docs`` apart from Alice's."""
+    alice = report_manager.create_report(title="A", owner="alice", collection_name="docs")["id"]
+    bob = report_manager.create_report(title="B", owner="bob", collection_name="docs")["id"]
+
+    report_manager.delete_reports_for_collection("alice", "docs")
+
+    assert report_manager.get_report(alice, "alice") is None
+    assert report_manager.get_report(bob, "bob") is not None
+
+
+def test_deleting_a_collection_spares_reports_scoped_to_none(report_manager: ReportManager) -> None:
+    """A report started outside any collection belongs to no collection's cascade."""
+    unscoped = report_manager.create_report(title="A", owner="alice", collection_name=None)["id"]
+
+    assert report_manager.delete_reports_for_collection("alice", "docs") == 0
+
+    assert report_manager.get_report(unscoped, "alice") is not None

@@ -300,3 +300,15 @@ def test_changing_the_window_restarts_the_grace_period(mgr: CollectionOwnerManag
 
     assert state == RetentionWindowState(window=after, set_at=T0 + timedelta(days=10))
     assert mgr.retention_window() == state
+
+
+def test_get_activity_reads_one_collections_clock(mgr: CollectionOwnerManager) -> None:
+    """The sweep's recheck reads a single collection by its physical name."""
+    physical = mgr.register("alice", "mydocs")
+    mgr.touch("alice", "mydocs", now=T0)
+
+    row = mgr.get_activity(physical)
+
+    assert row is not None
+    assert (row.owner, row.logical, row.last_activity_at) == ("alice", "mydocs", T0)
+    assert mgr.get_activity("u000000000000__missing") is None

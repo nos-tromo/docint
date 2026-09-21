@@ -301,6 +301,28 @@ class ReportManager:
             s.commit()
             return True
 
+    def delete_reports_for_collection(self, owner: str | None, logical: str) -> int:
+        """Delete every report ``owner`` built from logical collection ``logical``.
+
+        Part of a collection's delete cascade. Keyed on the owner as well as
+        the name because a report stores the *logical* collection name, which
+        another owner may share. Deletes ORM objects rather than issuing a bulk
+        DELETE so each report's items cascade with it.
+
+        Args:
+            owner (str | None): The collection's owner.
+            logical (str): The user-visible collection name.
+
+        Returns:
+            int: How many reports were deleted.
+        """
+        with self._session_scope() as s:
+            reports = s.query(Report).filter(Report.owner == owner, Report.collection_name == logical).all()
+            for report in reports:
+                s.delete(report)
+            s.commit()
+            return len(reports)
+
     # --- item operations ---
     def add_item(
         self,

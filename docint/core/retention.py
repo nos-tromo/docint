@@ -5,14 +5,21 @@ A collection expires once it has seen no activity for the configured window
 nowhere else, so the API listing, the operator report and the sweep can never
 disagree about a date.
 
-The module holds no docint domain imports: callers hand in timestamps, so the
-rule is testable without a database, Qdrant, or a clock.
+The module holds no docint domain imports: callers hand in timestamps, the
+busy check and the purge, so the rule and the sweep are testable without a
+database, Qdrant, or a clock.
 """
 
 from __future__ import annotations
 
+import asyncio
 import calendar
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Protocol
+
+from loguru import logger
 
 #: Days of notice every user gets: the SPA flags a collection this long before
 #: it goes, and switching retention on (or changing the window) holds every
@@ -85,3 +92,130 @@ def is_warning(deadline: datetime | None, now: datetime) -> bool:
         bool: ``True`` from ``NOTICE_DAYS`` before the deadline onwards.
     """
     return deadline is not None and deadline - now <= timedelta(days=NOTICE_DAYS)
+
+
+class RetentionClock(Protocol):
+    """One collection's retention clock, as the sweep reads it."""
+
+    @property
+    def owner(self) -> str | None:
+        """The owning principal."""
+        ...
+
+    @property
+    def logical(self) -> str:
+        """The user-visible collection name."""
+        ...
+
+    @property
+    def physical(self) -> str:
+        """The Qdrant collection name."""
+        ...
+
+    @property
+    def last_activity_at(self) -> datetime | None:
+        """The last recorded activity, timezone-aware; ``None`` never expires."""
+        ...
+
+
+@dataclass
+class SweepReport:
+    """What one sweep did, by logical collection name.
+
+    Attributes:
+        scanned (int): Collections looked at.
+        expired (int): Collections past their deadline at the scan.
+        deleted (list[str]): Collections deleted.
+        skipped_busy (list[str]): Expired, but a job was working on them.
+        skipped_active (list[str]): Expired at the scan, active again by the purge.
+        failed (list[str]): Collections whose delete raised; retried next sweep.
+    """
+
+    scanned: int = 0
+    expired: int = 0
+    deleted: list[str] = field(default_factory=list)
+    skipped_busy: list[str] = field(default_factory=list)
+    skipped_active: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+
+
+async def sweep_once(
+    rows: Sequence[RetentionClock],
+    *,
+    months: int,
+    window_set_at: datetime,
+    now: datetime,
+    is_busy: Callable[[str], Awaitable[bool]],
+    purge: Callable[[RetentionClock], Awaitable[bool]],
+) -> SweepReport:
+    """Delete every collection past its deadline, one at a time.
+
+    A collection a job is still working on is left for the next sweep. The
+    purge re-reads the clock before it deletes and answers ``False`` when the
+    collection was used since the scan; one that raises is counted and the
+    sweep moves on, so a single failure never strands the rest.
+
+    Args:
+        rows (Sequence[RetentionClock]): Every collection's clock at the scan.
+        months (int): The retention window.
+        window_set_at (datetime): When the window was set (the grace anchor).
+        now (datetime): The scan time, timezone-aware.
+        is_busy (Callable[[str], Awaitable[bool]]): Whether work is in
+            flight on a physical collection.
+        purge (Callable[[RetentionClock], Awaitable[bool]]): Deletes a
+            collection if it is still expired; ``False`` when it no longer is.
+
+    Returns:
+        SweepReport: What was deleted, skipped and failed.
+    """
+    report = SweepReport(scanned=len(rows))
+    for row in rows:
+        if not is_expired(expires_at(row.last_activity_at, months, window_set_at=window_set_at), now):
+            continue
+        report.expired += 1
+        if await is_busy(row.physical):
+            logger.info("Retention postponed collection '{}': a job is still working on it.", row.logical)
+            report.skipped_busy.append(row.logical)
+            continue
+        try:
+            purged = await purge(row)
+        except Exception:
+            logger.exception("Retention could not delete collection '{}'; the next sweep retries.", row.logical)
+            report.failed.append(row.logical)
+            continue
+        if purged:
+            logger.info("Retention deleted collection '{}' (last activity {}).", row.logical, row.last_activity_at)
+            report.deleted.append(row.logical)
+        else:
+            report.skipped_active.append(row.logical)
+    return report
+
+
+async def run_retention_loop(
+    sweep: Callable[[], Awaitable[object]],
+    *,
+    first_delay: float,
+    interval: float,
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+) -> None:
+    """Run ``sweep`` after ``first_delay`` seconds, then every ``interval``, until cancelled.
+
+    A sweep that raises is logged and the loop carries on: one bad run must
+    never end retention for the rest of the process's life. Cancellation
+    propagates, which is how shutdown stops it.
+
+    Args:
+        sweep (Callable[[], Awaitable[object]]): One full sweep.
+        first_delay (float): Seconds before the first sweep.
+        interval (float): Seconds between sweeps.
+        sleep (Callable[[float], Awaitable[object]]): The wait; injectable so
+            tests need not sleep.
+    """
+    delay = first_delay
+    while True:
+        await sleep(delay)
+        delay = interval
+        try:
+            await sweep()
+        except Exception:
+            logger.exception("Retention sweep failed; the next one runs in {} s.", interval)
