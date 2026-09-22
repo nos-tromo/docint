@@ -11,18 +11,25 @@ fall back to ``DOCINT_DEFAULT_IDENTITY`` ("test-operator").
 """
 
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
+from _pytest.logging import LogCaptureFixture
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import docint.core.api as api_module
+from docint.core.retention import NOTICE_DAYS
 from docint.core.state.base import Base
-from docint.core.state.collection_owner_manager import CollectionOwnerManager
+from docint.core.state.collection_owner_manager import CollectionOwnerManager, RetentionWindowState
+from docint.core.state.collection_ownership import CollectionOwnership
+from docint.core.state.report_manager import ReportManager
+from docint.utils.env_cfg import RetentionConfig
 
 
 class _FakeIngest:
@@ -72,6 +79,8 @@ class _OwnRAG:
         self.session_store = "sqlite://"
         self._com = CollectionOwnerManager(rag=cast(Any, self))
         self._com._SessionMaker = sessionmaker(bind=engine)
+        self._rm = ReportManager(rag=cast(Any, self))
+        self._rm._SessionMaker = sessionmaker(bind=engine)
         self.existing: set[str] = set()
         self.active: str = ""
         self.deleted: list[str] = []
@@ -101,6 +110,9 @@ class _OwnRAG:
 
     def ensure_session_manager(self) -> _SpySessions:
         return self._sessions
+
+    def ensure_report_manager(self) -> ReportManager:
+        return self._rm
 
     def select_collection(self, name: str) -> None:
         if name not in self.existing:
@@ -190,13 +202,18 @@ def test_delete_collection_cascades_sessions(client: TestClient, _patch_rag: _Ow
     assert _patch_rag._sessions.deleted_for == [physical]
 
 
-def test_legacy_collections_backfilled_to_default_identity(client: TestClient, _patch_rag: _OwnRAG) -> None:
-    """A pre-existing collection is owned by the default identity, not by other users."""
+def test_legacy_collections_backfilled_to_default_identity(_patch_rag: _OwnRAG) -> None:
+    """A pre-existing collection is owned by the default identity, not by other users.
+
+    Startup records the retention window through the ownership manager, so the
+    backfill runs at boot: the collection must exist before the app starts.
+    """
     _patch_rag.existing.add("legacy1")
-    # The default identity (no header) sees the backfilled legacy collection...
-    assert "legacy1" in client.get("/collections/list").json()
-    # ...but a different principal does not.
-    assert _list(client, "alice") == []
+    with TestClient(api_module.app) as client:
+        # The default identity (no header) sees the backfilled legacy collection...
+        assert "legacy1" in client.get("/collections/list").json()
+        # ...but a different principal does not.
+        assert _list(client, "alice") == []
 
 
 def test_preview_source_is_owner_gated_and_uses_physical(
@@ -349,3 +366,366 @@ def test_collections_list_no_params_unchanged_for_admin(client: TestClient) -> N
     _ingest(client, "root", "own")
 
     assert client.get("/collections/list", headers=ADMIN).json() == ["own"]
+
+
+# --- Retention clock and expiry listing (docs/retention.md) ---
+
+LONG_AGO = datetime(2020, 1, 1, tzinfo=UTC)
+
+
+def _age(rag: _OwnRAG, owner: str, logical: str, stamp: datetime | None = LONG_AGO) -> None:
+    """Backdate a collection's last activity and forget the in-memory throttle."""
+    mgr = rag.ensure_collection_owner_manager()
+    with mgr._session_scope() as s:
+        s.query(CollectionOwnership).filter(
+            CollectionOwnership.owner == owner, CollectionOwnership.logical_name == logical
+        ).update({CollectionOwnership.last_activity_at: stamp})
+        s.commit()
+    mgr._touch_due.clear()
+
+
+def _last_activity(rag: _OwnRAG, owner: str, logical: str) -> datetime | None:
+    """The recorded last activity of one collection."""
+    rows = rag.ensure_collection_owner_manager().list_activity(owner)
+    return next(row.last_activity_at for row in rows if row.logical == logical)
+
+
+def test_an_owner_gated_request_moves_the_clock(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Every collection-scoped endpoint passes the ownership gate, so every one counts."""
+    _ingest(client, "alice", "alpha")
+    _age(_patch_rag, "alice", "alpha")
+
+    assert (
+        client.post("/collections/select", json={"name": "alpha"}, headers={"X-Auth-User": "alice"}).status_code == 200
+    )
+
+    stamp = _last_activity(_patch_rag, "alice", "alpha")
+    assert stamp is not None and stamp > LONG_AGO
+
+
+def test_reingesting_moves_the_clock(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Registering an existing collection does not write, so the register path stamps it."""
+    _ingest(client, "alice", "alpha")
+    _age(_patch_rag, "alice", "alpha")
+
+    assert _ingest(client, "alice", "alpha").status_code == 200
+
+    stamp = _last_activity(_patch_rag, "alice", "alpha")
+    assert stamp is not None and stamp > LONG_AGO
+
+
+def test_admin_work_in_another_namespace_moves_that_clock(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """An admin working on a user's collection is activity on it."""
+    _ingest(client, "alice", "alpha")
+    _age(_patch_rag, "alice", "alpha")
+
+    assert client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers=ADMIN).status_code == 200
+
+    stamp = _last_activity(_patch_rag, "alice", "alpha")
+    assert stamp is not None and stamp > LONG_AGO
+
+
+def test_listing_sessions_does_not_move_the_clock(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """The sidebar lists sessions on every page load; that is looking, not working."""
+    _ingest(client, "alice", "alpha")
+    _age(_patch_rag, "alice", "alpha")
+
+    resp = client.get("/sessions/list", params={"collection": "alpha"}, headers={"X-Auth-User": "alice"})
+
+    assert resp.status_code == 200
+    assert _last_activity(_patch_rag, "alice", "alpha") == LONG_AGO
+
+
+def test_the_retention_listing_does_not_move_the_clock(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Reading a collection's expiry must never postpone it."""
+    _ingest(client, "alice", "alpha")
+    _age(_patch_rag, "alice", "alpha")
+
+    assert client.get("/collections/retention", headers={"X-Auth-User": "alice"}).status_code == 200
+
+    assert _last_activity(_patch_rag, "alice", "alpha") == LONG_AGO
+
+
+def test_a_failed_stamp_never_fails_the_request(
+    client: TestClient, _patch_rag: _OwnRAG, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clock is bookkeeping; the user's request is the work."""
+    _ingest(client, "alice", "alpha")
+    _age(_patch_rag, "alice", "alpha")
+
+    def _locked(self: CollectionOwnerManager, owner: str | None, logical: str, **_kw: Any) -> bool:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(CollectionOwnerManager, "touch", _locked)
+
+    assert (
+        client.post("/collections/select", json={"name": "alpha"}, headers={"X-Auth-User": "alice"}).status_code == 200
+    )
+    assert _ingest(client, "alice", "alpha").status_code == 200
+
+
+def test_retention_listing_when_retention_is_off(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """With retention off nothing has a deadline, but the clock is still shown."""
+    _ingest(client, "alice", "alpha")
+
+    body = client.get("/collections/retention", headers={"X-Auth-User": "alice"}).json()
+
+    assert body["window"] == "off"
+    [row] = body["collections"]
+    assert row["name"] == "alpha"
+    assert row["owner"] is None
+    assert row["last_activity_at"] is not None
+    assert row["expires_at"] is None
+    assert row["warning"] is False
+
+
+def test_retention_listing_dates_and_flags_each_collection(
+    monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG
+) -> None:
+    """A collection idle past the window is due when the grace period ends, and is flagged."""
+    monkeypatch.setenv("COLLECTION_RETENTION", "6m")
+    with TestClient(api_module.app) as client:
+        _ingest(client, "alice", "fresh")
+        _ingest(client, "alice", "stale")
+        _age(_patch_rag, "alice", "stale")
+        state = _patch_rag.ensure_collection_owner_manager().retention_window()
+        assert state is not None and state.window == "6m"
+
+        body = client.get("/collections/retention", headers={"X-Auth-User": "alice"}).json()
+
+    assert body["window"] == "6m"
+    stale, fresh = body["collections"]
+    assert stale["name"] == "stale"
+    assert datetime.fromisoformat(stale["expires_at"]) == state.set_at + timedelta(days=NOTICE_DAYS)
+    assert stale["warning"] is True
+    assert fresh["name"] == "fresh"
+    assert datetime.fromisoformat(fresh["expires_at"]) > datetime.now(UTC) + timedelta(days=150)
+    assert fresh["warning"] is False
+
+
+def test_an_unstamped_collection_never_expires(monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG) -> None:
+    """No recorded activity is listed without a deadline, and last."""
+    monkeypatch.setenv("COLLECTION_RETENTION", "6m")
+    with TestClient(api_module.app) as client:
+        _ingest(client, "alice", "alpha")
+        _ingest(client, "alice", "beta")
+        _age(_patch_rag, "alice", "alpha", stamp=None)
+
+        body = client.get("/collections/retention", headers={"X-Auth-User": "alice"}).json()
+
+    beta, alpha = body["collections"]
+    assert (beta["name"], alpha["name"]) == ("beta", "alpha")
+    assert alpha["expires_at"] is None
+    assert alpha["warning"] is False
+
+
+def test_retention_listing_is_owner_scoped(client: TestClient) -> None:
+    """A non-admin's ``all=true`` is ignored, so no other owner's collection leaks."""
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "bob", "beta")
+
+    body = client.get("/collections/retention?all=true", headers={"X-Auth-User": "alice"}).json()
+
+    assert [(row["name"], row["owner"]) for row in body["collections"]] == [("alpha", None)]
+
+
+def test_retention_listing_shows_admins_every_owner(client: TestClient) -> None:
+    """With ``all=true`` an admin sees every collection, foreign ones named by owner."""
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "root", "own")
+
+    body = client.get("/collections/retention?all=true", headers=ADMIN).json()
+
+    assert sorted((row["name"], row["owner"]) for row in body["collections"]) == [("alpha", "alice"), ("own", None)]
+
+
+def test_startup_records_the_window_in_force(monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG) -> None:
+    """The grace period is anchored on the startup that changed the window."""
+    monkeypatch.setenv("COLLECTION_RETENTION", "12m")
+    with TestClient(api_module.app):
+        pass
+
+    state = _patch_rag.ensure_collection_owner_manager().retention_window()
+    assert state is not None and state.window == "12m"
+
+
+def test_startup_logs_the_window(
+    monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG, loguru_caplog_info: LogCaptureFixture
+) -> None:
+    """One greppable line says whether retention is on — a typo that disabled it shows up here."""
+    monkeypatch.setenv("COLLECTION_RETENTION", "18m")
+    with TestClient(api_module.app):
+        pass
+
+    assert any("Collection retention | window=18m" in str(r.msg) for r in loguru_caplog_info.records)
+
+
+def test_config_advertises_the_retention_window(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SPA reads the window from ``/config`` before asking for any expiry dates."""
+    assert client.get("/config").json()["collection_retention"] == "off"
+    monkeypatch.setenv("COLLECTION_RETENTION", "24m")
+    assert client.get("/config").json()["collection_retention"] == "24m"
+
+
+# --- The shared delete cascade and the retention sweep ---
+
+
+def _report(rag: _OwnRAG, owner: str, collection: str | None) -> int:
+    return int(rag.ensure_report_manager().create_report(title="Akte", owner=owner, collection_name=collection)["id"])
+
+
+def test_deleting_a_collection_deletes_its_reports(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Manual delete removes the collection's reports too — and only its owner's."""
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "bob", "alpha")
+    doomed = _report(_patch_rag, "alice", "alpha")
+    kept_other_collection = _report(_patch_rag, "alice", "beta")
+    kept_other_owner = _report(_patch_rag, "bob", "alpha")
+
+    assert client.delete("/collections/alpha", headers={"X-Auth-User": "alice"}).status_code == 200
+
+    reports = _patch_rag.ensure_report_manager()
+    assert reports.get_report(doomed, "alice") is None
+    assert reports.get_report(kept_other_collection, "alice") is not None
+    assert reports.get_report(kept_other_owner, "bob") is not None
+
+
+def test_a_failed_qdrant_delete_leaves_everything_to_retry(
+    client: TestClient, _patch_rag: _OwnRAG, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cascade stops at the first failure, before sessions, reports or ownership go."""
+    _ingest(client, "alice", "alpha")
+    report = _report(_patch_rag, "alice", "alpha")
+
+    def _boom(name: str) -> None:
+        raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(_patch_rag, "delete_collection", _boom)
+
+    assert client.delete("/collections/alpha", headers={"X-Auth-User": "alice"}).status_code == 500
+
+    assert _patch_rag._sessions.deleted_for == []
+    assert _patch_rag.ensure_report_manager().get_report(report, "alice") is not None
+    assert _list(client, "alice") == ["alpha"]
+
+
+def test_a_collection_being_deleted_refuses_new_work(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Work arriving mid-delete would re-create what the cascade is removing."""
+    _ingest(client, "alice", "alpha")
+    physical = _patch_rag.ensure_collection_owner_manager().resolve("alice", "alpha")
+    assert physical is not None
+
+    with api_module._purge_guard(physical):
+        assert (
+            client.post("/collections/select", json={"name": "alpha"}, headers={"X-Auth-User": "alice"}).status_code
+            == 409
+        )
+        assert _ingest(client, "alice", "alpha").status_code == 409
+        assert client.delete("/collections/alpha", headers={"X-Auth-User": "alice"}).status_code == 409
+
+    assert (
+        client.post("/collections/select", json={"name": "alpha"}, headers={"X-Auth-User": "alice"}).status_code == 200
+    )
+
+
+class _IdleJobs:
+    """A job registry with nothing running, or with work on ``busy`` collections."""
+
+    def __init__(self, busy: frozenset[str] = frozenset()) -> None:
+        self.busy = busy
+
+    async def any_active_for(self, physical: str) -> bool:
+        return physical in self.busy
+
+
+def _run_sweep(rag: _OwnRAG, jobs: _IdleJobs, *, set_at: datetime = LONG_AGO) -> Any:
+    """Run one retention sweep under a 6-month window set at ``set_at``."""
+    state = RetentionWindowState(window="6m", set_at=set_at)
+    return anyio.run(api_module._retention_sweep, RetentionConfig(window="6m", months=6), state, cast(Any, jobs))
+
+
+def test_the_sweep_deletes_an_idle_collection_with_everything_connected(
+    client: TestClient, _patch_rag: _OwnRAG
+) -> None:
+    """Qdrant data, chat sessions, reports and the ownership row all go; a recent collection stays."""
+    _ingest(client, "alice", "alt")
+    _ingest(client, "alice", "laufend")
+    physical = _patch_rag.ensure_collection_owner_manager().resolve("alice", "alt")
+    report = _report(_patch_rag, "alice", "alt")
+    _age(_patch_rag, "alice", "alt")
+
+    result = _run_sweep(_patch_rag, _IdleJobs())
+
+    assert result.deleted == ["alt"]
+    assert _patch_rag.deleted == [physical]
+    assert _patch_rag._sessions.deleted_for == [physical]
+    assert _patch_rag.ensure_report_manager().get_report(report, "alice") is None
+    assert _list(client, "alice") == ["laufend"]
+
+
+def test_the_sweep_leaves_a_collection_a_job_is_working_on(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """An ingest still writing would re-create a collection deleted under it."""
+    _ingest(client, "alice", "alt")
+    physical = _patch_rag.ensure_collection_owner_manager().resolve("alice", "alt")
+    assert physical is not None
+    _age(_patch_rag, "alice", "alt")
+
+    result = _run_sweep(_patch_rag, _IdleJobs(busy=frozenset({physical})))
+
+    assert result.skipped_busy == ["alt"]
+    assert _patch_rag.deleted == []
+
+
+def test_the_sweep_rechecks_the_clock_before_deleting(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """A collection used after the scan read its clock is spared."""
+    _ingest(client, "alice", "alt")
+    _age(_patch_rag, "alice", "alt")
+    [stale] = _patch_rag.ensure_collection_owner_manager().list_activity("alice")
+    _patch_rag.ensure_collection_owner_manager().touch("alice", "alt")
+
+    purged = api_module._purge_if_still_expired(stale, 6, LONG_AGO, datetime.now(UTC))
+
+    assert purged is False
+    assert _patch_rag.deleted == []
+
+
+def test_the_sweep_honours_the_grace_period(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Right after retention is switched on nothing goes, however long it sat idle."""
+    _ingest(client, "alice", "alt")
+    _age(_patch_rag, "alice", "alt")
+
+    result = _run_sweep(_patch_rag, _IdleJobs(), set_at=datetime.now(UTC))
+
+    assert result.deleted == []
+    assert _patch_rag.deleted == []
+
+
+def test_retention_off_starts_no_sweeper(_patch_rag: _OwnRAG) -> None:
+    """With retention off nothing is ever scheduled."""
+    with TestClient(api_module.app):
+        assert api_module.app.state.retention_task is None
+
+
+def test_retention_on_starts_the_sweeper_and_shutdown_stops_it(
+    monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG
+) -> None:
+    """The sweeper runs for the app's lifetime and is stopped before the job registry.
+
+    Stopped first so a delete in progress finishes before the workers and the
+    registry it checks go away.
+    """
+    monkeypatch.setenv("COLLECTION_RETENTION", "6m")
+    sweeper_done_at_registry_stop: list[bool] = []
+    registry_stop = api_module.job_manager.stop
+
+    async def stop() -> None:
+        sweeper_done_at_registry_stop.append(api_module.app.state.retention_task.done())
+        await registry_stop()
+
+    monkeypatch.setattr(api_module.job_manager, "stop", stop)
+    with TestClient(api_module.app):
+        task = api_module.app.state.retention_task
+        assert task is not None
+        assert not task.done()
+
+    assert sweeper_done_at_registry_stop == [True]

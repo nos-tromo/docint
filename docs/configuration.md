@@ -713,7 +713,7 @@ Loaded by `load_path_env()` (`docint/utils/env_cfg.py`). Every path expands `~`.
 | `DATA_PATH` | `~/docint/data` | Root directory for ingestion inputs. Compose pins it to `/var/lib/docint/pipeline/data` (the `pipeline-storage` volume) — the container's `$HOME` is read-only. |
 | `QUERIES_PATH` | `~/docint/queries.txt` | Default query input file for the CLI. |
 | `RESULTS_PATH` | `~/docint/results` | Directory for CLI export artifacts. Compose: `/var/lib/docint/pipeline/results`. |
-| `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. |
+| `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. Deleting a collection removes the artifacts no other collection uses ([retention.md](retention.md#what-is-deleted)). |
 | `QDRANT_SRC_DIR` | `~/docint/qdrant_sources` | Where raw source files are staged for preview. |
 | `EXTRACT_DIR` | `~/docint/extracts` | Where rendered data extracts are stored. Compose: `/var/lib/docint/pipeline/extracts`. |
 | `HF_HUB_CACHE` | `~/.cache/huggingface/hub` | HF Hub cache path. |
@@ -735,6 +735,16 @@ extracts described in [extracts.md](extracts.md); the store's location is
 | `EXTRACT_PDF_MAX_FIGURES` | `400` | The same cap counted in figures — what actually fills WeasyPrint's memory. |
 | `EXTRACT_SYNC_MAX_UNITS` | `50` | Units a per-source download may render on the request. Above it the route answers 413 and the caller queues a job. Minimum 1. |
 | `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent extract jobs. Its own semaphore, so a bundle render never consumes an ingest or summary worker slot. |
+
+## Collection retention — `RetentionConfig`
+
+Loaded by `load_retention_env()` (`docint/utils/env_cfg.py`). Deletes
+collections nobody has worked with for the chosen window; the rules, what
+counts as activity and what is deleted are in [retention.md](retention.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `COLLECTION_RETENTION` | `off` | `off`, `6m`, `12m`, `18m` or `24m` — calendar months without activity after which a collection is deleted. Case and surrounding spaces are ignored. Any other value keeps retention **off** and logs a warning; it never falls back to a period. Read at startup, which logs `Collection retention \| window=…`; while on, a sweep deletes due collections once a day. |
 
 ## Response language — `LanguageConfig`
 

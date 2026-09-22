@@ -603,3 +603,24 @@ def test_preprocess_media_hands_the_transcriber_the_tally(tmp_path: Path, monkey
     preprocess.preprocess_media(path, "col", progress=progress, file_hash="h")
 
     assert captured["preprocess_progress"] is progress
+
+
+def test_inflight_hashes_names_the_files_being_read(pool: PreprocessPool) -> None:
+    """Artifact cleanup must not remove a directory a worker is still writing."""
+    release = threading.Event()
+    pool.submit(preprocess_key("pdf", "mine", "a1b2"), release.wait)
+    pool.submit(preprocess_key("image", "mine", "c3d4"), release.wait)
+    try:
+        assert pool.inflight_hashes("pdf") == {"a1b2"}
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+    assert pool.inflight_hashes("pdf") == set()
+
+
+def test_no_pool_means_nothing_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Asking must not start the pool's worker threads as a side effect."""
+    monkeypatch.setattr(preprocess, "_pool", None)
+
+    assert preprocess.inflight_pdf_hashes() == set()
+    assert preprocess._pool is None

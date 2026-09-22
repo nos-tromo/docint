@@ -20,6 +20,7 @@ from sqlalchemy import Engine, create_engine, text
 from docint.core.state import session_manager as session_manager_module
 from docint.core.state.base import (
     SessionStoreMigrationError,
+    _ensure_collection_owner_activity_column,
     _ensure_conversation_owner_column,
     _ensure_conversation_scope_columns,
     _ensure_report_columns,
@@ -61,6 +62,11 @@ def _readonly_engine(tmp_path: Path, ddl: str) -> Engine:
             _ensure_report_columns,
             "CREATE TABLE reports (id TEXT PRIMARY KEY)",
             id="report-columns",
+        ),
+        pytest.param(
+            _ensure_collection_owner_activity_column,
+            "CREATE TABLE collection_owners (physical_name TEXT PRIMARY KEY)",
+            id="collection-owner-activity-column",
         ),
     ],
 )

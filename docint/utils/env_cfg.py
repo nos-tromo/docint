@@ -2657,3 +2657,48 @@ def load_extract_env() -> ExtractConfig:
         pdf_max_figures=_extract_int("EXTRACT_PDF_MAX_FIGURES", 400),
         sync_max_units=_extract_int("EXTRACT_SYNC_MAX_UNITS", 50, minimum=1),
     )
+
+
+#: The idle windows ``COLLECTION_RETENTION`` accepts, in calendar months.
+RETENTION_WINDOWS: dict[str, int] = {"off": 0, "6m": 6, "12m": 12, "18m": 18, "24m": 24}
+
+RetentionWindow = Literal["off", "6m", "12m", "18m", "24m"]
+
+
+@dataclass(frozen=True)
+class RetentionConfig:
+    """Collection retention: how long a collection may sit idle before deletion.
+
+    Attributes:
+        window (RetentionWindow): ``"off"`` or one of the idle windows.
+        months (int): The window in calendar months; ``0`` when off.
+    """
+
+    window: RetentionWindow
+    months: int
+
+    @property
+    def enabled(self) -> bool:
+        """Whether idle collections are deleted at all."""
+        return self.months > 0
+
+
+def load_retention_env() -> RetentionConfig:
+    """Load the collection retention window from ``COLLECTION_RETENTION``.
+
+    An unknown value resolves to ``off`` with a warning, never to a default
+    period: a typo must not delete data on a schedule nobody chose.
+
+    Returns:
+        RetentionConfig: The window in force; ``off`` unless configured.
+    """
+    raw = os.getenv("COLLECTION_RETENTION", "")
+    window = raw.strip().lower() or "off"
+    if window not in RETENTION_WINDOWS:
+        logger.warning(
+            "Unknown COLLECTION_RETENTION '{}'; retention stays off. Use one of: {}.",
+            raw,
+            ", ".join(RETENTION_WINDOWS),
+        )
+        window = "off"
+    return RetentionConfig(window=cast(RetentionWindow, window), months=RETENTION_WINDOWS[window])

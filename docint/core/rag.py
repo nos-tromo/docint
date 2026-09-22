@@ -138,7 +138,7 @@ from docint.core.entities.store import EntityStore
 from docint.core.extract.store import ExtractStore
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
-from docint.core.ingest.preprocess import prefetch_batch
+from docint.core.ingest.preprocess import inflight_pdf_hashes, prefetch_batch
 from docint.core.ingest.streaming_executor import overlapped
 from docint.core.jobs import JobCancelled
 from docint.core.ner import (
@@ -193,9 +193,16 @@ from docint.core.search.index import (
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
+from docint.core.storage.artifact_gc import (
+    collection_artifacts,
+    recorded_sources,
+    remove_artifacts,
+    still_referenced,
+)
 from docint.core.storage.ingest_manifest import (
     IngestManifest,
     NullIngestManifest,
+    read_manifest_hashes,
 )
 from docint.core.storage.scroll import iter_scroll
 from docint.core.storage.sources import stage_sources_to_qdrant
@@ -854,6 +861,15 @@ def _attach_posting_group(sources: list[dict[str, Any]]) -> list[dict[str, Any]]
         if group:
             source["posting_group"] = group
     return sources
+
+
+class CollectionCleanupError(RuntimeError):
+    """A collection's Qdrant data is gone but its source directory survived.
+
+    Raised by :meth:`RAG.delete_collection` so the caller keeps the ownership
+    row and retries: finishing the cascade would drop the only record that
+    those files belong to anyone.
+    """
 
 
 class EmptyIngestionError(Exception):
@@ -3725,13 +3741,79 @@ class RAG:
         target = str(collection or self.qdrant_collection or "").strip()
         if not target:
             return NullIngestManifest()
-        db_path = self.qdrant_src_dir / target / f"{target}_ingest_manifest.db"
         return IngestManifest(
-            db_path=db_path,
+            db_path=self._ingest_manifest_path(target),
             max_retries=self.docstore_max_retries,
             retry_backoff_seconds=self.docstore_retry_backoff_seconds,
             retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
         )
+
+    def _ingest_manifest_path(self, collection: str) -> Path:
+        """Return where a collection's ingest manifest lives.
+
+        Args:
+            collection (str): Physical collection name.
+
+        Returns:
+            Path: ``{qdrant_src_dir}/{collection}/{collection}_ingest_manifest.db``.
+        """
+        return self.qdrant_src_dir / collection / f"{collection}_ingest_manifest.db"
+
+    def _collection_artifacts(self, target: str) -> tuple[set[str], dict[str, str]] | None:
+        """Find the PDF artifacts a collection accounts for, before its manifest is deleted.
+
+        Args:
+            target (str): Physical collection name.
+
+        Returns:
+            tuple[set[str], dict[str, str]] | None: The collection's artifact
+                directories and every directory's recorded source; ``None``
+                when the ingest manifest is off — without manifests nothing says
+                which artifacts other collections still use, so none are removed.
+        """
+        if not self.ingest_manifest_enabled:
+            logger.warning("Ingest manifest is off; PDF artifacts of collection '{}' are kept.", target)
+            return None
+        try:
+            recorded = recorded_sources(self.path_config.artifacts)
+            own = read_manifest_hashes(self._ingest_manifest_path(target))
+        except Exception as exc:
+            logger.warning("Could not list the PDF artifacts of collection '{}': {}", target, exc)
+            return None
+        return collection_artifacts(self.qdrant_src_dir / target, own, recorded), recorded
+
+    def _remove_orphaned_artifacts(self, target: str, candidates: set[str], recorded: dict[str, str]) -> None:
+        """Remove a deleted collection's PDF artifacts that nothing else uses.
+
+        Every other collection's manifest and source files are read afresh, and
+        a PDF a preprocessing worker is reading is kept too. Best-effort, like
+        the extract cleanup: a failure is logged, never raised.
+
+        Args:
+            target (str): Physical collection name, already deleted.
+            candidates (set[str]): From :meth:`_collection_artifacts`.
+            recorded (dict[str, str]): Every artifact directory's recorded source.
+        """
+        if not candidates:
+            return
+        try:
+            src_root = self.qdrant_src_dir
+            others = [d for d in src_root.iterdir() if d.is_dir() and d.name != target] if src_root.is_dir() else []
+            other_hashes: set[str] = set()
+            for directory in others:
+                other_hashes |= read_manifest_hashes(self._ingest_manifest_path(directory.name))
+            keep = still_referenced(
+                recorded=recorded,
+                other_source_dirs=others,
+                other_manifest_hashes=other_hashes,
+                inflight=inflight_pdf_hashes(),
+            )
+            removed = remove_artifacts(self.path_config.artifacts, candidates - keep)
+        except Exception as exc:
+            logger.warning("Could not remove the PDF artifacts of collection '{}': {}", target, exc)
+            return
+        if removed:
+            logger.info("Removed {} PDF artifact folder(s) of collection '{}'.", removed, target)
 
     def _build_ingestion_pipeline(
         self,
@@ -6407,15 +6489,22 @@ class RAG:
         fails, the method raises immediately — the SQLite KV file
         (nested under ``{qdrant_src_dir}/{name}/``) and the source
         directory are **not** touched, so the caller can diagnose and
-        retry without losing ground truth.  Failures deleting the
-        supplementary ``{name}_images`` collection are logged and
-        swallowed because they are not load-bearing.
+        retry without losing ground truth.  Failures deleting the hidden
+        companion collections are logged and swallowed because they are
+        not load-bearing.
+
+        Every companion is attempted without asking Qdrant first: deleting a
+        missing collection is a no-op there, while a probe that failed would
+        read as "absent" and orphan a hidden companion nothing lists again.
+        A collection Qdrant already dropped passes the same way, which is
+        what lets a retry after a partial failure finish.
 
         Args:
             name: Name of the collection to delete.
 
         Raises:
             ValueError: If the name is empty.
+            CollectionCleanupError: If the source directory survived.
             Exception: If the primary Qdrant collection delete fails.
         """
         if not name or not name.strip():
@@ -6425,19 +6514,15 @@ class RAG:
         self._bump_summary_revision(target, allow_create=False)
 
         # The primary collection is the only one whose failure is fatal.
-        # The `{target}_images` / `{target}_entities` companions are
-        # supplementary metadata whose absence is tolerated.
         secondary_collections: list[str] = []
         if not target.endswith(HIDDEN_COLLECTION_SUFFIXES):
-            secondary_collections.append(f"{target}_images")
-            if qdrant_collection_exists(self.qdrant_client, f"{target}_entities"):
-                secondary_collections.append(f"{target}_entities")
+            secondary_collections = [f"{target}{suffix}" for suffix in HIDDEN_COLLECTION_SUFFIXES]
 
         # 1. Delete the primary Qdrant collection — fail-fast on error so
         #    we don't proceed to destroy the SQLite KV file / source dir.
         try:
-            self.qdrant_client.delete_collection(target)
-            logger.info("Deleted collection '{}' from Qdrant.", target)
+            if self.qdrant_client.delete_collection(target):
+                logger.info("Deleted collection '{}' from Qdrant.", target)
         except Exception:
             logger.error(
                 "Failed to delete primary Qdrant collection '{}'; aborting "
@@ -6471,14 +6556,17 @@ class RAG:
         # 1b. Best-effort delete of supplementary collections.
         for collection_name in secondary_collections:
             try:
-                self.qdrant_client.delete_collection(collection_name)
-                logger.info("Deleted collection '{}' from Qdrant.", collection_name)
+                if self.qdrant_client.delete_collection(collection_name):
+                    logger.info("Deleted collection '{}' from Qdrant.", collection_name)
             except Exception as e:
                 logger.warning(
                     "Failed to delete supplementary collection '{}': {}",
                     collection_name,
                     e,
                 )
+
+        # The collection's PDF artifacts, read while its manifest still exists.
+        artifacts = self._collection_artifacts(target) if secondary_collections else None
 
         # 2. Cleanup source files (this also removes the nested SQLite KV db).
         for collection_name in [target, *secondary_collections]:
@@ -6530,6 +6618,13 @@ class RAG:
             ExtractStore(self.path_config.extracts).delete_collection(target)
         except Exception as e:
             logger.warning("Failed to delete stored extracts for collection '{}': {}", target, e)
+
+        # 4. PDF pipeline artifacts nothing else uses.
+        if artifacts is not None:
+            self._remove_orphaned_artifacts(target, *artifacts)
+
+        if (self.qdrant_src_dir / target).exists():
+            raise CollectionCleanupError(f"Source directory of collection '{target}' could not be removed.")
 
     def verify_collection(
         self,

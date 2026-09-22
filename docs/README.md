@@ -13,12 +13,13 @@ it, and what it can do) with topic-by-topic deep dives.
 | [architecture.md](architecture.md) | Runtime architecture, component map, end-to-end request flow |
 | [configuration.md](configuration.md) | Every environment variable grouped by the dataclass that reads it, with defaults |
 | [api-reference.md](api-reference.md) | Every FastAPI route, method, tag, request/response shape, and streaming semantics |
-| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `search-index`, `search-index-all`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
+| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `search-index`, `search-index-all`, `retention-report`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
 | [ingestion.md](ingestion.md) | Document ingestion pipeline: triage, layout, OCR, extraction, chunking, embedding |
 | [retrieval-and-agents.md](retrieval-and-agents.md) | Agent orchestration, hybrid retrieval, reranking, parent-context expansion, Graph-RAG |
 | [ui-guide.md](ui-guide.md) | React SPA pages — Dashboard, Chat, Ingest, Analysis, Inspector, Report — plus localization |
 | [reports.md](reports.md) | Report Builder: curating findings into a case file, frozen image evidence, the five export formats |
 | [extracts.md](extracts.md) | Data extracts: full transcripts, keyframe descriptions and document text as downloadable files |
+| [retention.md](retention.md) | Collection retention: deleting collections nobody has worked with for 6–24 months, and what counts as activity |
 | [deployment.md](deployment.md) | Docker services, shared volumes, networks, vLLM co-deployment, proxies |
 | [migrations.md](migrations.md) | Changes existing collections do not pick up on their own, and the one action that fixes each |
 | [development.md](development.md) | Dev workflow, `uv`, pre-commit, pytest layout, CI, extension points |
@@ -27,7 +28,8 @@ it, and what it can do) with topic-by-topic deep dives.
 
 - **Operators** deploying Docint behind their own inference stack — start
   with [getting-started.md](getting-started.md), then
-  [configuration.md](configuration.md) and [deployment.md](deployment.md).
+  [configuration.md](configuration.md) and [deployment.md](deployment.md);
+  [retention.md](retention.md) before switching on automatic deletion.
 - **Backend developers** extending the RAG engine, agents, or ingestion
   pipeline — start with [architecture.md](architecture.md), then the
   module-level docs in

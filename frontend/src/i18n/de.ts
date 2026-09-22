@@ -26,7 +26,7 @@ export const de: Strings = {
   'common.delete_collection_aria': 'Sammlung {name} löschen',
   'common.delete_collection_title': 'Diese Sammlung löschen',
   'common.delete_collection_confirm':
-    'Sammlung {label} löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
+    'Sammlung {label} mit ihren Chats und Berichten löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
   'common.delete_collection_error':
     'Sammlung {name} konnte nicht gelöscht werden. Prüfen Sie, ob Backend und Vektordatenbank erreichbar sind, und versuchen Sie es erneut.',
   'common.no_active_collection': 'Keine aktive Sammlung — wählen Sie eine aus, um Anfragen zu stellen.',
@@ -98,6 +98,8 @@ export const de: Strings = {
 
   // shared error copy
   'common.owned_by_suffix': ' (Eigentümer/-in: {owner})',
+  'common.collections_expiring_one': '{count} Sammlung wird innerhalb von 30 Tagen gelöscht',
+  'common.collections_expiring_other': '{count} Sammlungen werden innerhalb von 30 Tagen gelöscht',
   'common.error_request':
     'Etwas ist schiefgelaufen ({status}) – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_unknown':
@@ -476,6 +478,14 @@ export const de: Strings = {
   'dashboard.recent_sessions': 'Letzte Sessions',
   'dashboard.chart_empty': 'Noch keine Entitäten.',
   'dashboard.chart_mentions': 'Erwähnungen',
+  'dashboard.retention_title': 'Automatische Löschung',
+  'dashboard.retention_rule':
+    'Sammlungen werden nach {months} Monaten ohne Aktivität gelöscht, zusammen mit ihren Chats, Berichten, Quelldateien und Extrakten. Jede Arbeit in einer Sammlung startet die Frist neu.',
+  'dashboard.retention_due': 'Löschung am {date}',
+  'dashboard.retention_never': 'nicht geplant',
+  'dashboard.retention_warning': 'Wird innerhalb von 30 Tagen gelöscht',
+  'dashboard.retention_more': '+ {count} weitere',
+  'dashboard.retention_empty': 'Noch keine Sammlungen.',
 
   // inspector route wrapper
   'inspector.title': 'Dokumente',

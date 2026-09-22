@@ -789,6 +789,26 @@ class IngestJobManager:
         async with self._lock:
             return self._active_locked(owner, physical, kind)
 
+    async def any_active_for(self, physical: str) -> bool:
+        """Whether any job of any kind and owner is queued or running on a collection.
+
+        The collection retention sweep's busy check: deleting a collection a
+        job is still writing to would let the job re-create it. Unlike
+        :meth:`active_for` it ignores owner and kind — an admin's job in a
+        user's namespace counts, and so does a summary or an extract.
+
+        Args:
+            physical (str): Owner-namespaced Qdrant collection name.
+
+        Returns:
+            bool: ``True`` while any such job is unfinished.
+        """
+        async with self._lock:
+            return any(
+                state.physical == physical and state.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                for state in self._jobs.values()
+            )
+
     def _active_locked(self, owner: str, physical: str, kind: str = "ingest") -> IngestJobState | None:
         """Find the owner's unfinished job for a collection; caller must hold ``self._lock``.
 

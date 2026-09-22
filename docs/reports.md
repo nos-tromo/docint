@@ -137,6 +137,16 @@ and Noto fonts for multi-script text. It needs WeasyPrint's native libraries,
 which the backend image installs; if they are absent the `.pdf` route returns
 503 while every other format keeps working.
 
+## When the collection is deleted
+
+A report is deleted together with the collection it was built from — by
+`DELETE /collections/{name}` and by collection retention
+([retention.md](retention.md)) alike — so nothing derived from a deleted
+collection stays behind in docint. Export the report first if it has to
+survive: an exported file carries its evidence inline and keeps working after
+the collection is gone. Reports started outside any collection are not tied to
+one and are kept.
+
 ## Further reading
 
 - [api-reference.md](api-reference.md#reports) — every `/reports*` route.

@@ -23,7 +23,8 @@ export const en = {
   'common.select_collection_aria': 'Select collection',
   'common.delete_collection_aria': 'Delete collection {name}',
   'common.delete_collection_title': 'Delete this collection',
-  'common.delete_collection_confirm': 'Delete collection {label}? This cannot be undone.',
+  'common.delete_collection_confirm':
+    'Delete collection {label} with its chat sessions and reports? This cannot be undone.',
   'common.delete_collection_error':
     'Collection {name} could not be deleted. Check that the backend and vector store are reachable, then try again.',
   'common.no_active_collection': 'No active collection — pick one to query.',
@@ -94,6 +95,8 @@ export const en = {
 
   // shared error copy
   'common.owned_by_suffix': ' (owner: {owner})',
+  'common.collections_expiring_one': '{count} collection will be deleted within 30 days',
+  'common.collections_expiring_other': '{count} collections will be deleted within 30 days',
   'common.error_request': 'Something went wrong ({status}). Please try again or contact support.',
   'common.error_unknown': 'Something went wrong. Please try again or contact support.',
   'common.error_network': 'Service unreachable. Please check your connection or try again later.',
@@ -464,6 +467,14 @@ export const en = {
   'dashboard.recent_sessions': 'Recent sessions',
   'dashboard.chart_empty': 'No entities yet.',
   'dashboard.chart_mentions': 'Mentions',
+  'dashboard.retention_title': 'Automatic deletion',
+  'dashboard.retention_rule':
+    'Collections are deleted after {months} months without activity, together with their chat sessions, reports, source files and extracts. Any work in a collection restarts its clock.',
+  'dashboard.retention_due': 'deleted on {date}',
+  'dashboard.retention_never': 'not scheduled',
+  'dashboard.retention_warning': 'Deleted within 30 days',
+  'dashboard.retention_more': '+ {count} more',
+  'dashboard.retention_empty': 'No collections yet.',
 
   // inspector route wrapper
   'inspector.title': 'Documents',

@@ -819,6 +819,20 @@ async def test_active_for_finds_only_unfinished_jobs() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["ingest", "summary", "extract"])
+async def test_any_active_for_sees_every_kind_and_owner(kind: str) -> None:
+    """Retention must not delete a collection any job is still working on, whoever started it."""
+    manager = IngestJobManager(runner=_noop_runner)
+    state = await manager.create(owner="bob", logical_name="mydocs", physical="p1", kind=kind)
+
+    assert await manager.any_active_for("p1") is True
+    assert await manager.any_active_for("p2") is False
+    await _drain(manager, state)
+    assert await manager.any_active_for("p1") is False
+    await manager.stop()
+
+
+@pytest.mark.anyio
 async def test_subscribe_owner_replays_history_then_live_tails() -> None:
     """Test that a late subscriber gets the replay, then live frames, on one stream."""
     gate = asyncio.Event()

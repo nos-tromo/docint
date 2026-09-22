@@ -7,6 +7,7 @@ import { useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { ENTITY_MERGE_MODE } from '@/api/types'
 import { KpiCard } from '@/components/common/KpiCard'
+import { RetentionCard } from '@/components/dashboard/RetentionCard'
 import { TopEntitiesChart } from '@/components/dashboard/TopEntitiesChart'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -61,6 +62,8 @@ export function Dashboard() {
           hint={collection ? t('dashboard.kpi_hint_in', { collection }) : t('dashboard.kpi_hint_select')}
         />
       </div>
+
+      <RetentionCard />
 
       <Card>
         <header className="flex items-center justify-between mb-4">

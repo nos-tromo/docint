@@ -6,19 +6,27 @@ owner-scoped posture of :class:`ReportManager` (cross-owner access is "not
 found", never an error).
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import (
     CollectionOwnerManager,
     InvalidCollectionNameError,
+    RetentionWindowState,
     physical_collection_name,
 )
+from docint.core.state.collection_ownership import CollectionOwnership
+
+T0 = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
 
 class _Stub:
@@ -157,3 +165,150 @@ def test_spaces_brackets_and_unicode_stay_allowed(mgr: CollectionOwnerManager) -
     """Existing collections carry these, and Qdrant addresses them fine."""
     physical = mgr.register("alice", "2026-05-03 amanahMaz [media] - Test 549 ü")
     assert physical.endswith("__2026-05-03 amanahMaz [media] - Test 549 ü")
+
+
+# --- Retention clock (docs/retention.md) ---
+
+
+def _stamp(mgr: CollectionOwnerManager, owner: str, logical: str) -> datetime | None:
+    """The recorded last activity of one collection."""
+    return next(row.last_activity_at for row in mgr.list_activity(owner) if row.logical == logical)
+
+
+@contextmanager
+def _locked_scope(self: CollectionOwnerManager) -> Iterator[Session]:
+    """A session scope whose store refuses every write, like a locked SQLite file."""
+    raise OperationalError("UPDATE collection_owners", {}, Exception("database is locked"))
+    yield  # pragma: no cover
+
+
+def test_register_starts_the_clock(mgr: CollectionOwnerManager) -> None:
+    """A new collection is active the moment it is created."""
+    before = datetime.now(UTC) - timedelta(seconds=1)
+    physical = mgr.register("alice", "mydocs")
+
+    [row] = mgr.list_activity("alice")
+
+    assert (row.owner, row.logical, row.physical) == ("alice", "mydocs", physical)
+    assert row.last_activity_at is not None
+    assert row.last_activity_at.tzinfo is UTC
+    assert row.last_activity_at >= before
+
+
+def test_touch_moves_the_clock(mgr: CollectionOwnerManager) -> None:
+    """Activity restarts the window."""
+    mgr.register("alice", "mydocs")
+
+    assert mgr.touch("alice", "mydocs", now=T0) is True
+
+    assert _stamp(mgr, "alice", "mydocs") == T0
+
+
+def test_touch_writes_at_most_once_an_hour(mgr: CollectionOwnerManager) -> None:
+    """A page load fires several requests; the sessions DB takes one write."""
+    mgr.register("alice", "mydocs")
+
+    assert mgr.touch("alice", "mydocs", now=T0) is True
+    assert mgr.touch("alice", "mydocs", now=T0 + timedelta(minutes=59)) is False
+    assert _stamp(mgr, "alice", "mydocs") == T0
+    assert mgr.touch("alice", "mydocs", now=T0 + timedelta(hours=1)) is True
+    assert _stamp(mgr, "alice", "mydocs") == T0 + timedelta(hours=1)
+
+
+def test_a_failed_touch_is_retried_not_remembered_as_done(mgr: CollectionOwnerManager) -> None:
+    """One lost write near the end of a window must not cost the collection."""
+    mgr.register("alice", "mydocs")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(CollectionOwnerManager, "_session_scope", _locked_scope)
+        with pytest.raises(OperationalError):
+            mgr.touch("alice", "mydocs", now=T0)
+
+    assert mgr.touch("alice", "mydocs", now=T0 + timedelta(seconds=30)) is False
+    assert mgr.touch("alice", "mydocs", now=T0 + timedelta(minutes=2)) is True
+    assert _stamp(mgr, "alice", "mydocs") == T0 + timedelta(minutes=2)
+
+
+def test_touch_only_stamps_the_owners_collection(mgr: CollectionOwnerManager) -> None:
+    """Bob working on his own ``mydocs`` never keeps Alice's alive."""
+    mgr.register("alice", "mydocs")
+    mgr.touch("alice", "mydocs", now=T0)
+
+    assert mgr.touch("bob", "mydocs", now=T0 + timedelta(days=1)) is False
+
+    assert _stamp(mgr, "alice", "mydocs") == T0
+
+
+def test_deleting_a_collection_forgets_its_throttle(mgr: CollectionOwnerManager) -> None:
+    """A collection re-created under the same name is not stuck behind the old one's hour."""
+    mgr.register("alice", "mydocs")
+    mgr.touch("alice", "mydocs", now=T0)
+    mgr.delete("alice", "mydocs")
+    mgr.register("alice", "mydocs")
+
+    assert mgr.touch("alice", "mydocs", now=T0 + timedelta(minutes=5)) is True
+
+
+def test_list_activity_is_owner_scoped(mgr: CollectionOwnerManager) -> None:
+    """A caller's listing never carries another owner's collections."""
+    mgr.register("alice", "a")
+    mgr.register("bob", "b")
+
+    assert [row.logical for row in mgr.list_activity("alice")] == ["a"]
+    assert [(row.owner, row.logical) for row in mgr.list_all_activity()] == [("alice", "a"), ("bob", "b")]
+
+
+def test_an_unstamped_collection_lists_without_a_stamp(mgr: CollectionOwnerManager) -> None:
+    """``NULL`` survives the read as ``None`` — it is what "never expires" is made of."""
+    physical = mgr.register("alice", "mydocs")
+    with mgr._session_scope() as s:
+        s.query(CollectionOwnership).filter(CollectionOwnership.physical_name == physical).update(
+            {CollectionOwnership.last_activity_at: None}
+        )
+        s.commit()
+
+    assert _stamp(mgr, "alice", "mydocs") is None
+
+
+def test_no_retention_window_recorded_yet(mgr: CollectionOwnerManager) -> None:
+    """A store that never saw a startup has no window state."""
+    assert mgr.retention_window() is None
+
+
+def test_the_first_window_recorded_is_kept(mgr: CollectionOwnerManager) -> None:
+    """Startup records the window in force."""
+    state = mgr.record_retention_window("6m", now=T0)
+
+    assert state == RetentionWindowState(window="6m", set_at=T0)
+    assert mgr.retention_window() == state
+
+
+def test_restarting_with_the_same_window_keeps_its_start(mgr: CollectionOwnerManager) -> None:
+    """A restart is not a change: the grace period must not start over each boot."""
+    mgr.record_retention_window("6m", now=T0)
+
+    state = mgr.record_retention_window("6m", now=T0 + timedelta(days=10))
+
+    assert state.set_at == T0
+
+
+@pytest.mark.parametrize(("before", "after"), [("off", "6m"), ("24m", "6m"), ("6m", "12m"), ("12m", "off")])
+def test_changing_the_window_restarts_the_grace_period(mgr: CollectionOwnerManager, before: str, after: str) -> None:
+    """Switching on, shrinking, growing and switching off all count as a change."""
+    mgr.record_retention_window(before, now=T0)
+
+    state = mgr.record_retention_window(after, now=T0 + timedelta(days=10))
+
+    assert state == RetentionWindowState(window=after, set_at=T0 + timedelta(days=10))
+    assert mgr.retention_window() == state
+
+
+def test_get_activity_reads_one_collections_clock(mgr: CollectionOwnerManager) -> None:
+    """The sweep's recheck reads a single collection by its physical name."""
+    physical = mgr.register("alice", "mydocs")
+    mgr.touch("alice", "mydocs", now=T0)
+
+    row = mgr.get_activity(physical)
+
+    assert row is not None
+    assert (row.owner, row.logical, row.last_activity_at) == ("alice", "mydocs", T0)
+    assert mgr.get_activity("u000000000000__missing") is None

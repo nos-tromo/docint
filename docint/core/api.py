@@ -4,10 +4,11 @@ import asyncio
 import io
 import json
 import os
+import threading
 import time
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import partial
@@ -59,6 +60,15 @@ from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.ingest.preprocess import get_preprocess_pool, shutdown_preprocess_pool, submit_file
 from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
+from docint.core.retention import (
+    RetentionClock,
+    SweepReport,
+    expires_at,
+    is_expired,
+    is_warning,
+    run_retention_loop,
+    sweep_once,
+)
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.retrieval_filters import (
     build_metadata_filters,
@@ -68,12 +78,13 @@ from docint.core.retrieval_filters import (
 from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, field_indexes_ready
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.search.index import search_index_status
-from docint.core.state.collection_owner_manager import validate_collection_name
+from docint.core.state.collection_owner_manager import RetentionWindowState, validate_collection_name
 from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
+    RetentionConfig,
     load_corrective_retry_env,
     load_extract_env,
     load_frontend_env,
@@ -86,6 +97,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_resolution_env,
     load_response_validation_env,
+    load_retention_env,
     load_summary_env,
     resolve_enable_hybrid,
     set_offline_env,
@@ -118,7 +130,7 @@ allowed_origins = load_host_env().cors_allowed_origins.split(",")
 
 
 @asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Probe Qdrant on startup; close ingest-job subscriber streams on shutdown.
 
     The session store initializes (and migrates) eagerly here, and a failed
@@ -141,9 +153,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     file), not at import time — the lifespan only ever runs long after the
     module has finished loading.
 
+    With collection retention on, the retention sweeper runs for the app's
+    lifetime (``application.state.retention_task``, ``None`` while off) and
+    is cancelled before the job registry stops, so shutdown waits for a
+    delete in progress instead of abandoning it halfway.
+
     Args:
-        _app (FastAPI): The FastAPI application (unused; required by the
-            lifespan protocol).
+        application (FastAPI): The FastAPI application.
 
     Yields:
         None: Control while the application serves requests.
@@ -152,13 +168,159 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     def _init_session_store() -> None:
         rag.ensure_session_manager().init_session_store_if_needed()
 
+    retention = load_retention_env()
     await to_thread.run_sync(_init_session_store)
     await to_thread.run_sync(rag.probe_qdrant)
     await to_thread.run_sync(rag.probe_rerank_endpoint)
     await to_thread.run_sync(rag.reconcile_quantization)
+    state = await to_thread.run_sync(partial(_record_retention_window, retention))
+    application.state.retention_task = _start_retention_sweeper(retention, state)
     yield
+    await _stop_retention_sweeper(application.state.retention_task)
     await job_manager.stop()
     shutdown_preprocess_pool()
+
+
+#: Seconds from startup to the first retention sweep, and between sweeps.
+_RETENTION_FIRST_SWEEP_S = 300.0
+_RETENTION_SWEEP_INTERVAL_S = 86_400.0
+
+
+def _record_retention_window(retention: RetentionConfig) -> RetentionWindowState | None:
+    """Record the retention window in force and log it once per startup.
+
+    A window that differs from the last startup's — switched on, off, or to
+    another length — restarts the grace period (``docs/retention.md``). The
+    log line is written either way, so a typo that left retention off is
+    visible in one grep.
+
+    Args:
+        retention (RetentionConfig): The window resolved from the environment.
+
+    Returns:
+        RetentionWindowState | None: The recorded window, or ``None`` when it
+            could not be recorded — which keeps the sweeper from starting.
+    """
+    state: RetentionWindowState | None = None
+    try:
+        state = rag.ensure_collection_owner_manager().record_retention_window(retention.window, now=datetime.now(UTC))
+    except Exception as exc:
+        logger.error("Could not record the collection retention window: {}", exc)
+    logger.info(
+        "Collection retention | window={} set_at={}",
+        retention.window,
+        state.set_at.isoformat() if state is not None else "unknown",
+    )
+    return state
+
+
+def _start_retention_sweeper(
+    retention: RetentionConfig, state: RetentionWindowState | None
+) -> asyncio.Task[None] | None:
+    """Schedule the daily retention sweep, or nothing while retention is off.
+
+    Without a recorded window there is no grace anchor, and deleting without
+    one could skip the notice period, so the sweeper stays off until a
+    startup manages to record it.
+
+    Args:
+        retention (RetentionConfig): The window resolved from the environment.
+        state (RetentionWindowState | None): The recorded window.
+
+    Returns:
+        asyncio.Task[None] | None: The running sweeper.
+    """
+    if not retention.enabled:
+        return None
+    if state is None:
+        logger.error("Collection retention is on but its window could not be recorded; nothing is deleted.")
+        return None
+    sweep = partial(_retention_sweep, retention, state, job_manager)
+    return asyncio.create_task(
+        run_retention_loop(sweep, first_delay=_RETENTION_FIRST_SWEEP_S, interval=_RETENTION_SWEEP_INTERVAL_S)
+    )
+
+
+async def _stop_retention_sweeper(task: asyncio.Task[None] | None) -> None:
+    """Cancel the sweeper and wait for it; a delete in progress finishes first.
+
+    Args:
+        task (asyncio.Task[None] | None): From :func:`_start_retention_sweeper`.
+    """
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _retention_sweep(
+    retention: RetentionConfig, state: RetentionWindowState, jobs: IngestJobManager
+) -> SweepReport:
+    """Run one retention sweep and log its summary line.
+
+    Blocking work runs in worker threads. ``anyio`` waits for a thread it
+    started even when the sweep is cancelled, so a shutdown never leaves a
+    cascade half-done.
+
+    Args:
+        retention (RetentionConfig): The window in force.
+        state (RetentionWindowState): When it was set; anchors the grace period.
+        jobs (IngestJobManager): The job registry, for the busy check.
+
+    Returns:
+        SweepReport: What the sweep did.
+    """
+    now = datetime.now(UTC)
+    rows = await to_thread.run_sync(lambda: rag.ensure_collection_owner_manager().list_all_activity())
+
+    async def is_busy(physical: str) -> bool:
+        running, queued = get_preprocess_pool().inflight(physical)
+        return running + queued > 0 or await jobs.any_active_for(physical)
+
+    async def purge(row: RetentionClock) -> bool:
+        return await to_thread.run_sync(partial(_purge_if_still_expired, row, retention.months, state.set_at, now))
+
+    report = await sweep_once(
+        rows, months=retention.months, window_set_at=state.set_at, now=now, is_busy=is_busy, purge=purge
+    )
+    logger.info(
+        "Retention sweep complete | window={} scanned={} expired={} deleted={} skipped_busy={} "
+        "skipped_active={} failed={}",
+        retention.window,
+        report.scanned,
+        report.expired,
+        len(report.deleted),
+        len(report.skipped_busy),
+        len(report.skipped_active),
+        len(report.failed),
+    )
+    return report
+
+
+def _purge_if_still_expired(row: RetentionClock, months: int, window_set_at: datetime, now: datetime) -> bool:
+    """Delete a collection the sweep found expired, unless it was used since.
+
+    Re-reads the clock first: this, not the scan, is the last word, so a
+    collection someone opened after the scan — in this process or another —
+    is spared. Runs in a worker thread.
+
+    Args:
+        row (RetentionClock): The collection as the scan read it.
+        months (int): The retention window.
+        window_set_at (datetime): When the window was set.
+        now (datetime): The scan time.
+
+    Returns:
+        bool: Whether the collection was deleted.
+    """
+    current = rag.ensure_collection_owner_manager().get_activity(row.physical)
+    if current is None:
+        return False
+    if not is_expired(expires_at(current.last_activity_at, months, window_set_at=window_set_at), now):
+        return False
+    _purge_collection(current.owner, current.logical, current.physical)
+    return True
 
 
 app = FastAPI(title="Document Intelligence", lifespan=_lifespan)
@@ -321,6 +483,94 @@ def _require_owned_collection(logical_name: str, principal: Principal) -> str:
     physical = rag.ensure_collection_owner_manager().resolve(principal.effective_owner, name)
     if physical is None:
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+    _refuse_while_purging(physical)
+    _record_activity(principal.effective_owner, name)
+    return physical
+
+
+# Physical collections whose delete cascade is running in this process. The
+# backend runs a single uvicorn worker, so this is every delete there is.
+_purging: set[str] = set()
+_purging_lock = threading.Lock()
+
+
+@contextmanager
+def _purge_guard(physical: str) -> Iterator[None]:
+    """Mark a collection as being deleted for the duration of its cascade.
+
+    Work arriving mid-delete — an ingest, a query — would re-create what the
+    cascade is removing, so the gate refuses it with 409 until the cascade
+    ends. A second delete of the same collection is refused the same way.
+
+    Args:
+        physical (str): The Qdrant collection name.
+
+    Yields:
+        None: While the cascade runs.
+
+    Raises:
+        HTTPException: 409 when the collection is already being deleted.
+    """
+    with _purging_lock:
+        if physical in _purging:
+            raise HTTPException(status_code=409, detail="Collection is being deleted.")
+        _purging.add(physical)
+    try:
+        yield
+    finally:
+        with _purging_lock:
+            _purging.discard(physical)
+
+
+def _refuse_while_purging(physical: str) -> None:
+    """Answer 409 for a collection whose delete cascade is running.
+
+    Args:
+        physical (str): The Qdrant collection name.
+
+    Raises:
+        HTTPException: 409 while the collection is being deleted.
+    """
+    with _purging_lock:
+        purging = physical in _purging
+    if purging:
+        raise HTTPException(status_code=409, detail="Collection is being deleted.")
+
+
+def _record_activity(owner: str | None, logical: str) -> None:
+    """Stamp activity on a collection, restarting its retention window.
+
+    Called from the ownership gate, the register path and report lookups, so
+    every route that works on a collection counts without opting in. Never
+    fails the request that caused it: the clock is bookkeeping, and a failed
+    write is retried by the next request a minute later.
+
+    Args:
+        owner (str | None): The collection's owner (the effective owner).
+        logical (str): The user-visible collection name.
+    """
+    try:
+        rag.ensure_collection_owner_manager().touch(owner, logical)
+    except Exception as exc:
+        logger.warning("Could not record activity on collection '{}': {}", logical, exc)
+
+
+def _register_collection(principal: Principal, name: str) -> str:
+    """Register the caller's collection (idempotently) and stamp its activity.
+
+    ``register`` writes nothing for a collection that already exists, so
+    re-ingesting into one is stamped here.
+
+    Args:
+        principal (Principal): The resolved calling principal.
+        name (str): The user-visible collection name.
+
+    Returns:
+        str: The physical (owner-namespaced) Qdrant collection name.
+    """
+    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
+    _refuse_while_purging(physical)
+    _record_activity(principal.effective_owner, name)
     return physical
 
 
@@ -822,6 +1072,29 @@ class AdminCollectionsOut(BaseModel):
     others: list[AdminOwnerCollections]
 
 
+class CollectionRetentionOut(BaseModel):
+    """One collection's retention clock and deadline.
+
+    ``owner`` is ``None`` for the caller's own collections and names the owner
+    otherwise (admins with ``all=true`` only). ``expires_at`` is ``None`` when
+    retention is off or the collection has no recorded activity, which never
+    expires.
+    """
+
+    name: str
+    owner: str | None = None
+    last_activity_at: datetime | None
+    expires_at: datetime | None
+    warning: bool
+
+
+class CollectionsRetentionOut(BaseModel):
+    """The retention window in force and each listed collection's deadline."""
+
+    window: str
+    collections: list[CollectionRetentionOut]
+
+
 class MetadataFilterIn(BaseModel):
     """Single metadata filter applied to retrieval queries.
 
@@ -1217,6 +1490,7 @@ class FrontendConfigOut(BaseModel):
     max_upload_bytes: int
     report_batch_max_items: int
     language: str
+    collection_retention: str
 
 
 class FileTypeCount(BaseModel):
@@ -1388,9 +1662,11 @@ def get_frontend_config() -> dict[str, int | str]:
         ``collection_timeout``, ``max_upload_bytes`` (the per-request upload
         ceiling nginx enforces, which the SPA uses to size its upload batches),
         ``report_batch_max_items`` (the most artifacts one report batch add may
-        carry, which the SPA refuses an oversize section against), and
+        carry, which the SPA refuses an oversize section against),
         ``language`` (the active ``RESPONSE_LANGUAGE`` locale, ``"en"`` or
-        ``"de"``).
+        ``"de"``), and ``collection_retention`` (``COLLECTION_RETENTION``:
+        ``"off"`` or the idle window, which the SPA checks before asking for
+        expiry dates).
     """
     cfg = load_frontend_env()
     return {
@@ -1400,6 +1676,7 @@ def get_frontend_config() -> dict[str, int | str]:
         "max_upload_bytes": cfg.max_upload_bytes,
         "report_batch_max_items": REPORT_BATCH_MAX_ITEMS,
         "language": load_language_env().code,
+        "collection_retention": load_retention_env().window,
     }
 
 
@@ -1525,6 +1802,63 @@ def collections_list(
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
+@app.get("/collections/retention", response_model=CollectionsRetentionOut, tags=["Collections"])
+def collections_retention(
+    all: bool = False,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> CollectionsRetentionOut:
+    """List when each collection is due for deletion for inactivity.
+
+    Reads the retention clock without moving it, so looking at a deadline never
+    postpones it — which is why this route bypasses the ownership gate and
+    scopes its rows itself. ``all`` behaves as on ``/collections/list``: an
+    admin also gets every other owner's collections, a non-admin's flag is
+    ignored. Sorted soonest deadline first; collections that never expire
+    come last.
+
+    Args:
+        all (bool): When true and the caller is an admin, include every
+            other owner's collections. Ignored otherwise.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        CollectionsRetentionOut: The window in force (``off`` or e.g. ``6m``)
+            and one entry per collection.
+
+    Raises:
+        HTTPException: 500 if the ownership store cannot be read.
+    """
+    retention = load_retention_env()
+    everyone = all and principal.is_admin
+    now = datetime.now(UTC)
+    try:
+        mgr = rag.ensure_collection_owner_manager()
+        rows = mgr.list_all_activity() if everyone else mgr.list_activity(principal.name)
+        state = mgr.retention_window() if retention.enabled else None
+    except Exception:
+        logger.exception("Error listing collection retention")
+        raise HTTPException(status_code=500, detail="Request failed.") from None
+    # A window the last startup did not record is as good as set now: that
+    # never shows a date earlier than the sweep would act on.
+    set_at = state.set_at if state is not None and state.window == retention.window else now
+    entries: list[CollectionRetentionOut] = []
+    for row in rows:
+        if everyone and row.owner is None:
+            continue
+        deadline = expires_at(row.last_activity_at, retention.months, window_set_at=set_at)
+        entries.append(
+            CollectionRetentionOut(
+                name=row.logical,
+                owner=None if row.owner == principal.name else row.owner,
+                last_activity_at=row.last_activity_at,
+                expires_at=deadline,
+                warning=is_warning(deadline, now),
+            )
+        )
+    entries.sort(key=lambda e: (e.expires_at is None, e.expires_at or now, e.name, e.owner or ""))
+    return CollectionsRetentionOut(window=retention.window, collections=entries)
+
+
 @app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
 def collections_select(
     payload: SelectCollectionIn,
@@ -1563,11 +1897,9 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
     Deleting a collection the caller's effective owner does not own (or one
     that does not exist) is a 404, so a user can never delete another user's
     data outside their effective-owner scope — including an admin's own
-    namespace when a foreign ``owner`` is not explicitly requested. The Qdrant
-    collection is dropped first; only then is the ownership mapping removed, so
-    a failed Qdrant delete leaves ownership intact for retry. The collection's
-    chat sessions are cascade-deleted after the Qdrant collection is dropped and
-    before the ownership mapping is removed.
+    namespace when a foreign ``owner`` is not explicitly requested. Everything
+    connected goes with it — chat sessions and reports included — through the
+    cascade retention uses too (:func:`_purge_collection`).
 
     Args:
         name (str): The user-visible collection name to delete.
@@ -1577,21 +1909,43 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
         dict[str, bool]: A dictionary indicating success.
 
     Raises:
-        HTTPException: 404 if the caller does not own it; 500 on backend failure.
+        HTTPException: 404 if the caller does not own it; 409 while it is
+            already being deleted; 500 on backend failure.
     """
     physical = _require_owned_collection(name, principal)
     try:
-        rag.delete_collection(physical)
-        deleted_sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
-        if deleted_sessions:
-            logger.info("Deleted {} chat session(s) pinned to collection '{}'.", deleted_sessions, name)
-        rag.ensure_collection_owner_manager().delete(principal.effective_owner, name)
+        _purge_collection(principal.effective_owner, name.strip(), physical)
         return {"ok": True}
     except HTTPException:
         raise
     except Exception as e:
         logger.opt(exception=e).error("Error deleting collection")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+def _purge_collection(owner: str | None, logical: str, physical: str) -> None:
+    """Delete a collection and everything connected to it.
+
+    The one cascade a manual delete and the retention sweep share, so the two
+    cannot drift. Qdrant data, source files and extracts go first — the step
+    that can fail — then chat sessions, then reports, and the ownership row
+    last: a failure anywhere leaves the collection listed, and a retry
+    finishes the job, since every step is a no-op on what is already gone.
+
+    Args:
+        owner (str | None): The collection's owner.
+        logical (str): The user-visible collection name (reports key on it).
+        physical (str): The Qdrant collection name (sessions key on it).
+
+    Raises:
+        HTTPException: 409 when the collection is already being deleted.
+    """
+    with _purge_guard(physical):
+        rag.delete_collection(physical)
+        sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
+        reports = rag.ensure_report_manager().delete_reports_for_collection(owner, logical)
+        rag.ensure_collection_owner_manager().delete(owner, logical)
+    logger.info("Deleted collection '{}' with {} chat session(s) and {} report(s).", logical, sessions, reports)
 
 
 @app.put("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
@@ -3059,6 +3413,8 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
     report = rag.ensure_report_manager().get_report(report_id, principal)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
+    if report.get("collection_name"):
+        _record_activity(principal, str(report["collection_name"]))
     return report
 
 
@@ -4149,7 +4505,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
     name = _require_collection_name(payload.collection, context="ingest")
 
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
+    physical = _register_collection(principal, name)
 
     data_dir = _resolve_data_dir()
     if not data_dir.is_dir():
@@ -4838,7 +5194,7 @@ async def ingest_upload(
     # owner-namespaced physical collection so two users uploading the same
     # logical name keep separate Qdrant collections and source-file stores.
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
+    physical = _register_collection(principal, name)
 
     # We use a persistent directory for uploads to support previewing files later.
     # The files are ingested into Qdrant and kept in the collection directory.
@@ -4974,7 +5330,7 @@ async def ingest_finalize(
     """
     principal = resolve_principal(request)
     name = _require_collection_name(payload.collection, context="finalize")
-    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
+    physical = _register_collection(principal, name)
 
     # create_if_idle() checks for an in-flight job and creates one only if
     # idle, atomically under one lock. A separate active_for() check followed

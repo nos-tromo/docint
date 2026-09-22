@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Dashboard } from './Dashboard'
 import { useUiStore } from '@/stores/ui'
@@ -113,5 +113,97 @@ describe('Dashboard sessions panel scoping', () => {
     expect(
       screen.queryByText(/select a collection to see its chats/i)
     ).not.toBeInTheDocument()
+  })
+})
+
+interface RetentionRow {
+  name: string
+  owner: string | null
+  last_activity_at: string | null
+  expires_at: string | null
+  warning: boolean
+}
+
+function row(name: string, expires_at: string | null, warning = false, owner: string | null = null): RetentionRow {
+  return { name, owner, last_activity_at: '2026-03-02T09:14:00Z', expires_at, warning }
+}
+
+/** A backend with retention set to `window` whose deadline listing is `rows`. */
+function retentionFetch(window: string, rows: RetentionRow[]) {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const path = typeof input === 'string' ? input : input.toString()
+    const body = path.includes('/collections/retention')
+      ? { window, collections: rows }
+      : path.includes('/collections/list')
+        ? ['projekt-alpha']
+        : path.includes('/config')
+          ? { language: 'en', collection_retention: window }
+          : { sessions: [], documents: [], top_entities: [] }
+    return { ok: true, status: 200, json: async () => body }
+  })
+}
+
+describe('Dashboard automatic deletion card', () => {
+  it('stays hidden, and asks for no deadlines, while retention is off', async () => {
+    const fetchMock = retentionFetch('off', [row('projekt-alpha', null)])
+    vi.stubGlobal('fetch', fetchMock)
+    renderDashboard()
+
+    await screen.findByTestId('backend-status-dot')
+    await waitFor(() => expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/config'))).toBe(true))
+    expect(screen.queryByRole('heading', { name: /automatic deletion/i })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/collections/retention'))).toBe(false)
+  })
+
+  it('lists each collection with its deletion date and flags the imminent ones', async () => {
+    vi.stubGlobal(
+      'fetch',
+      retentionFetch('6m', [row('projekt-alpha', '2026-10-21T06:45:00Z', true), row('laufend', '2027-03-19T08:00:00Z')])
+    )
+    renderDashboard()
+
+    const card = await screen.findByRole('region', { name: /automatic deletion/i })
+    expect(card).toHaveTextContent(/6 months without activity/i)
+    const items = within(card).getAllByRole('listitem')
+    expect(items.map((li) => li.textContent)).toEqual([
+      expect.stringContaining('projekt-alpha'),
+      expect.stringContaining('laufend')
+    ])
+    expect(items[0]).toHaveTextContent('Oct 21, 2026')
+    expect(within(items[0]).getByRole('img', { name: /within 30 days/i })).toBeInTheDocument()
+    expect(within(items[1]).queryByRole('img')).not.toBeInTheDocument()
+  })
+
+  it("names the owner of another user's collection", async () => {
+    vi.stubGlobal('fetch', retentionFetch('12m', [row('shared-notes', '2027-01-05T10:00:00Z', false, 'a.beispiel')]))
+    renderDashboard()
+
+    expect(await screen.findByText(/shared-notes \(owner: a\.beispiel\)/)).toBeInTheDocument()
+  })
+
+  it('says so when there is no collection yet', async () => {
+    vi.stubGlobal('fetch', retentionFetch('6m', []))
+    renderDashboard()
+
+    const card = await screen.findByRole('region', { name: /automatic deletion/i })
+    expect(card).toHaveTextContent(/no collections yet/i)
+    expect(within(card).queryByRole('list')).not.toBeInTheDocument()
+  })
+
+  it('says when a collection is not scheduled', async () => {
+    vi.stubGlobal('fetch', retentionFetch('6m', [row('ohne-aktivitaet', null)]))
+    renderDashboard()
+
+    expect(await screen.findByText(/not scheduled/i)).toBeInTheDocument()
+  })
+
+  it('shows the soonest few and counts the rest', async () => {
+    const rows = Array.from({ length: 10 }, (_, i) => row(`sammlung-${i}`, `2027-0${(i % 9) + 1}-01T00:00:00Z`))
+    vi.stubGlobal('fetch', retentionFetch('6m', rows))
+    renderDashboard()
+
+    expect(await screen.findByText('sammlung-7')).toBeInTheDocument()
+    expect(screen.queryByText('sammlung-8')).not.toBeInTheDocument()
+    expect(screen.getByText(/2 more/)).toBeInTheDocument()
   })
 })
