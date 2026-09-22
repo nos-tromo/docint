@@ -26,12 +26,16 @@ from docint.core.search.fulltext import build_search_filter, value_match_forms
 from docint.core.search.index import SEARCH_TEXT_FIELD, search_index_params, write_search_text
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+# Read once at import: the autouse ``_hermetic_hybrid_env`` fixture clears the
+# key before each test, so a per-test ``os.getenv`` sees a different environment
+# than the collection-time reachability probe did and gets a 401.
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
 
 
 def _reachable() -> bool:
     """Return whether a Qdrant server answers at ``QDRANT_URL``."""
     try:
-        QdrantClient(url=QDRANT_URL, timeout=2, api_key=os.getenv("QDRANT_API_KEY") or None).get_collections()
+        QdrantClient(url=QDRANT_URL, timeout=2, api_key=QDRANT_API_KEY).get_collections()
     except Exception:
         return False
     return True
@@ -43,7 +47,7 @@ pytestmark = pytest.mark.skipif(not _reachable(), reason="no Qdrant reachable")
 @pytest.fixture
 def collection() -> Iterator[tuple[QdrantClient, str]]:
     """Create a throwaway collection with the search index, then drop it."""
-    client = QdrantClient(url=QDRANT_URL, timeout=30, api_key=os.getenv("QDRANT_API_KEY") or None)
+    client = QdrantClient(url=QDRANT_URL, timeout=30, api_key=QDRANT_API_KEY)
     name = f"zz_test_search_{uuid.uuid4().hex[:8]}"
     client.create_collection(
         name,
