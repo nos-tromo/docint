@@ -73,23 +73,12 @@ and `docker/Dockerfile.backend` already sets `UV_LINK_MODE=copy`. A Linux
 `.venv` synced before this setting existed keeps its hardlinks until
 `uv sync --reinstall`; CI creates a fresh one on every run.
 
-`[tool.uv]` also sets `environments` to Linux and macOS, so `uv.lock` carries
-wheels for both and nothing for Windows, which docint does not run on. Until
-2.94.1, `docling-core[chunking]` capped `transformers` below 5.9 on macOS only,
-which forked the resolution and pinned the macOS side to a release carrying
-CVE-2026-9856, so the lock was briefly Linux-only; 2.94.1 dropped the cap and
-the `docling-core` floor is above it. If a darwin-only constraint
-returns, `uv lock` will show two `transformers` entries — keep the fork out of
-the lock rather than the CVE in it.
+`[tool.uv]` also sets `environments` to Linux and macOS; `uv.lock` has no
+Windows wheels.
 
-Two dependencies load a C library from the system rather than a wheel:
-`python-magic` (libmagic, MIME detection) and WeasyPrint (Pango, the PDF report
-export). The Docker image installs both; on macOS, `brew install libmagic
-pango`. `python-magic` finds Homebrew's copy on its own, WeasyPrint does not —
-on Apple Silicon `/opt/homebrew/lib` is outside the dynamic loader's default
-path, so start the backend with `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`.
-Without it only the PDF export fails, answering 503; the test suite stubs
-WeasyPrint and needs neither.
+On macOS, `brew install libmagic pango` (the Docker image ships both). For the
+PDF report export, start the backend with
+`DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` so WeasyPrint finds Pango.
 
 ## Frontend (`frontend/`)
 
