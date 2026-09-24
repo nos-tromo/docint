@@ -73,12 +73,23 @@ and `docker/Dockerfile.backend` already sets `UV_LINK_MODE=copy`. A Linux
 `.venv` synced before this setting existed keeps its hardlinks until
 `uv sync --reinstall`; CI creates a fresh one on every run.
 
-`[tool.uv]` also sets `environments = ["sys_platform == 'linux'"]`, so `uv.lock`
-is resolved for Linux alone. `docling-core[chunking]` caps `transformers` below
-5.9 on macOS but allows anything below 6.0 elsewhere; a lock covering both forks
-the resolution and pins the macOS side to a `transformers` release carrying
-CVE-2026-9856. docint's runtime image is Debian-slim and CI runs on Linux, so
-the lock follows them — `uv sync` on macOS will refuse it.
+`[tool.uv]` also sets `environments` to Linux and macOS, so `uv.lock` carries
+wheels for both and nothing for Windows, which docint does not run on. Until
+2.94.1, `docling-core[chunking]` capped `transformers` below 5.9 on macOS only,
+which forked the resolution and pinned the macOS side to a release carrying
+CVE-2026-9856, so the lock was briefly Linux-only; 2.94.1 dropped the cap and
+the `docling-core` floor is above it. If a darwin-only constraint
+returns, `uv lock` will show two `transformers` entries — keep the fork out of
+the lock rather than the CVE in it.
+
+Two dependencies load a C library from the system rather than a wheel:
+`python-magic` (libmagic, MIME detection) and WeasyPrint (Pango, the PDF report
+export). The Docker image installs both; on macOS, `brew install libmagic
+pango`. `python-magic` finds Homebrew's copy on its own, WeasyPrint does not —
+on Apple Silicon `/opt/homebrew/lib` is outside the dynamic loader's default
+path, so start the backend with `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`.
+Without it only the PDF export fails, answering 503; the test suite stubs
+WeasyPrint and needs neither.
 
 ## Frontend (`frontend/`)
 
