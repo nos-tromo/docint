@@ -41,7 +41,7 @@ dependencies = [
   "scipy>=1.6.0",
   "sqlalchemy>=2.0.54",
   "striprtf>=0.0.33",
-  "transformers>=5.17.0",  # CVE-2026-9856; docling-core's <5.9 cap is darwin-only, see [tool.uv] environments
+  "transformers>=5.17.0",  # CVE-2026-9856
   "uvicorn>=0.53.0",
   "weasyprint>=70.0",
 ]
@@ -106,5 +106,5 @@ ignore-missing-imports = ["*"]
 
 [tool.uv]
 package = true
-environments = ["sys_platform == 'linux'"]
+environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
 link-mode = "copy"

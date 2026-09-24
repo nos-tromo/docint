@@ -73,12 +73,12 @@ and `docker/Dockerfile.backend` already sets `UV_LINK_MODE=copy`. A Linux
 `.venv` synced before this setting existed keeps its hardlinks until
 `uv sync --reinstall`; CI creates a fresh one on every run.
 
-`[tool.uv]` also sets `environments = ["sys_platform == 'linux'"]`, so `uv.lock`
-is resolved for Linux alone. `docling-core[chunking]` caps `transformers` below
-5.9 on macOS but allows anything below 6.0 elsewhere; a lock covering both forks
-the resolution and pins the macOS side to a `transformers` release carrying
-CVE-2026-9856. docint's runtime image is Debian-slim and CI runs on Linux, so
-the lock follows them — `uv sync` on macOS will refuse it.
+`[tool.uv]` also sets `environments` to Linux and macOS; `uv.lock` has no
+Windows wheels.
+
+On macOS, `brew install libmagic pango` (the Docker image ships both). For the
+PDF report export, start the backend with
+`DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` so WeasyPrint finds Pango.
 
 ## Frontend (`frontend/`)
 
