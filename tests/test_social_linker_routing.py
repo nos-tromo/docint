@@ -1,14 +1,22 @@
-"""Routing tests for SocialLinker: image CLIP path, video Nextext path, manifest caching."""
+"""Tests for SocialLinker over ``me-dossier/1`` exports: nodes, links, routing, claims.
 
+Every fixture is synthetic: invented handles, ids and texts only.
+"""
+
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+from _pytest.logging import LogCaptureFixture
+from llama_index.core import Document
+from typing_extensions import override
 
 from docint.core.ingest.images_service import IngestContext
 from docint.core.ingest.preprocess import collection_of_key
-from docint.core.ingest.social_linker import SocialLinker
+from docint.core.ingest.social_linker import SocialLinker, SocialLinkResult, build_posting_album_index
+from docint.core.summary.units import is_social_payload
+from docint.utils.hashing import compute_file_hash
 from docint.utils.nextext_client import NextextKeyframe, NextextResult
 
 
@@ -102,137 +110,598 @@ class _FakeNextext:
         )
 
 
+#: The profile folder of the standard fixture, named the way the exporter names them.
+_FB = "jane.poster - facebook"
+
+
+def _author(name: str = "Jane Poster", vanity: str = "jane.poster", platform_id: str = "42") -> dict[str, Any]:
+    """Return an invented author record.
+
+    Args:
+        name: Display name.
+        vanity: Handle.
+        platform_id: The network's own account id.
+
+    Returns:
+        dict[str, Any]: The author as a dossier writes it.
+    """
+    return {"id": f"acct-{platform_id}", "name": name, "vanity": vanity, "platformId": platform_id}
+
+
+def _posting(
+    uuid: str,
+    platform_id: str,
+    text: str | None,
+    *,
+    published_at: str = "2023-01-01T10:00:00+00:00",
+    network: str = "facebook",
+    author: dict[str, Any] | None = None,
+    media_ids: Sequence[str] = (),
+    comments: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """Return an invented posting record.
+
+    Args:
+        uuid: The export's own posting id.
+        platform_id: The network's own posting id.
+        text: The posting text.
+        published_at: ISO-8601 publication time.
+        network: The network key.
+        author: The author record; :func:`_author` when omitted.
+        media_ids: Media the posting names (the posting side of the link).
+        comments: Received comments nested under the posting.
+
+    Returns:
+        dict[str, Any]: The posting as a dossier writes it.
+    """
+    return {
+        "id": uuid,
+        "platformId": platform_id,
+        "publishedAt": published_at,
+        "text": text,
+        "url": f"https://social.invalid/{platform_id}",
+        "network": network,
+        "author": author or _author(),
+        "mediaIds": list(media_ids),
+        "comments": list(comments),
+    }
+
+
+def _comment(
+    uuid: str, platform_id: str, text: str | None, *, posting: str, parent: str | None = None
+) -> dict[str, Any]:
+    """Return an invented comment record.
+
+    Args:
+        uuid: The export's own comment id.
+        platform_id: The network's own comment id.
+        text: The comment text.
+        posting: The id of the posting it was left on.
+        parent: The id of the comment it answers, if any.
+
+    Returns:
+        dict[str, Any]: The comment as a dossier nests it under its posting.
+    """
+    return {
+        "id": uuid,
+        "platformId": platform_id,
+        "publishedAt": "2023-01-01T11:00:00+00:00",
+        "text": text,
+        "url": None,
+        "network": "facebook",
+        "author": _author("Joe Commenter", "joe.commenter", "77"),
+        "postingId": posting,
+        "parentCommentId": parent,
+    }
+
+
+def _media(
+    uuid: str,
+    platform_id: str,
+    file: str | None,
+    *,
+    published_at: str = "2023-01-01T10:00:00+00:00",
+    status: str = "complete",
+    attached_to: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Return an invented media record.
+
+    Args:
+        uuid: The export's own media id.
+        platform_id: The network's own media id.
+        file: The file path relative to the export root, ``None`` when not shipped.
+        published_at: ISO-8601 publication time.
+        status: ``complete`` or ``missing``.
+        attached_to: Postings the media names (the media side of the link).
+
+    Returns:
+        dict[str, Any]: The media item as a dossier writes it.
+    """
+    return {
+        "id": uuid,
+        "platformId": platform_id,
+        "publishedAt": published_at,
+        "file": file,
+        "status": status,
+        "attachedTo": {"postings": [{"id": posting, "inFile": True} for posting in attached_to], "albumId": None},
+    }
+
+
+def _write_dossier(
+    root: Path,
+    folder: str,
+    *,
+    postings: Sequence[dict[str, Any]] = (),
+    media: Sequence[dict[str, Any]] = (),
+    files: dict[str, bytes] | None = None,
+    **fields: Any,
+) -> Path:
+    """Write ``<root>/<folder>/dossier.json`` plus the media files it ships.
+
+    Args:
+        root: The export root.
+        folder: The profile folder.
+        postings: The posting records.
+        media: The media records.
+        files: Media bytes by path relative to the profile folder.
+        **fields: Top-level fields to add or override (e.g. ``schema``, ``messages``).
+
+    Returns:
+        Path: The dossier file.
+    """
+    profile = root / folder
+    profile.mkdir(parents=True, exist_ok=True)
+    dossier = {"schema": "me-dossier/1", "postings": list(postings), "media": list(media), **fields}
+    path = profile / "dossier.json"
+    path.write_text(json.dumps(dossier), encoding="utf-8")
+    for relative, data in (files or {}).items():
+        (profile / relative).parent.mkdir(parents=True, exist_ok=True)
+        (profile / relative).write_bytes(data)
+    return path
+
+
 def _write_export(root: Path) -> None:
-    """Write a minimal social export tree under *root* for testing.
+    """Write a minimal ``me-dossier/1`` export whose root is *root*.
 
-    Under the flat single-directory contract, ``postings.csv``, ``media.csv``,
-    and every referenced media file live directly in *root* — there is no
-    ``tables/``/``media/`` split.
-
-    The fixture includes a ``comments.csv`` that contains both ``UUID`` and
-    ``Posting ID`` columns to guard against subset-collision with the postings
-    profile detection — it must NOT be misdetected as the postings table.
+    Posting ``u1`` names its photo in ``mediaIds``; clip ``m2`` names its
+    posting ``u2`` only in ``attachedTo`` — one link from each side. The
+    export's bookkeeping sits where the exporter writes it.
 
     Args:
         root: Temporary directory in which to create the export.
     """
-    # Full 25-column postings profile — exact-match required by _find_tables.
-    postings_cols = [
-        "UUID",
-        "Posting ID",
-        "URL",
-        "Date last updated",
-        "Timestamp",
-        "Timezone",
-        "Crawled at",
-        "Postings Connections",
-        "Network Posting ID",
-        "Location",
-        "Author ID",
-        "Author",
-        "Vanity Name",
-        "Co-Author",
-        "Quoted User",
-        "Expected Reactions",
-        "Collected Reactions",
-        "Expected Comments",
-        "Collected Comments",
-        "Network",
-        "Posted in Group",
-        "Task",
-        "Text Content",
-        "Filename",
-        "Tags",
-    ]
-    postings_data = {col: ["", ""] for col in postings_cols}
-    postings_data["UUID"] = ["u1", "u2"]
-    postings_data["Posting ID"] = ["P_1", "P_2"]
-    postings_data["Text Content"] = ["a", "b"]
-    postings_data["Network"] = ["Facebook", "Facebook"]
-    postings_data["Author"] = ["Jane Poster", "Jane Poster"]
-    postings_data["URL"] = ["https://fb.example/p1", "https://fb.example/p2"]
-    postings_data["Timestamp"] = ["2023-01-01 10:00", "2023-02-02 11:00"]
-    pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False)
-    pd.DataFrame({"Media ID": ["P_1_0", "P_2_0"], "Exported media filename": ["pic.jpg", "clip.mp4"]}).to_csv(
-        root / "media.csv", index=False
+    _write_dossier(
+        root,
+        _FB,
+        postings=[
+            _posting("u1", "P_1", "a", media_ids=["m1"]),
+            _posting("u2", "P_2", "b", published_at="2023-02-02T11:00:00+00:00"),
+        ],
+        media=[
+            _media("m1", "M_1", f"{_FB}/media/photos/pic.jpg"),
+            _media("m2", "M_2", f"{_FB}/media/videos/clip.mp4", attached_to=["u2"]),
+        ],
+        files={"media/photos/pic.jpg": b"\xff\xd8\xff", "media/videos/clip.mp4": b"video"},
     )
-    # comments.csv contains UUID + Posting ID but is NOT the full postings header set;
-    # it must NOT be misdetected as the postings table (guards subset-collision regression).
-    pd.DataFrame({"UUID": ["c1"], "Posting ID": ["P_1"], "Text Content": ["comment text"]}).to_csv(
-        root / "comments.csv", index=False
-    )
-    (root / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    (root / "clip.mp4").write_bytes(b"video")
+    (root / _FB / "progress.json").write_text('{"schema": "me-dossier-progress/1"}', encoding="utf-8")
+    (root / "_run.json").write_text("{}", encoding="utf-8")
+
+
+def _linker(**kwargs: Any) -> SocialLinker:
+    """Return a linker over the in-memory stubs, overridable per test."""
+    kwargs.setdefault("image_service", _FakeImageService())
+    kwargs.setdefault("nextext_client", _FakeNextext())
+    kwargs.setdefault("target_collection", "c")
+    return SocialLinker(**kwargs)
+
+
+def _transcripts(result: SocialLinkResult) -> list[Document]:
+    """Return the transcript segments among a run's Documents."""
+    return [doc for doc in result.documents if doc.metadata.get("docint_doc_kind") == "transcript_segment"]
+
+
+def _rows(result: SocialLinkResult, style: str) -> list[Document]:
+    """Return a run's posting (``postings``) or comment (``comments``) Documents."""
+    return [doc for doc in result.documents if (doc.metadata.get("table") or {}).get("style") == style]
+
+
+def _linked(img: _FakeImageService) -> dict[str, Any]:
+    """Return ``{media file stem: posting uuid}`` for every image routed to CLIP."""
+    return {Path(asset.image_path).stem: asset.source_doc_id for asset in img.images}
 
 
 def test_run_routes_image_and_video_and_links(tmp_path: Path) -> None:
-    """Image goes to CLIP path; video goes to Nextext; both are linked to their posting UUID."""
+    """Image goes to CLIP, video to Nextext; each linked to its posting from either side of the link."""
     _write_export(tmp_path)
     img = _FakeImageService()
-    linker = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c")
-    result = linker.run(tmp_path)
+    result = _linker(image_service=img).run(tmp_path)
 
-    # The image went through the CLIP path with the posting UUID.
-    assert len(img.images) == 1
-    assert img.images[0].source_doc_id == "u1"
-    # The video produced keyframes (linked to u2) and a transcript Document.
+    assert _linked(img) == {"pic": "u1"}
     assert img.keyframe_calls and img.keyframe_calls[0]["source_doc_id"] == "u2"
-    assert len(result.transcript_documents) == 1
-    assert result.transcript_documents[0].metadata["posting_uuid"] == "u2"
-    # media.csv + both media files are consumed (excluded from the generic sweep).
+    assert [segment.metadata["posting_uuid"] for segment in _transcripts(result)] == ["u2"]
+    # The dossier, its bookkeeping and both media files are the linker's; no generic reader sees them.
     consumed_names = {p.name for p in result.consumed_paths}
-    assert {"media.csv", "pic.jpg", "clip.mp4"}.issubset(consumed_names)
-    # postings.csv is NOT consumed (the sweep ingests it as text nodes).
-    assert "postings.csv" not in consumed_names
+    assert {"dossier.json", "progress.json", "_run.json", "pic.jpg", "clip.mp4"}.issubset(consumed_names)
 
 
 def test_run_stamps_posting_reference_metadata(tmp_path: Path) -> None:
     """Derived media artifacts carry the parent posting's reference fields, additively.
 
-    The image asset and the keyframe call must carry the ``posting_*`` fields
-    plus a ready-made nested ``reference_metadata`` block; the transcript
-    segment must merge them into its own ``reference_metadata`` WITHOUT
-    dropping the Nextext identity (``network: nextext`` /
-    ``type: transcript_segment``).
+    The image's payload is pinned exactly — it is the shape every downstream
+    reader already knows. The transcript segment must merge the fields into its
+    own ``reference_metadata`` WITHOUT dropping the Nextext identity
+    (``network: nextext`` / ``type: transcript_segment``).
     """
     _write_export(tmp_path)
     img = _FakeImageService()
-    linker = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c")
-    result = linker.run(tmp_path)
+    result = _linker(image_service=img).run(tmp_path)
 
-    image_extra = img.images[0].extra_metadata
-    assert image_extra["posting_network"] == "Facebook"
-    assert image_extra["posting_author"] == "Jane Poster"
-    assert image_extra["posting_url"] == "https://fb.example/p1"
-    assert image_extra["posting_timestamp"] == "2023-01-01 10:00"
-    assert image_extra["posting_text"] == "a"
-    assert image_extra["reference_metadata"]["type"] == "image"
-    assert image_extra["reference_metadata"]["posting_uuid"] == "u1"
-    assert image_extra["reference_metadata"]["posting_network"] == "Facebook"
+    link_ids = {"posting_uuid": "u1", "posting_id": "P_1", "media_id": "M_1"}
+    posting_ref = {
+        "posting_network": "facebook",
+        "posting_author": "Jane Poster",
+        "posting_author_id": "42",
+        "posting_vanity": "jane.poster",
+        "posting_timestamp": "2023-01-01T10:00:00+00:00",
+        "posting_url": "https://social.invalid/P_1",
+        "posting_text": "a",
+    }
+    assert img.images[0].extra_metadata == {
+        **link_ids,
+        "source_type": "social_media",
+        **posting_ref,
+        "reference_metadata": {"type": "image", **link_ids, **posting_ref},
+    }
 
     keyframe_extra = img.keyframe_calls[0]["extra_metadata"]
-    assert keyframe_extra["posting_network"] == "Facebook"
-    assert keyframe_extra["posting_url"] == "https://fb.example/p2"
+    assert keyframe_extra["posting_network"] == "facebook"
+    assert keyframe_extra["posting_url"] == "https://social.invalid/P_2"
     assert keyframe_extra["reference_metadata"]["type"] == "keyframe"
     assert keyframe_extra["reference_metadata"]["posting_uuid"] == "u2"
 
-    segment_ref = result.transcript_documents[0].metadata["reference_metadata"]
-    # Nextext identity preserved (additive merge, nothing dropped).
+    segment_ref = _transcripts(result)[0].metadata["reference_metadata"]
     assert segment_ref["network"] == "nextext"
     assert segment_ref["type"] == "transcript_segment"
     assert segment_ref["posting_uuid"] == "u2"
-    assert segment_ref["posting_network"] == "Facebook"
     assert segment_ref["posting_author"] == "Jane Poster"
-    assert segment_ref["posting_url"] == "https://fb.example/p2"
     assert segment_ref["posting_text"] == "b"
 
 
-def test_build_posting_reference_index_requires_a_known_social_profile() -> None:
-    """Header drift away from both social profiles degrades to link-ids-only."""
-    from docint.core.ingest.social_linker import build_posting_reference_index
+def test_postings_become_table_rows_carrying_their_reference_metadata(tmp_path: Path) -> None:
+    """A posting is one row-shaped Document, so every social reader downstream takes it unchanged.
 
-    df = pd.DataFrame({"UUID": ["u1"], "Posting ID": ["P_1"], "Something Else": ["x"]})
-    assert build_posting_reference_index(df) == {}
+    ``source: "table"`` is load-bearing: node routing, social detection, the
+    collection profile and extract posting units all key on it.
+    """
+    _write_export(tmp_path)
+    result = _linker().run(tmp_path)
+
+    posting = _rows(result, "postings")[0]
+    assert posting.text == "a"
+    assert posting.metadata["reference_metadata"] == {
+        "network": "facebook",
+        "type": "posting",
+        "uuid": "u1",
+        "url": "https://social.invalid/P_1",
+        "timestamp": "2023-01-01T10:00:00+00:00",
+        "author": "Jane Poster",
+        "author_id": "42",
+        "vanity": "jane.poster",
+        "text": "a",
+        "text_id": "P_1",
+        "anchor_text": None,
+        "parent_text": None,
+    }
+    assert posting.metadata["source"] == "table"
+    assert posting.metadata["table"] == {"style": "postings", "row_index": 0, "n_rows": 2}
+    assert posting.metadata["file_name"] == f"{_FB}/dossier.json"
+    assert posting.metadata["file_hash"] == compute_file_hash(tmp_path / _FB / "dossier.json")
+    assert is_social_payload(posting.metadata)
+
+
+def test_comments_become_rows_naming_their_posting_and_parent(tmp_path: Path) -> None:
+    """A received comment is a comment row: the post it answers and the comment it replies to ride along."""
+    comments = [
+        _comment("c1", "C_1", "first", posting="u1"),
+        _comment("c2", "C_2", "a reply", posting="u1", parent="c1"),
+        _comment("c3", "C_3", None, posting="u1"),
+    ]
+    _write_dossier(tmp_path, _FB, postings=[_posting("u1", "P_1", "post body", comments=comments)])
+
+    result = _linker().run(tmp_path)
+
+    rows = _rows(result, "comments")
+    assert [row.text for row in rows] == ["first", "a reply"]
+    assert rows[1].metadata["reference_metadata"] == {
+        "network": "facebook",
+        "type": "comment",
+        "uuid": "c2",
+        "url": None,
+        "timestamp": "2023-01-01T11:00:00+00:00",
+        "author": "Joe Commenter",
+        "author_id": "77",
+        "vanity": "joe.commenter",
+        "text": "a reply",
+        "text_id": "C_2",
+        "anchor_text": "post body",
+        "parent_text": "first",
+    }
+    assert rows[1].metadata["table"] == {"style": "comments", "row_index": 2, "n_rows": 4}
+    assert is_social_payload(rows[1].metadata)
+
+
+def test_a_posting_without_text_gets_no_row_but_its_media_still_link(tmp_path: Path) -> None:
+    """An empty text makes no node, as an empty table row never did; its photo keeps the posting's identity."""
+    _write_dossier(
+        tmp_path,
+        _FB,
+        postings=[_posting("u1", "P_1", "  ", media_ids=["m1"])],
+        media=[_media("m1", "M_1", f"{_FB}/media/photos/pic.jpg")],
+        files={"media/photos/pic.jpg": b"\xff\xd8\xff"},
+    )
+    img = _FakeImageService()
+
+    result = _linker(image_service=img).run(tmp_path)
+
+    assert _rows(result, "postings") == []
+    assert _linked(img) == {"pic": "u1"}
+
+
+def test_each_profile_names_its_rows_by_its_own_folder(tmp_path: Path) -> None:
+    """Every profile's file is called dossier.json; the documents listing keys by name, so rows must differ."""
+    _write_dossier(tmp_path, "jane.poster - facebook", postings=[_posting("u1", "P_1", "a")])
+    _write_dossier(tmp_path, "jane.poster - instagram", postings=[_posting("u2", "P_2", "b", network="instagram")])
+
+    result = _linker().run(tmp_path)
+
+    assert sorted(row.metadata["file_name"] for row in _rows(result, "postings")) == [
+        "jane.poster - facebook/dossier.json",
+        "jane.poster - instagram/dossier.json",
+    ]
+
+
+def test_a_media_item_two_postings_name_is_linked_to_both(tmp_path: Path) -> None:
+    """The export may attach one file to several posts; each gets the link (the image service dedupes)."""
+    _write_dossier(
+        tmp_path,
+        _FB,
+        postings=[_posting("u1", "P_1", "a", media_ids=["m1"]), _posting("u2", "P_2", "b")],
+        media=[_media("m1", "M_1", f"{_FB}/media/photos/pic.jpg", attached_to=["u2"])],
+        files={"media/photos/pic.jpg": b"\xff\xd8\xff"},
+    )
+    img = _FakeImageService()
+
+    _linker(image_service=img).run(tmp_path)
+
+    assert sorted(asset.source_doc_id for asset in img.images) == ["u1", "u2"]
+
+
+def test_media_the_export_or_the_upload_lacks_is_counted_and_left_unclaimed(
+    tmp_path: Path, loguru_caplog_info: LogCaptureFixture
+) -> None:
+    """A media item the crawler never fetched, one the upload left out, and one whose name is ambiguous."""
+    _write_dossier(
+        tmp_path,
+        _FB,
+        postings=[_posting("u1", "P_1", "a", media_ids=["m1", "m2", "m3"])],
+        media=[
+            _media("m1", "M_1", None, status="missing"),
+            _media("m2", "M_2", f"{_FB}/media/photos/not-uploaded.jpg"),
+            _media("m3", "M_3", f"{_FB}/media/photos/twice.jpg"),
+        ],
+        files={"media/photos/twice.jpg": b"\xff\xd8\xff", "media/copy/twice.jpg": b"\xff\xd8\xff"},
+    )
+    img = _FakeImageService()
+
+    result = _linker(image_service=img).run(tmp_path)
+
+    assert img.images == []
+    assert "twice.jpg" not in {path.name for path in result.consumed_paths}
+    log = loguru_caplog_info.text
+    assert "1 missing from the export" in log
+    assert "1 with no local file" in log
+    assert "1 with an ambiguous filename" in log
+
+
+def test_a_media_path_cannot_reach_outside_its_profile_folder(tmp_path: Path) -> None:
+    """Only the basename is looked up, and only inside the dossier's own folder."""
+    outside = tmp_path / "secret.jpg"
+    outside.write_bytes(b"\xff\xd8\xff")
+    _write_dossier(
+        tmp_path,
+        _FB,
+        postings=[_posting("u1", "P_1", "a", media_ids=["m1", "m2", "m3"])],
+        media=[
+            _media("m1", "M_1", "../secret.jpg"),
+            _media("m2", "M_2", str(outside.resolve())),
+            _media("m3", "M_3", f"{_FB}/media/photos/inside.jpg"),
+        ],
+        files={"media/photos/inside.jpg": b"\xff\xd8\xff"},
+    )
+    img = _FakeImageService()
+
+    result = _linker(image_service=img).run(tmp_path)
+
+    assert _linked(img) == {"inside": "u1"}
+    assert outside not in result.consumed_paths
+
+
+#: A Telegram channel's own id; its postings and photos are numbered ``<channel><message>``.
+_CHANNEL = "100200"
+_TG = "jane.channel - telegram"
+
+
+def _tg_posting(uuid: str, message: int, text: str, published_at: str) -> dict[str, Any]:
+    """Return an invented Telegram posting filed under message number *message*."""
+    return _posting(
+        uuid,
+        f"{_CHANNEL}{message}",
+        text,
+        published_at=published_at,
+        network="telegram",
+        author=_author("Jane Channel", "jane.channel", _CHANNEL),
+    )
+
+
+def _tg_photo(uuid: str, message: int, published_at: str, *, attached_to: Sequence[str] = ()) -> dict[str, Any]:
+    """Return an invented Telegram photo carrying its own message number."""
+    return _media(
+        uuid,
+        f"{_CHANNEL}{message}",
+        f"{_TG}/media/photos/{uuid}.jpg",
+        published_at=published_at,
+        attached_to=attached_to,
+    )
+
+
+def _write_album_export(root: Path) -> None:
+    """Write a channel whose photos the export links for one of six.
+
+    - messages 5-7: a three-photo album; the text sits on the last message, 7;
+    - message 8: explicitly attached to the later post 12, though by message
+      order and time alone it would read as part of post 9;
+    - message 9: a single-photo post — the photo carries the post's own id;
+    - message 10: an hour off the next posting at or above it (12);
+    - message 20: no posting at or above it — the owner is absent from the export.
+
+    Args:
+        root: The export root.
+    """
+    photos = [
+        _tg_photo("m5", 5, "2026-03-04T21:30:55+01:00"),
+        _tg_photo("m6", 6, "2026-03-04T21:30:56+01:00"),
+        _tg_photo("m7", 7, "2026-03-04T21:30:56+01:00"),
+        _tg_photo("m8", 8, "2026-03-05T08:00:00+01:00", attached_to=["u12"]),
+        _tg_photo("m9", 9, "2026-03-05T08:00:00+01:00"),
+        _tg_photo("m10", 10, "2026-03-05T09:00:00+01:00"),
+        _tg_photo("m20", 20, "2026-03-06T08:00:00+01:00"),
+    ]
+    _write_dossier(
+        root,
+        _TG,
+        postings=[
+            _tg_posting("u7", 7, "album text", "2026-03-04T21:30:56+01:00"),
+            _tg_posting("u9", 9, "single photo post", "2026-03-05T08:00:00+01:00"),
+            _tg_posting("u12", 12, "later post", "2026-03-05T10:00:00+01:00"),
+        ],
+        media=photos,
+        files={f"media/photos/{photo['id']}.jpg": photo["id"].encode() for photo in photos},
+    )
+
+
+def test_album_members_link_to_the_text_post_filed_under_the_last_message(
+    tmp_path: Path, loguru_caplog_info: LogCaptureFixture
+) -> None:
+    """Telegram photos carry only their own message id; the album rule is what joins them.
+
+    An explicit link always wins over the rule, and a photo whose timestamp
+    disagrees, or whose owner is absent, is left for the standalone path
+    rather than attributed to a neighbouring post.
+    """
+    _write_album_export(tmp_path)
+    img = _FakeImageService()
+
+    result = _linker(image_service=img).run(tmp_path)
+
+    assert _linked(img) == {"m5": "u7", "m6": "u7", "m7": "u7", "m8": "u12", "m9": "u9"}
+    consumed_names = {path.name for path in result.consumed_paths}
+    assert "m10.jpg" not in consumed_names
+    assert "m20.jpg" not in consumed_names
+    assert "5 media linked (1 explicitly, 4 by album inference)" in loguru_caplog_info.text
+    assert "2 with no posting" in loguru_caplog_info.text
+
+
+def test_album_rule_can_be_switched_off(tmp_path: Path) -> None:
+    """``SOCIAL_ALBUM_LINK_ENABLED=false`` keeps only the links the export itself declares."""
+    _write_album_export(tmp_path)
+    img = _FakeImageService()
+
+    result = _linker(image_service=img, album_link_enabled=False).run(tmp_path)
+
+    assert _linked(img) == {"m8": "u12"}
+    assert "m9.jpg" not in {path.name for path in result.consumed_paths}
+
+
+def test_album_index_ignores_ids_that_do_not_decompose_by_channel() -> None:
+    """Instagram's ``<post>_<account>`` and Facebook's opaque ids never start with the author's id."""
+    postings = [
+        _posting("u1", "3000000000000000001_42", "ig", network="instagram"),
+        _posting("u2", "UzpfSVNDOjAwMDAwMDAwMDE=", "fb"),
+    ]
+
+    assert build_posting_album_index(postings) == {}
+
+
+def test_bookkeeping_outside_the_batch_is_never_claimed(tmp_path: Path) -> None:
+    """A profile folder uploaded on its own has no export root inside the batch to tidy."""
+    _write_dossier(tmp_path, _FB, postings=[_posting("u1", "P_1", "a")])
+    (tmp_path / "_run.json").write_text("{}", encoding="utf-8")
+
+    result = _linker().run(tmp_path / _FB)
+
+    assert {path.name for path in result.consumed_paths} == {"dossier.json"}
+
+
+def test_an_unreadable_or_foreign_dossier_is_claimed_and_skipped(
+    tmp_path: Path, loguru_caplog: LogCaptureFixture
+) -> None:
+    """Neither reaches the generic JSON reader, and neither costs the rest of the export."""
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "dossier.json").write_text("{not json", encoding="utf-8")
+    _write_dossier(tmp_path, "future", postings=[_posting("u9", "P_9", "z")], schema="me-dossier/2")
+    _write_dossier(tmp_path, _FB, postings=[_posting("u1", "P_1", "a")])
+
+    result = _linker().run(tmp_path)
+
+    assert [row.metadata["reference_metadata"]["uuid"] for row in _rows(result, "postings")] == ["u1"]
+    assert {path.parent.name for path in result.consumed_paths if path.name == "dossier.json"} == {
+        "broken",
+        "future",
+        _FB,
+    }
+    assert "broken/dossier.json" in loguru_caplog.text
+    assert "me-dossier/2" in loguru_caplog.text
+
+
+def test_sections_without_a_sample_are_reported_not_dropped_silently(
+    tmp_path: Path, loguru_caplog: LogCaptureFixture
+) -> None:
+    """Messages and own comments have no known shape yet, so they are skipped out loud."""
+    _write_dossier(tmp_path, _FB, messages=[{"id": "x"}], ownComments=[{"id": "y"}, {"id": "z"}])
+
+    _linker().run(tmp_path)
+
+    assert "1 messages and 2 own comments are not ingested" in loguru_caplog.text
+
+
+class _FailingImageService(_FakeImageService):
+    """Image service whose every store fails, as with the embedding endpoint down."""
+
+    @override
+    def ingest_image(self, asset: Any, *, context: IngestContext) -> Any:
+        """Fail the store.
+
+        Args:
+            asset: The image asset (ignored).
+            context: Ingestion context (ignored).
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("embedding endpoint down")
+
+
+def test_a_routing_failure_keeps_the_postings(tmp_path: Path, loguru_caplog: LogCaptureFixture) -> None:
+    """Media routing failing must not cost the text: the rows stay, the media go to the standalone passes."""
+    _write_export(tmp_path)
+
+    result = _linker(image_service=_FailingImageService()).run(tmp_path)
+
+    assert [row.text for row in _rows(result, "postings")] == ["a", "b"]
+    consumed_names = {path.name for path in result.consumed_paths}
+    assert "dossier.json" in consumed_names
+    assert not {"pic.jpg", "clip.mp4"} & consumed_names
+    assert "embedding endpoint down" in loguru_caplog.text
 
 
 class _CountingNextext:
@@ -306,7 +775,7 @@ def test_cached_transcript_skips_nextext(tmp_path: Path) -> None:
     ).run(tmp_path)
     assert nx.calls == 0  # cache hit -> Nextext job not submitted
     assert manifest.lookup_calls >= 1  # manifest was consulted for the cache lookup
-    assert any(d.metadata.get("posting_uuid") == "u2" for d in result.transcript_documents)
+    assert any(d.metadata.get("posting_uuid") == "u2" for d in _transcripts(result))
 
 
 def test_cache_miss_persists_transcript(tmp_path: Path) -> None:
@@ -342,436 +811,11 @@ def test_configured_keyframe_dedup_cosine_reaches_image_service(tmp_path: Path) 
     assert img.keyframe_calls[0]["dedup_cosine"] == 0.5
 
 
-_SEMICOLON_POSTINGS_COLUMNS = [
-    "UUID",
-    "Posting ID",
-    "URL",
-    "Date last updated",
-    "Timestamp",
-    "Timezone",
-    "Crawled at",
-    "Postings Connections",
-    "Network Posting ID",
-    "Location",
-    "Author ID",
-    "Author",
-    "Vanity Name",
-    "Co-Author",
-    "Quoted User",
-    "Expected Reactions",
-    "Collected Reactions",
-    "Expected Comments",
-    "Collected Comments",
-    "Network",
-    "Posted in Group",
-    "Task",
-    "Text Content",
-    "Filename",
-    "Tags",
-]
-
-
-def _write_semicolon_postings(root: Path, media_rows: dict[str, str]) -> None:
-    """Write a semicolon-delimited, BOM-prefixed postings + media manifest pair.
-
-    Mirrors :func:`_write_export`'s full 25-column postings profile (postings
-    ``u1``/``P_1`` and ``u2``/``P_2``) but serializes both tables with ``;``
-    as the delimiter and a UTF-8 BOM, matching real social-platform exports,
-    so tests can exercise delimiter sniffing end to end. Each test supplies
-    its own media manifest rows. Both CSVs are written directly in *root*,
-    matching the flat single-directory contract; callers are responsible for
-    placing any referenced media files directly in *root* as well.
-
-    Args:
-        root: Temporary directory in which to create the export.
-        media_rows: Mapping of ``Media ID`` to ``Exported media filename``
-            for the media manifest.
-    """
-    postings_data = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
-    postings_data["UUID"] = ["u1", "u2"]
-    postings_data["Posting ID"] = ["P_1", "P_2"]
-    postings_data["Text Content"] = ["a", "b"]
-    pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False, sep=";", encoding="utf-8-sig")
-    pd.DataFrame(
-        {
-            "Media ID": list(media_rows.keys()),
-            "Exported media filename": list(media_rows.values()),
-        }
-    ).to_csv(root / "media.csv", index=False, sep=";", encoding="utf-8-sig")
-
-
-def test_run_detects_semicolon_delimited_export(tmp_path: Path) -> None:
-    """A semicolon-delimited, BOM-prefixed export is still detected and linked.
-
-    Regression guard for the delimiter bug: plain ``pd.read_csv`` defaults to
-    a comma separator, so a ``;``-delimited header collapsed into a single
-    column and both ``is_media_manifest`` and the postings-profile exact
-    match failed, making the linker silently no-op on real social exports
-    (which are semicolon-delimited with a UTF-8 BOM).
-    """
-    _write_semicolon_postings(tmp_path, {"P_1_0": "pic.jpg"})
-    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    img = _FakeImageService()
-    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
-
-    assert len(img.images) == 1
-    assert img.images[0].source_doc_id == "u1"
-    consumed_names = {p.name for p in result.consumed_paths}
-    assert {"media.csv", "pic.jpg"}.issubset(consumed_names)
-
-
-def test_run_links_only_present_media(tmp_path: Path) -> None:
-    """Only manifest rows whose media file exists in the batch are ingested.
-
-    Mirrors a full manifest that references files never copied into the
-    batch (a common real-export shape): the row with no matching file must
-    be skipped rather than erroring, while the two present rows still
-    resolve and route.
-    """
-    _write_semicolon_postings(
-        tmp_path,
-        {"P_1_0": "pic.jpg", "P_2_0": "clip.mp4", "P_1_1": "missing.jpg"},
-    )
-    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    (tmp_path / "clip.mp4").write_bytes(b"video")
-    img = _FakeImageService()
-    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
-
-    assert len(img.images) == 1
-    assert img.images[0].source_doc_id == "u1"
-    assert img.keyframe_calls and img.keyframe_calls[0]["source_doc_id"] == "u2"
-    consumed_names = {p.name for p in result.consumed_paths}
-    assert {"pic.jpg", "clip.mp4"}.issubset(consumed_names)
-    assert "missing.jpg" not in consumed_names
-
-
-def test_run_skips_absolute_or_traversal_media_reference(tmp_path: Path) -> None:
-    """An absolute or ``../`` manifest filename collapses to its basename and is not found.
-
-    Regression guard, updated for the flat single-directory model: resolution
-    now only ever looks up ``Path(filename).name`` inside the manifest's own
-    directory — there is no path-branch handling and thus nothing that needs
-    a containment check. An absolute path and a ``../`` traversal both
-    collapse to the same basename (``secret.jpg``); since the real file lives
-    outside the batch directory and no ``secret.jpg`` exists directly inside
-    it, both rows are skipped rather than ingested.
-    """
-    outside_dir = tmp_path / "outside"
-    outside_dir.mkdir(parents=True)
-    outside_file = outside_dir / "secret.jpg"
-    outside_file.write_bytes(b"\xff\xd8\xff")
-
-    batch = tmp_path / "batch"
-    batch.mkdir()
-    postings_data = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
-    postings_data["UUID"] = ["u1", "u2"]
-    postings_data["Posting ID"] = ["P_1", "P_2"]
-    postings_data["Text Content"] = ["a", "b"]
-    pd.DataFrame(postings_data).to_csv(batch / "postings.csv", index=False, sep=";", encoding="utf-8-sig")
-    # One row escapes via an absolute path, the other via a "../" traversal;
-    # both point at the same real file living outside the batch directory.
-    pd.DataFrame(
-        {
-            "Media ID": ["P_1_0", "P_2_0"],
-            "Exported media filename": [str(outside_file.resolve()), "../outside/secret.jpg"],
-        }
-    ).to_csv(batch / "media.csv", index=False, sep=";", encoding="utf-8-sig")
-
-    img = _FakeImageService()
-    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(batch)
-
-    assert img.images == []
-    assert not img.keyframe_calls
-    assert not result.transcript_documents
-
-
-def _write_album_export(root: Path) -> None:
-    """Write a keyless album export with media nested in subdirectories.
-
-    Mirrors the default multimedia batch output: the two tables sit at the
-    root while the files live under ``dir/photos`` and ``dir/videos``. Channel
-    ``9900112233`` publishes one three-message album recorded as three media
-    rows but a single posting, filed under the group's last message id — so the
-    manifest names a known posting for only one of the three rows, and the
-    other two can be attached only by album inference.
-
-    Args:
-        root: Temporary directory in which to create the export.
-    """
-    postings_data: dict[str, list[str]] = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
-    postings_data["UUID"] = ["u1", "u2"]
-    postings_data["Posting ID"] = ["990011223303", "990011223309"]
-    postings_data["Author ID"] = ["9900112233", "9900112233"]
-    postings_data["Timestamp"] = ["2026-03-04 21:30:56+00", "2026-03-05 08:00:00+00"]
-    postings_data["Text Content"] = ["album post", "later post"]
-    postings_data["Network"] = ["Telegram", "Telegram"]
-    postings_data["Author"] = ["Jane Poster", "Jane Poster"]
-    pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False)
-    pd.DataFrame(
-        {
-            "Media ID": ["990011223301", "990011223302", "990011223303"],
-            "Network ID": ["990011223301", "990011223302", "990011223303"],
-            "Exported media filename": ["shot.jpg", "clip.mp4", "last.jpg"],
-            "Timestamp": [
-                "2026-03-04 21:30:55+00",
-                "2026-03-04 21:30:56+00",
-                "2026-03-04 21:30:56+00",
-            ],
-        }
-    ).to_csv(root / "media.csv", index=False)
-    photos = root / "dir" / "photos"
-    videos = root / "dir" / "videos"
-    photos.mkdir(parents=True)
-    videos.mkdir(parents=True)
-    (photos / "shot.jpg").write_bytes(b"\xff\xd8\xff")
-    (photos / "last.jpg").write_bytes(b"\xff\xd8\xff")
-    (videos / "clip.mp4").write_bytes(b"video")
-
-
-def test_run_links_nested_media_including_album_members(tmp_path: Path) -> None:
-    """A nested, keyless album export links every media row to its posting.
-
-    Covers both halves of the Telegram failure at once: the files sit in
-    subdirectories rather than beside the manifest, and two of the three rows
-    name no posting of their own.
-    """
-    _write_album_export(tmp_path)
-
-    img = _FakeImageService()
-    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
-
-    assert [asset.source_doc_id for asset in img.images] == ["u1", "u1"]
-    assert img.keyframe_calls[0]["source_doc_id"] == "u1"
-    consumed_names = {path.name for path in result.consumed_paths}
-    assert {"media.csv", "shot.jpg", "last.jpg", "clip.mp4"}.issubset(consumed_names)
-    assert all(segment.metadata["posting_uuid"] == "u1" for segment in result.transcript_documents)
-
-
-def test_run_leaves_album_members_unlinked_when_disabled(tmp_path: Path) -> None:
-    """``album_link_enabled=False`` restores manifest-key-only linking.
-
-    The operator keeps a way back to the declared-key behaviour; only the row
-    whose own ``Media ID`` names a posting survives.
-    """
-    _write_album_export(tmp_path)
-
-    img = _FakeImageService()
-    result = SocialLinker(
-        image_service=img,
-        nextext_client=_FakeNextext(),
-        target_collection="c",
-        album_link_enabled=False,
-    ).run(tmp_path)
-
-    assert [asset.source_doc_id for asset in img.images] == ["u1"]
-    assert not img.keyframe_calls
-    consumed_names = {path.name for path in result.consumed_paths}
-    assert "last.jpg" in consumed_names
-    assert "shot.jpg" not in consumed_names
-
-
-def test_timestamp_link_can_be_switched_off() -> None:
-    """``SOCIAL_TIMESTAMP_LINK_ENABLED=false`` leaves the fallback inert."""
-    linker = SocialLinker(
-        image_service=None,
-        nextext_client=None,
-        target_collection=None,
-        timestamp_link_enabled=False,
-    )
-    assert linker.timestamp_link_enabled is False
-
-
-#: The messages profile's exact header list, as a chat-style export writes it.
-_MESSAGES_COLUMNS: list[str] = [
-    "UUID",
-    "Chat ID",
-    "Sender",
-    "Timestamp",
-    "Text",
-    "Tags",
-    "URL",
-    "Chat Group",
-    "Answers Count",
-    "Reply To",
-    "Network",
-]
-
-
-def _write_messages_export(
-    root: Path,
-    *,
-    media_author: str = "Jane Poster",
-    filename: str = "pic.jpg",
-) -> None:
-    """Write a chat-style export: a messages-schema table plus a media manifest.
-
-    Serialized like :func:`_write_semicolon_postings` (``;`` + UTF-8 BOM). The
-    manifest's ids name no message, so only the stamp links the row — or the
-    repeated text, when *media_author* names someone else.
-
-    Args:
-        root: Temporary directory in which to create the export.
-        media_author: ``Author`` on the manifest row; a value other than the
-            message's ``Sender`` produces the shared-post shape.
-        filename: Basename written into ``Exported media filename``.
-    """
-    pd.DataFrame(
-        {
-            "UUID": ["u1"],
-            "Chat ID": ["4400000000000000001"],
-            "Sender": ["Jane Poster"],
-            "Timestamp": ["2026-03-04 21:30:56+00"],
-            "Text": ["A short invented post about nothing at all."],
-            "Tags": [""],
-            "URL": ["https://social.invalid/janeposter/status/4400000000000000001"],
-            "Chat Group": [""],
-            "Answers Count": ["0"],
-            "Reply To": [""],
-            "Network": ["ChatNet"],
-        },
-        columns=_MESSAGES_COLUMNS,
-    ).to_csv(root / "messages.csv", index=False, sep=";", encoding="utf-8-sig")
-    pd.DataFrame(
-        {
-            "Media ID": ["7700000000000000009"],
-            "Network ID": ["7700000000000000009"],
-            "Author": [media_author],
-            "Network": ["ChatNet"],
-            "Timestamp": ["2026-03-04 21:30:56+00"],
-            "Title": ["A short invented post about nothing at all."],
-            "Exported media filename": [filename],
-        }
-    ).to_csv(root / "media.csv", index=False, sep=";", encoding="utf-8-sig")
-
-
-def test_find_tables_accepts_a_messages_schema_as_the_postings_table(tmp_path: Path) -> None:
-    """A chat-style export carries its postings in the messages schema."""
-    _write_messages_export(tmp_path)
-    linker = SocialLinker(image_service=_FakeImageService(), nextext_client=_FakeNextext(), target_collection="c")
-
-    postings_csv, media_csv = linker._find_tables(tmp_path)
-
-    assert postings_csv is not None
-    assert postings_csv.name == "messages.csv"
-    assert media_csv is not None
-    assert media_csv.name == "media.csv"
-
-
-def test_postings_profile_wins_over_a_messages_table(tmp_path: Path) -> None:
-    """A real postings table is the authority; the messages one only stands in.
-
-    The messages file is named to sort first, so a first-match-wins sweep fails.
-    """
-    _write_semicolon_postings(tmp_path, {"P_1_0": "pic.jpg"})
-    _write_messages_export(tmp_path)
-    (tmp_path / "messages.csv").rename(tmp_path / "chats.csv")
-    linker = SocialLinker(image_service=_FakeImageService(), nextext_client=_FakeNextext(), target_collection="c")
-
-    postings_csv, _ = linker._find_tables(tmp_path)
-
-    assert postings_csv is not None
-    assert postings_csv.name == "postings.csv"
-
-
-def test_run_links_media_for_a_messages_style_export(tmp_path: Path) -> None:
-    """A chat-style export links end to end, keyed by the message's own id.
-
-    Regression: requiring the exact postings profile made such exports no-op.
-    """
-    _write_messages_export(tmp_path)
-    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    img = _FakeImageService()
-
-    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
-
-    assert len(img.images) == 1
-    assert img.images[0].source_doc_id == "u1"
-    assert img.images[0].extra_metadata["posting_id"] == "4400000000000000001"
-    consumed_names = {p.name for p in result.consumed_paths}
-    assert {"media.csv", "pic.jpg"}.issubset(consumed_names)
-    assert "messages.csv" not in consumed_names
-
-
-def test_run_stamps_posting_reference_metadata_from_a_messages_table(tmp_path: Path) -> None:
-    """Derived artifacts carry the message's own reference fields."""
-    _write_messages_export(tmp_path)
-    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    img = _FakeImageService()
-
-    SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
-
-    metadata = img.images[0].extra_metadata
-    assert metadata["posting_author"] == "Jane Poster"
-    assert metadata["posting_text"] == "A short invented post about nothing at all."
-    assert metadata["posting_network"] == "ChatNet"
-    assert metadata["posting_url"] == "https://social.invalid/janeposter/status/4400000000000000001"
-    assert metadata["posting_timestamp"] == "2026-03-04 21:30:56+00"
-
-
-def test_build_posting_reference_index_reads_a_messages_frame() -> None:
-    """A messages table is keyed by its own id column, not by ``Posting ID``."""
-    from docint.core.ingest.social_linker import build_posting_reference_index
-
-    df = pd.DataFrame(
-        {
-            "UUID": ["u1"],
-            "Chat ID": ["4400000000000000001"],
-            "Sender": ["Jane Poster"],
-            "Timestamp": ["2026-03-04 21:30:56+00"],
-            "Text": ["A short invented post about nothing at all."],
-            "Tags": [""],
-            "URL": ["https://social.invalid/janeposter/status/4400000000000000001"],
-            "Chat Group": [""],
-            "Answers Count": ["0"],
-            "Reply To": [""],
-            "Network": ["ChatNet"],
-        },
-        columns=_MESSAGES_COLUMNS,
-    )
-
-    index = build_posting_reference_index(df)
-
-    assert list(index) == ["4400000000000000001"]
-    assert index["4400000000000000001"]["posting_author"] == "Jane Poster"
-
-
-def test_run_links_a_shared_post_by_text_when_the_author_differs(tmp_path: Path) -> None:
-    """A shared post names the original author, so only its text can link it.
-
-    The manifest records the writer while the row is the sharer's, so the
-    author-scoped stamp rule refuses it and only the text rule is left.
-    """
-    _write_messages_export(tmp_path, media_author="Original Author")
-    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    img = _FakeImageService()
-
-    SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
-
-    assert len(img.images) == 1
-    assert img.images[0].source_doc_id == "u1"
-
-
-def test_text_link_can_be_switched_off(tmp_path: Path) -> None:
-    """``SOCIAL_TEXT_LINK_ENABLED=false`` leaves a shared post unlinked."""
-    _write_messages_export(tmp_path, media_author="Original Author")
-    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    img = _FakeImageService()
-
-    SocialLinker(
-        image_service=img,
-        nextext_client=_FakeNextext(),
-        target_collection="c",
-        text_link_enabled=False,
-    ).run(tmp_path)
-
-    assert img.images == []
-
-
 def test_derived_artifacts_name_the_media_file_they_came_from(tmp_path: Path) -> None:
     """A keyframe and a transcript segment must name the clip, not the transient JSONL.
 
     Without this the only identity a social video artifact carries is a posting
-    UUID and a manifest media id, so neither an extract nor a report can say
+    UUID and a network media id, so neither an extract nor a report can say
     which attachment an analyst is looking at. The standalone path has always
     stamped these; the social path did not.
     """
@@ -786,7 +830,7 @@ def test_derived_artifacts_name_the_media_file_they_came_from(tmp_path: Path) ->
     assert keyframe_extra["reference_metadata"]["source_file"] == "clip.mp4"
     assert keyframe_extra["media_file_hash"] == keyframe_extra["reference_metadata"]["media_file_hash"]
 
-    segment = result.transcript_documents[0].metadata
+    segment = _transcripts(result)[0].metadata
     assert segment["source_file"] == "clip.mp4"
     assert segment["file_name"] == "clip.mp4"
     assert segment["reference_metadata"]["source_file"] == "clip.mp4"
@@ -805,7 +849,7 @@ def test_a_transcript_segment_keeps_the_transcript_hash(tmp_path: Path) -> None:
 
     result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
 
-    segment = result.transcript_documents[0].metadata
+    segment = _transcripts(result)[0].metadata
     assert segment["media_file_hash"]
     assert segment["file_hash"] != segment["media_file_hash"]
 
