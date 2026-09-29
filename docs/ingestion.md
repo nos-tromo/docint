@@ -301,7 +301,9 @@ The rule has three guards:
 - **The posting id must have the form `<author id><digits>`.** Instagram's
   `<post id>_<account id>` and Facebook's opaque ids never do, so the rule is
   inert there.
-- **An explicit link always wins over it.**
+- **An explicit link always wins over it**, even one naming a posting the
+  export did not include: such a media item stays unlinked rather than being
+  re-homed to a neighbouring post.
 
 Set `SOCIAL_ALBUM_LINK_ENABLED=false` to switch the rule off.
 

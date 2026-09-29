@@ -622,6 +622,37 @@ def test_album_rule_can_be_switched_off(tmp_path: Path) -> None:
     assert "m9.jpg" not in {path.name for path in result.consumed_paths}
 
 
+def test_a_photo_naming_an_absent_posting_is_not_reattached_by_the_album_rule(tmp_path: Path) -> None:
+    """The export's own claim outranks the rule even when the post it names was not exported.
+
+    The photo would otherwise album-link to the next post along, which the
+    export says is not its owner.
+    """
+    photo = _tg_photo("m6", 6, "2026-03-04T21:30:56+01:00", attached_to=["not-exported"])
+    _write_dossier(
+        tmp_path,
+        _TG,
+        postings=[_tg_posting("u7", 7, "album text", "2026-03-04T21:30:56+01:00")],
+        media=[photo],
+        files={"media/photos/m6.jpg": b"\xff\xd8\xff"},
+    )
+    img = _FakeImageService()
+
+    _linker(image_service=img).run(tmp_path)
+
+    assert img.images == []
+
+
+def test_a_dossier_saved_with_a_byte_order_mark_is_read(tmp_path: Path) -> None:
+    """Exporters write a UTF-8 BOM (the export's own CSVs carry one); it must not make a dossier unreadable."""
+    path = _write_dossier(tmp_path, _FB, postings=[_posting("u1", "P_1", "a")])
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+
+    result = _linker().run(tmp_path)
+
+    assert [row.text for row in _rows(result, "postings")] == ["a"]
+
+
 def test_album_index_ignores_ids_that_do_not_decompose_by_channel() -> None:
     """Instagram's ``<post>_<account>`` and Facebook's opaque ids never start with the author's id."""
     postings = [
