@@ -642,7 +642,7 @@ def partition(
 def resolve_target(units: Sequence[Unit], source_id: str) -> list[Unit]:
     """Return the units a per-source extract of ``source_id`` covers.
 
-    A postings table is not one document: its file hash expands to every
+    A social export dossier is not one document: its file hash expands to every
     posting recorded in it, which is why a synchronous per-source download
     needs a unit cap.
 

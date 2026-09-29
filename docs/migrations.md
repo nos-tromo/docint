@@ -35,6 +35,21 @@ covers dense and sparse in one migration, not two.
 See [configuration.md](configuration.md#dense-embedding-client--embedclientconfig)
 for `EMBED_API_BASE` / `SPARSE_API_BASE` and the `embed-only` deployment shape.
 
+## Social exports are read from dossiers only
+
+Social exports are ingested from the crawler's `me-dossier/1` dossiers; see
+[ingestion.md](ingestion.md#social-media-exports). Collections ingested from
+the former table exports (`postings.csv` + `media.csv`, `messages.csv`,
+`comments.csv`) keep working as stored: their payloads carry the same fields,
+and nothing needs migrating.
+
+What changes is a *new* ingest of such a CSV: it now reads as an ordinary
+table, with no social reference metadata and no media linking. Re-export the
+data as dossiers instead.
+
+`SOCIAL_TIMESTAMP_LINK_ENABLED` and `SOCIAL_TEXT_LINK_ENABLED` are gone and can
+be removed from `.env`.
+
 ## Payload fields added after a collection was ingested
 
 These are ordinary re-ingests — no deletion needed — but they *do* need one,
