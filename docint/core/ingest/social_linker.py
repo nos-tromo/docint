@@ -368,9 +368,12 @@ def _dossier_links(
         if not name or item.get("status") == "missing":
             counts["missing"] += 1
             continue
-        linked = [uuid for uuid in owners.get(media_id, {}) if uuid in postings]
+        declared = owners.get(media_id, {})
+        linked = [uuid for uuid in declared if uuid in postings]
         how = "explicit"
-        if not linked and album_tolerance_s is not None:
+        # The rule only speaks for media the export names no owner for: one it
+        # names an unexported owner for stays unlinked rather than re-homed.
+        if not declared and album_tolerance_s is not None:
             inferred = _infer_album_posting_id(
                 str(item.get("platformId") or ""), _parse_time(item.get("publishedAt")), albums, album_tolerance_s
             )
@@ -482,7 +485,7 @@ class SocialLinker:
             # must not reach the generic JSON reader either.
             result.consumed_paths |= {path, *_bookkeeping(path, data_dir)}
             try:
-                dossier = json.loads(path.read_text(encoding="utf-8"))
+                dossier = json.loads(path.read_text(encoding="utf-8-sig"))
                 schema = dossier.get("schema") if isinstance(dossier, dict) else None
                 if schema != DOSSIER_SCHEMA:
                     raise ValueError(f"schema {schema!r} is not {DOSSIER_SCHEMA!r}")
