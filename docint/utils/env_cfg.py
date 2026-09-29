@@ -942,8 +942,6 @@ class IngestionConfig:
     media_filetypes: list[str]
     social_album_link_enabled: bool
     social_album_tolerance_s: float
-    social_timestamp_link_enabled: bool
-    social_text_link_enabled: bool
 
 
 DEFAULT_MEDIA_FILETYPES: list[str] = [
@@ -989,8 +987,6 @@ def load_ingestion_env(
     default_sentence_splitter_chunk_size: int = 1024,
     default_supported_filetypes: list[str] | None = None,
     default_social_album_link_enabled: bool = True,
-    default_social_timestamp_link_enabled: bool = True,
-    default_social_text_link_enabled: bool = True,
     default_social_album_tolerance_s: float = 5.0,
 ) -> IngestionConfig:
     """Loads ingestion configuration from environment variables or defaults.
@@ -1045,17 +1041,11 @@ def load_ingestion_env(
         - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
         - supported_filetypes (list[str]): List of supported file extensions for ingestion.
-        - social_album_link_enabled (bool): Whether a social export's media rows that name no
-            known posting may be attached to one by album inference (see
-            ``docint/core/ingest/social_linker.py``).
+        - social_album_link_enabled (bool): Whether a dossier's media item that no posting
+            links explicitly (a Telegram photo or album member) may be attached to one by
+            album inference (see ``docint/core/ingest/social_linker.py``).
         - social_album_tolerance_s (float): Maximum timestamp disagreement, in seconds, allowed
             when accepting such an inferred link.
-        - social_timestamp_link_enabled (bool): Whether a media row that no key and no album
-            ordering can reach may be attached to the single posting sharing its exact
-            timestamp (see ``docint/core/ingest/social_linker.py``).
-        - social_text_link_enabled (bool): Whether a media row whose author names no posting
-            may be attached to the single posting whose text it repeats verbatim -- the last
-            resort, for shared posts (see ``docint/core/ingest/social_linker.py``).
         - media_filetypes (list[str]): List of audio/video file extensions discovered by the
             standalone media ingestion pass (not parsed by the generic document readers).
     """
@@ -1172,12 +1162,6 @@ def load_ingestion_env(
             0.0,
             float(os.getenv("SOCIAL_ALBUM_TOLERANCE_S", default_social_album_tolerance_s)),
         ),
-        social_timestamp_link_enabled=str(
-            os.getenv("SOCIAL_TIMESTAMP_LINK_ENABLED", default_social_timestamp_link_enabled)
-        ).lower()
-        in {"true", "1", "yes"},
-        social_text_link_enabled=str(os.getenv("SOCIAL_TEXT_LINK_ENABLED", default_social_text_link_enabled)).lower()
-        in {"true", "1", "yes"},
     )
 
 

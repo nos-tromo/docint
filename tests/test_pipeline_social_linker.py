@@ -1,5 +1,6 @@
-"""Tests for social-linker integration in DocumentIngestionPipeline (Task 11)."""
+"""Tests for social-linker integration in DocumentIngestionPipeline."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -7,19 +8,20 @@ import pytest
 
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.ingest.social_linker import SocialLinkResult
+from docint.utils.hashing import compute_file_hash
 
 
-def test_pipeline_skips_consumed_and_yields_transcripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify the pipeline skips consumed paths and injects transcript Documents.
+def test_pipeline_skips_consumed_and_yields_linker_documents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify the pipeline skips consumed paths and injects the linker's Documents.
 
     Checks that:
-    - consumed media files (media.csv, a.jpg) are excluded from the sweep;
-    - transcript Documents produced by the social linker are yielded;
-    - non-consumed files (postings.csv) still flow through.
+    - consumed files (the dossier, a linked a.jpg) are excluded from the sweep;
+    - Documents produced by the social linker are yielded;
+    - non-consumed files (notes.txt) still flow through.
     """
-    (tmp_path / "media.csv").write_text("Media ID,Exported media filename\nP_1_0,a.jpg\n", encoding="utf-8")
+    (tmp_path / "dossier.json").write_text('{"schema": "me-dossier/1"}', encoding="utf-8")
     (tmp_path / "a.jpg").write_bytes(b"\xff\xd8\xff")
-    (tmp_path / "postings.csv").write_text("Posting ID,UUID,Text Content\nP_1,u1,hello\n", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
 
     from llama_index.core import Document
 
@@ -27,8 +29,8 @@ def test_pipeline_skips_consumed_and_yields_transcripts(tmp_path: Path, monkeypa
 
     def fake_run(self: Any, data_dir: Path) -> SocialLinkResult:
         return SocialLinkResult(
-            consumed_paths={tmp_path / "media.csv", tmp_path / "a.jpg"},
-            transcript_documents=[fake_doc],
+            consumed_paths={tmp_path / "dossier.json", tmp_path / "a.jpg"},
+            documents=[fake_doc],
         )
 
     monkeypatch.setattr("docint.core.ingest.social_linker.SocialLinker.run", fake_run)
@@ -41,17 +43,12 @@ def test_pipeline_skips_consumed_and_yields_transcripts(tmp_path: Path, monkeypa
     loaded = [doc for batch in batches for doc in batch]
 
     texts = {doc.text for doc in loaded}
-    assert "spoken" in texts  # transcript doc injected
-    # The consumed media.csv + a.jpg are not re-ingested by the generic sweep.
+    assert "spoken" in texts  # linker doc injected
+    # The consumed dossier + a.jpg are not re-ingested by the generic sweep.
     filenames = {doc.metadata.get("filename") for doc in loaded}
     assert "a.jpg" not in filenames
-    assert "media.csv" not in filenames
-    # postings.csv still flows through the sweep (not consumed).
-    # Note: the 3-column CSV doesn't match the full postings schema profile (25 cols
-    # required for exact-match detection), so _guess_text_cols falls back to the
-    # first column ("Posting ID").  We verify presence via the filename metadata key
-    # instead of by text content.
-    assert "postings.csv" in filenames
+    assert "dossier.json" not in filenames
+    assert "notes.txt" in filenames
 
 
 class _StubManifest:
@@ -89,27 +86,13 @@ def test_pipeline_skips_nested_media_the_real_linker_consumed(tmp_path: Path, mo
     subtraction would silently stop matching, and every linked image would be
     ingested twice — once linked to its posting, once as a standalone.
     """
-    import pandas as pd
-
     from docint.core.ingest import ingestion_pipeline as pipe_mod
-    from docint.core.readers.tables import TableReader
 
     real_root = tmp_path / "real"
     real_root.mkdir()
     batch = tmp_path / "batch"
     batch.symlink_to(real_root, target_is_directory=True)
-    photos = batch / "dir" / "photos"
-    photos.mkdir(parents=True)
-    (photos / "shot.jpg").write_bytes(b"\xff\xd8\xff")
-    (batch / "media.csv").write_text("Media ID,Exported media filename\nP_1_0,shot.jpg\n", encoding="utf-8")
-    # The postings table is detected by exact header-set equality, so build the
-    # full profile from its single source of truth rather than restating it.
-    columns = next(profile.headers for profile in TableReader.schema_profiles if profile.style == "postings")
-    postings_data: dict[str, list[str]] = {column: [""] for column in columns}
-    postings_data["UUID"] = ["u1"]
-    postings_data["Posting ID"] = ["P_1"]
-    postings_data["Text Content"] = ["hello"]
-    pd.DataFrame(postings_data).to_csv(batch / "postings.csv", index=False)
+    profile = _write_dossier(batch)
 
     images: Any = _RecordingImageService()
     monkeypatch.setattr(pipe_mod, "ImageIngestionService", lambda *a, **k: object())
@@ -125,7 +108,65 @@ def test_pipeline_skips_nested_media_the_real_linker_consumed(tmp_path: Path, mo
 
     # The real linker resolved the nested file and claimed it.
     assert [asset.source_doc_id for asset in images.images] == ["u1"]
-    assert photos / "shot.jpg" in pipeline.social_link_consumed
+    assert profile / "media" / "photos" / "shot.jpg" in pipeline.social_link_consumed
 
     loaded = [doc for batch in pipeline._iter_loaded_documents() for doc in batch]
-    assert "shot.jpg" not in {doc.metadata.get("filename") for doc in loaded}
+    filenames = {doc.metadata.get("filename") for doc in loaded}
+    assert "shot.jpg" not in filenames
+    # The posting arrives once, from the linker — the generic JSON reader never saw the dossier.
+    assert "dossier.json" not in filenames
+    assert [doc.text for doc in loaded if (doc.metadata.get("table") or {}).get("style") == "postings"] == ["hello"]
+
+
+def _write_dossier(root: Path) -> Path:
+    """Write a one-posting, one-photo ``me-dossier/1`` profile folder under *root*.
+
+    Args:
+        root: The export root.
+
+    Returns:
+        Path: The profile folder.
+    """
+    profile = root / "jane.poster - facebook"
+    (profile / "media" / "photos").mkdir(parents=True)
+    (profile / "media" / "photos" / "shot.jpg").write_bytes(b"\xff\xd8\xff")
+    posting = {
+        "id": "u1",
+        "platformId": "P_1",
+        "publishedAt": "2023-01-01T10:00:00+00:00",
+        "text": "hello",
+        "network": "facebook",
+        "author": {"name": "Jane Poster", "vanity": "jane.poster", "platformId": "42"},
+        "mediaIds": ["m1"],
+    }
+    media = {"id": "m1", "platformId": "M_1", "status": "complete", "file": f"{profile.name}/media/photos/shot.jpg"}
+    dossier = {"schema": "me-dossier/1", "postings": [posting], "media": [media]}
+    (profile / "dossier.json").write_text(json.dumps(dossier), encoding="utf-8")
+    return profile
+
+
+def test_prefilter_leaves_claimed_files_to_the_linker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-ingested dossier is counted skipped once, by the linker's rows — not a second time by the prefilter.
+
+    The dossier is a supported ``.json``, so the generic reader lists it; its
+    hash is already in the collection because its rows carry it. Counting it
+    in the prefilter too would report every profile twice in ``files_skipped``.
+    """
+    from docint.core.ingest import ingestion_pipeline as pipe_mod
+
+    profile = _write_dossier(tmp_path)
+    images: Any = _RecordingImageService()
+    monkeypatch.setattr(pipe_mod, "ImageIngestionService", lambda *a, **k: object())
+    monkeypatch.setattr(DocumentIngestionPipeline, "_open_ingest_manifest", lambda self: _StubManifest())
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        ner_model=None,
+        progress_callback=None,
+        target_collection="c",
+        image_ingestion_service=images,
+    )
+    pipeline._load_doc_readers()
+
+    pipeline._filter_input_files({compute_file_hash(profile / "dossier.json")})
+
+    assert pipeline.prefilter_skipped == 0
