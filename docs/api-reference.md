@@ -690,8 +690,8 @@ owner-multiplexed stream (`GET /ingest/jobs/events`), framed as
 frame and the job snapshot both carry the stored `artifact`.
 
 `source_id` is whichever identity the caller holds — a document's file hash, a
-media file's content hash, a standalone image's id, or a posting uuid. A
-postings table's file hash expands to every post recorded in it, which is what
+media file's content hash, a standalone image's id, or a posting uuid. A social
+export dossier's file hash expands to every post recorded in it, which is what
 the `413` exists for: the caller queues a targeted job instead of receiving a
 truncated bundle.
 

@@ -134,8 +134,8 @@ inference, so it is safe on an airgapped host.
 file's content hash, a standalone image's id, or a posting uuid. The
 Inspector's document table shows the file hash.
 
-One shape is not small: a **postings table**'s file hash expands to every
-post recorded in it. Above `EXTRACT_SYNC_MAX_UNITS` (default 50) the
+One shape is not small: a social export **dossier**'s file hash expands to
+every post recorded in it. Above `EXTRACT_SYNC_MAX_UNITS` (default 50) the
 synchronous route answers **413** rather than rendering for minutes on the
 request; the SPA turns that into a targeted background build, so the same
 click still gets you the bundle.

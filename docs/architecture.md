@@ -114,8 +114,9 @@ The diagram below expands what happens when the UI calls `POST /query` or
      (`docint/core/ingest/ingestion_pipeline.py`).
 3. **Ingestion pipeline** — before the per-file reader dispatch below, two
    pre-passes sweep the whole batch tree for audio/video:
-   `docint/core/ingest/social_linker.py` (media linked via a social export's
-   `postings.csv` / `media.csv` manifest) runs first, then
+   `docint/core/ingest/social_linker.py` (a social export's `me-dossier/1`
+   dossiers: posting and comment rows, media linked to their posts) runs
+   first, then
    `docint/core/ingest/standalone_media.py` picks up any other audio/video
    file the linker did not already claim. Both route through the shared
    `docint/core/ingest/media_transcribe.py` engine (`MediaTranscriber`) — a
