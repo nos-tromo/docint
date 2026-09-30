@@ -57,6 +57,8 @@ CHARS_PER_TOKEN: float = 3.0
 
 _TRANSLATION_PREFIX: str = "\n    → "
 _EMPTY_BLOCK: str = "—"
+_MIN_ROW_CHARS: int = 2048
+"""A labelled row is never clipped below this, however small the core budget (the old per-row cap)."""
 _PLACEHOLDER_RE = re.compile(r"\{(language|context_before|segments|context_after|first_index|last_index)\}")
 _INDEX_TEXT_RE = re.compile(r"^\[?\s*(\d+)\s*\]?$")
 
@@ -278,8 +280,9 @@ def next_window(lines: Sequence[TranscriptLine], start: int, core_chars: int, co
     """
     core_end = start
     used = 0
+    row_cap = max(core_chars, _MIN_ROW_CHARS)
     while core_end < len(lines):
-        cost = _line_cost(lines[core_end], core_chars)
+        cost = _line_cost(lines[core_end], row_cap)
         if core_end > start and used + cost > core_chars:
             break
         used += cost
@@ -354,7 +357,7 @@ def render_window_prompt(
     values = {
         "language": language,
         "context_before": block(window.context_start, window.core_start, context_chars, keep_tail=True),
-        "segments": block(window.core_start, window.core_end, core_chars),
+        "segments": block(window.core_start, window.core_end, max(core_chars, _MIN_ROW_CHARS)),
         "context_after": block(window.core_end, window.context_end, context_chars),
         "first_index": str(lines[window.core_start].index),
         "last_index": str(lines[window.core_end - 1].index),

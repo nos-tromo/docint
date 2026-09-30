@@ -65,6 +65,20 @@ def test_next_window_packs_core_and_frames_it_with_context() -> None:
     assert window == TranscriptWindow(context_start=1, core_start=2, core_end=3, context_end=4)
 
 
+def test_small_cores_never_clip_a_row_below_the_per_row_floor() -> None:
+    """A tiny core budget still shows each labelled segment whole (up to the old 2048-char cap)."""
+    lines = [
+        TranscriptLine(index=0, text="Die gehören alle weg, sagt er, und meint es ernst."),
+        TranscriptLine(index=1, text="x"),
+    ]
+    window = next_window(lines, 0, core_chars=3, context_chars=0)
+
+    prompt = render_window_prompt("{segments}", lines, window, core_chars=3, context_chars=0, language="de")
+
+    assert (window.core_start, window.core_end) == (0, 1)
+    assert prompt == "[0] Die gehören alle weg, sagt er, und meint es ernst."
+
+
 def test_render_window_prompt_substitutes_once() -> None:
     """Placeholder-like transcript text is inserted verbatim, never substituted again."""
     lines = [TranscriptLine(index=0, text="Er sagte {segments}.", speaker="Speaker 1")]
