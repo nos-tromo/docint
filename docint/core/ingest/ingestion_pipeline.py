@@ -24,13 +24,21 @@ from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
 from docint.core.ingest.hate_speech import (
+    CHARS_PER_TOKEN,
     CHUNK_CATEGORIES,
     CHUNK_STANCES,
     CONFIDENCE_LEVELS,
     REASON_MAX_CHARS,
+    TranscriptLine,
+    TranscriptWindow,
+    WindowFinding,
     chunk_response_format,
     is_structured_output_rejection,
+    next_window,
     normalize_choice,
+    parse_window_reply,
+    render_window_prompt,
+    window_response_format,
 )
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.preprocess import IMAGE_EXTENSIONS, get_preprocess_pool, submit_file
@@ -169,6 +177,62 @@ def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
     return parsed
 
 
+def _node_id(node: Any) -> str:
+    """Return a node's id (``node_id``, else ``id_``), or ``""``.
+
+    Args:
+        node (Any): The node.
+
+    Returns:
+        str: The id.
+    """
+    return str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
+
+
+def _sentence_index(node: Any) -> int:
+    """Return a transcript segment's ``sentence_index`` for ordering (unknown sorts last).
+
+    Args:
+        node (Any): The segment node.
+
+    Returns:
+        int: The index.
+    """
+    value = (getattr(node, "metadata", {}) or {}).get("sentence_index")
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return 2**31
+    try:
+        return int(value)
+    except ValueError:
+        return 2**31
+
+
+def _attach_hate_speech_finding(node: BaseNode, finding: WindowFinding) -> None:
+    """Store an endorsed-hate finding on a transcript segment in the per-chunk shape.
+
+    Args:
+        node (BaseNode): The segment node.
+        finding (WindowFinding): Its finding.
+    """
+    metadata = dict(getattr(node, "metadata", {}) or {})
+    detection: HateSpeechDetection = {
+        "hate_speech": True,
+        "category": finding["category"],
+        "confidence": finding["confidence"],
+        "reason": finding["reason"],
+        "chunk_id": _node_id(node),
+        "chunk_text": getattr(node, "text", "") or "",
+        "source_ref": str(
+            metadata.get("file_path")
+            or metadata.get("filename")
+            or metadata.get("file_name")
+            or metadata.get("source")
+            or ""
+        ),
+    }
+    node.metadata = {**metadata, "hate_speech": detection}
+
+
 def _response_text(response: Any) -> str:
     """Return the text of a llama-index completion response.
 
@@ -230,6 +294,12 @@ class DocumentIngestionPipeline:
     # Cleared once a provider rejects ``response_format`` (or its constrained
     # replies prove unparseable) so the rest of the run stops sending it.
     hate_speech_structured: bool = field(default=True, init=False)
+    # Nextext transcript segments are classified in context windows instead of
+    # one isolated sentence per request; ``None`` keeps the per-chunk path.
+    hate_speech_transcript_prompt: str | None = field(default=None, init=False)
+    hate_speech_window_tokens: int = field(default=1000, init=False)
+    hate_speech_context_tokens: int = field(default=300, init=False)
+    hate_speech_windowed_ids: set[str] = field(default_factory=set, init=False)
 
     # None when the batch holds no reader-supported files at all (e.g. an
     # audio/video-only upload): the generic sweep is skipped but the Nextext
@@ -276,6 +346,8 @@ class DocumentIngestionPipeline:
         )
         self.hate_speech_max_chars = hate_speech_cfg.max_chars
         self.hate_speech_max_workers = hate_speech_cfg.max_workers
+        self.hate_speech_window_tokens = hate_speech_cfg.window_tokens
+        self.hate_speech_context_tokens = hate_speech_cfg.context_tokens
         if self.hate_speech_enabled and self.hate_speech_model is not None:
             try:
                 self.hate_speech_prompt = OpenAIPipeline().load_prompt(kw="hate_speech")
@@ -285,6 +357,14 @@ class DocumentIngestionPipeline:
                     exc,
                 )
                 self.hate_speech_enabled = False
+            if self.hate_speech_enabled:
+                try:
+                    self.hate_speech_transcript_prompt = OpenAIPipeline().load_prompt(kw="hate_speech_transcript")
+                except Exception as exc:
+                    logger.warning(
+                        "Transcript hate-speech prompt unavailable - classifying transcript segments one by one: {}",
+                        exc,
+                    )
 
         # --- Ingestion config ---
         ingestion_cfg = load_ingestion_env()
@@ -419,6 +499,9 @@ class DocumentIngestionPipeline:
             yield docs, [], file_hashes
             return
 
+        # Before batching: a transcript's segments are spread over many small
+        # enrichment batches, and a window needs its neighbours.
+        self._detect_transcript_hate_speech(nodes)
         total_nodes = len(nodes)
         processed_nodes = 0
         node_batches = chunk_nodes(nodes, self.ingestion_batch_size)
@@ -694,7 +777,126 @@ class DocumentIngestionPipeline:
             bool: ``False`` for coarse parents.
         """
         metadata = getattr(node, "metadata", {}) or {}
-        return metadata.get("docint_hier_type") != "coarse"
+        if metadata.get("docint_hier_type") == "coarse":
+            return False
+        return _node_id(node) not in self.hate_speech_windowed_ids
+
+    def _detect_transcript_hate_speech(self, nodes: list[BaseNode]) -> None:
+        """Classify Nextext transcript segments in context windows, annotating endorsed hate.
+
+        Segments are grouped per source file and ordered by ``sentence_index``;
+        each window labels a core of segments while showing its neighbours as
+        read-only context, so a sentence such as "Das ist antisemitisch." is
+        judged as the condemnation it is. Runs on the full node list of a source
+        batch — before enrichment splits it into small node batches. Windowed
+        segments are skipped by the per-chunk detector afterwards; a window whose
+        request fails or whose reply is unparseable yields no finding.
+
+        Args:
+            nodes (list[BaseNode]): Nodes of one source batch.
+        """
+        if not (self.hate_speech_enabled and self.hate_speech_transcript_prompt and self.hate_speech_model is not None):
+            return
+        groups: dict[str, list[BaseNode]] = {}
+        for node in nodes:
+            metadata = getattr(node, "metadata", {}) or {}
+            if metadata.get("docint_doc_kind") != "transcript_segment" or not _node_id(node):
+                continue
+            if not (getattr(node, "text", "") or "").strip():
+                continue
+            key = str(metadata.get("file_hash") or metadata.get("source_file") or metadata.get("file_path") or "")
+            groups.setdefault(key, []).append(node)
+        if not groups:
+            return
+
+        core_chars = max(1, int(self.hate_speech_window_tokens * CHARS_PER_TOKEN))
+        context_chars = max(0, int(self.hate_speech_context_tokens * CHARS_PER_TOKEN))
+        jobs: list[tuple[list[BaseNode], list[TranscriptLine], TranscriptWindow, str]] = []
+        for group in groups.values():
+            ordered = sorted(group, key=_sentence_index)
+            lines = [
+                TranscriptLine(
+                    index=position,
+                    text=(getattr(node, "text", "") or "").strip(),
+                    speaker=str((getattr(node, "metadata", {}) or {}).get("speaker") or "").strip() or None,
+                )
+                for position, node in enumerate(ordered)
+            ]
+            language = str((getattr(ordered[0], "metadata", {}) or {}).get("whisper_language") or "") or "—"
+            position = 0
+            while position < len(lines):
+                window = next_window(lines, position, core_chars, context_chars)
+                jobs.append((ordered, lines, window, language))
+                position = window.core_end
+
+        total = sum(len(group) for group in groups.values())
+        done = 0
+        with ThreadPoolExecutor(max_workers=max(1, self.hate_speech_max_workers)) as executor:
+            futures = [
+                executor.submit(self._classify_transcript_window, lines, window, language, core_chars, context_chars)
+                for _, lines, window, language in jobs
+            ]
+            for (ordered, _, window, _), future in zip(jobs, futures, strict=True):
+                for finding in future.result():
+                    _attach_hate_speech_finding(ordered[finding["index"]], finding)
+                for position in range(window.core_start, window.core_end):
+                    self.hate_speech_windowed_ids.add(_node_id(ordered[position]))
+                done += window.core_end - window.core_start
+                if self.progress_callback:
+                    self.progress_callback(f"Detecting hate speech: {done}/{total} chunks processed")
+
+    def _classify_transcript_window(
+        self,
+        lines: list[TranscriptLine],
+        window: TranscriptWindow,
+        language: str,
+        core_chars: int,
+        context_chars: int,
+    ) -> list[WindowFinding]:
+        """Classify one transcript window, fail-soft.
+
+        Args:
+            lines (list[TranscriptLine]): The transcript's segments, in order.
+            window (TranscriptWindow): The window to classify.
+            language (str): Transcript language label.
+            core_chars (int): Core clip limit.
+            context_chars (int): Context clip limit.
+
+        Returns:
+            list[WindowFinding]: Endorsed-hate findings; ``[]`` when the request
+                fails or the reply is unparseable.
+        """
+        indices = [line.index for line in lines[window.core_start : window.core_end]]
+        prompt = render_window_prompt(
+            cast(str, self.hate_speech_transcript_prompt),
+            lines,
+            window,
+            core_chars=core_chars,
+            context_chars=context_chars,
+            language=language,
+        )
+        try:
+            raw, structured = self._complete_hate_speech(prompt, window_response_format(indices))
+            items = parse_window_reply(raw, indices)
+            if items is None and structured:
+                raw, _ = self._complete_hate_speech(prompt, None)
+                items = parse_window_reply(raw, indices)
+                if items is not None and self.hate_speech_structured:
+                    self.hate_speech_structured = False
+                    logger.warning("Constrained hate-speech replies were unparseable; continuing without it")
+        except Exception as exc:
+            logger.warning(
+                "Hate-speech detection failed on a transcript window of {} segment(s): {}", len(indices), exc
+            )
+            return []
+        if items is None:
+            logger.warning(
+                "Hate-speech reply for a transcript window of {} segment(s) was unparseable ({} chars)",
+                len(indices),
+                len(raw),
+            )
+            return []
+        return items
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
         """Create nodes from documents without applying enrichment stages.
@@ -1284,5 +1486,6 @@ class DocumentIngestionPipeline:
             RuntimeError: If node parsers are not initialized.
         """
         nodes = self._create_nodes_without_enrichment(docs)
+        self._detect_transcript_hate_speech(nodes)
         self._enrich_nodes_in_place(nodes)
         return nodes
