@@ -485,7 +485,7 @@ def _coerce_index(value: Any) -> int | None:
     return None
 
 
-def _normalize_stance(value: Any) -> str:
+def normalize_stance(value: Any) -> str:
     """Normalise a stance, accepting unconstrained inflections of ``endorses``.
 
     Args:
@@ -544,7 +544,7 @@ def parse_window_reply(raw: str, allowed: Collection[int]) -> list[WindowFinding
         readable += 1
         if index not in allowed_set or index in by_index:
             continue
-        if _normalize_stance(item.get("stance")) != "endorses":
+        if normalize_stance(item.get("stance")) != "endorses":
             continue
         by_index[index] = WindowFinding(
             index=index,

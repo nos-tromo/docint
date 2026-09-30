@@ -27,7 +27,6 @@ from loguru import logger
 from docint.core.ingest.hate_speech import (
     CHARS_PER_TOKEN,
     CHUNK_CATEGORIES,
-    CHUNK_STANCES,
     CONFIDENCE_LEVELS,
     REASON_MAX_CHARS,
     TranscriptLine,
@@ -37,6 +36,7 @@ from docint.core.ingest.hate_speech import (
     is_structured_output_rejection,
     next_window,
     normalize_choice,
+    normalize_stance,
     parse_window_reply,
     render_window_prompt,
     window_response_format,
@@ -153,11 +153,15 @@ def _parse_hate_speech_reply(raw: str) -> HateSpeechDetection | None:
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        parsed = next((item for item in parsed if isinstance(item, dict)), None)
+    if not isinstance(parsed, dict):
         parsed, _ = _extract_first_json_dict(cleaned)
     if not isinstance(parsed, dict):
         return None
 
-    endorsed = normalize_choice(parsed.get("stance"), CHUNK_STANCES, "none") == "endorses"
+    endorsed = normalize_stance(parsed.get("stance")) == "endorses"
     category = normalize_choice(parsed.get("category"), CHUNK_CATEGORIES, "other")
     if not endorsed:
         category = "none"
@@ -169,22 +173,6 @@ def _parse_hate_speech_reply(raw: str) -> HateSpeechDetection | None:
         "confidence": normalize_choice(parsed.get("confidence"), CONFIDENCE_LEVELS, "low"),
         "reason": str(parsed.get("reason") or "").strip()[:REASON_MAX_CHARS],
     }
-
-
-def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
-    """Parse hate-speech detector output into a structured verdict, failing closed.
-
-    Args:
-        raw (str): The raw string output from the hate-speech detection model.
-
-    Returns:
-        HateSpeechDetection: The verdict; an unparseable reply is no finding.
-    """
-    parsed = _parse_hate_speech_reply(raw)
-    if parsed is None:
-        logger.warning("Hate-speech reply held no JSON object ({} chars); treating it as no finding", len(raw or ""))
-        return {"hate_speech": False, "category": "none", "confidence": "low", "reason": ""}
-    return parsed
 
 
 def _node_id(node: Any) -> str:

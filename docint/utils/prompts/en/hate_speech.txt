@@ -4,7 +4,7 @@ Decide what the author of the passage says and means, not which words occur. Tal
 
 ## What counts as GMF (when the author endorses it)
 
-- race / ethnicity / nationality — racist slurs aimed at a group; "<group> are subhumans / vermin / parasites"; calls to expel or exterminate a group; "<group> don't belong in this country".
+- race / ethnicity / nationality (including refugees and migrants) — racist slurs aimed at a group; "<group> are subhumans / vermin / parasites"; calls to expel or exterminate a group; "<group> don't belong in this country".
 - religion — incitement against a religious community; "<religion> should be banned / wiped out"; conspiracy claims that cast a religion as a global threat (such as antisemitic world-conspiracy tropes); portraying Muslims as inherently violent.
 - antiziganism (Sinti and Roma; category "ethnicity") — calls for forced relocation, internment, or violence; "<slur> are thieves by nature".
 - gender — "women are property / inferior"; calls to strip women of rights; misogynist calls to violence.
@@ -12,7 +12,7 @@ Decide what the author of the passage says and means, not which words occur. Tal
 - disability — "disabled people should be euthanized / should not exist"; eugenicist incitement.
 - extremism — Holocaust denial or glorification; affirmative Nazi or fascist glorification ("Heil Hitler", "Sieg Heil"); calls for ethnic cleansing or genocide; recruitment for violent extremist movements.
 
-Not GMF, even when meant: insults aimed at an individual without reference to a group; profanity; sharp criticism of policies, governments, parties, ideologies, organizations, professions, or named public figures; satire or polemic that does not dehumanize a protected group.
+Not GMF, even when meant: insults aimed at an individual without reference to a group; profanity with no targeted group ("damn", "shit"); sharp criticism of policies, governments, parties, organizations, professions, or named public figures; criticism of an ideology or religion as a set of ideas, unless it is used to attack the people who belong to it (such as "Islam" meaning Muslims, or "Zionists" meaning Jews); satire or polemic that does not dehumanize a protected group.
 
 ## How to decide
 
@@ -20,14 +20,14 @@ Not GMF, even when meant: insults aimed at an individual without reference to a 
 2. Name the targeted group ("target").
 3. Decide the author's own stance:
    - endorses — the author states, affirms, or spreads the hostility as their own view, including sharing or reposting hateful content without distancing from it.
-   - quotes_or_reports — the author reports what someone else said or did (news, court records, research data) without adopting it.
+   - quotes_or_reports — the author reports what someone else said or did (news, court records, research data) without adopting it. A text styled as news or a report still endorses when it frames the group itself with dehumanizing labels, slurs, or blanket claims.
    - condemns_or_counters — the author rejects, criticizes, or labels something as hateful ("That is antisemitic.", "That's racist.").
    - analyzes_or_discusses — the author explains, teaches, analyzes (for example legally), or asks whether something is hateful.
    - unclear — the passage does not settle the stance.
    - none — the passage holds no hostile content about a protected group.
    Words such as "antisemitic", "racist", "Nazi", or "hate speech" used to describe or criticize something are description or condemnation, not an attack.
-4. If the passage contains several statements, answer "endorses" when the author endorses any of them.
-5. Image descriptions and text read from images (memes, signs, posters): judge the message the image itself conveys, not the neutral voice describing it. A hateful meme or poster endorses its message unless the surrounding text distances itself from it.
+4. If the passage contains several statements, answer "endorses" when the author endorses any of them; quoting hate approvingly, or sharing it without distancing, endorses it.
+5. Text that describes an image or was read from one (a caption, OCR text, tags — memes, signs, posters): judge the message the image itself conveys, not the neutral voice describing it. The uploader's stance is unknown, so a hateful meme or poster endorses its message unless the passage itself distances from it (for example a caption reporting that the poster was removed).
 
 ## Examples (invented)
 
@@ -43,13 +43,16 @@ Result: analyzes_or_discusses
 Text: <group> don't belong in this country. Send them all back.
 Result: endorses
 
-Text: Image description: a poster reading "<group> out!" above a crossed-out place of worship.
+Text: Another knife attack by a <group> man. These people are a plague — when will this country wake up?
+Result: endorses
+
+Text: A poster reads "<group> out!" above a crossed-out place of worship. Tags: poster, street, slogan
 Result: endorses
 
 ## Output
 
 Answer with JSON only, no Markdown:
-{"target": "<group>", "reason": "…", "stance": "endorses", "category": "ethnicity", "confidence": "high"}
+{"target": "<targeted group, or empty>", "reason": "<one short sentence>", "stance": "<stance>", "category": "<category>", "confidence": "<confidence>"}
 
 - "stance": endorses, quotes_or_reports, condemns_or_counters, analyzes_or_discusses, unclear, or none.
 - "category": race, ethnicity, religion, gender, sexual_orientation, disability, nationality, extremism, other, or none (use none with stance none).

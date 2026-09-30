@@ -18,7 +18,7 @@ import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 
 
-def test_parse_hate_speech_payload_extracts_first_json_object_from_noisy_output() -> None:
+def test_parse_hate_speech_reply_extracts_first_json_object_from_noisy_output() -> None:
     """Parser should recover the first JSON object from noisy LLM output."""
     raw = (
         "<think>private chain of thought</think>\n"
@@ -30,7 +30,7 @@ def test_parse_hate_speech_payload_extracts_first_json_object_from_noisy_output(
         '{"target": "", "reason": "ignored", "stance": "none", "category": "none", "confidence": "low"}'
     )
 
-    parsed = pipeline_module._parse_hate_speech_payload(raw)
+    parsed = pipeline_module._parse_hate_speech_reply(raw)
 
     assert parsed == {
         "hate_speech": True,
@@ -40,16 +40,11 @@ def test_parse_hate_speech_payload_extracts_first_json_object_from_noisy_output(
     }
 
 
-def test_parse_hate_speech_payload_returns_safe_default_for_invalid_json() -> None:
-    """Parser should fail open when the model response is unrecoverably malformed."""
+def test_parse_hate_speech_reply_reports_unrecoverable_json_as_unparseable() -> None:
+    """An unrecoverably malformed reply is unparseable (retried unconstrained, then no finding)."""
     raw = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains "quoted" slur"}'
 
-    parsed = pipeline_module._parse_hate_speech_payload(raw)
-
-    assert parsed["hate_speech"] is False
-    assert parsed["category"] == "none"
-    assert parsed["confidence"] == "low"
-    assert parsed["reason"] == ""
+    assert pipeline_module._parse_hate_speech_reply(raw) is None
 
 
 def test_get_collection(monkeypatch: pytest.MonkeyPatch) -> None:

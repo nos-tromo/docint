@@ -4,7 +4,7 @@ Entscheide, was die Verfasserin oder der Verfasser des Abschnitts sagt und meint
 
 ## Was als GMF gilt (wenn der Abschnitt es sich zu eigen macht)
 
-- race / ethnicity / nationality — rassistische Schimpfwörter gegen eine Gruppe; „<Gruppe> sind Untermenschen / Ungeziefer / Parasiten“; Aufrufe, eine Gruppe zu vertreiben oder auszurotten; „<Gruppe> gehören nicht in dieses Land“.
+- race / ethnicity / nationality (auch Geflüchtete und Zugewanderte) — rassistische Schimpfwörter gegen eine Gruppe; „<Gruppe> sind Untermenschen / Ungeziefer / Parasiten“; Aufrufe, eine Gruppe zu vertreiben oder auszurotten; „<Gruppe> gehören nicht in dieses Land“.
 - religion — Hetze gegen eine Religionsgemeinschaft; „<Religion> gehört verboten / vernichtet“; Verschwörungsbehauptungen, die eine Religion als globale Bedrohung darstellen (etwa antisemitische Topoi der Weltverschwörung); die Darstellung von Muslimen als von Natur aus gewalttätig.
 - Antiziganismus (Sinti und Roma; Kategorie „ethnicity“) — Aufrufe zu Zwangsumsiedlung, Internierung oder Gewalt; „<Schimpfwort> sind von Natur aus Diebe“.
 - gender — „Frauen sind Besitz / minderwertig“; Aufrufe, Frauen Rechte zu entziehen; frauenfeindliche Gewaltaufrufe.
@@ -12,7 +12,7 @@ Entscheide, was die Verfasserin oder der Verfasser des Abschnitts sagt und meint
 - disability — „Behinderte gehören euthanasiert / sollten nicht existieren“; eugenische Hetze.
 - extremism — Holocaustleugnung oder -verherrlichung; affirmative NS- oder faschistische Verherrlichung („Heil Hitler“, „Sieg Heil“); Aufrufe zu ethnischer Säuberung oder Völkermord; Rekrutierung für gewaltbereite extremistische Bewegungen.
 
-Keine GMF, auch wenn so gemeint: Beleidigungen einzelner Personen ohne Gruppenbezug; Schimpfwörter; scharfe Kritik an Politik, Regierungen, Parteien, Ideologien, Organisationen, Berufsgruppen oder namentlich genannten öffentlichen Personen; Satire oder Polemik, die keine geschützte Gruppe entmenschlicht.
+Keine GMF, auch wenn so gemeint: Beleidigungen einzelner Personen ohne Gruppenbezug; Kraftausdrücke und Flüche ohne Gruppenbezug („Scheiße“, „verdammt“); scharfe Kritik an Politik, Regierungen, Parteien, Organisationen, Berufsgruppen oder namentlich genannten öffentlichen Personen; Kritik an einer Ideologie oder Religion als Gedankengebäude, sofern damit nicht die Menschen angegriffen werden, die ihr angehören (etwa „der Islam“ im Sinne von Muslimen oder „Zionisten“ im Sinne von Juden); Satire oder Polemik, die keine geschützte Gruppe entmenschlicht.
 
 ## Vorgehen
 
@@ -20,14 +20,14 @@ Keine GMF, auch wenn so gemeint: Beleidigungen einzelner Personen ohne Gruppenbe
 2. Benenne die angegriffene Gruppe („target“).
 3. Bestimme die eigene Haltung des Abschnitts („stance“):
    - endorses — der Abschnitt äußert, bekräftigt oder verbreitet die Feindseligkeit als eigene Sicht, auch durch Teilen oder Weiterverbreiten hasserfüllter Inhalte ohne Distanzierung.
-   - quotes_or_reports — der Abschnitt berichtet, was jemand anderes gesagt oder getan hat (Nachrichten, Gerichtsakten, Forschungsdaten), ohne es sich zu eigen zu machen.
+   - quotes_or_reports — der Abschnitt berichtet, was jemand anderes gesagt oder getan hat (Nachrichten, Gerichtsakten, Forschungsdaten), ohne es sich zu eigen zu machen. Ein als Nachricht oder Bericht aufgemachter Text macht sich die Feindseligkeit dennoch zu eigen, wenn er die Gruppe selbst mit entmenschlichenden Bezeichnungen, Schimpfwörtern oder Pauschalurteilen belegt.
    - condemns_or_counters — der Abschnitt weist etwas zurück, kritisiert es oder bezeichnet es als hasserfüllt („Das ist antisemitisch.“, „Das ist rassistisch.“).
    - analyzes_or_discusses — der Abschnitt erklärt, lehrt, analysiert (etwa juristisch) oder fragt, ob etwas hasserfüllt ist.
    - unclear — der Abschnitt klärt die Haltung nicht.
    - none — der Abschnitt enthält keine feindseligen Inhalte über eine geschützte Gruppe.
    Wörter wie „antisemitisch“, „rassistisch“, „Nazi“ oder „Hassrede“, mit denen etwas beschrieben oder kritisiert wird, sind Beschreibung oder Verurteilung, kein Angriff.
-4. Enthält der Abschnitt mehrere Aussagen, antworte „endorses“, sobald er sich eine davon zu eigen macht.
-5. Bildbeschreibungen und aus Bildern gelesener Text (Memes, Schilder, Plakate): Beurteile die Botschaft, die das Bild selbst vermittelt, nicht die neutrale Stimme, die es beschreibt. Ein hasserfülltes Meme oder Plakat macht sich seine Botschaft zu eigen, sofern der umgebende Text sich nicht davon distanziert.
+4. Enthält der Abschnitt mehrere Aussagen, antworte „endorses“, sobald er sich eine davon zu eigen macht; wer Hass zustimmend zitiert oder ohne Distanzierung teilt, macht ihn sich zu eigen.
+5. Text, der ein Bild beschreibt oder aus einem Bild gelesen wurde (Bildunterschrift, OCR-Text, Schlagworte — Memes, Schilder, Plakate): Beurteile die Botschaft, die das Bild selbst vermittelt, nicht die neutrale Stimme, die es beschreibt. Die Haltung der hochladenden Person ist unbekannt; ein hasserfülltes Meme oder Plakat macht sich seine Botschaft daher zu eigen, sofern sich der Abschnitt nicht selbst davon distanziert (etwa eine Bildunterschrift, nach der das Plakat entfernt wurde).
 
 ## Beispiele (erfunden)
 
@@ -43,13 +43,16 @@ Ergebnis: analyzes_or_discusses
 Text: <Gruppe> gehören nicht in dieses Land. Schickt sie alle zurück.
 Ergebnis: endorses
 
-Text: Bildbeschreibung: ein Plakat mit der Aufschrift „<Gruppe> raus!“ über einem durchgestrichenen Gotteshaus.
+Text: Wieder ein Messerangriff durch einen <Gruppe>. Diese Leute sind eine Plage — wann wacht dieses Land endlich auf?
+Ergebnis: endorses
+
+Text: Ein Plakat mit der Aufschrift „<Gruppe> raus!“ über einem durchgestrichenen Gotteshaus. Schlagworte: Plakat, Straße, Parole
 Ergebnis: endorses
 
 ## Ausgabe
 
 Antworte ausschließlich mit JSON, ohne Markdown:
-{"target": "<Gruppe>", "reason": "…", "stance": "endorses", "category": "ethnicity", "confidence": "high"}
+{"target": "<angegriffene Gruppe oder leer>", "reason": "<ein kurzer Satz>", "stance": "<stance>", "category": "<category>", "confidence": "<confidence>"}
 
 - „stance“: endorses, quotes_or_reports, condemns_or_counters, analyzes_or_discusses, unclear oder none.
 - „category“: race, ethnicity, religion, gender, sexual_orientation, disability, nationality, extremism, other oder none (none zusammen mit stance none).

@@ -50,14 +50,14 @@ def _status_error(status_code: int, message: str) -> openai.APIStatusError:
 
 
 # ---------------------------------------------------------------------------
-# _parse_hate_speech_payload
+# _parse_hate_speech_reply
 # ---------------------------------------------------------------------------
 
 
 def test_parse_flags_only_an_endorsing_author() -> None:
     """The verdict comes from stance: endorsement is hate, condemnation is not."""
-    endorsed = pipeline_module._parse_hate_speech_payload(_chunk_reply("endorses", confidence="Medium"))
-    condemned = pipeline_module._parse_hate_speech_payload(_chunk_reply("condemns_or_counters"))
+    endorsed = pipeline_module._parse_hate_speech_reply(_chunk_reply("endorses", confidence="Medium"))
+    condemned = pipeline_module._parse_hate_speech_reply(_chunk_reply("condemns_or_counters"))
 
     assert endorsed == {
         "hate_speech": True,
@@ -65,6 +65,7 @@ def test_parse_flags_only_an_endorsing_author() -> None:
         "confidence": "medium",
         "reason": "Dehumanizes a group.",
     }
+    assert condemned is not None
     assert condemned["hate_speech"] is False
 
 
@@ -85,13 +86,17 @@ def test_parse_never_flags_without_an_endorsing_stance(payload: str) -> None:
     Args:
         payload (str): A model reply.
     """
-    assert pipeline_module._parse_hate_speech_payload(payload)["hate_speech"] is False
+    parsed = pipeline_module._parse_hate_speech_reply(payload)
+
+    assert parsed is not None
+    assert parsed["hate_speech"] is False
 
 
 def test_parse_maps_unknown_categories_to_other() -> None:
     """Categories outside the GMF enum are normalised instead of passed through."""
-    parsed = pipeline_module._parse_hate_speech_payload(_chunk_reply("endorses", category="racism"))
+    parsed = pipeline_module._parse_hate_speech_reply(_chunk_reply("endorses", category="racism"))
 
+    assert parsed is not None
     assert parsed["category"] == "other"
 
 
@@ -308,3 +313,47 @@ def test_chunk_prompt_asks_for_the_stance_verdict_the_parser_reads(locale: str) 
     for value in (*CHUNK_STANCES, *CHUNK_CATEGORIES, *CONFIDENCE_LEVELS):
         assert value in template, value
     assert '"hate_speech"' not in template
+
+
+def test_german_chunk_prompt_does_not_exempt_the_term_it_uses_for_slurs() -> None:
+    """The not-GMF list must not name "Schimpfwörter", which the GMF list uses for slurs."""
+    template = (_PROMPT_DIR / "de" / "hate_speech.txt").read_text(encoding="utf-8")
+    not_gmf = next(line for line in template.splitlines() if line.startswith("Keine GMF"))
+
+    assert "Schimpfw" not in not_gmf
+
+
+@pytest.mark.parametrize("locale", ["en", "de"])
+def test_chunk_prompt_output_example_is_not_a_verdict(locale: str) -> None:
+    """A model that copies the output template verbatim must not produce a finding.
+
+    Args:
+        locale (str): Prompt locale directory.
+    """
+    template = (_PROMPT_DIR / locale / "hate_speech.txt").read_text(encoding="utf-8")
+    example = next(line for line in template.splitlines() if line.startswith('{"target"'))
+
+    parsed = pipeline_module._parse_hate_speech_reply(example)
+
+    assert parsed is None or parsed["hate_speech"] is False
+
+
+@pytest.mark.parametrize("stance", ["Endorses.", "endorsed"])
+def test_chunk_parser_reads_unconstrained_stances(stance: str) -> None:
+    """Unconstrained inflections of the stance count, as in the window parser.
+
+    Args:
+        stance (str): The stance as an unconstrained model wrote it.
+    """
+    parsed = pipeline_module._parse_hate_speech_reply(_chunk_reply(stance))
+
+    assert parsed is not None
+    assert parsed["hate_speech"] is True
+
+
+def test_chunk_parser_reads_a_list_wrapped_verdict() -> None:
+    """A verdict wrapped in a list (a common unconstrained quirk) is still read."""
+    parsed = pipeline_module._parse_hate_speech_reply("[" + _chunk_reply("endorses") + "]")
+
+    assert parsed is not None
+    assert parsed["hate_speech"] is True
