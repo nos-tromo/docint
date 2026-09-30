@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, NotRequired, TypedDict, cast
@@ -63,6 +64,15 @@ from docint.utils.ner_client import build_remote_ner_extractor
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
+
+WINDOW_MIN_OUTPUT_TOKENS: int = 1024
+"""Minimum output-token cap for one transcript-window request."""
+
+WINDOW_OUTPUT_TOKENS_PER_SEGMENT: int = 80
+"""Output tokens budgeted per core segment, so a window whose every segment is a candidate still fits."""
+
+_TRANSCRIPT_WINDOW_FAILURE_LIMIT: int = 3
+"""Consecutive failed window requests after which the pass stops calling a dead endpoint."""
 
 
 class NoSupportedFilesError(RuntimeError):
@@ -231,6 +241,40 @@ def _attach_hate_speech_finding(node: BaseNode, finding: WindowFinding) -> None:
         ),
     }
     node.metadata = {**metadata, "hate_speech": detection}
+
+
+def _transcript_key(metadata: dict[str, Any]) -> tuple[str, ...]:
+    """Identify the transcript a segment belongs to.
+
+    The file hash alone is not enough: the same clip attached to two postings
+    (or served twice from the transcript cache) yields two transcripts whose
+    segments must not share a window.
+
+    Args:
+        metadata (dict[str, Any]): Segment metadata.
+
+    Returns:
+        tuple[str, ...]: ``(file_hash, file_path, posting_uuid, media_id)``.
+    """
+    return tuple(str(metadata.get(key) or "") for key in ("file_hash", "file_path", "posting_uuid", "media_id"))
+
+
+def _finish_reason(response: Any) -> str | None:
+    """Return why generation stopped, from a llama-index completion's raw provider response.
+
+    Args:
+        response (Any): The completion response.
+
+    Returns:
+        str | None: ``"stop"``, ``"length"``, ..., or ``None`` when not reported.
+    """
+    raw = getattr(response, "raw", None)
+    choices = raw.get("choices") if isinstance(raw, dict) else getattr(raw, "choices", None)
+    if not choices:
+        return None
+    first = choices[0]
+    reason = first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None)
+    return reason if isinstance(reason, str) else None
 
 
 def _response_text(response: Any) -> str:
@@ -681,10 +725,10 @@ class DocumentIngestionPipeline:
                 prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
                     "{text}", text_value[: self.hate_speech_max_chars]
                 )
-                raw, structured = self._complete_hate_speech(prompt, chunk_response_format())
+                raw, structured, _ = self._complete_hate_speech(prompt, chunk_response_format())
                 parsed = _parse_hate_speech_reply(raw)
                 if parsed is None and structured:
-                    raw, _ = self._complete_hate_speech(prompt, None)
+                    raw, _, _ = self._complete_hate_speech(prompt, None)
                     parsed = _parse_hate_speech_reply(raw)
                     if parsed is not None and self.hate_speech_structured:
                         self.hate_speech_structured = False
@@ -734,7 +778,13 @@ class DocumentIngestionPipeline:
         for future in futures:
             future.result()
 
-    def _complete_hate_speech(self, prompt: str, response_format: dict[str, Any] | None) -> tuple[str, bool]:
+    def _complete_hate_speech(
+        self,
+        prompt: str,
+        response_format: dict[str, Any] | None,
+        *,
+        max_tokens: int | None = None,
+    ) -> tuple[str, bool, str | None]:
         """Send one hate-speech request, constrained by ``response_format`` while the provider allows it.
 
         A provider rejecting the schema (HTTP 400/422 that is not a context
@@ -745,14 +795,19 @@ class DocumentIngestionPipeline:
             prompt (str): The rendered prompt.
             response_format (dict[str, Any] | None): The JSON-schema constraint,
                 or ``None`` for an unconstrained request.
+            max_tokens (int | None): Output-token cap for this request, or
+                ``None`` for the model's default.
 
         Returns:
-            tuple[str, bool]: The reply text and whether it was constrained.
+            tuple[str, bool, str | None]: The reply text, whether it was
+                constrained, and the provider's finish reason when reported.
         """
         model = cast(OpenAI, self.hate_speech_model)
+        extra: dict[str, Any] = {"max_tokens": max_tokens} if max_tokens is not None else {}
         if response_format is not None and self.hate_speech_structured:
             try:
-                return _response_text(model.complete(prompt, response_format=response_format)), True
+                response = model.complete(prompt, response_format=response_format, **extra)
+                return _response_text(response), True, _finish_reason(response)
             except Exception as exc:
                 if not is_structured_output_rejection(exc):
                     raise
@@ -762,7 +817,8 @@ class DocumentIngestionPipeline:
                     "without it",
                     getattr(exc, "status_code", "?"),
                 )
-        return _response_text(model.complete(prompt)), False
+        response = model.complete(prompt, **extra)
+        return _response_text(response), False, _finish_reason(response)
 
     def _wants_hate_speech(self, node: BaseNode) -> bool:
         """Report whether the per-chunk detector should classify ``node``.
@@ -797,15 +853,14 @@ class DocumentIngestionPipeline:
         """
         if not (self.hate_speech_enabled and self.hate_speech_transcript_prompt and self.hate_speech_model is not None):
             return
-        groups: dict[str, list[BaseNode]] = {}
+        groups: dict[tuple[str, ...], list[BaseNode]] = {}
         for node in nodes:
             metadata = getattr(node, "metadata", {}) or {}
             if metadata.get("docint_doc_kind") != "transcript_segment" or not _node_id(node):
                 continue
             if not (getattr(node, "text", "") or "").strip():
                 continue
-            key = str(metadata.get("file_hash") or metadata.get("source_file") or metadata.get("file_path") or "")
-            groups.setdefault(key, []).append(node)
+            groups.setdefault(_transcript_key(metadata), []).append(node)
         if not groups:
             return
 
@@ -829,21 +884,60 @@ class DocumentIngestionPipeline:
                 jobs.append((ordered, lines, window, language))
                 position = window.core_end
 
+        # Every windowed segment is settled here, even when its window fails or
+        # the pass stops early: re-judging it alone per chunk would bring back
+        # the context-free verdicts this pass exists to avoid.
+        for ordered, _, window, _ in jobs:
+            for position in range(window.core_start, window.core_end):
+                self.hate_speech_windowed_ids.add(_node_id(ordered[position]))
+
         total = sum(len(group) for group in groups.values())
         done = 0
-        with ThreadPoolExecutor(max_workers=max(1, self.hate_speech_max_workers)) as executor:
-            futures = [
-                executor.submit(self._classify_transcript_window, lines, window, language, core_chars, context_chars)
-                for _, lines, window, language in jobs
-            ]
-            for (ordered, _, window, _), future in zip(jobs, futures, strict=True):
-                for finding in future.result():
-                    _attach_hate_speech_finding(ordered[finding["index"]], finding)
-                for position in range(window.core_start, window.core_end):
-                    self.hate_speech_windowed_ids.add(_node_id(ordered[position]))
-                done += window.core_end - window.core_start
-                if self.progress_callback:
-                    self.progress_callback(f"Detecting hate speech: {done}/{total} chunks processed")
+        failures_in_a_row = 0
+        workers = max(1, self.hate_speech_max_workers)
+        queued = iter(jobs)
+        in_flight: deque[tuple[tuple[list[BaseNode], list[TranscriptLine], TranscriptWindow, str], Future[Any]]]
+        in_flight = deque()
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+
+            def submit_next() -> None:
+                """Start the next queued window, if any."""
+                job = next(queued, None)
+                if job is not None:
+                    _, lines, window, language = job
+                    in_flight.append(
+                        (
+                            job,
+                            executor.submit(
+                                self._classify_transcript_window, lines, window, language, core_chars, context_chars
+                            ),
+                        )
+                    )
+
+            for _ in range(workers):
+                submit_next()
+            try:
+                while in_flight:
+                    (ordered, _, window, _), future = in_flight.popleft()
+                    findings, failed = future.result()
+                    for finding in findings:
+                        _attach_hate_speech_finding(ordered[finding["index"]], finding)
+                    failures_in_a_row = failures_in_a_row + 1 if failed else 0
+                    done += window.core_end - window.core_start
+                    if failures_in_a_row >= _TRANSCRIPT_WINDOW_FAILURE_LIMIT:
+                        logger.warning(
+                            "Hate-speech detection gave up on transcript windows after {} consecutive failures; "
+                            "{} segment(s) left unclassified",
+                            failures_in_a_row,
+                            total - done,
+                        )
+                        break
+                    submit_next()
+                    if self.progress_callback:
+                        self.progress_callback(f"Detecting hate speech: {done}/{total} chunks processed")
+            finally:
+                for _, pending in in_flight:
+                    pending.cancel()
 
     def _classify_transcript_window(
         self,
@@ -852,8 +946,13 @@ class DocumentIngestionPipeline:
         language: str,
         core_chars: int,
         context_chars: int,
-    ) -> list[WindowFinding]:
+    ) -> tuple[list[WindowFinding], bool]:
         """Classify one transcript window, fail-soft.
+
+        The reply's output cap grows with the core (see
+        :data:`WINDOW_OUTPUT_TOKENS_PER_SEGMENT`). A reply stopped at that cap is
+        not trusted: the window's segments are asked again one per request, each
+        with its own context margins.
 
         Args:
             lines (list[TranscriptLine]): The transcript's segments, in order.
@@ -863,8 +962,8 @@ class DocumentIngestionPipeline:
             context_chars (int): Context clip limit.
 
         Returns:
-            list[WindowFinding]: Endorsed-hate findings; ``[]`` when the request
-                fails or the reply is unparseable.
+            tuple[list[WindowFinding], bool]: Endorsed-hate findings (``[]`` when
+                the reply is unparseable), and whether the request itself failed.
         """
         indices = [line.index for line in lines[window.core_start : window.core_end]]
         prompt = render_window_prompt(
@@ -875,11 +974,14 @@ class DocumentIngestionPipeline:
             context_chars=context_chars,
             language=language,
         )
+        max_tokens = max(WINDOW_MIN_OUTPUT_TOKENS, WINDOW_OUTPUT_TOKENS_PER_SEGMENT * len(indices))
         try:
-            raw, structured = self._complete_hate_speech(prompt, window_response_format(indices))
+            raw, structured, finish_reason = self._complete_hate_speech(
+                prompt, window_response_format(indices), max_tokens=max_tokens
+            )
             items = parse_window_reply(raw, indices)
-            if items is None and structured:
-                raw, _ = self._complete_hate_speech(prompt, None)
+            if items is None and structured and finish_reason != "length":
+                raw, _, finish_reason = self._complete_hate_speech(prompt, None, max_tokens=max_tokens)
                 items = parse_window_reply(raw, indices)
                 if items is not None and self.hate_speech_structured:
                     self.hate_speech_structured = False
@@ -888,15 +990,31 @@ class DocumentIngestionPipeline:
             logger.warning(
                 "Hate-speech detection failed on a transcript window of {} segment(s): {}", len(indices), exc
             )
-            return []
+            return [], True
+        if finish_reason == "length" and len(indices) > 1:
+            logger.warning(
+                "A hate-speech reply for a transcript window of {} segment(s) stopped at the output cap; "
+                "asking its segments one by one",
+                len(indices),
+            )
+            findings: list[WindowFinding] = []
+            failed = False
+            for position in range(window.core_start, window.core_end):
+                single = next_window(lines, position, 1, context_chars)
+                sub_findings, sub_failed = self._classify_transcript_window(
+                    lines, single, language, core_chars, context_chars
+                )
+                findings.extend(sub_findings)
+                failed = failed or sub_failed
+            return findings, failed
         if items is None:
             logger.warning(
                 "Hate-speech reply for a transcript window of {} segment(s) was unparseable ({} chars)",
                 len(indices),
                 len(raw),
             )
-            return []
-        return items
+            return [], False
+        return items, False
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
         """Create nodes from documents without applying enrichment stages.

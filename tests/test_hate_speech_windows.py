@@ -10,6 +10,7 @@ import httpx
 import openai
 import pytest
 from llama_index.core import Document
+from typing_extensions import override
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core.ingest.hate_speech import (
@@ -21,6 +22,8 @@ from docint.core.ingest.hate_speech import (
     window_response_format,
 )
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.jobs import JobCancelled
+from docint.core.readers.json import CustomJSONReader
 
 _TEMPLATE = "L={language}\nB:\n{context_before}\nS({first_index}-{last_index}):\n{segments}\nA:\n{context_after}"
 
@@ -501,3 +504,194 @@ _NEXTEXT_TRANSCRIPT_PROMPT_SHA256: dict[str, str] = {
     "de": "99703816dc6dbd4a213358dd6af940b238591867fdb97be8c7f6e4a13b62f576",
 }
 """SHA-256 of Nextext's ``nextext/utils/prompts/<locale>/hate_speech_transcript.txt``."""
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: cancellation, failure breaker, grouping, truncation, contract
+# ---------------------------------------------------------------------------
+
+
+def test_stop_cancels_the_windows_still_queued(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A cancelled job stops calling the model within one round of in-flight windows.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory.
+    """
+    model = _RecordingModel(lambda prompt, kwargs: '{"findings": []}')
+
+    def cancel(_: str) -> None:
+        raise JobCancelled("stop requested")
+
+    pipeline = _pipeline(monkeypatch, tmp_path, model, window_tokens=1, context_tokens=0)
+    pipeline.progress_callback = cancel
+    nodes = [_segment(f"Satz {i}.", i) for i in range(20)]
+    monkeypatch.setattr(DocumentIngestionPipeline, "_create_nodes_without_enrichment", lambda self, docs: nodes)
+
+    with pytest.raises(JobCancelled):
+        pipeline._create_nodes([Document(text="x")])
+
+    assert len(model.calls) <= pipeline.hate_speech_max_workers + 1
+
+
+def test_consecutive_failures_stop_the_window_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A dead endpoint is not called once per remaining window; the pass gives up and moves on.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory.
+    """
+
+    def respond(prompt: str, kwargs: dict[str, Any]) -> str:
+        raise ConnectionError("router unreachable")
+
+    model = _RecordingModel(respond)
+    pipeline = _pipeline(monkeypatch, tmp_path, model, window_tokens=1, context_tokens=0)
+    nodes = [_segment(f"Satz {i}.", i) for i in range(20)]
+    monkeypatch.setattr(DocumentIngestionPipeline, "_create_nodes_without_enrichment", lambda self, docs: nodes)
+
+    pipeline._create_nodes([Document(text="x")])
+
+    assert len(model.calls) <= 3 + pipeline.hate_speech_max_workers
+    assert all("hate_speech" not in node.metadata for node in nodes)
+
+
+def test_a_failed_window_is_not_resent_segment_by_segment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Segments of a window whose request failed are not re-judged alone by the per-chunk detector.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory.
+    """
+
+    def respond(prompt: str, kwargs: dict[str, Any]) -> str:
+        raise ConnectionError("router unreachable")
+
+    model = _RecordingModel(respond)
+    pipeline = _pipeline(monkeypatch, tmp_path, model)
+    nodes = [_segment("Eins.", 0), _segment("Zwei.", 1)]
+    monkeypatch.setattr(DocumentIngestionPipeline, "_create_nodes_without_enrichment", lambda self, docs: nodes)
+
+    pipeline._create_nodes([Document(text="x")])
+
+    assert len(model.calls) == 1
+
+
+def test_reposted_clips_are_windowed_per_posting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The same clip attached to two postings yields two transcripts, not one interleaved window.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory.
+    """
+    model = _RecordingModel(lambda prompt, kwargs: '{"findings": []}')
+    pipeline = _pipeline(monkeypatch, tmp_path, model)
+    nodes = []
+    for posting in ("p-1", "p-2"):
+        for index, text in enumerate(["Guten Abend.", "Willkommen."]):
+            node = _segment(text, index)
+            node.node_id = f"{posting}-{index}"
+            node.metadata["posting_uuid"] = posting
+            nodes.append(node)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_create_nodes_without_enrichment", lambda self, docs: nodes)
+
+    pipeline._create_nodes([Document(text="x")])
+
+    assert len(model.calls) == 2
+    assert all(call["prompt"].count("Guten Abend.") == 1 for call in model.calls)
+
+
+def test_a_cut_off_window_reply_falls_back_to_one_segment_per_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A window reply stopped at the output cap is not trusted; its segments are asked one by one.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory.
+    """
+    truncated = SimpleNamespace(choices=[SimpleNamespace(finish_reason="length")])
+
+    class _TruncatingModel(_RecordingModel):
+        """Cuts off the multi-segment window, answers single segments normally."""
+
+        @override
+        def complete(self, prompt: str, **kwargs: Any) -> SimpleNamespace:
+            """Record the call and cut the reply off when the core holds several segments.
+
+            Args:
+                prompt (str): The rendered prompt.
+                **kwargs (Any): Request keyword arguments.
+
+            Returns:
+                SimpleNamespace: A response exposing ``text`` and ``raw``.
+            """
+            self.calls.append({"prompt": prompt, **kwargs})
+            if "S(0-2)" in prompt:
+                return SimpleNamespace(text='{"findings": [{"index": 0, "sta', raw=truncated)
+            reply = _window_reply((2, "endorses")) if "S(2-2)" in prompt else '{"findings": []}'
+            return SimpleNamespace(text=reply, raw=SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop")]))
+
+    model = _TruncatingModel(lambda prompt, kwargs: "")
+    pipeline = _pipeline(monkeypatch, tmp_path, model)
+    nodes = [_segment("Eins.", 0), _segment("Zwei.", 1), _segment("Die gehören alle weg.", 2)]
+    monkeypatch.setattr(DocumentIngestionPipeline, "_create_nodes_without_enrichment", lambda self, docs: nodes)
+
+    pipeline._create_nodes([Document(text="x")])
+
+    assert len(model.calls) == 4
+    assert model.calls[0]["max_tokens"] >= 1024
+    assert "hate_speech" in nodes[2].metadata
+    assert "hate_speech" not in nodes[0].metadata
+
+
+def test_real_nextext_jsonl_reaches_the_window_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Contract with the Nextext reader: its metadata keys drive grouping, order, speakers and language.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory.
+    """
+    rows = [
+        (0, "Speaker 1", "In die Unterkunft sind viele Geflüchtete gezogen."),
+        (1, "Speaker 1", "Die gehören alle weg."),
+        (2, "Speaker 2", "So redet man nicht über Menschen."),
+    ]
+    transcript = tmp_path / "talk.docint.jsonl"
+    transcript.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "source_file": "talk.wav",
+                    "language": "de",
+                    "sentence_index": index,
+                    "start_seconds": float(index * 5),
+                    "end_seconds": float(index * 5 + 4),
+                    "start_ts": f"00:00:{index * 5:02d}",
+                    "end_ts": f"00:00:{index * 5 + 4:02d}",
+                    "speaker": speaker,
+                    "text": text,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            for index, speaker, text in rows
+        ),
+        encoding="utf-8",
+    )
+    model = _RecordingModel(lambda prompt, kwargs: _window_reply((1, "endorses")))
+    pipeline = _pipeline(monkeypatch, tmp_path, model)
+    pipeline.md_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: []))
+    pipeline.docling_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: []))
+
+    docs = list(CustomJSONReader(is_jsonl=True).iter_documents(transcript))
+    nodes = pipeline._create_nodes(docs)
+
+    assert len(model.calls) == 1
+    assert (
+        "[0] Speaker 1: In die Unterkunft sind viele Geflüchtete gezogen.\n"
+        "[1] Speaker 1: Die gehören alle weg.\n[2] Speaker 2: So redet man nicht über Menschen."
+    ) in model.calls[0]["prompt"]
+    assert model.calls[0]["prompt"].startswith("L=de\n")
+    flagged = [node.get_content() for node in nodes if "hate_speech" in (node.metadata or {})]
+    assert flagged == ["Die gehören alle weg."]
