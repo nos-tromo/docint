@@ -23,11 +23,11 @@ def test_parse_hate_speech_payload_extracts_first_json_object_from_noisy_output(
     raw = (
         "<think>private chain of thought</think>\n"
         "```json\n"
-        '{"hate_speech": true, "category": "ethnicity", "confidence": "high", '
-        '"reason": "Contains dehumanizing language."}\n'
+        '{"target": "refugees", "reason": "Contains dehumanizing language.", "stance": "endorses", '
+        '"category": "ethnicity", "confidence": "high"}\n'
         "```\n"
         "One more note the caller should ignore.\n"
-        '{"hate_speech": false, "category": "none", "confidence": "low", "reason": "ignored"}'
+        '{"target": "", "reason": "ignored", "stance": "none", "category": "none", "confidence": "low"}'
     )
 
     parsed = pipeline_module._parse_hate_speech_payload(raw)
@@ -607,6 +607,8 @@ def test_hate_speech_detection_attaches_flagged_metadata(monkeypatch: pytest.Mon
         enabled = True
         max_chars = 128
         max_workers = 1
+        window_tokens = 1000
+        context_tokens = 300
 
     class FakeIngestionConfig:
         ingestion_batch_size = 2
@@ -647,18 +649,19 @@ def test_hate_speech_detection_attaches_flagged_metadata(monkeypatch: pytest.Mon
         """Fake response class to simulate the output of the OpenAI API for hate-speech detection."""
 
         text = (
-            '{"hate_speech": true, "category": "ethnicity", "confidence": "high",'
-            ' "reason": "Contains hateful language."}'
+            '{"target": "a group", "reason": "Contains hateful language.", "stance": "endorses",'
+            ' "category": "ethnicity", "confidence": "high"}'
         )
 
     class FakeModel:
         """Fake model class to simulate the behavior of a hate-speech detection model."""
 
-        def complete(self, prompt: str) -> FakeResponse:
+        def complete(self, prompt: str, **kwargs: Any) -> FakeResponse:
             """Simulate the completion of a prompt by the fake model.
 
             Args:
                 prompt (str): The prompt to complete.
+                **kwargs: Request keyword arguments (e.g. ``response_format``), ignored.
 
             Returns:
                 FakeResponse: The simulated response.
@@ -725,6 +728,8 @@ def test_hate_speech_detection_parallel_workers(monkeypatch: pytest.MonkeyPatch,
         enabled = True
         max_chars = 128
         max_workers = 2
+        window_tokens = 1000
+        context_tokens = 300
 
     class FakeIngestionConfig:
         """Ingestion config stub with default settings."""
@@ -758,16 +763,17 @@ def test_hate_speech_detection_parallel_workers(monkeypatch: pytest.MonkeyPatch,
     class FakeResponse:
         """Fake LLM response indicating hate speech detected."""
 
-        text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "offensive"}'
+        text = _FLAGGED_RESPONSE_TEXT
 
     class FakeModel:
         """Fake model that counts invocations."""
 
-        def complete(self, prompt: str) -> FakeResponse:
+        def complete(self, prompt: str, **kwargs: Any) -> FakeResponse:
             """Increment invocation count and return a flagged response.
 
             Args:
                 prompt: The prompt text.
+                **kwargs: Request keyword arguments (e.g. ``response_format``), ignored.
 
             Returns:
                 A ``FakeResponse`` with hate-speech flagged.
@@ -821,7 +827,9 @@ def test_hate_speech_detection_parallel_workers(monkeypatch: pytest.MonkeyPatch,
         assert detection["hate_speech"] is True
 
 
-_FLAGGED_RESPONSE_TEXT = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "offensive"}'
+_FLAGGED_RESPONSE_TEXT = (
+    '{"target": "a group", "reason": "offensive", "stance": "endorses", "category": "ethnicity", "confidence": "high"}'
+)
 
 
 def _make_enrichment_pipeline(
@@ -863,6 +871,8 @@ def _make_enrichment_pipeline(
         enabled = hate_enabled
         max_chars = 512
         max_workers = hate_workers
+        window_tokens = 1000
+        context_tokens = 300
 
     class FakeIngestionConfig:
         ingestion_batch_size = 2
@@ -941,11 +951,12 @@ def test_enrichment_overlaps_hate_speech_with_ner_across_nodes(monkeypatch: pyte
         text = _FLAGGED_RESPONSE_TEXT
 
     class FakeModel:
-        def complete(self, prompt: str) -> FakeResponse:
+        def complete(self, prompt: str, **kwargs: Any) -> FakeResponse:
             """Signal that the hate-speech stage has started.
 
             Args:
                 prompt: The prompt text.
+                **kwargs: Request keyword arguments (e.g. ``response_format``), ignored.
 
             Returns:
                 A flagged response.
@@ -1003,11 +1014,12 @@ def test_enrichment_honors_per_stage_concurrency_caps(monkeypatch: pytest.Monkey
         text = _FLAGGED_RESPONSE_TEXT
 
     class FakeModel:
-        def complete(self, prompt: str) -> FakeResponse:
+        def complete(self, prompt: str, **kwargs: Any) -> FakeResponse:
             """Track in-flight hate-speech calls.
 
             Args:
                 prompt: The prompt text.
+                **kwargs: Request keyword arguments (e.g. ``response_format``), ignored.
 
             Returns:
                 A flagged response.
@@ -1047,11 +1059,12 @@ def test_enrichment_progress_messages_per_stage(monkeypatch: pytest.MonkeyPatch,
         text = _FLAGGED_RESPONSE_TEXT
 
     class FakeModel:
-        def complete(self, prompt: str) -> FakeResponse:
+        def complete(self, prompt: str, **kwargs: Any) -> FakeResponse:
             """Return a flagged response.
 
             Args:
                 prompt: The prompt text.
+                **kwargs: Request keyword arguments (e.g. ``response_format``), ignored.
 
             Returns:
                 A flagged response.
@@ -1104,11 +1117,12 @@ def test_enrichment_exactly_once_and_skips_empty_text(monkeypatch: pytest.Monkey
         text = _FLAGGED_RESPONSE_TEXT
 
     class FakeModel:
-        def complete(self, prompt: str) -> FakeResponse:
+        def complete(self, prompt: str, **kwargs: Any) -> FakeResponse:
             """Record the prompt and return a flagged response.
 
             Args:
                 prompt: The prompt text.
+                **kwargs: Request keyword arguments (e.g. ``response_format``), ignored.
 
             Returns:
                 A flagged response.
@@ -1179,11 +1193,12 @@ def test_enrichment_single_stage_and_disabled(monkeypatch: pytest.MonkeyPatch, t
         text = _FLAGGED_RESPONSE_TEXT
 
     class FakeModel:
-        def complete(self, prompt: str) -> FakeResponse:
+        def complete(self, prompt: str, **kwargs: Any) -> FakeResponse:
             """Return a flagged response.
 
             Args:
                 prompt: The prompt text.
+                **kwargs: Request keyword arguments (e.g. ``response_format``), ignored.
 
             Returns:
                 A flagged response.

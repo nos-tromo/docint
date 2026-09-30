@@ -23,6 +23,15 @@ from llama_index.llms.openai import OpenAI
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
+from docint.core.ingest.hate_speech import (
+    CHUNK_CATEGORIES,
+    CHUNK_STANCES,
+    CONFIDENCE_LEVELS,
+    REASON_MAX_CHARS,
+    chunk_response_format,
+    is_structured_output_rejection,
+    normalize_choice,
+)
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.preprocess import IMAGE_EXTENSIONS, get_preprocess_pool, submit_file
 from docint.core.ingest.standalone_media import StandaloneMediaIngestor
@@ -100,14 +109,20 @@ def _extract_first_json_dict(text: str) -> tuple[dict[str, Any] | None, json.JSO
     return None, last_exc
 
 
-def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
-    """Parse hate-speech detector model output into a structured dictionary.
+def _parse_hate_speech_reply(raw: str) -> HateSpeechDetection | None:
+    """Parse a stance-aware hate-speech verdict, or report it as unparseable.
+
+    The verdict comes from ``stance`` alone: only ``endorses`` is hate speech.
+    No boolean is read, so neither a stray ``"hate_speech": true`` nor the
+    string ``"false"`` can create a finding. Categories and confidences are
+    normalised to their enums; an endorsed verdict never carries ``none``.
 
     Args:
-        raw (str): The raw string output from the hate-speech detection model.
+        raw (str): The raw model output (reasoning, prose and fences tolerated).
 
     Returns:
-        HateSpeechDetection: A structured dictionary containing hate-speech detection results.
+        HateSpeechDetection | None: The verdict, or ``None`` when the reply
+            holds no JSON object.
     """
     cleaned, captured = strip_reasoning(raw or "")
     if captured:
@@ -116,42 +131,54 @@ def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
             len(captured),
         )
 
-    parsed: Any = {}
+    parsed: Any
     try:
         parsed = json.loads(cleaned)
-    except Exception as exc:
-        logger.debug("Failed direct hate-speech JSON parse: {}", exc)
-        extracted, extract_exc = _extract_first_json_dict(cleaned)
-        if extracted is not None:
-            parsed = extracted
-        else:
-            preview = cleaned[:160].replace("\n", " ")
-            logger.warning(
-                "Failed hate-speech JSON extraction from model response: {} (preview={!r})",
-                extract_exc or exc,
-                preview,
-            )
-            parsed = cast(dict[str, Any], {})
-
+    except json.JSONDecodeError:
+        parsed, _ = _extract_first_json_dict(cleaned)
     if not isinstance(parsed, dict):
-        return {
-            "hate_speech": False,
-            "category": "none",
-            "confidence": "low",
-            "reason": "Invalid model response format",
-        }
+        return None
 
-    category = str(parsed.get("category") or "none").strip().lower() or "none"
-    confidence = str(parsed.get("confidence") or "low").strip().lower() or "low"
-    if confidence not in {"high", "medium", "low"}:
-        confidence = "low"
-
+    endorsed = normalize_choice(parsed.get("stance"), CHUNK_STANCES, "none") == "endorses"
+    category = normalize_choice(parsed.get("category"), CHUNK_CATEGORIES, "other")
+    if not endorsed:
+        category = "none"
+    elif category == "none":
+        category = "other"
     return {
-        "hate_speech": bool(parsed.get("hate_speech")),
+        "hate_speech": endorsed,
         "category": category,
-        "confidence": confidence,
-        "reason": str(parsed.get("reason") or "").strip(),
+        "confidence": normalize_choice(parsed.get("confidence"), CONFIDENCE_LEVELS, "low"),
+        "reason": str(parsed.get("reason") or "").strip()[:REASON_MAX_CHARS],
     }
+
+
+def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
+    """Parse hate-speech detector output into a structured verdict, failing closed.
+
+    Args:
+        raw (str): The raw string output from the hate-speech detection model.
+
+    Returns:
+        HateSpeechDetection: The verdict; an unparseable reply is no finding.
+    """
+    parsed = _parse_hate_speech_reply(raw)
+    if parsed is None:
+        logger.warning("Hate-speech reply held no JSON object ({} chars); treating it as no finding", len(raw or ""))
+        return {"hate_speech": False, "category": "none", "confidence": "low", "reason": ""}
+    return parsed
+
+
+def _response_text(response: Any) -> str:
+    """Return the text of a llama-index completion response.
+
+    Args:
+        response (Any): The completion response.
+
+    Returns:
+        str: Its text.
+    """
+    return str(response.text if hasattr(response, "text") else response)
 
 
 @dataclass(slots=True)
@@ -200,6 +227,9 @@ class DocumentIngestionPipeline:
     hate_speech_max_chars: int = field(default=1500, init=False)
     hate_speech_max_workers: int = field(default=1, init=False)
     hate_speech_prompt: str | None = field(default=None, init=False)
+    # Cleared once a provider rejects ``response_format`` (or its constrained
+    # replies prove unparseable) so the rest of the run stops sending it.
+    hate_speech_structured: bool = field(default=True, init=False)
 
     # None when the batch holds no reader-supported files at all (e.g. an
     # audio/video-only upload): the generic sweep is skipped but the Nextext
@@ -568,10 +598,18 @@ class DocumentIngestionPipeline:
                 prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
                     "{text}", text_value[: self.hate_speech_max_chars]
                 )
-                response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
-                raw = response.text if hasattr(response, "text") else str(response)
-                parsed = _parse_hate_speech_payload(str(raw))
-                if bool(parsed.get("hate_speech")):
+                raw, structured = self._complete_hate_speech(prompt, chunk_response_format())
+                parsed = _parse_hate_speech_reply(raw)
+                if parsed is None and structured:
+                    raw, _ = self._complete_hate_speech(prompt, None)
+                    parsed = _parse_hate_speech_reply(raw)
+                    if parsed is not None and self.hate_speech_structured:
+                        self.hate_speech_structured = False
+                        logger.warning("Constrained hate-speech replies were unparseable; continuing without it")
+                if parsed is None:
+                    logger.warning("Hate-speech reply for chunk {} was unparseable ({} chars)", idx, len(raw))
+                    return
+                if parsed["hate_speech"]:
                     meta = dict(getattr(node, "metadata", {}) or {})
                     chunk_id = str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
                     source_ref = str(
@@ -598,7 +636,7 @@ class DocumentIngestionPipeline:
                         _extract_entities(idx, node, text_value)
                 _tick("ner", "Extracting entities")
             if hate_enabled:
-                if has_text:
+                if has_text and self._wants_hate_speech(node):
                     with hate_sem:
                         _detect_hate_speech(idx, node, text_value)
                 _tick("hate", "Detecting hate speech")
@@ -612,6 +650,51 @@ class DocumentIngestionPipeline:
         # and must fail the batch like it did pre-pooling, not vanish.
         for future in futures:
             future.result()
+
+    def _complete_hate_speech(self, prompt: str, response_format: dict[str, Any] | None) -> tuple[str, bool]:
+        """Send one hate-speech request, constrained by ``response_format`` while the provider allows it.
+
+        A provider rejecting the schema (HTTP 400/422 that is not a context
+        overflow) gets the same prompt again unconstrained, and the rest of the
+        run stops sending the schema.
+
+        Args:
+            prompt (str): The rendered prompt.
+            response_format (dict[str, Any] | None): The JSON-schema constraint,
+                or ``None`` for an unconstrained request.
+
+        Returns:
+            tuple[str, bool]: The reply text and whether it was constrained.
+        """
+        model = cast(OpenAI, self.hate_speech_model)
+        if response_format is not None and self.hate_speech_structured:
+            try:
+                return _response_text(model.complete(prompt, response_format=response_format)), True
+            except Exception as exc:
+                if not is_structured_output_rejection(exc):
+                    raise
+                self.hate_speech_structured = False
+                logger.warning(
+                    "The inference endpoint rejected response_format (HTTP {}); continuing hate-speech detection "
+                    "without it",
+                    getattr(exc, "status_code", "?"),
+                )
+        return _response_text(model.complete(prompt)), False
+
+    def _wants_hate_speech(self, node: BaseNode) -> bool:
+        """Report whether the per-chunk detector should classify ``node``.
+
+        Coarse hierarchical parents are never stored as vectors, so their
+        verdicts would never surface — classifying them only costs requests.
+
+        Args:
+            node (BaseNode): The node.
+
+        Returns:
+            bool: ``False`` for coarse parents.
+        """
+        metadata = getattr(node, "metadata", {}) or {}
+        return metadata.get("docint_hier_type") != "coarse"
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
         """Create nodes from documents without applying enrichment stages.
