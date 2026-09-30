@@ -61,6 +61,7 @@ _MIN_ROW_CHARS: int = 2048
 """A labelled row is never clipped below this, however small the core budget (the old per-row cap)."""
 _PLACEHOLDER_RE = re.compile(r"\{(language|context_before|segments|context_after|first_index|last_index)\}")
 _INDEX_TEXT_RE = re.compile(r"^\[?\s*(\d+)\s*\]?$")
+_NON_WORD_RE = re.compile(r"[^a-z_]+")
 
 _CONTEXT_LENGTH_ERROR_MARKERS: tuple[str, ...] = (
     "context length",
@@ -422,31 +423,45 @@ def _looks_like_findings(candidate: Any) -> bool:
 def _load_json_payload(text: str) -> Any:
     """Decode the findings payload from a reply that may wrap it in prose or fences.
 
+    Scanning skips past every value it decodes, so when the outer
+    ``{"findings": [...]`` never closes (a reply cut off mid-list) every
+    complete item inside it is still recovered.
+
     Args:
         text (str): The reply with reasoning removed.
 
     Returns:
-        Any: The first ``{"findings": ...}`` object, else the first value that
-            looks like findings, else the whole reply decoded (or ``None``).
+        Any: The first ``{"findings": ...}`` object, else the first list of
+            objects, else every complete finding object found (as a list), else
+            ``None``.
     """
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
     decoder = json.JSONDecoder()
-    fallback: Any = None
-    for position, char in enumerate(text):
-        if char not in "{[":
+    first_list: list[Any] | None = None
+    items: list[dict[str, Any]] = []
+    position = 0
+    while position < len(text):
+        if text[position] not in "{[":
+            position += 1
             continue
         try:
-            candidate, _ = decoder.raw_decode(text, position)
+            candidate, end = decoder.raw_decode(text, position)
         except json.JSONDecodeError:
+            position += 1
             continue
         if isinstance(candidate, dict) and "findings" in candidate:
             return candidate
-        if fallback is None and _looks_like_findings(candidate):
-            fallback = candidate
-    return fallback
+        if isinstance(candidate, list) and first_list is None and _looks_like_findings(candidate):
+            first_list = candidate
+        elif isinstance(candidate, dict) and _looks_like_findings(candidate):
+            items.append(candidate)
+        position = end
+    if first_list is not None:
+        return first_list
+    return items or None
 
 
 def _coerce_index(value: Any) -> int | None:
@@ -470,11 +485,31 @@ def _coerce_index(value: Any) -> int | None:
     return None
 
 
+def _normalize_stance(value: Any) -> str:
+    """Normalise a stance, accepting unconstrained inflections of ``endorses``.
+
+    Args:
+        value (Any): The raw ``stance`` value.
+
+    Returns:
+        str: One of :data:`HATE_SPEECH_STANCES`; negations such as
+            ``"does not endorse"`` stay ``unclear``.
+    """
+    if not isinstance(value, str):
+        return "unclear"
+    normalized = _NON_WORD_RE.sub("_", value.strip().lower()).strip("_")
+    if normalized in HATE_SPEECH_STANCES:
+        return normalized
+    return "endorses" if normalized.startswith("endors") else "unclear"
+
+
 def parse_window_reply(raw: str, allowed: Collection[int]) -> list[WindowFinding] | None:
     """Parse a window reply into the segments whose speaker endorses hate.
 
-    A segment is a finding if and only if its stance is ``endorses``; items for
-    segments outside ``allowed`` are dropped and the first item per segment wins.
+    A segment is a finding if and only if an item for it has the stance
+    ``endorses`` (a segment listed twice — quoted, then endorsed — is
+    reported; the first endorsing item supplies the details). Items for
+    segments outside ``allowed`` are dropped.
 
     Args:
         raw (str): The raw model reply.
@@ -482,7 +517,8 @@ def parse_window_reply(raw: str, allowed: Collection[int]) -> list[WindowFinding
 
     Returns:
         list[WindowFinding] | None: Findings in order (``[]`` when none), or
-            ``None`` when the reply holds no usable findings structure.
+            ``None`` when the reply holds no usable findings structure —
+            including items none of which carries a readable ``index``.
     """
     cleaned, _ = strip_reasoning(raw or "")
     payload = _load_json_payload(cleaned.strip())
@@ -497,24 +533,25 @@ def parse_window_reply(raw: str, allowed: Collection[int]) -> list[WindowFinding
         return None
 
     allowed_set = set(allowed)
-    seen: set[int] = set()
-    findings: list[WindowFinding] = []
+    by_index: dict[int, WindowFinding] = {}
+    readable = 0
     for item in items:
         if not isinstance(item, dict):
             continue
         index = _coerce_index(item.get("index"))
-        if index is None or index not in allowed_set or index in seen:
+        if index is None:
             continue
-        seen.add(index)
-        if normalize_choice(item.get("stance"), HATE_SPEECH_STANCES, "unclear") != "endorses":
+        readable += 1
+        if index not in allowed_set or index in by_index:
             continue
-        findings.append(
-            WindowFinding(
-                index=index,
-                category=normalize_choice(item.get("category"), HATE_SPEECH_CATEGORIES, "other"),
-                confidence=normalize_choice(item.get("confidence"), CONFIDENCE_LEVELS, "low"),
-                reason=str(item.get("reason") or "").strip()[:REASON_MAX_CHARS],
-            )
+        if _normalize_stance(item.get("stance")) != "endorses":
+            continue
+        by_index[index] = WindowFinding(
+            index=index,
+            category=normalize_choice(item.get("category"), HATE_SPEECH_CATEGORIES, "other"),
+            confidence=normalize_choice(item.get("confidence"), CONFIDENCE_LEVELS, "low"),
+            reason=str(item.get("reason") or "").strip()[:REASON_MAX_CHARS],
         )
-    findings.sort(key=lambda finding: finding["index"])
-    return findings
+    if items and not readable:
+        return None
+    return [by_index[index] for index in sorted(by_index)]

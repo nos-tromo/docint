@@ -92,12 +92,50 @@ def test_render_window_prompt_substitutes_once() -> None:
 
 
 def test_parse_window_reply_keeps_endorsed_core_rows_only() -> None:
-    """Condemnations and context rows are dropped; the first item per row wins."""
-    raw = _window_reply((1, "condemns_or_counters"), (2, "endorses"), (7, "endorses"), (1, "endorses"))
+    """Condemnations and context rows are dropped."""
+    raw = _window_reply((1, "condemns_or_counters"), (2, "endorses"), (7, "endorses"))
 
     findings = parse_window_reply(raw, allowed=[1, 2])
 
     assert findings == [{"index": 2, "category": "ethnicity", "confidence": "high", "reason": "Dehumanizes a group."}]
+
+
+def test_parse_window_reply_salvages_every_complete_item_of_a_cut_off_reply() -> None:
+    """A reply cut off mid-list keeps every complete item, not just the first one."""
+    items = json.loads(_window_reply((3, "quotes_or_reports"), (4, "endorses")))["findings"]
+    raw = '{"findings": [' + json.dumps(items[0]) + ", " + json.dumps(items[1]) + ', {"index": 5, "stan'
+
+    assert [f["index"] for f in parse_window_reply(raw, allowed=[3, 4, 5]) or []] == [4]
+
+
+def test_parse_window_reply_lets_an_endorsing_duplicate_win() -> None:
+    """A segment listed as quoted and then endorsed is reported, whatever the order."""
+    assert [
+        f["index"] for f in parse_window_reply(_window_reply((7, "quotes_or_reports"), (7, "endorses")), [7]) or []
+    ] == [7]
+    assert [
+        f["index"] for f in parse_window_reply(_window_reply((7, "endorses"), (7, "quotes_or_reports")), [7]) or []
+    ] == [7]
+
+
+@pytest.mark.parametrize(("stance", "flagged"), [("Endorses.", True), ("endorsed", True), ("does not endorse", False)])
+def test_parse_window_reply_reads_unconstrained_stances(stance: str, flagged: bool) -> None:
+    """Inflected endorsement counts; negations do not.
+
+    Args:
+        stance (str): The stance as an unconstrained model wrote it.
+        flagged (bool): Whether the segment must be reported.
+    """
+    raw = _window_reply((1, "endorses")).replace('"endorses"', json.dumps(stance))
+
+    assert bool(parse_window_reply(raw, allowed=[1])) is flagged
+
+
+def test_parse_window_reply_without_readable_indices_is_unparseable() -> None:
+    """Items that name the segment under another key cannot be read and must not pass as clean."""
+    raw = json.dumps({"findings": [{"row": 3, "stance": "endorses"}]})
+
+    assert parse_window_reply(raw, allowed=[3]) is None
 
 
 def test_parse_window_reply_reports_unparseable_replies() -> None:
