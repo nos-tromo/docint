@@ -435,24 +435,41 @@ def load_graphrag_env(
 
 @dataclass(frozen=True)
 class HateSpeechConfig:
-    """Dataclass for hate-speech detection configuration."""
+    """Dataclass for hate-speech detection configuration.
+
+    Attributes:
+        enabled: Whether hate-speech detection runs during ingestion.
+        max_chars: Maximum characters of one document chunk sent to the detector.
+        max_workers: Maximum concurrent detector requests.
+        window_tokens: Estimated tokens of Nextext transcript segments labelled
+            per request (the core of a context window).
+        context_tokens: Estimated tokens of read-only neighbouring segments shown
+            on each side of the core; ``0`` disables the margins.
+    """
 
     enabled: bool
     max_chars: int
     max_workers: int
+    window_tokens: int
+    context_tokens: int
 
 
 def load_hate_speech_env(
     default_enabled: bool = False,
-    default_max_chars: int = 2048,
+    default_max_chars: int = 8192,
     default_max_workers: int = 1,
+    default_window_tokens: int = 1000,
+    default_context_tokens: int = 300,
 ) -> HateSpeechConfig:
     """Load hate-speech detection settings from environment variables.
 
     Args:
         default_enabled (bool): Whether hate-speech detection runs during ingestion.
-        default_max_chars (int): Maximum characters from each chunk sent to the detector.
+        default_max_chars (int): Maximum characters from each chunk sent to the
+            detector. The default covers a whole ``FINE_CHUNK_SIZE`` chunk.
         default_max_workers (int): Maximum worker threads for parallel hate-speech detection.
+        default_window_tokens (int): Transcript tokens labelled per request.
+        default_context_tokens (int): Transcript context tokens per side.
 
     Returns:
         HateSpeechConfig: Parsed hate-speech detection configuration.
@@ -461,6 +478,8 @@ def load_hate_speech_env(
         enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower() in {"true", "1", "yes"},
         max_chars=max(256, int(os.getenv("HATE_SPEECH_MAX_CHARS", default_max_chars))),
         max_workers=max(1, int(os.getenv("HATE_SPEECH_MAX_WORKERS", default_max_workers))),
+        window_tokens=max(1, int(os.getenv("HATE_SPEECH_WINDOW_TOKENS", default_window_tokens))),
+        context_tokens=max(0, int(os.getenv("HATE_SPEECH_CONTEXT_TOKENS", default_context_tokens))),
     )
 
 

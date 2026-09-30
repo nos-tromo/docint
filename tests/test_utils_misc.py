@@ -496,7 +496,7 @@ def test_load_ner_client_env_labels(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default hate-speech config should be disabled with one worker.
+    """Default hate-speech config: disabled, one worker, a cap covering a whole fine chunk, default windows.
 
     Args:
         monkeypatch: Fixture to clear environment variables.
@@ -504,12 +504,46 @@ def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ENABLE_HATE_SPEECH_DETECTION", raising=False)
     monkeypatch.delenv("HATE_SPEECH_MAX_CHARS", raising=False)
     monkeypatch.delenv("HATE_SPEECH_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("HATE_SPEECH_WINDOW_TOKENS", raising=False)
+    monkeypatch.delenv("HATE_SPEECH_CONTEXT_TOKENS", raising=False)
 
     cfg = load_hate_speech_env()
 
     assert cfg.enabled is False
-    assert cfg.max_chars == 2048
+    assert cfg.max_chars == 8192
     assert cfg.max_workers == 1
+    assert cfg.window_tokens == 1000
+    assert cfg.context_tokens == 300
+
+
+def test_load_hate_speech_env_parses_window_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Transcript window budgets are configurable; context 0 disables the margins.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("HATE_SPEECH_WINDOW_TOKENS", "600")
+    monkeypatch.setenv("HATE_SPEECH_CONTEXT_TOKENS", "0")
+
+    cfg = load_hate_speech_env()
+
+    assert cfg.window_tokens == 600
+    assert cfg.context_tokens == 0
+
+
+def test_load_hate_speech_env_clamps_window_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-positive window clamps to 1 and a negative context to 0.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("HATE_SPEECH_WINDOW_TOKENS", "0")
+    monkeypatch.setenv("HATE_SPEECH_CONTEXT_TOKENS", "-5")
+
+    cfg = load_hate_speech_env()
+
+    assert cfg.window_tokens == 1
+    assert cfg.context_tokens == 0
 
 
 def test_load_hate_speech_env_parses_max_workers(
