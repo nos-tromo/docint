@@ -576,7 +576,7 @@ chunks carrying the earlier types.
 
 ## Hate-speech detection — `HateSpeechConfig`
 
-Loaded by `load_hate_speech_env()` (`env_cfg.py:438`).
+Loaded by `load_hate_speech_env()` (`env_cfg.py:457`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -585,6 +585,10 @@ Loaded by `load_hate_speech_env()` (`env_cfg.py:438`).
 | `HATE_SPEECH_MAX_WORKERS` | `1` | Parallel hate-speech requests (chunks or transcript windows). |
 | `HATE_SPEECH_WINDOW_TOKENS` | `1000` | Estimated tokens of Nextext transcript segments labelled per request (the window's core). |
 | `HATE_SPEECH_CONTEXT_TOKENS` | `300` | Estimated tokens of read-only neighbouring segments shown on each side of the core; `0` disables the context. |
+
+The hate-speech prompts need a chat context of at least 8k tokens. Ollama's
+default `num_ctx` of 2048 silently truncates them; see `docs/ingestion.md`
+§ NER and hate-speech.
 
 ## Graph-RAG — `GraphRAGConfig`
 

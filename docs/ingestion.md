@@ -551,7 +551,8 @@ inline. For each batch:
    parents are skipped) — Nextext transcript segments in context windows
    instead, see [NER and hate-speech](#ner-and-hate-speech) — and stores
    the parsed verdict of an endorsing finding under a `hate_speech` key in
-   metadata.
+   metadata. PDFs read by the core PDF lane (`CorePDFPipelineReader`) get
+   NER only: hate-speech detection does not reach them yet.
 6. Chunks are embedded with the dense model (`EMBED_MODEL`) and, for
    hybrid collections, the sparse model (`SPARSE_MODEL`).
 7. Embeddings and nodes are upserted to Qdrant and to the SQLite-backed
@@ -694,6 +695,29 @@ rejects it (HTTP 400/422 other than a context overflow), or whose
 constrained reply cannot be parsed, is served unconstrained for the rest
 of the run. An unparseable reply, or a failed request, is no finding,
 and its log line carries the reply length, never its text.
+
+Window requests carry an output cap that grows with the core (80 tokens
+per segment, at least 1024). A reply stopped at that cap is not trusted:
+the window's segments are asked again one per request, each with its
+context.
+
+At most `HATE_SPEECH_MAX_WORKERS` windows are in flight at a time.
+Stopping the job cancels the queued ones, and three consecutive failed
+window requests end the pass instead of calling a dead endpoint once per
+window.
+
+The prompts run to 3–5k tokens, so the chat model needs a context of at
+least 8k tokens. Ollama's default `num_ctx` of 2048 silently drops the
+start of the prompt; raise it with a Modelfile `PARAMETER num_ctx` or
+`OLLAMA_CONTEXT_LENGTH`.
+
+Gaps and caveats:
+- PDFs read by the core PDF lane (`CorePDFPipelineReader`) get NER only,
+  not hate-speech detection.
+- Existing collections keep the verdicts they were ingested with.
+  Re-uploading the same files does not re-classify them, because the
+  file-hash ledger skips them. Ingest into a fresh collection, or delete
+  and re-ingest, to apply the current classifier.
 
 ## Source staging
 
