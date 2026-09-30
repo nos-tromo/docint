@@ -4,7 +4,7 @@ Decide what each speaker says and means, not which words occur. Talking about ha
 
 ## What counts as GMF (when the speaker endorses it)
 
-- race / ethnicity / nationality — racist slurs aimed at a group; "<group> are subhumans / vermin / parasites"; calls to expel or exterminate a group; "<group> don't belong in this country".
+- race / ethnicity / nationality (including refugees and migrants) — racist slurs aimed at a group; "<group> are subhumans / vermin / parasites"; calls to expel or exterminate a group; "<group> don't belong in this country".
 - religion — incitement against a religious community; "<religion> should be banned / wiped out"; conspiracy claims that cast a religion as a global threat (such as antisemitic world-conspiracy tropes); portraying Muslims as inherently violent.
 - antiziganism (Sinti and Roma; category "ethnicity") — calls for forced relocation, internment, or violence; "<slur> are thieves by nature".
 - gender — "women are property / inferior"; calls to strip women of rights; misogynist calls to violence.
@@ -12,7 +12,7 @@ Decide what each speaker says and means, not which words occur. Talking about ha
 - disability — "disabled people should be euthanized / should not exist"; eugenicist incitement.
 - extremism — Holocaust denial or glorification; affirmative Nazi or fascist glorification ("Heil Hitler", "Sieg Heil"); calls for ethnic cleansing or genocide; recruitment for violent extremist movements.
 
-Not GMF, even when meant: insults aimed at an individual without reference to a group; profanity; sharp criticism of policies, governments, parties, ideologies, organizations, professions, or named public figures; satire or polemic that does not dehumanize a protected group.
+Not GMF, even when meant: insults aimed at an individual without reference to a group; profanity with no targeted group ("damn", "shit"); sharp criticism of policies, governments, parties, organizations, professions, or named public figures; criticism of an ideology or religion as a set of ideas, unless it is used to attack the people who belong to it (such as "Islam" meaning Muslims); satire or polemic that does not dehumanize a protected group.
 
 ## Input
 
@@ -29,38 +29,38 @@ Rows look like "[index] Speaker N: text" ("[index] text" when the speaker is unk
    - analyzes_or_discusses — the speaker explains, teaches, analyzes (for example legally), or asks whether something is hateful.
    - unclear — the rows shown do not settle the stance.
    Words such as "antisemitic", "racist", "Nazi", or "hate speech" used to describe or criticize something are description or condemnation, not an attack.
-4. List every row that reached step 3, whatever its stance. Attribute each statement to the row in which it is made. When a statement spans several rows, list each of them. A row that approvingly picks up an earlier hateful statement ("Exactly, get them out.") endorses it itself.
+4. List every row that reached step 3 exactly once, whatever its stance; if a row both quotes and endorses, its stance is endorses. Attribute each statement to the row in which it is made. When a statement spans several rows, list each of them. A row that approvingly picks up an earlier hateful statement ("Exactly, get them out.") endorses it itself.
 
-## Examples (invented)
+## Examples (invented; rows are lettered here, your answer uses the row numbers of SEGMENTS TO CLASSIFY)
 
-[3] Speaker 1: On the bus a man shouted that <group> are vermin.
-[4] Speaker 2: That is racist.
-Result: 3 quotes_or_reports; 4 condemns_or_counters
+[A] Speaker 1: On the bus a man shouted that <group> are vermin.
+[B] Speaker 2: That is racist.
+Result: A quotes_or_reports; B condemns_or_counters
 
-[7] Speaker 2: That is antisemitic.
-Result: 7 condemns_or_counters
+[C] Speaker 2: That is antisemitic.
+Result: C condemns_or_counters
 
-[9] Speaker 1: The "great replacement" is a far-right conspiracy myth.
-Result: 9 analyzes_or_discusses
+[D] Speaker 1: The "great replacement" is a far-right conspiracy myth.
+Result: D analyzes_or_discusses
 
-[12] Speaker 1: Is it hate speech to call <group> parasites?
-Result: 12 analyzes_or_discusses
+[E] Speaker 1: Is it hate speech to call <group> parasites?
+Result: E analyzes_or_discusses
 
-[15] Speaker 1: Many Muslims in our town are fasting this month.
+[F] Speaker 1: Many Muslims in our town are fasting this month.
 Result: nothing listed
 
-[20] Speaker 1: A lot of <group> moved into the new shelter.
-[21] Speaker 1: They are animals, lock them all up.
-Result: 21 endorses
+[G] Speaker 1: A lot of <group> moved into the new shelter.
+[H] Speaker 1: They are animals, lock them all up.
+Result: H endorses
 
-[25] Speaker 1: <group> don't belong in this country.
-[26] Speaker 2: Exactly, get them out.
-Result: 25 endorses; 26 endorses
+[I] Speaker 1: <group> don't belong in this country.
+[J] Speaker 2: Exactly, get them out.
+Result: I endorses; J endorses
 
 ## Output
 
 Answer with JSON only, no Markdown:
-{"findings": [{"index": 21, "target": "<group>", "reason": "…", "stance": "endorses", "category": "ethnicity", "confidence": "high"}]}
+{"findings": [{"index": <row number>, "target": "<group>", "reason": "…", "stance": "endorses", "category": "ethnicity", "confidence": "high"}]}
 
 - "index": a row number from SEGMENTS TO CLASSIFY only.
 - "stance": endorses, quotes_or_reports, condemns_or_counters, analyzes_or_discusses, or unclear.

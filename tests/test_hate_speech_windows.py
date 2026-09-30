@@ -445,7 +445,7 @@ def test_transcript_prompts_are_pinned_to_nextexts_copy() -> None:
 
 
 _NEXTEXT_TRANSCRIPT_PROMPT_SHA256: dict[str, str] = {
-    "en": "1ca322f899dec8779fde10ec208500df6d9832e927a50e4ad6e63d7ba7749286",
-    "de": "39647265cac54e0ff5c146d30f01ecddc08ca50c2494081e741edcd4961714c0",
+    "en": "208e798b79810203d1d82398d760fe14807287d9caac8f741ca07ea38aabfda4",
+    "de": "99703816dc6dbd4a213358dd6af940b238591867fdb97be8c7f6e4a13b62f576",
 }
 """SHA-256 of Nextext's ``nextext/utils/prompts/<locale>/hate_speech_transcript.txt``."""

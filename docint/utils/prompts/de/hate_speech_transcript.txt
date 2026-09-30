@@ -4,7 +4,7 @@ Entscheide, was die sprechende Person sagt und meint, nicht welche Wörter vorko
 
 ## Was als GMF gilt (wenn die sprechende Person es sich zu eigen macht)
 
-- race / ethnicity / nationality — rassistische Schimpfwörter gegen eine Gruppe; „<Gruppe> sind Untermenschen / Ungeziefer / Parasiten“; Aufrufe, eine Gruppe zu vertreiben oder auszurotten; „<Gruppe> gehören nicht in dieses Land“.
+- race / ethnicity / nationality (auch Geflüchtete und Zugewanderte) — rassistische Schimpfwörter gegen eine Gruppe; „<Gruppe> sind Untermenschen / Ungeziefer / Parasiten“; Aufrufe, eine Gruppe zu vertreiben oder auszurotten; „<Gruppe> gehören nicht in dieses Land“.
 - religion — Hetze gegen eine Religionsgemeinschaft; „<Religion> gehört verboten / vernichtet“; Verschwörungsbehauptungen, die eine Religion als globale Bedrohung darstellen (etwa antisemitische Topoi der Weltverschwörung); die Darstellung von Muslimen als von Natur aus gewalttätig.
 - Antiziganismus (Sinti und Roma; Kategorie „ethnicity“) — Aufrufe zu Zwangsumsiedlung, Internierung oder Gewalt; „<Schimpfwort> sind von Natur aus Diebe“.
 - gender — „Frauen sind Besitz / minderwertig“; Aufrufe, Frauen Rechte zu entziehen; frauenfeindliche Gewaltaufrufe.
@@ -12,7 +12,7 @@ Entscheide, was die sprechende Person sagt und meint, nicht welche Wörter vorko
 - disability — „Behinderte gehören euthanasiert / sollten nicht existieren“; eugenische Hetze.
 - extremism — Holocaustleugnung oder -verherrlichung; affirmative NS- oder faschistische Verherrlichung („Heil Hitler“, „Sieg Heil“); Aufrufe zu ethnischer Säuberung oder Völkermord; Rekrutierung für gewaltbereite extremistische Bewegungen.
 
-Keine GMF, auch wenn so gemeint: Beleidigungen einzelner Personen ohne Gruppenbezug; Schimpfwörter; scharfe Kritik an Politik, Regierungen, Parteien, Ideologien, Organisationen, Berufsgruppen oder namentlich genannten öffentlichen Personen; Satire oder Polemik, die keine geschützte Gruppe entmenschlicht.
+Keine GMF, auch wenn so gemeint: Beleidigungen einzelner Personen ohne Gruppenbezug; Kraftausdrücke und Flüche ohne Gruppenbezug („Scheiße“, „verdammt“); scharfe Kritik an Politik, Regierungen, Parteien, Organisationen, Berufsgruppen oder namentlich genannten öffentlichen Personen; Kritik an einer Ideologie oder Religion als Gedankengebäude, sofern damit nicht die Menschen angegriffen werden, die ihr angehören (etwa „der Islam“ im Sinne von Muslimen); Satire oder Polemik, die keine geschützte Gruppe entmenschlicht.
 
 ## Eingabe
 
@@ -29,38 +29,38 @@ Zeilen haben die Form „[Index] Speaker N: Text“ („[Index] Text“, wenn di
    - analyzes_or_discusses — die Person erklärt, lehrt, analysiert (etwa juristisch) oder fragt, ob etwas hasserfüllt ist.
    - unclear — die gezeigten Zeilen klären die Haltung nicht.
    Wörter wie „antisemitisch“, „rassistisch“, „Nazi“ oder „Hassrede“, mit denen etwas beschrieben oder kritisiert wird, sind Beschreibung oder Verurteilung, kein Angriff.
-4. Liste jede Zeile auf, die Schritt 3 erreicht hat, unabhängig von ihrer Haltung. Ordne jede Aussage der Zeile zu, in der sie gemacht wird. Erstreckt sich eine Aussage über mehrere Zeilen, liste jede davon auf. Eine Zeile, die eine frühere hasserfüllte Aussage zustimmend aufgreift („Genau, raus mit denen.“), macht sie sich selbst zu eigen.
+4. Liste jede Zeile, die Schritt 3 erreicht hat, genau einmal auf, unabhängig von ihrer Haltung; zitiert und bekräftigt eine Zeile zugleich, ist ihre Haltung endorses. Ordne jede Aussage der Zeile zu, in der sie gemacht wird. Erstreckt sich eine Aussage über mehrere Zeilen, liste jede davon auf. Eine Zeile, die eine frühere hasserfüllte Aussage zustimmend aufgreift („Genau, raus mit denen.“), macht sie sich selbst zu eigen.
 
-## Beispiele (erfunden)
+## Beispiele (erfunden; die Zeilen sind hier mit Buchstaben benannt, deine Antwort nutzt die Zeilennummern aus ZU KLASSIFIZIERENDE SEGMENTE)
 
-[3] Speaker 1: Im Bus hat ein Mann gerufen, <Gruppe> seien Ungeziefer.
-[4] Speaker 2: Das ist rassistisch.
-Ergebnis: 3 quotes_or_reports; 4 condemns_or_counters
+[A] Speaker 1: Im Bus hat ein Mann gerufen, <Gruppe> seien Ungeziefer.
+[B] Speaker 2: Das ist rassistisch.
+Ergebnis: A quotes_or_reports; B condemns_or_counters
 
-[7] Speaker 2: Das ist antisemitisch.
-Ergebnis: 7 condemns_or_counters
+[C] Speaker 2: Das ist antisemitisch.
+Ergebnis: C condemns_or_counters
 
-[9] Speaker 1: Der „große Austausch“ ist ein rechtsextremer Verschwörungsmythos.
-Ergebnis: 9 analyzes_or_discusses
+[D] Speaker 1: Der „große Austausch“ ist ein rechtsextremer Verschwörungsmythos.
+Ergebnis: D analyzes_or_discusses
 
-[12] Speaker 1: Ist es Hassrede, <Gruppe> als Parasiten zu bezeichnen?
-Ergebnis: 12 analyzes_or_discusses
+[E] Speaker 1: Ist es Hassrede, <Gruppe> als Parasiten zu bezeichnen?
+Ergebnis: E analyzes_or_discusses
 
-[15] Speaker 1: Viele Muslime in unserer Stadt fasten diesen Monat.
+[F] Speaker 1: Viele Muslime in unserer Stadt fasten diesen Monat.
 Ergebnis: keine Zeile gelistet
 
-[20] Speaker 1: In die neue Unterkunft sind viele <Gruppe> gezogen.
-[21] Speaker 1: Das sind Tiere, die gehören alle weggesperrt.
-Ergebnis: 21 endorses
+[G] Speaker 1: In die neue Unterkunft sind viele <Gruppe> gezogen.
+[H] Speaker 1: Das sind Tiere, die gehören alle weggesperrt.
+Ergebnis: H endorses
 
-[25] Speaker 1: <Gruppe> gehören nicht in dieses Land.
-[26] Speaker 2: Genau, raus mit denen.
-Ergebnis: 25 endorses; 26 endorses
+[I] Speaker 1: <Gruppe> gehören nicht in dieses Land.
+[J] Speaker 2: Genau, raus mit denen.
+Ergebnis: I endorses; J endorses
 
 ## Ausgabe
 
 Antworte ausschließlich mit JSON, ohne Markdown:
-{"findings": [{"index": 21, "target": "<Gruppe>", "reason": "…", "stance": "endorses", "category": "ethnicity", "confidence": "high"}]}
+{"findings": [{"index": <Zeilennummer>, "target": "<Gruppe>", "reason": "…", "stance": "endorses", "category": "ethnicity", "confidence": "high"}]}
 
 - „index“: nur eine Zeilennummer aus ZU KLASSIFIZIERENDE SEGMENTE.
 - „stance“: endorses, quotes_or_reports, condemns_or_counters, analyzes_or_discusses oder unclear.
