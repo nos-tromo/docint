@@ -142,7 +142,10 @@ The diagram below expands what happens when the UI calls `POST /query` or
    later be expanded to their parent context at retrieval time.
 5. **NER & hate-speech detection** — chunk-level GLiNER extraction runs in
    parallel workers; entities and hate-speech flags are attached as
-   metadata on the resulting nodes.
+   metadata on the resulting nodes. Hate speech is judged by the author's
+   or speaker's stance (only endorsement is a finding); Nextext transcript
+   segments are classified in context windows rather than one sentence at
+   a time (see `docs/ingestion.md` § NER and hate-speech).
 6. **Persistence** —
    - Chunks are embedded (dense + optional sparse) and upserted into
      Qdrant.
