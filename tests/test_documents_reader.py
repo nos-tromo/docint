@@ -191,6 +191,60 @@ def _counting_extractor() -> Any:
     return _extract
 
 
+class _RecordingPass:
+    """Stand-in for the pipeline's enrichment pass: NER through *extract*, recording each hand-off."""
+
+    def __init__(self, extract: Any) -> None:
+        """Keep the extractor and start with no hand-offs.
+
+        Args:
+            extract: Text -> ``(entities, relations)`` extractor.
+        """
+        self.extract = extract
+        self.handed: list[list[Any]] = []
+
+    def __call__(self, nodes: list[Any]) -> None:
+        """Record *nodes* and attach their entities/relations.
+
+        Args:
+            nodes: The nodes handed to the pass.
+        """
+        self.handed.append(list(nodes))
+        for node in nodes:
+            entities, relations = self.extract(node.text)
+            node.metadata = {**node.metadata, "entities": entities, "relations": relations}
+
+
+def test_enrich_nodes_hands_only_fine_children_to_the_pass(tmp_path: Path) -> None:
+    """The parents are never sent to NER or hate-speech detection themselves.
+
+    A coarse parent repeats its children's text, so enriching it as well
+    would pay every model call twice — for hate speech a full chat round
+    trip per parent, whose verdict would surface nowhere (parents are never
+    stored as vectors).
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    parser = HierarchicalNodeParser(coarse_chunk_size=100_000, fine_chunk_size=1024, fine_chunk_overlap=0)
+    _docs, nodes = CorePDFPipelineReader._build_nodes(
+        file_path=pdf_path,
+        doc_id="hashP",
+        pipeline_version="2.0.0",
+        chunks=[_long_pdf_chunk()],
+        hierarchical_node_parser=parser,
+    )
+    fine = [n for n in nodes if n.metadata.get("docint_hier_type") == "fine"]
+    assert len(fine) > 1 and len(fine) < len(nodes)
+
+    enrich = _RecordingPass(_counting_extractor())
+    CorePDFPipelineReader(data_dir=tmp_path, enrich_nodes=enrich)._enrich_nodes(nodes)
+
+    assert [[id(n) for n in batch] for batch in enrich.handed] == [[id(n) for n in fine]]
+
+
 def test_enrich_nodes_mirrors_child_entities_onto_coarse_parents(tmp_path: Path) -> None:
     """Coarse parents must carry the union of their children's NER results.
 
@@ -215,7 +269,7 @@ def test_enrich_nodes_mirrors_child_entities_onto_coarse_parents(tmp_path: Path)
         hierarchical_node_parser=parser,
     )
 
-    reader = CorePDFPipelineReader(data_dir=tmp_path, entity_extractor=_counting_extractor())
+    reader = CorePDFPipelineReader(data_dir=tmp_path, enrich_nodes=_RecordingPass(_counting_extractor()))
     reader._enrich_nodes(nodes)
 
     coarse = [n for n in nodes if n.metadata.get("docint_hier_type") == "coarse"]
@@ -250,7 +304,7 @@ def test_enrich_nodes_flat_collection_ners_every_node(tmp_path: Path) -> None:
         chunks=chunks,
     )
 
-    reader = CorePDFPipelineReader(data_dir=tmp_path, entity_extractor=_counting_extractor())
+    reader = CorePDFPipelineReader(data_dir=tmp_path, enrich_nodes=_RecordingPass(_counting_extractor()))
     reader._enrich_nodes(nodes)
 
     assert nodes and all(n.metadata.get("entities") for n in nodes)
