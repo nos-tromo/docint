@@ -650,18 +650,37 @@ class DocumentIngestionPipeline:
 
         return docs, nodes
 
-    def enrich_nodes(self, nodes: list[BaseNode]) -> None:
-        """Apply this run's NER and hate-speech enrichment to nodes another lane built.
+    def enrich_nodes(
+        self,
+        nodes: list[BaseNode],
+        *,
+        ner: bool = True,
+        hate_speech: bool = True,
+        progress_offset: int = 0,
+        progress_total: int | None = None,
+    ) -> None:
+        """Apply this run's NER and hate-speech enrichment to nodes built outside the generic lane.
 
-        The core PDF lane builds its nodes outside this pipeline. It used to be
-        handed the NER extractor alone, so no PDF was ever classified for hate
-        speech; routing its nodes through the same pass keeps every lane on
-        every stage.
+        The core PDF lane and the image companion build their nodes outside
+        this pipeline; routing them through the same pass keeps every lane on
+        every stage. ``ner`` / ``hate_speech`` narrow the stages for this call,
+        so one text can be read for entities while another is judged for hate
+        speech; a stage the run has switched off stays off either way.
 
         Args:
             nodes (list[BaseNode]): Nodes to enrich in place.
+            ner (bool): Run entity extraction on these nodes.
+            hate_speech (bool): Run hate-speech detection on these nodes.
+            progress_offset (int): Processed count offset for cumulative progress.
+            progress_total (int | None): Total count for progress display.
         """
-        self._enrich_nodes_in_place(nodes)
+        self._enrich_nodes_in_place(
+            nodes,
+            progress_offset=progress_offset,
+            progress_total=progress_total,
+            ner=ner,
+            hate_speech=hate_speech,
+        )
 
     def _enrich_nodes_in_place(
         self,
@@ -669,6 +688,8 @@ class DocumentIngestionPipeline:
         *,
         progress_offset: int = 0,
         progress_total: int | None = None,
+        ner: bool = True,
+        hate_speech: bool = True,
     ) -> None:
         """Apply NER and hate-speech enrichment to *nodes* in-place.
 
@@ -683,12 +704,16 @@ class DocumentIngestionPipeline:
             nodes (list[BaseNode]): Nodes to enrich.
             progress_offset (int): Processed node count offset for cumulative progress.
             progress_total (int | None): Total node count for progress display.
+            ner (bool): Whether this call runs entity extraction (when the run has it enabled).
+            hate_speech (bool): Whether this call runs hate-speech detection (when the run has it enabled).
         """
         if not nodes:
             return
 
-        ner_enabled = self.entity_extractor is not None
-        hate_enabled = bool(self.hate_speech_enabled and self.hate_speech_prompt and self.hate_speech_model is not None)
+        ner_enabled = ner and self.entity_extractor is not None
+        hate_enabled = hate_speech and bool(
+            self.hate_speech_enabled and self.hate_speech_prompt and self.hate_speech_model is not None
+        )
         if not ner_enabled and not hate_enabled:
             return
 

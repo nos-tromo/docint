@@ -8,10 +8,11 @@ share one well-tested implementation.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any, Literal
 
 from loguru import logger
+from qdrant_client import models
 
 from docint.utils.cursor import decode_cursor, encode_cursor
 
@@ -45,7 +46,7 @@ def iter_scroll(
     collection_name: str,
     scroll_filter: Any | None = None,
     page_size: int = 256,
-    with_payload: bool = True,
+    with_payload: bool | Sequence[str] | models.PayloadSelector = True,
     with_vectors: bool = False,
     max_pages: int | None = None,
     on_error: ScrollErrorMode = "warn",
@@ -58,7 +59,8 @@ def iter_scroll(
         collection_name (str): Collection to scroll.
         scroll_filter (Any | None): Optional Qdrant ``Filter`` applied during scroll.
         page_size (int): Points per page (the Qdrant ``limit`` parameter).
-        with_payload (bool): Whether to fetch payloads.
+        with_payload (bool | Sequence[str] | models.PayloadSelector): Whether
+            to fetch payloads, or which payload keys to fetch or leave out.
         with_vectors (bool): Whether to fetch vectors.
         max_pages (int | None): If set, stop after this many pages.
         on_error (ScrollErrorMode): How to react to scroll exceptions:

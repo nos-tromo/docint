@@ -1441,6 +1441,8 @@ def test_get_collection_ner_refresh_bypasses_cache() -> None:
     """Refreshing collection NER should re-fetch data instead of returning stale cache."""
     rag = RAG(qdrant_collection="test")
     rag._qdrant_client = MagicMock()
+    # A text-only collection: there is no image companion to read entities from.
+    rag._qdrant_client.collection_exists.return_value = False
 
     point1 = MagicMock()
     point1.payload = {"filename": "doc1.pdf", "entities": [{"text": "Acme"}]}
