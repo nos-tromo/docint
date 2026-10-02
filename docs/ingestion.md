@@ -552,7 +552,8 @@ inline. For each batch:
    instead, see [NER and hate-speech](#ner-and-hate-speech) — and stores
    the parsed verdict of an endorsing finding under a `hate_speech` key in
    metadata. PDFs read by the core PDF lane (`CorePDFPipelineReader`) get
-   NER only: hate-speech detection does not reach them yet.
+   NER only; hate-speech detection does not reach them. This is a bug,
+   fixed by [#607](https://github.com/nos-tromo/docint/pull/607).
 6. Chunks are embedded with the dense model (`EMBED_MODEL`) and, for
    hybrid collections, the sparse model (`SPARSE_MODEL`).
 7. Embeddings and nodes are upserted to Qdrant and to the SQLite-backed
@@ -712,8 +713,15 @@ start of the prompt; raise it with a Modelfile `PARAMETER num_ctx` or
 `OLLAMA_CONTEXT_LENGTH`.
 
 Gaps and caveats:
-- PDFs read by the core PDF lane (`CorePDFPipelineReader`) get NER only,
-  not hate-speech detection.
+- Known bug, fixed by
+  [#607](https://github.com/nos-tromo/docint/pull/607): PDFs read by the
+  core PDF lane (`CorePDFPipelineReader`) get NER only, not hate-speech
+  detection.
+- Known bug, fixed by
+  [#608](https://github.com/nos-tromo/docint/pull/608): the words inside
+  images (a PDF figure, an image attached to a posting, a video keyframe)
+  get neither NER nor hate-speech detection. Only a standalone image file
+  is classified, through the main-collection document written for it.
 - Existing collections keep the verdicts they were ingested with.
   Re-uploading the same files does not re-classify them, because the
   file-hash ledger skips them. Ingest into a fresh collection, or delete
