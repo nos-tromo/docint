@@ -481,6 +481,29 @@ ingestion path:
   down-scaled first.
 - Embeddings and metadata land in a sibling collection named per
   `IMAGE_QDRANT_COLLECTION` (template `{collection}_images`).
+- **An image's words go through the job's NER + hate-speech pass, on its
+  `_images` point** (`docint/core/ingest/image_enrichment.py`). NER reads the
+  printed text, then the caption. Hate-speech detection judges the printed
+  text alone: a verdict is about the stance of whoever wrote a text, and a
+  caption is the vision model's description of the picture. The results
+  (`entities`, `relations`, `hate_speech`) are written payload-only and are
+  listed beside the chunks' in the Entities and Hate speech views, the entity
+  graph, entity resolution and the findings CSVs. This covers PDF figures,
+  images attached to social postings and video keyframes. A standalone image
+  file is left out, because its words and caption are also a main-collection
+  document, which the generic lane enriches; listing both would count each
+  finding twice.
+- Every point written fresh carries `enrichment: "pending"`. Once its lanes
+  are done, the ingest job enriches the pending points with its own stages and
+  per-request overrides and marks them `done`, including points written at
+  upload time, before the job existed. A keyframe rewritten for another
+  posting keeps the results it already has. If the pass fails, the points stay
+  pending for the next run; `INGEST_FAIL_FAST=true` aborts the run instead.
+  Images ingested before the marker existed carry none and are not enriched
+  retroactively; re-ingest into a fresh collection to analyse them.
+- In the Analysis tables, a finding read off a PDF figure or a keyframe shows
+  no thumbnail: the preview route serves source files, and its source is the
+  PDF or the clip. Report exports still carry the stored image.
 - Failures are soft unless `IMAGE_FAIL_ON_EMBED_ERROR` /
   `IMAGE_FAIL_ON_TAG_ERROR` are set.
 
