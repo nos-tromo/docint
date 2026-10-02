@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +32,9 @@ class CorePDFPipelineReader:
 
     Attributes:
         data_dir: Root ingestion path (directory or single file).
+        enrich_nodes: The run's NER + hate-speech pass
+            (``DocumentIngestionPipeline.enrich_nodes``), shared with every
+            other lane; ``None`` leaves the nodes unenriched.
         discovered_hashes: File hashes observed while scanning PDF sources.
         skipped_hashes: File hashes this reader declined because the
             collection already holds them. Read by ``RAG.ingest_docs`` for
@@ -42,86 +44,37 @@ class CorePDFPipelineReader:
     """
 
     data_dir: Path
-    entity_extractor: Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]] | None = None
-    ner_max_workers: int = 1
+    enrich_nodes: Callable[[list[BaseNode]], None] | None = None
     source_collection: str | None = None
     image_ingestion_service: ImageIngestionService | None = None
     hierarchical_node_parser: HierarchicalNodeParser | None = None
     discovered_hashes: set[str] = field(default_factory=set, init=False)
     skipped_hashes: set[str] = field(default_factory=set, init=False)
 
-    def _apply_ner(
-        self,
-        nodes: list[BaseNode],
-        progress_callback: Callable[[str], None] | None = None,
-    ) -> None:
-        """Attach entity/relation metadata to nodes in-place.
+    def _enrich_nodes(self, nodes: list[BaseNode]) -> None:
+        """Enrich the embedded nodes through the run's pass and mirror entities onto parents.
 
-        Args:
-            nodes (list[BaseNode]): Nodes to enrich.
-            progress_callback (Callable[[str], None] | None): Optional callback for progress updates.
-        """
-        if not self.entity_extractor or not nodes:
-            return
-
-        total_nodes = len(nodes)
-
-        def _process_node(idx: int, node: BaseNode) -> None:
-            """Run NER extraction on ``node`` and merge entities/relations into metadata."""
-            text_value = getattr(node, "text", "") or ""
-            if not text_value.strip():
-                return
-            try:
-                if self.entity_extractor:
-                    ents, rels = self.entity_extractor(text_value)
-                    if ents or rels:
-                        meta = dict(getattr(node, "metadata", {}) or {})
-                        if ents:
-                            meta["entities"] = ents
-                        if rels:
-                            meta["relations"] = rels
-                        node.metadata = meta
-            except Exception as exc:
-                logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
-
-        if self.ner_max_workers > 1:
-            with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
-                futures = [executor.submit(_process_node, i, node) for i, node in enumerate(nodes)]
-                for i, _ in enumerate(as_completed(futures)):
-                    if progress_callback:
-                        progress_callback(f"Extracting entities: {i + 1}/{total_nodes} chunks processed")
-        else:
-            for i, node in enumerate(nodes):
-                _process_node(i, node)
-                if progress_callback:
-                    progress_callback(f"Extracting entities: {i + 1}/{total_nodes} chunks processed")
-
-    def _enrich_nodes(
-        self,
-        nodes: list[BaseNode],
-        progress_callback: Callable[[str], None] | None = None,
-    ) -> None:
-        """Run NER over the embedded nodes and mirror the results onto parents.
-
-        NER runs on the fine children only (flat collections carry no hier
-        type — every node is NERed directly): their texts jointly cover the
-        parent, so extracting from the parent again would double the extractor
-        calls *and* lose entities to GLiNER's long-input truncation. But the
-        coarse parents must not stay bare — ``ParentContextPostprocessor``
-        replaces a retrieved fine chunk with its docstore-loaded parent at
-        query time, and an entity-less parent strips the entities off the
-        normalized source (no entity pills in chat/summary). Each parent
-        therefore receives the concatenation of its children's ``entities`` /
-        ``relations``, in child order.
+        Only the fine children are enriched (flat collections carry no hier
+        type — every node is enriched directly): their texts jointly cover the
+        parent, so enriching the parent again would double the model calls
+        *and* lose entities to GLiNER's long-input truncation. Hate-speech
+        verdicts stay on the children, where the Analysis view reads them — a
+        coarse parent is never stored as a vector. But the coarse parents must
+        not stay entity-less — ``ParentContextPostprocessor`` replaces a
+        retrieved fine chunk with its docstore-loaded parent at query time, and
+        an entity-less parent strips the entities off the normalized source (no
+        entity pills in chat/summary). Each parent therefore receives the
+        concatenation of its children's ``entities`` / ``relations``, in child
+        order.
 
         Args:
             nodes (list[BaseNode]): The reader's full node set for one PDF
                 (coarse parents plus fine children, or flat nodes).
-            progress_callback (Callable[[str], None] | None): Optional
-                callback for NER progress updates.
         """
+        if self.enrich_nodes is None or not nodes:
+            return
         fine_nodes = [n for n in nodes if n.metadata.get("docint_hier_type") == "fine"]
-        self._apply_ner(fine_nodes or nodes, progress_callback=progress_callback)
+        self.enrich_nodes(fine_nodes or nodes)
         if not fine_nodes:
             return
 
@@ -494,7 +447,7 @@ class CorePDFPipelineReader:
                 yield docs, nodes, manifest.doc_id
                 continue
 
-            self._enrich_nodes(nodes, progress_callback=progress_callback)
+            self._enrich_nodes(nodes)
             emitted_hashes.add(manifest.doc_id)
             if progress_callback:
                 progress_callback(f"Core pipeline indexed {len(nodes)} chunks: {pdf_path.name}")
