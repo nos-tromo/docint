@@ -14,6 +14,7 @@ from llama_index.core import Document
 from llama_index.core.schema import BaseNode, TextNode
 from loguru import logger
 
+from docint.core.ingest.enrichment import set_enrichment
 from docint.core.ingest.images_service import (
     ImageAsset,
     ImageIngestionService,
@@ -74,13 +75,7 @@ class CorePDFPipelineReader:
             try:
                 if self.entity_extractor:
                     ents, rels = self.entity_extractor(text_value)
-                    if ents or rels:
-                        meta = dict(getattr(node, "metadata", {}) or {})
-                        if ents:
-                            meta["entities"] = ents
-                        if rels:
-                            meta["relations"] = rels
-                        node.metadata = meta
+                    set_enrichment(node, {"entities": ents, "relations": rels})
             except Exception as exc:
                 logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
 
@@ -138,14 +133,7 @@ class CorePDFPipelineReader:
         for parent_id, parent in coarse_by_id.items():
             entities = entities_by_parent.get(parent_id) or []
             relations = relations_by_parent.get(parent_id) or []
-            if not entities and not relations:
-                continue
-            meta = dict(parent.metadata or {})
-            if entities:
-                meta["entities"] = entities
-            if relations:
-                meta["relations"] = relations
-            parent.metadata = meta
+            set_enrichment(parent, {"entities": entities, "relations": relations})
 
     @staticmethod
     def _iter_pdf_files(data_dir: Path) -> list[Path]:

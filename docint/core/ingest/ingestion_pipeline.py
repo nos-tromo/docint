@@ -24,6 +24,7 @@ from llama_index.llms.openai import OpenAI
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
+from docint.core.ingest.enrichment import set_enrichment
 from docint.core.ingest.hate_speech import (
     CHARS_PER_TOKEN,
     CHUNK_CATEGORIES,
@@ -228,7 +229,7 @@ def _attach_hate_speech_finding(node: BaseNode, finding: WindowFinding) -> None:
             or ""
         ),
     }
-    node.metadata = {**metadata, "hate_speech": detection}
+    set_enrichment(node, {"hate_speech": detection})
 
 
 def _transcript_key(metadata: dict[str, Any]) -> tuple[str, ...]:
@@ -697,13 +698,7 @@ class DocumentIngestionPipeline:
             try:
                 if self.entity_extractor:
                     ents, rels = self.entity_extractor(text_value)
-                    if ents or rels:
-                        meta = dict(getattr(node, "metadata", {}) or {})
-                        if ents:
-                            meta["entities"] = ents
-                        if rels:
-                            meta["relations"] = rels
-                        node.metadata = meta
+                    set_enrichment(node, {"entities": ents, "relations": rels})
             except Exception as exc:
                 logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
 
@@ -737,7 +732,7 @@ class DocumentIngestionPipeline:
                     parsed["chunk_id"] = chunk_id
                     parsed["chunk_text"] = text_value
                     parsed["source_ref"] = source_ref
-                    node.metadata = {**meta, "hate_speech": parsed}
+                    set_enrichment(node, {"hate_speech": parsed})
             except Exception as exc:
                 logger.warning("Hate-speech detection failed on chunk {}: {}", idx, exc)
 
