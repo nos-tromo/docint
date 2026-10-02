@@ -3535,10 +3535,16 @@ class _FakePipeline:
     """Minimal pipeline stub for ingest invalidation tests."""
 
     def __init__(self) -> None:
-        """Initialise with empty reader and extractor fields."""
+        """Initialise with an empty reader field."""
         self.dir_reader: None = None
-        self.entity_extractor: None = None
-        self.ner_max_workers = 1
+
+    def enrich_nodes(self, nodes: list[Any]) -> None:
+        """Leave the nodes as they are.
+
+        Args:
+            nodes: Nodes handed over by the PDF lane (ignored).
+        """
+        _ = nodes
 
     def build(self, processed_hashes: set[str]) -> list[tuple[list[Any], list[Any]]]:
         """Return an empty batch list.
@@ -3559,8 +3565,7 @@ class _FakeCorePDFReader:
     def __init__(
         self,
         data_dir: Path,
-        entity_extractor: Any = None,
-        ner_max_workers: int = 1,
+        enrich_nodes: Any = None,
         source_collection: str | None = None,
         image_ingestion_service: Any = None,
         hierarchical_node_parser: Any = None,
@@ -3569,16 +3574,14 @@ class _FakeCorePDFReader:
 
         Args:
             data_dir: Root directory for PDF documents (ignored).
-            entity_extractor: Optional NER extractor (ignored).
-            ner_max_workers: Worker thread count (ignored).
+            enrich_nodes: The run's enrichment pass (ignored).
             source_collection: Qdrant collection name (ignored).
             image_ingestion_service: Image ingestion service (ignored).
             hierarchical_node_parser: Shared hierarchical parser (ignored).
         """
         _ = (
             data_dir,
-            entity_extractor,
-            ner_max_workers,
+            enrich_nodes,
             source_collection,
             image_ingestion_service,
             hierarchical_node_parser,

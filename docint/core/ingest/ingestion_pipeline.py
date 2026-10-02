@@ -505,6 +505,19 @@ class DocumentIngestionPipeline:
 
         return docs, nodes
 
+    def enrich_nodes(self, nodes: list[BaseNode]) -> None:
+        """Apply this run's NER and hate-speech enrichment to nodes another lane built.
+
+        The core PDF lane builds its nodes outside this pipeline. It used to be
+        handed the NER extractor alone, so no PDF was ever classified for hate
+        speech; routing its nodes through the same pass keeps every lane on
+        every stage.
+
+        Args:
+            nodes (list[BaseNode]): Nodes to enrich in place.
+        """
+        self._enrich_nodes_in_place(nodes)
+
     def _enrich_nodes_in_place(
         self,
         nodes: list[BaseNode],

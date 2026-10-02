@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+import docint.core.ingest.ingestion_pipeline as pipeline_module
 import docint.core.rag as rag_module
+from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.rag import RAG
 from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.readers.documents.models import DocumentManifest
 from docint.utils.hashing import compute_file_hash
 
 
@@ -101,47 +107,6 @@ def test_reader_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch, tmp_path:
     batches = list(reader.build({existing_hash}))
     assert batches == []
     assert reader.discovered_hashes == {existing_hash}
-
-
-def test_reader_applies_ner_metadata(tmp_path: Path) -> None:
-    """Core reader should enrich nodes when an entity extractor is provided."""
-    pdf_path = tmp_path / "sample.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4\n")
-
-    chunks = [
-        {
-            "chunk_id": "chunk-1",
-            "text": "Ada Lovelace worked with Charles Babbage.",
-            "page_range": [0],
-        }
-    ]
-    _, nodes = CorePDFPipelineReader._build_nodes(
-        file_path=pdf_path,
-        doc_id="abc123",
-        pipeline_version="1.0.0",
-        chunks=chunks,
-    )
-
-    reader = CorePDFPipelineReader(
-        data_dir=tmp_path,
-        entity_extractor=lambda text: (
-            [{"text": "Ada Lovelace", "type": "person"}],
-            [
-                {
-                    "head": "Ada Lovelace",
-                    "tail": "Charles Babbage",
-                    "label": "worked_with",
-                }
-            ],
-        ),
-        ner_max_workers=1,
-    )
-    reader._apply_ner(nodes)
-
-    assert nodes[0].metadata["entities"] == [{"text": "Ada Lovelace", "type": "person"}]
-    assert nodes[0].metadata["relations"] == [
-        {"head": "Ada Lovelace", "tail": "Charles Babbage", "label": "worked_with"}
-    ]
 
 
 def test_reader_ingests_extracted_images_via_shared_service(tmp_path: Path) -> None:
@@ -233,8 +198,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
         def __init__(
             self,
             data_dir: Path,
-            entity_extractor: Any = None,
-            ner_max_workers: int = 1,
+            enrich_nodes: Any = None,
             source_collection: str | None = None,
             image_ingestion_service: Any = None,
             hierarchical_node_parser: Any = None,
@@ -242,8 +206,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
             """Initialise and discard all arguments."""
             _ = (
                 data_dir,
-                entity_extractor,
-                ner_max_workers,
+                enrich_nodes,
                 source_collection,
                 image_ingestion_service,
                 hierarchical_node_parser,
@@ -263,8 +226,9 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
             """Initialise with empty state."""
             self.dir_reader: None = None
             self.seen_hashes: set[str] | None = None
-            self.entity_extractor: None = None
-            self.ner_max_workers = 1
+
+        def enrich_nodes(self, nodes: list[Any]) -> None:
+            """Leave the nodes as they are."""
 
         def build(self, existing_hashes: Any) -> Iterator[Any]:
             """Record the hashes passed into the legacy pipeline."""
@@ -434,3 +398,152 @@ def test_reader_yields_and_ingests_images_when_no_text_chunks(monkeypatch: pytes
 
     # The hash should be tracked so subsequent runs skip this file.
     assert doc_id in reader.discovered_hashes
+
+
+_HATEFUL_CHUNK = "HATEFUL slogan printed on the cover page."
+_NEUTRAL_CHUNK = "Neutral paragraph about the weather."
+
+
+class _VerdictModel:
+    """Chat-model stand-in that endorses only the chunk carrying the hateful marker."""
+
+    def complete(self, prompt: str, **_kwargs: Any) -> SimpleNamespace:
+        """Return a verdict for the chunk rendered into *prompt*.
+
+        Args:
+            prompt: The rendered hate-speech prompt.
+            **_kwargs: Request options such as ``response_format`` (ignored).
+
+        Returns:
+            A response carrying the verdict as JSON ``text``.
+        """
+        endorsed = "HATEFUL" in prompt
+        verdict = {
+            "hate_speech": endorsed,
+            "stance": "endorses" if endorsed else "none",
+            "category": "ethnicity" if endorsed else "none",
+            "confidence": "high" if endorsed else "low",
+            "reason": "Endorses excluding a group." if endorsed else "",
+        }
+        return SimpleNamespace(text=json.dumps(verdict))
+
+
+def _enriching_pipeline(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> DocumentIngestionPipeline:
+    """Build a real ingestion pipeline with hate speech on, a stub NER extractor and flat chunking.
+
+    Only the env, the prompt file and the remote models are stubbed; the
+    enrichment code is the pipeline's own.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        data_dir: The batch directory.
+
+    Returns:
+        The pipeline.
+    """
+    ner_cfg = replace(pipeline_module.load_ner_env(), enabled=False, max_workers=1)
+    hate_cfg = replace(pipeline_module.load_hate_speech_env(), enabled=True, max_workers=1)
+    ingestion_cfg = replace(pipeline_module.load_ingestion_env(), hierarchical_chunking_enabled=False)
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: ner_cfg)
+    monkeypatch.setattr(pipeline_module, "load_hate_speech_env", lambda: hate_cfg)
+    monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: ingestion_cfg)
+    monkeypatch.setattr(
+        pipeline_module, "OpenAIPipeline", lambda: SimpleNamespace(load_prompt=lambda kw: "Classify:\n{text}")
+    )
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=data_dir,
+        ner_model=None,
+        progress_callback=None,
+        hate_speech_model=cast(Any, _VerdictModel()),
+    )
+    pipeline.entity_extractor = lambda text: ([{"text": text.split()[0], "type": "org"}], [])
+    return pipeline
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_ingest_docs_runs_hate_speech_detection_on_pdf_chunks(
+    mode: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recording_pool: Any
+) -> None:
+    """A PDF is enriched by the same NER + hate-speech pass as every other file.
+
+    The PDF lane used to receive the NER extractor alone, so with detection
+    enabled a PDF's chunks were persisted without a verdict and the Analysis
+    view read a hateful document as clean.
+
+    Args:
+        mode: ``sync`` drives ``ingest_docs``, ``async`` drives ``asingest_docs``.
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+        recording_pool: Inline preprocessing pool.
+    """
+    batch_dir = tmp_path / "batch"
+    batch_dir.mkdir()
+    (batch_dir / "leaflet.pdf").write_bytes(b"%PDF-1.4\nleaflet")
+    artifacts = tmp_path / "artifacts"
+
+    class _FakeOrchestrator:
+        config = SimpleNamespace(artifacts_dir=str(artifacts))
+
+        def process(self, path: Path, *, page_progress: Any = None) -> DocumentManifest:
+            doc_id = compute_file_hash(path)
+            (artifacts / doc_id).mkdir(parents=True, exist_ok=True)
+            rows = [
+                {"chunk_id": "c1", "text": _HATEFUL_CHUNK, "page_range": [0]},
+                {"chunk_id": "c2", "text": _NEUTRAL_CHUNK, "page_range": [1]},
+            ]
+            (artifacts / doc_id / "chunks.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            manifest = DocumentManifest(doc_id=doc_id, file_path=str(path), file_name=path.name, pipeline_version="t")
+            manifest.status = "completed"
+            return manifest
+
+    monkeypatch.setattr("docint.core.readers.documents.reader.DocumentPipelineOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr("docint.core.readers.documents.reader.get_preprocess_pool", lambda: recording_pool)
+
+    pipeline = _enriching_pipeline(monkeypatch, batch_dir)
+    # The generic lane has nothing to read here; the PDF lane is under test.
+    monkeypatch.setattr(DocumentIngestionPipeline, "build_streaming", lambda self, existing_hashes=None: iter(()))
+    monkeypatch.setattr(RAG, "_build_ingestion_pipeline", lambda self, progress_callback=None, **_kw: pipeline)
+
+    persisted: list[Any] = []
+
+    def _persist(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
+        persisted.extend(nodes)
+
+    async def _apersist(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
+        persisted.extend(nodes)
+
+    monkeypatch.setattr(RAG, "_persist_node_batches", _persist)
+    monkeypatch.setattr(RAG, "_apersist_node_batches", _apersist)
+    monkeypatch.setattr(RAG, "create_collection_if_missing", lambda self: None)
+    monkeypatch.setattr(RAG, "probe_sparse_endpoint", lambda self: None)
+    monkeypatch.setattr(RAG, "probe_embed_endpoint", lambda self: None)
+    monkeypatch.setattr(RAG, "_prepare_sources_dir", lambda self, path: path)
+    monkeypatch.setattr(RAG, "_vector_store", lambda self: object())
+    monkeypatch.setattr(RAG, "_storage_context", lambda self, vector_store: object())
+    monkeypatch.setattr(RAG, "embed_model", property(lambda self: object()))
+    monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: set())
+    monkeypatch.setattr(RAG, "_build_ingest_manifest", lambda self, *a, **k: rag_module.NullIngestManifest())
+    monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "qdrant_client", property(lambda self: object()))
+    monkeypatch.setattr(rag_module, "VectorStoreIndex", lambda **_kw: SimpleNamespace())
+    monkeypatch.setattr(rag_module, "ensure_search_index", lambda client, collection: None)
+    monkeypatch.setattr(rag_module, "prefetch_batch", lambda *a, **k: 0)
+
+    rag = RAG(qdrant_collection="test")
+    if mode == "sync":
+        rag.ingest_docs(batch_dir, build_query_engine=False)
+    else:
+        asyncio.run(rag.asingest_docs(batch_dir, build_query_engine=False))
+
+    by_text = {node.text: node for node in persisted}
+    assert set(by_text) == {_HATEFUL_CHUNK, _NEUTRAL_CHUNK}
+    finding = by_text[_HATEFUL_CHUNK].metadata.get("hate_speech")
+    assert isinstance(finding, dict) and finding["hate_speech"] is True
+    assert finding["chunk_text"] == _HATEFUL_CHUNK
+    assert "hate_speech" not in by_text[_NEUTRAL_CHUNK].metadata
+    # NER runs in the same pass, so it still reaches every chunk.
+    assert by_text[_HATEFUL_CHUNK].metadata["entities"] == [{"text": "HATEFUL", "type": "org"}]
+    assert by_text[_NEUTRAL_CHUNK].metadata["entities"] == [{"text": "Neutral", "type": "org"}]
