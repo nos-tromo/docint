@@ -1,0 +1,229 @@
+"""Run the ingest job's NER + hate-speech pass over the image companion's points.
+
+An image's words live only in the ``{collection}_images`` companion: the text
+printed in it (``ocr_text``) and the vision model's caption
+(``llm_description``). No lane the pipeline enriches reads them — except a
+standalone image file's, which ``ImageReader`` also writes into the main
+collection as a document — so the words on a poster in a posting, a slide in
+a video or a figure in a PDF reached neither the Entities nor the Hate speech
+view.
+
+The image service marks every point it writes fresh ``pending``, and the job
+runs this pass once its lanes are done. Points written at upload time, before
+any job existed to say which stages are on, are therefore enriched with the
+stages of the job that ingests them. Points stored before the marker existed
+carry none and are left as they were ingested, like the text chunks of a
+collection ingested before a stage was switched on.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+from llama_index.core.schema import BaseNode, TextNode
+from qdrant_client import models
+
+from docint.core.storage.scroll import iter_scroll
+
+ENRICHMENT_FIELD: str = "enrichment"
+"""Payload key holding an image point's enrichment state."""
+
+ENRICHMENT_PENDING: str = "pending"
+"""Written fresh, waiting for the job's pass."""
+
+ENRICHMENT_DONE: str = "done"
+"""Settled by the pass, whether or not a stage found anything."""
+
+ENRICHMENT_RESULT_KEYS: tuple[str, ...] = ("entities", "relations", "hate_speech")
+"""Payload keys the pass writes."""
+
+_SOURCE_PAYLOAD_KEYS: list[str] = ["ocr_text", "llm_description"]
+
+
+class NodeEnricher(Protocol):
+    """The run's enrichment entry point, ``DocumentIngestionPipeline.enrich_nodes``."""
+
+    def __call__(
+        self,
+        nodes: list[BaseNode],
+        *,
+        ner: bool,
+        hate_speech: bool,
+        progress_offset: int,
+        progress_total: int | None,
+    ) -> None:
+        """Enrich *nodes* in place with the selected stages.
+
+        Args:
+            nodes (list[BaseNode]): Nodes to enrich.
+            ner (bool): Run entity extraction.
+            hate_speech (bool): Run hate-speech detection.
+            progress_offset (int): Processed count offset for cumulative progress.
+            progress_total (int | None): Total count for progress display.
+        """
+
+
+def has_text_twin(payload: dict[str, Any]) -> bool:
+    """Report whether an image point is also a main-collection document.
+
+    A standalone image file is read twice: ``ImageReader`` writes its words
+    and caption into the main collection as a document, which the generic
+    lane enriches, and the image service writes this point. Identity is
+    first-wins, so a file seen standalone after a posting claimed it keeps the
+    posting's ``source_type``; its occurrences still record the standalone
+    copy.
+
+    Args:
+        payload (dict[str, Any]): The image point's payload.
+
+    Returns:
+        bool: ``True`` when the point's findings belong to its document.
+    """
+    if payload.get("source_type") == "standalone":
+        return True
+    occurrences = payload.get("occurrences")
+    return isinstance(occurrences, list) and any(
+        isinstance(occurrence, dict) and occurrence.get("source_type") == "standalone" for occurrence in occurrences
+    )
+
+
+def entity_text(payload: dict[str, Any]) -> str:
+    """Return the text NER reads off an image: its printed words, then its caption.
+
+    Args:
+        payload (dict[str, Any]): The image point's payload.
+
+    Returns:
+        str: The text, empty when the image has neither.
+    """
+    parts = (str(payload.get("ocr_text") or "").strip(), str(payload.get("llm_description") or "").strip())
+    return "\n\n".join(part for part in parts if part)
+
+
+def hate_speech_text(payload: dict[str, Any]) -> str:
+    """Return the text hate-speech detection judges: the image's printed words only.
+
+    A verdict is about the stance of whoever wrote the text, and the caption
+    is the vision model's description of the picture, not anything its
+    author said.
+
+    Args:
+        payload (dict[str, Any]): The image point's payload.
+
+    Returns:
+        str: The printed words, empty when the image has none.
+    """
+    return str(payload.get("ocr_text") or "").strip()
+
+
+def enrichment_carryover(cached_payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the enrichment fields a point rewritten from *cached_payload* starts with.
+
+    A rewrite that reuses a cached point's words and caption keeps the results
+    computed from them; anything else waits for the pass.
+
+    Args:
+        cached_payload (dict[str, Any] | None): The stored point being rewritten, if any.
+
+    Returns:
+        dict[str, Any]: The enrichment state and any results to keep.
+    """
+    if cached_payload and cached_payload.get(ENRICHMENT_FIELD) == ENRICHMENT_DONE:
+        return {
+            key: cached_payload[key] for key in (ENRICHMENT_FIELD, *ENRICHMENT_RESULT_KEYS) if key in cached_payload
+        }
+    return {ENRICHMENT_FIELD: ENRICHMENT_PENDING}
+
+
+def _pending_filter() -> models.Filter:
+    """Return the filter matching the points waiting for the pass.
+
+    Returns:
+        models.Filter: ``enrichment == "pending"``.
+    """
+    return models.Filter(
+        must=[models.FieldCondition(key=ENRICHMENT_FIELD, match=models.MatchValue(value=ENRICHMENT_PENDING))]
+    )
+
+
+def _settled_payload(ner_node: BaseNode, hate_node: BaseNode) -> dict[str, Any]:
+    """Return the payload update recording one point's results.
+
+    Args:
+        ner_node (BaseNode): The point's node after entity extraction.
+        hate_node (BaseNode): The point's node after hate-speech detection.
+
+    Returns:
+        dict[str, Any]: The results found, plus the ``done`` marker.
+    """
+    update: dict[str, Any] = {ENRICHMENT_FIELD: ENRICHMENT_DONE}
+    for key in ("entities", "relations"):
+        if ner_node.metadata.get(key):
+            update[key] = ner_node.metadata[key]
+    if hate_node.metadata.get("hate_speech"):
+        update["hate_speech"] = hate_node.metadata["hate_speech"]
+    return update
+
+
+def enrich_pending_images(
+    client: Any,
+    collection_name: str,
+    enrich: NodeEnricher,
+    *,
+    page_size: int = 64,
+) -> int:
+    """Enrich every image point waiting for the pass, then mark it done.
+
+    Entities are read from :func:`entity_text` and the hate-speech verdict
+    from :func:`hate_speech_text`, both through the run's own pipeline, so the
+    stages, worker limits and per-request overrides are the text lanes'. The
+    results are written payload-only. Only the points pending when the pass
+    begins are settled; one written meanwhile waits for the next run.
+
+    Args:
+        client (Any): Qdrant client.
+        collection_name (str): The image companion collection.
+        enrich (NodeEnricher): The run's enrichment entry point.
+        page_size (int): Points enriched and written per round.
+
+    Returns:
+        int: How many points were settled.
+    """
+    total = int(client.count(collection_name=collection_name, count_filter=_pending_filter(), exact=True).count)
+    settled = 0
+    if not total:
+        return settled
+    # Paging continues from the next point id, so settling a page (which
+    # drops it out of the filter) cannot make the scroll skip a point.
+    for page in iter_scroll(
+        client,
+        collection_name=collection_name,
+        scroll_filter=_pending_filter(),
+        page_size=page_size,
+        with_payload=_SOURCE_PAYLOAD_KEYS,
+        on_error="raise",
+        error_context="pending images",
+    ):
+        points = page[: total - settled]
+        ner_nodes: list[BaseNode] = [
+            TextNode(id_=str(point.id), text=entity_text(point.payload or {})) for point in points
+        ]
+        hate_nodes: list[BaseNode] = [
+            TextNode(id_=str(point.id), text=hate_speech_text(point.payload or {})) for point in points
+        ]
+        enrich(ner_nodes, ner=True, hate_speech=False, progress_offset=settled, progress_total=total)
+        enrich(hate_nodes, ner=False, hate_speech=True, progress_offset=settled, progress_total=total)
+        client.batch_update_points(
+            collection_name=collection_name,
+            update_operations=[
+                models.SetPayloadOperation(
+                    set_payload=models.SetPayload(payload=_settled_payload(ner_node, hate_node), points=[point.id])
+                )
+                for point, ner_node, hate_node in zip(points, ner_nodes, hate_nodes, strict=True)
+            ],
+            wait=True,
+        )
+        settled += len(points)
+        if settled >= total:
+            break
+    return settled
