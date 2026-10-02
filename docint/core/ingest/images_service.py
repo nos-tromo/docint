@@ -21,6 +21,12 @@ from loguru import logger
 from PIL import Image, ImageOps
 from qdrant_client import QdrantClient, models
 
+from docint.core.ingest.image_enrichment import (
+    ENRICHMENT_FIELD,
+    ENRICHMENT_PENDING,
+    enrichment_carryover,
+    has_text_twin,
+)
 from docint.core.ocr import DocumentOcrEngine, build_engine
 from docint.core.search.fields import ensure_field_indexes
 from docint.core.search.index import ensure_search_index, write_search_text
@@ -1476,6 +1482,8 @@ class ImageIngestionService:
         }
         if tag_error:
             image_payload["tagging_error"] = tag_error
+        if not has_text_twin(image_payload):
+            image_payload[ENRICHMENT_FIELD] = ENRICHMENT_PENDING
 
         node_text = self._node_text(ocr_text, description, tags)
 
@@ -1673,6 +1681,7 @@ class ImageIngestionService:
                 "keyframe_time_sec": times[frame_index] if frame_index < len(times) else None,
                 "vector_name": self.img_ingestion_config.vector_name,
                 "image_collection": target_collection,
+                **enrichment_carryover(cached_payload),
             }
             thumbnail = self._thumbnail_fields(frame_bytes)
             if link_field:
