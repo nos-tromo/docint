@@ -698,7 +698,9 @@ Requests carry a strict JSON-schema `response_format`. A provider that
 rejects it (HTTP 400/422 other than a context overflow), or whose
 constrained reply cannot be parsed, is served unconstrained for the rest
 of the run. An unparseable reply, or a failed request, is no finding,
-and its log line carries the reply length, never its text.
+and its log line carries the reply length, never its text. An
+unconstrained reply that lists one verdict per statement is read as the
+whole chunk: it is a finding when any listed verdict endorses.
 
 Window requests carry an output cap that grows with the core (80 tokens
 per segment, at least 1024). A reply stopped at that cap is not trusted:
