@@ -506,6 +506,23 @@ _NEXTEXT_TRANSCRIPT_PROMPT_SHA256: dict[str, str] = {
 """SHA-256 of Nextext's ``nextext/utils/prompts/<locale>/hate_speech_transcript.txt``."""
 
 
+def test_chunk_prompts_are_pinned_to_nextexts_image_copy() -> None:
+    """Nextext judges keyframe captions with a byte-identical copy of the chunk prompt; change both repos together."""
+    digests = {
+        locale: hashlib.sha256((_PROMPT_DIR / locale / "hate_speech.txt").read_bytes()).hexdigest()
+        for locale in ("en", "de")
+    }
+
+    assert digests == _NEXTEXT_IMAGE_PROMPT_SHA256
+
+
+_NEXTEXT_IMAGE_PROMPT_SHA256: dict[str, str] = {
+    "en": "2dd0526d6c5ed5ad4ea730a2ca534745712c15039719da031ec8bb078b783a27",
+    "de": "c5069d64de9b2f600f4266f68d22f5ae0ce29f6047d7a15bf3ef1e45ef7d01f2",
+}
+"""SHA-256 of Nextext's ``nextext/utils/prompts/<locale>/hate_speech_image.txt``."""
+
+
 # ---------------------------------------------------------------------------
 # Review fixes: cancellation, failure breaker, grouping, truncation, contract
 # ---------------------------------------------------------------------------

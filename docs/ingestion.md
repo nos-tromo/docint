@@ -660,7 +660,8 @@ toward group-focused enmity (GMF), never a model boolean: `endorses`,
 is a finding. Quoting, reporting, condemning, analysing or asking about
 hate is not hate, and a word such as "antisemitic" used to describe
 something is not an attack. Image descriptions are judged by the message
-the image itself conveys.
+the image itself conveys. The uploader's stance is unknown, so a hate
+symbol shown with no distancing in the description is a finding.
 
 Flagged chunks carry a `hate_speech` metadata object (`hate_speech`,
 `category`, `confidence`, `reason`, `chunk_id`, `chunk_text`,
@@ -690,6 +691,10 @@ the UI.
   shape. The transcript prompt is byte-identical to Nextext's (a test
   pins its hash); without it, segments fall back to per-chunk
   detection.
+
+`hate_speech.txt` is pinned the same way: Nextext judges its keyframe
+captions with a byte-identical copy (`hate_speech_image.txt`), so a
+change to either side must land in both repos.
 
 Requests carry a strict JSON-schema `response_format`. A provider that
 rejects it (HTTP 400/422 other than a context overflow), or whose

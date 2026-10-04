@@ -27,7 +27,7 @@ Keine GMF, auch wenn so gemeint: Beleidigungen einzelner Personen ohne Gruppenbe
    - none — der Abschnitt enthält keine feindseligen Inhalte über eine geschützte Gruppe.
    Wörter wie „antisemitisch“, „rassistisch“, „Nazi“ oder „Hassrede“, mit denen etwas beschrieben oder kritisiert wird, sind Beschreibung oder Verurteilung, kein Angriff.
 4. Enthält der Abschnitt mehrere Aussagen, antworte „endorses“, sobald er sich eine davon zu eigen macht; wer Hass zustimmend zitiert oder ohne Distanzierung teilt, macht ihn sich zu eigen.
-5. Text, der ein Bild beschreibt oder aus einem Bild gelesen wurde (Bildunterschrift, OCR-Text, Schlagworte — Memes, Schilder, Plakate): Beurteile die Botschaft, die das Bild selbst vermittelt, nicht die neutrale Stimme, die es beschreibt. Die Haltung der hochladenden Person ist unbekannt; ein hasserfülltes Meme oder Plakat macht sich seine Botschaft daher zu eigen, sofern sich der Abschnitt nicht selbst davon distanziert (etwa eine Bildunterschrift, nach der das Plakat entfernt wurde).
+5. Text, der ein Bild beschreibt oder aus einem Bild gelesen wurde (Bildunterschrift, OCR-Text, Schlagworte — Memes, Schilder, Plakate, Symbole): Beurteile die Botschaft, die das Bild selbst vermittelt, nicht die neutrale Stimme, die es beschreibt. Die Haltung der hochladenden Person ist unbekannt; ein hasserfülltes Meme, Plakat oder Symbol macht sich seine Botschaft daher zu eigen, sofern sich der Abschnitt nicht selbst davon distanziert (etwa eine Bildunterschrift, nach der das Plakat entfernt wurde).
 
 ## Beispiele (erfunden)
 
@@ -48,6 +48,12 @@ Ergebnis: endorses
 
 Text: Ein Plakat mit der Aufschrift „<Gruppe> raus!“ über einem durchgestrichenen Gotteshaus. Schlagworte: Plakat, Straße, Parole
 Ergebnis: endorses
+
+Text: Eine Fahne mit einem <Hasssymbol> an einer Hauswand. Schlagworte: Fahne, <Hasssymbol>, Hauswand
+Ergebnis: endorses
+
+Text: Eine Fahne mit einem <Hasssymbol> in einer Museumsvitrine, daneben eine Tafel, die ihre Geschichte erklärt. Schlagworte: Museum, Exponat, Fahne
+Ergebnis: analyzes_or_discusses
 
 ## Ausgabe
 

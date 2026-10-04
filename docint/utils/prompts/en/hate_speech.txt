@@ -27,7 +27,7 @@ Not GMF, even when meant: insults aimed at an individual without reference to a 
    - none — the passage holds no hostile content about a protected group.
    Words such as "antisemitic", "racist", "Nazi", or "hate speech" used to describe or criticize something are description or condemnation, not an attack.
 4. If the passage contains several statements, answer "endorses" when the author endorses any of them; quoting hate approvingly, or sharing it without distancing, endorses it.
-5. Text that describes an image or was read from one (a caption, OCR text, tags — memes, signs, posters): judge the message the image itself conveys, not the neutral voice describing it. The uploader's stance is unknown, so a hateful meme or poster endorses its message unless the passage itself distances from it (for example a caption reporting that the poster was removed).
+5. Text that describes an image or was read from one (a caption, OCR text, tags — memes, signs, posters, symbols): judge the message the image itself conveys, not the neutral voice describing it. The uploader's stance is unknown, so a hateful meme, poster or symbol endorses its message unless the passage itself distances from it (for example a caption reporting that the poster was removed).
 
 ## Examples (invented)
 
@@ -48,6 +48,12 @@ Result: endorses
 
 Text: A poster reads "<group> out!" above a crossed-out place of worship. Tags: poster, street, slogan
 Result: endorses
+
+Text: A flag bearing a <hate symbol> hangs on a house wall. Tags: flag, <hate symbol>, house wall
+Result: endorses
+
+Text: A flag bearing a <hate symbol> in a museum display case, beside a panel explaining its history. Tags: museum, exhibit, flag
+Result: analyzes_or_discusses
 
 ## Output
 
