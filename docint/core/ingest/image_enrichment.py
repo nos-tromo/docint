@@ -115,7 +115,8 @@ def image_text_fields(payload: dict[str, Any]) -> dict[str, Any]:
     A finding's ``chunk_text`` is the text a stage judged, its parts run
     together. Kept apart, they let a view say which words were printed in the
     picture and which are docint's own description of it. A text chunk carries
-    none of these payload keys, so its row gains nothing.
+    none of these payload keys, so its row gains nothing. The printed words
+    lose the blank lines an OCR answer puts between its lines.
 
     Args:
         payload (dict[str, Any]): A main-collection or image-companion payload.
@@ -125,7 +126,7 @@ def image_text_fields(payload: dict[str, Any]) -> dict[str, Any]:
         each only when the image carries it.
     """
     fields: dict[str, Any] = {}
-    ocr_text = str(payload.get("ocr_text") or "").strip()
+    ocr_text = "\n".join(line for line in str(payload.get("ocr_text") or "").strip().splitlines() if line.strip())
     if ocr_text:
         fields["ocr_text"] = ocr_text
     description = str(payload.get("llm_description") or "").strip()

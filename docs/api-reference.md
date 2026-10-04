@@ -610,8 +610,9 @@ full-list mode. Query params: `cursor`, `limit` (1–500, default `50`),
 `collection`. With `entity_merge_mode="resolved"` the filter expands to the
 canonical entity's sibling aliases, so the drill-down matches the merged
 mention count. A row judged from an image also carries the image's parts
-apart: `ocr_text` (the words printed in it), `image_description` and
-`image_tags`, each only when present. `chunk_text` stays the text NER read.
+apart: `ocr_text` (the words printed in it, one line per line, blank lines
+dropped), `image_description` and `image_tags`, each only when present.
+`chunk_text` stays the text NER read.
 
 ### `POST /collections/ner/warm`
 

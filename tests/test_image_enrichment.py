@@ -520,6 +520,13 @@ def test_image_text_fields_keep_an_images_words_description_and_tags_apart() -> 
     assert image_text_fields({"text": "Chunk text naming Acme.", "filename": "notes.txt"}) == {}
 
 
+def test_image_text_fields_collapse_blank_lines_in_the_printed_words() -> None:
+    """An OCR answer's blank lines between lines are dropped; the lines themselves stay apart."""
+    payload = {"ocr_text": "\nFIRST LINE\n\nSECOND LINE\n \t\n\nTHIRD LINE\n\n"}
+    assert image_text_fields(payload) == {"ocr_text": "FIRST LINE\nSECOND LINE\nTHIRD LINE"}
+    assert image_text_fields({"ocr_text": "\n \n"}) == {}
+
+
 def test_finding_rows_carry_an_images_parts_apart_from_its_judged_text(monkeypatch: pytest.MonkeyPatch) -> None:
     """Image rows name their printed words, description and tags separately; text rows gain nothing.
 
