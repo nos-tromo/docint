@@ -963,3 +963,101 @@ def test_a_document_figure_finding_names_its_document_and_page(monkeypatch: pyte
 
     for blob in (R.render_markdown(report), R.render_html(report)):
         assert f"quarterly report.pdf · {ui_string('report_label_page')} 3" in blob
+
+
+_PRINTED = "PRINTED SLOGAN\nSECOND LINE"
+_DESCRIPTION = "A poster held up in a town square."
+
+
+def _image_finding(artifact_type: str, **extra: Any) -> dict[str, Any]:
+    """A finding judged from an image, carrying its printed words, description and tags apart.
+
+    Args:
+        artifact_type: ``entity_finding`` or ``hate_speech_finding``.
+        **extra: Snapshot keys to add or override.
+
+    Returns:
+        A one-item report.
+    """
+    snapshot: dict[str, Any] = {
+        "chunk_id": "img-1",
+        "chunk_text": f"{_PRINTED}\n\n{_DESCRIPTION}\n\nTags: poster, crowd",
+        "filename": "poster.png",
+        "image_id": "img-1",
+        "ocr_text": _PRINTED,
+        "image_description": _DESCRIPTION,
+        "image_tags": ["poster", "crowd"],
+        **extra,
+    }
+    if artifact_type == "entity_finding":
+        snapshot |= {"entity_label": "Acme [ORG]", "entities": [{"text": "Acme", "type": "ORG"}]}
+    else:
+        snapshot |= {"category": "religion", "confidence": "high", "reason": "Endorses excluding a group."}
+    return _single_item_report(artifact_type, snapshot)
+
+
+@pytest.mark.parametrize("artifact_type", ["entity_finding", "hate_speech_finding"])
+def test_image_finding_renders_its_parts_as_labelled_rows(monkeypatch: pytest.MonkeyPatch, artifact_type: str) -> None:
+    """Printed words, description and tags each get a labelled row instead of one combined block."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _image_finding(artifact_type)
+
+    htm = R.render_html(report)
+    printed = f'<td class="f-key">Text in the image</td><td class="f-text">{_PRINTED}</td>'
+    described = f'<td class="f-key">Image description</td><td class="f-text">{_DESCRIPTION}</td>'
+    tagged = '<td class="f-key">Tags</td><td class="f-val">poster, crowd</td>'
+    assert htm.index(printed) < htm.index(described) < htm.index(tagged)
+    assert '<td colspan="2" class="f-text">' not in htm
+
+    md = R.render_markdown(report)
+    tag = "Acme [ORG]" if artifact_type == "entity_finding" else "religion (high)"
+    assert f"| {tag} |  |" in md
+    printed_md = "| Text in the image | PRINTED SLOGAN<br>SECOND LINE |"
+    described_md = f"| Image description | {_DESCRIPTION} |"
+    assert md.index(printed_md) < md.index(described_md) < md.index("| Tags | poster, crowd |")
+    assert "Tags: poster, crowd" not in md
+
+
+def test_image_finding_translation_sits_under_the_printed_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The translation of an image's printed words follows them, ahead of the description."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _image_finding(
+        "hate_speech_finding", translation={"text": "TRANSLATED SLOGAN", "target_lang": "en", "model": "m"}
+    )
+
+    htm = R.render_html(report)
+    translated = '<td class="f-key">Machine translation (→ English)</td><td class="f-val">TRANSLATED SLOGAN</td>'
+    assert htm.index("Text in the image") < htm.index(translated) < htm.index("Image description")
+    assert htm.count("TRANSLATED SLOGAN") == 1
+
+    md = R.render_markdown(report)
+    translated_md = "| Machine translation (→ English) | TRANSLATED SLOGAN |"
+    assert md.index("| Text in the image |") < md.index(translated_md) < md.index("| Image description |")
+
+
+def test_image_finding_without_printed_words_keeps_its_translation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With nothing printed in the picture, the parts it has render and a translation stays where it always was."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _image_finding(
+        "entity_finding",
+        ocr_text="",
+        image_tags=[],
+        translation={"text": "TRANSLATED", "target_lang": "en", "model": "m"},
+    )
+
+    htm = R.render_html(report)
+    assert "Text in the image" not in htm
+    assert "Tags</td>" not in htm
+    assert htm.index("Image description") < htm.index("Machine translation (→ English)")
+
+    md = R.render_markdown(report)
+    assert md.index("| Image description |") < md.index("| Machine translation (→ English) | TRANSLATED |")
+
+
+def test_image_finding_part_labels_follow_the_response_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The part labels are the report's locale, like every other label."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    htm = R.render_html(_image_finding("hate_speech_finding"))
+    assert '<td class="f-key">Text im Bild</td>' in htm
+    assert '<td class="f-key">Bildbeschreibung</td>' in htm
+    assert '<td class="f-key">Schlagworte</td>' in htm
