@@ -296,7 +296,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
               <> · {t('analysis.coverage_partial_label')}</>
             )}
           </p>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1">
             {/* Its label stays "Aktualisieren":
                 `analysis.coverage_partial_detail` tells the reader to click
                 that word, and an icon whose name no longer said it would
@@ -306,6 +306,9 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
               busy={state.busy}
               onClick={() => generate(true)}
             />
+            {reportItem && reportDedupeKeys && (
+              <AddToReportButton item={reportItem} inReport={inReport} />
+            )}
             <DownloadButton
               label={t('analysis.summary_download_md')}
               onClick={() =>
@@ -316,9 +319,6 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
                 )
               }
             />
-            {reportItem && reportDedupeKeys && (
-              <AddToReportButton item={reportItem} inReport={inReport} />
-            )}
           </div>
         </div>
       )}
