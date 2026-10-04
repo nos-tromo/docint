@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, NotRequired, TypedDict, cast
@@ -23,6 +24,23 @@ from llama_index.llms.openai import OpenAI
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
+from docint.core.ingest.hate_speech import (
+    CHARS_PER_TOKEN,
+    CHUNK_CATEGORIES,
+    CONFIDENCE_LEVELS,
+    REASON_MAX_CHARS,
+    TranscriptLine,
+    TranscriptWindow,
+    WindowFinding,
+    chunk_response_format,
+    is_structured_output_rejection,
+    next_window,
+    normalize_choice,
+    normalize_stance,
+    parse_window_reply,
+    render_window_prompt,
+    window_response_format,
+)
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.preprocess import IMAGE_EXTENSIONS, get_preprocess_pool, submit_file
 from docint.core.ingest.standalone_media import StandaloneMediaIngestor
@@ -46,6 +64,15 @@ from docint.utils.ner_client import build_remote_ner_extractor
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
+
+WINDOW_MIN_OUTPUT_TOKENS: int = 1024
+"""Minimum output-token cap for one transcript-window request."""
+
+WINDOW_OUTPUT_TOKENS_PER_SEGMENT: int = 80
+"""Output tokens budgeted per core segment, so a window whose every segment is a candidate still fits."""
+
+_TRANSCRIPT_WINDOW_FAILURE_LIMIT: int = 3
+"""Consecutive failed window requests after which the pass stops calling a dead endpoint."""
 
 
 class NoSupportedFilesError(RuntimeError):
@@ -100,14 +127,20 @@ def _extract_first_json_dict(text: str) -> tuple[dict[str, Any] | None, json.JSO
     return None, last_exc
 
 
-def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
-    """Parse hate-speech detector model output into a structured dictionary.
+def _parse_hate_speech_reply(raw: str) -> HateSpeechDetection | None:
+    """Parse a stance-aware hate-speech verdict, or report it as unparseable.
+
+    The verdict comes from ``stance`` alone: only ``endorses`` is hate speech.
+    No boolean is read, so neither a stray ``"hate_speech": true`` nor the
+    string ``"false"`` can create a finding. Categories and confidences are
+    normalised to their enums; an endorsed verdict never carries ``none``.
 
     Args:
-        raw (str): The raw string output from the hate-speech detection model.
+        raw (str): The raw model output (reasoning, prose and fences tolerated).
 
     Returns:
-        HateSpeechDetection: A structured dictionary containing hate-speech detection results.
+        HateSpeechDetection | None: The verdict, or ``None`` when the reply
+            holds no JSON object.
     """
     cleaned, captured = strip_reasoning(raw or "")
     if captured:
@@ -116,42 +149,132 @@ def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
             len(captured),
         )
 
-    parsed: Any = {}
+    parsed: Any
     try:
         parsed = json.loads(cleaned)
-    except Exception as exc:
-        logger.debug("Failed direct hate-speech JSON parse: {}", exc)
-        extracted, extract_exc = _extract_first_json_dict(cleaned)
-        if extracted is not None:
-            parsed = extracted
-        else:
-            preview = cleaned[:160].replace("\n", " ")
-            logger.warning(
-                "Failed hate-speech JSON extraction from model response: {} (preview={!r})",
-                extract_exc or exc,
-                preview,
-            )
-            parsed = cast(dict[str, Any], {})
-
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        parsed = next((item for item in parsed if isinstance(item, dict)), None)
     if not isinstance(parsed, dict):
-        return {
-            "hate_speech": False,
-            "category": "none",
-            "confidence": "low",
-            "reason": "Invalid model response format",
-        }
+        parsed, _ = _extract_first_json_dict(cleaned)
+    if not isinstance(parsed, dict):
+        return None
 
-    category = str(parsed.get("category") or "none").strip().lower() or "none"
-    confidence = str(parsed.get("confidence") or "low").strip().lower() or "low"
-    if confidence not in {"high", "medium", "low"}:
-        confidence = "low"
-
+    endorsed = normalize_stance(parsed.get("stance")) == "endorses"
+    category = normalize_choice(parsed.get("category"), CHUNK_CATEGORIES, "other")
+    if not endorsed:
+        category = "none"
+    elif category == "none":
+        category = "other"
     return {
-        "hate_speech": bool(parsed.get("hate_speech")),
+        "hate_speech": endorsed,
         "category": category,
-        "confidence": confidence,
-        "reason": str(parsed.get("reason") or "").strip(),
+        "confidence": normalize_choice(parsed.get("confidence"), CONFIDENCE_LEVELS, "low"),
+        "reason": str(parsed.get("reason") or "").strip()[:REASON_MAX_CHARS],
     }
+
+
+def _node_id(node: Any) -> str:
+    """Return a node's id (``node_id``, else ``id_``), or ``""``.
+
+    Args:
+        node (Any): The node.
+
+    Returns:
+        str: The id.
+    """
+    return str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
+
+
+def _sentence_index(node: Any) -> int:
+    """Return a transcript segment's ``sentence_index`` for ordering (unknown sorts last).
+
+    Args:
+        node (Any): The segment node.
+
+    Returns:
+        int: The index.
+    """
+    value = (getattr(node, "metadata", {}) or {}).get("sentence_index")
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return 2**31
+    try:
+        return int(value)
+    except ValueError:
+        return 2**31
+
+
+def _attach_hate_speech_finding(node: BaseNode, finding: WindowFinding) -> None:
+    """Store an endorsed-hate finding on a transcript segment in the per-chunk shape.
+
+    Args:
+        node (BaseNode): The segment node.
+        finding (WindowFinding): Its finding.
+    """
+    metadata = dict(getattr(node, "metadata", {}) or {})
+    detection: HateSpeechDetection = {
+        "hate_speech": True,
+        "category": finding["category"],
+        "confidence": finding["confidence"],
+        "reason": finding["reason"],
+        "chunk_id": _node_id(node),
+        "chunk_text": getattr(node, "text", "") or "",
+        "source_ref": str(
+            metadata.get("file_path")
+            or metadata.get("filename")
+            or metadata.get("file_name")
+            or metadata.get("source")
+            or ""
+        ),
+    }
+    node.metadata = {**metadata, "hate_speech": detection}
+
+
+def _transcript_key(metadata: dict[str, Any]) -> tuple[str, ...]:
+    """Identify the transcript a segment belongs to.
+
+    The file hash alone is not enough: the same clip attached to two postings
+    (or served twice from the transcript cache) yields two transcripts whose
+    segments must not share a window.
+
+    Args:
+        metadata (dict[str, Any]): Segment metadata.
+
+    Returns:
+        tuple[str, ...]: ``(file_hash, file_path, posting_uuid, media_id)``.
+    """
+    return tuple(str(metadata.get(key) or "") for key in ("file_hash", "file_path", "posting_uuid", "media_id"))
+
+
+def _finish_reason(response: Any) -> str | None:
+    """Return why generation stopped, from a llama-index completion's raw provider response.
+
+    Args:
+        response (Any): The completion response.
+
+    Returns:
+        str | None: ``"stop"``, ``"length"``, ..., or ``None`` when not reported.
+    """
+    raw = getattr(response, "raw", None)
+    choices = raw.get("choices") if isinstance(raw, dict) else getattr(raw, "choices", None)
+    if not choices:
+        return None
+    first = choices[0]
+    reason = first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None)
+    return reason if isinstance(reason, str) else None
+
+
+def _response_text(response: Any) -> str:
+    """Return the text of a llama-index completion response.
+
+    Args:
+        response (Any): The completion response.
+
+    Returns:
+        str: Its text.
+    """
+    return str(response.text if hasattr(response, "text") else response)
 
 
 @dataclass(slots=True)
@@ -200,6 +323,15 @@ class DocumentIngestionPipeline:
     hate_speech_max_chars: int = field(default=1500, init=False)
     hate_speech_max_workers: int = field(default=1, init=False)
     hate_speech_prompt: str | None = field(default=None, init=False)
+    # Cleared once a provider rejects ``response_format`` (or its constrained
+    # replies prove unparseable) so the rest of the run stops sending it.
+    hate_speech_structured: bool = field(default=True, init=False)
+    # Nextext transcript segments are classified in context windows instead of
+    # one isolated sentence per request; ``None`` keeps the per-chunk path.
+    hate_speech_transcript_prompt: str | None = field(default=None, init=False)
+    hate_speech_window_tokens: int = field(default=1000, init=False)
+    hate_speech_context_tokens: int = field(default=300, init=False)
+    hate_speech_windowed_ids: set[str] = field(default_factory=set, init=False)
 
     # None when the batch holds no reader-supported files at all (e.g. an
     # audio/video-only upload): the generic sweep is skipped but the Nextext
@@ -246,6 +378,8 @@ class DocumentIngestionPipeline:
         )
         self.hate_speech_max_chars = hate_speech_cfg.max_chars
         self.hate_speech_max_workers = hate_speech_cfg.max_workers
+        self.hate_speech_window_tokens = hate_speech_cfg.window_tokens
+        self.hate_speech_context_tokens = hate_speech_cfg.context_tokens
         if self.hate_speech_enabled and self.hate_speech_model is not None:
             try:
                 self.hate_speech_prompt = OpenAIPipeline().load_prompt(kw="hate_speech")
@@ -255,6 +389,14 @@ class DocumentIngestionPipeline:
                     exc,
                 )
                 self.hate_speech_enabled = False
+            if self.hate_speech_enabled:
+                try:
+                    self.hate_speech_transcript_prompt = OpenAIPipeline().load_prompt(kw="hate_speech_transcript")
+                except Exception as exc:
+                    logger.warning(
+                        "Transcript hate-speech prompt unavailable - classifying transcript segments one by one: {}",
+                        exc,
+                    )
 
         # --- Ingestion config ---
         ingestion_cfg = load_ingestion_env()
@@ -389,6 +531,9 @@ class DocumentIngestionPipeline:
             yield docs, [], file_hashes
             return
 
+        # Before batching: a transcript's segments are spread over many small
+        # enrichment batches, and a window needs its neighbours.
+        self._detect_transcript_hate_speech(nodes)
         total_nodes = len(nodes)
         processed_nodes = 0
         node_batches = chunk_nodes(nodes, self.ingestion_batch_size)
@@ -568,10 +713,18 @@ class DocumentIngestionPipeline:
                 prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
                     "{text}", text_value[: self.hate_speech_max_chars]
                 )
-                response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
-                raw = response.text if hasattr(response, "text") else str(response)
-                parsed = _parse_hate_speech_payload(str(raw))
-                if bool(parsed.get("hate_speech")):
+                raw, structured, _ = self._complete_hate_speech(prompt, chunk_response_format())
+                parsed = _parse_hate_speech_reply(raw)
+                if parsed is None and structured:
+                    raw, _, _ = self._complete_hate_speech(prompt, None)
+                    parsed = _parse_hate_speech_reply(raw)
+                    if parsed is not None and self.hate_speech_structured:
+                        self.hate_speech_structured = False
+                        logger.warning("Constrained hate-speech replies were unparseable; continuing without it")
+                if parsed is None:
+                    logger.warning("Hate-speech reply for chunk {} was unparseable ({} chars)", idx, len(raw))
+                    return
+                if parsed["hate_speech"]:
                     meta = dict(getattr(node, "metadata", {}) or {})
                     chunk_id = str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
                     source_ref = str(
@@ -598,7 +751,7 @@ class DocumentIngestionPipeline:
                         _extract_entities(idx, node, text_value)
                 _tick("ner", "Extracting entities")
             if hate_enabled:
-                if has_text:
+                if has_text and self._wants_hate_speech(node):
                     with hate_sem:
                         _detect_hate_speech(idx, node, text_value)
                 _tick("hate", "Detecting hate speech")
@@ -612,6 +765,244 @@ class DocumentIngestionPipeline:
         # and must fail the batch like it did pre-pooling, not vanish.
         for future in futures:
             future.result()
+
+    def _complete_hate_speech(
+        self,
+        prompt: str,
+        response_format: dict[str, Any] | None,
+        *,
+        max_tokens: int | None = None,
+    ) -> tuple[str, bool, str | None]:
+        """Send one hate-speech request, constrained by ``response_format`` while the provider allows it.
+
+        A provider rejecting the schema (HTTP 400/422 that is not a context
+        overflow) gets the same prompt again unconstrained, and the rest of the
+        run stops sending the schema.
+
+        Args:
+            prompt (str): The rendered prompt.
+            response_format (dict[str, Any] | None): The JSON-schema constraint,
+                or ``None`` for an unconstrained request.
+            max_tokens (int | None): Output-token cap for this request, or
+                ``None`` for the model's default.
+
+        Returns:
+            tuple[str, bool, str | None]: The reply text, whether it was
+                constrained, and the provider's finish reason when reported.
+        """
+        model = cast(OpenAI, self.hate_speech_model)
+        extra: dict[str, Any] = {"max_tokens": max_tokens} if max_tokens is not None else {}
+        if response_format is not None and self.hate_speech_structured:
+            try:
+                response = model.complete(prompt, response_format=response_format, **extra)
+                return _response_text(response), True, _finish_reason(response)
+            except Exception as exc:
+                if not is_structured_output_rejection(exc):
+                    raise
+                self.hate_speech_structured = False
+                logger.warning(
+                    "The inference endpoint rejected response_format (HTTP {}); continuing hate-speech detection "
+                    "without it",
+                    getattr(exc, "status_code", "?"),
+                )
+        response = model.complete(prompt, **extra)
+        return _response_text(response), False, _finish_reason(response)
+
+    def _wants_hate_speech(self, node: BaseNode) -> bool:
+        """Report whether the per-chunk detector should classify ``node``.
+
+        Coarse hierarchical parents are never stored as vectors, so their
+        verdicts would never surface — classifying them only costs requests.
+
+        Args:
+            node (BaseNode): The node.
+
+        Returns:
+            bool: ``False`` for coarse parents.
+        """
+        metadata = getattr(node, "metadata", {}) or {}
+        if metadata.get("docint_hier_type") == "coarse":
+            return False
+        return _node_id(node) not in self.hate_speech_windowed_ids
+
+    def _detect_transcript_hate_speech(self, nodes: list[BaseNode]) -> None:
+        """Classify Nextext transcript segments in context windows, annotating endorsed hate.
+
+        Segments are grouped per source file and ordered by ``sentence_index``;
+        each window labels a core of segments while showing its neighbours as
+        read-only context, so a sentence such as "Das ist antisemitisch." is
+        judged as the condemnation it is. Runs on the full node list of a source
+        batch — before enrichment splits it into small node batches. Windowed
+        segments are skipped by the per-chunk detector afterwards; a window whose
+        request fails or whose reply is unparseable yields no finding.
+
+        Args:
+            nodes (list[BaseNode]): Nodes of one source batch.
+        """
+        if not (self.hate_speech_enabled and self.hate_speech_transcript_prompt and self.hate_speech_model is not None):
+            return
+        groups: dict[tuple[str, ...], list[BaseNode]] = {}
+        for node in nodes:
+            metadata = getattr(node, "metadata", {}) or {}
+            if metadata.get("docint_doc_kind") != "transcript_segment" or not _node_id(node):
+                continue
+            if not (getattr(node, "text", "") or "").strip():
+                continue
+            groups.setdefault(_transcript_key(metadata), []).append(node)
+        if not groups:
+            return
+
+        core_chars = max(1, int(self.hate_speech_window_tokens * CHARS_PER_TOKEN))
+        context_chars = max(0, int(self.hate_speech_context_tokens * CHARS_PER_TOKEN))
+        jobs: list[tuple[list[BaseNode], list[TranscriptLine], TranscriptWindow, str]] = []
+        for group in groups.values():
+            ordered = sorted(group, key=_sentence_index)
+            lines = [
+                TranscriptLine(
+                    index=position,
+                    text=(getattr(node, "text", "") or "").strip(),
+                    speaker=str((getattr(node, "metadata", {}) or {}).get("speaker") or "").strip() or None,
+                )
+                for position, node in enumerate(ordered)
+            ]
+            language = str((getattr(ordered[0], "metadata", {}) or {}).get("whisper_language") or "") or "—"
+            position = 0
+            while position < len(lines):
+                window = next_window(lines, position, core_chars, context_chars)
+                jobs.append((ordered, lines, window, language))
+                position = window.core_end
+
+        # Every windowed segment is settled here, even when its window fails or
+        # the pass stops early: re-judging it alone per chunk would bring back
+        # the context-free verdicts this pass exists to avoid.
+        for ordered, _, window, _ in jobs:
+            for position in range(window.core_start, window.core_end):
+                self.hate_speech_windowed_ids.add(_node_id(ordered[position]))
+
+        total = sum(len(group) for group in groups.values())
+        done = 0
+        failures_in_a_row = 0
+        workers = max(1, self.hate_speech_max_workers)
+        queued = iter(jobs)
+        in_flight: deque[tuple[tuple[list[BaseNode], list[TranscriptLine], TranscriptWindow, str], Future[Any]]]
+        in_flight = deque()
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+
+            def submit_next() -> None:
+                """Start the next queued window, if any."""
+                job = next(queued, None)
+                if job is not None:
+                    _, lines, window, language = job
+                    in_flight.append(
+                        (
+                            job,
+                            executor.submit(
+                                self._classify_transcript_window, lines, window, language, core_chars, context_chars
+                            ),
+                        )
+                    )
+
+            for _ in range(workers):
+                submit_next()
+            try:
+                while in_flight:
+                    (ordered, _, window, _), future = in_flight.popleft()
+                    findings, failed = future.result()
+                    for finding in findings:
+                        _attach_hate_speech_finding(ordered[finding["index"]], finding)
+                    failures_in_a_row = failures_in_a_row + 1 if failed else 0
+                    done += window.core_end - window.core_start
+                    if failures_in_a_row >= _TRANSCRIPT_WINDOW_FAILURE_LIMIT:
+                        logger.warning(
+                            "Hate-speech detection gave up on transcript windows after {} consecutive failures; "
+                            "{} segment(s) left unclassified",
+                            failures_in_a_row,
+                            total - done,
+                        )
+                        break
+                    submit_next()
+                    if self.progress_callback:
+                        self.progress_callback(f"Detecting hate speech: {done}/{total} chunks processed")
+            finally:
+                for _, pending in in_flight:
+                    pending.cancel()
+
+    def _classify_transcript_window(
+        self,
+        lines: list[TranscriptLine],
+        window: TranscriptWindow,
+        language: str,
+        core_chars: int,
+        context_chars: int,
+    ) -> tuple[list[WindowFinding], bool]:
+        """Classify one transcript window, fail-soft.
+
+        The reply's output cap grows with the core (see
+        :data:`WINDOW_OUTPUT_TOKENS_PER_SEGMENT`). A reply stopped at that cap is
+        not trusted: the window's segments are asked again one per request, each
+        with its own context margins.
+
+        Args:
+            lines (list[TranscriptLine]): The transcript's segments, in order.
+            window (TranscriptWindow): The window to classify.
+            language (str): Transcript language label.
+            core_chars (int): Core clip limit.
+            context_chars (int): Context clip limit.
+
+        Returns:
+            tuple[list[WindowFinding], bool]: Endorsed-hate findings (``[]`` when
+                the reply is unparseable), and whether the request itself failed.
+        """
+        indices = [line.index for line in lines[window.core_start : window.core_end]]
+        prompt = render_window_prompt(
+            cast(str, self.hate_speech_transcript_prompt),
+            lines,
+            window,
+            core_chars=core_chars,
+            context_chars=context_chars,
+            language=language,
+        )
+        max_tokens = max(WINDOW_MIN_OUTPUT_TOKENS, WINDOW_OUTPUT_TOKENS_PER_SEGMENT * len(indices))
+        try:
+            raw, structured, finish_reason = self._complete_hate_speech(
+                prompt, window_response_format(indices), max_tokens=max_tokens
+            )
+            items = parse_window_reply(raw, indices)
+            if items is None and structured and finish_reason != "length":
+                raw, _, finish_reason = self._complete_hate_speech(prompt, None, max_tokens=max_tokens)
+                items = parse_window_reply(raw, indices)
+                if items is not None and self.hate_speech_structured:
+                    self.hate_speech_structured = False
+                    logger.warning("Constrained hate-speech replies were unparseable; continuing without it")
+        except Exception as exc:
+            logger.warning(
+                "Hate-speech detection failed on a transcript window of {} segment(s): {}", len(indices), exc
+            )
+            return [], True
+        if finish_reason == "length" and len(indices) > 1:
+            logger.warning(
+                "A hate-speech reply for a transcript window of {} segment(s) stopped at the output cap; "
+                "asking its segments one by one",
+                len(indices),
+            )
+            findings: list[WindowFinding] = []
+            failed = False
+            for position in range(window.core_start, window.core_end):
+                single = next_window(lines, position, 1, context_chars)
+                sub_findings, sub_failed = self._classify_transcript_window(
+                    lines, single, language, core_chars, context_chars
+                )
+                findings.extend(sub_findings)
+                failed = failed or sub_failed
+            return findings, failed
+        if items is None:
+            logger.warning(
+                "Hate-speech reply for a transcript window of {} segment(s) was unparseable ({} chars)",
+                len(indices),
+                len(raw),
+            )
+            return [], False
+        return items, False
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
         """Create nodes from documents without applying enrichment stages.
@@ -1201,5 +1592,6 @@ class DocumentIngestionPipeline:
             RuntimeError: If node parsers are not initialized.
         """
         nodes = self._create_nodes_without_enrichment(docs)
+        self._detect_transcript_hate_speech(nodes)
         self._enrich_nodes_in_place(nodes)
         return nodes

@@ -547,8 +547,13 @@ inline. For each batch:
    produces fine child nodes and optional coarse parent nodes.
 4. NER runs in parallel on each fine chunk (when enabled) and annotates
    the chunk metadata with entities and relations.
-5. Hate-speech detection runs per chunk (when enabled) and stores the
-   parsed verdict under a `hate_speech` key in metadata.
+5. Hate-speech detection runs per fine chunk (when enabled; coarse
+   parents are skipped) — Nextext transcript segments in context windows
+   instead, see [NER and hate-speech](#ner-and-hate-speech) — and stores
+   the parsed verdict of an endorsing finding under a `hate_speech` key in
+   metadata. PDFs read by the core PDF lane (`CorePDFPipelineReader`) get
+   NER only; hate-speech detection does not reach them. This is a bug,
+   fixed by [#607](https://github.com/nos-tromo/docint/pull/607).
 6. Chunks are embedded with the dense model (`EMBED_MODEL`) and, for
    hybrid collections, the sparse model (`SPARSE_MODEL`).
 7. Embeddings and nodes are upserted to Qdrant and to the SQLite-backed
@@ -566,7 +571,7 @@ a two-level chunker:
 
 - **Coarse parent chunks** — size `COARSE_CHUNK_SIZE` (default 8192
   tokens).
-- **Fine child chunks** — size `FINE_CHUNK_SIZE` (default 8192 tokens)
+- **Fine child chunks** — size `FINE_CHUNK_SIZE` (default 1024 tokens)
   with `FINE_CHUNK_OVERLAP` (default 0) overlap. A sentence splitter with
   `SENTENCE_SPLITTER_CHUNK_SIZE` / `_OVERLAP` is used to break text at
   natural boundaries.
@@ -648,8 +653,84 @@ Two operator-side deployment shapes for the upstream NER service:
   `http://gliner-ner:8000/gliner`; no Bearer auth needed.
 
 Hate-speech detection is an optional parallel stage governed by
-`HateSpeechConfig`. Flagged chunks carry a `hate_speech_detected` flag
-that the `/collections/hate-speech` endpoint surfaces in the UI.
+`HateSpeechConfig`. The verdict is the **author's or speaker's stance**
+toward group-focused enmity (GMF), never a model boolean: `endorses`,
+`quotes_or_reports`, `condemns_or_counters`, `analyzes_or_discusses`,
+`unclear` (or `none` for a chunk without such content). Only `endorses`
+is a finding. Quoting, reporting, condemning, analysing or asking about
+hate is not hate, and a word such as "antisemitic" used to describe
+something is not an attack. Image descriptions are judged by the message
+the image itself conveys. The uploader's stance is unknown, so a hate
+symbol shown with no distancing in the description is a finding.
+
+Flagged chunks carry a `hate_speech` metadata object (`hate_speech`,
+`category`, `confidence`, `reason`, `chunk_id`, `chunk_text`,
+`source_ref`) that the `/collections/hate-speech` endpoint surfaces in
+the UI.
+
+- **Document chunks** are classified one fine chunk at a time with
+  `prompts/<code>/hate_speech.txt`. The first `HATE_SPEECH_MAX_CHARS` of
+  the chunk are sent; the default of 8192 covers a whole
+  `FINE_CHUNK_SIZE` chunk. Coarse hierarchical parents are never
+  classified: they are not stored as vectors, so their verdicts would
+  never surface.
+- **Nextext transcript segments** are one sentence per node, too little
+  to tell a speaker who condemns hate from one who spreads it. So they
+  are grouped per source file, ordered by `sentence_index`, and
+  classified in **context windows** with
+  `prompts/<code>/hate_speech_transcript.txt`:
+  - a core of about `HATE_SPEECH_WINDOW_TOKENS` of segments is labelled
+    per request;
+  - it is framed by about `HATE_SPEECH_CONTEXT_TOKENS` of read-only
+    neighbouring segments on each side;
+  - the model reports segment indices, never text.
+
+  The pass runs on the full node list of a source batch, before
+  enrichment splits it into `INGESTION_BATCH_SIZE` node batches, so no
+  window loses its neighbours. Findings keep the per-chunk metadata
+  shape. The transcript prompt is byte-identical to Nextext's (a test
+  pins its hash); without it, segments fall back to per-chunk
+  detection.
+
+`hate_speech.txt` is pinned the same way: Nextext judges its keyframe
+captions with a byte-identical copy (`hate_speech_image.txt`), so a
+change to either side must land in both repos.
+
+Requests carry a strict JSON-schema `response_format`. A provider that
+rejects it (HTTP 400/422 other than a context overflow), or whose
+constrained reply cannot be parsed, is served unconstrained for the rest
+of the run. An unparseable reply, or a failed request, is no finding,
+and its log line carries the reply length, never its text.
+
+Window requests carry an output cap that grows with the core (80 tokens
+per segment, at least 1024). A reply stopped at that cap is not trusted:
+the window's segments are asked again one per request, each with its
+context.
+
+At most `HATE_SPEECH_MAX_WORKERS` windows are in flight at a time.
+Stopping the job cancels the queued ones, and three consecutive failed
+window requests end the pass instead of calling a dead endpoint once per
+window.
+
+The prompts run to 3–5k tokens, so the chat model needs a context of at
+least 8k tokens. Ollama's default `num_ctx` of 2048 silently drops the
+start of the prompt; raise it with a Modelfile `PARAMETER num_ctx` or
+`OLLAMA_CONTEXT_LENGTH`.
+
+Gaps and caveats:
+- Known bug, fixed by
+  [#607](https://github.com/nos-tromo/docint/pull/607): PDFs read by the
+  core PDF lane (`CorePDFPipelineReader`) get NER only, not hate-speech
+  detection.
+- Known bug, fixed by
+  [#608](https://github.com/nos-tromo/docint/pull/608): the words inside
+  images (a PDF figure, an image attached to a posting, a video keyframe)
+  get neither NER nor hate-speech detection. Only a standalone image file
+  is classified, through the main-collection document written for it.
+- Existing collections keep the verdicts they were ingested with.
+  Re-uploading the same files does not re-classify them, because the
+  file-hash ledger skips them. Ingest into a fresh collection, or delete
+  and re-ingest, to apply the current classifier.
 
 ## Source staging
 
