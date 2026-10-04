@@ -248,7 +248,7 @@ class SessionManager:
             # Matches logic in _maybe_update_summary (every 5 turns)
             # If turns=6, 6%5=1, last 1 turn is not in summary.
             # If turns=4, 4%5=4, last 4 turns are not in summary.
-            remainder = len(turns) % 5  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
+            remainder = len(turns) % 5
 
             if remainder == 0:
                 return summary
@@ -718,7 +718,7 @@ class SessionManager:
                 "schema_version": "1.0.0",
                 "session_id": conv.id,
                 "created_at": conv.created_at.replace(tzinfo=UTC).isoformat(),
-                "turn_count": len(conv.turns),  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
+                "turn_count": len(conv.turns),
                 "rolling_summary": rolling_summary,
                 "models": {
                     "embed_model_id": self.rag.embed_model_id,
@@ -984,7 +984,7 @@ class SessionManager:
                 t.citations.clear()
                 s.flush()
             else:
-                next_idx = len(conv.turns)  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
+                next_idx = len(conv.turns)
                 t = Turn(
                     conversation_id=conv.id,
                     idx=next_idx,
@@ -1094,7 +1094,7 @@ class SessionManager:
         """
         with self._session_scope() as s:
             conv = s.get(Conversation, session_id)
-            if not conv or len(conv.turns) == 0 or (len(conv.turns) % every_n_turns) != 0:  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
+            if not conv or len(conv.turns) == 0 or (len(conv.turns) % every_n_turns) != 0:
                 return
 
             slice_text = []
@@ -1214,7 +1214,7 @@ class SessionManager:
             if not conv or conv.owner != owner:
                 return []
 
-            messages = []
+            messages: list[dict[str, Any]] = []
             # Citations persist only a node id; the text is rehydrated from
             # the collection's store. That lookup is collection-scoped, so
             # replaying history has to re-bind the conversation's pinned
@@ -1235,7 +1235,7 @@ class SessionManager:
                         for index, c in enumerate(t.citations, start=1)
                     ]
 
-                    msg_entry = {
+                    msg_entry: dict[str, Any] = {
                         "role": "assistant",
                         "content": t.model_response,
                         "sources": sources,

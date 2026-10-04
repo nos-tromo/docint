@@ -81,7 +81,8 @@ def test_a_backfilled_stamp_compares_with_an_orm_written_one(tmp_path: Path) -> 
 
     assert len(stamps) == 2
     assert all(stamp is not None and stamp.tzinfo is None for stamp in stamps)
-    assert max(stamps) >= min(stamps)
+    present = [stamp for stamp in stamps if stamp is not None]
+    assert max(present) >= min(present)
 
 
 def test_the_migration_never_moves_an_existing_stamp(tmp_path: Path) -> None:
