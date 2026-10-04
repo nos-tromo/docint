@@ -481,11 +481,14 @@ ingestion path:
   down-scaled first.
 - Embeddings and metadata land in a sibling collection named per
   `IMAGE_QDRANT_COLLECTION` (template `{collection}_images`).
-- **An image's words go through the job's NER + hate-speech pass, on its
+- **An image goes through the job's NER + hate-speech pass, on its
   `_images` point** (`docint/core/ingest/image_enrichment.py`). NER reads the
-  printed text, then the caption. Hate-speech detection judges the printed
-  text alone: a verdict is about the stance of whoever wrote a text, and a
-  caption is the vision model's description of the picture. The results
+  printed text, then the caption. Hate-speech detection reads the printed
+  text, the caption and the tags, each labelled (`Text in the image:`,
+  `Image description:`, `Tags:`, in the `RESPONSE_LANGUAGE`), and judges the
+  message the picture conveys. A picture whose hate is purely visual has no
+  printed words, so its caption is the only text that shows it. With the
+  stage on, every captioned image costs one hate-speech request. The results
   (`entities`, `relations`, `hate_speech`) are written payload-only and are
   listed beside the chunks' in the Entities and Hate speech views, the entity
   graph, entity resolution and the findings CSVs. This covers PDF figures,
@@ -493,6 +496,16 @@ ingestion path:
   file is left out, because its words and caption are also a main-collection
   document, which the generic lane enriches; listing both would count each
   finding twice.
+- Every hate-speech row carries a `basis`: `image` for a verdict judged from
+  an image (on the `_images` companion, or a standalone file's document),
+  `text` otherwise. The Hate speech view shows it as a **From an image** pill,
+  and the findings CSV appends it as its last column.
+- The caption prompt (`prompts/<code>/image_caption.txt`) asks the vision
+  model to name recognisable symbols, emblems, flags, gestures and codes, so
+  what a picture shows reaches the hate-speech pass in words. Image points
+  are cached by content hash, so images already in a collection keep the
+  caption they were stored with; ingest into a fresh collection to caption
+  them again.
 - Every point written fresh carries `enrichment: "pending"`. Once its lanes
   are done, the ingest job enriches the pending points with its own stages and
   per-request overrides and marks them `done`, including points written at

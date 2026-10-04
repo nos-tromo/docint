@@ -1352,6 +1352,18 @@ def test_the_caption_prompt_keeps_its_json_keys_english_in_every_locale() -> Non
         assert "tags" in text
 
 
+@pytest.mark.parametrize(("locale", "word"), [("en", "symbols"), ("de", "Symbole")])
+def test_the_caption_prompt_asks_for_symbols_by_name(locale: str, word: str) -> None:
+    """A symbol described only vaguely gives the hate-speech pass nothing to judge.
+
+    Args:
+        locale (str): Prompt locale directory.
+        word (str): The locale's word for symbols.
+    """
+    text = load_localized_prompt("image_caption", default="", lang=locale)
+    assert word in text
+
+
 def test_an_unknown_locale_still_yields_a_usable_caption_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing language pack must not leave the tagger promptless."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "xx")

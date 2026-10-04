@@ -24,6 +24,7 @@ from llama_index.core.schema import BaseNode, TextNode
 from qdrant_client import models
 
 from docint.core.storage.scroll import iter_scroll
+from docint.utils.ui_strings import ui_string
 
 ENRICHMENT_FIELD: str = "enrichment"
 """Payload key holding an image point's enrichment state."""
@@ -37,7 +38,13 @@ ENRICHMENT_DONE: str = "done"
 ENRICHMENT_RESULT_KEYS: tuple[str, ...] = ("entities", "relations", "hate_speech")
 """Payload keys the pass writes."""
 
-_SOURCE_PAYLOAD_KEYS: list[str] = ["ocr_text", "llm_description"]
+FINDING_BASIS_IMAGE: str = "image"
+"""A finding judged from an image's printed words, description and tags."""
+
+FINDING_BASIS_TEXT: str = "text"
+"""A finding judged from a text chunk or transcript segment."""
+
+_SOURCE_PAYLOAD_KEYS: list[str] = ["ocr_text", "llm_description", "llm_tags"]
 
 
 class NodeEnricher(Protocol):
@@ -101,19 +108,45 @@ def entity_text(payload: dict[str, Any]) -> str:
 
 
 def hate_speech_text(payload: dict[str, Any]) -> str:
-    """Return the text hate-speech detection judges: the image's printed words only.
+    """Return the text hate-speech detection judges: the image's printed words, description and tags.
 
-    A verdict is about the stance of whoever wrote the text, and the caption
-    is the vision model's description of the picture, not anything its
-    author said.
+    A picture whose hate is purely visual has no printed words, so the
+    description is the only text that shows it. Each part is labelled, which
+    tells the classifier it is reading an image and lets it judge the message
+    the picture conveys rather than the neutral voice describing it. The
+    labels follow ``RESPONSE_LANGUAGE`` and stay in the finding's quoted text.
 
     Args:
         payload (dict[str, Any]): The image point's payload.
 
     Returns:
-        str: The printed words, empty when the image has none.
+        str: The labelled parts, empty when the image has none.
     """
-    return str(payload.get("ocr_text") or "").strip()
+    tags = payload.get("llm_tags")
+    tag_text = ", ".join(str(tag).strip() for tag in tags if str(tag).strip()) if isinstance(tags, list) else ""
+    parts = (
+        ("image_label_text", str(payload.get("ocr_text") or "").strip()),
+        ("image_label_description", str(payload.get("llm_description") or "").strip()),
+        ("image_label_tags", tag_text),
+    )
+    return "\n\n".join(f"{ui_string(key)}: {value}" for key, value in parts if value)
+
+
+def finding_basis(payload: dict[str, Any]) -> str:
+    """Return what a main-collection point's finding was judged from.
+
+    The only main-collection points carrying an image's caption or printed
+    words are the documents ``ImageReader`` writes for standalone image files.
+
+    Args:
+        payload (dict[str, Any]): The main-collection point's payload.
+
+    Returns:
+        str: :data:`FINDING_BASIS_IMAGE` for an image's document, else :data:`FINDING_BASIS_TEXT`.
+    """
+    if payload.get("llm_description") or payload.get("ocr_text"):
+        return FINDING_BASIS_IMAGE
+    return FINDING_BASIS_TEXT
 
 
 def enrichment_carryover(cached_payload: dict[str, Any] | None) -> dict[str, Any]:

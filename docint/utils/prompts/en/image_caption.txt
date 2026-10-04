@@ -5,5 +5,6 @@ Return strict JSON with keys description and tags.
 - tags: 5-20 concise tags, each 1-3 words.
 - Write the description and the tags in English.
 - Describe only what is visible. Do not speculate about intent or identity.
+- Name recognisable symbols, emblems, flags, gestures and codes by their common name, in the description and in the tags.
 - Keep the key names exactly as given, in English.
 - Do not include markdown or prose outside JSON.

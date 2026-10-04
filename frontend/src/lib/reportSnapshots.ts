@@ -107,6 +107,7 @@ export function hateSpeechSnapshot(row: HateSpeechRow, translation?: Translation
       row: row.row ?? null,
       reference_metadata: row.reference_metadata ?? null,
       ...(row.image_id ? { image_id: row.image_id } : {}),
+      ...(row.basis ? { basis: row.basis } : {}),
       ...(translation ? { translation } : {})
     }
   }

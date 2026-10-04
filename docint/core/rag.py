@@ -139,8 +139,10 @@ from docint.core.extract.store import ExtractStore
 from docint.core.ingest.image_enrichment import (
     ENRICHMENT_DONE,
     ENRICHMENT_FIELD,
+    FINDING_BASIS_IMAGE,
     enrich_pending_images,
     entity_text,
+    finding_basis,
     has_text_twin,
 )
 from docint.core.ingest.images_service import ImageIngestionService
@@ -9859,9 +9861,10 @@ class RAG:
     def get_collection_hate_speech(self) -> list[dict[str, Any]]:
         """Return flagged hate-speech chunks from the selected collection.
 
-        Covers the collection's chunks and the words read off its images,
-        whose verdicts live on the ``_images`` companion
-        (:meth:`_image_finding_points`).
+        Covers the collection's chunks and its images, whose verdicts live on
+        the ``_images`` companion (:meth:`_image_finding_points`). Each row's
+        ``basis`` says whether the verdict was judged from text or from an
+        image's printed words, description and tags.
 
         Returns:
             list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
@@ -9873,8 +9876,8 @@ class RAG:
 
         findings: list[dict[str, Any]] = []
 
-        def _add(point_id: str, payload: dict[str, Any]) -> None:
-            """Append *payload*'s finding, if it carries an endorsed verdict."""
+        def _add(point_id: str, payload: dict[str, Any], basis: str) -> None:
+            """Append *payload*'s finding, judged from *basis*, if it carries an endorsed verdict."""
             detection = payload.get("hate_speech")
             if not isinstance(detection, dict) or not bool(detection.get("hate_speech")):
                 return
@@ -9894,6 +9897,7 @@ class RAG:
             source["source_ref"] = str(
                 detection.get("source_ref") or source.get("filename") or payload.get("file_path") or ""
             )
+            source["basis"] = basis
             findings.append(source)
 
         for page in iter_scroll(
@@ -9905,7 +9909,7 @@ class RAG:
             for point in page:
                 payload = getattr(point, "payload", None)
                 if isinstance(payload, dict):
-                    _add(str(getattr(point, "id", "") or ""), payload)
+                    _add(str(getattr(point, "id", "") or ""), payload, finding_basis(payload))
 
         flagged = qdrant_models.Filter(
             must=[
@@ -9913,7 +9917,7 @@ class RAG:
             ]
         )
         for point_id, payload in self._image_finding_points(flagged):
-            _add(point_id, payload)
+            _add(point_id, payload, FINDING_BASIS_IMAGE)
 
         findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))
         return findings

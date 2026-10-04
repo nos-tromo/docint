@@ -345,3 +345,14 @@ describe('HateSpeechTable — evidence thumbnail', () => {
     expect(document.querySelector('[data-testid="hate-speech-row"] img')).toBeNull()
   })
 })
+
+describe('HateSpeechTable basis', () => {
+  it('marks a finding judged from an image, and not one judged from text', () => {
+    const { unmount } = renderRow({ ...rows[0], basis: 'image' })
+    expect(screen.getByText('From an image')).toBeInTheDocument()
+    unmount()
+
+    renderRow({ ...rows[0], basis: 'text' })
+    expect(screen.queryByText('From an image')).not.toBeInTheDocument()
+  })
+})

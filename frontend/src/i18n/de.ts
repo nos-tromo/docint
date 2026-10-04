@@ -366,6 +366,7 @@ export const de: Strings = {
   'hate.category_other': 'Sonstiges',
   'hate.category_none': 'Keine',
   'hate.category_unknown': 'Unbekannt',
+  'hate.basis_image': 'Aus einem Bild',
 
   // analysis orphans: coverage banner + summary panel
   'analysis.coverage_label': 'Abdeckung',

@@ -89,6 +89,9 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "extract_disclaimer": "Transcripts and image descriptions are machine-generated.",
         "report_disclaimer": "AI-generated report",
         "report_empty": "This report has no items yet.",
+        "image_label_text": "Text in the image",
+        "image_label_description": "Image description",
+        "image_label_tags": "Tags",
     },
     "de": {
         "clarify_generic": "Können Sie präzisieren, was Sie benötigen?",
@@ -165,6 +168,9 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "extract_disclaimer": "Transkripte und Bildbeschreibungen sind maschinell erzeugt.",
         "report_disclaimer": ("KI-generierter Bericht"),
         "report_empty": "Dieser Bericht enthält noch keine Einträge.",
+        "image_label_text": "Text im Bild",
+        "image_label_description": "Bildbeschreibung",
+        "image_label_tags": "Schlagworte",
     },
 }
 

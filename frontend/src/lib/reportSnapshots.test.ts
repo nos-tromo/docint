@@ -114,4 +114,9 @@ describe('reportSnapshots', () => {
     expect(withoutImage.snapshot).not.toHaveProperty('image_id')
     expect(hateSpeechSnapshot({ chunk_id: 'c3', image_id: 'kf-1' }).snapshot.image_id).toBe('kf-1')
   })
+
+  it('hate-speech snapshots freeze what the verdict was judged from, when the row says', () => {
+    expect(hateSpeechSnapshot({ chunk_id: 'c4', basis: 'image' }).snapshot.basis).toBe('image')
+    expect(hateSpeechSnapshot({ chunk_id: 'c5' }).snapshot).not.toHaveProperty('basis')
+  })
 })

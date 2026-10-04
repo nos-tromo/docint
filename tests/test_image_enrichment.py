@@ -15,7 +15,7 @@ from qdrant_client import QdrantClient, models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 import docint.core.rag as rag_module
-from docint.core.ingest.image_enrichment import enrich_pending_images
+from docint.core.ingest.image_enrichment import enrich_pending_images, hate_speech_text
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.rag import RAG
@@ -24,6 +24,7 @@ _COMPANION = "docs_images"
 _FIGURE_OCR = "HATEFUL slogan printed on the poster"
 _FIGURE_CAPTION = "Poster held up in a town square"
 _KEYFRAME_CAPTION = "Speaker at a lectern"
+_SYMBOL_CAPTION = "A flag bearing a HATEFUL symbol hangs on a wall"
 
 
 def _point_id(name: str) -> str:
@@ -43,6 +44,7 @@ KEYFRAME = _point_id("keyframe")
 FINISHED = _point_id("finished")
 LEGACY = _point_id("legacy")
 TWIN = _point_id("twin")
+SYMBOL = _point_id("symbol")
 
 
 def _figure_payload(**extra: Any) -> dict[str, Any]:
@@ -172,20 +174,20 @@ def _pipeline(
     return pipeline
 
 
-def test_pending_images_get_ner_on_words_and_caption_and_hate_speech_on_words_only(
+def test_pending_images_get_ner_on_words_and_caption_and_hate_speech_on_every_labelled_part(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The printed words are the author's; the caption is the vision model's.
+    """NER reads the words and the caption; hate-speech detection reads words, description and tags, labelled.
 
-    NER reads both, so a name in either becomes an entity. Hate-speech
-    detection judges the author's stance, so it sees the printed words alone
-    — a caption describing a hateful poster is not an endorsement — and an
-    image with no words costs no call at all.
+    A picture whose hate is purely visual has no printed words, so its
+    description is the only text that shows it. The labels tell the
+    classifier the text describes an image.
 
     Args:
         monkeypatch: The monkeypatch fixture.
         tmp_path: Temporary directory path for the test.
     """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     client = QdrantClient(location=":memory:")
     _store(
         client,
@@ -199,6 +201,13 @@ def test_pending_images_get_ner_on_words_and_caption_and_hate_speech_on_words_on
                 "llm_description": _KEYFRAME_CAPTION,
                 "enrichment": "pending",
             },
+            SYMBOL: {
+                "image_id": "img-symbol",
+                "source_type": "social_media",
+                "llm_description": _SYMBOL_CAPTION,
+                "llm_tags": ["flag", "wall"],
+                "enrichment": "pending",
+            },
             FINISHED: _figure_payload(image_id="img-finished", enrichment="done"),
             LEGACY: _figure_payload(image_id="img-legacy"),
         },
@@ -209,16 +218,26 @@ def test_pending_images_get_ner_on_words_and_caption_and_hate_speech_on_words_on
 
     enriched = enrich_pending_images(client, _COMPANION, pipeline.enrich_nodes)
 
-    assert enriched == 2
-    assert sorted(read) == sorted([f"{_FIGURE_OCR}\n\n{_FIGURE_CAPTION}", _KEYFRAME_CAPTION])
-    assert model.prompts == [f"Classify:\n{_FIGURE_OCR}"]
+    figure_input = f"Text in the image: {_FIGURE_OCR}\n\nImage description: {_FIGURE_CAPTION}\n\nTags: poster"
+    keyframe_input = f"Image description: {_KEYFRAME_CAPTION}"
+    symbol_input = f"Image description: {_SYMBOL_CAPTION}\n\nTags: flag, wall"
+    assert enriched == 3
+    assert sorted(read) == sorted([f"{_FIGURE_OCR}\n\n{_FIGURE_CAPTION}", _KEYFRAME_CAPTION, _SYMBOL_CAPTION])
+    assert sorted(model.prompts) == sorted(
+        f"Classify:\n{text}" for text in (figure_input, keyframe_input, symbol_input)
+    )
 
     figure = _payload(client, _COMPANION, FIGURE)
     assert figure["enrichment"] == "done"
     assert figure["entities"] == [{"text": "HATEFUL", "type": "org"}]
     assert figure["hate_speech"]["hate_speech"] is True
-    assert figure["hate_speech"]["chunk_text"] == _FIGURE_OCR
+    assert figure["hate_speech"]["chunk_text"] == figure_input
     assert figure["hate_speech"]["chunk_id"] == FIGURE
+
+    # No printed words at all: the description alone carries the finding.
+    symbol = _payload(client, _COMPANION, SYMBOL)
+    assert symbol["hate_speech"]["hate_speech"] is True
+    assert symbol["hate_speech"]["chunk_text"] == symbol_input
 
     keyframe = _payload(client, _COMPANION, KEYFRAME)
     assert keyframe["enrichment"] == "done"
@@ -232,6 +251,22 @@ def test_pending_images_get_ner_on_words_and_caption_and_hate_speech_on_words_on
     legacy = _payload(client, _COMPANION, LEGACY)
     assert "enrichment" not in legacy
     assert "entities" not in legacy
+
+
+def test_hate_speech_labels_follow_the_response_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The labels are in the prompt's language, and an image with no text gives no input.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    payload = {"ocr_text": "Gedruckt", "llm_description": "Beschreibung", "llm_tags": ["eins", " ", "zwei"]}
+
+    assert (
+        hate_speech_text(payload)
+        == "Text im Bild: Gedruckt\n\nBildbeschreibung: Beschreibung\n\nSchlagworte: eins, zwei"
+    )
+    assert hate_speech_text({"ocr_text": " ", "llm_tags": []}) == ""
 
 
 def test_every_pending_image_is_reached_across_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -386,6 +421,42 @@ def test_hate_speech_findings_include_the_words_inside_images(monkeypatch: pytes
     assert figure["page"] == 3
     assert figure["image_id"] == "img-figure"
     assert figure["category"] == "religion"
+
+
+def test_hate_speech_rows_say_whether_text_or_an_image_was_judged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A row judged from an image says so, whether it lives on the companion or is a standalone file's document.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    client = _analysed_collection()
+    standalone = _point_id("standalone-document")
+    _store(
+        client,
+        "docs",
+        {
+            standalone: {
+                "text": f"{_SYMBOL_CAPTION}\n\nTags: flag",
+                "filename": "flag.png",
+                "image_id": "img-standalone",
+                "llm_description": _SYMBOL_CAPTION,
+                "hate_speech": {
+                    "hate_speech": True,
+                    "category": "extremism",
+                    "confidence": "high",
+                    "reason": "Shows a hate symbol without distance.",
+                    "chunk_text": f"{_SYMBOL_CAPTION}\n\nTags: flag",
+                },
+            }
+        },
+    )
+    rag = _rag_over(client, monkeypatch)
+
+    rows = {row["chunk_id"]: row for row in rag.get_collection_hate_speech()}
+
+    assert rows[_point_id("chunk")]["basis"] == "text"
+    assert rows[FIGURE]["basis"] == "image"
+    assert rows[standalone]["basis"] == "image"
 
 
 def test_entity_sources_include_the_words_and_caption_of_images(monkeypatch: pytest.MonkeyPatch) -> None:
