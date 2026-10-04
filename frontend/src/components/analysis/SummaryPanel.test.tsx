@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { SummaryPanel } from './SummaryPanel'
 import { useUiStore } from '@/stores/ui'
@@ -169,6 +170,26 @@ describe('SummaryPanel cache hit', () => {
 
     expect(await screen.findByText('Collection two.')).toBeInTheDocument()
     expect(mockCachedSummary).toHaveBeenLastCalledWith('c2')
+  })
+
+  it('orders its actions like the findings tables: refresh, report, download', async () => {
+    mockCachedSummary.mockResolvedValue({ summary: 'A summary.', sources: [] })
+    // AddToReportButton holds report mutations, so it needs a client.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    })
+
+    render(
+      <QueryClientProvider client={qc}>
+        <SummaryPanel reportDedupeKeys={new Set()} />
+      </QueryClientProvider>
+    )
+
+    const refresh = await screen.findByRole('button', { name: /refresh/i })
+    const report = screen.getByRole('button', { name: 'Add to report' })
+    const download = screen.getByRole('button', { name: /download md/i })
+    expect(refresh.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(report.compareDocumentPosition(download) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
 
