@@ -421,7 +421,7 @@ The PDF pipeline is page-level and has its own sub-modules:
 | `documents/chunking.py` | Splits the extracted text into coarse parent chunks and fine child chunks. |
 | `documents/artifacts.py` | Persists intermediate artifacts under `PIPELINE_ARTIFACTS_DIR` so reruns are incremental. |
 | `documents/orchestrator.py` | Glues the stages above into a single per-document run. |
-| `documents/reader.py` | The LlamaIndex-compatible reader class (`CorePDFPipelineReader`) used by the ingestion pipeline. |
+| `documents/reader.py` | The LlamaIndex-compatible reader class (`CorePDFPipelineReader`) used by the ingestion pipeline. It builds the PDF's nodes itself, then hands the fine chunks to the pipeline's shared NER + hate-speech pass (`DocumentIngestionPipeline.enrich_nodes`), so a PDF is enriched exactly like every other file; coarse parents only receive their children's entities. |
 | `documents/config.py` | Thin re-export of `load_pipeline_config()` from `env_cfg`. |
 | `documents/models.py` | Dataclasses shared by the pipeline stages. |
 
@@ -551,9 +551,7 @@ inline. For each batch:
    parents are skipped) — Nextext transcript segments in context windows
    instead, see [NER and hate-speech](#ner-and-hate-speech) — and stores
    the parsed verdict of an endorsing finding under a `hate_speech` key in
-   metadata. PDFs read by the core PDF lane (`CorePDFPipelineReader`) get
-   NER only; hate-speech detection does not reach them. This is a bug,
-   fixed by [#607](https://github.com/nos-tromo/docint/pull/607).
+   metadata.
 6. Chunks are embedded with the dense model (`EMBED_MODEL`) and, for
    hybrid collections, the sparse model (`SPARSE_MODEL`).
 7. Embeddings and nodes are upserted to Qdrant and to the SQLite-backed
@@ -718,10 +716,6 @@ start of the prompt; raise it with a Modelfile `PARAMETER num_ctx` or
 `OLLAMA_CONTEXT_LENGTH`.
 
 Gaps and caveats:
-- Known bug, fixed by
-  [#607](https://github.com/nos-tromo/docint/pull/607): PDFs read by the
-  core PDF lane (`CorePDFPipelineReader`) get NER only, not hate-speech
-  detection.
 - Known bug, fixed by
   [#608](https://github.com/nos-tromo/docint/pull/608): the words inside
   images (a PDF figure, an image attached to a posting, a video keyframe)
