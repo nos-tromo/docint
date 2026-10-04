@@ -335,7 +335,26 @@ def test_column_constants_match_documented_schemas() -> None:
 
 
 def test_hate_speech_row_says_what_the_finding_was_judged_from() -> None:
-    """The basis column is appended last; a snapshot frozen before rows carried it leaves it blank."""
-    assert HATE_SPEECH_COLUMNS[-1] == "basis"
+    """The basis column follows translation; a snapshot frozen before rows carried it leaves it blank."""
+    assert HATE_SPEECH_COLUMNS[HATE_SPEECH_COLUMNS.index("translation") + 1] == "basis"
     assert hate_speech_row({"basis": "image"})["basis"] == "image"
     assert hate_speech_row({})["basis"] == ""
+
+
+def test_findings_rows_carry_an_images_parts_in_their_own_columns() -> None:
+    """Printed words, description and tags are appended as columns, blank for a text finding."""
+    parts = ("ocr_text", "image_description", "image_tags")
+    assert NER_SOURCE_COLUMNS[-3:] == parts
+    assert HATE_SPEECH_COLUMNS[-3:] == parts
+    image = {
+        "chunk_text": "PRINTED WORDS\n\nA poster in a square",
+        "ocr_text": "PRINTED WORDS",
+        "image_description": "A poster in a square",
+        "image_tags": ["poster", "crowd"],
+    }
+    expected = {"ocr_text": "PRINTED WORDS", "image_description": "A poster in a square", "image_tags": "poster, crowd"}
+    for row in (ner_source_row(image, entity_label="X"), hate_speech_row(image)):
+        assert {key: row[key] for key in parts} == expected
+        assert row["chunk_text"] == image["chunk_text"]
+    for row in (ner_source_row({"chunk_text": "plain"}, entity_label="X"), hate_speech_row({"chunk_text": "plain"})):
+        assert {key: row[key] for key in parts} == dict.fromkeys(parts, "")

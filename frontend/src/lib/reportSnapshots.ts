@@ -9,12 +9,45 @@ import type { TranslationPayload } from '@/hooks/useTranslatable'
  */
 
 /**
- * The canonical text of a finding row. One derivation shared by display, the
- * translate POST, the store key and the "Add all" lookup, so a translation is
- * always found under the key the row filed it under.
+ * The canonical text of a finding row: what a text finding displays, and what
+ * its Translate control sends (see `translatableTextOf`).
  */
 export function chunkTextOf(row: { chunk_text?: string | null; text?: string | null }): string {
   return (row.chunk_text ?? row.text ?? '').trim()
+}
+
+/** An image finding's printed words, description and tags, as the API keeps them apart. */
+export interface ImageParts {
+  ocr_text?: string | null
+  image_description?: string | null
+  image_tags?: string[] | null
+}
+
+/** True when a finding row or frozen snapshot carries an image's parts apart. */
+export function hasImageParts(row: ImageParts): boolean {
+  return Boolean(row.ocr_text?.trim() || row.image_description?.trim() || row.image_tags?.some((tag) => tag.trim()))
+}
+
+/**
+ * The text a finding's Translate control sends. One derivation shared by the
+ * translate POST, the store key and the "Add all" lookup, so a translation is
+ * always found under the key the row filed it under. An image's description
+ * and tags are docint's own words, written in `RESPONSE_LANGUAGE`, so only its
+ * printed words are sent — and an image with none has nothing to translate.
+ */
+export function translatableTextOf(
+  row: { chunk_text?: string | null; text?: string | null } & ImageParts
+): string {
+  return hasImageParts(row) ? (row.ocr_text ?? '').trim() : chunkTextOf(row)
+}
+
+/** The image parts a snapshot freezes; absent keys keep a text finding's snapshot byte-identical. */
+function imagePartsOf(row: ImageParts): ImageParts {
+  return {
+    ...(row.ocr_text ? { ocr_text: row.ocr_text } : {}),
+    ...(row.image_description ? { image_description: row.image_description } : {}),
+    ...(row.image_tags?.length ? { image_tags: row.image_tags } : {})
+  }
 }
 
 export function chatAnswerSnapshot(params: {
@@ -78,6 +111,7 @@ export function entityFindingSnapshot(
       entities: (row.entities ?? []).map((e) => ({ text: e.text, type: e.type, score: e.score ?? null })),
       reference_metadata: row.reference_metadata ?? null,
       ...(row.image_id ? { image_id: row.image_id } : {}),
+      ...imagePartsOf(row),
       ...(translation ? { translation } : {})
     }
   }
@@ -108,6 +142,7 @@ export function hateSpeechSnapshot(row: HateSpeechRow, translation?: Translation
       reference_metadata: row.reference_metadata ?? null,
       ...(row.image_id ? { image_id: row.image_id } : {}),
       ...(row.basis ? { basis: row.basis } : {}),
+      ...imagePartsOf(row),
       ...(translation ? { translation } : {})
     }
   }

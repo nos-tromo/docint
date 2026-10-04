@@ -14,8 +14,9 @@ import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
 import { EvidenceThumbnail } from '@/components/common/EvidenceThumbnail'
+import { ImageTextParts } from '@/components/common/ImageTextParts'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
-import { chunkTextOf, hateSpeechSnapshot } from '@/lib/reportSnapshots'
+import { chunkTextOf, hasImageParts, hateSpeechSnapshot, translatableTextOf } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
@@ -62,9 +63,10 @@ function HateSpeechTableRow({
 }) {
   const i18n = useT()
   const chunkText = chunkTextOf(row)
+  const translatableText = translatableTextOf(row)
   // The shared store, not row state: the same translation must reach a
   // hand-added snapshot and "Add all" alike, and survive an unmount.
-  const translation = useTranslationsStore((s) => s.byText[chunkText])
+  const translation = useTranslationsStore((s) => s.byText[translatableText])
   const reportItem = hateSpeechSnapshot(row, translation)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
   // A keyframe or PDF figure shows no thumbnail here, so the pill is what says
@@ -73,7 +75,7 @@ function HateSpeechTableRow({
     ...(row.basis === 'image' ? [{ key: 'basis', value: i18n('hate.basis_image') }] : []),
     ...referenceMetadataPills(row.reference_metadata, i18n)
   ]
-  const translationState = useTranslatable(chunkText)
+  const translationState = useTranslatable(translatableText)
   const source = row.source_ref ?? row.filename ?? i18n('common.unknown_source')
   const location = locationParts(row, i18n)
   const category = hateCategoryLabel((row.category ?? 'unknown').trim(), i18n)
@@ -106,7 +108,9 @@ function HateSpeechTableRow({
         )}
       </div>
       <div className="min-w-0">
-        {chunkText ? (
+        {hasImageParts(row) ? (
+          <ImageTextParts parts={row} ocrTranslation={translationState.translation} />
+        ) : chunkText ? (
           <>
             {translationState.shown && (
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -116,18 +120,16 @@ function HateSpeechTableRow({
             <ClampedText length={(translationState.translation ?? chunkText).length}>
               {translationState.translation ?? chunkText}
             </ClampedText>
-            {translationState.failed && (
-              <div className="mt-1 text-[11px] text-muted-foreground">
-                {i18n('common.translation_unavailable')}
-              </div>
-            )}
           </>
         ) : (
           <span className="text-xs text-muted-foreground">{i18n('common.chunk_text_unavailable')}</span>
         )}
+        {translationState.failed && (
+          <div className="mt-1 text-[11px] text-muted-foreground">{i18n('common.translation_unavailable')}</div>
+        )}
       </div>
       <div className="flex items-center justify-end gap-1">
-        {chunkText && (
+        {translatableText && (
           <TranslateToggle
             shown={translationState.shown}
             busy={translationState.busy}
@@ -186,12 +188,12 @@ export function HateSpeechTable({
         </p>
         <div className="flex items-center gap-1">
           {/* Every flagged chunk, not just the rows paged in. */}
-          <TranslateAllButton fetchAll={fetchAllRows} textOf={chunkTextOf} hasRows={rows.length > 0} />
+          <TranslateAllButton fetchAll={fetchAllRows} textOf={translatableTextOf} hasRows={rows.length > 0} />
           {/* Adds every flagged chunk in the collection, not only the rows
               paged in — see AddAllToReportButton. */}
           <AddAllToReportButton
             fetchAll={fetchAllRows}
-            toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(chunkTextOf(row)))}
+            toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(translatableTextOf(row)))}
             hasRows={rows.length > 0}
           />
           {collection && (

@@ -345,6 +345,10 @@ export interface NerSourceRow {
   entities?: NerEntityMention[]
   relations?: Array<{ head?: string; label?: string; tail?: string }>
   image_id?: string
+  /** An image's printed words, kept apart from its description and tags. */
+  ocr_text?: string
+  image_description?: string
+  image_tags?: string[]
 }
 
 export interface NerTypeRow {
@@ -431,6 +435,10 @@ export interface HateSpeechRow {
   image_id?: string
   /** What the verdict was judged from: a text, or an image's words, description and tags. */
   basis?: 'image' | 'text'
+  /** An image's printed words, kept apart from its description and tags. */
+  ocr_text?: string
+  image_description?: string
+  image_tags?: string[]
 }
 
 // --- Report builder ---

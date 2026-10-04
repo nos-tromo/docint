@@ -3,8 +3,10 @@ import {
   chatAnswerSnapshot,
   chunkTextOf,
   entityFindingSnapshot,
+  hasImageParts,
   hateSpeechSnapshot,
-  summarySnapshot
+  summarySnapshot,
+  translatableTextOf
 } from './reportSnapshots'
 import type { HateSpeechRow, NerSourceRow } from '@/api/types'
 
@@ -118,5 +120,39 @@ describe('reportSnapshots', () => {
   it('hate-speech snapshots freeze what the verdict was judged from, when the row says', () => {
     expect(hateSpeechSnapshot({ chunk_id: 'c4', basis: 'image' }).snapshot.basis).toBe('image')
     expect(hateSpeechSnapshot({ chunk_id: 'c5' }).snapshot).not.toHaveProperty('basis')
+  })
+
+  it('translatableTextOf sends an image only its printed words, and a text finding its chunk', () => {
+    // The description and tags are docint's own words, already in the reader's
+    // language; the printed words are the image's.
+    const image = {
+      chunk_text: 'PRINTED WORDS\n\nA poster in a square',
+      ocr_text: '  PRINTED WORDS ',
+      image_description: 'A poster in a square'
+    }
+    expect(hasImageParts(image)).toBe(true)
+    expect(translatableTextOf(image)).toBe('PRINTED WORDS')
+    // An image with nothing printed in it has nothing to translate.
+    expect(translatableTextOf({ chunk_text: 'A poster', image_description: 'A poster' })).toBe('')
+    expect(hasImageParts({ image_tags: [' '] })).toBe(false)
+    expect(translatableTextOf({ chunk_text: '  plain line ' })).toBe('plain line')
+  })
+
+  it('finding snapshots freeze the parts of an image apart, and leave a text finding byte-identical', () => {
+    const parts = { ocr_text: 'PRINTED', image_description: 'A poster', image_tags: ['poster'] }
+    const entity = entityFindingSnapshot({ chunk_id: 'c6', chunk_text: 'PRINTED\n\nA poster', ...parts }, 'X [ORG]')
+    const hate = hateSpeechSnapshot({ chunk_id: 'c7', chunk_text: 'PRINTED\n\nA poster', ...parts })
+    for (const snap of [entity.snapshot, hate.snapshot]) {
+      expect(snap).toMatchObject(parts)
+      expect(snap.chunk_text).toBe('PRINTED\n\nA poster')
+    }
+    expect(hateSpeechSnapshot({ chunk_id: 'c8', image_description: 'A poster' }).snapshot).not.toHaveProperty(
+      'ocr_text'
+    )
+    for (const snap of [entityFindingSnapshot({ chunk_id: 'c9' }, 'X').snapshot, hateSpeechSnapshot({ chunk_id: 'c9' }).snapshot]) {
+      expect(snap).not.toHaveProperty('ocr_text')
+      expect(snap).not.toHaveProperty('image_description')
+      expect(snap).not.toHaveProperty('image_tags')
+    }
   })
 })

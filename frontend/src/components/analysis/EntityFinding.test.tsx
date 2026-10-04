@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { EntityFinding } from './EntityFinding'
 import { useUiStore } from '@/stores/ui'
+import { useTranslationsStore } from '@/stores/translations'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 import type { NerSourceRow } from '@/api/types'
 
@@ -327,5 +328,74 @@ describe('EntityFinding — evidence thumbnail', () => {
     await userEvent.click(container.querySelector('img')!)
 
     expect(useUiStore.getState().previewModal).toMatchObject({ file_hash: 'h4', filename: 'slide.png' })
+  })
+})
+
+describe('EntityFinding — image parts', () => {
+  const imageRow: NerSourceRow = {
+    chunk_id: 'img-1',
+    filename: 'poster.png',
+    chunk_text: 'ACME PRINTED SLOGAN\n\nA poster naming Acme in a town square.\n\nTags: poster, crowd',
+    ocr_text: 'ACME PRINTED SLOGAN',
+    image_description: 'A poster naming Acme in a town square.',
+    image_tags: ['poster', 'crowd'],
+    entities: [{ text: 'Acme', type: 'ORG' }]
+  }
+
+  function renderImageRow(source: NerSourceRow) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <EntityFinding index={1} source={source} highlightTerms={['acme']} gridTemplate={GRID} />
+      </QueryClientProvider>
+    )
+  }
+
+  beforeEach(() => useTranslationsStore.setState({ byText: {} }))
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('labels the printed words, description and tags apart, marking mentions in each', () => {
+    renderImageRow(imageRow)
+    const row = screen.getByTestId('entity-finding-row')
+    const printed = within(row).getByText('Text in the image').nextElementSibling as HTMLElement
+    const described = within(row).getByText('Image description').nextElementSibling as HTMLElement
+    const tagged = within(row).getByText('Tags').nextElementSibling as HTMLElement
+    expect(printed).toHaveTextContent('ACME PRINTED SLOGAN')
+    expect(described).toHaveTextContent('A poster naming Acme in a town square.')
+    expect(tagged).toHaveTextContent('poster, crowd')
+    expect(within(printed).getByText('ACME').tagName).toBe('MARK')
+    expect(within(described).getByText('Acme').tagName).toBe('MARK')
+    expect(within(row).queryByText(/Tags: poster/)).not.toBeInTheDocument()
+  })
+
+  it('translates only the printed words and keeps the description in view', async () => {
+    const sent: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_u: string, init?: RequestInit) => {
+        sent.push(String(JSON.parse(String(init?.body)).text))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, translation: 'TRANSLATED SLOGAN', model: 'm', target_lang: 'en' })
+        }
+      })
+    )
+    renderImageRow(imageRow)
+
+    await userEvent.click(screen.getByRole('button', { name: /^translate$/i }))
+
+    await waitFor(() => expect(screen.getByText('TRANSLATED SLOGAN')).toBeInTheDocument())
+    expect(sent).toEqual(['ACME PRINTED SLOGAN'])
+    expect(screen.getByText('Text in the image · Translation')).toBeInTheDocument()
+    expect(screen.queryByText('PRINTED SLOGAN', { exact: false })).not.toBeInTheDocument()
+    expect(screen.getByText('Image description')).toBeInTheDocument()
+  })
+
+  it('offers no Translate control for an image with nothing printed in it', () => {
+    renderImageRow({ ...imageRow, ocr_text: undefined })
+    expect(screen.getByText('Image description')).toBeInTheDocument()
+    expect(screen.queryByText('Text in the image')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^translate$/i })).not.toBeInTheDocument()
   })
 })

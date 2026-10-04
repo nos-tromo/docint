@@ -129,6 +129,12 @@ and hate-speech findings; entity and hate-speech findings carry their source
 report name is the single headline and the subheader stays on one line
 (collection · creation date · operator).
 
+A finding judged from an image renders its text as labelled rows — the text
+printed in the image (with its machine translation directly under it), the
+image description, and the tags — instead of one block, and the CSV bundle
+gives each its own column (`ocr_text`, `image_description`, `image_tags`).
+Findings added before rows carried those parts keep rendering as one block.
+
 The PDF is rendered server-side by WeasyPrint into a real paginated document: a
 running header carrying the case file (*Aktenzeichen*) in the upper-right
 corner, page numbers and an "AI-generated — verify before further processing"

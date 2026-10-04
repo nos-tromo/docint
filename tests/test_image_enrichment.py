@@ -15,7 +15,7 @@ from qdrant_client import QdrantClient, models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 import docint.core.rag as rag_module
-from docint.core.ingest.image_enrichment import enrich_pending_images, hate_speech_text
+from docint.core.ingest.image_enrichment import enrich_pending_images, hate_speech_text, image_text_fields
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.rag import RAG
@@ -505,3 +505,66 @@ def test_entity_sources_include_the_words_and_caption_of_images(monkeypatch: pyt
     assert figure["chunk_text"] == f"{_FIGURE_OCR}\n\n{_FIGURE_CAPTION}"
     assert figure["filename"] == "report.pdf"
     assert figure["image_id"] == "img-figure"
+
+
+def test_image_text_fields_keep_an_images_words_description_and_tags_apart() -> None:
+    """Each part is its own field, trimmed, and only when the image carries it."""
+    padded = {"ocr_text": f"  {_FIGURE_OCR}\n", "llm_description": f"{_FIGURE_CAPTION} ", "llm_tags": [" ", "crowd "]}
+    assert image_text_fields(padded) == {
+        "ocr_text": _FIGURE_OCR,
+        "image_description": _FIGURE_CAPTION,
+        "image_tags": ["crowd"],
+    }
+    untagged = {"ocr_text": "", "llm_description": _KEYFRAME_CAPTION, "llm_tags": "not-a-list"}
+    assert image_text_fields(untagged) == {"image_description": _KEYFRAME_CAPTION}
+    assert image_text_fields({"text": "Chunk text naming Acme.", "filename": "notes.txt"}) == {}
+
+
+def test_image_text_fields_collapse_blank_lines_in_the_printed_words() -> None:
+    """An OCR answer's blank lines between lines are dropped; the lines themselves stay apart."""
+    payload = {"ocr_text": "\nFIRST LINE\n\nSECOND LINE\n \t\n\nTHIRD LINE\n\n"}
+    assert image_text_fields(payload) == {"ocr_text": "FIRST LINE\nSECOND LINE\nTHIRD LINE"}
+    assert image_text_fields({"ocr_text": "\n \n"}) == {}
+
+
+def test_finding_rows_carry_an_images_parts_apart_from_its_judged_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Image rows name their printed words, description and tags separately; text rows gain nothing.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    client = _analysed_collection()
+    standalone = _point_id("standalone-document")
+    _store(
+        client,
+        "docs",
+        {
+            standalone: {
+                "text": f"{_FIGURE_OCR}\n\n{_SYMBOL_CAPTION}\n\nTags: flag",
+                "filename": "flag.png",
+                "image_id": "img-standalone",
+                "ocr_text": _FIGURE_OCR,
+                "llm_description": _SYMBOL_CAPTION,
+                "llm_tags": ["flag"],
+                "entities": [{"text": "Berlin", "type": "location"}],
+                "hate_speech": {
+                    "hate_speech": True,
+                    "category": "extremism",
+                    "confidence": "high",
+                    "reason": "Shows a hate symbol without distance.",
+                    "chunk_text": f"{_FIGURE_OCR}\n\n{_SYMBOL_CAPTION}\n\nTags: flag",
+                },
+            }
+        },
+    )
+    rag = _rag_over(client, monkeypatch)
+    figure_parts = {"ocr_text": _FIGURE_OCR, "image_description": _FIGURE_CAPTION, "image_tags": ["poster"]}
+    standalone_parts = {"ocr_text": _FIGURE_OCR, "image_description": _SYMBOL_CAPTION, "image_tags": ["flag"]}
+
+    for rows in (
+        {row["chunk_id"]: row for row in rag.get_collection_hate_speech()},
+        {row["chunk_id"]: row for row in rag._load_collection_ner_sources()},
+    ):
+        assert {key: rows[FIGURE][key] for key in figure_parts} == figure_parts
+        assert {key: rows[standalone][key] for key in standalone_parts} == standalone_parts
+        assert not set(figure_parts) & set(rows[_point_id("chunk")])

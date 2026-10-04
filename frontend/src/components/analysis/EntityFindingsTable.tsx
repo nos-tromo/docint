@@ -7,7 +7,7 @@ import { EntityFinding } from './EntityFinding'
 import { AddAllToReportButton } from '@/components/report/AddAllToReportButton'
 import { TranslateAllButton } from '@/components/common/TranslateAllButton'
 import { fetchAllPages } from '@/lib/fetchAllPages'
-import { chunkTextOf, entityFindingSnapshot } from '@/lib/reportSnapshots'
+import { entityFindingSnapshot, translatableTextOf } from '@/lib/reportSnapshots'
 import { storedTranslation } from '@/stores/translations'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -116,13 +116,13 @@ export function EntityFindingsTable({
         </div>
         <div className="flex items-center gap-1">
           {/* Every matching finding, not just the rows paged in. */}
-          <TranslateAllButton fetchAll={fetchAllFindings} textOf={chunkTextOf} hasRows={findings.length > 0} />
+          <TranslateAllButton fetchAll={fetchAllFindings} textOf={translatableTextOf} hasRows={findings.length > 0} />
           {/* Adds every finding the entity filter matches, not only the rows
               paged in — see AddAllToReportButton. */}
           <AddAllToReportButton
             fetchAll={fetchAllFindings}
             toItem={(row: NerSourceRow) =>
-              entityFindingSnapshot(row, entityLabel, storedTranslation(chunkTextOf(row)))
+              entityFindingSnapshot(row, entityLabel, storedTranslation(translatableTextOf(row)))
             }
             hasRows={findings.length > 0}
           />

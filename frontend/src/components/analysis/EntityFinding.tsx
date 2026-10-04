@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { NerSourceRow } from '@/api/types'
 import { referenceMetadataPills, type MetadataPillItem } from '@/lib/referenceMetadata'
 import { highlightSegments } from '@/lib/highlight'
@@ -8,8 +9,9 @@ import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
 import { EvidenceThumbnail } from '@/components/common/EvidenceThumbnail'
+import { ImageTextParts } from '@/components/common/ImageTextParts'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
-import { chunkTextOf, entityFindingSnapshot } from '@/lib/reportSnapshots'
+import { chunkTextOf, entityFindingSnapshot, hasImageParts, translatableTextOf } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
@@ -68,6 +70,21 @@ function matchedMentions(source: NerSourceRow, terms: string[], typeLower?: stri
   return [...byKey.values()]
 }
 
+/** `text` with every mention of the picked entity marked. */
+function highlighted(text: string, terms: string[]): ReactNode {
+  return highlightSegments(text, terms).map((seg, i) =>
+    seg.highlight ? (
+      // eslint-disable-next-line @eslint-react/no-array-index-key
+      <mark key={i} className="bg-yellow-300 text-zinc-950 rounded px-0.5">
+        {seg.text}
+      </mark>
+    ) : (
+      // eslint-disable-next-line @eslint-react/no-array-index-key
+      <span key={i}>{seg.text}</span>
+    )
+  )
+}
+
 /**
  * One finding (chunk) rendered as a table row. Locator and reference-metadata
  * fields render as a curated pill list in a single "Metadata" cell (opaque IDs
@@ -87,13 +104,13 @@ export function EntityFinding({
 }: Props) {
   const t = useT()
   const chunkText = chunkTextOf(source)
+  const translatableText = translatableTextOf(source)
   // The shared store, not row state: the same translation must reach a
   // hand-added snapshot and "Add all" alike, and survive an unmount.
-  const translation = useTranslationsStore((s) => s.byText[chunkText])
+  const translation = useTranslationsStore((s) => s.byText[translatableText])
   const reportItem = entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
-  const segments = highlightSegments(chunkText, highlightTerms)
-  const translationState = useTranslatable(chunkText)
+  const translationState = useTranslatable(translatableText)
   const mentions = matchedMentions(source, highlightTerms, selectedTypeLower)
   const locParts: string[] = []
   if (source.page !== null && source.page !== undefined) {
@@ -155,7 +172,13 @@ export function EntityFinding({
       </div>
 
       <div className="min-w-0">
-        {chunkText ? (
+        {hasImageParts(source) ? (
+          <ImageTextParts
+            parts={source}
+            ocrTranslation={translationState.translation}
+            renderText={(text) => highlighted(text, highlightTerms)}
+          />
+        ) : chunkText ? (
           <>
             {translationState.shown && (
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -163,35 +186,19 @@ export function EntityFinding({
               </div>
             )}
             <ClampedText length={(translationState.translation ?? chunkText).length}>
-              {translationState.translation ??
-                segments.map((seg, i) =>
-                  seg.highlight ? (
-                    <mark
-                      // eslint-disable-next-line @eslint-react/no-array-index-key
-                      key={i}
-                      className="bg-yellow-300 text-zinc-950 rounded px-0.5"
-                    >
-                      {seg.text}
-                    </mark>
-                  ) : (
-                    // eslint-disable-next-line @eslint-react/no-array-index-key
-                    <span key={i}>{seg.text}</span>
-                  )
-                )}
+              {translationState.translation ?? highlighted(chunkText, highlightTerms)}
             </ClampedText>
-            {translationState.failed && (
-              <div className="mt-1 text-[11px] text-muted-foreground">
-                {t('common.translation_unavailable')}
-              </div>
-            )}
           </>
         ) : (
           <span className="text-xs text-muted-foreground">{t('common.chunk_text_unavailable')}</span>
         )}
+        {translationState.failed && (
+          <div className="mt-1 text-[11px] text-muted-foreground">{t('common.translation_unavailable')}</div>
+        )}
       </div>
 
       <div className="flex items-center justify-end gap-1">
-        {chunkText && (
+        {translatableText && (
           <TranslateToggle
             shown={translationState.shown}
             busy={translationState.busy}

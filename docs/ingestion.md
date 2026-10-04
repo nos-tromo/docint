@@ -500,7 +500,11 @@ ingestion path:
 - Every hate-speech row carries a `basis`: `image` for a verdict judged from
   an image (on the `_images` companion, or a standalone file's document),
   `text` otherwise. The Hate speech view shows it as a **From an image** pill,
-  and the findings CSV appends it as its last column.
+  and the findings CSV appends it after `translation`.
+- Entity and hate-speech rows judged from an image also carry its parts apart
+  (`ocr_text`, `image_description`, `image_tags`), read from the same payload
+  fields the stages read, so the views and report exports can label the
+  printed words and the description separately.
 - The caption prompt (`prompts/<code>/image_caption.txt`) asks the vision
   model to name recognisable symbols, emblems, flags, gestures and codes, so
   what a picture shows reaches the hate-speech pass in words. Image points

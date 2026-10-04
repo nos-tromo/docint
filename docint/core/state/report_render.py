@@ -232,6 +232,41 @@ def _md_translation_row(snap: dict[str, Any]) -> list[str]:
     return [f"| {_md_cell(label)} | {_md_cell(text)} |"]
 
 
+def _image_parts(snap: dict[str, Any]) -> tuple[str, str, str]:
+    """An image finding's printed words, description and tags, each truncated.
+
+    All three are empty for a text finding, and for a snapshot frozen before
+    rows carried an image's parts apart; both render ``chunk_text`` instead.
+
+    Args:
+        snap (dict[str, Any]): A finding snapshot.
+
+    Returns:
+        tuple[str, str, str]: ``(printed words, description, tags)``.
+    """
+    tags = snap.get("image_tags")
+    tag_text = ", ".join(str(tag).strip() for tag in tags if str(tag).strip()) if isinstance(tags, list) else ""
+    return (
+        _truncate(str(snap.get("ocr_text") or "")),
+        _truncate(str(snap.get("image_description") or "")),
+        tag_text,
+    )
+
+
+def _md_image_rows(snap: dict[str, Any]) -> list[str]:
+    """Markdown rows for an image's printed words, their translation, its description and tags."""
+    printed, description, tags = _image_parts(snap)
+    lines: list[str] = []
+    if printed:
+        lines.append(f"| {_md_cell(ui_string('image_label_text'))} | {_md_cell(printed)} |")
+        lines += _md_translation_row(snap)
+    if description:
+        lines.append(f"| {_md_cell(ui_string('image_label_description'))} | {_md_cell(description)} |")
+    if tags:
+        lines.append(f"| {_md_cell(ui_string('image_label_tags'))} | {_md_cell(tags)} |")
+    return lines
+
+
 def _date_only(value: Any) -> str:
     """Reduce an ISO datetime to its calendar date (``YYYY-MM-DD``).
 
@@ -515,15 +550,20 @@ def _md_finding_table(snap: dict[str, Any], note: str | None, *, tag: str, body_
     prominent top placement. Content stays together below it — translation,
     then the parent posting's text — followed by the type-specific rows
     (entities / reason) and the grouped provenance block (source → posting →
-    account, see :func:`_provenance_rows`).
+    account, see :func:`_provenance_rows`). An image finding replaces the
+    chunk text with labelled rows for its printed words (their translation
+    directly under them), description and tags.
     """
-    chunk = _truncate(snap.get("chunk_text") or "")
+    printed, description, tags = _image_parts(snap)
+    chunk = "" if printed or description or tags else _truncate(snap.get("chunk_text") or "")
     lines = [
         f"| {_md_cell(tag)} | {_md_cell(chunk)} |",
         "| --- | --- |",
     ]
+    lines += _md_image_rows(snap)
     lines += _md_thumbnail_row(snap)
-    lines += _md_translation_row(snap)
+    if not printed:
+        lines += _md_translation_row(snap)
     posting_text = _posting_text(snap)
     if posting_text:
         lines.append(f"| {_md_cell(ui_string('report_label_posting_text'))} | {_md_cell(posting_text)} |")
@@ -730,7 +770,7 @@ table.finding td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: 
    the next page, leaving the previous one half empty. Rows split mid-cell like
    ordinary table content instead. */
 table.finding tr.f-head td { background: #f7f7f7; font-weight: 600; font-size: 9.5pt; }
-table.finding td.f-text { white-space: pre-wrap; font-size: 9.5pt; color: #222; }
+table.finding td.f-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 9.5pt; color: #222; }
 table.finding td.f-key { width: 16%; font-weight: 600; color: #555; font-size: 8pt; }
 table.finding td.f-val { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 8pt; color: #444; }
 /* Rendered Markdown prose (summaries, chat answers). */
@@ -820,6 +860,11 @@ def _html_finding_row(label: str, value_html: str) -> str:
     return f'<tr><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
 
 
+def _html_evidence_row(label: str, text: str) -> str:
+    """One labelled row of verbatim evidence text, set like the chunk text."""
+    return f'<tr><td class="f-key">{_esc(label)}</td><td class="f-text">{_esc(text)}</td></tr>'
+
+
 def _html_evidence_figure(data_uri: str, label: str, caption: str = "") -> str:
     """One captioned evidence figure (data URI already validated by ``_thumbnail_view``).
 
@@ -860,6 +905,24 @@ def _html_translation_row(snap: dict[str, Any]) -> str:
     return _html_finding_row(label, _esc(text))
 
 
+def _html_image_rows(snap: dict[str, Any]) -> str:
+    """Rows for an image's printed words, their translation, its description and tags.
+
+    The printed words and the description are evidence, so they keep the chunk
+    text's verbatim style beside their label; the tags are a plain row.
+    """
+    printed, description, tags = _image_parts(snap)
+    rows: list[str] = []
+    if printed:
+        rows.append(_html_evidence_row(ui_string("image_label_text"), printed))
+        rows.append(_html_translation_row(snap))
+    if description:
+        rows.append(_html_evidence_row(ui_string("image_label_description"), description))
+    if tags:
+        rows.append(_html_finding_row(ui_string("image_label_tags"), _esc(tags)))
+    return "".join(rows)
+
+
 def _html_finding_table(snap: dict[str, Any], note: str | None, *, tag_html: str, body_rows: str) -> str:
     """Render one finding as a single table.
 
@@ -869,13 +932,18 @@ def _html_finding_table(snap: dict[str, Any], note: str | None, *, tag_html: str
     The type-specific rows (entities / reason) follow, then the grouped
     provenance block (source → posting → account, see
     :func:`_provenance_rows`). The chunk row is omitted when there is no chunk.
+    An image finding replaces it with labelled rows for its printed words
+    (their translation directly under them), description and tags.
     """
-    chunk = _truncate(snap.get("chunk_text") or "")
+    printed, description, tags = _image_parts(snap)
+    chunk = "" if printed or description or tags else _truncate(snap.get("chunk_text") or "")
     rows = [f'<tr class="f-head"><td colspan="2">{tag_html}</td></tr>']
     if chunk:
         rows.append(f'<tr><td colspan="2" class="f-text">{_esc(chunk)}</td></tr>')
+    rows.append(_html_image_rows(snap))
     rows.append(_html_thumbnail_row(snap))
-    rows.append(_html_translation_row(snap))
+    if not printed:
+        rows.append(_html_translation_row(snap))
     posting_text = _posting_text(snap)
     if posting_text:
         rows.append(_html_finding_row(ui_string("report_label_posting_text"), _esc(posting_text)))

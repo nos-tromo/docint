@@ -609,7 +609,10 @@ full-list mode. Query params: `cursor`, `limit` (1–500, default `50`),
 (`orthographic` | `exact` | `resolved`, default `orthographic`) and
 `collection`. With `entity_merge_mode="resolved"` the filter expands to the
 canonical entity's sibling aliases, so the drill-down matches the merged
-mention count.
+mention count. A row judged from an image also carries the image's parts
+apart: `ocr_text` (the words printed in it, one line per line, blank lines
+dropped), `image_description` and `image_tags`, each only when present.
+`chunk_text` stays the text NER read.
 
 ### `POST /collections/ner/warm`
 
@@ -623,6 +626,8 @@ concurrently — the cache is keyed per collection and tolerates repeat loads.
 Returns the list of chunks flagged by hate-speech detection as
 `HateSpeechOut`. Each row's `basis` is `image` when the verdict was judged
 from an image's printed words, description and tags, and `text` otherwise.
+An image's row carries those parts apart as `ocr_text`, `image_description`
+and `image_tags`, like the NER source rows.
 
 ### `GET /collections/documents`
 
@@ -651,6 +656,10 @@ is not owned by the caller.
 | `GET /collections/{name}/export/entities.csv` | Top entities by mention frequency (`rank,entity,type,mentions`), mirroring the CLI's `query --entities`. Query params: `top_k` (default `50`), `min_mentions` (default `1`), `entity_type`, `entity_merge_mode`. | `ENTITY_STATS_COLUMNS` |
 | `GET /collections/{name}/export/hate-speech.csv` | The hate-speech findings table, filtered by the same logic as `GET /collections/hate-speech`. Query params: `category`, `min_confidence`. | `HATE_SPEECH_COLUMNS` |
 | `GET /collections/{name}/export/ner-sources.csv` | Per-source entity findings — the rows the SPA's entity inspector shows. Query params: the same `entity_key`, `entity_text`, `entity_type` and `entity_merge_mode` as `GET /collections/ner/sources`. | `NER_SOURCE_COLUMNS` |
+
+Both findings exports end with `ocr_text`, `image_description` and
+`image_tags` (tags comma-separated), filled for a finding judged from an image
+and blank otherwise.
 
 The examples below assume the API is reachable on port 8000; under Docker the
 backend publishes no host port, so run them from inside the network or through
