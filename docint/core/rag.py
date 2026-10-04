@@ -136,6 +136,15 @@ from docint.core.entities.resolution import (
 )
 from docint.core.entities.store import EntityStore
 from docint.core.extract.store import ExtractStore
+from docint.core.ingest.image_enrichment import (
+    ENRICHMENT_DONE,
+    ENRICHMENT_FIELD,
+    FINDING_BASIS_IMAGE,
+    enrich_pending_images,
+    entity_text,
+    finding_basis,
+    has_text_twin,
+)
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.ingest.preprocess import inflight_pdf_hashes, prefetch_batch
@@ -3882,6 +3891,41 @@ class RAG:
             self._image_ingestion_service = ImageIngestionService()
         return self._image_ingestion_service._resolve_collection_name(collection or self.qdrant_collection)
 
+    def _enrich_pending_images(self, pipeline: DocumentIngestionPipeline) -> None:
+        """Give the image points waiting for enrichment this run's NER + hate-speech pass.
+
+        Runs once every lane has joined its preprocessing tasks, so the points
+        written at upload time are in place too. A failure leaves them pending
+        for the next run rather than failing one whose text is already stored,
+        unless ``INGEST_FAIL_FAST`` asks for the abort.
+
+        Args:
+            pipeline (DocumentIngestionPipeline): The run's pipeline, carrying
+                its stages and per-request overrides.
+
+        Raises:
+            JobCancelled: When the job is stopped during the pass.
+            Exception: Any failure of the pass when ``ingest_fail_fast`` is set.
+        """
+        companion = self._image_collection_name()
+        if not qdrant_collection_exists(self.qdrant_client, companion):
+            return
+        try:
+            settled = enrich_pending_images(self.qdrant_client, companion, pipeline.enrich_nodes)
+        except JobCancelled:
+            raise
+        except Exception as exc:
+            if self.ingest_fail_fast:
+                raise
+            logger.warning(
+                "Image enrichment of collection '{}' did not finish; its images stay pending: {}",
+                self.qdrant_collection,
+                exc,
+            )
+            return
+        if settled:
+            logger.info("Enriched {} image(s) of collection '{}'", settled, self.qdrant_collection)
+
     def _fetch_posting_entity_nodes(self, posting_uuid: str, *, exclude_node_ids: set[str]) -> list[NodeWithScore]:
         """Fetch a posting's sibling artifacts across both collections.
 
@@ -6417,6 +6461,9 @@ class RAG:
     ) -> list[dict[str, Any]]:
         """Load NER-bearing source rows from Qdrant.
 
+        Covers the collection's chunks and its enriched images, whose entities
+        live on the ``_images`` companion (:meth:`_image_finding_points`).
+
         Args:
             qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter applied during scroll.
 
@@ -6451,7 +6498,55 @@ class RAG:
                 source["chunk_text"] = str(source.get("text") or "")
                 sources.append(source)
 
+        for point_id, payload in self._image_finding_points(qdrant_filter):
+            if not payload.get("entities") and not payload.get("relations"):
+                continue
+            # The text the entities were read from: the image's words, then its caption.
+            source = self._source_from_payload(
+                collection=self.qdrant_collection, payload=payload, text_value=entity_text(payload)
+            )
+            source["chunk_id"] = point_id
+            source["chunk_text"] = str(source.get("text") or "")
+            sources.append(source)
+
         return sources
+
+    def _image_finding_points(
+        self, qdrant_filter: qdrant_models.Filter | None = None
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Yield the enriched points of the ``_images`` companion, as ``(point id, payload)``.
+
+        A point whose image file is also a main-collection document is
+        skipped: that document carries its findings, and listing both would
+        count every finding twice. The stored thumbnail and node copy are left
+        out of the scroll; no finding row reads them.
+
+        Args:
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant
+                filter, applied alongside the enriched-points condition.
+
+        Yields:
+            tuple[str, dict[str, Any]]: Each point's id and payload.
+        """
+        companion = self._image_collection_name()
+        if not qdrant_collection_exists(self.qdrant_client, companion):
+            return
+        enriched = qdrant_models.FieldCondition(
+            key=ENRICHMENT_FIELD, match=qdrant_models.MatchValue(value=ENRICHMENT_DONE)
+        )
+        conditions: list[Any] = [enriched] if qdrant_filter is None else [qdrant_filter, enriched]
+        for page in iter_scroll(
+            self.qdrant_client,
+            collection_name=companion,
+            scroll_filter=qdrant_models.Filter(must=conditions),
+            page_size=100,
+            with_payload=qdrant_models.PayloadSelectorExclude(exclude=["thumbnail_b64", "_node_content"]),
+            error_context="image findings",
+        ):
+            for point in page:
+                payload = getattr(point, "payload", None)
+                if isinstance(payload, dict) and not has_text_twin(payload):
+                    yield str(getattr(point, "id", "") or ""), payload
 
     def list_collections(self) -> list[str]:
         """Return user-selectable collection names via the Qdrant API.
@@ -7198,6 +7293,7 @@ class RAG:
             self._finalize_empty_ingestion(self.qdrant_collection, progress_callback)
             raise EmptyIngestionError(self.qdrant_collection)
 
+        self._enrich_pending_images(pipeline)
         self.dir_reader = pipeline.dir_reader
         # Clear memory-heavy lists as they are persisted in the vector store
         self.docs = []
@@ -7456,6 +7552,7 @@ class RAG:
             self._finalize_empty_ingestion(self.qdrant_collection, progress_callback)
             raise EmptyIngestionError(self.qdrant_collection)
 
+        self._enrich_pending_images(pipeline)
         self.dir_reader = pipeline.dir_reader
         self.docs = []
         self.nodes = []
@@ -9764,6 +9861,11 @@ class RAG:
     def get_collection_hate_speech(self) -> list[dict[str, Any]]:
         """Return flagged hate-speech chunks from the selected collection.
 
+        Covers the collection's chunks and its images, whose verdicts live on
+        the ``_images`` companion (:meth:`_image_finding_points`). Each row's
+        ``basis`` says whether the verdict was judged from text or from an
+        image's printed words, description and tags.
+
         Returns:
             list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
             findings, such as chunk ID, text, category, confidence, reason, source reference,
@@ -9773,6 +9875,31 @@ class RAG:
             return []
 
         findings: list[dict[str, Any]] = []
+
+        def _add(point_id: str, payload: dict[str, Any], basis: str) -> None:
+            """Append *payload*'s finding, judged from *basis*, if it carries an endorsed verdict."""
+            detection = payload.get("hate_speech")
+            if not isinstance(detection, dict) or not bool(detection.get("hate_speech")):
+                return
+
+            source = self._source_from_payload(
+                collection=self.qdrant_collection,
+                payload=payload,
+                text_value=str(detection.get("chunk_text") or self._extract_payload_text(payload) or ""),
+            )
+            source["chunk_id"] = str(
+                detection.get("chunk_id") or payload.get("node_id") or payload.get("id_") or point_id
+            )
+            source["chunk_text"] = str(source.get("text") or "")
+            source["category"] = str(detection.get("category") or "none")
+            source["confidence"] = str(detection.get("confidence") or "low")
+            source["reason"] = str(detection.get("reason") or "")
+            source["source_ref"] = str(
+                detection.get("source_ref") or source.get("filename") or payload.get("file_path") or ""
+            )
+            source["basis"] = basis
+            findings.append(source)
+
         for page in iter_scroll(
             self.qdrant_client,
             collection_name=self.qdrant_collection,
@@ -9781,32 +9908,16 @@ class RAG:
         ):
             for point in page:
                 payload = getattr(point, "payload", None)
-                if not isinstance(payload, dict):
-                    continue
+                if isinstance(payload, dict):
+                    _add(str(getattr(point, "id", "") or ""), payload, finding_basis(payload))
 
-                detection = payload.get("hate_speech")
-                if not isinstance(detection, dict) or not bool(detection.get("hate_speech")):
-                    continue
-
-                source = self._source_from_payload(
-                    collection=self.qdrant_collection,
-                    payload=payload,
-                    text_value=str(detection.get("chunk_text") or self._extract_payload_text(payload) or ""),
-                )
-                source["chunk_id"] = str(
-                    detection.get("chunk_id")
-                    or payload.get("node_id")
-                    or payload.get("id_")
-                    or str(getattr(point, "id", "") or "")
-                )
-                source["chunk_text"] = str(source.get("text") or "")
-                source["category"] = str(detection.get("category") or "none")
-                source["confidence"] = str(detection.get("confidence") or "low")
-                source["reason"] = str(detection.get("reason") or "")
-                source["source_ref"] = str(
-                    detection.get("source_ref") or source.get("filename") or payload.get("file_path") or ""
-                )
-                findings.append(source)
+        flagged = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(key="hate_speech.hate_speech", match=qdrant_models.MatchValue(value=True))
+            ]
+        )
+        for point_id, payload in self._image_finding_points(flagged):
+            _add(point_id, payload, FINDING_BASIS_IMAGE)
 
         findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))
         return findings

@@ -429,6 +429,8 @@ export interface HateSpeechRow {
   source_ref?: string
   reference_metadata?: ReferenceMetadata
   image_id?: string
+  /** What the verdict was judged from: a text, or an image's words, description and tags. */
+  basis?: 'image' | 'text'
 }
 
 // --- Report builder ---

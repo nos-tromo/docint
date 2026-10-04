@@ -357,6 +357,7 @@ export const en = {
   'hate.category_other': 'Other',
   'hate.category_none': 'None',
   'hate.category_unknown': 'Unknown',
+  'hate.basis_image': 'From an image',
 
   // analysis orphans: coverage banner + summary panel
   'analysis.coverage_label': 'Coverage',

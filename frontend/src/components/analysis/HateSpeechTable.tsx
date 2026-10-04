@@ -67,7 +67,12 @@ function HateSpeechTableRow({
   const translation = useTranslationsStore((s) => s.byText[chunkText])
   const reportItem = hateSpeechSnapshot(row, translation)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
-  const pills = referenceMetadataPills(row.reference_metadata, i18n)
+  // A keyframe or PDF figure shows no thumbnail here, so the pill is what says
+  // the verdict was judged from an image's description.
+  const pills = [
+    ...(row.basis === 'image' ? [{ key: 'basis', value: i18n('hate.basis_image') }] : []),
+    ...referenceMetadataPills(row.reference_metadata, i18n)
+  ]
   const translationState = useTranslatable(chunkText)
   const source = row.source_ref ?? row.filename ?? i18n('common.unknown_source')
   const location = locationParts(row, i18n)

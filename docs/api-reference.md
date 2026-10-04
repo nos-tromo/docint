@@ -621,7 +621,8 @@ concurrently — the cache is keyed per collection and tolerates repeat loads.
 ### `GET /collections/hate-speech`
 
 Returns the list of chunks flagged by hate-speech detection as
-`HateSpeechOut`.
+`HateSpeechOut`. Each row's `basis` is `image` when the verdict was judged
+from an image's printed words, description and tags, and `text` otherwise.
 
 ### `GET /collections/documents`
 

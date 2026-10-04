@@ -163,6 +163,15 @@ with several finishing in a row the last one wins.
 Three tabs: **NER**, **Hate Speech** (`HateSpeechTable`), and **Summary**
 (`SummaryPanel`). Pre-warms the NER aggregate when opened.
 
+The NER and Hate Speech tabs list what was found in images as well as in
+text: the words printed in a PDF figure, an image attached to a posting or a
+video keyframe, with the image's caption also read for entities (see
+[Ingestion — Images](ingestion.md#images--imagespy)). Such a row names the
+file the words came from: the PDF a figure was cut out of, the attached
+image itself, or the clip a keyframe belongs to. A hate-speech row judged
+from an image's words and description carries a **From an image** pill,
+since a keyframe or a PDF figure shows no thumbnail there.
+
 The **Summary** tab reads before it builds. On open — and whenever the
 selected collection changes — it probes `GET /summarize`, which only ever
 reads: a stored summary renders straight away beside a **Refresh** icon,

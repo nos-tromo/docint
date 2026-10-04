@@ -332,3 +332,10 @@ def test_column_constants_match_documented_schemas() -> None:
         "chunk_text",
     )
     assert len(SEARCH_EXPORT_COLUMNS) == len(set(SEARCH_EXPORT_COLUMNS))
+
+
+def test_hate_speech_row_says_what_the_finding_was_judged_from() -> None:
+    """The basis column is appended last; a snapshot frozen before rows carried it leaves it blank."""
+    assert HATE_SPEECH_COLUMNS[-1] == "basis"
+    assert hate_speech_row({"basis": "image"})["basis"] == "image"
+    assert hate_speech_row({})["basis"] == ""

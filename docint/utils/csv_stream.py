@@ -84,6 +84,7 @@ HATE_SPEECH_COLUMNS: tuple[str, ...] = (
     "posting_url",
     "posting_text",
     "translation",
+    "basis",
 )
 
 SEARCH_EXPORT_COLUMNS: tuple[str, ...] = (
@@ -348,6 +349,8 @@ def hate_speech_row(chunk: dict[str, Any]) -> dict[str, Any]:
         "parent_text": _reference_field(ref, "parent_text"),
         **_posting_reference_cells(ref),
         "translation": (chunk.get("translation") or {}).get("text") or "",
+        # Blank, not "text", for a report snapshot frozen before rows carried it.
+        "basis": chunk.get("basis") or "",
     }
 
 

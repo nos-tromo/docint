@@ -1352,6 +1352,18 @@ def test_the_caption_prompt_keeps_its_json_keys_english_in_every_locale() -> Non
         assert "tags" in text
 
 
+@pytest.mark.parametrize(("locale", "word"), [("en", "symbols"), ("de", "Symbole")])
+def test_the_caption_prompt_asks_for_symbols_by_name(locale: str, word: str) -> None:
+    """A symbol described only vaguely gives the hate-speech pass nothing to judge.
+
+    Args:
+        locale (str): Prompt locale directory.
+        word (str): The locale's word for symbols.
+    """
+    text = load_localized_prompt("image_caption", default="", lang=locale)
+    assert word in text
+
+
 def test_an_unknown_locale_still_yields_a_usable_caption_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing language pack must not leave the tagger promptless."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "xx")
@@ -1555,3 +1567,81 @@ def test_the_companion_collection_is_created_once_under_concurrency(monkeypatch:
         thread.join(timeout=5)
 
     assert created == [1]
+
+
+@pytest.mark.parametrize(
+    ("source_type", "marker"),
+    [("document", "pending"), ("social_media", "pending"), ("standalone", None)],
+)
+def test_a_new_image_point_awaits_the_jobs_enrichment_unless_a_document_carries_its_text(
+    source_type: str, marker: str | None
+) -> None:
+    """A fresh point waits for the job's NER + hate-speech pass — except a standalone file's.
+
+    A standalone image is also a main-collection document (``ImageReader``),
+    which the generic lane enriches; enriching its point as well would count
+    every finding twice.
+
+    Args:
+        source_type: The asset's source type.
+        marker: The ``enrichment`` value the stored point should carry.
+    """
+    service, client, _ = _build_service()
+
+    record = service.ingest_image(
+        ImageAsset(source_type=source_type, image_bytes=_make_png_bytes(), mime_type="image/png"),
+        context=IngestContext(source_collection="att-2"),
+    )
+
+    assert record.status == "stored"
+    assert client.records[record.point_id or ""].get("enrichment") == marker
+
+
+def test_a_new_keyframe_awaits_the_jobs_enrichment() -> None:
+    """A keyframe has no document twin, so its point always waits for the pass."""
+    service, client, _ = _build_service()
+
+    records = service.ingest_keyframe_set(
+        [_make_png_bytes((1, 2, 3))],
+        context=IngestContext(source_collection="docs"),
+        source_doc_id="clip-1",
+    )
+
+    assert client.records[records[0].point_id or ""]["enrichment"] == "pending"
+
+
+def test_a_rewritten_keyframe_keeps_the_enrichment_it_already_has() -> None:
+    """A cached keyframe is rewritten from scratch for every posting that claims it.
+
+    The rewrite reuses the cached caption and OCR text, so the NER and
+    hate-speech results computed from them stay valid and must survive it —
+    neither lost nor paid for again.
+    """
+    service, client, _ = _build_service()
+    frame = _make_png_bytes((9, 8, 7))
+    first = service.ingest_keyframe_set(
+        [frame], context=IngestContext(source_collection="docs"), source_doc_id="post-1"
+    )
+    point_id = first[0].point_id or ""
+    finding = {
+        "hate_speech": True,
+        "category": "religion",
+        "confidence": "high",
+        "reason": "Endorses excluding a group.",
+        "chunk_id": point_id,
+        "chunk_text": "Printed words.",
+        "source_ref": "",
+    }
+    client.set_payload(
+        "test-images",
+        {"enrichment": "done", "entities": [{"text": "Acme", "type": "org"}], "hate_speech": finding},
+        [point_id],
+    )
+
+    service.ingest_keyframe_set([frame], context=IngestContext(source_collection="docs"), source_doc_id="post-2")
+
+    stored = client.records[point_id]
+    assert stored["posting_uuid"] == "post-2"
+    assert stored["enrichment"] == "done"
+    assert stored["entities"] == [{"text": "Acme", "type": "org"}]
+    assert stored["hate_speech"] == finding
