@@ -144,6 +144,7 @@ from docint.core.ingest.image_enrichment import (
     entity_text,
     finding_basis,
     has_text_twin,
+    image_text_fields,
 )
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
@@ -6462,7 +6463,9 @@ class RAG:
         """Load NER-bearing source rows from Qdrant.
 
         Covers the collection's chunks and its enriched images, whose entities
-        live on the ``_images`` companion (:meth:`_image_finding_points`).
+        live on the ``_images`` companion (:meth:`_image_finding_points`). An
+        image's row also carries its printed words, description and tags apart
+        (:func:`image_text_fields`).
 
         Args:
             qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter applied during scroll.
@@ -6496,6 +6499,7 @@ class RAG:
                     payload.get("node_id") or payload.get("id_") or str(getattr(point, "id", "") or "")
                 )
                 source["chunk_text"] = str(source.get("text") or "")
+                source.update(image_text_fields(payload))
                 sources.append(source)
 
         for point_id, payload in self._image_finding_points(qdrant_filter):
@@ -6507,6 +6511,7 @@ class RAG:
             )
             source["chunk_id"] = point_id
             source["chunk_text"] = str(source.get("text") or "")
+            source.update(image_text_fields(payload))
             sources.append(source)
 
         return sources
@@ -9864,7 +9869,8 @@ class RAG:
         Covers the collection's chunks and its images, whose verdicts live on
         the ``_images`` companion (:meth:`_image_finding_points`). Each row's
         ``basis`` says whether the verdict was judged from text or from an
-        image's printed words, description and tags.
+        image's printed words, description and tags, which an image's row also
+        carries apart (:func:`image_text_fields`).
 
         Returns:
             list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
@@ -9898,6 +9904,7 @@ class RAG:
                 detection.get("source_ref") or source.get("filename") or payload.get("file_path") or ""
             )
             source["basis"] = basis
+            source.update(image_text_fields(payload))
             findings.append(source)
 
         for page in iter_scroll(

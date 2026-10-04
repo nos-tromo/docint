@@ -94,6 +94,49 @@ def has_text_twin(payload: dict[str, Any]) -> bool:
     )
 
 
+def _tag_list(payload: dict[str, Any]) -> list[str]:
+    """Return an image's non-blank tags, in stored order.
+
+    Args:
+        payload (dict[str, Any]): The image point's payload.
+
+    Returns:
+        list[str]: The tags, empty when it has none.
+    """
+    tags = payload.get("llm_tags")
+    if not isinstance(tags, list):
+        return []
+    return [text for text in (str(tag).strip() for tag in tags) if text]
+
+
+def image_text_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return an image finding's printed words, description and tags as separate row fields.
+
+    A finding's ``chunk_text`` is the text a stage judged, its parts run
+    together. Kept apart, they let a view say which words were printed in the
+    picture and which are docint's own description of it. A text chunk carries
+    none of these payload keys, so its row gains nothing.
+
+    Args:
+        payload (dict[str, Any]): A main-collection or image-companion payload.
+
+    Returns:
+        dict[str, Any]: ``ocr_text``, ``image_description`` and ``image_tags``,
+        each only when the image carries it.
+    """
+    fields: dict[str, Any] = {}
+    ocr_text = str(payload.get("ocr_text") or "").strip()
+    if ocr_text:
+        fields["ocr_text"] = ocr_text
+    description = str(payload.get("llm_description") or "").strip()
+    if description:
+        fields["image_description"] = description
+    tags = _tag_list(payload)
+    if tags:
+        fields["image_tags"] = tags
+    return fields
+
+
 def entity_text(payload: dict[str, Any]) -> str:
     """Return the text NER reads off an image: its printed words, then its caption.
 
@@ -124,11 +167,9 @@ def hate_speech_text(payload: dict[str, Any]) -> str:
     Returns:
         str: The labelled parts, empty when the image has none.
     """
-    tags = payload.get("llm_tags")
-    tag_text = ", ".join(str(tag).strip() for tag in tags if str(tag).strip()) if isinstance(tags, list) else ""
     parts = (
         ("image_label_description", str(payload.get("llm_description") or "").strip()),
-        ("image_label_tags", tag_text),
+        ("image_label_tags", ", ".join(_tag_list(payload))),
         ("image_label_text", str(payload.get("ocr_text") or "").strip()),
     )
     return "\n\n".join(f"{ui_string(key)}: {value}" for key, value in parts if value)

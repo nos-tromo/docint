@@ -51,6 +51,9 @@ NER_SOURCE_COLUMNS: tuple[str, ...] = (
     "posting_url",
     "posting_text",
     "translation",
+    "ocr_text",
+    "image_description",
+    "image_tags",
 )
 
 HATE_SPEECH_COLUMNS: tuple[str, ...] = (
@@ -85,6 +88,9 @@ HATE_SPEECH_COLUMNS: tuple[str, ...] = (
     "posting_text",
     "translation",
     "basis",
+    "ocr_text",
+    "image_description",
+    "image_tags",
 )
 
 SEARCH_EXPORT_COLUMNS: tuple[str, ...] = (
@@ -243,6 +249,20 @@ def _posting_reference_cells(ref: Any) -> dict[str, Any]:
     return {key: _reference_field(ref, key) for key in _POSTING_REFERENCE_COLUMNS}
 
 
+def _image_part_cells(chunk: dict[str, Any]) -> dict[str, str]:
+    """Build an image finding's printed-words, description and tags cells.
+
+    Blank for a text finding, and for a report snapshot frozen before rows
+    carried an image's parts apart.
+    """
+    tags = chunk.get("image_tags")
+    return {
+        "ocr_text": str(chunk.get("ocr_text") or ""),
+        "image_description": str(chunk.get("image_description") or ""),
+        "image_tags": ", ".join(str(tag) for tag in tags) if isinstance(tags, list) else "",
+    }
+
+
 def _source_label(chunk: dict[str, Any]) -> str:
     """Pick the canonical 'source' field for a chunk row."""
     return str(chunk.get("filename") or chunk.get("source_ref") or "")
@@ -273,6 +293,7 @@ def ner_source_row(chunk: dict[str, Any], *, entity_label: str) -> dict[str, Any
         "parent_text": _reference_field(ref, "parent_text"),
         **_posting_reference_cells(ref),
         "translation": (chunk.get("translation") or {}).get("text") or "",
+        **_image_part_cells(chunk),
     }
 
 
@@ -351,6 +372,7 @@ def hate_speech_row(chunk: dict[str, Any]) -> dict[str, Any]:
         "translation": (chunk.get("translation") or {}).get("text") or "",
         # Blank, not "text", for a report snapshot frozen before rows carried it.
         "basis": chunk.get("basis") or "",
+        **_image_part_cells(chunk),
     }
 
 
