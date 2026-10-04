@@ -170,7 +170,10 @@ video keyframe, with the image's caption also read for entities (see
 file the words came from: the PDF a figure was cut out of, the attached
 image itself, or the clip a keyframe belongs to. A hate-speech row judged
 from an image's words and description carries a **From an image** pill,
-since a keyframe or a PDF figure shows no thumbnail there.
+since a keyframe or a PDF figure shows no thumbnail there. Either tab shows
+an image's text as labelled parts — **Text in the image** (the words printed
+in it), **Image description** and **Tags** — rather than one passage, so it
+is clear which words the picture says and which are docint's description.
 
 The **Summary** tab reads before it builds. On open — and whenever the
 selected collection changes — it probes `GET /summarize`, which only ever
@@ -294,6 +297,9 @@ swapped view, and a second click ("Show original") brings the original back;
 the original is always one click away, never discarded. Long chunks stay
 clamped to four lines behind a "Show more" toggle in either view. This is a
 display-time overlay only: nothing ingested or stored is ever translated.
+For a finding judged from an image only the text printed in it is translated:
+the description and tags are written in `RESPONSE_LANGUAGE` already, so they
+stay in view, and an image with no printed text has no Translate control.
 
 **Translate all**, in each Analysis section's header, does the same for every
 finding the section matches instead of one at a time — a corpus in a language

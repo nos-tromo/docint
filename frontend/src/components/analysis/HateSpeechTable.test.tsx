@@ -356,3 +356,107 @@ describe('HateSpeechTable basis', () => {
     expect(screen.queryByText('From an image')).not.toBeInTheDocument()
   })
 })
+
+describe('HateSpeechTable — image parts', () => {
+  const imageRows: HateSpeechRow[] = [
+    {
+      chunk_id: 'h40',
+      filename: 'poster.png',
+      category: 'religion',
+      confidence: 'high',
+      basis: 'image',
+      chunk_text: 'Image description: A poster in a town square.\n\nTags: poster\n\nText in the image: PRINTED SLOGAN',
+      ocr_text: 'PRINTED SLOGAN',
+      image_description: 'A poster in a town square.',
+      image_tags: ['poster']
+    },
+    {
+      chunk_id: 'h41',
+      filename: 'flag.png',
+      category: 'extremism',
+      confidence: 'high',
+      basis: 'image',
+      chunk_text: 'Image description: A flag on a wall.',
+      image_description: 'A flag on a wall.'
+    }
+  ]
+
+  it('labels the printed words, description and tags apart', () => {
+    renderWithClient(<HateSpeechTable rows={[imageRows[0]]} collection="alpha" />)
+    const row = screen.getByTestId('hate-speech-row')
+    expect(within(row).getByText('Text in the image').nextElementSibling).toHaveTextContent('PRINTED SLOGAN')
+    expect(within(row).getByText('Image description').nextElementSibling).toHaveTextContent(
+      'A poster in a town square.'
+    )
+    expect(within(row).getByText('Tags').nextElementSibling).toHaveTextContent('poster')
+    expect(within(row).queryByText(/Image description: A poster/)).not.toBeInTheDocument()
+  })
+
+  it('Translate all sends an image only its printed words, and skips one with none', async () => {
+    const sent: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/collections/hate-speech')) {
+          return { ok: true, status: 200, json: async () => ({ items: imageRows, next_cursor: null }) }
+        }
+        if (url.includes('/translate')) {
+          const text = String(JSON.parse(String(init?.body)).text)
+          sent.push(text)
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, translation: `en:${text}`, model: 'm', target_lang: 'en' })
+          }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+
+    renderWithClient(<HateSpeechTable rows={imageRows} collection="alpha" />)
+    await userEvent.click(screen.getByRole('button', { name: /translate all findings/i }))
+
+    await waitFor(() => expect(Object.keys(useTranslationsStore.getState().byText)).toEqual(['PRINTED SLOGAN']))
+    expect(sent).toEqual(['PRINTED SLOGAN'])
+  })
+
+  it('Add all freezes the parts and the translation of the printed words', async () => {
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    useTranslationsStore.setState({
+      byText: { 'PRINTED SLOGAN': { text: 'TRANSLATED SLOGAN', target_lang: 'en', model: 'm' } }
+    })
+    const captured: Record<string, unknown>[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/collections/hate-speech')) {
+          return { ok: true, status: 200, json: async () => ({ items: imageRows, next_cursor: null }) }
+        }
+        if (url.endsWith('/reports') && init?.method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        if (url.includes('/items/batch')) {
+          captured.push(JSON.parse(String(init?.body)))
+          return { ok: true, status: 200, json: async () => ({ added: 2, skipped: 0, updated: 0, item_count: 2 }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+
+    renderWithClient(<HateSpeechTable rows={imageRows} collection="alpha" reportDedupeKeys={new Set()} />)
+    await userEvent.click(screen.getByRole('button', { name: /add all findings to report/i }))
+
+    await waitFor(() => expect(captured).toHaveLength(1))
+    const [poster, flag] = (captured[0].items as { snapshot: Record<string, unknown> }[]).map((i) => i.snapshot)
+    expect(poster).toMatchObject({
+      ocr_text: 'PRINTED SLOGAN',
+      image_description: 'A poster in a town square.',
+      image_tags: ['poster'],
+      translation: { text: 'TRANSLATED SLOGAN', target_lang: 'en', model: 'm' }
+    })
+    expect(flag).toMatchObject({ image_description: 'A flag on a wall.' })
+    expect(flag).not.toHaveProperty('translation')
+  })
+})

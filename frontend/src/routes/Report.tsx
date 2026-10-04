@@ -13,6 +13,7 @@ import {
 } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem, SnapshotThumbnail } from '@/api/types'
+import { ImageTextParts } from '@/components/common/ImageTextParts'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import { ReportSection } from '@/components/report/ReportSection'
 import {
@@ -32,6 +33,7 @@ import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
+import { hasImageParts, type ImageParts } from '@/lib/reportSnapshots'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
@@ -144,6 +146,37 @@ function itemBody(item: ReportItem): string {
     default:
       return truncate(str(s, 'text'))
   }
+}
+
+/**
+ * The printed words, description and tags of a finding judged from an image,
+ * when the snapshot froze them apart — shown labelled instead of the body. A
+ * hate-speech finding keeps its reason as the body and shows them only when
+ * it has none.
+ */
+function itemImageParts(item: ReportItem): ImageParts | null {
+  const s = item.snapshot
+  if (item.artifact_type !== 'entity_finding' && !(item.artifact_type === 'hate_speech_finding' && !str(s, 'reason'))) {
+    return null
+  }
+  // Stored JSON, so only string tags are trusted.
+  const tags = Array.isArray(s.image_tags) ? s.image_tags.filter((tag): tag is string => typeof tag === 'string') : []
+  const parts = { ocr_text: str(s, 'ocr_text'), image_description: str(s, 'image_description'), image_tags: tags }
+  return hasImageParts(parts) ? parts : null
+}
+
+/** An item's body: an image finding's labelled parts, else its text. */
+function ItemBody({ item }: { item: ReportItem }) {
+  const parts = itemImageParts(item)
+  if (parts) {
+    return (
+      <div className="text-sm text-muted-foreground">
+        <ImageTextParts parts={parts} />
+      </div>
+    )
+  }
+  const body = itemBody(item)
+  return body ? <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">{body}</p> : null
 }
 
 function isRenderableThumbnail(value: unknown): value is SnapshotThumbnail {
@@ -522,11 +555,7 @@ export function Report() {
                               />
                             </div>
                           </div>
-                          {itemBody(item) && (
-                            <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
-                              {itemBody(item)}
-                            </p>
-                          )}
+                          <ItemBody item={item} />
                           <EvidenceStrip figures={itemFigures(item)} t={t} />
                           <input
                             key={`note-${item.id}`}

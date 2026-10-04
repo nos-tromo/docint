@@ -591,3 +591,41 @@ describe('Report view — enlarging frozen evidence', () => {
     expect(useUiStore.getState().previewModal).toEqual({ filename: 'folie.jpg', data_uri: DATA_URI })
   })
 })
+
+describe('Report view — image findings', () => {
+  const parts = { ocr_text: 'PRINTED SLOGAN', image_description: 'A poster in a town square.', image_tags: ['poster'] }
+
+  it('labels the printed words, description and tags of an entity finding instead of one block', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          ...reportDetail.items[0],
+          snapshot: { ...reportDetail.items[0].snapshot, chunk_text: 'PRINTED SLOGAN\n\nA poster in a town square.', ...parts }
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    expect((await screen.findByText('Text in the image')).nextElementSibling).toHaveTextContent('PRINTED SLOGAN')
+    expect(screen.getByText('Image description').nextElementSibling).toHaveTextContent('A poster in a town square.')
+    expect(screen.getByText('Tags').nextElementSibling).toHaveTextContent('poster')
+  })
+
+  it('keeps a hate-speech finding’s reason as its body, and labels the parts only without one', async () => {
+    const hate = reportDetail.items[1]
+    const detail = {
+      ...reportDetail,
+      items: [
+        { ...hate, snapshot: { ...hate.snapshot, ...parts } },
+        { ...hate, id: 12, dedupe_key: 'hate:c3', position: 2, snapshot: { ...hate.snapshot, reason: '', ...parts } }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    expect(await screen.findByText('bad')).toBeInTheDocument()
+    expect(screen.getAllByText('Text in the image')).toHaveLength(1)
+  })
+})
