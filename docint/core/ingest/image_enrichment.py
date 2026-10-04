@@ -108,13 +108,15 @@ def entity_text(payload: dict[str, Any]) -> str:
 
 
 def hate_speech_text(payload: dict[str, Any]) -> str:
-    """Return the text hate-speech detection judges: the image's printed words, description and tags.
+    """Return the text hate-speech detection judges: the image's description, tags and printed words.
 
     A picture whose hate is purely visual has no printed words, so the
-    description is the only text that shows it. Each part is labelled, which
-    tells the classifier it is reading an image and lets it judge the message
-    the picture conveys rather than the neutral voice describing it. The
-    labels follow ``RESPONSE_LANGUAGE`` and stay in the finding's quoted text.
+    description is the only text that shows it. The short description and
+    tags come first, so a long printed text cannot push them past
+    ``HATE_SPEECH_MAX_CHARS``. Each part is labelled, which tells the
+    classifier it is reading an image and lets it judge the message the
+    picture conveys rather than the neutral voice describing it. The labels
+    follow ``RESPONSE_LANGUAGE`` and stay in the finding's quoted text.
 
     Args:
         payload (dict[str, Any]): The image point's payload.
@@ -125,9 +127,9 @@ def hate_speech_text(payload: dict[str, Any]) -> str:
     tags = payload.get("llm_tags")
     tag_text = ", ".join(str(tag).strip() for tag in tags if str(tag).strip()) if isinstance(tags, list) else ""
     parts = (
-        ("image_label_text", str(payload.get("ocr_text") or "").strip()),
         ("image_label_description", str(payload.get("llm_description") or "").strip()),
         ("image_label_tags", tag_text),
+        ("image_label_text", str(payload.get("ocr_text") or "").strip()),
     )
     return "\n\n".join(f"{ui_string(key)}: {value}" for key, value in parts if value)
 

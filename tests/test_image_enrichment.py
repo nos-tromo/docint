@@ -218,7 +218,7 @@ def test_pending_images_get_ner_on_words_and_caption_and_hate_speech_on_every_la
 
     enriched = enrich_pending_images(client, _COMPANION, pipeline.enrich_nodes)
 
-    figure_input = f"Text in the image: {_FIGURE_OCR}\n\nImage description: {_FIGURE_CAPTION}\n\nTags: poster"
+    figure_input = f"Image description: {_FIGURE_CAPTION}\n\nTags: poster\n\nText in the image: {_FIGURE_OCR}"
     keyframe_input = f"Image description: {_KEYFRAME_CAPTION}"
     symbol_input = f"Image description: {_SYMBOL_CAPTION}\n\nTags: flag, wall"
     assert enriched == 3
@@ -264,9 +264,39 @@ def test_hate_speech_labels_follow_the_response_language(monkeypatch: pytest.Mon
 
     assert (
         hate_speech_text(payload)
-        == "Text im Bild: Gedruckt\n\nBildbeschreibung: Beschreibung\n\nSchlagworte: eins, zwei"
+        == "Bildbeschreibung: Beschreibung\n\nSchlagworte: eins, zwei\n\nText im Bild: Gedruckt"
     )
     assert hate_speech_text({"ocr_text": " ", "llm_tags": []}) == ""
+
+
+def test_a_long_printed_text_cannot_push_the_description_out_of_the_judged_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the first ``HATE_SPEECH_MAX_CHARS`` are judged, so the short description goes first.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    client = QdrantClient(location=":memory:")
+    _store(
+        client,
+        _COMPANION,
+        {
+            SYMBOL: {
+                "image_id": "img-dense",
+                "ocr_text": "word " * 2000,
+                "llm_description": _SYMBOL_CAPTION,
+                "enrichment": "pending",
+            }
+        },
+    )
+    pipeline = _pipeline(monkeypatch, tmp_path, _Verdicts(), [])
+
+    enrich_pending_images(client, _COMPANION, pipeline.enrich_nodes)
+
+    assert _payload(client, _COMPANION, SYMBOL)["hate_speech"]["hate_speech"] is True
 
 
 def test_every_pending_image_is_reached_across_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -483,11 +483,12 @@ ingestion path:
   `IMAGE_QDRANT_COLLECTION` (template `{collection}_images`).
 - **An image goes through the job's NER + hate-speech pass, on its
   `_images` point** (`docint/core/ingest/image_enrichment.py`). NER reads the
-  printed text, then the caption. Hate-speech detection reads the printed
-  text, the caption and the tags, each labelled (`Text in the image:`,
-  `Image description:`, `Tags:`, in the `RESPONSE_LANGUAGE`), and judges the
+  printed text, then the caption. Hate-speech detection reads the caption,
+  the tags and the printed text, each labelled (`Image description:`,
+  `Tags:`, `Text in the image:`, in the `RESPONSE_LANGUAGE`), and judges the
   message the picture conveys. A picture whose hate is purely visual has no
-  printed words, so its caption is the only text that shows it. With the
+  printed words, so its caption is the only text that shows it; it goes first,
+  so a long printed text cannot push it past `HATE_SPEECH_MAX_CHARS`. With the
   stage on, every captioned image costs one hate-speech request. The results
   (`entities`, `relations`, `hate_speech`) are written payload-only and are
   listed beside the chunks' in the Entities and Hate speech views, the entity
