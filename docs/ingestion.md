@@ -551,9 +551,7 @@ inline. For each batch:
    parents are skipped) — Nextext transcript segments in context windows
    instead, see [NER and hate-speech](#ner-and-hate-speech) — and stores
    the parsed verdict of an endorsing finding under a `hate_speech` key in
-   metadata. PDFs read by the core PDF lane (`CorePDFPipelineReader`) get
-   NER only; hate-speech detection does not reach them. This is a bug,
-   fixed by [#607](https://github.com/nos-tromo/docint/pull/607).
+   metadata.
 6. Chunks are embedded with the dense model (`EMBED_MODEL`) and, for
    hybrid collections, the sparse model (`SPARSE_MODEL`).
 7. Embeddings and nodes are upserted to Qdrant and to the SQLite-backed
@@ -718,10 +716,6 @@ start of the prompt; raise it with a Modelfile `PARAMETER num_ctx` or
 `OLLAMA_CONTEXT_LENGTH`.
 
 Gaps and caveats:
-- Known bug, fixed by
-  [#607](https://github.com/nos-tromo/docint/pull/607): PDFs read by the
-  core PDF lane (`CorePDFPipelineReader`) get NER only, not hate-speech
-  detection.
 - Known bug, fixed by
   [#608](https://github.com/nos-tromo/docint/pull/608): the words inside
   images (a PDF figure, an image attached to a posting, a video keyframe)
