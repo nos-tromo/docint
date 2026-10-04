@@ -4,12 +4,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import DateTime, Engine, bindparam, create_engine, inspect, text
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from docint.utils.env_cfg import load_principal_env
 
+
 # --- Session persistence (ORM) ---
-Base = declarative_base()
+class Base(DeclarativeBase):
+    """Declarative base class for the session-store ORM models."""
 
 
 class SessionStoreMigrationError(RuntimeError):

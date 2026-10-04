@@ -2,12 +2,13 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, Index, String
+from sqlalchemy import DateTime, Index, String
+from sqlalchemy.orm import Mapped, mapped_column
 
 from docint.core.state.base import Base
 
 
-class CollectionOwnership(Base):  # type: ignore[misc]
+class CollectionOwnership(Base):
     """Ownership record for one user-visible collection.
 
     docint is multi-tenant: each user names collections logically (``mydocs``)
@@ -21,16 +22,18 @@ class CollectionOwnership(Base):  # type: ignore[misc]
     default identity, so no Qdrant rename is ever required.
 
     Args:
-        Base (declarative_base): The declarative base class for SQLAlchemy models.
+        Base (DeclarativeBase): The declarative base class for SQLAlchemy models.
     """
 
     __tablename__ = "collection_owners"
-    physical_name = Column(String, primary_key=True)
-    owner = Column(String, nullable=True, index=True)
-    logical_name = Column(String, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    physical_name: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    logical_name: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
     # The retention clock (docs/retention.md). NULL never expires.
-    last_activity_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=True)
+    last_activity_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), nullable=True
+    )
 
     # One logical name per owner. (NULL owners are distinct under SQLite, which
     # is fine: real principals are non-NULL — NULL only appears in tests.)

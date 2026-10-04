@@ -147,7 +147,7 @@ def _persist_turn_with_citation(sm: SessionManager, session_id: str, owner: str)
     """
     with sm._session_scope() as s:
         conv = sm._load_or_create_convo(s, session_id, owner)
-        conv.collection_name = PINNED_COLLECTION  # pyrefly: ignore[bad-assignment]
+        conv.collection_name = PINNED_COLLECTION
         s.commit()
 
     node = MagicMock()
