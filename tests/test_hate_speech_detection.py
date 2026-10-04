@@ -357,3 +357,57 @@ def test_chunk_parser_reads_a_list_wrapped_verdict() -> None:
 
     assert parsed is not None
     assert parsed["hate_speech"] is True
+
+
+def test_chunk_parser_reports_the_endorsement_in_a_fenced_verdict_list() -> None:
+    """A fenced per-statement list is judged by its endorsing verdict, not by its first item."""
+    reply = (
+        "```json\n["
+        + _chunk_reply("none", target="", reason="Insults one person.", category="none")
+        + ", "
+        + _chunk_reply(
+            "endorses", reason="Calls for violence against <Gruppe>.", category="religion", confidence="medium"
+        )
+        + "]\n```"
+    )
+
+    parsed = pipeline_module._parse_hate_speech_reply(reply)
+
+    assert parsed == {
+        "hate_speech": True,
+        "category": "religion",
+        "confidence": "medium",
+        "reason": "Calls for violence against <Gruppe>.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("condemns_or_counters", "endorses"), ("endorses", "condemns_or_counters")],
+)
+def test_chunk_parser_flags_a_bare_verdict_list_with_any_endorsement(first: str, second: str) -> None:
+    """An unfenced list is aggregated the same way: one endorsement anywhere makes the chunk a finding.
+
+    Args:
+        first (str): Stance of the first listed verdict.
+        second (str): Stance of the second listed verdict.
+    """
+    reply = "[" + _chunk_reply(first) + ", " + _chunk_reply(second) + "]"
+
+    parsed = pipeline_module._parse_hate_speech_reply(reply)
+
+    assert parsed is not None
+    assert parsed["hate_speech"] is True
+
+
+def test_chunk_parser_skips_bracketed_prose_before_the_verdict() -> None:
+    """A bracket in the prose is not a verdict list; the object after it is still read."""
+    parsed = pipeline_module._parse_hate_speech_reply("Statement [1] decides it: " + _chunk_reply("endorses"))
+
+    assert parsed is not None
+    assert parsed["hate_speech"] is True
+
+
+def test_chunk_parser_reads_an_empty_list_as_no_verdict() -> None:
+    """A list holding no verdict object is unparseable, never a crash."""
+    assert pipeline_module._parse_hate_speech_reply("[]") is None

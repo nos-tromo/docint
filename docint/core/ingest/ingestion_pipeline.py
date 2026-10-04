@@ -98,33 +98,48 @@ class HateSpeechDetection(TypedDict):
     source_ref: NotRequired[str]
 
 
-def _extract_first_json_dict(text: str) -> tuple[dict[str, Any] | None, json.JSONDecodeError | None]:
-    """Return the first decodable JSON object embedded in *text*.
+def _verdict_payload(value: Any) -> dict[str, Any] | list[Any] | None:
+    """Return ``value`` when it can carry a verdict: an object, or a list holding one.
+
+    Args:
+        value (Any): A decoded JSON value.
+
+    Returns:
+        dict[str, Any] | list[Any] | None: ``value``, or ``None`` for anything else.
+    """
+    if isinstance(value, dict) or (isinstance(value, list) and any(isinstance(item, dict) for item in value)):
+        return value
+    return None
+
+
+def _extract_first_json_verdict(text: str) -> dict[str, Any] | list[Any] | None:
+    """Return the first JSON object, or list of objects, embedded in *text*.
+
+    A list is returned whole: scanning for ``{`` alone would read a fenced
+    per-statement list as its first item and drop every later verdict.
 
     Args:
         text (str): Arbitrary model output that may contain prose, fences,
-            or multiple JSON objects.
+            or multiple JSON values.
 
     Returns:
-        tuple[dict[str, Any] | None, json.JSONDecodeError | None]: The first
-            decoded JSON object plus the last decode error seen while
-            scanning, if no object could be recovered.
+        dict[str, Any] | list[Any] | None: The first decodable verdict
+            payload, or ``None`` when the text holds none.
     """
     decoder = json.JSONDecoder()
-    last_exc: json.JSONDecodeError | None = None
 
     for idx, ch in enumerate(text):
-        if ch != "{":
+        if ch not in "{[":
             continue
         try:
             parsed, _ = decoder.raw_decode(text[idx:])
-        except json.JSONDecodeError as exc:
-            last_exc = exc
+        except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict):
-            return parsed, None
+        payload = _verdict_payload(parsed)
+        if payload is not None:
+            return payload
 
-    return None, last_exc
+    return None
 
 
 def _parse_hate_speech_reply(raw: str) -> HateSpeechDetection | None:
@@ -134,6 +149,10 @@ def _parse_hate_speech_reply(raw: str) -> HateSpeechDetection | None:
     No boolean is read, so neither a stray ``"hate_speech": true`` nor the
     string ``"false"`` can create a finding. Categories and confidences are
     normalised to their enums; an endorsed verdict never carries ``none``.
+    A model that answers with one verdict per statement is read as the
+    passage the prompt asked about: its first endorsing verdict, else its
+    first verdict — never its first item alone, which silently drops an
+    endorsement that is not listed first.
 
     Args:
         raw (str): The raw model output (reasoning, prose and fences tolerated).
@@ -151,13 +170,14 @@ def _parse_hate_speech_reply(raw: str) -> HateSpeechDetection | None:
 
     parsed: Any
     try:
-        parsed = json.loads(cleaned)
+        parsed = _verdict_payload(json.loads(cleaned))
     except json.JSONDecodeError:
         parsed = None
+    if parsed is None:
+        parsed = _extract_first_json_verdict(cleaned)
     if isinstance(parsed, list):
-        parsed = next((item for item in parsed if isinstance(item, dict)), None)
-    if not isinstance(parsed, dict):
-        parsed, _ = _extract_first_json_dict(cleaned)
+        verdicts = [item for item in parsed if isinstance(item, dict)]
+        parsed = next((v for v in verdicts if normalize_stance(v.get("stance")) == "endorses"), verdicts[0])
     if not isinstance(parsed, dict):
         return None
 
