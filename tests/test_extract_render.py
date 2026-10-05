@@ -9,6 +9,7 @@ import pytest
 from pdf_layout import (
     cell_line_counts,
     content_width_share,
+    contents_entries,
     count_min_content_splits,
     text_beyond_its_cell,
     weasyprint_html,
@@ -344,6 +345,23 @@ def test_html_opens_with_a_contents_block_naming_each_section_once() -> None:
     assert 'id="sec-extract-documents"' in document
     assert 'href="#sec-extract-media"' in document
     assert 'href="#sec-extract-postings"' not in document
+
+
+def test_pdf_contents_name_the_page_each_section_starts_on() -> None:
+    """The appendix's contents print where each section starts — never 0."""
+    html_cls = weasyprint_html()
+    spoken = " ".join(f"spoken{i}" for i in range(40))[:200]
+    units = [
+        DocumentUnit(key=f"d{i}", file_name=f"doc{i}.txt", chunks=[Chunk("a", 1, spoken * 8)]) for i in range(4)
+    ] + [MediaUnit(key="m1", file_name="clip.mp4", segments=_segments())]
+    document = extract_html(units, collection="testcol", created_at="2026-01-02T03:04:05+00:00")
+
+    entries = contents_entries(html_cls(string=document).render())
+
+    assert set(entries) == {"sec-extract-documents", "sec-extract-media"}
+    for target, (printed, starts) in entries.items():
+        assert printed == str(starts), target
+    assert entries["sec-extract-media"][1] > entries["sec-extract-documents"][1], "sections share a page"
 
 
 def test_index_names_the_case_file_and_numbers_its_entries() -> None:

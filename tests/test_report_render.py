@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from pdf_layout import (
     content_width_share,
+    contents_entries,
     count_min_content_splits,
     hyphenated_text,
     text_beyond_its_cell,
@@ -641,6 +642,30 @@ def test_html_toc_lists_only_present_sections(monkeypatch: pytest.MonkeyPatch) -
     assert 'href="#sec-chat"' in htm
     assert 'href="#sec-entities"' not in htm
     assert 'href="#sec-summaries"' not in htm
+
+
+def test_pdf_contents_name_the_page_each_section_starts_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every contents entry prints the page its section starts on — never 0."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    evidence = " ".join(f"evidence{i}" for i in range(250))[:1500]
+    findings = [
+        {"artifact_type": kind, "snapshot": {**snapshot, "chunk_text": evidence, "filename": "a.csv", "row": i}}
+        for kind, snapshot in (
+            ("entity_finding", {"entity_label": "Acme [ORG]"}),
+            ("hate_speech_finding", {"category": "religion", "confidence": "high", "reason": "r"}),
+        )
+        for i in range(4)
+    ]
+
+    entries = contents_entries(
+        html_cls(string=R.render_html({"title": "T", "show_toc": True, "items": findings})).render()
+    )
+
+    assert set(entries) == {"sec-entities", "sec-hate"}
+    for target, (printed, starts) in entries.items():
+        assert printed == str(starts), target
+    assert entries["sec-hate"][1] > entries["sec-entities"][1], "sections share a page"
 
 
 def test_markdown_toc_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
