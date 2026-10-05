@@ -6,6 +6,13 @@ Every fixture is synthetic: invented handles, filenames and hashes.
 from __future__ import annotations
 
 import pytest
+from pdf_layout import (
+    cell_line_counts,
+    content_width_share,
+    count_min_content_splits,
+    text_beyond_its_cell,
+    weasyprint_html,
+)
 
 from docint.core.extract.render import (
     appendix_numbers,
@@ -364,8 +371,8 @@ def test_html_transcript_is_a_table_with_a_column_per_field() -> None:
     unit = MediaUnit(key="m1", file_name="clip.mp4", segments=_segments())
     document = extract_html([unit], collection="c", created_at="2026-01-02T03:04:05+00:00")
     assert '<table class="transcript">' in document
-    assert "<th>Time</th>" in document
-    assert "<th>Speaker</th>" in document
+    assert '<th class="t-time">Time</th>' in document
+    assert '<th class="t-speaker">Speaker</th>' in document
     assert '<td class="t-time">00:00:00 - 00:00:04</td>' in document
     assert "SPEAKER_00" in document
 
@@ -379,7 +386,7 @@ def test_html_transcript_omits_the_speaker_column_when_undiarized() -> None:
     )
     document = extract_html([unit], collection="c", created_at="2026-01-02T03:04:05+00:00")
     assert '<table class="transcript">' in document
-    assert "<th>Speaker</th>" not in document
+    assert "Speaker</th>" not in _body(document)
     assert "t-speaker" not in _body(document)
 
 
@@ -430,3 +437,79 @@ def test_a_figure_with_no_stored_thumbnail_says_so() -> None:
     )
     assert "The image itself was not stored." in document
     assert "a sign" in document
+
+
+# --------------------------------------------------------------------------- #
+# PDF layout (real WeasyPrint; skipped where its native libraries are absent)
+# --------------------------------------------------------------------------- #
+def _long_clip(speaker: str = "SPEAKER_00") -> MediaUnit:
+    """A clip with a 60-segment transcript and a keyframe that reads a long printed text."""
+    spoken = " ".join(f"spoken{i}" for i in range(40))[:200]
+    segments = [
+        Segment(i, i * 5.0, i * 5.0 + 5.0, format_clock(i * 5), format_clock(i * 5 + 5), speaker, "en", spoken)
+        for i in range(60)
+    ]
+    frame = Figure(
+        image_id="frame-1",
+        kind="keyframe",
+        time_sec=12.0,
+        index=1,
+        ocr_text=" ".join(f"printed{i}" for i in range(200)),
+    )
+    return MediaUnit(key="m1", file_name="clip.mp4", segments=segments, keyframes=[frame])
+
+
+def _long_posting() -> PostingUnit:
+    """A posting whose provenance carries an unbroken 600-character URL."""
+    reference = {"network": "examplenet", "author": "Example Account", "url": "https://example.invalid/" + "z" * 600}
+    return PostingUnit(key="p1", reference=reference, text="a post", file_name="postings.csv", row=3)
+
+
+def _laid_out(*units: MediaUnit | PostingUnit) -> object:
+    """Lay the units' extract out with WeasyPrint."""
+    html_cls = weasyprint_html()
+    return html_cls(
+        string=extract_html(list(units), collection="testcol", created_at="2026-01-02T03:04:05+00:00")
+    ).render()
+
+
+def test_pdf_does_not_measure_extract_tables_character_by_character(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sizing the transcript and figure tables never splits their text one character at a time."""
+    weasyprint_html()
+    splits = count_min_content_splits(monkeypatch)
+
+    _laid_out(_long_clip(), _long_posting())
+
+    # Per character, the segments, the printed text and the URL would take 14,000 splits.
+    assert splits[0] < 200
+
+
+def test_pdf_keeps_a_long_speaker_name_inside_its_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A speaker label longer than its column wraps there instead of running into the spoken words."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    document = _laid_out(_long_clip(speaker="Moderatorin der Abendsendung im Studio Nord"))
+
+    assert text_beyond_its_cell(document, "t-speaker") == []
+
+
+def test_pdf_fits_a_full_time_stamp_on_one_line() -> None:
+    """A segment's start and end stamps share one line inside the time column."""
+    document = _laid_out(_long_clip())
+
+    assert text_beyond_its_cell(document, "t-time") == []
+    # A row broken across pages leaves an empty continuation of its time cell.
+    assert max(cell_line_counts(document, "t-time")) == 1
+
+
+def test_pdf_gives_the_spoken_words_most_of_the_width() -> None:
+    """The stamp and speaker columns stay narrow so the transcript's words get the page."""
+    document = _laid_out(_long_clip())
+
+    assert min(content_width_share(document, "t-text")) > 0.5
+
+
+def test_pdf_fits_a_diarization_label_on_one_line() -> None:
+    """The speaker column holds a `SPEAKER_00` label whole rather than breaking it."""
+    document = _laid_out(_long_clip())
+
+    assert max(cell_line_counts(document, "t-speaker")) == 1

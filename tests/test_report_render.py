@@ -7,6 +7,14 @@ import zipfile
 from typing import Any, cast
 
 import pytest
+from pdf_layout import (
+    content_width_share,
+    count_min_content_splits,
+    hyphenated_text,
+    text_beyond_its_cell,
+    text_beyond_the_page,
+    weasyprint_html,
+)
 
 from docint.core.state import report_render as R
 from docint.utils.ui_strings import ui_string
@@ -1061,3 +1069,73 @@ def test_image_finding_part_labels_follow_the_response_language(monkeypatch: pyt
     assert '<td class="f-key">Text im Bild</td>' in htm
     assert '<td class="f-key">Bildbeschreibung</td>' in htm
     assert '<td class="f-key">Schlagworte</td>' in htm
+
+
+# --------------------------------------------------------------------------- #
+# PDF layout (real WeasyPrint; skipped where its native libraries are absent)
+# --------------------------------------------------------------------------- #
+def _long_finding(text: str, **extra: Any) -> dict[str, Any]:
+    """A one-finding report whose evidence cells hold ``text``."""
+    return _single_item_report(
+        "entity_finding",
+        {"chunk_id": "c1", "entity_label": "Acme [ORG]", "chunk_text": text, "filename": "a.csv", "row": 1, **extra},
+    )
+
+
+def test_pdf_does_not_measure_a_finding_character_by_character(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sizing a finding's table never splits its evidence one character at a time.
+
+    Auto table layout measures every cell's narrowest width, and text that may
+    break anywhere is measured per character, each split re-laying out the rest
+    of the text: quadratic per cell, which turned a report of a few dozen
+    findings into a gateway timeout.
+    """
+    weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    text = " ".join(f"evidence{i}" for i in range(200))[:1500]
+    report = _long_finding(text, translation={"text": text, "target_lang": "en", "model": "m"})
+    splits = count_min_content_splits(monkeypatch)
+
+    assert R.render_pdf(report).startswith(b"%PDF")
+    # Per character, the chunk and its translation alone would take 3,000 splits.
+    assert splits[0] < 100
+
+
+def test_pdf_wraps_an_unbroken_token_inside_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A URL or hash with no break opportunity wraps instead of pushing the table past the margin."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _long_finding(
+        "x" * 400, reference_metadata={"network": "examplenet", "url": "https://example.invalid/" + "y" * 300}
+    )
+
+    assert text_beyond_the_page(html_cls(string=R.render_html(report)).render()) == []
+
+
+def test_pdf_keeps_a_long_label_inside_the_key_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A German label wider than the key column breaks there instead of running into its value."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    document = html_cls(string=R.render_html(_image_finding("entity_finding"))).render()
+
+    assert text_beyond_its_cell(document, "f-key") == []
+
+
+def test_pdf_gives_a_finding_s_evidence_most_of_the_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The label column stays slim and the evidence beside it gets the page, as the colgroup lays out."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    document = html_cls(string=R.render_html(_long_finding("short evidence"))).render()
+
+    assert max(content_width_share(document, "f-key")) < 0.2
+    assert min(content_width_share(document, "f-val")) > 0.7
+
+
+def test_pdf_never_hyphenates_a_label_that_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A label whose words fit the key column wraps at its spaces, never mid-word."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _long_finding("evidence", translation={"text": "translated evidence", "target_lang": "de", "model": "m"})
+    document = html_cls(string=R.render_html(report)).render()
+
+    assert hyphenated_text(document, "f-key") == []
