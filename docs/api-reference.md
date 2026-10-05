@@ -71,9 +71,12 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `POST` | `/reports/{report_id}/items/reorder` | `Reports` | Reorder a report's items. |
 | `GET`  | `/reports/{report_id}/export.md` | `Reports` | Combined Markdown export. |
 | `GET`  | `/reports/{report_id}/export.html` | `Reports` | Self-contained HTML export (also the PDF source). |
-| `GET`  | `/reports/{report_id}/export.pdf` | `Reports` | Paginated case-file PDF (WeasyPrint); `503` when unavailable. |
+| `GET`  | `/reports/{report_id}/export.pdf` | `Reports` | Paginated case-file PDF (WeasyPrint), rendered on the request; `503` when unavailable. |
 | `GET`  | `/reports/{report_id}/export.json` | `Reports` | Structured selection with snapshots. |
 | `GET`  | `/reports/{report_id}/export.zip` | `Reports` | Per-type CSV bundle. |
+| `POST` | `/reports/{report_id}/pdf` | `Reports` | Queue the PDF as a background render (`kind="report_pdf"` job). |
+| `GET`  | `/reports/{report_id}/pdf` | `Reports` | Download the report's newest rendered PDF. |
+| `GET`  | `/reports/{report_id}/pdf/status` | `Reports` | The newest render job and the stored PDF, and whether it is current. |
 | `POST` | `/agent/chat` | `Agent` | Run the agent orchestrator for one turn (non-streaming). |
 | `POST` | `/agent/chat/stream` | `Agent` | Streaming orchestrator variant (SSE tokens). |
 | `POST` | `/ingest/upload` | `Ingestion` | Stage files into a collection's batch directory (upload only, no ingestion). |
@@ -827,7 +830,32 @@ stem derived from the report:
 | `export.pdf` | `application/pdf` | attachment — paginated, rendered by WeasyPrint |
 
 `export.pdf` answers `503` when the PDF engine (WeasyPrint plus its native
-libraries) is unavailable; the other four formats are unaffected.
+libraries) is unavailable; the other four formats are unaffected. It renders
+on the request, outside the render slot below, so behind the gateway a very
+large report can outlast the proxy's read timeout — the SPA renders PDFs
+through the job routes instead.
+
+### PDF render jobs — `/reports/{report_id}/pdf`
+
+| Route | Notes |
+|---|---|
+| `POST /reports/{report_id}/pdf` | Queue a render. `202 {"job_id"}`; `409 {"detail": {"message", "job_id"}}` while this report is already rendering; `404` for a report the caller does not own; `503` when the PDF engine is unavailable (no job is queued). |
+| `GET /reports/{report_id}/pdf` | The newest rendered PDF as an attachment, named as the report was when it rendered. `404` when nothing is stored. |
+| `GET /reports/{report_id}/pdf/status` | `{"job": <snapshot> \| null, "pdf": <record> \| null}` — the newest render job for this report (any status), and the stored PDF with `current: true` while the report is unchanged since it rendered (compared by `updated_at`). |
+
+A render runs as a `kind="report_pdf"` job on the shared owner-multiplexed
+stream (`GET /ingest/jobs/events`), framed as `report_pdf_started` (carrying
+the report id as `target`) / `report_pdf_progress` (`stage`: `preparing`,
+`layout` with the `page` reached, or `finishing`) / `report_pdf_completed`;
+the terminal frame and the snapshot carry the stored record as `artifact`. It
+waits for the WeasyPrint render slot collection extracts use
+(`DOCINT_EXTRACT_CONCURRENCY`), and a waiting job emits no frames — the status
+route is where a client sees it queued.
+
+The report is read when the render starts. One PDF is kept per report
+(`REPORT_PDF_DIR`), replaced by the next render and deleted with the report,
+by hand or by its collection's deletion; a render that finishes after its
+report was deleted discards what it wrote.
 
 ## Sessions
 
