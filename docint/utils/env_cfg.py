@@ -2,6 +2,7 @@
 
 import math
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
@@ -2009,6 +2010,7 @@ class PathConfig:
     qdrant_sources: Path
     hf_hub_cache: Path
     extracts: Path
+    report_pdfs: Path
 
 
 def load_path_env() -> PathConfig:
@@ -2026,6 +2028,8 @@ def load_path_env() -> PathConfig:
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
         - extracts (Path): Directory holding rendered collection extracts.
+        - report_pdfs (Path): Directory holding each report's newest rendered PDF.
+            Scratch space by default: a PDF can always be rendered again.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
@@ -2052,6 +2056,7 @@ def load_path_env() -> PathConfig:
         qdrant_sources=Path(os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
         extracts=Path(os.getenv("EXTRACT_DIR", default_extracts_dir)).expanduser(),
+        report_pdfs=Path(os.getenv("REPORT_PDF_DIR", Path(tempfile.gettempdir()) / "docint-report-pdfs")).expanduser(),
     )
 
 

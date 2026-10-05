@@ -642,6 +642,28 @@ def test_run_job_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == ["summary", "ingest"]
 
 
+def test_a_report_pdf_job_never_reaches_the_ingest_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PDF render runs its own runner, and does not drop an upload's tallies afterwards as an ingest does."""
+    calls: list[str] = []
+    forgotten: list[str] = []
+    monkeypatch.setattr(
+        api_module,
+        "_run_report_pdf_job",
+        lambda state, push: calls.append("report_pdf") or {"empty": False, "resolution": None},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_run_ingest_job",
+        lambda state, push: calls.append("ingest") or {"empty": False, "resolution": None},
+    )
+    monkeypatch.setattr(api_module, "get_preprocess_pool", lambda: SimpleNamespace(forget_collection=forgotten.append))
+
+    api_module._run_job(_make_state(kind="report_pdf"), lambda ev, p: None)
+
+    assert calls == ["report_pdf"]
+    assert forgotten == []
+
+
 def test_staged_reports_the_pools_per_stage_tally(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

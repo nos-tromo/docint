@@ -209,6 +209,49 @@ class ReportManager:
                 return None
             return self._serialize_report(s, report)
 
+    def get_report_meta(self, report_id: int, owner: str | None) -> dict[str, Any] | None:
+        """Return an owned report's identity without loading its items.
+
+        :meth:`get_report` decodes every item's snapshot — megabytes for a
+        report with a few hundred findings and their frozen thumbnails — which
+        a route that only gates on ownership or names a file must not pay.
+
+        Args:
+            report_id (int): The report id.
+            owner (str | None): The principal requesting the report.
+
+        Returns:
+            dict[str, Any] | None: ``id``, ``title``, ``collection_name``,
+                ``created_at`` and ``updated_at`` (ISO, formatted as
+                :meth:`get_report` formats them), or ``None`` when missing or
+                not owned by ``owner``.
+        """
+        with self._session_scope() as s:
+            row = (
+                s.query(
+                    Report.id,
+                    Report.owner,
+                    Report.title,
+                    Report.collection_name,
+                    Report.created_at,
+                    Report.updated_at,
+                )
+                .filter(Report.id == report_id)
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            row_id, row_owner, title, collection_name, created, updated = row
+            if row_owner != owner:
+                return None
+            return {
+                "id": row_id,
+                "title": title,
+                "collection_name": collection_name,
+                "created_at": created.isoformat() if created else None,
+                "updated_at": updated.isoformat() if updated else None,
+            }
+
     def update_report(
         self,
         report_id: int,
@@ -301,7 +344,7 @@ class ReportManager:
             s.commit()
             return True
 
-    def delete_reports_for_collection(self, owner: str | None, logical: str) -> int:
+    def delete_reports_for_collection(self, owner: str | None, logical: str) -> list[int]:
         """Delete every report ``owner`` built from logical collection ``logical``.
 
         Part of a collection's delete cascade. Keyed on the owner as well as
@@ -314,14 +357,16 @@ class ReportManager:
             logical (str): The user-visible collection name.
 
         Returns:
-            int: How many reports were deleted.
+            list[int]: The ids of the deleted reports, so what was derived from
+                them (a rendered PDF) can follow.
         """
         with self._session_scope() as s:
             reports = s.query(Report).filter(Report.owner == owner, Report.collection_name == logical).all()
+            ids = [report.id for report in reports]
             for report in reports:
                 s.delete(report)
             s.commit()
-            return len(reports)
+            return ids
 
     # --- item operations ---
     def add_item(
