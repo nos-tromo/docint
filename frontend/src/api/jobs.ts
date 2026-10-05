@@ -25,32 +25,47 @@ export interface CreateIngestJobPayload {
 }
 
 /**
- * Queue an ingest job over a collection's staged upload batches.
+ * POST to a route that queues a background job, adopting the run already in
+ * flight when the route refuses a second one.
  *
- * A 409 means that collection already has a run in flight. That is not an
- * error condition for the user — it happens when they re-submit after a
- * reload — so the in-flight `job_id` is adopted and the caller simply
- * re-attaches to the existing run.
+ * Every queueing route answers that refusal with 409 and names the in-flight
+ * `job_id` — under `detail` when FastAPI wraps an `HTTPException`, at the top
+ * level when the route writes the body itself — so both shapes are read. The
+ * user has usually just re-submitted after a reload, so it is not an error for
+ * them; the caller re-attaches to the existing run.
  *
- * @param payload - Collection and per-run enrichment overrides.
+ * @param path - The queueing route.
+ * @param body - Its JSON body.
  * @returns The job id, and whether it was adopted from an in-flight run.
  */
-export async function createIngestJob(
-  payload: CreateIngestJobPayload
+export async function queueJob(
+  path: string,
+  body?: unknown
 ): Promise<{ job_id: string; adopted: boolean }> {
   try {
-    const res = await apiPost<{ job_id: string }>('/ingest/finalize', payload)
+    const res = await apiPost<{ job_id: string }>(path, body)
     return { job_id: res.job_id, adopted: false }
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) {
-      const detail = e.detail as { detail?: { job_id?: string } } | { job_id?: string }
-      const nested = (detail as { detail?: { job_id?: string } }).detail
-      const jobId = nested?.job_id ?? (detail as { job_id?: string }).job_id
-      if (jobId) return { job_id: jobId, adopted: true }
+      const detail = e.detail as { detail?: { job_id?: unknown }; job_id?: unknown } | null
+      const jobId = detail?.detail?.job_id ?? detail?.job_id
+      if (typeof jobId === 'string' && jobId) return { job_id: jobId, adopted: true }
     }
     throw e
   }
 }
+
+/**
+ * Queue an ingest job over a collection's staged upload batches.
+ *
+ * A 409 means that collection already has a run in flight, whose `job_id` is
+ * adopted (see {@link queueJob}).
+ *
+ * @param payload - Collection and per-run enrichment overrides.
+ * @returns The job id, and whether it was adopted from an in-flight run.
+ */
+export const createIngestJob = (payload: CreateIngestJobPayload) =>
+  queueJob('/ingest/finalize', payload)
 
 /** One file already on the server, as a re-picking client recognises it. */
 export interface StagedFile {
