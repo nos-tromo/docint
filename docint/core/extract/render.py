@@ -70,10 +70,10 @@ h2.unit { font-size: 13pt; font-weight: 600; border-bottom: 1px solid #333; padd
           margin: 20pt 0 6pt; break-after: avoid; }
 h3.part { font-size: 11pt; font-weight: 600; margin: 12pt 0 4pt; break-after: avoid; }
 /* Provenance key/value, sized like the report's finding table so the appendix
-   and the report it belongs to print the same block. `anywhere`, not
-   `break-word`: WeasyPrint excludes break-word from min-content measurement,
-   so an unbroken URL would widen the column past the page margin. */
-table.meta { width: 100%; border-collapse: collapse; margin: 0 0 8pt; font-size: 9.5pt; }
+   and the report it belongs to print the same block. Every table here is
+   fixed-layout: auto layout measures each cell, per character where text
+   breaks `anywhere` (quadratic in the text). */
+table.meta { width: 100%; border-collapse: collapse; margin: 0 0 8pt; font-size: 9.5pt; table-layout: fixed; }
 table.meta td { border: 1px solid #e6e6e6; padding: 2pt 6pt; vertical-align: top; overflow-wrap: anywhere; }
 table.meta td.k { width: 16%; font-weight: 600; color: #555; font-size: 8pt; }
 /* Figures: one row per figure, the picture beside the words that describe it —
@@ -81,7 +81,7 @@ table.meta td.k { width: 16%; font-weight: 600; color: #555; font-size: 8pt; }
    `break-inside: avoid` is right here (unlike the report's finding rows, which
    approach a page in height): an <img> is monolithic in WeasyPrint, so without it
    a row starting low on the page puts its text here and its picture overleaf. */
-table.figures { width: 100%; border-collapse: collapse; margin: 0 0 8pt; }
+table.figures { width: 100%; border-collapse: collapse; margin: 0 0 8pt; table-layout: fixed; }
 table.figures td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: top; }
 table.figures tr { break-inside: avoid; }
 table.figures td.fig { width: 64mm; }
@@ -90,13 +90,15 @@ table.figures figure.evidence img { max-width: 60mm; max-height: 70mm; }
 table.figures p.fig-label { font-weight: 600; font-size: 9.5pt; margin: 0 0 3pt; }
 /* Transcript: a table, so the stamp cannot be reordered into the words by bidi
    and a reader can scan down one speaker. <thead> repeats on every page. */
-table.transcript { width: 100%; border-collapse: collapse; margin: 0 0 8pt; font-size: 9.5pt; }
+table.transcript { width: 100%; border-collapse: collapse; margin: 0 0 8pt; font-size: 9.5pt; table-layout: fixed; }
 table.transcript th, table.transcript td {
   border: 1px solid #e6e6e6; padding: 2pt 6pt; vertical-align: top; text-align: left;
 }
 table.transcript th { background: #f7f7f7; font-weight: 600; font-size: 8.5pt; color: #444; white-space: nowrap; }
+table.transcript th.t-time { width: 19ch; }
+table.transcript th.t-speaker { width: 30mm; }
 table.transcript td.t-time { white-space: nowrap; font-size: 8.5pt; color: #555; }
-table.transcript td.t-speaker { white-space: nowrap; color: #555; }
+table.transcript td.t-speaker { color: #555; overflow-wrap: anywhere; }
 table.transcript td.t-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 [dir="rtl"] { text-align: right; }
 .figure-meta { font-size: 9pt; color: #444; margin: 0 0 6pt; overflow-wrap: anywhere; }
@@ -504,9 +506,9 @@ def _html_transcript(unit: MediaUnit) -> str:
     if not unit.segments:
         return f'<p class="note">{_esc(ui_string("extract_note_no_transcript"))}</p>'
     with_speaker = any(segment.speaker for segment in unit.segments)
-    head = [f"<th>{_esc(ui_string('extract_label_time'))}</th>"]
+    head = [f'<th class="t-time">{_esc(ui_string("extract_label_time"))}</th>']
     if with_speaker:
-        head.append(f"<th>{_esc(ui_string('report_label_speaker'))}</th>")
+        head.append(f'<th class="t-speaker">{_esc(ui_string("report_label_speaker"))}</th>')
     head.append(f"<th>{_esc(ui_string('extract_label_text'))}</th>")
 
     rows = []
