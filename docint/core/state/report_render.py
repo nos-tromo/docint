@@ -763,7 +763,10 @@ h2.section {
    follows at full width (fewer wrapped lines than a squeezed column), and
    every remaining field is a muted label/value row with a slim label column.
    Verbatim evidence text keeps `pre-wrap` — never reflowed. */
-table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; }
+/* Fixed layout: auto layout sizes columns by measuring every cell, and text
+   that breaks `anywhere` is measured per character (quadratic per cell). */
+table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; table-layout: fixed; }
+table.finding col.f-key { width: 16%; }
 table.finding td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: top; }
 /* No `break-inside: avoid` on finding rows: the chunk row and the entity-badge
    row can each approach a page in height, and an unbreakable row jumps whole to
@@ -771,7 +774,8 @@ table.finding td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: 
    ordinary table content instead. */
 table.finding tr.f-head td { background: #f7f7f7; font-weight: 600; font-size: 9.5pt; }
 table.finding td.f-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 9.5pt; color: #222; }
-table.finding td.f-key { width: 16%; font-weight: 600; color: #555; font-size: 8pt; }
+/* Only a word too long for the slim label column (`Bildbeschreibung`) may hyphenate. */
+table.finding td.f-key { font-weight: 600; color: #555; font-size: 8pt; hyphens: auto; hyphenate-limit-chars: 13 4 4; }
 table.finding td.f-val { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 8pt; color: #444; }
 /* Rendered Markdown prose (summaries, chat answers). */
 .prose { margin: 2pt 0 4pt; }
@@ -951,7 +955,7 @@ def _html_finding_table(snap: dict[str, Any], note: str | None, *, tag_html: str
     rows.extend(_html_finding_row(label, _esc(value)) for label, value in _provenance_rows(snap))
     if note:
         rows.append(_html_finding_row(ui_string("report_label_note"), _esc(note)))
-    return f'<table class="finding">{"".join(rows)}</table>'
+    return f'<table class="finding"><colgroup><col class="f-key"><col></colgroup>{"".join(rows)}</table>'
 
 
 def _html_chat(snap: dict[str, Any], note: str | None) -> str:
