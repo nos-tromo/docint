@@ -87,23 +87,24 @@ KIND_EVENTS: dict[str, dict[str, str]] = {
         "failed_code": "extract_failed",
         "failed_message": "Extract failed.",
     },
+    "report_pdf": {
+        "started": "report_pdf_started",
+        "progress": "report_pdf_progress",
+        "complete": "report_pdf_completed",
+        "cancelled": "report_pdf_cancelled",
+        "failed_code": "report_pdf_failed",
+        "failed_message": "Report PDF failed.",
+    },
 }
 
+# Derived from KIND_EVENTS: a name missing from these sets is never replayed.
 #: SSE event names, across all kinds, that open a run's history.
-STARTED_EVENTS: frozenset[str] = frozenset({"ingestion_started", "summary_started", "extract_started"})
+STARTED_EVENTS: frozenset[str] = frozenset(names["started"] for names in KIND_EVENTS.values())
 #: SSE event names, across all kinds, carrying a collapsed-to-latest progress update.
-PROGRESS_EVENTS: frozenset[str] = frozenset({"ingestion_progress", "summary_progress", "extract_progress"})
+PROGRESS_EVENTS: frozenset[str] = frozenset(names["progress"] for names in KIND_EVENTS.values())
 #: SSE event names, across all kinds, that end a run.
 TERMINAL_EVENTS: frozenset[str] = frozenset(
-    {
-        "ingestion_complete",
-        "summary_completed",
-        "extract_completed",
-        "ingestion_cancelled",
-        "summary_cancelled",
-        "extract_cancelled",
-        "error",
-    }
+    {"error"} | {names[key] for names in KIND_EVENTS.values() for key in ("complete", "cancelled")}
 )
 
 
@@ -248,7 +249,8 @@ class IngestJobState:
     logical_name: str
     physical: str
     kind: str = "ingest"
-    #: The one source an extract job covers; ``None`` for a whole collection.
+    #: What the job covers: an extract's one source (``None`` for a whole
+    #: collection), or the id of the report a PDF render is for.
     target: str | None = None
     #: Case file an extract is filed under, printed on every page of its PDF.
     reference_number: str | None = None
@@ -472,22 +474,25 @@ class IngestJobManager:
             summary_concurrency (int | None): Worker semaphore size for
                 ``kind="summary"`` jobs. Defaults to
                 :func:`docint.utils.env_cfg.load_summary_concurrency`.
-            extract_concurrency (int | None): Worker semaphore size for
-                ``kind="extract"`` jobs. Defaults to
+            extract_concurrency (int | None): Size of the WeasyPrint render
+                slot ``kind="extract"`` and ``kind="report_pdf"`` jobs share. Defaults to
                 :func:`docint.utils.env_cfg.load_extract_concurrency`.
         """
         self._runner = runner
         self._jobs: dict[str, IngestJobState] = {}
         self._subscribers: dict[str, list[asyncio.Queue[str | None]]] = {}
         self._lock = asyncio.Lock()
+        render_slot = asyncio.Semaphore(
+            extract_concurrency if extract_concurrency is not None else load_extract_concurrency()
+        )
         self._semaphores: dict[str, asyncio.Semaphore] = {
             "ingest": asyncio.Semaphore(concurrency if concurrency is not None else load_ingest_concurrency()),
             "summary": asyncio.Semaphore(
                 summary_concurrency if summary_concurrency is not None else load_summary_concurrency()
             ),
-            "extract": asyncio.Semaphore(
-                extract_concurrency if extract_concurrency is not None else load_extract_concurrency()
-            ),
+            # Both kinds render with WeasyPrint, and a second concurrent render is what OOMs.
+            "extract": render_slot,
+            "report_pdf": render_slot,
         }
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -534,7 +539,7 @@ class IngestJobManager:
                 ``SUMMARY_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"``, ``"summary"`` or ``"extract"``. Selects
+            kind (str): ``"ingest"``, ``"summary"``, ``"extract"`` or ``"report_pdf"``. Selects
                 the SSE event names (:data:`KIND_EVENTS`) and the worker
                 semaphore this job waits on.
             target (str | None): The one source an extract covers.
@@ -625,7 +630,7 @@ class IngestJobManager:
                 ``SUMMARY_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"``, ``"summary"`` or ``"extract"``. Selects
+            kind (str): ``"ingest"``, ``"summary"``, ``"extract"`` or ``"report_pdf"``. Selects
                 the SSE event names (:data:`KIND_EVENTS`), the worker semaphore
                 this job waits on, and the idleness scope checked before
                 creating.
@@ -707,7 +712,7 @@ class IngestJobManager:
                 ``SUMMARY_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"``, ``"summary"`` or ``"extract"``.
+            kind (str): ``"ingest"``, ``"summary"``, ``"extract"`` or ``"report_pdf"``.
             target (str | None): The one source an extract covers.
             reference_number (str | None): Case file an extract is filed
                 under. Extract-only.
@@ -719,7 +724,13 @@ class IngestJobManager:
 
         Returns:
             IngestJobState: A new, not-yet-registered job state.
+
+        Raises:
+            ValueError: When ``kind`` has no events or worker slot — such a
+                job would sit queued forever, blocking its target as "active".
         """
+        if kind not in KIND_EVENTS or kind not in self._semaphores:
+            raise ValueError(f"Unknown job kind: {kind!r}")
         return IngestJobState(
             job_id=uuid.uuid4().hex,
             owner=owner,
@@ -1222,6 +1233,8 @@ class IngestJobManager:
             started: dict[str, Any] = {"collection": state.logical_name}
             if inventory is not None:
                 started["total_files"] = inventory.total_files
+            if state.target is not None:
+                started["target"] = state.target
             _emit(names["started"], started)
             self._log_run_banner(state, inventory)
             try:
