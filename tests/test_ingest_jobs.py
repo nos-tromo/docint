@@ -1122,6 +1122,128 @@ class TestExtractJobs:
         await manager.stop()
 
 
+class TestReportPdfJobs:
+    """``kind="report_pdf"`` renders a report's PDF off the request, in the extract's render slot."""
+
+    @staticmethod
+    def _done(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        return {"empty": False, "resolution": None}
+
+    @pytest.mark.anyio
+    async def test_a_report_pdf_job_frames_and_replays_its_own_events(self) -> None:
+        """A reloading tab replays the render's start, latest page and end."""
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            push("report_pdf_progress", {"message": "Laying out page 1", "stage": "layout", "page": 1})
+            push("report_pdf_progress", {"message": "Laying out page 2", "stage": "layout", "page": 2})
+            return {"empty": False, "resolution": None, "artifact": {"report_id": 7, "filename": "report-7.pdf"}}
+
+        manager = IngestJobManager(runner=runner)
+        state = await manager.create(owner="o", logical_name="c", physical="report#7#t", kind="report_pdf", target="7")
+        await _drain(manager, state)
+
+        history = state.history()
+        assert _events(history) == ["report_pdf_started", "report_pdf_progress", "report_pdf_completed"]
+        assert _data_of(history[1])["page"] == 2
+        assert _data_of(history[2])["artifact"] == {"report_id": 7, "filename": "report-7.pdf"}
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_a_failed_render_uses_its_own_code(self) -> None:
+        """A failed PDF must not read as a failed ingest or extract."""
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        manager = IngestJobManager(runner=runner)
+        state = await manager.create(owner="o", logical_name="c", physical="report#7#t", kind="report_pdf")
+        await _drain(manager, state)
+
+        assert state.status is JobStatus.FAILED
+        assert _data_of(state.history()[-1])["code"] == "report_pdf_failed"
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_a_render_waits_for_the_slot_an_extract_holds(self) -> None:
+        """Two WeasyPrint renders at once run the container out of memory, so they queue."""
+        gate = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            if state.kind == "extract":
+                asyncio.run_coroutine_threadsafe(gate.wait(), loop).result(timeout=5)
+            return {"empty": False, "resolution": None}
+
+        manager = IngestJobManager(runner=runner, extract_concurrency=1)
+        extract = await manager.create(owner="o", logical_name="c", physical="p", kind="extract")
+        report = await manager.create(owner="o", logical_name="c", physical="report#7#t", kind="report_pdf")
+        await asyncio.sleep(0.1)
+
+        assert report.status is JobStatus.QUEUED
+        assert report.history() == []
+        gate.set()
+        await _drain(manager, extract)
+        await _drain(manager, report)
+        assert report.status is JobStatus.COMPLETED
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_a_render_never_takes_the_ingest_slot(self) -> None:
+        """A long ingest must not hold an export hostage."""
+        gate = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            if state.kind == "ingest":
+                asyncio.run_coroutine_threadsafe(gate.wait(), loop).result(timeout=5)
+            return {"empty": False, "resolution": None}
+
+        manager = IngestJobManager(runner=runner, concurrency=1)
+        ingest = await manager.create(owner="o", logical_name="c", physical="p", kind="ingest")
+        report = await manager.create(owner="o", logical_name="c", physical="report#7#t", kind="report_pdf")
+        await _drain(manager, report)
+
+        assert report.status is JobStatus.COMPLETED
+        assert ingest.status is JobStatus.RUNNING
+        gate.set()
+        await _drain(manager, ingest)
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_the_started_frame_names_the_target(self) -> None:
+        """A tab that attaches mid-run learns which report a render is for from its first frame."""
+        manager = IngestJobManager(runner=self._done)
+        report = await manager.create(owner="o", logical_name="c", physical="report#7#t", kind="report_pdf", target="7")
+        ingest = await manager.create(owner="o", logical_name="c", physical="p")
+        await _drain(manager, report)
+        await _drain(manager, ingest)
+
+        assert _data_of(report.history()[0])["target"] == "7"
+        assert "target" not in _data_of(ingest.history()[0])
+        await manager.stop()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("kind", sorted(jobs_module.KIND_EVENTS))
+    async def test_every_kind_runs_to_completion(self, kind: str) -> None:
+        """Each kind has events and a worker slot; a missing slot would leave its job queued forever."""
+        manager = IngestJobManager(runner=self._done)
+        state = await manager.create(owner="o", logical_name="c", physical="p", kind=kind)
+        await _drain(manager, state)
+
+        assert state.status is JobStatus.COMPLETED
+        await manager.stop()
+
+    @pytest.mark.anyio
+    async def test_an_unknown_kind_is_refused_at_creation(self) -> None:
+        """A job no worker could run must never be registered as queued and block its target."""
+        manager = IngestJobManager(runner=self._done)
+
+        with pytest.raises(ValueError, match="report_png"):
+            await manager.create(owner="o", logical_name="c", physical="p", kind="report_png")
+        assert await manager.list_for_owner("o") == []
+        await manager.stop()
+
+
 class TestSummaryJobs:
     """``kind="summary"`` jobs share the registry but frame their own events."""
 

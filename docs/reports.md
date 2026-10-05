@@ -116,7 +116,7 @@ the API is reachable on port 8000; under Docker the backend publishes no host
 port, so run them from inside the network or through the gateway:
 
 ```bash
-curl -O "http://localhost:8000/reports/1/export.pdf"   # paginated case-file PDF (WeasyPrint)
+curl -O "http://localhost:8000/reports/1/export.pdf"   # paginated case-file PDF (WeasyPrint), rendered on the request
 curl -O "http://localhost:8000/reports/1/export.md"    # combined Markdown
 curl    "http://localhost:8000/reports/1/export.html"  # self-contained HTML (also the PDF source)
 curl -O "http://localhost:8000/reports/1/export.json"  # structured selection
@@ -142,6 +142,19 @@ disclaimer in the footer of every page, findings kept whole across page breaks,
 and Noto fonts for multi-script text. It needs WeasyPrint's native libraries,
 which the backend image installs; if they are absent the `.pdf` route returns
 503 while every other format keeps working.
+
+A long report takes minutes to paginate — longer than the gateway waits on a
+single request — so the Report tab renders the PDF as a background job and
+downloads it when it is ready, showing the page WeasyPrint has reached while it
+works. A PDF that is still current (the report unchanged since it rendered)
+downloads at once; an edited report renders again. Scripts can use the same
+flow (see [api-reference.md](api-reference.md#pdf-render-jobs--reportsreport_idpdf)):
+
+```bash
+curl -X POST "http://localhost:8000/reports/1/pdf"        # 202 {"job_id": …}
+curl "http://localhost:8000/reports/1/pdf/status"         # job progress, and the stored PDF once done
+curl -OJ "http://localhost:8000/reports/1/pdf"            # the rendered PDF
+```
 
 ## When the collection is deleted
 

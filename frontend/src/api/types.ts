@@ -558,6 +558,33 @@ export interface ExtractRecord {
   operator?: string | null
 }
 
+/**
+ * The stored PDF render of one report, as `GET /reports/{id}/pdf/status`
+ * describes it. Rendered by a background job, so the record outlives the job
+ * that made it.
+ */
+export interface ReportPdfRecord {
+  report_id: number
+  filename: string
+  size: number
+  /** When the PDF was rendered. */
+  created_at: string
+  /** The report's `updated_at` as it stood when this PDF was rendered. */
+  report_updated_at: string
+  pages: number | null
+}
+
+/** What `GET /reports/{id}/pdf/status` answers. */
+export interface ReportPdfStatus {
+  /** The newest report-PDF job for this report, in any status; null when the registry holds none. */
+  job: IngestJobSnapshot | null
+  /**
+   * The stored render, if any. `current` is false once the report has been
+   * edited since the render, so downloading it would hand over an old version.
+   */
+  pdf: (ReportPdfRecord & { current: boolean }) | null
+}
+
 export interface IngestEvent {
   event:
     | 'start'
@@ -582,6 +609,10 @@ export interface IngestEvent {
     | 'extract_progress'
     | 'extract_completed'
     | 'extract_cancelled'
+    | 'report_pdf_started'
+    | 'report_pdf_progress'
+    | 'report_pdf_completed'
+    | 'report_pdf_cancelled'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was
@@ -652,11 +683,14 @@ export interface IngestJobSnapshot {
   empty: boolean
   resolution: Record<string, number> | null
   /** Which job kind this is; drives the event names its frames carry. */
-  kind?: 'ingest' | 'summary' | 'extract'
-  /** The one source an extract job covers, or null for a whole collection. */
+  kind?: 'ingest' | 'summary' | 'extract' | 'report_pdf'
+  /**
+   * The one source an extract job covers, or null for a whole collection. A
+   * report-PDF job carries its report's id here, as a string.
+   */
   target?: string | null
-  /** What a finished extract job stored, and what the client can download. */
-  artifact?: ExtractRecord | null
+  /** What a finished extract or report-PDF job stored for the client to download. */
+  artifact?: ExtractRecord | ReportPdfRecord | null
   created_at: string
   /**
    * When the run began, upload leg included — earlier than `created_at` by

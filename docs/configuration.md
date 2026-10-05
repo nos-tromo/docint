@@ -722,6 +722,7 @@ Loaded by `load_path_env()` (`docint/utils/env_cfg.py`). Every path expands `~`.
 | `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. Deleting a collection removes the artifacts no other collection uses ([retention.md](retention.md#what-is-deleted)). |
 | `QDRANT_SRC_DIR` | `~/docint/qdrant_sources` | Where raw source files are staged for preview. |
 | `EXTRACT_DIR` | `~/docint/extracts` | Where rendered data extracts are stored. Compose: `/var/lib/docint/pipeline/extracts`. |
+| `REPORT_PDF_DIR` | `<temp dir>/docint-report-pdfs` | Where each report's newest rendered PDF is kept — one per report, replaced by the next render and deleted with the report. Scratch space by default, since a PDF can always be rendered again; in the container that is the `media-tmp` volume. |
 | `HF_HUB_CACHE` | `~/.cache/huggingface/hub` | HF Hub cache path. |
 
 `PathConfig` also exposes a derived `prompts` path pointing at
@@ -740,7 +741,7 @@ extracts described in [extracts.md](extracts.md); the store's location is
 | `EXTRACT_PDF_MAX_UNITS` | `200` | Above this the combined PDF is skipped and the bundle's README says so. `0` disables the PDF entirely. |
 | `EXTRACT_PDF_MAX_FIGURES` | `400` | The same cap counted in figures — what actually fills WeasyPrint's memory. |
 | `EXTRACT_SYNC_MAX_UNITS` | `50` | Units a per-source download may render on the request. Above it the route answers 413 and the caller queues a job. Minimum 1. |
-| `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent extract jobs. Its own semaphore, so a bundle render never consumes an ingest or summary worker slot. |
+| `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent WeasyPrint renders: collection extracts and report PDF jobs share these slots, never an ingest or summary worker slot. |
 
 ## Collection retention — `RetentionConfig`
 

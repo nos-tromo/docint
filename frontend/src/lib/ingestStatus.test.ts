@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IngestEvent } from '@/api/types'
 import {
+  appendCollapsedEvent,
   applyIngestEvent,
   deriveIngestStatus,
   emptyStatus,
@@ -115,6 +116,22 @@ describe('parseProgressMessage', () => {
     expect(parseProgressMessage(undefined as unknown as string)).toEqual({
       kind: 'unknown'
     })
+  })
+})
+
+describe('appendCollapsedEvent', () => {
+  it('collapses a report PDF’s per-page frames into one entry', () => {
+    // One frame per laid-out page: a long report would otherwise append one
+    // entry per page, and every append re-scans the whole log.
+    let log: IngestEvent[] = [{ event: 'report_pdf_started', data: { job_id: 'j1' } }]
+    for (let page = 1; page <= 40; page += 1) {
+      log = appendCollapsedEvent(log, {
+        event: 'report_pdf_progress',
+        data: { job_id: 'j1', message: `Laying out page ${page}`, stage: 'layout', page }
+      })
+    }
+    expect(log.map((e) => e.event)).toEqual(['report_pdf_started', 'report_pdf_progress'])
+    expect(log[1].data.page).toBe(40)
   })
 })
 

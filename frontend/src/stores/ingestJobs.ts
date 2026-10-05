@@ -34,14 +34,16 @@ export interface IngestJobsState {
 /**
  * SSE event names that open a run, across every job kind this store can hold:
  * an ingest job starts with `ingestion_started`, a summary job with
- * `summary_started`, an extract job with `extract_started`. The backend
- * replays a job's collapsed history from its started frame on every
- * reconnect, so all of them must reset the local log.
+ * `summary_started`, an extract job with `extract_started`, a report-PDF job
+ * with `report_pdf_started`. The backend replays a job's collapsed history
+ * from its started frame on every reconnect, so all of them must reset the
+ * local log.
  */
 const STARTED_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_started',
   'summary_started',
-  'extract_started'
+  'extract_started',
+  'report_pdf_started'
 ])
 
 /**
@@ -112,28 +114,46 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
  * SSE event names, across every job kind this store can hold, that end a
  * run. Mirrors the backend's `jobs.py::TERMINAL_EVENTS` — an ingest job
  * terminates on `ingestion_complete`, a summary job on `summary_completed`,
- * an extract job on `extract_completed`, any kind on `error`. The stream is multiplexed across kinds with no
- * kind filter (`useIngestJobStream.ts`), so both must be recognized here or
- * a completed summary job would look permanently "running" to the selector
- * below and leave the sidebar badge stuck on.
+ * an extract job on `extract_completed`, a report-PDF job on
+ * `report_pdf_completed`, any kind on `error`. The stream is multiplexed
+ * across kinds with no kind filter (`useIngestJobStream.ts`), so every kind
+ * must be recognized here or its finished jobs would look permanently
+ * "running" to the selector below and leave the sidebar badge stuck on.
  */
 const TERMINAL_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_complete',
   'summary_completed',
   'extract_completed',
+  'report_pdf_completed',
   'ingestion_cancelled',
   'summary_cancelled',
   'extract_cancelled',
+  'report_pdf_cancelled',
   'error'
+])
+
+/** Frames only a report-PDF job emits; any one of them identifies the job's kind. */
+const REPORT_PDF_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
+  'report_pdf_started',
+  'report_pdf_progress',
+  'report_pdf_completed',
+  'report_pdf_cancelled'
 ])
 
 /**
  * Whether any tracked job is still running — i.e. it has started and has not
- * yet produced a terminal frame. Drives the sidebar badge.
+ * yet produced a terminal frame. Drives the sidebar badge on the Ingest item.
+ *
+ * Report-PDF jobs are left out: rendering a report touches no collection, and
+ * the Report tab shows its own progress, so counting one would light up
+ * "Ingestion running" while nothing is being ingested.
  */
 export const selectHasRunningJob = (s: IngestJobsState): boolean =>
   Object.values(s.events).some(
-    (events) => events.length > 0 && !events.some((e) => TERMINAL_EVENTS.has(e.event))
+    (events) =>
+      events.length > 0 &&
+      !events.some((e) => TERMINAL_EVENTS.has(e.event)) &&
+      !events.some((e) => REPORT_PDF_EVENTS.has(e.event))
   )
 
 /** Stable selector for one job's log; returns a frozen empty array when absent. */

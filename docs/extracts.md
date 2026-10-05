@@ -150,7 +150,7 @@ click still gets you the bundle.
 | `EXTRACT_PDF_MAX_UNITS` | `200` | Above this the combined PDF is skipped. |
 | `EXTRACT_PDF_MAX_FIGURES` | `400` | Same, counted in figures. |
 | `EXTRACT_SYNC_MAX_UNITS` | `50` | Units a per-source download may render inline. |
-| `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent builds. |
+| `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent builds, shared with report PDF renders. |
 
 The PDF caps are about memory: WeasyPrint holds the whole document plus every
 decoded image resident, and a figure-heavy collection is a multi-gigabyte

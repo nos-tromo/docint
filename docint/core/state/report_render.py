@@ -22,6 +22,7 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
+from docint.core.state.pdf_progress import ProgressCallback, progress_scope
 from docint.utils.env_cfg import language_endonym
 from docint.utils.ui_strings import ui_string
 
@@ -1161,11 +1162,23 @@ def _load_weasyprint() -> tuple[Any, Exception | None]:
         return None, exc
 
 
-def html_to_pdf(document: str) -> bytes:
+def pdf_engine_available() -> bool:
+    """Whether WeasyPrint and its native libraries load, so a PDF can be rendered.
+
+    Returns:
+        bool: ``True`` when :func:`html_to_pdf` can run.
+    """
+    html_cls, _error = _load_weasyprint()
+    return html_cls is not None
+
+
+def html_to_pdf(document: str, progress: ProgressCallback | None = None) -> bytes:
     """Paginate a self-contained HTML document with WeasyPrint.
 
     Args:
         document (str): The complete HTML, styles and images inlined.
+        progress (ProgressCallback | None): Told each step of the render, from
+            this thread; an exception it raises stops the render.
 
     Returns:
         bytes: The PDF document.
@@ -1181,14 +1194,16 @@ def html_to_pdf(document: str) -> bytes:
             "PDF export requires WeasyPrint and its native libraries (Pango/cairo); "
             f"install them to enable PDF reports. Underlying error: {error}"
         )
-    return bytes(html_cls(string=document).write_pdf())
+    with progress_scope(progress):
+        return bytes(html_cls(string=document).write_pdf())
 
 
-def render_pdf(report: dict[str, Any]) -> bytes:
+def render_pdf(report: dict[str, Any], progress: ProgressCallback | None = None) -> bytes:
     """Render the report as a real paginated PDF via WeasyPrint.
 
     Args:
         report (dict[str, Any]): The report dict from ``get_report``.
+        progress (ProgressCallback | None): See :func:`html_to_pdf`.
 
     Returns:
         bytes: The PDF document.
@@ -1196,7 +1211,7 @@ def render_pdf(report: dict[str, Any]) -> bytes:
     Raises:
         PdfEngineUnavailableError: See :func:`html_to_pdf`.
     """
-    return html_to_pdf(render_html(report))
+    return html_to_pdf(render_html(report), progress)
 
 
 # --------------------------------------------------------------------------- #

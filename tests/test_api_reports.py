@@ -7,10 +7,14 @@ endpoints are exercised against the true manager logic end-to-end.
 """
 
 import io
+import logging
+import threading
+import time
 import zipfile
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -21,11 +25,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import docint.core.api as api_module
+from docint.core.jobs import TERMINAL_STATUSES, IngestJobManager
 from docint.core.state import report_render
 from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.report_manager import ReportManager
+from docint.core.state.report_pdf_store import ReportPdfStore
 
 
 class _ReportRAG:
@@ -917,3 +923,272 @@ def test_a_report_without_a_collection_touches_no_clock(client: TestClient) -> N
     rid = _create(client, collection=None)["id"]
 
     assert client.get(f"/reports/{rid}").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# PDF as a background job — POST /reports/{id}/pdf, GET …/pdf, GET …/pdf/status
+# ---------------------------------------------------------------------------
+_PROGRESS = logging.getLogger("weasyprint.progress")
+
+
+@pytest.fixture
+def pdf_jobs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Generator[IngestJobManager, None, None]:
+    """A private job registry running the real PDF runner, over a scratch PDF store."""
+    monkeypatch.setenv("REPORT_PDF_DIR", str(tmp_path / "report-pdfs"))
+    manager = IngestJobManager(runner=api_module._run_job)
+    api_module.app.dependency_overrides[api_module.get_job_manager] = lambda: manager
+    yield manager
+    # A render outlives its request; let it finish before the store's env var unwinds.
+    for _ in range(200):
+        if all(state.status in TERMINAL_STATUSES for state in manager._jobs.values()):
+            break
+        time.sleep(0.02)
+    api_module.app.dependency_overrides.pop(api_module.get_job_manager, None)
+
+
+def _fake_engine(monkeypatch: pytest.MonkeyPatch, gate: threading.Event | None = None) -> None:
+    """Stand WeasyPrint in with a render that reports two pages and, given a gate, waits on it."""
+
+    class _FakeHTML:
+        def __init__(self, string: str) -> None:
+            self.string = string
+
+        def write_pdf(self) -> bytes:
+            _PROGRESS.info("Step 5 - Creating layout - Page %d", 1)
+            if gate is not None:
+                assert gate.wait(timeout=5)
+            _PROGRESS.info("Step 5 - Creating layout - Page %d", 2)
+            _PROGRESS.info("Step 6 - Creating PDF")
+            return b"%PDF-1.7 fake"
+
+    monkeypatch.setattr(report_render, "_load_weasyprint", lambda: (_FakeHTML, None))
+
+
+def _settled(client: TestClient, rid: int, **kwargs: Any) -> dict[str, Any]:
+    """Poll a report's PDF status until its newest job has finished."""
+    status: dict[str, Any] = {}
+    for _ in range(200):
+        status = client.get(f"/reports/{rid}/pdf/status", **kwargs).json()
+        if status["job"] and status["job"]["status"] in {"completed", "failed", "cancelled"}:
+            return status
+        time.sleep(0.02)
+    raise AssertionError(f"render did not finish; last status={status}")
+
+
+def test_a_queued_pdf_renders_and_downloads(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PDF renders off the request and downloads when the job is done."""
+    _fake_engine(monkeypatch)
+    rid = _create(client, title="Case A")["id"]
+
+    queued = client.post(f"/reports/{rid}/pdf")
+    assert queued.status_code == 202
+    status = _settled(client, rid)
+
+    assert status["job"]["job_id"] == queued.json()["job_id"]
+    assert status["job"]["status"] == "completed"
+    assert status["pdf"]["current"] is True
+    assert status["pdf"]["filename"] == f"report-{rid}-Case A.pdf"
+    download = client.get(f"/reports/{rid}/pdf")
+    assert download.status_code == 200
+    assert download.headers["content-type"] == "application/pdf"
+    assert "attachment" in download.headers["content-disposition"]
+    assert download.content == b"%PDF-1.7 fake"
+
+
+def test_a_render_reports_its_pages_as_it_goes(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tab watching the job sees the page WeasyPrint has reached."""
+    gate = threading.Event()
+    _fake_engine(monkeypatch, gate)
+    rid = _create(client)["id"]
+    job_id = client.post(f"/reports/{rid}/pdf").json()["job_id"]
+
+    reached = False
+    for _ in range(200):
+        if pdf_jobs._jobs[job_id].message == "Laying out page 1":
+            reached = True
+            break
+        time.sleep(0.02)
+    gate.set()
+    _settled(client, rid)
+
+    assert reached
+
+
+def test_a_second_request_adopts_the_render_in_flight(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A double click, or a second tab, joins the running render instead of starting another."""
+    gate = threading.Event()
+    _fake_engine(monkeypatch, gate)
+    rid = _create(client)["id"]
+
+    first = client.post(f"/reports/{rid}/pdf")
+    second = client.post(f"/reports/{rid}/pdf")
+    gate.set()
+
+    assert second.status_code == 409
+    assert second.json()["detail"]["job_id"] == first.json()["job_id"]
+    assert _settled(client, rid)["job"]["job_id"] == first.json()["job_id"]
+
+
+def test_two_reports_render_without_refusing_each_other(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-flight check is per report: another report's render queues rather than 409s."""
+    gate = threading.Event()
+    _fake_engine(monkeypatch, gate)
+    first, second = _create(client, title="A")["id"], _create(client, title="B")["id"]
+
+    assert client.post(f"/reports/{first}/pdf").status_code == 202
+    assert client.post(f"/reports/{second}/pdf").status_code == 202
+    gate.set()
+    assert _settled(client, first)["pdf"] is not None
+    assert _settled(client, second)["pdf"] is not None
+
+
+def test_pdf_routes_hide_another_owners_report(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every PDF route answers 404 across owners, so a report's existence never leaks."""
+    _fake_engine(monkeypatch)
+    alice = {"X-Auth-User": "alice"}
+    rid = client.post("/reports", json={"title": "Alice case", "collection_name": None}, headers=alice).json()["id"]
+    bob = {"X-Auth-User": "bob"}
+
+    assert client.post(f"/reports/{rid}/pdf", headers=bob).status_code == 404
+    assert client.get(f"/reports/{rid}/pdf", headers=bob).status_code == 404
+    assert client.get(f"/reports/{rid}/pdf/status", headers=bob).status_code == 404
+    assert client.post("/reports/99999/pdf").status_code == 404
+    assert client.post(f"/reports/{rid}/pdf", headers=alice).status_code == 202
+
+
+def test_an_admin_renders_another_owners_pdf_with_the_owner_param(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admin working in a user's namespace can render and fetch that user's PDF."""
+    _fake_engine(monkeypatch)
+    alice = {"X-Auth-User": "alice"}
+    rid = client.post("/reports", json={"title": "Alice case", "collection_name": None}, headers=alice).json()["id"]
+    as_alice = {"params": {"owner": "alice"}, "headers": ADMIN}
+
+    assert client.post(f"/reports/{rid}/pdf", **as_alice).status_code == 202
+    assert _settled(client, rid, **as_alice)["pdf"]["current"] is True
+    assert client.get(f"/reports/{rid}/pdf", **as_alice).status_code == 200
+    assert client.get(f"/reports/{rid}/pdf", headers=ADMIN).status_code == 404
+
+
+def test_no_render_is_queued_without_the_pdf_engine(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without WeasyPrint the request fails at once instead of queueing a job that cannot run."""
+    monkeypatch.setattr(report_render, "_load_weasyprint", lambda: (None, ImportError("no native libs")))
+    rid = _create(client)["id"]
+
+    assert client.post(f"/reports/{rid}/pdf").status_code == 503
+    assert pdf_jobs._jobs == {}
+
+
+def test_an_edit_makes_the_stored_pdf_outdated(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PDF missing what was added since it rendered must not pass as the current one."""
+    _fake_engine(monkeypatch)
+    rid = _create(client)["id"]
+    assert client.get(f"/reports/{rid}/pdf/status").json() == {"job": None, "pdf": None}
+    client.post(f"/reports/{rid}/pdf")
+    assert _settled(client, rid)["pdf"]["current"] is True
+
+    client.post(f"/reports/{rid}/items", json=_entity_payload())
+
+    assert client.get(f"/reports/{rid}/pdf/status").json()["pdf"]["current"] is False
+
+
+def test_deleting_a_report_deletes_its_pdf(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing rendered from a deleted report stays behind."""
+    _fake_engine(monkeypatch)
+    rid = _create(client)["id"]
+    client.post(f"/reports/{rid}/pdf")
+    _settled(client, rid)
+
+    assert client.delete(f"/reports/{rid}").status_code == 200
+
+    assert list((tmp_path / "report-pdfs").iterdir()) == []
+
+
+def test_a_report_deleted_mid_render_leaves_no_pdf(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A render that finishes after its report is gone discards what it wrote."""
+    gate = threading.Event()
+    _fake_engine(monkeypatch, gate)
+    rid = _create(client)["id"]
+    job_id = client.post(f"/reports/{rid}/pdf").json()["job_id"]
+
+    assert client.delete(f"/reports/{rid}").status_code == 200
+    gate.set()
+    for _ in range(200):
+        if pdf_jobs._jobs[job_id].status in TERMINAL_STATUSES:
+            break
+        time.sleep(0.02)
+
+    assert pdf_jobs._jobs[job_id].empty is True
+    assert not any((tmp_path / "report-pdfs").glob("*.pdf"))
+
+
+def test_a_reused_report_id_never_serves_the_deleted_reports_pdf(
+    client: TestClient, pdf_jobs: IngestJobManager, tmp_path: Path
+) -> None:
+    """SQLite reuses a deleted report's id, and the PDF left under it belongs to the old report."""
+    rid = _create(client)["id"]
+    ReportPdfStore(tmp_path / "report-pdfs").write(
+        rid,
+        b"%PDF-1.7 someone else's",
+        report_created_at="2020-01-01T00:00:00",
+        report_updated_at="2020-01-01T00:00:00",
+        filename="report-old.pdf",
+        pages=1,
+        now=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+
+    assert client.get(f"/reports/{rid}/pdf").status_code == 404
+    assert client.get(f"/reports/{rid}/pdf/status").json()["pdf"] is None
+
+
+def test_queueing_a_pdf_counts_as_activity_on_its_collection(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exporting a collection's report keeps it alive under retention, like every other export."""
+    _fake_engine(monkeypatch)
+    touched: list[tuple[str | None, str]] = []
+    monkeypatch.setattr(api_module, "_record_activity", lambda owner, logical: touched.append((owner, logical)))
+    rid = _create(client, collection="docs")["id"]
+    touched.clear()
+
+    client.post(f"/reports/{rid}/pdf")
+
+    assert touched == [("test-operator", "docs")]
+
+
+def test_a_reused_report_id_does_not_inherit_the_deleted_reports_render(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new report that took a deleted one's id starts with no render job of its own."""
+    _fake_engine(monkeypatch)
+    old = _create(client, title="Old")["id"]
+    client.post(f"/reports/{old}/pdf")
+    _settled(client, old)
+    client.delete(f"/reports/{old}")
+    time.sleep(0.002)
+
+    new = _create(client, title="New")["id"]
+
+    assert new == old
+    assert client.get(f"/reports/{new}/pdf/status").json() == {"job": None, "pdf": None}

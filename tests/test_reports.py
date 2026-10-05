@@ -1,5 +1,6 @@
 """Tests for owner-scoped curated reports (ReportManager)."""
 
+import time
 from collections.abc import Generator
 from typing import Any
 from unittest.mock import MagicMock
@@ -519,7 +520,7 @@ def test_deleting_a_collection_deletes_its_reports_and_their_items(report_manage
     report_manager.add_item(doomed, "alice", **_entity_item("c2"))
     other_collection = report_manager.create_report(title="B", owner="alice", collection_name="other")["id"]
 
-    assert report_manager.delete_reports_for_collection("alice", "docs") == 1
+    assert report_manager.delete_reports_for_collection("alice", "docs") == [doomed]
 
     assert report_manager.get_report(doomed, "alice") is None
     assert report_manager.get_report(other_collection, "alice") is not None
@@ -542,6 +543,38 @@ def test_deleting_a_collection_spares_reports_scoped_to_none(report_manager: Rep
     """A report started outside any collection belongs to no collection's cascade."""
     unscoped = report_manager.create_report(title="A", owner="alice", collection_name=None)["id"]
 
-    assert report_manager.delete_reports_for_collection("alice", "docs") == 0
+    assert report_manager.delete_reports_for_collection("alice", "docs") == []
 
     assert report_manager.get_report(unscoped, "alice") is not None
+
+
+def test_report_meta_names_an_owned_report_without_its_items(report_manager: ReportManager) -> None:
+    """The light lookup keeps get_report's owner gate and formats its timestamps the same way."""
+    rid = report_manager.create_report(title="Case Alpha", owner="alice", collection_name="docs")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("c1"))
+    full = _ok(report_manager.get_report(rid, "alice"))
+
+    assert report_manager.get_report_meta(rid, "alice") == {
+        "id": rid,
+        "title": "Case Alpha",
+        "collection_name": "docs",
+        "created_at": full["created_at"],
+        "updated_at": full["updated_at"],
+    }
+    assert report_manager.get_report_meta(rid, "bob") is None
+    assert report_manager.get_report_meta(rid + 1, "alice") is None
+
+
+def test_report_meta_moves_with_every_change(report_manager: ReportManager) -> None:
+    """A rendered PDF is current only while updated_at stands still, so every edit must move it."""
+    rid = report_manager.create_report(title="A", owner="alice", collection_name="docs")["id"]
+    stamps = [_ok(report_manager.get_report_meta(rid, "alice"))["updated_at"]]
+    for change in (
+        lambda: report_manager.add_item(rid, "alice", **_entity_item("c1")),
+        lambda: report_manager.update_report(rid, "alice", title="B"),
+    ):
+        time.sleep(0.002)
+        change()
+        stamps.append(_ok(report_manager.get_report_meta(rid, "alice"))["updated_at"])
+
+    assert len(set(stamps)) == 3

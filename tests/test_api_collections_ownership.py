@@ -29,6 +29,7 @@ from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager, RetentionWindowState
 from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.report_manager import ReportManager
+from docint.core.state.report_pdf_store import ReportPdfStore
 from docint.utils.env_cfg import RetentionConfig
 
 
@@ -588,6 +589,40 @@ def test_deleting_a_collection_deletes_its_reports(client: TestClient, _patch_ra
     assert reports.get_report(doomed, "alice") is None
     assert reports.get_report(kept_other_collection, "alice") is not None
     assert reports.get_report(kept_other_owner, "bob") is not None
+
+
+def test_deleting_a_collection_deletes_its_reports_pdfs(
+    client: TestClient, _patch_rag: _OwnRAG, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A rendered report PDF goes with its collection; other collections' and owners' stay."""
+    monkeypatch.setenv("REPORT_PDF_DIR", str(tmp_path / "report-pdfs"))
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "bob", "alpha")
+    doomed = _report(_patch_rag, "alice", "alpha")
+    kept_other_collection = _report(_patch_rag, "alice", "beta")
+    kept_other_owner = _report(_patch_rag, "bob", "alpha")
+    store = ReportPdfStore(tmp_path / "report-pdfs")
+    reports = _patch_rag.ensure_report_manager()
+    created: dict[int, str] = {}
+    for owner, rid in (("alice", doomed), ("alice", kept_other_collection), ("bob", kept_other_owner)):
+        meta = reports.get_report_meta(rid, owner)
+        assert meta is not None
+        created[rid] = meta["created_at"]
+        store.write(
+            rid,
+            b"%PDF-1.7 fake",
+            report_created_at=meta["created_at"],
+            report_updated_at=meta["updated_at"],
+            filename=f"report-{rid}.pdf",
+            pages=1,
+            now=datetime.now(tz=UTC),
+        )
+
+    assert client.delete("/collections/alpha", headers={"X-Auth-User": "alice"}).status_code == 200
+
+    assert not store.path(doomed, created[doomed]).exists()
+    assert store.path(kept_other_collection, created[kept_other_collection]).exists()
+    assert store.path(kept_other_owner, created[kept_other_owner]).exists()
 
 
 def test_a_failed_qdrant_delete_leaves_everything_to_retry(

@@ -218,6 +218,44 @@ describe('extract jobs share the store', () => {
   })
 })
 
+describe('report-PDF jobs share the store', () => {
+  beforeEach(() => useIngestJobsStore.getState().clear())
+
+  it('treats report_pdf_started as the start of a fresh fold', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'report_pdf_started', data: {} } as IngestEvent)
+    store.appendEvent('j1', { event: 'warning', data: { message: 'a warning' } } as IngestEvent)
+    // A reconnect replays the job's history from its started frame.
+    store.appendEvent('j1', { event: 'report_pdf_started', data: {} } as IngestEvent)
+    expect(useIngestJobsStore.getState().events.j1).toHaveLength(1)
+  })
+
+  it.each(['report_pdf_completed', 'report_pdf_cancelled'] as const)(
+    'marks the job terminal on %s',
+    (terminal) => {
+      const store = useIngestJobsStore.getState()
+      store.appendEvent('j1', { event: 'report_pdf_started', data: {} } as IngestEvent)
+      expect(useIngestJobsStore.getState().terminal.j1).toBeUndefined()
+      store.appendEvent('j1', { event: terminal, data: {} } as IngestEvent)
+      expect(useIngestJobsStore.getState().terminal.j1).toBe(true)
+    }
+  )
+
+  it('never lights the ingestion badge for a running report PDF', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'report_pdf_started', data: {} } as IngestEvent)
+    store.appendEvent('j1', {
+      event: 'report_pdf_progress',
+      data: { message: 'Laying out page 3', stage: 'layout', page: 3 }
+    } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
+
+    // An ingest job beside it still counts.
+    store.appendEvent('j2', { event: 'ingestion_started', data: {} } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(true)
+  })
+})
+
 describe('terminal job tracking', () => {
   it('marks a job terminal on its completion frame and clears it on a replay', () => {
     const { appendEvent } = useIngestJobsStore.getState()

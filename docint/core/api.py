@@ -79,7 +79,9 @@ from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, fi
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.search.index import search_index_status
 from docint.core.state.collection_owner_manager import RetentionWindowState, validate_collection_name
-from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf
+from docint.core.state.pdf_progress import ProgressCallback
+from docint.core.state.report_pdf_store import ReportPdfStore
+from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
@@ -1943,9 +1945,10 @@ def _purge_collection(owner: str | None, logical: str, physical: str) -> None:
     with _purge_guard(physical):
         rag.delete_collection(physical)
         sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
-        reports = rag.ensure_report_manager().delete_reports_for_collection(owner, logical)
+        report_ids = rag.ensure_report_manager().delete_reports_for_collection(owner, logical)
+        _discard_report_pdfs(report_ids)
         rag.ensure_collection_owner_manager().delete(owner, logical)
-    logger.info("Deleted collection '{}' with {} chat session(s) and {} report(s).", logical, sessions, reports)
+    logger.info("Deleted collection '{}' with {} chat session(s) and {} report(s).", logical, sessions, len(report_ids))
 
 
 @app.put("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
@@ -4157,6 +4160,7 @@ def delete_report(report_id: int, principal: Principal = Depends(resolve_princip
     """
     if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner):
         raise HTTPException(status_code=404, detail="Report not found.")
+    _discard_report_pdfs([report_id])
     return {"ok": True}
 
 
@@ -4864,6 +4868,140 @@ def _extract_store() -> ExtractStore:
     return ExtractStore(load_path_env().extracts)
 
 
+def _report_pdf_store() -> ReportPdfStore:
+    """Return the store rendered report PDFs are written to and served from."""
+    return ReportPdfStore(load_path_env().report_pdfs)
+
+
+def _report_pdf_key(report: dict[str, Any]) -> str:
+    """Name a report's PDF renders in the job registry.
+
+    The registry scopes its in-flight check by a job's ``physical`` name. A
+    collection name cannot contain ``#``, so this key never matches a real
+    collection's, and the report's creation time keeps a reused id from
+    inheriting a deleted report's renders.
+
+    Args:
+        report (dict[str, Any]): The report or its identity (``id``, ``created_at``).
+
+    Returns:
+        str: ``report#<id>#<created_at>``.
+    """
+    return f"report#{report['id']}#{report['created_at']}"
+
+
+def _discard_report_pdfs(report_ids: Sequence[int]) -> None:
+    """Delete the rendered PDFs of deleted reports, never failing the delete that caused it.
+
+    Args:
+        report_ids (Sequence[int]): The deleted reports.
+    """
+    store = _report_pdf_store()
+    for report_id in report_ids:
+        try:
+            store.delete(report_id)
+        except Exception as exc:
+            logger.warning("Could not delete the rendered PDF of report {}: {}", report_id, exc)
+
+
+_PDF_PROGRESS_INTERVAL_S = 1.0
+_PDF_STAGE_MESSAGES = {"preparing": "Preparing the PDF", "finishing": "Finishing the PDF"}
+
+
+def _report_pdf_progress(push: PushEvent) -> ProgressCallback:
+    """Turn WeasyPrint's render steps into ``report_pdf_progress`` frames.
+
+    WeasyPrint reports every page, and a frame per page would flood the owner's
+    stream on a long report, so one stage repeats at most once a second. A
+    cancel raised by ``push`` propagates and stops the render where it is.
+
+    Args:
+        push (PushEvent): The job's thread-safe event publisher.
+
+    Returns:
+        ProgressCallback: The callback to render with.
+    """
+    last: dict[str, Any] = {"stage": None, "at": 0.0}
+
+    def report(stage: str, page: int | None) -> None:
+        now = time.monotonic()
+        if stage == last["stage"] and now - last["at"] < _PDF_PROGRESS_INTERVAL_S:
+            return
+        last["stage"], last["at"] = stage, now
+        message = f"Laying out page {page}" if stage == "layout" and page else _PDF_STAGE_MESSAGES.get(stage, stage)
+        push("report_pdf_progress", {"message": message, "stage": stage, "page": page})
+
+    return report
+
+
+def _pdf_page_count(pdf: bytes) -> int | None:
+    """Count a rendered PDF's pages, or ``None`` when it cannot be read.
+
+    Args:
+        pdf (bytes): The rendered document.
+
+    Returns:
+        int | None: The page count.
+    """
+    try:
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument(pdf)
+        try:
+            return len(document)
+        finally:
+            document.close()
+    except Exception:
+        return None
+
+
+def _run_report_pdf_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Execute one report PDF job: render the report, then store the PDF.
+
+    The report is read when the render starts, not when it was queued, so a
+    wait behind another export renders what the report holds by then; the
+    stored record says which version that was. A report deleted before the
+    render ends the job empty, and one deleted during it takes the fresh PDF
+    with it: the write is checked against the report afterwards, which closes
+    the gap a check before the write would leave open.
+
+    Args:
+        state (IngestJobState): The job; ``target`` is the report id and
+            ``physical`` the key from :func:`_report_pdf_key`.
+        push (PushEvent): Thread-safe event publisher, and the cancel checkpoint.
+
+    Returns:
+        dict[str, Any]: ``empty`` when the report is gone, else the stored
+            record as ``artifact`` and the render's counters as ``stats``.
+    """
+    # The first push is the cancel checkpoint for a job stopped while it queued.
+    push("report_pdf_progress", {"message": _PDF_STAGE_MESSAGES["preparing"], "stage": "preparing", "page": None})
+    report_id = int(state.target or 0)
+    manager = rag.ensure_report_manager()
+    report = manager.get_report(report_id, state.owner)
+    if report is None or _report_pdf_key(report) != state.physical:
+        return {"empty": True, "resolution": None}
+    pdf = render_pdf(report, progress=_report_pdf_progress(push))
+    push("report_pdf_progress", {"message": "Saving the PDF", "stage": "finishing", "page": None})
+    pages = _pdf_page_count(pdf)
+    store = _report_pdf_store()
+    record = store.write(
+        report_id,
+        pdf,
+        report_created_at=str(report["created_at"]),
+        report_updated_at=str(report["updated_at"]),
+        filename=f"{_report_stem(report)}.pdf",
+        pages=pages,
+        now=datetime.now(tz=UTC),
+    )
+    live = manager.get_report_meta(report_id, state.owner)
+    if live is None or live["created_at"] != report["created_at"]:
+        store.delete(report_id, report_created_at=str(report["created_at"]))
+        return {"empty": True, "resolution": None}
+    stats = {"items": len(report.get("items") or []), "pages": pages, "bytes": len(pdf)}
+    return {"empty": False, "resolution": None, "artifact": dict(record), "stats": stats}
+
+
 def _gather_units(physical: str, source_id: str | None = None) -> list[Unit]:
     """Read a collection (or one source of it) and partition it into units.
 
@@ -4960,6 +5098,8 @@ def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         return _run_summary_job(state, push)
     if state.kind == "extract":
         return _run_extract_job(state, push)
+    if state.kind == "report_pdf":
+        return _run_report_pdf_job(state, push)
     try:
         return _run_ingest_job(state, push)
     finally:
@@ -5476,6 +5616,161 @@ def delete_extract(
     if not _extract_store().delete(physical, extract_id):
         raise HTTPException(status_code=404, detail="Extract not found.")
     return {"ok": True}
+
+
+def _owned_report_meta(report_id: int, owner: str) -> dict[str, Any]:
+    """Return an owned report's identity, or raise 404.
+
+    Args:
+        report_id (int): The report id.
+        owner (str): The effective owner.
+
+    Returns:
+        dict[str, Any]: The report's ``id``, ``title``, ``collection_name``,
+            ``created_at`` and ``updated_at``.
+
+    Raises:
+        HTTPException: 404 when the report is missing or owned by another principal.
+    """
+    meta = rag.ensure_report_manager().get_report_meta(report_id, owner)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return meta
+
+
+def _report_pdf_preflight(report_id: int, owner: str) -> dict[str, Any]:
+    """Gate a render request, count it as collection activity, and check the engine.
+
+    Runs off the event loop: the first engine load initialises Pango and its fonts.
+
+    Args:
+        report_id (int): The report id.
+        owner (str): The effective owner.
+
+    Returns:
+        dict[str, Any]: The report's identity.
+
+    Raises:
+        HTTPException: 404 for a report the caller does not own; 503 when the
+            PDF engine is not installed, before a job that cannot run is queued.
+    """
+    meta = _owned_report_meta(report_id, owner)
+    if meta.get("collection_name"):
+        _record_activity(owner, str(meta["collection_name"]))
+    if not pdf_engine_available():
+        raise HTTPException(status_code=503, detail="PDF export is not available.")
+    return meta
+
+
+@app.post("/reports/{report_id}/pdf", response_model=None, tags=["Reports"])
+async def queue_report_pdf(
+    report_id: int,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 - FastAPI dependency marker
+) -> Response:
+    """Queue a render of a report's PDF as a background job.
+
+    A long report takes minutes to paginate, longer than the gateway waits on
+    one request. The render runs in the render slot collection extracts use;
+    progress arrives on ``GET /ingest/jobs/events`` as ``report_pdf_started``/
+    ``report_pdf_progress``/``report_pdf_completed``, and the PDF is fetched
+    from ``GET /reports/{report_id}/pdf`` once stored.
+
+    Args:
+        report_id (int): The report id.
+        principal (Principal): The resolved request principal.
+        jobs (IngestJobManager): The shared job registry.
+
+    Returns:
+        Response: 202 ``{"job_id"}``.
+
+    Raises:
+        HTTPException: 404 when the report is not owned; 409 carrying the
+            in-flight ``job_id`` when this report is already rendering; 503
+            when the PDF engine is not installed.
+    """
+    owner = principal.effective_owner
+    meta = await to_thread.run_sync(_report_pdf_preflight, report_id, owner)
+    state, created = await jobs.create_if_idle(
+        owner=owner,
+        logical_name=str(meta.get("collection_name") or ""),
+        physical=_report_pdf_key(meta),
+        kind="report_pdf",
+        target=str(report_id),
+    )
+    if not created:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "A PDF of this report is already being rendered.", "job_id": state.job_id},
+        )
+    return JSONResponse({"job_id": state.job_id}, status_code=202)
+
+
+@app.get("/reports/{report_id}/pdf", tags=["Reports"])
+def download_report_pdf(
+    report_id: int,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> FileResponse:
+    """Download a report's newest rendered PDF.
+
+    Args:
+        report_id (int): The report id.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        FileResponse: The PDF, named as it was when it rendered.
+
+    Raises:
+        HTTPException: 404 when the report is not owned or has no rendered PDF.
+    """
+    owner = principal.effective_owner
+    meta = _owned_report_meta(report_id, owner)
+    store = _report_pdf_store()
+    record = store.get(report_id, str(meta["created_at"]))
+    if record is None:
+        raise HTTPException(status_code=404, detail="No rendered PDF.")
+    if meta.get("collection_name"):
+        _record_activity(owner, str(meta["collection_name"]))
+    return FileResponse(
+        store.path(report_id, str(meta["created_at"])),
+        media_type="application/pdf",
+        headers=_download_headers(record["filename"].removesuffix(".pdf"), "pdf"),
+    )
+
+
+@app.get("/reports/{report_id}/pdf/status", tags=["Reports"])
+async def report_pdf_status(
+    report_id: int,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, Any]:
+    """Report a PDF's render job and stored file, as the Report tab shows them.
+
+    Read from the store as well as the registry: jobs live in memory and
+    finished ones are evicted, while a stored PDF outlives them. A queued job
+    emits no frames until the render slot frees, so this is the only place a
+    client learns that a render is waiting.
+
+    Args:
+        report_id (int): The report id.
+        principal (Principal): The resolved request principal.
+        jobs (IngestJobManager): The shared job registry.
+
+    Returns:
+        dict[str, Any]: ``{"job": <newest render job snapshot> | None,
+            "pdf": <stored record plus "current"> | None}`` — ``current`` is
+            whether the report is unchanged since the PDF rendered.
+
+    Raises:
+        HTTPException: 404 when the report is not owned.
+    """
+    owner = principal.effective_owner
+    meta = await to_thread.run_sync(_owned_report_meta, report_id, owner)
+    record = await to_thread.run_sync(_report_pdf_store().get, report_id, str(meta["created_at"]))
+    key = _report_pdf_key(meta)
+    job = next((state for state in await jobs.list_for_owner(owner) if state.physical == key), None)
+    pdf = None if record is None else {**record, "current": record["report_updated_at"] == meta["updated_at"]}
+    return {"job": job.snapshot() if job is not None else None, "pdf": pdf}
 
 
 @app.get("/collections/{name}/sources/{source_id}/extract.{fmt}", response_model=None, tags=["Query"])

@@ -9,10 +9,18 @@ import {
   NewButton,
   RefreshButton,
   RemoveButton,
-  SelectMenu
+  SelectMenu,
+  StatusIcon,
+  type StatusIconStatus
 } from '@infra/ui'
-import { reportExportHref } from '@/api/reports'
-import type { ArtifactType, ReportExportFormat, ReportItem, SnapshotThumbnail } from '@/api/types'
+import { reportExportHref, reportPdfHref } from '@/api/reports'
+import type {
+  ArtifactType,
+  ReportExportFormat,
+  ReportItem,
+  ReportSummary,
+  SnapshotThumbnail
+} from '@/api/types'
 import { ImageTextParts } from '@/components/common/ImageTextParts'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import { ReportSection } from '@/components/report/ReportSection'
@@ -27,6 +35,7 @@ import {
   useUpdateReport,
   useUpdateReportItem
 } from '@/hooks/useReports'
+import { useReportPdf, type ReportPdfPhase, type ReportPdfView } from '@/hooks/useReportPdf'
 import { useWhoami } from '@/hooks/useWhoami'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
@@ -47,14 +56,58 @@ function sections(t: Translate): Array<{ type: ArtifactType; label: string }> {
   ]
 }
 
-function exportFormats(t: Translate): Array<{ format: ReportExportFormat; label: string; view?: boolean }> {
+// The PDF is not among them: it is rendered by a background job, so its entry
+// is built separately (`ExportMenu`).
+function exportFormats(
+  t: Translate
+): Array<{ format: Exclude<ReportExportFormat, 'pdf'>; label: string; view?: boolean }> {
   return [
-    { format: 'pdf', label: t('report.format_pdf') },
     { format: 'md', label: t('report.format_markdown') },
     { format: 'html', label: t('report.format_html'), view: true },
     { format: 'zip', label: t('report.format_csv') },
     { format: 'json', label: t('report.format_json') }
   ]
+}
+
+const PDF_MARKER: Partial<Record<ReportPdfPhase, StatusIconStatus>> = {
+  queued: 'idle',
+  running: 'running',
+  failed: 'failed'
+}
+
+/** What the PDF render is doing, in words — or null when there is nothing to say. */
+function pdfStatusText(view: ReportPdfView, t: Translate): string | null {
+  switch (view.phase) {
+    case 'queued':
+      return t('report.pdf_queued')
+    case 'running':
+      if (view.stage === 'finishing') return t('report.pdf_finishing')
+      return view.page != null ? t('report.pdf_rendering_page', { page: view.page }) : t('report.pdf_rendering')
+    case 'failed':
+      return t('report.pdf_failed')
+    default:
+      return null
+  }
+}
+
+/**
+ * The one-line account of a PDF render beside the export menu. The marker
+ * carries the wording as its accessible name, so the visible copy beside it
+ * is hidden from assistive tech rather than read out twice.
+ */
+function PdfStatusLine({ view, t }: { view: ReportPdfView; t: Translate }) {
+  const text = pdfStatusText(view, t)
+  const marker = PDF_MARKER[view.phase]
+  if (!text || !marker) return null
+  return (
+    <p
+      role={view.phase === 'failed' ? 'alert' : undefined}
+      className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+    >
+      <StatusIcon status={marker} label={text} />
+      <span aria-hidden="true">{text}</span>
+    </p>
+  )
 }
 
 /**
@@ -66,37 +119,72 @@ function exportFormats(t: Translate): Array<{ format: ReportExportFormat; label:
  * has, and the panel had no `role="menu"`, no `aria-expanded` and no way to
  * dismiss it.
  *
- * @param reportId - The report to export.
+ * The PDF entry is the exception among plain links. A large report renders
+ * for longer than the gateway waits on one request, so the PDF is a background
+ * job: the entry starts a render, the line beside the menu follows it, and the
+ * file downloads when it is ready. Only a PDF matching the report as it stands
+ * is linked directly; an edited report renders again.
+ *
+ * @param report - The report to export.
  * @param t - The active locale's translate function.
- * @returns The export control.
+ * @returns The export control and the PDF's status line.
  */
-function ExportMenu({ reportId, t }: { reportId: number; t: Translate }) {
+function ExportMenu({ report, t }: { report: Pick<ReportSummary, 'id' | 'updated_at'>; t: Translate }) {
+  const pdf = useReportPdf(report)
+  const rendering = pdf.phase === 'queued' || pdf.phase === 'running'
+  const pdfLabel = t('report.format_pdf')
   return (
-    <Menu
-      align="end"
-      className="shrink-0"
-      panelClassName="min-w-[11rem]"
-      trigger={(props) => (
-        <DownloadButton {...props} label={t('chat.download')} className="gap-1 px-2">
-          <ChevronDownIcon className="h-3.5 w-3.5" />
-        </DownloadButton>
-      )}
-    >
-      {exportFormats(t).map((e) => (
-        <MenuItem
-          key={e.format}
-          href={reportExportHref(reportId, e.format)}
-          {...(e.view ? { target: '_blank' as const, rel: 'noreferrer' } : { download: true })}
-          hint={
-            e.view
-              ? t('report.open_new_tab_title')
-              : t('report.download_format_title', { label: e.label })
-          }
-        >
-          {e.label}
-        </MenuItem>
-      ))}
-    </Menu>
+    <>
+      <PdfStatusLine view={pdf} t={t} />
+      <Menu
+        align="end"
+        className="shrink-0"
+        panelClassName="min-w-[11rem]"
+        trigger={(props) => (
+          <DownloadButton {...props} label={t('chat.download')} className="gap-1 px-2">
+            <ChevronDownIcon className="h-3.5 w-3.5" />
+          </DownloadButton>
+        )}
+      >
+        {pdf.phase === 'ready' && pdf.pdf ? (
+          <MenuItem
+            href={reportPdfHref(report.id)}
+            download={pdf.pdf.filename}
+            hint={t('report.download_format_title', { label: pdfLabel })}
+          >
+            {pdfLabel}
+          </MenuItem>
+        ) : (
+          <MenuItem
+            onSelect={() => void pdf.start()}
+            disabled={rendering || pdf.loading}
+            hint={
+              rendering
+                ? (pdfStatusText(pdf, t) ?? undefined)
+                : pdf.phase === 'stale'
+                  ? t('report.pdf_stale_title')
+                  : t('report.pdf_create_title')
+            }
+          >
+            {pdfLabel}
+          </MenuItem>
+        )}
+        {exportFormats(t).map((e) => (
+          <MenuItem
+            key={e.format}
+            href={reportExportHref(report.id, e.format)}
+            {...(e.view ? { target: '_blank' as const, rel: 'noreferrer' } : { download: true })}
+            hint={
+              e.view
+                ? t('report.open_new_tab_title')
+                : t('report.download_format_title', { label: e.label })
+            }
+          >
+            {e.label}
+          </MenuItem>
+        ))}
+      </Menu>
+    </>
   )
 }
 
@@ -385,7 +473,7 @@ export function Report() {
           {report && (
             <DeleteButton label={t('report.delete_aria')} onClick={() => onDelete(report.id)} />
           )}
-          {report && <ExportMenu reportId={report.id} t={t} />}
+          {report && <ExportMenu report={report} t={t} />}
         </div>
       </div>
 

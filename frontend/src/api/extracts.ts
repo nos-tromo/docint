@@ -1,4 +1,5 @@
-import { apiDelete, apiGet, apiPost, ApiError, getOwnerParam, url } from './client'
+import { apiDelete, apiGet, getOwnerParam, url } from './client'
+import { queueJob } from './jobs'
 import type { ExtractRecord } from './types'
 
 /** The three formats a single source can be downloaded in. */
@@ -24,37 +25,23 @@ function appendixEntries(appendix?: AppendixFields): [string, string][] {
 /**
  * Queue a written extract of a collection, or of one source in it.
  *
- * A 409 means a build is already in flight for that collection — not an error
- * for the user, who has usually just re-submitted after a reload — so the
- * in-flight `job_id` is adopted, mirroring `createIngestJob`.
+ * A 409 means a build is already in flight for that collection, whose
+ * `job_id` is adopted (see {@link queueJob}).
  *
  * @param collection - The caller's logical collection name.
  * @param target - One source to render, or undefined for the whole collection.
  * @param appendix - Case file and operator to print on the rendered PDF.
  * @returns The job id, and whether it was adopted from an in-flight run.
  */
-export async function createExtract(
+export function createExtract(
   collection: string,
   target?: string,
   appendix?: AppendixFields
 ): Promise<{ job_id: string; adopted: boolean }> {
-  const path = `/collections/${encodeURIComponent(collection)}/extracts`
-  const body = {
+  return queueJob(`/collections/${encodeURIComponent(collection)}/extracts`, {
     ...(target ? { target } : {}),
     ...Object.fromEntries(appendixEntries(appendix))
-  }
-  try {
-    const res = await apiPost<{ job_id: string }>(path, body)
-    return { job_id: res.job_id, adopted: false }
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 409) {
-      const detail = e.detail as { detail?: { job_id?: string } } | { job_id?: string }
-      const nested = (detail as { detail?: { job_id?: string } }).detail
-      const jobId = nested?.job_id ?? (detail as { job_id?: string }).job_id
-      if (jobId) return { job_id: jobId, adopted: true }
-    }
-    throw e
-  }
+  })
 }
 
 /** List a collection's stored extracts, newest first. */

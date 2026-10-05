@@ -26,6 +26,14 @@ describe('createIngestJob', () => {
     })
   })
 
+  it('adopts an in-flight job named at the top level of the body', async () => {
+    mockFetch(409, { message: 'Ingestion already in progress.', job_id: 'running-2' })
+    await expect(createIngestJob({ collection: 'mydocs', hybrid: true })).resolves.toEqual({
+      job_id: 'running-2',
+      adopted: true
+    })
+  })
+
   it('rethrows other errors', async () => {
     mockFetch(404, { detail: 'Collection not found' })
     await expect(createIngestJob({ collection: 'gone', hybrid: true })).rejects.toThrow()

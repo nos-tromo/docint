@@ -265,6 +265,21 @@ the app: an **"+ Report"** control sits on every chat answer, entity finding,
 and hate-speech finding. Switching the active collection releases the active
 report, so a report and its evidence always describe the same collection.
 
+The PDF is the one export that is not a plain link. A large report renders for
+longer than the gateway waits on a single request, so choosing **PDF** queues a
+background render (`POST /reports/{id}/pdf`, on the same job machinery as the
+Inspector's data extracts) and a compact status line beside the export menu
+follows it: queued while another export holds the render slot, then rendering
+with the page the layout pass has reached, then finishing — or a failure. While
+a render is under way the entry cannot start another. Progress comes from the
+shared job stream (`src/hooks/useReportPdf.ts`); the status route
+(`GET /reports/{id}/pdf/status`) is the authority on which job is the report's
+and on whether the stored PDF still matches it. The render this tab asked for
+downloads by itself once it is ready — exactly once, even when the stream
+replays the job after a reconnect — and a stored PDF that matches the report is
+linked straight from the menu. Editing the report outdates that PDF, so the next
+**PDF** renders it again. The other formats stay plain download links.
+
 The full workflow — snapshot semantics, frozen image evidence, and what each
 export contains — is in [reports.md](reports.md).
 

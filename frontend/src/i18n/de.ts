@@ -423,6 +423,13 @@ export const de: Strings = {
   'report.format_html': 'HTML',
   'report.format_csv': 'CSV',
   'report.format_json': 'JSON',
+  'report.pdf_create_title': 'PDF erstellen — der Download startet, sobald es fertig ist',
+  'report.pdf_stale_title': 'Der Bericht wurde seit dem letzten PDF geändert — ein neues erstellen',
+  'report.pdf_queued': 'In der Warteschlange — ein anderer Export läuft noch',
+  'report.pdf_rendering': 'PDF wird erstellt…',
+  'report.pdf_rendering_page': 'PDF wird erstellt… Seite {page}',
+  'report.pdf_finishing': 'PDF wird fertiggestellt…',
+  'report.pdf_failed': 'Das PDF konnte nicht erstellt werden.',
   'report.empty_report_hint':
     'Dieser Bericht ist leer. Verwenden Sie das Berichtssymbol bei einer Chat-Antwort, einem Entitätsfund oder einem Hatespeech-Fund, um sie hier hinzuzufügen.',
   'report.section_show': '{title} anzeigen',
