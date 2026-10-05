@@ -413,6 +413,13 @@ export const en = {
   'report.format_html': 'HTML',
   'report.format_csv': 'CSV',
   'report.format_json': 'JSON',
+  'report.pdf_create_title': 'Create the PDF — it downloads when it is ready',
+  'report.pdf_stale_title': 'The report has changed since the last PDF — create a new one',
+  'report.pdf_queued': 'Queued — waiting for another export to finish',
+  'report.pdf_rendering': 'Rendering the PDF…',
+  'report.pdf_rendering_page': 'Rendering the PDF… page {page}',
+  'report.pdf_finishing': 'Finishing the PDF…',
+  'report.pdf_failed': 'The PDF could not be created.',
   'report.empty_report_hint':
     'This report is empty. Use the report icon on a chat answer, entity finding, or hate-speech finding to add it here.',
   'report.section_show': 'Show {title}',
