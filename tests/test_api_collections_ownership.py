@@ -603,9 +603,11 @@ def test_deleting_a_collection_deletes_its_reports_pdfs(
     kept_other_owner = _report(_patch_rag, "bob", "alpha")
     store = ReportPdfStore(tmp_path / "report-pdfs")
     reports = _patch_rag.ensure_report_manager()
+    created: dict[int, str] = {}
     for owner, rid in (("alice", doomed), ("alice", kept_other_collection), ("bob", kept_other_owner)):
         meta = reports.get_report_meta(rid, owner)
         assert meta is not None
+        created[rid] = meta["created_at"]
         store.write(
             rid,
             b"%PDF-1.7 fake",
@@ -618,9 +620,9 @@ def test_deleting_a_collection_deletes_its_reports_pdfs(
 
     assert client.delete("/collections/alpha", headers={"X-Auth-User": "alice"}).status_code == 200
 
-    assert not store.path(doomed).exists()
-    assert store.path(kept_other_collection).exists()
-    assert store.path(kept_other_owner).exists()
+    assert not store.path(doomed, created[doomed]).exists()
+    assert store.path(kept_other_collection, created[kept_other_collection]).exists()
+    assert store.path(kept_other_owner, created[kept_other_owner]).exists()
 
 
 def test_a_failed_qdrant_delete_leaves_everything_to_retry(

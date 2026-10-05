@@ -5732,7 +5732,7 @@ def download_report_pdf(
     if meta.get("collection_name"):
         _record_activity(owner, str(meta["collection_name"]))
     return FileResponse(
-        store.path(report_id),
+        store.path(report_id, str(meta["created_at"])),
         media_type="application/pdf",
         headers=_download_headers(record["filename"].removesuffix(".pdf"), "pdf"),
     )

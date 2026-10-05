@@ -6,15 +6,20 @@ it can always be rendered again. The store keeps one PDF per report beside a
 JSON sidecar, under scratch space by default (``REPORT_PDF_DIR``), and is only
 ever read through the report it belongs to; nothing lists it.
 
-SQLite hands a deleted report's id to the next report created, so a read and a
-guarded delete also match the report's creation time: a render of a deleted
-report is never served for the report that inherited its id.
+SQLite hands a deleted report's id to the next report created, so the files
+are named for the report *incarnation* — its id and a digest of its creation
+time — never for the id alone. Keyed by id, a render for the report that
+inherited the id could replace a PDF between a download's check and its read,
+and serve one owner another owner's evidence; keyed by incarnation, a path
+checked for a report only ever holds that report's renders.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict, cast
@@ -43,14 +48,22 @@ class ReportPdfRecord(TypedDict):
     pages: int | None
 
 
+def _incarnation(report_id: int, report_created_at: str) -> str:
+    """Name one report's files: its id plus a digest of its creation time."""
+    digest = hashlib.sha256(report_created_at.encode("utf-8")).hexdigest()[:16]
+    return f"{int(report_id)}-{digest}"
+
+
 def _write_private(path: Path, data: bytes) -> None:
     """Write ``data`` to ``path`` atomically, readable by the process user only."""
-    staging = path.with_name(f".{path.name}.tmp")
-    staging.unlink(missing_ok=True)
-    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(data)
-    os.replace(staging, path)
+    descriptor, staging = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        os.replace(staging, path)
+    except BaseException:
+        Path(staging).unlink(missing_ok=True)
+        raise
 
 
 class ReportPdfStore:
@@ -64,28 +77,21 @@ class ReportPdfStore:
         """
         self._root = root
 
-    def path(self, report_id: int) -> Path:
+    def path(self, report_id: int, report_created_at: str) -> Path:
         """Return where a report's PDF is stored.
 
         Args:
             report_id (int): The report id.
+            report_created_at (str): The report's creation time.
 
         Returns:
             Path: The PDF's path; the file may not exist.
         """
-        return self._root / f"{int(report_id)}.pdf"
+        return self._root / f"{_incarnation(report_id, report_created_at)}.pdf"
 
-    def _sidecar(self, report_id: int) -> Path:
+    def _sidecar(self, report_id: int, report_created_at: str) -> Path:
         """Return where a report's PDF metadata is stored."""
-        return self._root / f"{int(report_id)}.json"
-
-    def _read_sidecar(self, report_id: int) -> dict[str, Any] | None:
-        """Return a report's stored metadata, or ``None`` when absent or unreadable."""
-        try:
-            data = json.loads(self._sidecar(report_id).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
+        return self._root / f"{_incarnation(report_id, report_created_at)}.json"
 
     def write(
         self,
@@ -126,8 +132,8 @@ class ReportPdfStore:
             "report_updated_at": report_updated_at,
             "pages": pages,
         }
-        _write_private(self.path(report_id), pdf)
-        _write_private(self._sidecar(report_id), json.dumps(record).encode("utf-8"))
+        _write_private(self.path(report_id, report_created_at), pdf)
+        _write_private(self._sidecar(report_id, report_created_at), json.dumps(record).encode("utf-8"))
         return record
 
     def get(self, report_id: int, report_created_at: str) -> ReportPdfRecord | None:
@@ -139,13 +145,15 @@ class ReportPdfStore:
 
         Returns:
             ReportPdfRecord | None: The metadata, or ``None`` when nothing is
-                stored, the render belongs to an earlier report with this id,
-                or its PDF is gone.
+                stored for this report or its PDF is gone.
         """
-        stored = self._read_sidecar(report_id)
-        if stored is None or stored.get("report_created_at") != report_created_at:
+        try:
+            stored: Any = json.loads(self._sidecar(report_id, report_created_at).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             return None
-        if not self.path(report_id).is_file():
+        if not isinstance(stored, dict) or stored.get("report_created_at") != report_created_at:
+            return None
+        if not self.path(report_id, report_created_at).is_file():
             return None
         return cast(ReportPdfRecord, stored)
 
@@ -154,19 +162,20 @@ class ReportPdfStore:
 
         Args:
             report_id (int): The report id.
-            report_created_at (str | None): When given, remove the render only
-                if it belongs to the report created then — the guard a late
-                cleanup needs once a new report may have reused the id.
+            report_created_at (str | None): When given, remove only the render
+                of the report created then — what a late cleanup needs once a
+                new report may have reused the id. Without it, everything
+                rendered under the id goes, orphans of earlier reports included.
 
         Returns:
             bool: ``True`` when anything was removed.
         """
         if report_created_at is not None:
-            stored = self._read_sidecar(report_id)
-            if stored is None or stored.get("report_created_at") != report_created_at:
-                return False
+            targets = [self.path(report_id, report_created_at), self._sidecar(report_id, report_created_at)]
+        else:
+            targets = [*self._root.glob(f"{int(report_id)}-*.pdf"), *self._root.glob(f"{int(report_id)}-*.json")]
         removed = False
-        for path in (self.path(report_id), self._sidecar(report_id)):
+        for path in targets:
             try:
                 path.unlink()
                 removed = True

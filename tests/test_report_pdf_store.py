@@ -50,7 +50,7 @@ def test_write_then_read_round_trips(tmp_path: Path) -> None:
         "pages": 3,
     }
     assert store.get(7, _CREATED) == record
-    assert store.path(7).read_bytes() == b"%PDF-1.7 one"
+    assert store.path(7, _CREATED).read_bytes() == b"%PDF-1.7 one"
 
 
 def test_a_new_render_replaces_the_last_and_leaves_no_temp_file(tmp_path: Path) -> None:
@@ -59,8 +59,8 @@ def test_a_new_render_replaces_the_last_and_leaves_no_temp_file(tmp_path: Path) 
     _write(store, pdf=b"%PDF old")
     _write(store, pdf=b"%PDF new")
 
-    assert store.path(7).read_bytes() == b"%PDF new"
-    assert sorted(path.name for path in (tmp_path / "report-pdfs").iterdir()) == ["7.json", "7.pdf"]
+    assert store.path(7, _CREATED).read_bytes() == b"%PDF new"
+    assert sorted(path.suffix for path in (tmp_path / "report-pdfs").iterdir()) == [".json", ".pdf"]
 
 
 def test_a_reused_report_id_never_serves_the_old_reports_pdf(tmp_path: Path) -> None:
@@ -80,7 +80,7 @@ def test_a_sidecar_whose_pdf_is_gone_reads_as_missing(tmp_path: Path) -> None:
     """A record must never offer a download that would 404."""
     store = _store(tmp_path)
     _write(store)
-    store.path(7).unlink()
+    store.path(7, _CREATED).unlink()
 
     assert store.get(7, _CREATED) is None
 
@@ -104,14 +104,39 @@ def test_a_guarded_delete_spares_the_pdf_of_a_report_that_reused_the_id(tmp_path
     assert store.get(7, "2026-03-03T00:00:00") is not None
 
 
+def test_two_reports_sharing_an_id_never_share_a_file(tmp_path: Path) -> None:
+    """A path checked for one report holds only that report's PDF, whatever is rendered under the reused id.
+
+    Were the files keyed by id alone, a render for the report that inherited
+    the id could replace the PDF between a download's check and its read, and
+    serve one owner another owner's evidence.
+    """
+    store = _store(tmp_path)
+    _write(store, pdf=b"%PDF the deleted report", created=_CREATED)
+    _write(store, pdf=b"%PDF the new report", created="2026-03-03T00:00:00")
+
+    assert store.path(7, _CREATED).read_bytes() == b"%PDF the deleted report"
+    assert store.path(7, "2026-03-03T00:00:00").read_bytes() == b"%PDF the new report"
+
+
+def test_an_unguarded_delete_removes_every_render_under_the_id(tmp_path: Path) -> None:
+    """Deleting a report clears whatever was ever rendered under its id, orphans included."""
+    store = _store(tmp_path)
+    _write(store, created=_CREATED)
+    _write(store, created="2026-03-03T00:00:00")
+
+    assert store.delete(7) is True
+    assert list((tmp_path / "report-pdfs").iterdir()) == []
+
+
 def test_the_store_is_private_to_the_process_user(tmp_path: Path) -> None:
     """Rendered evidence sits in scratch space other local users must not read."""
     store = _store(tmp_path)
     _write(store)
 
     assert stat.S_IMODE((tmp_path / "report-pdfs").stat().st_mode) == 0o700
-    assert stat.S_IMODE(store.path(7).stat().st_mode) == 0o600
-    assert stat.S_IMODE((tmp_path / "report-pdfs" / "7.json").stat().st_mode) == 0o600
+    for path in (tmp_path / "report-pdfs").iterdir():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, path.name
 
 
 def test_the_root_defaults_to_scratch_space(monkeypatch: pytest.MonkeyPatch) -> None:
