@@ -160,3 +160,30 @@ def hyphenated_text(document: Any, cell_class: str) -> list[str]:
         for box in _of_kind(cell, "TextBox")
         if box.text.endswith(hyphen)
     ]
+
+
+def contents_entries(document: Any) -> dict[str, tuple[str, int | None]]:
+    """Return what each contents link prints as its page, and the page its target starts on.
+
+    Read from WeasyPrint's laid-out boxes, not from the PDF's text: extraction
+    order puts a floated page number wherever the PDF happens to draw it.
+
+    Args:
+        document (Any): A rendered ``weasyprint.Document`` with a contents block.
+
+    Returns:
+        dict[str, tuple[str, int | None]]: ``{target id: (the number the entry
+            prints, the 1-based page the target starts on)}``.
+    """
+    printed: dict[str, str] = {}
+    for box in _of_kind(document.pages[0]._page_box, "TextBox"):
+        if box.element_tag == "a::after":
+            target = str(box.element.get("href") or "").lstrip("#")
+            printed[target] = printed.get(target, "") + box.text
+    starts: dict[str, int] = {}
+    for number, page in enumerate(document.pages, start=1):
+        for box in _of_kind(page._page_box, "BlockBox"):
+            anchor = box.element.get("id") if box.element is not None else None
+            if anchor in printed and anchor not in starts:
+                starts[anchor] = number
+    return {target: (text, starts.get(target)) for target, text in printed.items()}

@@ -745,9 +745,10 @@ h2.section {
 .toc-head { font-weight: 600; font-size: 12pt; margin: 0 0 5pt; }
 .toc ul { list-style: none; margin: 0; padding: 0; }
 .toc li { margin: 1.5pt 0; }
-.toc a { display: flex; justify-content: space-between; text-decoration: none; color: #1a1a1a; }
+/* Floated, not flex: WeasyPrint never fills a target-counter inside a flex item (it prints 0). */
+.toc a { display: block; text-decoration: none; color: #1a1a1a; }
 @media print {
-  .toc a::after { content: target-counter(attr(href), page); color: #666; padding-left: 10pt; }
+  .toc a::after { content: target-counter(attr(href), page); float: right; color: #666; padding-left: 10pt; }
 }
 /* Flat layout: no boxed cards. Findings sit in open space, separated from one
    another by a single hairline rule between consecutive items. */
