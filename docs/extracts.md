@@ -78,7 +78,10 @@ The vision tagger's **keyword lists are not extracted**. They are retrieval
 machinery, and beside a caption that already says what a picture shows they
 read as noise; the caption and the text read out of the pixels are both kept.
 
-Headings follow `RESPONSE_LANGUAGE`, like the report exports.
+Headings follow `RESPONSE_LANGUAGE`, like the report exports — a posting's
+heading and its Posting row print its time the way the report does
+(`23.09.2026 20:31:52 (UTC+02:00)` in German); bundle folder names keep the
+locale-free form.
 
 ## Filing an appendix under a report
 

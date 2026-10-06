@@ -531,3 +531,30 @@ def test_pdf_fits_a_diarization_label_on_one_line() -> None:
     document = _laid_out(_long_clip())
 
     assert max(cell_line_counts(document, "t-speaker")) == 1
+
+
+def test_the_appendix_prints_the_report_s_footer_and_date_in_its_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The appendix shares the report's stylesheet, so its page counter and date are localized too."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    unit = MediaUnit(key="m1", file_name="clip.mp4", keyframes=[_keyframe()])
+    document = extract_html([unit], collection="c", created_at="2026-01-02T03:04:05+00:00")
+
+    assert 'content: "Seite " counter(page) " / " counter(pages);' in document
+    assert "Erstellt: 02.01.2026" in _body(document)
+
+
+def test_a_posting_heading_reads_its_time_as_the_posting_row_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Localizing the Posting row must not leave the heading above it in another format."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    unit = PostingUnit(
+        key="uuid-1",
+        reference={"network": "examplenet", "author": "Example Account", "timestamp": "2026-09-23T20:31:52+02:00"},
+        text="the posted words",
+    )
+    shown = "23.09.2026 20:31:52 (UTC+02:00)"
+
+    md = unit_markdown(unit)
+    assert f"# Example Account · {shown}" in md
+    assert f"examplenet · {shown}" in md
+    assert unit.title == "Example Account · 2026-09-23 20:31"  # bundle folders keep the locale-free name
+    assert f"Example Account · {shown}</h2>" in extract_html([unit], collection="c", created_at="2026-09-24")

@@ -20,10 +20,10 @@ from docint.core.state import report_render
 
 
 def weasyprint_html() -> Any:
-    """Return WeasyPrint's ``HTML`` class, skipping the test when the engine cannot load.
+    """Return the renderer's WeasyPrint document factory, skipping the test when the engine cannot load.
 
     Returns:
-        Any: ``weasyprint.HTML``.
+        Any: A callable taking ``string=`` like ``weasyprint.HTML``.
     """
     html_cls, error = report_render._load_weasyprint()
     if html_cls is None:
@@ -160,6 +160,89 @@ def hyphenated_text(document: Any, cell_class: str) -> list[str]:
         for box in _of_kind(cell, "TextBox")
         if box.text.endswith(hyphen)
     ]
+
+
+def _classes(box: Any) -> list[str]:
+    """The class names of the element ``box`` was laid out for."""
+    if box.element is None:
+        return []
+    return str(box.element.get("class") or "").split()
+
+
+def rows_split_across_pages(document: Any, css_class: str) -> list[str]:
+    """Return the text of table rows marked ``css_class`` that were laid out on more than one page.
+
+    A row is marked when it, or one of its own cells, carries the class.
+
+    Args:
+        document (Any): A rendered ``weasyprint.Document``.
+        css_class (str): The row or cell class to look for.
+
+    Returns:
+        list[str]: The start of each split row's text; empty when every row stayed whole.
+    """
+    pages_of: dict[int, set[int]] = {}
+    text_of: dict[int, str] = {}
+    for number, page in enumerate(document.pages):
+        for row in _of_kind(page._page_box, "TableRowBox"):
+            if css_class not in _classes(row) and not any(css_class in _classes(cell) for cell in row.children):
+                continue
+            pages_of.setdefault(id(row.element), set()).add(number)
+            text_of[id(row.element)] = " ".join("".join(row.element.itertext()).split())[:60]
+    return [text_of[key] for key, pages in pages_of.items() if len(pages) > 1]
+
+
+def rows_alone_at_page_foot(document: Any, css_class: str) -> list[str]:
+    """Return the text of rows marked ``css_class`` that end a page with no table row beneath them.
+
+    Args:
+        document (Any): A rendered ``weasyprint.Document``.
+        css_class (str): The row class to look for (a finding's ``f-head`` band).
+
+    Returns:
+        list[str]: The stranded rows' text; empty when each such row has a row under it.
+    """
+    stranded: list[str] = []
+    for page in document.pages:
+        rows = [row for row in _of_kind(page._page_box, "TableRowBox") if row.element is not None]
+        for row in rows:
+            if css_class in _classes(row) and not any(other.position_y > row.position_y + 0.5 for other in rows):
+                stranded.append(" ".join("".join(row.element.itertext()).split())[:60])
+    return stranded
+
+
+def pages_showing_a_finding_without_its_band(document: Any) -> list[int]:
+    """Return the 1-based pages that show part of a finding table but not its header band.
+
+    Args:
+        document (Any): A rendered ``weasyprint.Document``.
+
+    Returns:
+        list[int]: The offending page numbers; empty when every page names the findings it shows.
+    """
+    missing: list[int] = []
+    for number, page in enumerate(document.pages, start=1):
+        for table in _of_kind(page._page_box, "TableBox"):
+            if "finding" not in _classes(table):
+                continue
+            if not any("f-head" in _classes(row) for row in _of_kind(table, "TableRowBox")):
+                missing.append(number)
+    return missing
+
+
+def images_drawn(document: Any) -> int:
+    """Return how many images the rendered document actually draws.
+
+    Args:
+        document (Any): A rendered ``weasyprint.Document``.
+
+    Returns:
+        int: The number of image boxes across all pages.
+    """
+    return sum(
+        len(_of_kind(page._page_box, "InlineReplacedBox")) + len(_of_kind(page._page_box, "BlockReplacedBox"))
+        for page in document.pages
+    )
 
 
 def contents_entries(document: Any) -> dict[str, tuple[str, int | None]]:

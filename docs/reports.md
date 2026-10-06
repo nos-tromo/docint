@@ -67,8 +67,8 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   run — see `docint/core/ingest/media_transcribe.py`).
   A chat answer's images render as a strip of **captioned figures** beneath
   its source list, each captioned with the number the answer cites (`[2]`), so
-  a reader can tell which figure the text means; a finding shows its one figure
-  inside the finding table.
+  a reader can tell which figure the text means; a finding opens with its one
+  figure, its printed words beside it (see [Exporting](#exporting)).
 - **A report belongs to one collection.** Switching the active collection
   releases the active report, so the next "+ Report" click starts one for the
   collection you are actually working in — a report's document overview and its
@@ -79,7 +79,8 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   beside it; clicking it opens the full-size preview. That view is live rather
   than frozen — nothing is being exported there.
 - **The frozen evidence is zoomable, and it is all inside the file.** Thumbnails
-  are generated at 768px (~355 dpi at the size the exports print a figure), so a
+  are generated at 768px (at least ~215 dpi at the up to 62 × 90 mm the exports
+  print a finding's picture, ~355 dpi in a chat answer's 55 mm strip), so a
   reader can zoom into a PDF page and still read what a poster or a slide says.
   Every export embeds them as data URIs — an exported HTML or PDF references
   nothing outside itself and keeps working after the collection is deleted — and
@@ -129,19 +130,50 @@ and hate-speech findings; entity and hate-speech findings carry their source
 report name is the single headline and the subheader stays on one line
 (collection · creation date · operator).
 
-A finding judged from an image renders its text as labelled rows — the text
-printed in the image (with its machine translation directly under it), the
-image description, and the tags — instead of one block, and the CSV bundle
-gives each its own column (`ocr_text`, `image_description`, `image_tags`).
-Findings added before rows carried those parts keep rendering as one block.
+In the Markdown, HTML and PDF exports:
+
+- **Findings are numbered** within their section (`#1`, `#2`, …), and the
+  contents list counts them ("Hate-speech findings (12)").
+- **Hate-speech findings read newest first**, by the posting time each one
+  shows — as the extract appendix lists postings — with undated findings last
+  in their stored order. "Add all" lands them
+  in whatever order the findings table paged them in, so the stored order says
+  little there. The Report tab says so above that section; its arrows still
+  order every other section, and the JSON and CSV exports keep the stored order.
+- **Category and confidence print as labels in the report's language**
+  ("Religion", "Confidence: high" / "Konfidenz: hoch") — the labels the Report
+  tab shows too (the Analysis tab shows the category); the stored values stay
+  the English protocol enum. High confidence is tinted.
+- **Posting times print in the report's locale with the offset they were
+  exported with** (`23.09.2026 20:31:52 (UTC+02:00)` in German), never converted
+  to another zone. A value that is not an ISO timestamp prints verbatim.
+- A summary is not titled with its collection's name when the subheader already
+  names it.
+
+A finding judged from an image **opens with the picture**, printed at up to
+62 × 90 mm and captioned with its kind (image or video frame). Beside it sit the
+text printed in the image (with its machine translation directly under it), the
+image description and the tags; the reason and the posting's own text follow.
+When that text could outgrow a page beside the picture, the picture keeps a row
+of its own and the text follows as rows that may split. The CSV bundle gives
+each part its own column (`ocr_text`, `image_description`, `image_tags`).
+Findings added before rows carried those parts show their text beside the
+picture as one block.
 
 The PDF is rendered server-side by WeasyPrint into a real paginated document: a
 running header carrying the case file (*Aktenzeichen*) in the upper-right
-corner, page numbers and an "AI-generated — verify before further processing"
-disclaimer in the footer of every page, findings kept whole across page breaks,
-and Noto fonts for multi-script text. It needs WeasyPrint's native libraries,
-which the backend image installs; if they are absent the `.pdf` route returns
-503 while every other format keeps working.
+corner, page numbers (labelled in the report's language) and an "AI-generated —
+verify before further processing" disclaimer in the footer of every page, and
+Noto fonts for multi-script text and color emoji. Findings flow across page
+breaks, but a short row never splits — a label stays with its value, a picture
+with the words beside it — a finding's header band (number, category,
+confidence) never ends a page on its own, and a finding that continues overleaf
+repeats its band at the top of the next page. Long rows split like ordinary
+text: the evidence text, the entity badges, and any value too long to move as a
+block (a posting or note of many lines). The document overview is set densely
+(about 50 documents a page). It needs WeasyPrint's native libraries, which the backend image installs;
+if they are absent the `.pdf` route returns 503 while every other format keeps
+working.
 
 A long report takes minutes to paginate — longer than the gateway waits on a
 single request — so the Report tab renders the PDF as a background job and

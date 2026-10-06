@@ -25,7 +25,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 
 from docint.core.extract.units import DocumentUnit, Figure, ImageUnit, MediaUnit, PostingUnit, Segment, Unit
-from docint.core.state.report_render import _HTML_STYLE, _esc, _provenance_rows
+from docint.core.state.report_render import _esc, _format_date, _format_timestamp, _html_style, _provenance_rows
 from docint.utils.ui_strings import ui_string
 
 __all__ = [
@@ -78,9 +78,9 @@ table.meta td { border: 1px solid #e6e6e6; padding: 2pt 6pt; vertical-align: top
 table.meta td.k { width: 16%; font-weight: 600; color: #555; font-size: 8pt; }
 /* Figures: one row per figure, the picture beside the words that describe it —
    stacked, the text left the page's right half empty for every figure. Row-level
-   `break-inside: avoid` is right here (unlike the report's finding rows, which
-   approach a page in height): an <img> is monolithic in WeasyPrint, so without it
-   a row starting low on the page puts its text here and its picture overleaf. */
+   `break-inside: avoid` is right here, as on the report's picture rows: an <img>
+   is monolithic in WeasyPrint, so without it a row starting low on the page puts
+   its text here and its picture overleaf. */
 table.figures { width: 100%; border-collapse: collapse; margin: 0 0 8pt; table-layout: fixed; }
 table.figures td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: top; }
 table.figures tr { break-inside: avoid; }
@@ -258,10 +258,27 @@ def _posting_rows(unit: PostingUnit) -> list[tuple[str, str]]:
     return [(label, value.strip()) for label, value in _provenance_rows(snapshot) if value.strip()]
 
 
+def _display_title(unit: Unit) -> str:
+    """A unit's title as the reader sees it: a posting's time in the report's locale.
+
+    ``PostingUnit.title`` stays locale-free because it also names the unit's
+    folder in a bundle; only the rendered heading reads the time the way the
+    Posting row under it does (:func:`_provenance_rows`).
+    """
+    if isinstance(unit, PostingUnit):
+        stamp = str(unit.reference.get("timestamp") or "").strip()
+        if stamp:
+            author = str(unit.reference.get("author") or unit.reference.get("author_id") or "").strip()
+            shown = _format_timestamp(stamp)
+            return f"{author} · {shown}" if author else shown
+    return unit.title
+
+
 def _unit_heading(unit: Unit, numbers: Mapping[str, str] | None) -> str:
-    """Prefix a unit's title with its appendix number, when it has one."""
+    """Prefix a unit's display title with its appendix number, when it has one."""
     number = (numbers or {}).get(unit.key)
-    return f"{number}  {unit.title}" if number else unit.title
+    title = _display_title(unit)
+    return f"{number}  {title}" if number else title
 
 
 # --------------------------------------------------------------------------- #
@@ -617,7 +634,7 @@ def extract_html(
     heading = title or f"{ui_string('extract_title')}: {collection}"
     meta_bits = [
         f"{ui_string('report_label_collection')}: {collection}",
-        f"{ui_string('report_label_generated')}: {created_at[:10]}",
+        f"{ui_string('report_label_generated')}: {_format_date(created_at)}",
     ]
     if operator:
         meta_bits.append(f"{ui_string('report_label_operator')}: {operator}")
@@ -647,6 +664,6 @@ def extract_html(
     return (
         "<!DOCTYPE html>\n"
         f'<html><head><meta charset="utf-8"><title>{_esc(heading)}</title>'
-        f"<style>{_HTML_STYLE}{_EXTRA_STYLE}</style></head><body>"
+        f"<style>{_html_style()}{_EXTRA_STYLE}</style></head><body>"
         f"{''.join(body)}</body></html>"
     )

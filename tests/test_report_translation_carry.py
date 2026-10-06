@@ -20,7 +20,7 @@ def test_md_entity_renders_translation_block(monkeypatch: pytest.MonkeyPatch) ->
     """An entity snapshot carrying a translation renders a labeled block after the chunk."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     snap = _entity_snap(translation={"text": "übersetzter Text", "target_lang": "de", "model": "m"})
-    out = "\n".join(rr._md_entity(snap, None))
+    out = "\n".join(rr._md_entity(snap, None, 1))
     assert "Machine translation" in out
     assert "übersetzter Text" in out
     assert "original text" in out  # original preserved
@@ -30,7 +30,7 @@ def test_md_entity_without_translation_unchanged(monkeypatch: pytest.MonkeyPatch
     """Absent translation field renders no translation block (byte-identical to today)."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     snap = _entity_snap()
-    out = "\n".join(rr._md_entity(snap, None))
+    out = "\n".join(rr._md_entity(snap, None, 1))
     assert "Machine translation" not in out
 
 
@@ -43,7 +43,7 @@ def test_html_hate_renders_translation_block(monkeypatch: pytest.MonkeyPatch) ->
         "chunk_text": "orig",
         "translation": {"text": "übersetzt", "target_lang": "de", "model": "m"},
     }
-    out = rr._html_hate(snap, None)
+    out = rr._html_hate(snap, None, 1)
     assert "Machine translation" in out
     assert "übersetzt" in out
     assert "orig" in out  # original preserved
@@ -53,7 +53,7 @@ def test_md_entity_translation_label_shows_endonym(monkeypatch: pytest.MonkeyPat
     """The Markdown translation heading shows the language endonym, not the raw code."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     snap = _entity_snap(translation={"text": "übersetzter Text", "target_lang": "de", "model": "m"})
-    out = "\n".join(rr._md_entity(snap, None))
+    out = "\n".join(rr._md_entity(snap, None, 1))
     assert "Machine translation (→ Deutsch)" in out
 
 
@@ -66,7 +66,7 @@ def test_html_hate_translation_label_shows_endonym(monkeypatch: pytest.MonkeyPat
         "chunk_text": "orig",
         "translation": {"text": "translated", "target_lang": "en", "model": "m"},
     }
-    out = rr._html_hate(snap, None)
+    out = rr._html_hate(snap, None, 1)
     assert "Machine translation (→ English)" in out
 
 
