@@ -25,3 +25,18 @@ export function hateCategoryLabel(raw: string, t: (key: keyof Strings) => string
   const key = CATEGORY_LABEL_KEY[raw.toLowerCase()]
   return key ? t(key) : raw
 }
+
+// `confidence` is protocol too (high / medium / low, from the same prompt's
+// output schema) and gets the same treatment: only its display label is
+// translated, and an unrecognized value shows as stored. The report exports
+// label it the same way (docint/utils/ui_strings.py `hate_confidence_*`).
+const CONFIDENCE_LABEL_KEY: Partial<Record<string, keyof Strings>> = {
+  high: 'hate.confidence_high',
+  medium: 'hate.confidence_medium',
+  low: 'hate.confidence_low'
+}
+
+export function hateConfidenceLabel(raw: string, t: (key: keyof Strings) => string): string {
+  const key = CONFIDENCE_LABEL_KEY[raw.toLowerCase()]
+  return key ? t(key) : raw
+}

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from docint.utils.ui_strings import UI_STRINGS, ui_string
@@ -53,3 +56,20 @@ def test_collection_overview_keys_present_both_locales() -> None:
     assert keys <= set(UI_STRINGS["en"])
     assert keys <= set(UI_STRINGS["de"])
     assert UI_STRINGS["de"]["report_section_collection_overview"] == "Dokumentenübersicht"
+
+
+_SPA_CATALOGS = Path(__file__).resolve().parents[1] / "frontend" / "src" / "i18n"
+
+
+@pytest.mark.parametrize("lang", ["en", "de"])
+def test_hate_speech_labels_match_the_spa_catalog(lang: str) -> None:
+    """A finding's category and confidence read the same in the SPA and in every report export."""
+    catalog = (_SPA_CATALOGS / f"{lang}.ts").read_text(encoding="utf-8")
+    spa = dict(re.findall(r"'hate\.((?:category|confidence)_\w+)': '([^']*)'", catalog))
+    exported = {
+        key.removeprefix("hate_"): label
+        for key, label in UI_STRINGS[lang].items()
+        if key.startswith(("hate_category_", "hate_confidence_"))
+    }
+    assert len(spa) == 14
+    assert exported == spa

@@ -115,6 +115,10 @@ describe('Report view', () => {
     })
     expect(screen.getByText(/Entity findings/i)).toBeInTheDocument()
     expect(screen.getByText(/Hate-speech findings/i)).toBeInTheDocument()
+    // The exports re-sort hate-speech findings, which the hand order must not hide.
+    expect(
+      screen.getByText('The PDF, HTML and Markdown exports list these by posting time, newest first.')
+    ).toBeInTheDocument()
 
     // The formats live behind the download button now, and it opens on a
     // click rather than on hover — which is what made them reachable by touch
