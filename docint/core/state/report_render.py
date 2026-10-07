@@ -900,6 +900,8 @@ h2.section {
   font-size: 13pt; font-weight: 600; border-bottom: 1px solid #333; padding-bottom: 3pt;
   margin: 22pt 0 8pt; break-after: avoid;
 }
+/* A forced break keeps the margin after it, so the chapter would start lower than a page's content. */
+h2.section.page-start { break-before: page; margin-top: 0; }
 /* Contents (Inhaltsverzeichnis). Page numbers are emitted only in paged media
    (WeasyPrint renders @media print) via target-counter; on screen the entries are
    plain in-document anchors. */
@@ -1498,8 +1500,10 @@ def render_html(report: dict[str, Any]) -> str:
                 rendered = _html_item(artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection)
                 body_parts.append(f'<div class="{item_class}">{rendered}</div>')
         if overview is not None:
+            # Its own page after the findings; alone, it stays under the title.
+            heading_class = "section page-start" if sections else "section"
             body_parts.append(
-                f'<h2 class="section" id="{COLLECTION_OVERVIEW_ANCHOR}">'
+                f'<h2 class="{heading_class}" id="{COLLECTION_OVERVIEW_ANCHOR}">'
                 f"{_esc(ui_string(COLLECTION_OVERVIEW_HEADING))}</h2>"
             )
             body_parts.append(f'<div class="item">{_html_collection_overview(overview)}</div>')

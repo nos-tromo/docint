@@ -818,6 +818,29 @@ def test_overview_renders_after_items_in_markdown(monkeypatch: pytest.MonkeyPatc
     assert md.index("## Document overview") > md.index("UNIQUE_ITEM_BODY_MARKER")
 
 
+def test_pdf_overview_starts_its_own_page_after_the_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The overview chapter opens a fresh page rather than running on under the last item."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    item = {"id": 1, "artifact_type": "summary", "note": None, "snapshot": {"collection": "c1", "text": "Short."}}
+    report = _overview_report(items=[item], show_toc=True)
+
+    entries = contents_entries(html_cls(string=R.render_html(report)).render())
+
+    assert entries["sec-summaries"][1] == 1
+    assert entries["sec-collection-overview"] == ("2", 2)
+
+
+def test_pdf_overview_alone_stays_under_the_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With nothing before it, the overview does not leave the first page blank."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+
+    entries = contents_entries(html_cls(string=R.render_html(_overview_report(show_toc=True))).render())
+
+    assert entries["sec-collection-overview"] == ("1", 1)
+
+
 def test_csv_bundle_includes_overview_with_full_hash() -> None:
     """The CSV bundle carries collection-overview.csv with the untruncated hash."""
     zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report())))

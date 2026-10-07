@@ -170,8 +170,8 @@ with the words beside it — a finding's header band (number, category,
 confidence) never ends a page on its own, and a finding that continues overleaf
 repeats its band at the top of the next page. Long rows split like ordinary
 text: the evidence text, the entity badges, and any value too long to move as a
-block (a posting or note of many lines). The document overview is set densely
-(about 50 documents a page). It needs WeasyPrint's native libraries, which the backend image installs;
+block (a posting or note of many lines). The document overview starts on a page
+of its own after the items and is set densely (about 50 documents a page). It needs WeasyPrint's native libraries, which the backend image installs;
 if they are absent the `.pdf` route returns 503 while every other format keeps
 working.
 
