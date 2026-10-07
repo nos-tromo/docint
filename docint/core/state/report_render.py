@@ -17,9 +17,11 @@ from __future__ import annotations
 import html
 import io
 import json
+import re
+import unicodedata
 import zipfile
 from collections import OrderedDict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from docint.core.state.pdf_progress import ProgressCallback, progress_scope
@@ -153,13 +155,19 @@ def _md_cell(value: Any) -> str:
     return "<br>".join(text.replace("|", "\\|").splitlines())
 
 
+#: What a frozen thumbnail may be: a base64 raster image, the only thing the
+#: thumbnail pipeline produces. Nothing a renderer embeds can then name another
+#: resource or break out of a Markdown image's parentheses.
+_THUMBNAIL_DATA_URI = re.compile(r"data:image/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/]+={0,2}")
+
+
 def _thumbnail_view(container: dict[str, Any]) -> tuple[str, str] | None:
     """Validate a container's frozen thumbnail into ``(data_uri, label)``.
 
     Snapshots are caller-supplied JSON, so the validation is load-bearing:
-    only a string ``data_uri`` that is actually an inline image
-    (``data:image/…``) may ever reach an ``<img src>`` or a Markdown image —
-    anything else (a ``javascript:`` URI, a remote URL) renders nothing.
+    only a base64 raster image (:data:`_THUMBNAIL_DATA_URI`) may ever reach an
+    ``<img src>`` or a Markdown image — anything else (a ``javascript:`` URI, a
+    remote URL, an SVG, which can reference further files) renders nothing.
     Shared by the Markdown and HTML renderers so the label stays identical
     across export formats.
 
@@ -175,7 +183,7 @@ def _thumbnail_view(container: dict[str, Any]) -> tuple[str, str] | None:
     if not isinstance(thumb, dict):
         return None
     data_uri = thumb.get("data_uri")
-    if not isinstance(data_uri, str) or not data_uri.startswith("data:image/"):
+    if not isinstance(data_uri, str) or not _THUMBNAIL_DATA_URI.fullmatch(data_uri):
         return None
     label_key = (
         "report_label_video_keyframe" if thumb.get("kind") == "video_keyframe" else "report_label_image_evidence"
@@ -268,20 +276,78 @@ def _md_image_rows(snap: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _date_only(value: Any) -> str:
-    """Reduce an ISO datetime to its calendar date (``YYYY-MM-DD``).
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse an extended ISO-8601 date or datetime, or ``None`` when it is not one.
+
+    Only the extended form (``YYYY-MM-DD…``) is accepted: ``fromisoformat`` also
+    reads the basic form, which would turn an epoch number into a date.
+
+    Args:
+        value (Any): The raw value, typically a posting's ``timestamp``.
+
+    Returns:
+        datetime | None: The parsed value, naive when it carries no offset.
+    """
+    text = str(value or "").strip()
+    if len(text) < 10 or text[4:5] != "-":
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _utc_offset_label(parsed: datetime) -> str:
+    """Name a parsed timestamp's offset as ``UTC±HH:MM[:SS]`` (``UTC`` at zero), or ``""`` when naive."""
+    offset = parsed.utcoffset()
+    if offset is None:
+        return ""
+    total = int(offset.total_seconds())
+    if total == 0:
+        return "UTC"
+    hours, rest = divmod(abs(total), 3600)
+    minutes, seconds = divmod(rest, 60)
+    label = f"UTC{'+' if total > 0 else '-'}{hours:02d}:{minutes:02d}"
+    return f"{label}:{seconds:02d}" if seconds else label
+
+
+def _format_timestamp(value: Any) -> str:
+    """Render a timestamp in the report's locale, keeping its seconds and its own offset.
+
+    The value is never converted to another zone: a posting time is evidence,
+    and the offset it was exported with is part of it. Anything that is not an
+    ISO timestamp is returned verbatim.
+
+    Args:
+        value (Any): The raw timestamp.
+
+    Returns:
+        str: E.g. ``"23.09.2026 20:31:52 (UTC+02:00)"`` under ``de``.
+    """
+    text = str(value or "").strip()
+    parsed = _parse_timestamp(text)
+    if parsed is None:
+        return text
+    if len(text) == 10:
+        return parsed.strftime(ui_string("report_date_format"))
+    pattern = ui_string("report_datetime_format")
+    if text[16:17] != ":":  # no seconds in the source: print none rather than invent ":00"
+        pattern = pattern.replace(":%S", "")
+    shown = parsed.strftime(pattern)
+    offset = _utc_offset_label(parsed)
+    return f"{shown} ({offset})" if offset else shown
+
+
+def _format_date(value: Any) -> str:
+    """Reduce an ISO datetime to its calendar date in the report's locale.
 
     The report dict carries ``created_at`` as an ISO timestamp; the subheader
     shows only the creation *date* so it stays on a single line. Falls back to
     the leading 10 characters when the value cannot be parsed.
     """
     text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        return datetime.fromisoformat(text).date().isoformat()
-    except ValueError:
-        return text[:10]
+    parsed = _parse_timestamp(text)
+    return parsed.strftime(ui_string("report_date_format")) if parsed is not None else text[:10]
 
 
 def _location(snap: dict[str, Any]) -> str:
@@ -413,8 +479,8 @@ def _provenance_rows(snap: dict[str, Any]) -> list[tuple[str, str]]:
     * **Source** — which file, and where in it (page/row, or the in-media
       timestamp for transcript segments; the original media file is preferred
       over the derived transcript artifact). Language/speaker ride along.
-    * **Posting** — network, posting timestamp, posting ID, URL. The media ID
-      appears only when it differs from the posting ID.
+    * **Posting** — network, posting time (:func:`_format_timestamp`), posting
+      ID, URL. The media ID appears only when it differs from the posting ID.
     * **Account** — author display name with handle and account ID inline.
 
     Pipeline-internal fields (``network: nextext``, ``type``, UUIDs,
@@ -442,7 +508,7 @@ def _provenance_rows(snap: dict[str, Any]) -> list[tuple[str, str]]:
         rows.append((ui_string("report_label_source"), " · ".join(bits)))
 
     # Posting: network · timestamp · ID, with the URL on its own line.
-    bits = [b for b in (post["network"], post["timestamp"]) if b]
+    bits = [b for b in (post["network"], _format_timestamp(post["timestamp"])) if b]
     if post["id"]:
         bits.append(f"ID {post['id']}")
     media_id = str(rm.get("media_id") or "").strip()
@@ -506,6 +572,60 @@ def _collapse_entity_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
+def _newest_first_key(item: dict[str, Any]) -> tuple[bool, float]:
+    """Sort key placing an item by the posting time its finding shows, newest first, undated last.
+
+    The time is the one the Posting row prints (:func:`_posting_view`), so the
+    order a reader sees and the dates they read agree. A naive value is read
+    as UTC so that it still compares with offset-carrying ones.
+    """
+    post, _ = _posting_view(_ref_meta(item.get("snapshot") or {}))
+    parsed = _parse_timestamp(post["timestamp"])
+    if parsed is None:
+        return (True, 0.0)
+    return (False, -(parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)).timestamp())
+
+
+def _section_items(artifact_type: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the items one section renders, in the order it renders them.
+
+    Entity findings on one chunk collapse into a single block. Hate-speech
+    findings read newest first by posting time, as the extract appendix lists
+    postings — a bulk add lands them in whatever order the findings table paged
+    them in — and findings without a date follow in their stored order. Every
+    other section keeps the order the investigator set. The JSON and CSV
+    exports keep the stored order.
+    """
+    if artifact_type == ARTIFACT_ENTITY:
+        return _collapse_entity_items(items)
+    if artifact_type == ARTIFACT_HATE:
+        return sorted(items, key=_newest_first_key)
+    return items
+
+
+def _enum_label(prefix: str, raw: Any) -> str:
+    """Localized display label for a protocol enum value, or the value itself when unknown.
+
+    Mirrors ``frontend/src/lib/hateCategoryLabel.ts``: the stored value stays
+    English protocol; only what a reader sees is translated, and a value with no
+    label (a future category) shows as stored.
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    try:
+        return ui_string(f"{prefix}{value.lower()}")
+    except KeyError:
+        return value
+
+
+def _hate_tags(snap: dict[str, Any]) -> tuple[str, str]:
+    """A hate-speech finding's category label and its labelled confidence (``""`` when absent)."""
+    category = _enum_label("hate_category_", snap.get("category"))
+    confidence = _enum_label("hate_confidence_", snap.get("confidence"))
+    return category, f"{ui_string('report_label_confidence')}: {confidence}" if confidence else ""
+
+
 # --------------------------------------------------------------------------- #
 # JSON
 # --------------------------------------------------------------------------- #
@@ -544,16 +664,22 @@ def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     return lines
 
 
-def _md_finding_table(snap: dict[str, Any], note: str | None, *, tag: str, body_rows: list[str]) -> list[str]:
+def _is_image_finding(snap: dict[str, Any]) -> bool:
+    """Whether a finding was judged from a picture: it carries the picture or its parts."""
+    return _thumbnail_view(snap) is not None or any(_image_parts(snap))
+
+
+def _md_finding_table(snap: dict[str, Any], note: str | None, *, tag: str, detail_rows: list[str]) -> list[str]:
     """Render one finding as a single two-column Markdown table.
 
     The GFM header row gives the tag and the verbatim chunk text their
     prominent top placement. Content stays together below it — translation,
     then the parent posting's text — followed by the type-specific rows
     (entities / reason) and the grouped provenance block (source → posting →
-    account, see :func:`_provenance_rows`). An image finding replaces the
-    chunk text with labelled rows for its printed words (their translation
-    directly under them), description and tags.
+    account, see :func:`_provenance_rows`). An image finding leads with its
+    picture, replaces the chunk text with labelled rows for its printed words
+    (their translation directly under them), description and tags, and puts
+    the reason before the posting's text, as the HTML does.
     """
     printed, description, tags = _image_parts(snap)
     chunk = "" if printed or description or tags else _truncate(snap.get("chunk_text") or "")
@@ -561,14 +687,15 @@ def _md_finding_table(snap: dict[str, Any], note: str | None, *, tag: str, body_
         f"| {_md_cell(tag)} | {_md_cell(chunk)} |",
         "| --- | --- |",
     ]
-    lines += _md_image_rows(snap)
     lines += _md_thumbnail_row(snap)
+    lines += _md_image_rows(snap)
     if not printed:
         lines += _md_translation_row(snap)
     posting_text = _posting_text(snap)
-    if posting_text:
-        lines.append(f"| {_md_cell(ui_string('report_label_posting_text'))} | {_md_cell(posting_text)} |")
-    lines += body_rows
+    posting_rows = (
+        [f"| {_md_cell(ui_string('report_label_posting_text'))} | {_md_cell(posting_text)} |"] if posting_text else []
+    )
+    lines += [*detail_rows, *posting_rows] if _is_image_finding(snap) else [*posting_rows, *detail_rows]
     lines += [f"| {_md_cell(label)} | {_md_cell(value)} |" for label, value in _provenance_rows(snap)]
     if note:
         lines.append(f"| {ui_string('report_label_note')} | {_md_cell(note)} |")
@@ -576,27 +703,35 @@ def _md_finding_table(snap: dict[str, Any], note: str | None, *, tag: str, body_
     return lines
 
 
-def _md_entity(snap: dict[str, Any], note: str | None) -> list[str]:
-    body_rows: list[str] = []
+def _md_entity(snap: dict[str, Any], note: str | None, number: int) -> list[str]:
+    detail_rows: list[str] = []
     entities = _dedupe_entities(snap.get("entities") or [])
     if entities:
         rendered = ", ".join(f"{text} [{etype}]" if etype else text for text, etype in entities)
-        body_rows.append(f"| {ui_string('report_label_entities')} | {_md_cell(rendered)} |")
-    return _md_finding_table(snap, note, tag=str(snap.get("entity_label") or ""), body_rows=body_rows)
+        detail_rows.append(f"| {ui_string('report_label_entities')} | {_md_cell(rendered)} |")
+    tag = " · ".join(part for part in (f"#{number}", str(snap.get("entity_label") or "").strip()) if part)
+    return _md_finding_table(snap, note, tag=tag, detail_rows=detail_rows)
 
 
-def _md_hate(snap: dict[str, Any], note: str | None) -> list[str]:
-    category = snap.get("category") or ""
-    confidence = snap.get("confidence") or ""
-    body_rows: list[str] = []
+def _md_hate(snap: dict[str, Any], note: str | None, number: int) -> list[str]:
+    detail_rows: list[str] = []
     reason = snap.get("reason")
     if reason:
-        body_rows.append(f"| {ui_string('report_label_reason')} | {_md_cell(reason)} |")
-    return _md_finding_table(snap, note, tag=f"{category} ({confidence})".strip(), body_rows=body_rows)
+        detail_rows.append(f"| {ui_string('report_label_reason')} | {_md_cell(reason)} |")
+    tag = " · ".join(part for part in (f"#{number}", *_hate_tags(snap)) if part)
+    return _md_finding_table(snap, note, tag=tag, detail_rows=detail_rows)
 
 
-def _md_summary(snap: dict[str, Any], note: str | None) -> list[str]:
-    lines = [f"### {snap.get('collection') or ''}".rstrip(), "", (snap.get("text") or "").strip()]
+def _summary_title(snap: dict[str, Any], collection: str) -> str:
+    """A summary's own title — its collection — unless the report's subheader already names it."""
+    title = str(snap.get("collection") or "").strip()
+    return "" if title == collection else title
+
+
+def _md_summary(snap: dict[str, Any], note: str | None, collection: str) -> list[str]:
+    title = _summary_title(snap, collection)
+    lines = [f"### {title}", ""] if title else []
+    lines.append((snap.get("text") or "").strip())
     if note:
         lines += ["", f"*{ui_string('report_label_note')}: {note.strip()}*"]
     lines.append("")
@@ -633,19 +768,47 @@ def _md_collection_overview(overview: dict[str, Any]) -> list[str]:
     return lines
 
 
-_MD_DISPATCH = {
-    ARTIFACT_CHAT: _md_chat,
-    ARTIFACT_ENTITY: _md_entity,
-    ARTIFACT_HATE: _md_hate,
-    ARTIFACT_SUMMARY: _md_summary,
-}
+#: Sections whose items are numbered findings: each carries ``#n`` and the
+#: contents entry counts them.
+_NUMBERED_SECTIONS: frozenset[str] = frozenset({ARTIFACT_ENTITY, ARTIFACT_HATE})
+
+Section = tuple[str, str, list[dict[str, Any]]]
 
 
-def _md_toc(grouped: OrderedDict[str, list[dict[str, Any]]], overview_present: bool) -> list[str]:
-    """Render a Markdown contents list — section names only (Markdown has no pages)."""
-    entries = [
-        f"- {ui_string(heading_key)}" for artifact_type, heading_key in SECTION_ORDER if grouped.get(artifact_type)
+def _report_sections(report: dict[str, Any]) -> list[Section]:
+    """The report's non-empty sections as ``(artifact type, heading key, items)``, in render order.
+
+    Built once per render so the contents block counts exactly the findings
+    the body numbers (entity findings on one chunk collapse into one).
+    """
+    grouped = _group_items(report.get("items") or [])
+    return [
+        (artifact_type, heading_key, _section_items(artifact_type, grouped[artifact_type]))
+        for artifact_type, heading_key in SECTION_ORDER
+        if grouped.get(artifact_type)
     ]
+
+
+def _toc_label(artifact_type: str, heading_key: str, count: int) -> str:
+    """A contents entry: the section heading, with its finding count for numbered sections."""
+    heading = ui_string(heading_key)
+    return f"{heading} ({count})" if artifact_type in _NUMBERED_SECTIONS else heading
+
+
+def _md_item(artifact_type: str, snap: dict[str, Any], note: str | None, number: int, collection: str) -> list[str]:
+    """Markdown for one item of a section, ``number`` being its 1-based place there."""
+    if artifact_type == ARTIFACT_CHAT:
+        return _md_chat(snap, note)
+    if artifact_type == ARTIFACT_ENTITY:
+        return _md_entity(snap, note, number)
+    if artifact_type == ARTIFACT_HATE:
+        return _md_hate(snap, note, number)
+    return _md_summary(snap, note, collection)
+
+
+def _md_toc(sections: list[Section], overview_present: bool) -> list[str]:
+    """Render a Markdown contents list — section names only (Markdown has no pages)."""
+    entries = [f"- {_toc_label(artifact_type, key, len(items))}" for artifact_type, key, items in sections]
     if overview_present:
         entries.append(f"- {ui_string(COLLECTION_OVERVIEW_HEADING)}")
     if not entries:
@@ -668,31 +831,26 @@ def render_markdown(report: dict[str, Any]) -> str:
     if report.get("collection_name"):
         meta_bits.append(f"{ui_string('report_label_collection')}: {report['collection_name']}")
     if report.get("created_at"):
-        meta_bits.append(f"{ui_string('report_label_generated')}: {_date_only(report['created_at'])}")
+        meta_bits.append(f"{ui_string('report_label_generated')}: {_format_date(report['created_at'])}")
     if report.get("operator"):
         meta_bits.append(f"{ui_string('report_label_operator')}: {report['operator']}")
     if meta_bits:
         lines += ["  ·  ".join(meta_bits), ""]
 
-    grouped = _group_items(report.get("items") or [])
+    sections = _report_sections(report)
     overview = _overview_snapshot(report)
-    if not any(grouped.values()) and overview is None:
+    if not sections and overview is None:
         lines += [ui_string("report_empty"), ""]
         return "\n".join(lines)
 
     if report.get("show_toc"):
-        lines += _md_toc(grouped, overview is not None)
+        lines += _md_toc(sections, overview is not None)
 
-    for artifact_type, heading_key in SECTION_ORDER:
-        items = grouped.get(artifact_type) or []
-        if not items:
-            continue
+    collection = str(report.get("collection_name") or "").strip()
+    for artifact_type, heading_key, items in sections:
         lines += [f"## {ui_string(heading_key)}", ""]
-        if artifact_type == ARTIFACT_ENTITY:
-            items = _collapse_entity_items(items)
-        renderer = _MD_DISPATCH[artifact_type]
-        for item in items:
-            lines += renderer(item.get("snapshot") or {}, item.get("note"))
+        for number, item in enumerate(items, start=1):
+            lines += _md_item(artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection)
 
     if overview is not None:
         lines += _md_collection_overview(overview)
@@ -712,12 +870,16 @@ _HTML_STYLE = """
   @top-right { content: element(refnum); }
   @bottom-left { content: element(disclaimer); }
   @bottom-right {
-    content: "Page " counter(page) " / " counter(pages);
+    content: "__PAGE_LABEL__ " counter(page) " / " counter(pages);
     font-family: 'Noto Sans', 'DejaVu Sans', 'Liberation Sans', Arial, sans-serif;
     font-size: 8pt; color: #888;
   }
 }
 * { box-sizing: border-box; }
+/* Emoji are left to fontconfig's fallback (the image installs Noto Color
+   Emoji). Naming the emoji font here would make Pango draw digits, `#` and `*`
+   from it too — they carry the Unicode emoji property — printing every number
+   as spaced-out keycap glyphs. */
 body {
   font-family: 'Noto Sans', 'Noto Sans CJK SC', 'DejaVu Sans', 'Liberation Sans', Arial, sans-serif;
   font-size: 10.5pt; line-height: 1.45; color: #1a1a1a; margin: 0;
@@ -738,6 +900,8 @@ h2.section {
   font-size: 13pt; font-weight: 600; border-bottom: 1px solid #333; padding-bottom: 3pt;
   margin: 22pt 0 8pt; break-after: avoid;
 }
+/* A forced break keeps the margin after it, so the chapter would start lower than a page's content. */
+h2.section.page-start { break-before: page; margin-top: 0; }
 /* Contents (Inhaltsverzeichnis). Page numbers are emitted only in paged media
    (WeasyPrint renders @media print) via target-counter; on screen the entries are
    plain in-document anchors. */
@@ -750,18 +914,21 @@ h2.section {
 @media print {
   .toc a::after { content: target-counter(attr(href), page); float: right; color: #666; padding-left: 10pt; }
 }
-/* Flat layout: no boxed cards. Findings sit in open space, separated from one
-   another by a single hairline rule between consecutive items. */
-.item { margin: 0; padding: 0; }
 /* Every item flows across page breaks — findings included. A finding table
-   (full chunk text + entity badges) is routinely taller than a page, and any
-   `break-inside: avoid` on it makes WeasyPrint push the whole block onto a
-   fresh page: the section heading strands alone on an almost-empty page and
-   a page-sized gap opens before the content. */
-.item + .item { border-top: 1px solid #e6e6e6; margin-top: 12pt; padding-top: 12pt; }
+   (full chunk text + entity badges) is routinely taller than a page, and a
+   `break-inside: avoid` on the whole item makes WeasyPrint push it onto a fresh
+   page: the section heading strands alone on an almost-empty page and a
+   page-sized gap opens before the content. Rows decide instead (see below). */
+.item { margin: 0; padding: 0; }
+/* Findings are boxed tables and need only space between them; prose items
+   (chat answers, summaries) are separated by a hairline rule. A rule above a
+   boxed finding printed alone at the top of a page whenever a break fell
+   between two findings. */
+.item + .item { margin-top: 12pt; }
+.item-prose + .item-prose { border-top: 1px solid #e6e6e6; padding-top: 12pt; }
 .item-title { font-weight: 600; font-size: 11pt; margin: 0 0 2pt; }
 /* One table per finding, ordered top-to-bottom: a full-width shaded header
-   band carries the tag (the finding's title bar), the verbatim chunk text
+   band carries the number and tags (the finding's title bar), the evidence
    follows at full width (fewer wrapped lines than a squeezed column), and
    every remaining field is a muted label/value row with a slim label column.
    Verbatim evidence text keeps `pre-wrap` — never reflowed. */
@@ -770,15 +937,35 @@ h2.section {
 table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; table-layout: fixed; }
 table.finding col.f-key { width: 16%; }
 table.finding td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: top; }
-/* No `break-inside: avoid` on finding rows: the chunk row and the entity-badge
-   row can each approach a page in height, and an unbreakable row jumps whole to
-   the next page, leaving the previous one half empty. Rows split mid-cell like
-   ordinary table content instead. */
+/* The band is the table's <thead>: WeasyPrint never leaves it at the foot of a
+   page without a row under it, and repeats it over the rest of a finding that
+   continues overleaf, so every page says which finding it is showing. */
 table.finding tr.f-head td { background: #f7f7f7; font-weight: 600; font-size: 9.5pt; }
+.f-num { color: #777; margin-right: 6pt; }
+/* Short rows move whole: a label never ends a page while its value starts the
+   next. "Short" is estimated per row (`_KEEP_MAX_PT`); evidence text, the entity
+   badges and any long value carry no class and split like ordinary text — an
+   unbreakable row that tall would jump to the next page and leave the previous
+   one half empty. */
+table.finding tr.f-keep, table.finding tr.f-media { break-inside: avoid; }
 table.finding td.f-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 9.5pt; color: #222; }
 /* Only a word too long for the slim label column (`Bildbeschreibung`) may hyphenate. */
 table.finding td.f-key { font-weight: 600; color: #555; font-size: 8pt; hyphens: auto; hyphenate-limit-chars: 13 4 4; }
 table.finding td.f-val { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 8pt; color: #444; }
+/* A finding judged from a picture leads with it: the figure on the left, its
+   printed words, description and tags in a column beside it. A nested
+   fixed-layout table, not a float: WeasyPrint sets a float's neighbouring block
+   below it, not beside it. The text breaks `break-word`, not `anywhere`, so
+   nothing here is measured per character. */
+table.finding table.media-grid { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 0; }
+table.finding table.media-grid td { border: 0; padding: 0; vertical-align: top; }
+table.finding table.media-grid col.m-fig { width: 66mm; }
+table.finding table.media-grid td.m-fig { padding-right: 4mm; }
+.m-label { font-weight: 600; color: #555; font-size: 8pt; margin: 5pt 0 1pt; }
+.m-label:first-child { margin-top: 0; }
+.m-text, .m-val { white-space: pre-wrap; overflow-wrap: break-word; }
+.m-text { font-size: 9.5pt; color: #222; }
+.m-val { font-size: 8pt; color: #444; }
 /* Rendered Markdown prose (summaries, chat answers). */
 .prose { margin: 2pt 0 4pt; }
 .prose > :first-child { margin-top: 0; }
@@ -794,6 +981,8 @@ table.finding td.f-val { white-space: pre-wrap; overflow-wrap: anywhere; font-si
   display: inline-block; padding: 1pt 5pt; border-radius: 3px;
   background: #f0f0f0; font-size: 8.5pt; margin: 0 3pt 2pt 0;
 }
+.badge.conf-high { background: #f6dede; color: #7a1717; }
+.badge.conf-low { color: #666; }
 .badge .etype { color: #999; font-size: 7.5pt; }
 ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
 /* Evidence figures. Inline-block, not flex: WeasyPrint's flex support is
@@ -801,7 +990,7 @@ ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
    inline-block already does. Fixed width so several captions align. */
 .evidence-strip { margin: 4pt 0 0; }
 figure.evidence { display: inline-block; vertical-align: top; width: 55mm; margin: 0 6pt 4pt 0; }
-figure.evidence img { display: block; max-width: 55mm; max-height: 40mm; border: 1px solid #ddd; }
+figure.evidence img { display: block; max-width: 55mm; max-height: 70mm; border: 1px solid #ddd; }
 figure.evidence figcaption {
   font-size: 7.5pt; color: #555; margin-top: 1.5pt; line-height: 1.25;
   /* break-word, not anywhere: a filename longer than the figure is wide has to
@@ -809,17 +998,32 @@ figure.evidence figcaption {
   overflow-wrap: break-word;
 }
 table.finding figure.evidence { margin: 0; }
+/* A finding's own picture, read at up to 62 by 90 mm: a portrait story or a
+   screenshot stays legible, and a landscape frame keeps the full column. */
+figure.evidence.lead { display: block; width: auto; }
+figure.evidence.lead img { max-width: 62mm; max-height: 90mm; }
 .empty { color: #888; font-style: italic; }
 .overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
-table.manifest { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+/* Dense on purpose: the manifest lists every document of the collection, often
+   hundreds of single-line rows. */
+table.manifest { width: 100%; border-collapse: collapse; font-size: 7.5pt; line-height: 1.25; }
 table.manifest th, table.manifest td {
-  text-align: left; padding: 3pt 6pt; border-bottom: 1px solid #eee; vertical-align: top;
+  text-align: left; padding: 1.5pt 4pt; border-bottom: 1px solid #eee; vertical-align: top;
 }
 table.manifest th { font-weight: 600; color: #444; border-bottom: 1px solid #ccc; }
 table.manifest td.num, table.manifest th.num { text-align: right; }
 table.manifest td.hash { font-family: 'DejaVu Sans Mono', 'Liberation Mono', monospace; color: #666; }
 table.manifest tr { break-inside: avoid; }
 """
+
+
+def _html_style() -> str:
+    """Return the shared stylesheet with its page-number label in the report's language.
+
+    Shared with the extract renderer, whose appendix prints the same footer.
+    """
+    label = ui_string("report_label_page").replace("\\", "\\\\").replace('"', '\\"')
+    return _HTML_STYLE.replace("__PAGE_LABEL__", label)
 
 
 def _esc(value: Any) -> str:
@@ -861,17 +1065,62 @@ def _html_note(note: str | None) -> str:
     return f'<div class="note">{ui_string("report_label_note")}: {_esc(note)}</div>'
 
 
-def _html_finding_row(label: str, value_html: str) -> str:
-    """One label/value row of a finding table (value passed as ready HTML)."""
-    return f'<tr><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
+def _display_width(line: str) -> int:
+    """How many narrow character cells a line takes: a wide one (CJK, most emoji) counts as two."""
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in line)
+
+
+def _text_height_pt(text: str, cells_per_line: int, line_pt: float) -> float:
+    """Estimate, pessimistically, how tall ``text`` sets in a column ``cells_per_line`` narrow characters wide.
+
+    Every line the text breaks itself counts, which is what makes a short text
+    of many lines (a list, a poem, OCR of a poster) tall.
+    """
+    lines = text.splitlines() or [""]
+    return line_pt * sum(max(1, -(-_display_width(line) // cells_per_line)) for line in lines)
+
+
+# A detail value (8pt) in the value column beside the slim label column, and the
+# tallest such row that still moves to the next page whole. A kept row that does
+# not fit the rest of a page leaves that much blank space behind it, and one
+# taller than a page cannot be kept at all — WeasyPrint pushes it to a fresh page
+# and splits it there anyway, printing that page without the finding's band.
+_VALUE_LINE = (72, 12.0)
+_KEEP_MAX_PT = 150.0
+
+
+def _html_finding_row(label: str, value_html: str, *, keep: bool) -> str:
+    """One label/value row of a finding table (value passed as ready HTML).
+
+    Args:
+        label (str): The row's label.
+        value_html (str): The value, already escaped.
+        keep (bool): Whether the row moves to the next page whole rather than
+            splitting.
+
+    Returns:
+        str: The row markup.
+    """
+    row_class = ' class="f-keep"' if keep else ""
+    return f'<tr{row_class}><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
+
+
+def _html_text_row(label: str, text: str) -> str:
+    """A label/value row of plain text, kept whole only while it is short (:data:`_KEEP_MAX_PT`).
+
+    So a label never ends a page while its value starts the next, and a long
+    value — a posting of many lines, its translation — still splits rather than
+    leaving a page half blank.
+    """
+    return _html_finding_row(label, _esc(text), keep=_text_height_pt(text, *_VALUE_LINE) <= _KEEP_MAX_PT)
 
 
 def _html_evidence_row(label: str, text: str) -> str:
-    """One labelled row of verbatim evidence text, set like the chunk text."""
+    """One labelled row of verbatim evidence text, set like the chunk text (and split like it)."""
     return f'<tr><td class="f-key">{_esc(label)}</td><td class="f-text">{_esc(text)}</td></tr>'
 
 
-def _html_evidence_figure(data_uri: str, label: str, caption: str = "") -> str:
+def _html_evidence_figure(data_uri: str, label: str, caption: str = "", *, lead: bool = False) -> str:
     """One captioned evidence figure (data URI already validated by ``_thumbnail_view``).
 
     A ``figure`` rather than a bare ``img`` so the image and the words naming
@@ -882,40 +1131,40 @@ def _html_evidence_figure(data_uri: str, label: str, caption: str = "") -> str:
     Args:
         data_uri (str): The validated inline image.
         label (str): Localized evidence label, used as the alt text.
-        caption (str): Optional visible caption. Empty for findings, which
-            name their source in the provenance rows below.
+        caption (str): Optional visible caption.
+        lead (bool): Whether this is a finding's own picture, set larger at the
+            head of its finding (see :func:`_html_media_rows`).
 
     Returns:
         str: The figure markup.
     """
     figcaption = f"<figcaption>{_esc(caption)}</figcaption>" if caption else ""
-    return f'<figure class="evidence"><img src="{_esc(data_uri)}" alt="{_esc(label)}">{figcaption}</figure>'
+    figure_class = "evidence lead" if lead else "evidence"
+    return f'<figure class="{figure_class}"><img src="{_esc(data_uri)}" alt="{_esc(label)}">{figcaption}</figure>'
 
 
-def _html_thumbnail_row(snap: dict[str, Any]) -> str:
-    """Finding-table row for an optional frozen thumbnail, or ''."""
-    view = _thumbnail_view(snap)
-    if view is None:
-        return ""
-    data_uri, label = view
-    return _html_finding_row(label, _html_evidence_figure(data_uri, label))
+def _translation_part(snap: dict[str, Any]) -> tuple[str, str] | None:
+    """A snapshot's machine translation as ``(label, text)``, or ``None`` without one."""
+    tr = snap.get("translation") or {}
+    text = _truncate(tr.get("text") or "")
+    if not text:
+        return None
+    return _translation_label(str(tr.get("target_lang") or "").strip()), text
 
 
 def _html_translation_row(snap: dict[str, Any]) -> str:
     """Finding-table row for an optional machine-translation, or ''."""
-    tr = snap.get("translation") or {}
-    text = _truncate(tr.get("text") or "")
-    if not text:
-        return ""
-    label = _translation_label(str(tr.get("target_lang") or "").strip())
-    return _html_finding_row(label, _esc(text))
+    part = _translation_part(snap)
+    return _html_text_row(*part) if part else ""
 
 
 def _html_image_rows(snap: dict[str, Any]) -> str:
     """Rows for an image's printed words, their translation, its description and tags.
 
-    The printed words and the description are evidence, so they keep the chunk
-    text's verbatim style beside their label; the tags are a plain row.
+    Used for a snapshot that carries an image's parts but no picture. The
+    printed words are evidence, so they keep the chunk text's verbatim style
+    beside their label; the description and tags are machine-written detail,
+    set like the reason.
     """
     printed, description, tags = _image_parts(snap)
     rows: list[str] = []
@@ -923,41 +1172,143 @@ def _html_image_rows(snap: dict[str, Any]) -> str:
         rows.append(_html_evidence_row(ui_string("image_label_text"), printed))
         rows.append(_html_translation_row(snap))
     if description:
-        rows.append(_html_evidence_row(ui_string("image_label_description"), description))
+        rows.append(_html_text_row(ui_string("image_label_description"), description))
     if tags:
-        rows.append(_html_finding_row(ui_string("image_label_tags"), _esc(tags)))
+        rows.append(_html_text_row(ui_string("image_label_tags"), tags))
     return "".join(rows)
 
 
-def _html_finding_table(snap: dict[str, Any], note: str | None, *, tag_html: str, body_rows: str) -> str:
-    """Render one finding as a single table.
+def _media_parts(snap: dict[str, Any]) -> list[tuple[str, str, bool]]:
+    """The text a finding's picture carries beside it, as ``(label, text, is_evidence)``.
 
-    A full-width shaded header band carries the tag (the finding's title bar),
-    the verbatim chunk text follows at full width, and content stays together:
-    the translation and the parent posting's text sit directly under the chunk.
-    The type-specific rows (entities / reason) follow, then the grouped
-    provenance block (source → posting → account, see
-    :func:`_provenance_rows`). The chunk row is omitted when there is no chunk.
-    An image finding replaces it with labelled rows for its printed words
-    (their translation directly under them), description and tags.
+    In reading order: the printed words with their translation directly under
+    them, the description, the tags — and the translation last when nothing is
+    printed in the picture, since it then translates the finding's whole text.
+    A snapshot frozen before rows carried the parts apart shows its chunk text,
+    unlabelled, as the full-width chunk row would.
     """
     printed, description, tags = _image_parts(snap)
-    chunk = "" if printed or description or tags else _truncate(snap.get("chunk_text") or "")
-    rows = [f'<tr class="f-head"><td colspan="2">{tag_html}</td></tr>']
-    if chunk:
-        rows.append(f'<tr><td colspan="2" class="f-text">{_esc(chunk)}</td></tr>')
-    rows.append(_html_image_rows(snap))
-    rows.append(_html_thumbnail_row(snap))
+    translation = _translation_part(snap)
+    translated = [(translation[0], translation[1], False)] if translation else []
+    if not (printed or description or tags):
+        chunk = _truncate(snap.get("chunk_text") or "")
+        return ([("", chunk, True)] if chunk else []) + translated
+    parts: list[tuple[str, str, bool]] = []
+    if printed:
+        parts += [(ui_string("image_label_text"), printed, True), *translated]
+    if description:
+        parts.append((ui_string("image_label_description"), description, False))
+    if tags:
+        parts.append((ui_string("image_label_tags"), tags, False))
     if not printed:
-        rows.append(_html_translation_row(snap))
+        parts += translated
+    return parts
+
+
+# How much text fits beside a lead figure, estimated pessimistically: narrow
+# character cells per line and line height for evidence (9.5pt) and detail (8pt)
+# text in the ~100mm column beside a 62mm figure, plus a line per part's label.
+_BESIDE_EVIDENCE_LINE = (46, 14.0)
+_BESIDE_DETAIL_LINE = (56, 12.0)
+_BESIDE_LABEL_PT = 17.0
+# The media row is kept whole, and a kept row taller than a page cannot be: it
+# is pushed to a fresh page and split there anyway, which prints the finding's
+# band alone on the page before or drops it from the page the finding starts
+# on. Text that might not fit beside the figure goes below it instead.
+_BESIDE_MAX_PT = 520.0
+
+
+def _beside_height_pt(parts: list[tuple[str, str, bool]]) -> float:
+    """Estimate the height of the text column beside a lead figure, in points."""
+    total = 0.0
+    for label, text, evidence in parts:
+        cells, line_pt = _BESIDE_EVIDENCE_LINE if evidence else _BESIDE_DETAIL_LINE
+        total += _text_height_pt(text, cells, line_pt) + (_BESIDE_LABEL_PT if label else 0.0)
+    return total
+
+
+def _html_media_rows(snap: dict[str, Any], view: tuple[str, str]) -> list[str]:
+    """Rows leading a finding judged from a picture: the picture, and its text beside it.
+
+    The picture is the evidence, so it opens the finding at a readable size,
+    captioned with its kind (image or video keyframe); its printed words,
+    description and tags share its height in a column beside it — a portrait
+    story and its short lines of overlaid text take one block, not two. The
+    row is kept whole, so the picture never sits on one page and its words on
+    the next. When the text could outgrow a page, the picture keeps a row of
+    its own and the text follows as ordinary rows that may split.
+
+    Args:
+        snap (dict[str, Any]): The finding snapshot.
+        view (tuple[str, str]): Its validated ``(data_uri, label)`` thumbnail view.
+
+    Returns:
+        list[str]: The rows' markup.
+    """
+    data_uri, label = view
+    figure = _html_evidence_figure(data_uri, label, label, lead=True)
+    parts = _media_parts(snap)
+    if _beside_height_pt(parts) <= _BESIDE_MAX_PT:
+        beside = "".join(
+            (f'<div class="m-label">{_esc(part_label)}</div>' if part_label else "")
+            + f'<div class="{"m-text" if evidence else "m-val"}">{_esc(text)}</div>'
+            for part_label, text, evidence in parts
+        )
+        return [
+            '<tr class="f-media"><td colspan="2"><table class="media-grid">'
+            '<colgroup><col class="m-fig"><col></colgroup>'
+            f'<tr><td class="m-fig">{figure}</td><td class="m-parts">{beside}</td></tr></table></td></tr>'
+        ]
+    rows = [f'<tr class="f-media"><td colspan="2">{figure}</td></tr>']
+    for part_label, text, evidence in parts:
+        if not evidence:
+            rows.append(_html_text_row(part_label, text))
+        elif part_label:
+            rows.append(_html_evidence_row(part_label, text))
+        else:
+            rows.append(f'<tr><td colspan="2" class="f-text">{_esc(text)}</td></tr>')
+    return rows
+
+
+def _html_finding_table(snap: dict[str, Any], note: str | None, *, band_html: str, detail_rows: list[str]) -> str:
+    """Render one finding as a single table.
+
+    A full-width shaded header band carries the number and tags (the finding's
+    title bar), the verbatim chunk text follows at full width, and content
+    stays together: the translation and the parent posting's text sit directly
+    under the chunk. The type-specific rows (entities / reason) follow, then
+    the grouped provenance block (source → posting → account, see
+    :func:`_provenance_rows`). The chunk row is omitted when there is no chunk.
+
+    A finding judged from a picture opens with it instead
+    (:func:`_html_media_rows`), and its reason comes before the posting's
+    text: the picture and its words already show what was judged. A snapshot
+    carrying the picture's parts but not the picture lists them as labelled
+    rows.
+    """
+    view = _thumbnail_view(snap)
+    rows: list[str] = []
+    if view is not None:
+        rows += _html_media_rows(snap, view)
+    else:
+        printed, description, tags = _image_parts(snap)
+        chunk = "" if printed or description or tags else _truncate(snap.get("chunk_text") or "")
+        if chunk:
+            rows.append(f'<tr><td colspan="2" class="f-text">{_esc(chunk)}</td></tr>')
+        rows.append(_html_image_rows(snap))
+        if not printed:
+            rows.append(_html_translation_row(snap))
     posting_text = _posting_text(snap)
-    if posting_text:
-        rows.append(_html_finding_row(ui_string("report_label_posting_text"), _esc(posting_text)))
-    rows.append(body_rows)
-    rows.extend(_html_finding_row(label, _esc(value)) for label, value in _provenance_rows(snap))
+    posting_rows = [_html_text_row(ui_string("report_label_posting_text"), posting_text)] if posting_text else []
+    rows += [*detail_rows, *posting_rows] if _is_image_finding(snap) else [*posting_rows, *detail_rows]
+    rows.extend(_html_text_row(label, value) for label, value in _provenance_rows(snap))
     if note:
-        rows.append(_html_finding_row(ui_string("report_label_note"), _esc(note)))
-    return f'<table class="finding"><colgroup><col class="f-key"><col></colgroup>{"".join(rows)}</table>'
+        rows.append(_html_text_row(ui_string("report_label_note"), note))
+    return (
+        '<table class="finding"><colgroup><col class="f-key"><col></colgroup>'
+        f'<thead><tr class="f-head"><td colspan="2">{band_html}</td></tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
 
 
 def _html_chat(snap: dict[str, Any], note: str | None) -> str:
@@ -981,8 +1332,13 @@ def _html_chat(snap: dict[str, Any], note: str | None) -> str:
     return "".join(parts)
 
 
-def _html_entity(snap: dict[str, Any], note: str | None) -> str:
-    body_rows = ""
+def _html_band(number: int, tags_html: str) -> str:
+    """A finding's header band: its number in the section, then its tags."""
+    return f'<span class="f-num">#{number}</span>{tags_html}'
+
+
+def _html_entity(snap: dict[str, Any], note: str | None, number: int) -> str:
+    detail_rows: list[str] = []
     entities = _dedupe_entities(snap.get("entities") or [])
     if entities:
         badges = "".join(
@@ -991,24 +1347,32 @@ def _html_entity(snap: dict[str, Any], note: str | None) -> str:
             + "</span>"
             for text, etype in entities
         )
-        body_rows = _html_finding_row(ui_string("report_label_entities"), badges)
-    return _html_finding_table(snap, note, tag_html=_esc(snap.get("entity_label")), body_rows=body_rows)
+        detail_rows.append(_html_finding_row(ui_string("report_label_entities"), badges, keep=False))
+    band = _html_band(number, _esc(snap.get("entity_label")))
+    return _html_finding_table(snap, note, band_html=band, detail_rows=detail_rows)
 
 
-def _html_hate(snap: dict[str, Any], note: str | None) -> str:
-    tag_html = (
-        f'<span class="badge">{_esc(snap.get("category"))}</span>'
-        f'<span class="badge">{_esc(snap.get("confidence"))}</span>'
+#: Confidence values that get their own badge tint (the prompt's fixed enum).
+_CONFIDENCE_LEVELS: frozenset[str] = frozenset({"high", "medium", "low"})
+
+
+def _html_hate(snap: dict[str, Any], note: str | None, number: int) -> str:
+    category, confidence = _hate_tags(snap)
+    level = str(snap.get("confidence") or "").strip().lower()
+    tint = f" conf-{level}" if level in _CONFIDENCE_LEVELS else ""
+    tags_html = (f'<span class="badge">{_esc(category)}</span>' if category else "") + (
+        f'<span class="badge{tint}">{_esc(confidence)}</span>' if confidence else ""
     )
-    body_rows = ""
+    detail_rows: list[str] = []
     if snap.get("reason"):
-        body_rows = _html_finding_row(ui_string("report_label_reason"), _esc(snap.get("reason")))
-    return _html_finding_table(snap, note, tag_html=tag_html, body_rows=body_rows)
+        detail_rows.append(_html_text_row(ui_string("report_label_reason"), str(snap.get("reason"))))
+    return _html_finding_table(snap, note, band_html=_html_band(number, tags_html), detail_rows=detail_rows)
 
 
-def _html_summary(snap: dict[str, Any], note: str | None) -> str:
+def _html_summary(snap: dict[str, Any], note: str | None, collection: str) -> str:
+    title = _summary_title(snap, collection)
     parts = [
-        f'<div class="item-title">{_esc(snap.get("collection"))}</div>',
+        f'<div class="item-title">{_esc(title)}</div>' if title else "",
         f'<div class="prose">{_render_markdown_html(snap.get("text") or "")}</div>',
         _html_note(note),
     ]
@@ -1044,25 +1408,28 @@ def _html_collection_overview(overview: dict[str, Any]) -> str:
     )
 
 
-_HTML_DISPATCH = {
-    ARTIFACT_CHAT: _html_chat,
-    ARTIFACT_ENTITY: _html_entity,
-    ARTIFACT_HATE: _html_hate,
-    ARTIFACT_SUMMARY: _html_summary,
-}
+def _html_item(artifact_type: str, snap: dict[str, Any], note: str | None, number: int, collection: str) -> str:
+    """HTML for one item of a section, ``number`` being its 1-based place there."""
+    if artifact_type == ARTIFACT_CHAT:
+        return _html_chat(snap, note)
+    if artifact_type == ARTIFACT_ENTITY:
+        return _html_entity(snap, note, number)
+    if artifact_type == ARTIFACT_HATE:
+        return _html_hate(snap, note, number)
+    return _html_summary(snap, note, collection)
 
 
-def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]], overview_present: bool) -> str:
+def _html_toc(sections: list[Section], overview_present: bool) -> str:
     """Render the contents block (Inhaltsverzeichnis) linking each present section.
 
-    Lists only sections that have content, section-level only. Page numbers come
-    from WeasyPrint's ``target-counter`` in paged media (see the ``@media print``
-    stylesheet rule); on screen the entries are plain in-document anchors.
+    Lists only sections that have content, section-level only, numbered
+    sections with their finding count. Page numbers come from WeasyPrint's
+    ``target-counter`` in paged media (see the ``@media print`` stylesheet
+    rule); on screen the entries are plain in-document anchors.
     """
     entries = [
-        f'<li><a href="#{SECTION_ANCHOR[artifact_type]}">{_esc(ui_string(heading_key))}</a></li>'
-        for artifact_type, heading_key in SECTION_ORDER
-        if grouped.get(artifact_type)
+        f'<li><a href="#{SECTION_ANCHOR[artifact_type]}">{_esc(_toc_label(artifact_type, key, len(items)))}</a></li>'
+        for artifact_type, key, items in sections
     ]
     if overview_present:
         entries.append(
@@ -1097,7 +1464,7 @@ def render_html(report: dict[str, Any]) -> str:
     if report.get("collection_name"):
         meta_bits.append(f"{ui_string('report_label_collection')}: {_esc(report['collection_name'])}")
     if report.get("created_at"):
-        meta_bits.append(f"{ui_string('report_label_generated')}: {_esc(_date_only(report['created_at']))}")
+        meta_bits.append(f"{ui_string('report_label_generated')}: {_esc(_format_date(report['created_at']))}")
     if report.get("operator"):
         meta_bits.append(f"{ui_string('report_label_operator')}: {_esc(report['operator'])}")
     meta_html = f'<div class="report-meta">{"  ·  ".join(meta_bits)}</div>' if meta_bits else ""
@@ -1117,27 +1484,26 @@ def render_html(report: dict[str, Any]) -> str:
         )
     body_parts.append(f'<div class="running-disclaimer">{_esc(ui_string("report_disclaimer"))}</div>')
 
-    grouped = _group_items(report.get("items") or [])
+    sections = _report_sections(report)
     overview = _overview_snapshot(report)
-    if not any(grouped.values()) and overview is None:
+    if not sections and overview is None:
         body_parts.append(f'<p class="empty">{_esc(ui_string("report_empty"))}</p>')
     else:
         if report.get("show_toc"):
-            body_parts.append(_html_toc(grouped, overview is not None))
-        for artifact_type, heading_key in SECTION_ORDER:
-            items = grouped.get(artifact_type) or []
-            if not items:
-                continue
+            body_parts.append(_html_toc(sections, overview is not None))
+        collection = str(report.get("collection_name") or "").strip()
+        for artifact_type, heading_key, items in sections:
             anchor = SECTION_ANCHOR.get(artifact_type, "")
             body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
-            if artifact_type == ARTIFACT_ENTITY:
-                items = _collapse_entity_items(items)
-            renderer = _HTML_DISPATCH[artifact_type]
-            for item in items:
-                body_parts.append(f'<div class="item">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>')
+            item_class = "item" if artifact_type in _NUMBERED_SECTIONS else "item item-prose"
+            for number, item in enumerate(items, start=1):
+                rendered = _html_item(artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection)
+                body_parts.append(f'<div class="{item_class}">{rendered}</div>')
         if overview is not None:
+            # Its own page after the findings; alone, it stays under the title.
+            heading_class = "section page-start" if sections else "section"
             body_parts.append(
-                f'<h2 class="section" id="{COLLECTION_OVERVIEW_ANCHOR}">'
+                f'<h2 class="{heading_class}" id="{COLLECTION_OVERVIEW_ANCHOR}">'
                 f"{_esc(ui_string(COLLECTION_OVERVIEW_HEADING))}</h2>"
             )
             body_parts.append(f'<div class="item">{_html_collection_overview(overview)}</div>')
@@ -1145,7 +1511,7 @@ def render_html(report: dict[str, Any]) -> str:
     return (
         f'<!DOCTYPE html>\n<html lang="{_esc(locale)}">\n<head>\n'
         f'<meta charset="utf-8">\n<title>{_esc(title)}</title>\n'
-        f"<style>{_HTML_STYLE}</style>\n</head>\n<body>\n"
+        f"<style>{_html_style()}</style>\n</head>\n<body>\n"
         f"{''.join(p for p in body_parts if p)}\n</body>\n</html>\n"
     )
 
@@ -1154,13 +1520,25 @@ def render_html(report: dict[str, Any]) -> str:
 # PDF (WeasyPrint, lazily imported + import-guarded)
 # --------------------------------------------------------------------------- #
 def _load_weasyprint() -> tuple[Any, Exception | None]:
-    """Import WeasyPrint lazily; return (HTML class | None, error | None)."""
+    """Import WeasyPrint lazily; return (document factory | None, error | None).
+
+    The factory takes ``string=`` like ``weasyprint.HTML`` and lets the document
+    fetch nothing but ``data:`` URIs. Every export embeds what it shows, so any
+    other URL in one — an SVG thumbnail in a caller-supplied snapshot naming a
+    file on the server, a Markdown image in an LLM-written answer — is refused
+    instead of being read off the server's disk or the network. A fetcher is
+    made per document: it keeps per-request state, and renders run in threads.
+    """
     try:
         from weasyprint import HTML
-
-        return HTML, None
+        from weasyprint.urls import URLFetcher
     except Exception as exc:  # ImportError, or OSError when native libs are absent
         return None, exc
+
+    def document(string: str) -> Any:
+        return HTML(string=string, url_fetcher=URLFetcher(allowed_protocols={"data"}))
+
+    return document, None
 
 
 def pdf_engine_available() -> bool:

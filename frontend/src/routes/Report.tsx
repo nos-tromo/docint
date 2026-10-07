@@ -41,7 +41,7 @@ import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
-import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
+import { hateCategoryLabel, hateConfidenceLabel } from '@/lib/hateCategoryLabel'
 import { hasImageParts, type ImageParts } from '@/lib/reportSnapshots'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
@@ -207,15 +207,18 @@ function itemTitle(item: ReportItem, t: Translate): string {
     case 'entity_finding':
       return str(s, 'entity_label') || t('report.default_entity_finding')
     case 'hate_speech_finding': {
-      // `category` is a frozen protocol value from the same fixed enum as
-      // HateSpeechTable's — mapped through the same shared label lookup so a
-      // category reads identically in Analysis and in Report (e.g. German
-      // "Rasse", not "race"). `confidence` stays verbatim, mirroring
-      // HateSpeechTable's treatment of that field.
+      // `category` and `confidence` are frozen protocol values from the
+      // hate-speech prompt's fixed enums, shown through the shared label
+      // lookups: the category reads as it does in Analysis, and both use the
+      // labels the exported report prints (German "Rasse", "hoch" — not "race",
+      // "high").
       const cat = str(s, 'category')
       const conf = str(s, 'confidence')
       const label = cat ? hateCategoryLabel(cat, t) : ''
-      return [label, conf && `(${conf})`].filter(Boolean).join(' ') || t('report.default_hate_finding')
+      return (
+        [label, conf && `(${hateConfidenceLabel(conf, t)})`].filter(Boolean).join(' ') ||
+        t('report.default_hate_finding')
+      )
     }
     default:
       return str(s, 'collection') || t('report.default_summary')
@@ -612,6 +615,11 @@ export function Report() {
                   if (sectionItems.length === 0) return null
                   return (
                     <ReportSection key={type} title={label} count={`(${sectionItems.length})`}>
+                      {/* The exports re-sort this section by posting time, so the
+                          arrows below order only this list and the JSON/CSV. */}
+                      {type === 'hate_speech_finding' && (
+                        <p className="text-xs text-muted-foreground">{t('report.hate_export_order_hint')}</p>
+                      )}
                       {sectionItems.map((item, si) => (
                         <div key={item.id} className="rounded-md border border-border bg-muted p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">

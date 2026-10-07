@@ -360,6 +360,9 @@ export const en = {
   'hate.category_other': 'Other',
   'hate.category_none': 'None',
   'hate.category_unknown': 'Unknown',
+  'hate.confidence_high': 'high',
+  'hate.confidence_medium': 'medium',
+  'hate.confidence_low': 'low',
   'hate.basis_image': 'From an image',
 
   // analysis orphans: coverage banner + summary panel
@@ -428,6 +431,7 @@ export const en = {
   'report.section_chat_answers': 'Chat answers',
   'report.section_entity_findings': 'Entity findings',
   'report.section_hate_findings': 'Hate-speech findings',
+  'report.hate_export_order_hint': 'The PDF, HTML and Markdown exports list these by posting time, newest first.',
   'report.default_chat_answer': 'Chat answer',
   'report.default_entity_finding': 'Entity finding',
   'report.default_hate_finding': 'Hate-speech finding',

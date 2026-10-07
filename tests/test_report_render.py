@@ -1,5 +1,6 @@
 """Tests for report renderers (Markdown / HTML / PDF / JSON / CSV bundle)."""
 
+import base64
 import io
 import json
 import re
@@ -12,6 +13,9 @@ from pdf_layout import (
     contents_entries,
     count_min_content_splits,
     hyphenated_text,
+    pages_showing_a_finding_without_its_band,
+    rows_alone_at_page_foot,
+    rows_split_across_pages,
     text_beyond_its_cell,
     text_beyond_the_page,
     weasyprint_html,
@@ -161,30 +165,59 @@ def test_render_html_escapes_user_content_and_has_paged_media() -> None:
     assert 'class="item"' in htm
 
 
-def test_all_items_flow_across_page_breaks() -> None:
-    """Page-break contract: every item — findings included — flows across pages.
+def test_only_short_finding_rows_resist_page_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Page-break contract: items and finding tables flow; only their short rows move whole.
 
     A finding table (full chunk text + entity badges) is routinely taller than
-    a page. Any ``break-inside: avoid`` on the item or its rows makes WeasyPrint
-    push the whole block (or a giant row) onto a fresh page, stranding the
-    section heading on an almost-empty page and leaving page-sized gaps. So
-    neither the item wrapper nor ``table.finding`` rows may carry a break-avoid
-    guard; only the short manifest rows keep one. The section heading stays
-    attached to its first item via ``break-after: avoid`` instead.
+    a page. A ``break-inside: avoid`` on the item, the table or a giant row
+    makes WeasyPrint push it onto a fresh page, stranding the section heading
+    on an almost-empty page and leaving page-sized gaps. So the guard sits on
+    the short rows alone — provenance, reason, the picture and its words —
+    which is what stops a label ending one page while its value starts the
+    next. The chunk row and the entity badges stay breakable.
     """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     htm = R.render_html(_report())  # chat (prose) + entity + hate findings
     assert ".item--card" not in htm  # the unbreakable-card modifier is gone
     base_item_rule = re.search(r"\.item\s*\{([^}]*)\}", htm)
     assert base_item_rule is not None
     assert "break-inside" not in base_item_rule.group(1)  # items flow
-    finding_rules = re.findall(r"table\.finding[^{]*\{([^}]*)\}", htm)
-    assert finding_rules and all("break-inside" not in rule for rule in finding_rules)
+    guarded = [
+        selector.strip()
+        for selector, body in re.findall(r"(table\.finding[^{]*)\{([^}]*)\}", htm)
+        if "break-inside" in body
+    ]
+    assert guarded == ["table.finding tr.f-keep, table.finding tr.f-media"]
+    assert '<tr><td colspan="2" class="f-text">bad text</td></tr>' in htm  # the chunk row splits
+    assert '<tr><td class="f-key">Entities</td>' in htm  # so do the entity badges
+    assert '<tr class="f-keep"><td class="f-key">Source</td>' in htm
     # Headings keep their content: no orphaned section title at a page bottom.
     heading_rule = re.search(r"h2\.section\s*\{([^}]*)\}", htm)
     assert heading_rule is not None and "break-after: avoid" in heading_rule.group(1)
     # The manifest keeps its per-row guard (rows are single-line).
     manifest_rule = re.search(r"table\.manifest tr\s*\{([^}]*)\}", htm)
     assert manifest_rule is not None and "break-inside: avoid" in manifest_rule.group(1)
+
+
+def test_a_finding_s_band_heads_its_table() -> None:
+    """The band is the table's header group, so a finding that continues overleaf is named again."""
+    htm = R.render_html(_report())
+    assert htm.count('<thead><tr class="f-head">') == 2
+
+
+def test_rules_separate_prose_items_and_space_separates_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hairline between two boxed findings printed alone at the top of a page; only prose keeps it."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+    report["items"].append({"id": 4, "artifact_type": "chat_answer", "note": None, "snapshot": {"user_text": "Q2"}})
+    htm = R.render_html(report)
+
+    spacing = re.search(r"\.item \+ \.item\s*\{([^}]*)\}", htm)
+    assert spacing is not None and "border" not in spacing.group(1)
+    rule = re.search(r"\.item-prose \+ \.item-prose\s*\{([^}]*)\}", htm)
+    assert rule is not None and "border-top" in rule.group(1)
+    assert htm.count('<div class="item item-prose">') == 2  # both chat answers
+    assert htm.count('<div class="item"><table class="finding">') == 2
 
 
 def test_render_includes_case_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,33 +390,36 @@ def test_findings_render_as_single_table_each(monkeypatch: pytest.MonkeyPatch) -
     # header band, the chunk text a full-width row right under it.
     assert htm.count('<table class="finding">') == 2
     assert htm.count('class="f-head"') == 2
-    assert '<tr class="f-head"><td colspan="2">Acme [ORG]</td></tr>' in htm
-    assert re.search(
-        r'class="f-head"><td colspan="2"><span class="badge">slur</span><span class="badge">high</span>', htm
-    )
+    assert '<tr class="f-head"><td colspan="2"><span class="f-num">#1</span>Acme [ORG]</td></tr>' in htm
+    # A category outside the fixed enum shows as stored; the confidence is labelled.
+    assert (
+        '<tr class="f-head"><td colspan="2"><span class="f-num">#1</span><span class="badge">slur</span>'
+        '<span class="badge conf-high">Confidence: high</span></td></tr>'
+    ) in htm
     assert re.search(r'<td colspan="2" class="f-text">bad text</td>', htm)
     # The rest sits below as grouped label/value rows inside the same table.
     assert '<td class="f-key">Source</td><td class="f-val">a.pdf · Page 2</td>' in htm
     assert (
         '<td class="f-key">Posting</td>'
-        '<td class="f-val">Facebook · 2026-03-04 09:00:00+00 · ID P1\nhttps://fb.example/p1</td>'
+        '<td class="f-val">Facebook · 2026-03-04 09:00:00 (UTC) · ID P1\nhttps://fb.example/p1</td>'
     ) in htm
 
     md = R.render_markdown(report)
     # GFM table: tag + chunk text form the (prominent) header row.
-    assert "| slur (high) | bad text |" in md
-    assert "| Acme [ORG] | Acme met Bob <script>alert(1)</script> |" in md
+    assert "| #1 · slur · Confidence: high | bad text |" in md
+    assert "| #1 · Acme [ORG] | Acme met Bob <script>alert(1)</script> |" in md
     assert "| --- | --- |" in md
     # Grouped provenance rows; the multi-line posting value keeps the grid intact.
-    assert "| Posting | Facebook · 2026-03-04 09:00:00+00 · ID P1<br>https://fb.example/p1 |" in md
+    assert "| Posting | Facebook · 2026-03-04 09:00:00 (UTC) · ID P1<br>https://fb.example/p1 |" in md
     assert "| Posting text | Original post body |" in md
     # The old exhaustive per-field metadata block is gone.
     assert "Posting Network" not in md
     assert "Posting UUID" not in md
 
 
-def test_md_finding_table_cells_escape_pipes_and_newlines() -> None:
+def test_md_finding_table_cells_escape_pipes_and_newlines(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verbatim evidence text cannot break the Markdown table grid."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     report = _single_item_report(
         "hate_speech_finding",
         {
@@ -395,7 +431,7 @@ def test_md_finding_table_cells_escape_pipes_and_newlines() -> None:
         },
     )
     md = R.render_markdown(report)
-    assert "| x (high) | a\\|b<br>c |" in md
+    assert "| #1 · x · Confidence: high | a\\|b<br>c |" in md
     assert "line one<br>line two" in md
 
 
@@ -784,6 +820,29 @@ def test_overview_renders_after_items_in_markdown(monkeypatch: pytest.MonkeyPatc
     assert md.index("## Document overview") > md.index("UNIQUE_ITEM_BODY_MARKER")
 
 
+def test_pdf_overview_starts_its_own_page_after_the_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The overview chapter opens a fresh page rather than running on under the last item."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    item = {"id": 1, "artifact_type": "summary", "note": None, "snapshot": {"collection": "c1", "text": "Short."}}
+    report = _overview_report(items=[item], show_toc=True)
+
+    entries = contents_entries(html_cls(string=R.render_html(report)).render())
+
+    assert entries["sec-summaries"][1] == 1
+    assert entries["sec-collection-overview"] == ("2", 2)
+
+
+def test_pdf_overview_alone_stays_under_the_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With nothing before it, the overview does not leave the first page blank."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+
+    entries = contents_entries(html_cls(string=R.render_html(_overview_report(show_toc=True))).render())
+
+    assert entries["sec-collection-overview"] == ("1", 1)
+
+
 def test_csv_bundle_includes_overview_with_full_hash() -> None:
     """The CSV bundle carries collection-overview.csv with the untruncated hash."""
     zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report())))
@@ -860,10 +919,11 @@ def test_html_renders_finding_thumbnail_with_kind_label(monkeypatch: pytest.Monk
 
 
 def test_html_renders_chat_source_thumbnails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A chat answer's image sources render beneath the source list."""
+    """A chat answer's image sources render beneath the source list; a finding leads with its own."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     html = R.render_html(_report_with_thumbnails())
-    assert html.count(f'<figure class="evidence"><img src="{_DATA_URI}"') == 2
+    assert html.count(f'<figure class="evidence"><img src="{_DATA_URI}"') == 1
+    assert html.count(f'<figure class="evidence lead"><img src="{_DATA_URI}"') == 1
     assert ui_string("report_label_image_evidence") in html
 
 
@@ -926,12 +986,13 @@ def test_html_chat_figures_carry_the_citation_number(monkeypatch: pytest.MonkeyP
     assert "<li>[1] chart.png</li>" in html
 
 
-def test_html_finding_figure_has_no_caption(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A finding holds one figure and names its source in the provenance rows."""
+def test_html_finding_figure_is_captioned_with_its_kind_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finding's figure says what it is — a picture or a video frame — and names its file in the provenance rows."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     html = R.render_html(_report_with_thumbnails())
-    finding = html.split(ui_string("report_label_video_keyframe"))[1]
-    assert "<figcaption>" not in finding.split("</table>")[0]
+    keyframe = ui_string("report_label_video_keyframe")
+    assert f'alt="{keyframe}"><figcaption>{keyframe}</figcaption></figure>' in html
+    assert "<figcaption>clip.mp4" not in html
 
 
 def test_markdown_chat_figures_carry_the_citation_number(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1037,13 +1098,13 @@ def test_image_finding_renders_its_parts_as_labelled_rows(monkeypatch: pytest.Mo
 
     htm = R.render_html(report)
     printed = f'<td class="f-key">Text in the image</td><td class="f-text">{_PRINTED}</td>'
-    described = f'<td class="f-key">Image description</td><td class="f-text">{_DESCRIPTION}</td>'
+    described = f'<td class="f-key">Image description</td><td class="f-val">{_DESCRIPTION}</td>'
     tagged = '<td class="f-key">Tags</td><td class="f-val">poster, crowd</td>'
     assert htm.index(printed) < htm.index(described) < htm.index(tagged)
     assert '<td colspan="2" class="f-text">' not in htm
 
     md = R.render_markdown(report)
-    tag = "Acme [ORG]" if artifact_type == "entity_finding" else "religion (high)"
+    tag = "#1 · Acme [ORG]" if artifact_type == "entity_finding" else "#1 · Religion · Confidence: high"
     assert f"| {tag} |  |" in md
     printed_md = "| Text in the image | PRINTED SLOGAN<br>SECOND LINE |"
     described_md = f"| Image description | {_DESCRIPTION} |"
@@ -1164,3 +1225,427 @@ def test_pdf_never_hyphenates_a_label_that_fits(monkeypatch: pytest.MonkeyPatch)
     document = html_cls(string=R.render_html(report)).render()
 
     assert hyphenated_text(document, "f-key") == []
+
+
+# --------------------------------------------------------------------------- #
+# A finding judged from a picture leads with it
+# --------------------------------------------------------------------------- #
+def _jpeg_data_uri(width: int, height: int) -> str:
+    """A real JPEG data URI, so WeasyPrint lays a figure out at its true aspect ratio."""
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (90, 120, 200)).save(buffer, "JPEG")
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+_THUMBNAIL = {"data_uri": _DATA_URI, "kind": "image"}
+
+
+def test_image_finding_leads_with_its_picture_and_sets_its_words_beside_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The picture opens the finding; its printed words, description and tags share its row."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _image_finding(
+        "hate_speech_finding", thumbnail=_THUMBNAIL, reference_metadata={"network": "examplenet", "text": "Post body"}
+    )
+
+    htm = R.render_html(report)
+    media = htm.split('<tr class="f-media">')[1].split("</table></td></tr>")[0]
+    assert media.index('<figure class="evidence lead">') < media.index("PRINTED SLOGAN")
+    assert f'<div class="m-label">Text in the image</div><div class="m-text">{_PRINTED}</div>' in media
+    assert f'<div class="m-label">Image description</div><div class="m-val">{_DESCRIPTION}</div>' in media
+    assert '<div class="m-label">Tags</div><div class="m-val">poster, crowd</div>' in media
+    assert "Text in the image</td>" not in htm  # no second, row-per-part copy
+    # The picture row comes first, and the reason before the posting's own text.
+    assert htm.index('<tbody><tr class="f-media">') < htm.index(">Reason<") < htm.index(">Posting text<")
+
+    md = R.render_markdown(report)
+    assert md.index(f"]({_DATA_URI})") < md.index("| Text in the image |") < md.index("| Reason |")
+    assert md.index("| Reason |") < md.index("| Posting text |")
+
+
+def test_image_finding_with_long_printed_text_gives_its_picture_a_row_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Words that could outgrow a page follow the picture as a row that may split; the picture row stays whole."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    printed = "\n".join(f"line {i}" for i in range(80))
+    htm = R.render_html(_image_finding("hate_speech_finding", ocr_text=printed, thumbnail=_THUMBNAIL))
+
+    assert 'class="media-grid"' not in htm
+    assert '<tr class="f-media"><td colspan="2"><figure class="evidence lead">' in htm
+    assert f'<tr><td class="f-key">Text in the image</td><td class="f-text">{printed}</td></tr>' in htm
+
+
+def test_a_picture_frozen_without_its_parts_sets_the_finding_s_text_beside_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An older snapshot names no parts: its text, and that text's translation, sit beside the picture."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report(
+        "hate_speech_finding",
+        {
+            "category": "religion",
+            "confidence": "low",
+            "chunk_text": "words on the picture",
+            "translation": {"text": "translated words", "target_lang": "en", "model": "m"},
+            "thumbnail": _THUMBNAIL,
+        },
+    )
+
+    htm = R.render_html(report)
+    assert (
+        '<td class="m-parts"><div class="m-text">words on the picture</div>'
+        '<div class="m-label">Machine translation (→ English)</div><div class="m-val">translated words</div></td>'
+    ) in htm
+    assert '<td colspan="2" class="f-text">' not in htm
+
+
+# --------------------------------------------------------------------------- #
+# Order, numbers and labels
+# --------------------------------------------------------------------------- #
+def _dated_hate(chunk: str, timestamp: str | None) -> dict[str, Any]:
+    """A hate-speech item whose posting carries ``timestamp`` (none when ``None``)."""
+    reference: dict[str, str] = {"network": "examplenet"}
+    if timestamp is not None:
+        reference["timestamp"] = timestamp
+    return {
+        "id": chunk,
+        "artifact_type": "hate_speech_finding",
+        "note": None,
+        "snapshot": {
+            "chunk_id": chunk,
+            "category": "other",
+            "confidence": "low",
+            "chunk_text": chunk,
+            "reference_metadata": reference,
+        },
+    }
+
+
+def test_hate_speech_findings_read_newest_first_and_are_numbered_in_that_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bulk add lands findings in paging order; the export reads them newest first, undated last."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = {
+        "title": "T",
+        "items": [
+            _dated_hate("undated-first", None),
+            _dated_hate("evening-utc", "2026-05-02T18:00:00Z"),
+            _dated_hate("not-a-date", "yesterday"),
+            _dated_hate("morning-plus-two", "2026-05-02T09:00:00+02:00"),  # 07:00 UTC
+            _dated_hate("naive-noon", "2026-05-02T12:00:00"),  # read as UTC
+            _dated_hate("day-before", "2026-05-01"),
+        ],
+    }
+    expected = ["evening-utc", "naive-noon", "morning-plus-two", "day-before", "undated-first", "not-a-date"]
+
+    for blob in (R.render_html(report), R.render_markdown(report)):
+        positions = [blob.index(name) for name in expected]
+        assert positions == sorted(positions)
+    md = R.render_markdown(report)
+    assert "| #1 · Other · Confidence: low | evening-utc |" in md
+    assert "| #6 · Other · Confidence: low | not-a-date |" in md
+    # The data exports keep the stored order.
+    with zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(report))) as bundle:
+        rows = bundle.read("hate-speech.csv").decode("utf-8")
+    assert rows.index("undated-first") < rows.index("evening-utc") < rows.index("day-before")
+
+
+@pytest.mark.parametrize(
+    ("locale", "raw", "shown"),
+    [
+        ("en", "2026-09-23T20:31:52+02:00", "2026-09-23 20:31:52 (UTC+02:00)"),
+        ("de", "2026-09-23T20:31:52+02:00", "23.09.2026 20:31:52 (UTC+02:00)"),
+        ("de", "2026-09-23T20:31:52Z", "23.09.2026 20:31:52 (UTC)"),
+        ("de", "2026-09-23T20:31:52-05:30", "23.09.2026 20:31:52 (UTC-05:30)"),
+        ("de", "2026-09-23 20:31:52", "23.09.2026 20:31:52"),
+        ("de", "2026-09-23", "23.09.2026"),
+        ("de", "2026-09-23T20:31", "23.09.2026 20:31"),  # no seconds invented
+        ("de", "2026-09-23T20:31:52-05:30:15", "23.09.2026 20:31:52 (UTC-05:30:15)"),
+        ("de", "1695470000", "1695470000"),
+        ("de", "20260923", "20260923"),
+        ("de", "yesterday", "yesterday"),
+    ],
+)
+def test_posting_times_read_in_the_report_s_locale_with_their_own_offset(
+    monkeypatch: pytest.MonkeyPatch, locale: str, raw: str, shown: str
+) -> None:
+    """A posting time is evidence: reformatted for the reader, never moved to another zone."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", locale)
+    report = {"title": "T", "items": [_dated_hate("x", raw)]}
+    assert f"| {ui_string('report_label_posting')} | examplenet · {shown} |" in R.render_markdown(report)
+
+
+def test_creation_date_reads_in_the_report_s_locale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The subheader's date follows the response language, like every other label."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    report = _single_item_report("summary", {"collection": "c", "text": "t"})
+    assert "Erstellt: 20.06.2026" in R.render_html(report)
+    assert "Erstellt: 20.06.2026" in R.render_markdown(report)
+
+
+def test_hate_speech_band_reads_in_the_report_s_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Category and confidence are protocol values; the reader sees their labels, the confidence named as such."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    report = _single_item_report(
+        "hate_speech_finding", {"category": "sexual_orientation", "confidence": "medium", "chunk_text": "x"}
+    )
+
+    htm = R.render_html(report)
+    assert (
+        '<span class="badge">Sexuelle Orientierung</span><span class="badge conf-medium">Konfidenz: mittel</span>'
+    ) in htm
+    assert "| #1 · Sexuelle Orientierung · Konfidenz: mittel | x |" in R.render_markdown(report)
+
+
+def test_an_unknown_confidence_shows_as_stored_and_never_reaches_a_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Snapshots are caller-supplied JSON: an unexpected value is escaped text, not markup."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report(
+        "hate_speech_finding", {"category": "religion", "confidence": 'x" onclick="y', "chunk_text": "x"}
+    )
+    assert '<span class="badge">Confidence: x&quot; onclick=&quot;y</span>' in R.render_html(report)
+
+
+def test_contents_count_the_numbered_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The contents count what the body numbers: entity findings on one chunk count once."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+    report["show_toc"] = True
+    entity = report["items"][1]["snapshot"]
+    report["items"].append(
+        {
+            "id": 5,
+            "artifact_type": "entity_finding",
+            "note": None,
+            "snapshot": {**entity, "entity_label": "Bob [PERSON]"},
+        }
+    )
+
+    htm = R.render_html(report)
+    assert ">Entity findings (1)</a>" in htm
+    assert ">Hate-speech findings (1)</a>" in htm
+    assert ">Chat answers</a>" in htm
+    md = R.render_markdown(report)
+    assert "- Entity findings (1)" in md
+    assert "- Chat answers\n" in md
+
+
+@pytest.mark.parametrize(("locale", "label"), [("en", "Page"), ("de", "Seite")])
+def test_page_numbers_are_labelled_in_the_report_s_language(
+    monkeypatch: pytest.MonkeyPatch, locale: str, label: str
+) -> None:
+    """The footer's page counter carries the locale's word, not a hard-coded English one."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", locale)
+    assert f'content: "{label} " counter(page) " / " counter(pages);' in R.render_html(_report())
+
+
+def test_summary_title_is_dropped_when_the_subheader_already_names_the_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report belongs to one collection; repeating its name over the summary says nothing new."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report("summary", {"collection": "c", "text": "Summary body."})
+    assert '<div class="item-title">' not in R.render_html(report)
+    assert "### c" not in R.render_markdown(report)
+
+    report["items"][0]["snapshot"]["collection"] = "other"
+    assert '<div class="item-title">other</div>' in R.render_html(report)
+    assert "### other" in R.render_markdown(report)
+
+
+# --------------------------------------------------------------------------- #
+# Page breaks (real WeasyPrint)
+# --------------------------------------------------------------------------- #
+def _uneven_findings_report(count: int) -> dict[str, Any]:
+    """Findings of uneven height, a third of them pictures, so page breaks land all over them."""
+    portrait, landscape = _jpeg_data_uri(432, 768), _jpeg_data_uri(768, 432)
+    items = []
+    for i in range(count):
+        snapshot: dict[str, Any] = {
+            "chunk_id": f"c{i}",
+            "category": "other",
+            "confidence": "low",
+            "chunk_text": " ".join(f"evidence{j}" for j in range(5 + (i * 7) % 40)),
+            "reason": " ".join(f"reason{j}" for j in range(8 + (i * 11) % 60)),
+            "filename": "a.csv",
+            "row": i,
+            "reference_metadata": {
+                "network": "examplenet",
+                "timestamp": f"2026-05-{1 + i % 28:02d}T10:00:00Z",
+                "url": f"https://example.invalid/{i}",
+                "author": f"Person {i}",
+            },
+        }
+        if i % 3 == 0:
+            snapshot |= {
+                "thumbnail": {"data_uri": portrait if i % 2 else landscape, "kind": "image"},
+                "ocr_text": "\n".join(f"WORD {j}" for j in range(2 + i % 9)),
+                "image_description": " ".join(f"described{j}" for j in range(10 + i % 30)),
+            }
+        items.append({"id": i, "artifact_type": "hate_speech_finding", "note": None, "snapshot": snapshot})
+    return {"title": "T", "items": items}
+
+
+def test_pdf_never_parts_a_label_from_its_value_or_a_picture_from_its_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Short rows move whole and a finding's band never ends a page on its own."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    document = html_cls(string=R.render_html(_uneven_findings_report(40))).render()
+
+    assert len(document.pages) > 5
+    assert rows_split_across_pages(document, "f-keep") == []
+    assert rows_split_across_pages(document, "f-media") == []
+    assert rows_alone_at_page_foot(document, "f-head") == []
+    assert pages_showing_a_finding_without_its_band(document) == []
+
+
+@pytest.mark.parametrize("lines", [6, 120], ids=["beside the picture", "below the picture"])
+def test_pdf_lays_out_a_picture_s_words_without_measuring_them_per_character(
+    monkeypatch: pytest.MonkeyPatch, lines: int
+) -> None:
+    """The text beside (or below) a picture is sized without one split per character, as #624 requires."""
+    weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    words = [f"evidence{i}" for i in range(200)]
+    report = _image_finding(
+        "hate_speech_finding",
+        thumbnail={"data_uri": _jpeg_data_uri(432, 768), "kind": "image"},
+        ocr_text="\n".join(" ".join(words[i::lines]) for i in range(lines))[:1500],
+        image_description=" ".join(words)[:1200],
+    )
+    splits = count_min_content_splits(monkeypatch)
+
+    assert R.render_pdf(report).startswith(b"%PDF")
+    assert splits[0] < 100
+
+
+def test_pdf_sets_the_document_overview_densely(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The manifest lists every document of the collection; 120 of them take three pages, not four."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    documents = [
+        {
+            "filename": f"document_{i:03d}.pdf",
+            "type_label": "PDF",
+            "page_count": i % 9 + 1,
+            "row_count": None,
+            "node_count": 3,
+            "file_hash": f"{i:064x}",
+        }
+        for i in range(120)
+    ]
+    report = _overview_report(collection_overview={**_OVERVIEW, "documents": documents, "document_count": 120})
+
+    assert len(html_cls(string=R.render_html(report)).render().pages) <= 3
+
+
+# --------------------------------------------------------------------------- #
+# Height estimates behind the kept rows
+# --------------------------------------------------------------------------- #
+_CJK = "".join(chr(0x4E00 + (i * 37) % 2000) for i in range(1400))  # synthetic ideographs
+
+
+def test_wide_characters_count_twice_toward_the_height_estimate() -> None:
+    """A CJK glyph or an emoji takes about two narrow cells; counted as one, the estimate ran 1.4x short."""
+    assert R._display_width("漢字ab") == 6
+    assert R._display_width("😀x") == 3
+    assert R._text_height_pt("漢" * 46, 46, 10.0) == 20.0
+
+
+def test_wide_printed_text_too_tall_for_beside_the_picture_goes_below_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1,400 ideographs fit the narrow-cell estimate but not the page; they are set below the picture."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_image_finding("hate_speech_finding", ocr_text=_CJK, thumbnail=_THUMBNAIL))
+    assert 'class="media-grid"' not in htm
+    assert '<tr class="f-media"><td colspan="2"><figure class="evidence lead">' in htm
+
+
+def test_a_value_too_long_to_move_whole_splits_while_a_short_one_moves_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A posting of many lines may not be kept whole; the short reason beside it still is."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    posting = "\n".join(f"posting line {i}" for i in range(60))
+    report = _single_item_report(
+        "hate_speech_finding",
+        {
+            "category": "other",
+            "confidence": "low",
+            "chunk_text": "short chunk",
+            "reason": "A short reason.",
+            "reference_metadata": {"network": "examplenet", "text": posting},
+        },
+    )
+
+    htm = R.render_html(report)
+    assert '<tr><td class="f-key">Posting text</td>' in htm
+    assert '<tr class="f-keep"><td class="f-key">Reason</td>' in htm
+
+
+def test_pdf_names_every_finding_on_every_page_it_reaches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wide picture text and a many-line posting no longer push a kept row past a page and lose the band."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    filler = {"category": "other", "confidence": "low", "chunk_text": " ".join(["filler"] * 600), "reason": "r"}
+    picture = {
+        "category": "other",
+        "confidence": "low",
+        "chunk_text": "x",
+        "ocr_text": _CJK,
+        "image_tags": ["tag"] * 6,
+        "reason": "A reason.",
+        "thumbnail": {"data_uri": _jpeg_data_uri(432, 768), "kind": "image"},
+    }
+    posting = {
+        "category": "other",
+        "confidence": "low",
+        "chunk_text": "short chunk",
+        "reason": "r",
+        "reference_metadata": {"network": "examplenet", "text": "\n".join(f"line {i}" for i in range(60))},
+    }
+    items = [
+        {"id": i, "artifact_type": "hate_speech_finding", "note": None, "snapshot": snapshot}
+        for i, snapshot in enumerate((filler, picture, filler, posting))
+    ]
+    document = html_cls(string=R.render_html({"title": "T", "items": items})).render()
+
+    assert pages_showing_a_finding_without_its_band(document) == []
+    assert rows_split_across_pages(document, "f-keep") == []
+    assert rows_split_across_pages(document, "f-media") == []
+
+
+# --------------------------------------------------------------------------- #
+# Nothing outside the document is ever fetched
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "data_uri",
+    [
+        "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",  # an SVG can reference further files
+        "data:image/png;base64,AAAA)![x](https://example.invalid/y.png",  # breaks out of a Markdown image
+        "data:image/png;base64,AA AA",
+        "data:image/png,rawbytes",
+        "https://example.invalid/x.png",
+    ],
+)
+def test_a_thumbnail_must_be_a_base64_raster_image(data_uri: str) -> None:
+    """Snapshots are caller-supplied JSON: only a base64 JPEG, PNG, WebP or GIF is ever embedded."""
+    assert R._thumbnail_view({"thumbnail": {"data_uri": data_uri}}) is None
+
+
+@pytest.mark.parametrize("kind", ["jpeg", "png", "webp", "gif"])
+def test_raster_thumbnails_are_embedded(kind: str) -> None:
+    """The thumbnail pipeline's own output passes."""
+    assert R._thumbnail_view({"thumbnail": {"data_uri": f"data:image/{kind};base64,AAAA+/9="}}) is not None
+
+
+def test_pdf_fetches_nothing_but_data_uris(tmp_path: Any) -> None:
+    """A file or an SVG that names one is refused; the inline image beside them is drawn."""
+    from PIL import Image
+
+    local = tmp_path / "red.png"
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(local)
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><image href="{local.as_uri()}"/></svg>'
+    svg_uri = "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
+    document = f'<img src="{local.as_uri()}"><img src="{svg_uri}"><img src="{_jpeg_data_uri(8, 8)}">'
+
+    pdf = weasyprint_html()(string=document).write_pdf()
+    assert pdf.count(b"/Subtype /Image") == 1

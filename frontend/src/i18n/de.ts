@@ -369,6 +369,9 @@ export const de: Strings = {
   'hate.category_other': 'Sonstiges',
   'hate.category_none': 'Keine',
   'hate.category_unknown': 'Unbekannt',
+  'hate.confidence_high': 'hoch',
+  'hate.confidence_medium': 'mittel',
+  'hate.confidence_low': 'niedrig',
   'hate.basis_image': 'Aus einem Bild',
 
   // analysis orphans: coverage banner + summary panel
@@ -438,6 +441,7 @@ export const de: Strings = {
   'report.section_chat_answers': 'Chat-Antworten',
   'report.section_entity_findings': 'Entitätsfunde',
   'report.section_hate_findings': 'Hatespeech-Funde',
+  'report.hate_export_order_hint': 'PDF-, HTML- und Markdown-Export listen diese nach Beitragszeit, neueste zuerst.',
   'report.default_chat_answer': 'Chat-Antwort',
   'report.default_entity_finding': 'Entitätsfund',
   'report.default_hate_finding': 'Hatespeech-Fund',
