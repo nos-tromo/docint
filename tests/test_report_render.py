@@ -165,7 +165,7 @@ def test_render_html_escapes_user_content_and_has_paged_media() -> None:
     assert 'class="item"' in htm
 
 
-def test_only_short_finding_rows_resist_page_breaks() -> None:
+def test_only_short_finding_rows_resist_page_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Page-break contract: items and finding tables flow; only their short rows move whole.
 
     A finding table (full chunk text + entity badges) is routinely taller than
@@ -176,6 +176,7 @@ def test_only_short_finding_rows_resist_page_breaks() -> None:
     which is what stops a label ending one page while its value starts the
     next. The chunk row and the entity badges stay breakable.
     """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     htm = R.render_html(_report())  # chat (prose) + entity + hate findings
     assert ".item--card" not in htm  # the unbreakable-card modifier is gone
     base_item_rule = re.search(r"\.item\s*\{([^}]*)\}", htm)
@@ -416,8 +417,9 @@ def test_findings_render_as_single_table_each(monkeypatch: pytest.MonkeyPatch) -
     assert "Posting UUID" not in md
 
 
-def test_md_finding_table_cells_escape_pipes_and_newlines() -> None:
+def test_md_finding_table_cells_escape_pipes_and_newlines(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verbatim evidence text cannot break the Markdown table grid."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     report = _single_item_report(
         "hate_speech_finding",
         {
