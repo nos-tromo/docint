@@ -1,6 +1,6 @@
 [project]
 name = "docint"
-version = "2.5.4"
+version = "2.5.5"
 description = "Proof of concept RAG application"
 authors = [
   { name = "nos-tromo" }
