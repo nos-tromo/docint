@@ -204,7 +204,7 @@ describe('IngestionStatus preprocess bars', () => {
   it('draws no bar for a stage the batch has no work for', () => {
     render(<IngestionStatus status={uploading([{ stage: 'media', done: 0, total: 0, failed: 0 }])} />)
 
-    expect(screen.queryByText('Transcribing clips')).not.toBeInTheDocument()
+    expect(screen.queryByText('Transcribing audio and video')).not.toBeInTheDocument()
   })
 
   it('names failures, since a stalled bar and a failing one read alike', () => {
@@ -233,7 +233,7 @@ describe('IngestionStatus preprocess bars', () => {
       />
     )
 
-    expect(screen.getByText('Transcribing clips')).toBeInTheDocument()
+    expect(screen.getByText('Transcribing audio and video')).toBeInTheDocument()
     expect(screen.getByText('Embedding and storing')).toBeInTheDocument()
   })
 })

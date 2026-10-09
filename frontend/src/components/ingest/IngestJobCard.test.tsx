@@ -140,7 +140,7 @@ describe('IngestJobCard preprocess bars', () => {
 
     renderIn(<IngestJobCard jobId="job-1" collection="mydocs" />)
 
-    expect(await screen.findByText('Transcribing clips')).toBeInTheDocument()
+    expect(await screen.findByText('Transcribing audio and video')).toBeInTheDocument()
     expect(screen.getByText('1/3')).toBeInTheDocument()
   })
 })

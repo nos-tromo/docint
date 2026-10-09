@@ -80,8 +80,10 @@ class MediaTranscriber:
     # than fetched twice. ``None`` runs everything on the calling thread — the
     # shape a task already on a pool worker must use.
     pool: Any = None
-    # The job's progress channel. A clip is minutes of Nextext, so a batch of
-    # them is the longest stretch an ingest spends saying nothing at all.
+    # The job's progress channel, for the round trips this run makes itself.
+    # A clip the pool transcribed is already on its ``media`` bar: counting
+    # it again here showed the same work twice, per posting link and in this
+    # run's walk order rather than as it finished.
     progress_callback: Callable[[str], None] | None = None
     # The pool's per-stage tally. A clip's keyframes are the only thing that
     # moves once Nextext has answered, and upload-time work has no job to
@@ -111,18 +113,6 @@ class MediaTranscriber:
         collection = self.target_collection or ""
         for clip in clips:
             result.consumed_paths.add(clip.path)
-        # Every tick below runs on this thread — phase 1 is serial and phase
-        # 2 reports from its own ``as_completed`` loop — so the counter needs
-        # no lock.
-        transcribed = 0
-
-        def _tick() -> None:
-            """Report one more clip's transcript in hand."""
-            nonlocal transcribed
-            transcribed += 1
-            if self.progress_callback:
-                self.progress_callback(f"Transcribing media: {transcribed}/{len(clips)} clips processed")
-
         # Phase 1 (serial): hash + transcript-cache lookup.
         hashes: dict[Path, str] = {}
         cached: dict[Path, bytes] = {}
@@ -135,7 +125,6 @@ class MediaTranscriber:
             hit = self.manifest.get_nextext_transcript(collection, media_hash) if self.manifest else None
             if hit is not None:
                 cached[clip.path] = hit.encode("utf-8")
-                _tick()
             else:
                 to_fetch.append(clip)
         # Phase 2 (concurrent): Nextext round-trips only (HTTP is concurrency-safe).
@@ -144,14 +133,15 @@ class MediaTranscriber:
             workers = max(1, min(self.nextext_max_concurrency, len(to_fetch)))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {executor.submit(self.nextext_client.process_media, clip.path): clip for clip in to_fetch}
-                for future in as_completed(futures):
+                for done, future in enumerate(as_completed(futures), start=1):
                     clip = futures[future]
                     try:
                         outcomes[clip.path] = future.result()
                     except Exception as exc:  # defensive: a raised call must not abort the batch
                         logger.warning("Nextext call raised for {!r}: {}", clip.path.name, exc)
                         outcomes[clip.path] = NextextResult(status="error", error=str(exc))
-                    _tick()
+                    if self.progress_callback:
+                        self.progress_callback(f"Transcribing media: {done}/{len(to_fetch)} clips processed")
         # Phase 3: cache the transcripts, caption the keyframes (across clips,
         # through the pool), then ingest each clip's transcript in order.
         for clip in to_fetch:

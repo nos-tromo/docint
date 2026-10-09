@@ -564,7 +564,7 @@ export const en = {
   'ingest.stage_processing_pdfs': 'Processing PDFs',
   'ingest.task_hate_detection': 'Hate speech detection',
   'ingest.task_reading_files': 'Reading files',
-  'ingest.task_transcribing_media': 'Transcribing audio and video',
+  'ingest.task_transcribing_media': 'Transcribing remaining audio and video',
   'ingest.task_linking_images': 'Linking images to posts',
   'ingest.task_embedding': 'Embedding and storing',
   'ingest.task_summary': 'Summarizing collection',
@@ -572,7 +572,7 @@ export const en = {
   'ingest.preprocess_pdf': 'Reading PDFs',
   'ingest.preprocess_ocr_pages': 'Recognizing scanned pages',
   'ingest.preprocess_image': 'Describing images',
-  'ingest.preprocess_media': 'Transcribing clips',
+  'ingest.preprocess_media': 'Transcribing audio and video',
   'ingest.preprocess_keyframes': 'Describing keyframes',
   'ingest.preprocess_failed': '{count} failed',
 

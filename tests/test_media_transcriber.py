@@ -1,9 +1,12 @@
 """Tests for the shared MediaTranscriber engine (media_transcribe.py)."""
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
 from loguru import logger
+from typing_extensions import override
 
 from docint.core.ingest.media_transcribe import MediaClip, MediaTranscriber
 from docint.core.ingest.preprocess import PreprocessProgress, StageProgress
@@ -435,31 +438,60 @@ def test_cache_hit_of_a_standalone_clip_relinks_nothing(tmp_path: Path) -> None:
     assert images.relink_calls == []
 
 
-def test_reports_one_counter_per_clip(tmp_path: Path) -> None:
-    """A clip is minutes of Nextext, so a batch of them is the run's longest silence.
+class _PartlyCachedManifest(_CachedManifest):
+    """Manifest stub that reports a cached transcript for some hashes only."""
 
-    Both a cache hit and a round trip count: the bar measures transcripts in
-    hand, not calls made.
+    def __init__(self, hits: set[str]) -> None:
+        """Initialise with the hashes that have a cached transcript.
+
+        Args:
+            hits: Media hashes the stub reports as cached.
+        """
+        self.hits = hits
+
+    @override
+    def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+        """Return the fixed cached transcript for a hash in ``hits``, else ``None``.
+
+        Args:
+            collection: Ignored.
+            file_hash: The media hash looked up.
+
+        Returns:
+            One cached segment, or ``None`` on a miss.
+        """
+        return super().get_nextext_transcript(collection, file_hash) if file_hash in self.hits else None
+
+
+@pytest.mark.parametrize(
+    ("cached", "expected"),
+    [
+        ({"hash-a"}, ["Transcribing media: 1/1 clips processed"]),
+        ({"hash-a", "hash-b"}, []),
+    ],
+)
+def test_reports_only_the_round_trips_it_makes(tmp_path: Path, cached: set[str], expected: list[str]) -> None:
+    """A cached clip is the pool's work, already on its ``media`` bar; only a fetch here counts.
+
+    Counting cache hits too drew the same clips as a second bar — once per
+    posting link, and in this run's walk order rather than as they finished.
     """
     clips = []
     for name in ("a.mp4", "b.mp4"):
         path = tmp_path / name
         path.write_bytes(b"x")
-        clips.append(_clip(path))
+        clips.append(replace(_clip(path), media_hash=f"hash-{path.stem}"))
     reported: list[str] = []
 
     MediaTranscriber(
         _FakeImages(),
         _FakeNextext(NextextResult(status="error")),
         target_collection="c",
-        manifest=None,
+        manifest=_PartlyCachedManifest(cached),
         progress_callback=reported.append,
     ).run(clips)
 
-    assert reported == [
-        "Transcribing media: 1/2 clips processed",
-        "Transcribing media: 2/2 clips processed",
-    ]
+    assert reported == expected
 
 
 def test_a_clips_keyframes_are_reported_to_the_tally(tmp_path: Path) -> None:
