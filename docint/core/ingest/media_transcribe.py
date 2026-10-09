@@ -80,10 +80,8 @@ class MediaTranscriber:
     # than fetched twice. ``None`` runs everything on the calling thread — the
     # shape a task already on a pool worker must use.
     pool: Any = None
-    # The job's progress channel, for the round trips this run makes itself.
-    # A clip the pool transcribed is already on its ``media`` bar: counting
-    # it again here showed the same work twice, per posting link and in this
-    # run's walk order rather than as it finished.
+    # The job's progress channel, for the Nextext round trips this run makes
+    # itself. A clip the pool transcribed counts on the pool's ``media`` bar.
     progress_callback: Callable[[str], None] | None = None
     # The pool's per-stage tally. A clip's keyframes are the only thing that
     # moves once Nextext has answered, and upload-time work has no job to

@@ -832,7 +832,7 @@ processed` — and the SPA renders each as its own bar:
 | Message | Stage |
 | --- | --- |
 | `Reading files: n/total files read` | The generic sweep: every document, image and table the readers open. An image batch spends its hours here. |
-| `Transcribing media: n/total clips processed` | Nextext round trips a media lane makes itself, for the clips the preprocessing pool left without a transcript (`MediaTranscriber`). A clip the pool transcribed counts only on its `media` bar (below): the lanes wait on those once per posting link and in their own walk order, so counting them here too drew the same work as a second bar with different numbers. |
+| `Transcribing media: n/total clips processed` | Nextext round trips a media lane makes itself, for the clips the preprocessing pool left without a transcript (`MediaTranscriber`). A clip the pool transcribed counts only on its `media` bar (below). |
 | `Linking images: n/total images linked` | A social export's images, stored and stamped with their posting. |
 | `Extracting entities: n/total chunks processed` | NER. |
 | `Detecting hate speech: n/total chunks processed` | Hate-speech detection. |

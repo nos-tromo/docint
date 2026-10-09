@@ -471,11 +471,7 @@ class _PartlyCachedManifest(_CachedManifest):
     ],
 )
 def test_reports_only_the_round_trips_it_makes(tmp_path: Path, cached: set[str], expected: list[str]) -> None:
-    """A cached clip is the pool's work, already on its ``media`` bar; only a fetch here counts.
-
-    Counting cache hits too drew the same clips as a second bar — once per
-    posting link, and in this run's walk order rather than as they finished.
-    """
+    """A cached clip is the pool's work, already on its ``media`` bar; only a fetch here counts."""
     clips = []
     for name in ("a.mp4", "b.mp4"):
         path = tmp_path / name
