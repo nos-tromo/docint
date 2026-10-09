@@ -1202,6 +1202,10 @@ class DocumentIngestionPipeline:
 
         for file_path in self.dir_reader.input_files:
             path_obj: Path = Path(file_path)
+            if path_obj in self.social_link_consumed:
+                # The linker's own files: the sweep never reads them, and a known
+                # dossier is already counted skipped through its rows.
+                continue
             path_str = str(path_obj)
             try:
                 # Compute hash (or get from cache if we ever re-run)
@@ -1427,10 +1431,9 @@ class DocumentIngestionPipeline:
         return open_ingest_manifest(self.target_collection)
 
     def _run_social_linker(self) -> None:
-        """Run the social linker; record consumed paths + transcript Documents.
+        """Run the social linker; record consumed paths + its posting, comment and transcript Documents.
 
-        No-op (and fail-soft) unless the batch is a social export with both a
-        postings table and a media manifest.
+        No-op (and fail-soft) unless the batch holds ``me-dossier/1`` dossiers.
         """
         from docint.core.ingest.social_linker import SocialLinker
         from docint.utils.env_cfg import load_ingestion_env, load_nextext_env
@@ -1449,8 +1452,6 @@ class DocumentIngestionPipeline:
                 nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
                 album_link_enabled=ingestion_cfg.social_album_link_enabled,
                 album_tolerance_s=ingestion_cfg.social_album_tolerance_s,
-                timestamp_link_enabled=ingestion_cfg.social_timestamp_link_enabled,
-                text_link_enabled=ingestion_cfg.social_text_link_enabled,
                 pool=get_preprocess_pool(),
                 progress_callback=self.progress_callback,
             ).run(self.data_dir)
@@ -1464,7 +1465,7 @@ class DocumentIngestionPipeline:
         finally:
             manifest.close()
         self.social_link_consumed = result.consumed_paths
-        self.social_link_documents = result.transcript_documents
+        self.social_link_documents = result.documents
 
     def _run_standalone_media(self) -> None:
         """Transcribe loose audio/video files the social linker did not claim.
