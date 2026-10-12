@@ -4007,8 +4007,9 @@ class RAG:
         English-only text tower, so a German query embeds near-degenerately and
         the nearest images come back essentially at random. Translating first
         restores the ranking. English deployments skip the round-trip entirely,
-        and a translation outage degrades to the untranslated query rather than
-        dropping the image lane.
+        a query already in English is embedded as it is, and a translation
+        outage degrades to the untranslated query rather than dropping the image
+        lane.
 
         Args:
             query (str): The user's original query.
@@ -4019,11 +4020,9 @@ class RAG:
         if (self.language_code or "en").lower().startswith("en"):
             return query
         result = translate_text(query, target_lang="en")
-        translated = (result.translation or "").strip() if result.ok else ""
-        if not translated:
+        if not result.ok:
             logger.warning("Image query translation unavailable; embedding the untranslated query.")
-            return query
-        return translated
+        return (result.translation or "").strip() or query
 
     def _image_config_value(self, name: str, default: Any) -> Any:
         """Read one image-lane setting, tolerating an unbuilt image service.

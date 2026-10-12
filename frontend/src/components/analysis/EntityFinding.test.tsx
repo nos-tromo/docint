@@ -221,6 +221,41 @@ describe('EntityFinding', () => {
     expect(screen.getByRole('button', { name: /show original/i })).toBeInTheDocument()
   })
 
+  it('says a chunk already in the target language needs no translation, keeping it in view', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          translation: null,
+          model: 'm',
+          target_lang: 'en',
+          error: null,
+          same_language: true
+        })
+      }))
+    )
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    })
+    render(
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={{ chunk_id: 'c', filename: 'a.pdf', chunk_text: 'Already English text.', entities: [] }}
+          highlightTerms={[]}
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^translate$/i }))
+    await waitFor(() => expect(screen.getByText(/already in english/i)).toBeInTheDocument())
+    expect(screen.getByText('Already English text.')).toBeInTheDocument()
+    expect(screen.queryByText(/^translation$/i)).not.toBeInTheDocument()
+  })
+
   it('includes the translation in the report snapshot after translating', () => {
     const snap = entityFindingSnapshot(
       { chunk_id: 'c1', chunk_text: 'orig' } as never,

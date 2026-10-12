@@ -31,6 +31,23 @@ def test_translate_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["target_lang"] == "de"
     assert body["model"] == "m"
     assert body["error"] is None
+    assert body["same_language"] is False
+
+
+def test_translate_reports_text_already_in_the_target_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text already in the target language is ok, flagged, and carries no translation."""
+    monkeypatch.setattr(
+        api,
+        "translate",
+        lambda text, **kw: TranslateResult(True, None, "m", "de", same_language=True),
+    )
+    r = client.post("/translate", json={"text": "Hallo"}, headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["same_language"] is True
+    assert body["translation"] is None
+    assert body["error"] is None
 
 
 def test_translate_failsoft_shape(monkeypatch: pytest.MonkeyPatch) -> None:

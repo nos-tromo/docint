@@ -9,6 +9,7 @@ Pins the default-to-chat-model behavior and env override for the
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -143,6 +144,7 @@ def test_translate_success(monkeypatch: pytest.MonkeyPatch) -> None:
     res = tc.translate("Hello world")
     assert res.ok is True
     assert res.translation == "Hallo Welt"  # stripped
+    assert res.same_language is False
     assert res.target_lang  # set from locale
     assert len(calls) == 1
 
@@ -307,3 +309,156 @@ def test_translate_defaults_to_the_active_locale(monkeypatch: pytest.MonkeyPatch
     res = tc.translate("Hello")
 
     assert res.target_lang == "de"
+
+
+class _CannedPipe:
+    """Fake chat pipeline answering every call with one canned reply."""
+
+    def __init__(self, reply: str) -> None:
+        """Store the reply.
+
+        Args:
+            reply: What the model answers.
+        """
+        self.reply = reply
+
+    def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+        """Return the canned reply.
+
+        Args:
+            prompt: The source text (unused by the fake).
+            system_prompt: The localized translate prompt (unused by the fake).
+            model: Optional model override (unused by the fake).
+
+        Returns:
+            str: The canned reply.
+        """
+        return self.reply
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "[[SAME_LANGUAGE]]",
+        "[SAME_LANGUAGE]",
+        "`[[same_language]]`",
+        "[[SAME_LANGUAGE]] The text is already in German.",
+    ],
+)
+def test_translate_marker_reply_is_not_a_translation(monkeypatch: pytest.MonkeyPatch, reply: str) -> None:
+    """The model's same-language marker, however decorated, yields no translation.
+
+    Passed through, the marker would be shown and frozen into a report as the
+    finding's translation.
+
+    Args:
+        monkeypatch: Fixture used to patch the module-level pipeline factory.
+        reply: The model's raw answer.
+    """
+    monkeypatch.setattr(tc, "_pipeline", lambda: _CannedPipe(reply))
+
+    res = tc.translate("Das ist bereits ein deutscher Satz.")
+
+    assert res.ok is True
+    assert res.translation is None
+    assert res.same_language is True
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Das ist bereits ein deutscher Satz.",
+        '"Das ist bereits ein deutscher Satz."',
+        "„Das ist bereits ein deutscher Satz“",
+        "das ist bereits ein   deutscher\nSatz",
+    ],
+)
+def test_translate_echo_is_not_a_translation(monkeypatch: pytest.MonkeyPatch, reply: str) -> None:
+    """A reply repeating the source word for word is not a translation.
+
+    A model can still echo despite the marker instruction — verbatim, quoted, or
+    with case and spacing changed — and an echo shown as a translation is the
+    bug this guards.
+
+    Args:
+        monkeypatch: Fixture used to patch the module-level pipeline factory.
+        reply: The model's raw answer.
+    """
+    monkeypatch.setattr(tc, "_pipeline", lambda: _CannedPipe(reply))
+
+    res = tc.translate("Das ist bereits ein deutscher Satz.")
+
+    assert res.ok is True
+    assert res.translation is None
+    assert res.same_language is True
+
+
+@pytest.mark.parametrize("locale", ["en", "de"])
+def test_translate_recognises_the_marker_its_prompt_asks_for(monkeypatch: pytest.MonkeyPatch, locale: str) -> None:
+    """The marker each locale's prompt asks for must be the one ``translate`` detects.
+
+    The fake model obeys the prompt it is sent: it answers the ``[[…]]`` marker
+    that prompt names, or a translation when it names none. A prompt edit that
+    drops the marker, or a detector renamed away from it, fails here.
+
+    Args:
+        monkeypatch: Fixture used to patch the pipeline and locale.
+        locale: The active ``RESPONSE_LANGUAGE``.
+    """
+    monkeypatch.setattr(tc, "load_language_env", lambda: type("_L", (), {"code": locale})())
+
+    class _ObedientPipe:
+        """Fake chat pipeline doing what the system prompt asks."""
+
+        def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+            """Answer the prompt's marker, or a translation without one.
+
+            Args:
+                prompt: The source text (unused by the fake).
+                system_prompt: The localized translate prompt under test.
+                model: Optional model override (unused by the fake).
+
+            Returns:
+                str: The marker the prompt names, else a canned translation.
+            """
+            marker = re.search(r"\[\[[A-Z_]+\]\]", system_prompt or "")
+            return marker.group(0) if marker else "a translation"
+
+    monkeypatch.setattr(tc, "_pipeline", lambda: _ObedientPipe())
+
+    res = tc.translate("Text already in the target language.")
+
+    assert res.same_language is True
+    assert res.translation is None
+
+
+@pytest.mark.parametrize(
+    ("text", "reply"),
+    [
+        ("Follow #same_language for more news.", "Folgt #same_language für weitere Neuigkeiten."),
+        ("Read https://example.org/same_language today.", "Lies heute https://example.org/same_language."),
+        ("same_language is the flag the API returns.", "same_language ist das Flag, das die API zurückgibt."),
+        ("Good morning. Guten Morgen.", "Guten Morgen. [[SAME_LANGUAGE]]"),
+    ],
+)
+def test_translate_marker_word_inside_a_translation_never_suppresses_it(
+    monkeypatch: pytest.MonkeyPatch, text: str, reply: str
+) -> None:
+    """A reply carrying a translation is kept, whatever marker word it holds.
+
+    The prompt has the model preserve hashtags and URLs, so a source carrying
+    the marker word hands it on to a faithful translation. Matched anywhere in
+    the reply, it would let a text's author suppress the text's translation.
+
+    Args:
+        monkeypatch: Fixture used to patch the module-level pipeline factory.
+        text: The source snippet.
+        reply: The model's faithful translation of it.
+    """
+    monkeypatch.setattr(tc, "_pipeline", lambda: _CannedPipe(reply))
+
+    res = tc.translate(text)
+
+    assert res.ok is True
+    assert res.same_language is False
+    assert res.translation == reply

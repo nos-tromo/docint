@@ -50,7 +50,8 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   consecutive failures rather than working through the whole section to report
   the same outage. Nothing is stored by translating: the translations live in
   the browser for the session, and only reach the server when a finding they
-  belong to is added to a report.
+  belong to is added to a report. A finding already in the active locale gets
+  no translation, so its snapshot carries none.
 - The **Report** view lists your reports and, for the active one, shows the
   picked artifacts grouped by type with per-item notes, reordering, and removal.
 - Reports are **owner-scoped** and persisted server-side in the same SQLite

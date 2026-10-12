@@ -3,7 +3,7 @@ import { storedTranslation, useTranslationsStore } from './translations'
 
 describe('translations store', () => {
   beforeEach(() => {
-    useTranslationsStore.setState({ byText: {} })
+    useTranslationsStore.setState({ byText: {}, sameLanguage: {} })
   })
 
   it('stores a payload retrievable by its raw text', () => {
@@ -31,5 +31,16 @@ describe('translations store', () => {
     useTranslationsStore.getState().put('', { text: 'nothing', target_lang: 'de', model: 'test-model' })
 
     expect(storedTranslation('')).toBeUndefined()
+  })
+
+  it('remembers text already in the target language apart from translations, ignoring an empty key', () => {
+    const { markSameLanguage } = useTranslationsStore.getState()
+
+    markSameLanguage('Schon deutsch.')
+    markSameLanguage('')
+
+    expect(useTranslationsStore.getState().sameLanguage).toEqual({ 'Schon deutsch.': true })
+    // Never a translation: the report snapshots and "Add all" read only those.
+    expect(storedTranslation('Schon deutsch.')).toBeUndefined()
   })
 })

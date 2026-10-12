@@ -20,7 +20,10 @@ interface Props<Row> {
  */
 export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }: Props<Row>) {
   const t = useT()
-  const { run, stop, status, cap, total, done, failed, skipped } = useTranslateAll<Row>({ fetchAll, textOf })
+  const { run, stop, status, cap, total, done, failed, skipped, same, processed } = useTranslateAll<Row>({
+    fetchAll,
+    textOf
+  })
   const translating = status === 'translating'
   const isFailed = status === 'failed'
 
@@ -28,13 +31,13 @@ export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }
   // it has got to.
   let message: string | null = null
   if (status === 'too_many') message = t('common.translate_all_too_many', { max: cap })
-  else if (translating) message = t('common.translate_all_progress', { done, total })
+  else if (translating) message = t('common.translate_all_progress', { processed, total })
   else if (isFailed) message = t('common.translate_all_failed')
-  else if (status === 'stopped') message = t('common.translate_all_stopped', { done, total })
+  else if (status === 'stopped') message = t('common.translate_all_stopped', { processed, total })
   else if (status === 'done') {
     if (total === 0) message = t('common.translate_all_none')
-    else if (failed > 0) message = t('common.translate_all_done_failed', { done, failed })
-    else message = t('common.translate_all_done', { done, skipped })
+    else if (failed > 0) message = t('common.translate_all_done_failed', { done, failed, same })
+    else message = t('common.translate_all_done', { done, same, skipped })
   }
 
   // `IconButton`'s `busy` disables the control: right for the page walk, wrong

@@ -40,6 +40,9 @@ export function TranslateControl({ rawText, onTranslated, className }: Props) {
       {translatable.failed && (
         <div className="mt-1 text-[11px] text-muted-foreground">{t('common.translation_unavailable')}</div>
       )}
+      {translatable.sameLanguage && (
+        <div className="mt-1 text-[11px] text-muted-foreground">{t('common.translation_same_language')}</div>
+      )}
     </div>
   )
 }
