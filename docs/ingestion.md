@@ -514,7 +514,8 @@ ingestion path:
   are cached by content hash, so images already in a collection keep the
   caption they were stored with; ingest into a fresh collection to caption
   them again.
-- Every point written fresh carries `enrichment: "pending"`. Once its lanes
+- Every point written fresh carries `enrichment: "pending"`, except a
+  standalone file's, whose analysis belongs to its document. Once its lanes
   are done, the ingest job enriches the pending points with its own stages and
   per-request overrides and marks them `done`, including points written at
   upload time, before the job existed. A keyframe rewritten for another

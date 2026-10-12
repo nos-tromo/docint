@@ -1407,11 +1407,16 @@ class ImageIngestionService:
                     # linked write. Nothing queued one stored loose — as a
                     # standalone file's, whose document the linker's files
                     # never get — or one stored before the marker existed.
-                    self.qdrant_client.set_payload(
-                        collection_name=target_collection,
-                        payload={ENRICHMENT_FIELD: ENRICHMENT_PENDING},
-                        points=[existing_point_id],
-                    )
+                    # Fail-soft: the linker drops a whole export's links on
+                    # an exception, and the next job's claim queues it anyway.
+                    try:
+                        self.qdrant_client.set_payload(
+                            collection_name=target_collection,
+                            payload={ENRICHMENT_FIELD: ENRICHMENT_PENDING},
+                            points=[existing_point_id],
+                        )
+                    except Exception as exc:
+                        logger.warning("Could not queue image point '{}' for enrichment: {}", existing_point_id, exc)
                 self._backfill_thumbnail(
                     collection_name=target_collection,
                     point_id=existing_point_id,

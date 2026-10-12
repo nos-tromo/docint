@@ -1720,6 +1720,34 @@ def test_a_linked_image_never_queued_is_queued_when_a_posting_claims_it_again() 
     assert client.records[point_id].get("enrichment") == "pending"
 
 
+def test_a_claim_whose_queue_write_fails_still_links_the_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed marker write costs the queueing, never the claim.
+
+    The linker treats an exception from one image as the export failing and
+    drops every posting link of the job, so the write must fail soft; the
+    next job's claim queues the image instead.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    service, client, _ = _build_service()
+    image = _make_png_bytes((13, 23, 33))
+    point_id = _store_loose(service, image)
+    merge = client.set_payload
+
+    def _refuse_the_marker(collection_name: str, payload: dict[str, Any], points: list[str]) -> None:
+        if "enrichment" in payload:
+            raise RuntimeError("qdrant unavailable")
+        merge(collection_name, payload, points)
+
+    monkeypatch.setattr(client, "set_payload", _refuse_the_marker)
+
+    _claim(service, image, "u1")
+
+    assert client.records[point_id]["posting_uuid"] == "u1"
+    assert "enrichment" not in client.records[point_id]
+
+
 def test_a_claimed_image_keeps_the_enrichment_it_already_has() -> None:
     """A point the pass already settled is not queued again by a later claim."""
     service, client, _ = _build_service()
