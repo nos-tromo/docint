@@ -69,8 +69,8 @@ function HateSpeechTableRow({
   const translation = useTranslationsStore((s) => s.byText[translatableText])
   const reportItem = hateSpeechSnapshot(row, translation)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
-  // A keyframe or PDF figure shows no thumbnail here, so the pill is what says
-  // the verdict was judged from an image's description.
+  // The thumbnail shows the picture; the pill says the verdict was judged from
+  // its description, tags and printed words.
   const pills = [
     ...(row.basis === 'image' ? [{ key: 'basis', value: i18n('hate.basis_image') }] : []),
     ...referenceMetadataPills(row.reference_metadata, i18n)

@@ -519,9 +519,10 @@ ingestion path:
   pending for the next run; `INGEST_FAIL_FAST=true` aborts the run instead.
   Images ingested before the marker existed carry none and are not enriched
   retroactively; re-ingest into a fresh collection to analyse them.
-- In the Analysis tables, a finding read off a PDF figure or a keyframe shows
-  no thumbnail: the preview route serves source files, and its source is the
-  PDF or the clip. Report exports still carry the stored image.
+- In the Analysis tables, every finding read off an image shows the picture:
+  `/sources/thumbnail` serves the stored thumbnail by `image_id`, so a PDF
+  figure or a keyframe shows its own pixels rather than the document or the
+  clip it came from. Report exports carry the same stored image.
 - Failures are soft unless `IMAGE_FAIL_ON_EMBED_ERROR` /
   `IMAGE_FAIL_ON_TAG_ERROR` are set.
 

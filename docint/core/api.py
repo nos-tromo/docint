@@ -1,8 +1,10 @@
 """FastAPI app exposing chat, ingestion, collection, and citation endpoints."""
 
 import asyncio
+import base64
 import io
 import json
+import mimetypes
 import os
 import threading
 import time
@@ -6084,6 +6086,56 @@ def preview_source(collection: str, file_hash: str, principal: Principal = Depen
     # text; downloads go through the session-ZIP endpoint.
     if path.suffix.lower() in {".md", ".csv"}:
         return FileResponse(path, media_type="text/plain; charset=utf-8")
+    return FileResponse(path)
+
+
+@app.get("/sources/thumbnail", tags=["Sources"])
+def source_thumbnail(collection: str, image_id: str, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+    """Serve the picture behind an image finding, addressed by the image itself.
+
+    ``/sources/preview`` serves the file a finding came from, and for a video
+    keyframe or a PDF figure that is the clip or the document — nothing an
+    ``<img>`` can show. This route answers with the stored thumbnail on the
+    ``_images`` companion instead, which every kind of image point carries
+    and which is the only copy of a keyframe's pixels. A point stored before
+    thumbnails existed falls back to its own image file, never to a clip or
+    a document.
+
+    Args:
+        collection (str): The caller's logical collection name.
+        image_id (str): The image's content hash.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        Response: The thumbnail, or the image file it would have been made from.
+
+    Raises:
+        HTTPException: 404 when the caller does not own the collection or the
+            image has no picture to show.
+    """
+    physical = _require_owned_collection(collection, principal)
+    try:
+        points, _ = rag.qdrant_client.scroll(
+            collection_name=rag._image_collection_name(physical),
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="image_id", match=models.MatchValue(value=image_id))]
+            ),
+            limit=1,
+            with_payload=["thumbnail_b64", "thumbnail_mime"],
+            with_vectors=False,
+        )
+        payload = (points[0].payload or {}) if points else {}
+        stored = payload.get("thumbnail_b64")
+        if isinstance(stored, str) and stored:
+            mime = str(payload.get("thumbnail_mime") or "")
+            return Response(
+                base64.b64decode(stored, validate=True), media_type=mime if mime.startswith("image/") else "image/jpeg"
+            )
+    except Exception as exc:
+        logger.warning("Stored thumbnail of image '{}' unavailable: {}", image_id, exc)
+    path = _resolve_source_file_path(physical, image_id)
+    if path is None or not (mimetypes.guess_type(path.name)[0] or "").startswith("image/"):
+        raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(path)
 
 

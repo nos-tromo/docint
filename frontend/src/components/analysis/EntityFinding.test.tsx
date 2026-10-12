@@ -288,7 +288,37 @@ describe('EntityFinding — evidence thumbnail', () => {
     // The picture is the control: it carries the accessible name, and the img
     // inside it is presentational so the two are not announced twice.
     expect(screen.getByRole('button', { name: /slide\.png/ })).toBeInTheDocument()
-    expect(container.querySelector('img')?.getAttribute('src')).toContain('file_hash=h1')
+    expect(container.querySelector('img')?.getAttribute('src')).toContain('/sources/thumbnail?')
+    expect(container.querySelector('img')?.getAttribute('src')).toContain('image_id=h1')
+  })
+
+  it('shows a keyframe from its stored frame, not from the clip it was cut from', () => {
+    const { container } = renderFinding({
+      chunk_id: 'c5',
+      filename: 'talk.mp4',
+      file_hash: 'clip-hash',
+      image_id: 'frame-hash'
+    })
+
+    const src = container.querySelector('img')?.getAttribute('src') ?? ''
+    expect(src).toContain('image_id=frame-hash')
+    expect(src).not.toContain('clip-hash')
+  })
+
+  it('enlarges a keyframe from its stored frame, since its file is a clip', async () => {
+    const { container } = renderFinding({
+      chunk_id: 'c6',
+      filename: 'talk.mp4',
+      file_hash: 'clip-hash',
+      image_id: 'frame-hash'
+    })
+
+    await userEvent.click(container.querySelector('img')!)
+
+    const modal = useUiStore.getState().previewModal
+    expect(modal).toMatchObject({ filename: 'talk.mp4' })
+    expect(modal?.image_url).toContain('image_id=frame-hash')
+    expect(modal?.file_hash).toBeUndefined()
   })
 
   it('shows nothing for a text finding', () => {

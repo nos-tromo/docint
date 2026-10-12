@@ -201,3 +201,13 @@ export const sourcePreviewUrl = (collection: string, file_hash: string) =>
       `/sources/preview?collection=${encodeURIComponent(collection)}&file_hash=${encodeURIComponent(file_hash)}`
     )
   )
+
+// The picture behind an image finding, addressed by the image rather than by
+// the file it was cut from (a keyframe's file is its clip, a figure's its PDF).
+// Used as an <img src>, so it carries the sub-path base too.
+export const sourceThumbnailUrl = (collection: string, imageId: string) =>
+  url(
+    withOwner(
+      `/sources/thumbnail?collection=${encodeURIComponent(collection)}&image_id=${encodeURIComponent(imageId)}`
+    )
+  )

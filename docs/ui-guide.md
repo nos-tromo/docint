@@ -171,9 +171,11 @@ text: the words printed in a PDF figure, an image attached to a posting or a
 video keyframe, with the image's caption also read for entities (see
 [Ingestion — Images](ingestion.md#images--imagespy)). Such a row names the
 file the words came from: the PDF a figure was cut out of, the attached
-image itself, or the clip a keyframe belongs to. A hate-speech row judged
-from an image's words and description carries a **From an image** pill,
-since a keyframe or a PDF figure shows no thumbnail there. Either tab shows
+image itself, or the clip a keyframe belongs to. Every such row shows the
+picture beside it, a keyframe and a PDF figure included; clicking it
+enlarges a still from its own file and a keyframe or figure from the stored
+image. A hate-speech row judged from an image's words and description also
+carries a **From an image** pill. Either tab shows
 an image's text as labelled parts — **Text in the image** (the words printed
 in it), **Image description** and **Tags** — rather than one passage, so it
 is clear which words the picture says and which are docint's description.

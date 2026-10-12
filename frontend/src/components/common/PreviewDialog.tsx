@@ -85,12 +85,13 @@ export function PreviewDialog() {
   const panelRef = useRef<HTMLDivElement | null>(null)
   const openerRef = useRef<HTMLElement | null>(null)
 
-  // Frozen evidence is always a JPEG thumbnail, whatever the source document
-  // it was cut from was called — a keyframe's filename ends in .mp4. So the
-  // extension decides the kind only for a live source file.
+  // Frozen evidence and a stored image are always a JPEG thumbnail, whatever
+  // the source document they were cut from was called — a keyframe's filename
+  // ends in .mp4. So the extension decides the kind only for a live source file.
   const frozen = modal?.data_uri
-  const kind = frozen ? 'image' : modal ? previewKind(modal.filename) : 'none'
-  const url = frozen ?? (modal?.collection ? sourcePreviewUrl(modal.collection, modal.file_hash ?? '') : null)
+  const image = frozen ?? modal?.image_url
+  const kind = image ? 'image' : modal ? previewKind(modal.filename) : 'none'
+  const url = image ?? (modal?.collection ? sourcePreviewUrl(modal.collection, modal.file_hash ?? '') : null)
   const textPreview = useTextPreview(kind === 'text' ? url : null)
 
   useEffect(() => {
