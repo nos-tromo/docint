@@ -9,6 +9,7 @@ view, or a report export never crashes on a bad translate call.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -18,10 +19,16 @@ from docint.utils.env_cfg import load_language_env, load_model_env
 from docint.utils.openai_cfg import OpenAIPipeline
 from docint.utils.prompt_loader import load_localized_prompt
 
+#: What the translate prompt has the model answer, instead of the text, when
+#: there is nothing to translate. Protocol, so the same token in every locale.
+_SAME_LANGUAGE = "[[SAME_LANGUAGE]]"
+
 _DEFAULT_TRANSLATE_PROMPT = (
     "Translate the user's message into the target language. Output only the "
     "translation — no preamble, no explanation, no quotation marks. Preserve "
-    "names, numbers, URLs, and line breaks."
+    "names, numbers, URLs, and line breaks. If the text is already in the target "
+    "language, or contains nothing to translate (only names, numbers or URLs), "
+    f"output exactly {_SAME_LANGUAGE} and nothing else."
 )
 
 
@@ -31,10 +38,13 @@ class TranslateResult:
 
     Attributes:
         ok: True on success (including a blank-input no-op).
-        translation: Translated text, or None on failure.
+        translation: Translated text, or None on failure or when there is
+            nothing to translate.
         model: The model that produced (or would have produced) the translation.
         target_lang: The destination locale code (the operator's language).
         error: Short machine-readable failure token, or None on success.
+        same_language: True when the text needs no translation — it is
+            already in ``target_lang``, or holds only names, numbers and URLs.
     """
 
     ok: bool
@@ -42,6 +52,7 @@ class TranslateResult:
     model: str
     target_lang: str
     error: str | None = None
+    same_language: bool = False
 
 
 @lru_cache(maxsize=1)
@@ -63,6 +74,15 @@ def _translate_cached(text: str, target_lang: str, model: str) -> str:
     return _pipeline().call_chat(text, system_prompt=system_prompt, model=model).strip()
 
 
+def _words(text: str) -> list[str]:
+    """Case-folded words of ``text``, for comparing a reply with its source.
+
+    Quotes, punctuation, ``#`` and emoji drop out, so a reply that merely wraps
+    or re-punctuates the source still compares equal to it.
+    """
+    return re.findall(r"\w+", text.casefold())
+
+
 def translate(text: str, *, target_lang: str | None = None) -> TranslateResult:
     """Translate a snippet into the operator's active locale, or an explicit one.
 
@@ -71,6 +91,11 @@ def translate(text: str, *, target_lang: str | None = None) -> TranslateResult:
     destination is dictated by a downstream model rather than by the operator:
     image retrieval translates to English because the CLIP text tower is
     English-only, whatever locale the UI runs in.
+
+    Text needing no translation comes back with ``same_language`` set and no
+    translation, so no caller can show a copy of the source as one. The model
+    answers :data:`_SAME_LANGUAGE` for it, and a reply repeating the source
+    word for word counts the same.
 
     Args:
         text: The source snippet (already held by the caller).
@@ -85,7 +110,11 @@ def translate(text: str, *, target_lang: str | None = None) -> TranslateResult:
         return TranslateResult(ok=True, translation="", model=model, target_lang=target_lang)
     try:
         translated = _translate_cached(text, target_lang, model)
-        return TranslateResult(ok=True, translation=translated, model=model, target_lang=target_lang)
     except Exception as exc:  # fail-soft: degrade, never crash the caller
         logger.warning("Translation unavailable: {}", exc)
         return TranslateResult(ok=False, translation=None, model=model, target_lang=target_lang, error="unavailable")
+    # The marker is matched without its brackets and in any case: models
+    # re-bracket, quote or annotate it.
+    if _SAME_LANGUAGE.strip("[]").casefold() in translated.casefold() or _words(translated) == _words(text):
+        return TranslateResult(ok=True, translation=None, model=model, target_lang=target_lang, same_language=True)
+    return TranslateResult(ok=True, translation=translated, model=model, target_lang=target_lang)

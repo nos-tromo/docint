@@ -30,6 +30,7 @@ import types
 from typing import Any, cast
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from llama_index.core.schema import NodeWithScore, QueryBundle
 
 from docint.core.rag import RAG, ImageRelevanceFloorPostprocessor
@@ -259,6 +260,34 @@ def test_translation_failure_falls_back_to_the_original_query(monkeypatch: pytes
     rag._retrieve_image_nodes("Gibt es Dokumente über KI?", top_k=2)
 
     assert image_service.seen_query_text == "Gibt es Dokumente über KI?"
+
+
+def test_query_already_in_english_is_embedded_as_is_without_a_warning(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """An English query in a German deployment is embedded unchanged, and is no outage.
+
+    The translator answers such a query with ``same_language`` and no
+    translation; logging that as "translation unavailable" would report a false
+    outage on every English query.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        loguru_caplog: Captures loguru WARNING records.
+    """
+    monkeypatch.setattr(
+        "docint.core.rag.translate_text",
+        lambda text, target_lang=None: TranslateResult(
+            ok=True, translation=None, model="stub", target_lang="en", same_language=True
+        ),
+    )
+    image_service = StubImageService([TRANSFORMER])
+    rag = _build_rag(image_service=image_service, locale="de")
+
+    rag._retrieve_image_nodes("Show me the Transformer architecture", top_k=2)
+
+    assert image_service.seen_query_text == "Show me the Transformer architecture"
+    assert not [r.getMessage() for r in loguru_caplog.records if r.funcName == "_image_query_for_clip"]
 
 
 def test_english_locale_skips_the_translation_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:

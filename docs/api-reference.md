@@ -1145,7 +1145,14 @@ path. Used by the UI Inspector page to render citations.
 
 Translates a caller-supplied snippet into the operator's locale
 (`RESPONSE_LANGUAGE`). Request `TranslateIn` — `{"text": str}`; response
-`{ok, translation, model, target_lang, error}`.
+`{ok, translation, model, target_lang, error, same_language}`.
+
+Text that needs no translation returns `ok: true, translation: null,
+same_language: true`. That covers text already in the operator's locale, and
+text that is only names, numbers or URLs. It is an answer, not a failure. The
+model replies with a marker instead of repeating the text, and a reply that
+repeats the source word for word counts the same. The route never returns a
+copy of the source as a translation.
 
 Principal-authenticated but deliberately **not** collection-scoped: it
 translates text the caller already holds, so there is nothing to leak and no

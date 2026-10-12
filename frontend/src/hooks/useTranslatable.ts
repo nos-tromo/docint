@@ -11,6 +11,8 @@ export interface Translatable {
   busy: boolean
   /** True when the last attempt failed (transport error or ok:false). */
   failed: boolean
+  /** True when the last answer was that the text is already in the target language. */
+  sameLanguage: boolean
   /** Translated text to render when `shown`, else null. */
   translation: string | null
   /** Fetch+show, or hide if already shown. */
@@ -25,6 +27,8 @@ export interface Translatable {
  *
  * The text lives in the shared translations store keyed by `rawText`; only
  * the show/hide flag is local, so a row keeps its translation across a remount.
+ * Text already in the target language is never shown or stored as a
+ * translation: `sameLanguage` says so instead.
  */
 export function useTranslatable(
   rawText: string,
@@ -34,8 +38,12 @@ export function useTranslatable(
   const { mutateAsync, data, status } = useTranslate()
   const cached = useTranslationsStore((s) => s.byText[rawText])
   const put = useTranslationsStore((s) => s.put)
+  const markSameLanguage = useTranslationsStore((s) => s.markSameLanguage)
   const busy = status === 'pending'
   const failed = status === 'error' || (data != null && !data.ok)
+  // This row's own answer, not the store: after "Translate all" every such
+  // row would otherwise carry the note.
+  const sameLanguage = data?.ok === true && data.same_language === true
   const translation = shown ? (cached?.text ?? null) : null
 
   async function toggle() {
@@ -49,7 +57,9 @@ export function useTranslatable(
     }
     try {
       const res = await mutateAsync(rawText)
-      if (res.ok && res.translation != null) {
+      if (res.ok && res.same_language) {
+        markSameLanguage(rawText)
+      } else if (res.ok && res.translation != null) {
         const payload = { text: res.translation, target_lang: res.target_lang, model: res.model }
         put(rawText, payload)
         setShown(true)
@@ -60,5 +70,5 @@ export function useTranslatable(
     }
   }
 
-  return { shown, busy, failed, translation, toggle }
+  return { shown, busy, failed, sameLanguage, translation, toggle }
 }

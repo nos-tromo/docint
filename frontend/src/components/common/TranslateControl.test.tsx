@@ -8,7 +8,7 @@ import { useTranslationsStore } from '@/stores/translations'
 afterEach(() => vi.restoreAllMocks())
 // Keyed by text app-wide: one test's translation would otherwise satisfy the
 // next one's toggle.
-beforeEach(() => useTranslationsStore.setState({ byText: {} }))
+beforeEach(() => useTranslationsStore.setState({ byText: {}, sameLanguage: {} }))
 
 function renderControl(onTranslated?: (t: unknown) => void) {
   const qc = new QueryClient({
@@ -79,6 +79,31 @@ describe('TranslateControl', () => {
     await userEvent.click(screen.getByRole('button', { name: /translate/i }))
     await waitFor(() => expect(screen.getByText(/unavailable/i)).toBeInTheDocument())
     expect(screen.getByText('Hello world')).toBeInTheDocument()
+    expect(onTranslated).not.toHaveBeenCalled()
+  })
+
+  it('says text already in the target language needs no translation, keeping the original', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          translation: null,
+          model: 'm',
+          target_lang: 'en',
+          error: null,
+          same_language: true
+        })
+      }))
+    )
+    const onTranslated = vi.fn()
+    renderControl(onTranslated)
+    await userEvent.click(screen.getByRole('button', { name: /translate/i }))
+    await waitFor(() => expect(screen.getByText(/already in english/i)).toBeInTheDocument())
+    expect(screen.getByText('Hello world')).toBeInTheDocument()
+    expect(screen.queryByText(/^translation$/i)).not.toBeInTheDocument()
     expect(onTranslated).not.toHaveBeenCalled()
   })
 

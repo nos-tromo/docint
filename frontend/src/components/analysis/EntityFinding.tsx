@@ -195,6 +195,9 @@ export function EntityFinding({
         {translationState.failed && (
           <div className="mt-1 text-[11px] text-muted-foreground">{t('common.translation_unavailable')}</div>
         )}
+        {translationState.sameLanguage && (
+          <div className="mt-1 text-[11px] text-muted-foreground">{t('common.translation_same_language')}</div>
+        )}
       </div>
 
       <div className="flex items-center justify-end gap-1">

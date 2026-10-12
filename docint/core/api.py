@@ -6094,13 +6094,15 @@ def translate_text(payload: TranslateIn, principal: Principal = Depends(resolve_
     Authenticated for consistency, but not collection-scoped: it translates text
     the caller already holds, so there is nothing to leak and no store re-fetch.
     Fail-soft — a transport error returns ``ok: false`` with the original shape.
+    Text already in the operator's locale returns ``ok: true`` with
+    ``same_language: true`` and no translation.
 
     Args:
         payload (TranslateIn): The snippet to translate.
         principal (Principal): The resolved request principal.
 
     Returns:
-        dict[str, Any]: ``{ok, translation, model, target_lang, error}``.
+        dict[str, Any]: ``{ok, translation, model, target_lang, error, same_language}``.
     """
     result = translate(payload.text)
     return {
@@ -6109,4 +6111,5 @@ def translate_text(payload: TranslateIn, principal: Principal = Depends(resolve_
         "model": result.model,
         "target_lang": result.target_lang,
         "error": result.error,
+        "same_language": result.same_language,
     }

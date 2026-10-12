@@ -23,6 +23,7 @@ interface Deferred {
 function stubFetch(opts: {
   calls: string[]
   fail?: (text: string) => boolean
+  same?: (text: string) => boolean
   gate?: Deferred[]
 } = { calls: [] }) {
   vi.stubGlobal(
@@ -40,6 +41,20 @@ function stubFetch(opts: {
             ok: true,
             status: 200,
             json: async () => ({ ok: false, translation: null, model: 'm', target_lang: 'de', error: 'unavailable' })
+          }
+        }
+        if (opts.same?.(text)) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ok: true,
+              translation: null,
+              model: 'm',
+              target_lang: 'de',
+              error: null,
+              same_language: true
+            })
           }
         }
         return {
@@ -67,7 +82,7 @@ const clickTranslateAll = () => userEvent.click(screen.getByRole('button', { nam
 beforeEach(() => {
   // Keyed by text app-wide: one test's success would otherwise satisfy the
   // next one's already-translated check.
-  useTranslationsStore.setState({ byText: {} })
+  useTranslationsStore.setState({ byText: {}, sameLanguage: {} })
   vi.stubGlobal('confirm', vi.fn(() => true))
 })
 
@@ -128,6 +143,46 @@ describe('TranslateAllButton', () => {
     expect(calls).toEqual([])
   })
 
+  it('counts findings already in the target language without filing them or tripping the breaker', async () => {
+    // Four in a row: "nothing to translate" must not read as an outage.
+    const calls: string[] = []
+    stubFetch({ calls, same: (text) => text !== 'hello' })
+
+    renderButton(
+      [
+        { chunk_text: 'eins' },
+        { chunk_text: 'zwei' },
+        { chunk_text: 'drei' },
+        { chunk_text: 'vier' },
+        { chunk_text: 'hello' }
+      ],
+      client()
+    )
+    await clickTranslateAll()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('translate-all-message')).toHaveTextContent('1 translated, 4 already in English')
+    )
+    expect(calls.sort()).toEqual(['drei', 'eins', 'hello', 'vier', 'zwei'])
+    expect(Object.keys(useTranslationsStore.getState().byText)).toEqual(['hello'])
+  })
+
+  it('never sends text again once it is known to be in the target language', async () => {
+    const calls: string[] = []
+    stubFetch({ calls })
+    useTranslationsStore.setState({ sameLanguage: { eins: true } })
+
+    renderButton([{ chunk_text: 'eins' }, { chunk_text: 'zwei' }], client())
+    await clickTranslateAll()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('translate-all-message')).toHaveTextContent(
+        '1 translated, 1 already in English, 0 already translated'
+      )
+    )
+    expect(calls).toEqual(['zwei'])
+  })
+
   it('refuses a section larger than the server cap without translating anything', async () => {
     const calls: string[] = []
     stubFetch({ calls })
@@ -180,7 +235,7 @@ describe('TranslateAllButton', () => {
     // Concurrency 3: three calls are in flight and the button now stops the run.
     await waitFor(() => expect(calls).toHaveLength(3))
     const stopButton = await screen.findByRole('button', { name: /stop translating/i })
-    expect(screen.getByTestId('translate-all-message')).toHaveTextContent('0 of 8 translated')
+    expect(screen.getByTestId('translate-all-message')).toHaveTextContent('0 of 8 processed')
 
     await userEvent.click(stopButton)
     gate.forEach((d) => d.resolve())

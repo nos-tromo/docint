@@ -16,7 +16,7 @@ afterEach(() => {
 
 beforeEach(() => {
   localStorage.clear()
-  useTranslationsStore.setState({ byText: {} })
+  useTranslationsStore.setState({ byText: {}, sameLanguage: {} })
   useReportStore.setState({ activeReportId: null })
 })
 
@@ -103,6 +103,30 @@ describe('HateSpeechTable', () => {
     await waitFor(() => expect(within(row).getByText('übersetzt')).toBeInTheDocument())
     expect(within(row).queryByText(/Body of the flagged passage/)).not.toBeInTheDocument()
     expect(within(row).getByRole('button', { name: /show original/i })).toBeInTheDocument()
+  })
+
+  it('says a finding already in the target language needs no translation, keeping it in view', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          translation: null,
+          model: 'm',
+          target_lang: 'en',
+          error: null,
+          same_language: true
+        })
+      }))
+    )
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
+    const row = screen.getByTestId('hate-speech-row')
+    await userEvent.click(within(row).getByRole('button', { name: /^translate$/i }))
+    await waitFor(() => expect(within(row).getByText(/already in english/i)).toBeInTheDocument())
+    expect(within(row).getByText(/Body of the flagged passage/)).toBeInTheDocument()
+    expect(within(row).queryByText(/^translation$/i)).not.toBeInTheDocument()
   })
 
   it('includes the translation in the hate-speech snapshot', () => {

@@ -6,7 +6,7 @@ import { useTranslatable } from './useTranslatable'
 import { useTranslationsStore, storedTranslation } from '@/stores/translations'
 
 afterEach(() => vi.restoreAllMocks())
-beforeEach(() => useTranslationsStore.setState({ byText: {} }))
+beforeEach(() => useTranslationsStore.setState({ byText: {}, sameLanguage: {} }))
 
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({
@@ -112,6 +112,26 @@ describe('useTranslatable', () => {
 
     expect(second.result.current.translation).toBe('Hallo Welt')
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows, stores and reports nothing for text already in the target language, and is no failure', async () => {
+    mockFetchOk({ ok: true, translation: null, model: 'm', target_lang: 'de', error: null, same_language: true })
+    const onTranslated = vi.fn()
+    const { result } = renderHook(() => useTranslatable('Schon deutsch.', onTranslated), { wrapper })
+
+    await act(async () => {
+      await result.current.toggle()
+    })
+
+    // Derived from the mutation's state, which React Query publishes async.
+    await waitFor(() => expect(result.current.sameLanguage).toBe(true))
+    expect(result.current.shown).toBe(false)
+    expect(result.current.translation).toBeNull()
+    expect(result.current.failed).toBe(false)
+    expect(onTranslated).not.toHaveBeenCalled()
+    expect(storedTranslation('Schon deutsch.')).toBeUndefined()
+    // Remembered, so "Translate all" never sends it again.
+    expect(useTranslationsStore.getState().sameLanguage['Schon deutsch.']).toBe(true)
   })
 
   it('sets failed and does not call onTranslated when the fetch rejects at the transport layer', async () => {

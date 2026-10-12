@@ -318,13 +318,20 @@ display-time overlay only: nothing ingested or stored is ever translated.
 For a finding judged from an image only the text printed in it is translated:
 the description and tags are written in `RESPONSE_LANGUAGE` already, so they
 stay in view, and an image with no printed text has no Translate control.
+Text that is already in `RESPONSE_LANGUAGE` is not translated. The same goes
+for text that is only names, numbers or URLs. The original stays in view under
+a "No translation needed" note, and nothing is carried into a report. The model
+makes that call. A model that copies foreign text instead of translating it is
+read the same way, so that text also shows the note.
 
 **Translate all**, in each Analysis section's header, does the same for every
 finding the section matches instead of one at a time — a corpus in a language
 nobody on the team reads is not made readable one hover at a time. It runs in
 the foreground, one call per distinct chunk text with three in flight, showing
 how far it has got and staying clickable to stop; pressing it again picks up
-the remainder, since nothing already translated this session is re-sent. Three
+the remainder, since nothing already translated this session is re-sent. Text
+found to be in `RESPONSE_LANGUAGE` already is counted separately ("already in
+English"), is never sent again, and does not count toward the failures. Three
 consecutive failures end the run, so an unreachable model is reported in
 seconds rather than after the whole section. It stores nothing — the
 translations live in the browser for the session.
