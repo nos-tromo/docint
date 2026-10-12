@@ -67,6 +67,13 @@ def test_writes_a_bundle_named_for_the_collection(tmp_path: Path) -> None:
         assert any(name.endswith("documents/report.pdf-a1b2c3d4/extract.md") for name in archive.namelist())
 
 
+def test_a_name_too_long_for_a_filename_still_writes(tmp_path: Path) -> None:
+    """A file name is capped at 255 bytes, which a legal collection name can exceed."""
+    path = cli.build_extract("ä" * 150, target=None, out_dir=tmp_path, with_pdf=False)
+    assert path.is_file()
+    assert len(path.name.encode("utf-8")) <= 255
+
+
 def test_no_pdf_skips_the_engine_entirely(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``--no-pdf`` must not even probe WeasyPrint."""
     called: dict[str, bool] = {}

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -260,6 +261,26 @@ def test_the_job_writes_an_artifact_that_lists_and_downloads(client: TestClient)
     assert download.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
         assert any(name.endswith("README.md") for name in archive.namelist())
+
+
+@pytest.mark.parametrize("name", ["Akte Müller: 2026 (Entwurf) & Co.", "测试 📁", "ä" * 150])
+def test_any_collection_name_extracts_lists_and_downloads(client: TestClient, name: str) -> None:
+    """Every collection that could be ingested must be extractable from the SPA, whatever its name."""
+    segment = quote(name, safe="")
+    job_id = client.post(f"/collections/{segment}/extracts").json()["job_id"]
+    for _ in range(100):
+        snapshot = client.get(f"/ingest/jobs/{job_id}").json()
+        if snapshot["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.05)
+    assert snapshot["status"] == "completed"
+
+    (record,) = client.get(f"/collections/{segment}/extracts").json()["extracts"]
+    download = client.get(f"/collections/{segment}/extracts/{record['extract_id']}/download")
+    assert download.status_code == 200
+    assert quote(f"{name}-extract-", safe="") in download.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+        assert any(member.endswith("README.md") for member in archive.namelist())
 
 
 # --------------------------------------------------------------------------- #

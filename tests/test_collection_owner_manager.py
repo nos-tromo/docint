@@ -161,6 +161,20 @@ def test_a_blank_name_is_refused(logical: str) -> None:
         physical_collection_name("alice", logical)
 
 
+@pytest.mark.parametrize("logical", [".", ".."])
+def test_a_dot_segment_name_is_refused(mgr: CollectionOwnerManager, logical: str) -> None:
+    """Browsers and nginx collapse it out of ``/collections/{name}/…``, so no route could ever reach it."""
+    with pytest.raises(InvalidCollectionNameError, match=r"'\.' or '\.\.'"):
+        mgr.register("alice", logical)
+    assert mgr.list_for("alice") == []
+
+
+def test_names_that_merely_contain_dots_stay_allowed(mgr: CollectionOwnerManager) -> None:
+    """Only a whole ``.`` or ``..`` segment is collapsed; dots inside a name are ordinary."""
+    assert mgr.register("alice", "a..b").endswith("__a..b")
+    assert mgr.register("alice", ".hidden").endswith("__.hidden")
+
+
 def test_spaces_brackets_and_unicode_stay_allowed(mgr: CollectionOwnerManager) -> None:
     """Existing collections carry these, and Qdrant addresses them fine."""
     physical = mgr.register("alice", "2026-05-03 amanahMaz [media] - Test 549 ü")

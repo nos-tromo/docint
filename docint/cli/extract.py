@@ -112,7 +112,9 @@ def build_extract(
         rag.unload_models()
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{collection}-extract-{now:%Y%m%d-%H%M}.zip"
+    # A file name holds 255 bytes, and a legal collection name can hold more.
+    stem = collection.encode("utf-8")[:200].decode("utf-8", "ignore")
+    path = out_dir / f"{stem}-extract-{now:%Y%m%d-%H%M}.zip"
     path.write_bytes(bundle.zip_bytes)
     logger.info(
         "Extract written | file={!r} bytes={} {}",

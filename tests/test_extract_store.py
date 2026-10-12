@@ -111,11 +111,28 @@ def test_delete_collection_removes_the_whole_directory(tmp_path: Path) -> None:
     assert not (tmp_path / "extracts" / "u0000__col").exists()
 
 
-def test_a_physical_name_with_separators_is_refused(tmp_path: Path) -> None:
-    """The collection name is part of a path, so it is validated too."""
+@pytest.mark.parametrize(
+    "physical",
+    [
+        "u0000__Akte Müller: 2026 (Entwurf) & Co.",
+        "u0000__测试 📁",
+        "u0000__" + "ä" * 150,
+        ".",
+        "..",
+        "../escape",
+    ],
+)
+def test_any_collection_name_round_trips_inside_the_root(tmp_path: Path, physical: str) -> None:
+    """Every collection that could be ingested must be extractable, whatever its name."""
     store = _store(tmp_path)
-    with pytest.raises(ValueError):
-        _write(store, physical="../escape")
+    extract_id = _write(store, physical=physical)
+    archive = store.path(physical, extract_id)
+    assert archive.read_bytes() == b"PK-payload"
+    assert archive.parent.parent == (tmp_path / "extracts").resolve()
+    assert [record["extract_id"] for record in store.list(physical)] == [extract_id]
+    assert store.get(physical, extract_id) is not None
+    store.delete_collection(physical)
+    assert list((tmp_path / "extracts").iterdir()) == []
 
 
 def test_sidecar_records_what_the_build_produced(tmp_path: Path) -> None:
