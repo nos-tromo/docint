@@ -18,7 +18,10 @@ A collection name may not contain `#`, `?`, `/`, `\`, `%` or a control
 character; every entry point answers `400` naming the offending characters.
 qdrant-client formats the name into the request path unencoded, so such a
 name would silently address a different collection (`Test #549` created and
-queried `Test `). Spaces, brackets and non-ASCII letters are fine.
+queried `Test `). Nor may a name be exactly `.` or `..`: browsers and nginx
+resolve that path segment away, so no `/collections/{name}/…` route could
+reach the collection. Spaces, brackets and non-ASCII letters are fine, and a
+collection carrying them extracts like any other.
 
 All of them end up calling `RAG.ingest_docs()` in `docint/core/rag.py`,
 which owns the whole pipeline.

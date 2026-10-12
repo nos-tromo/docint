@@ -5,13 +5,15 @@ evicts finished runs, so the list a client sees must come from here, never
 from the registry.
 
 One directory per physical collection, holding an archive and a JSON sidecar
-per build. Both the collection name and the extract id are validated before
-any path join — they arrive from a request, and a store that writes where it
+per build. The extract id is validated before any path join, and a collection
+name only becomes a directory as itself when it is a plain file name — any
+other is hashed. Both arrive from a request, and a store that writes where it
 is told is a directory traversal.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -29,6 +31,7 @@ __all__ = ["ExtractRecord", "ExtractStore"]
 ExtractRecord = dict[str, Any]
 
 _ID_PATTERN = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$")
+#: A collection name that is its own directory; any other is hashed (see ``ExtractStore._dir``).
 _COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
@@ -49,11 +52,11 @@ class ExtractStore:
     def _contained(self, candidate: Path) -> Path:
         """Return a path once it is proven to resolve under the store root.
 
-        The patterns above already reject every separator, so a valid name can
-        never fail here. This is the containment proof itself: it normalizes the
-        path and compares it against the root, which is what makes the guard
-        independent of the caller and holds even where the root is reached
-        through a symlink.
+        A collection directory is a plain name or a hash and an extract id is
+        pattern-checked, so neither can fail here. This is the containment proof
+        itself: it normalizes the path and compares it against the root, which is
+        what makes the guard independent of the caller and holds even where the
+        root is reached through a symlink.
 
         The shape matters as much as the check. Normalizing and then testing the
         prefix on its own is what a static analyser can follow, so the condition
@@ -76,7 +79,14 @@ class ExtractStore:
         return Path(resolved)
 
     def _dir(self, physical: str) -> Path:
-        """Return a collection's directory, refusing an unsafe name.
+        """Return a collection's directory, whatever the collection is called.
+
+        Every collection that can be ingested must be extractable, and its name
+        may carry spaces, non-ASCII, punctuation or more bytes than a file name
+        holds. A plain name is its own directory — every directory written
+        before other names were accepted is one, so those still resolve — and
+        any other name is stored under its SHA-256. The ``~`` prefix lies outside
+        the plain alphabet, so the two kinds can never collide.
 
         Args:
             physical (str): Owner-namespaced Qdrant collection name.
@@ -85,11 +95,11 @@ class ExtractStore:
             Path: The collection's directory (not created).
 
         Raises:
-            ValueError: When the name could escape the root.
+            ValueError: When the directory resolves outside the root.
         """
-        if not _COLLECTION_PATTERN.match(physical or ""):
-            raise ValueError(f"Unsafe collection name for the extract store: {physical!r}")
-        return self._contained(self._root / physical)
+        plain = physical not in {".", ".."} and _COLLECTION_PATTERN.fullmatch(physical)
+        name = physical if plain else "~" + hashlib.sha256(physical.encode("utf-8")).hexdigest()
+        return self._contained(self._root / name)
 
     def path(self, physical: str, extract_id: str) -> Path:
         """Return the archive path for one build.

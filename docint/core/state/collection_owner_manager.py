@@ -86,22 +86,22 @@ class InvalidCollectionNameError(ValueError):
 
     Attributes:
         offending (list[str]): The characters that were rejected, sorted;
-            empty when the name itself was blank.
+            empty when the name as a whole was refused.
     """
 
-    def __init__(self, offending: list[str]) -> None:
-        """Build the client-facing message from the rejected characters."""
+    def __init__(self, offending: list[str], message: str | None = None) -> None:
+        """Build the client-facing message from the rejected characters, unless one is given."""
         self.offending = offending
-        if offending:
+        if message is None and offending:
             shown = ", ".join(repr(char) for char in offending)
             message = f"Collection name contains characters that cannot be used: {shown}."
-        else:
+        elif message is None:
             message = "Collection name must not be empty."
         super().__init__(message)
 
 
 def validate_collection_name(logical: str) -> str:
-    """Refuse a logical name that would not survive the trip to Qdrant.
+    """Refuse a logical name that would not survive the trip to Qdrant or through a docint URL.
 
     Args:
         logical (str): The user-visible collection name.
@@ -110,11 +110,16 @@ def validate_collection_name(logical: str) -> str:
         str: The same name, when it is usable.
 
     Raises:
-        InvalidCollectionNameError: For a blank name or one carrying a
-            character from ``_FORBIDDEN_NAME_CHARS`` or a control character.
+        InvalidCollectionNameError: For a blank name, a name that is just
+            ``.`` or ``..``, or one carrying a character from
+            ``_FORBIDDEN_NAME_CHARS`` or a control character.
     """
     if not logical or not logical.strip():
         raise InvalidCollectionNameError([])
+    if logical in {".", ".."}:
+        # Browsers and nginx resolve a dot segment away, so no
+        # ``/collections/{name}/…`` route could ever reach this collection.
+        raise InvalidCollectionNameError([], message="Collection name cannot be '.' or '..'.")
     offending = sorted({char for char in logical if char in _FORBIDDEN_NAME_CHARS or ord(char) < 32 or char == "\x7f"})
     if offending:
         raise InvalidCollectionNameError(offending)
