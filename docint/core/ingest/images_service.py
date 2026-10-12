@@ -1375,7 +1375,7 @@ class ImageIngestionService:
                 relinked = False
                 if self._link_value(asset) and not existing_payload.get(_LINK_FIELD):
                     # A point written loose — by the preprocessing pool before
-                    # the export's manifest arrived, or from a copy elsewhere
+                    # the export's dossier was read, or from a copy elsewhere
                     # in the batch — takes the posting's identity the first
                     # time an export claims it. Top level, not an occurrence:
                     # that is the field posting grouping, the uuid search and

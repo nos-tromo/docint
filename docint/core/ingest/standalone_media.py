@@ -1,9 +1,9 @@
-"""Standalone audio/video ingestion — transcribe loose media without social tables.
+"""Standalone audio/video ingestion — transcribe loose media without a social export.
 
 Runs as a pipeline pre-pass right after the social linker. It walks the batch
 tree for audio/video files the linker did not already claim and routes each
 through the shared :class:`MediaTranscriber`, anchoring every artifact to the
-media file's own content hash (no postings/media manifest required). Enabled
+media file's own content hash (no social export required). Enabled
 whenever Nextext is configured (``NEXTEXT_API_BASE`` set); a no-op otherwise.
 """
 
@@ -97,7 +97,7 @@ class StandaloneMediaIngestor:
         Args:
             data_dir (Path): The batch tree root.
             already_consumed (set[Path]): Paths the social linker already claimed
-                (excluded here so manifest-linked media is never double-ingested).
+                (excluded here so posting-linked media is never double-ingested).
 
         Returns:
             MediaTranscribeResult: Consumed paths + transcript Documents (empty when

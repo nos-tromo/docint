@@ -1,12 +1,16 @@
-"""Tabular reader: CSV/TSV/Parquet/Excel with optional social-schema detection."""
+"""Tabular reader: CSV/TSV/Parquet/Excel, one Document per row.
+
+Social exports are not tables any more: they arrive as ``me-dossier/1`` JSON and
+are read by ``docint/core/ingest/social_linker.py``.
+"""
 
 from __future__ import annotations
 
 import csv
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, cast
 
 import pandas as pd
 from llama_index.core import Document
@@ -20,63 +24,6 @@ from docint.utils.mimetype import get_mimetype
 
 RowFilter = Callable[[dict[str, Any]], bool]
 ORIGINAL_INDEX_COL = "_original_row_index"
-
-
-@dataclass(frozen=True, slots=True)
-class TableSchemaProfile:
-    """Declarative profile for exact-match specialized table schemas."""
-
-    style: str
-    headers: tuple[str, ...]
-    text_col: str
-    id_col: str
-    reference_mapping: dict[str, str | None]
-
-    @property
-    def normalized_headers(self) -> set[str]:
-        """Return the normalized header set used for exact matching.
-
-        Returns:
-            set[str]: A set of normalized column names for schema matching.
-        """
-        return {_normalize_column_name(header) for header in self.headers}
-
-
-def _normalize_column_name(value: Any) -> str:
-    """Normalize a column name for exact schema-set matching.
-
-    Args:
-        value (Any): The column name to normalize.
-
-    Returns:
-        str: The normalized column name.
-    """
-    return str(value or "").strip().casefold()
-
-
-MEDIA_MANIFEST_REQUIRED_COLUMNS: frozenset[str] = frozenset(
-    {
-        _normalize_column_name("Media ID"),
-        _normalize_column_name("Exported media filename"),
-    }
-)
-
-
-def is_media_manifest(columns: Iterable[Any]) -> bool:
-    """Return whether a table's columns identify it as a social media manifest.
-
-    Detection is fuzzy by design: only the two join columns must be present
-    (``Media ID`` + ``Exported media filename``), not an exact header set, so
-    the manifest is recognized regardless of platform-specific extra columns.
-
-    Args:
-        columns (Iterable[Any]): The table's column names.
-
-    Returns:
-        bool: True when both join columns are present (case-insensitively).
-    """
-    normalized = {_normalize_column_name(column) for column in columns}
-    return MEDIA_MANIFEST_REQUIRED_COLUMNS.issubset(normalized)
 
 
 @dataclass(slots=True)
@@ -138,124 +85,6 @@ class TableReader(BaseReader):
     encoding: str = "utf-8"
     excel_sheet: str | int | None = None  # for XLSX
     csv_sep: str | None = None  # allow overriding delimiter
-    schema_profiles: ClassVar[tuple[TableSchemaProfile, ...]] = (
-        TableSchemaProfile(
-            style="comments",
-            headers=(
-                "UUID",
-                "Comment ID",
-                "Network Object ID",
-                "URL",
-                "Crawled at",
-                "Network",
-                "Text Content",
-                "Timestamp",
-                "Tags",
-                "Author ID",
-                "Author",
-                "Vanity Name",
-                "Replies Count",
-                "Reactions Count",
-                "Parent Comment Text",
-                "Parent Comment ID",
-                "Posting Text",
-                "Posting ID",
-            ),
-            text_col="Text Content",
-            id_col="Comment ID",
-            reference_mapping={
-                "network": "Network",
-                "type": None,
-                "uuid": "UUID",
-                "timestamp": "Timestamp",
-                "author": "Author",
-                "author_id": "Author ID",
-                "vanity": "Vanity Name",
-                "text": "Text Content",
-                "text_id": "Comment ID",
-                "anchor_text": "Posting Text",
-                "parent_text": "Parent Comment Text",
-            },
-        ),
-        TableSchemaProfile(
-            style="messages",
-            headers=(
-                "UUID",
-                "Chat ID",
-                "Sender",
-                "Timestamp",
-                "Text",
-                "Tags",
-                "URL",
-                "Chat Group",
-                "Answers Count",
-                "Reply To",
-                "Network",
-            ),
-            text_col="Text",
-            id_col="Chat ID",
-            reference_mapping={
-                "network": "Network",
-                "type": None,
-                "uuid": "UUID",
-                "url": "URL",
-                "timestamp": "Timestamp",
-                "author": "Sender",
-                "author_id": None,
-                "vanity": None,
-                "text": "Text",
-                "text_id": "Chat ID",
-                "anchor_text": None,
-                "parent_text": "Reply To",
-            },
-        ),
-        TableSchemaProfile(
-            style="postings",
-            headers=(
-                "UUID",
-                "Posting ID",
-                "URL",
-                "Date last updated",
-                "Timestamp",
-                "Timezone",
-                "Crawled at",
-                "Postings Connections",
-                "Network Posting ID",
-                "Location",
-                "Author ID",
-                "Author",
-                "Vanity Name",
-                "Co-Author",
-                "Quoted User",
-                "Expected Reactions",
-                "Collected Reactions",
-                "Expected Comments",
-                "Collected Comments",
-                "Network",
-                "Posted in Group",
-                "Task",
-                "Text Content",
-                "Filename",
-                "Tags",
-            ),
-            text_col="Text Content",
-            id_col="Posting ID",
-            reference_mapping={
-                "network": "Network",
-                "type": None,
-                "uuid": "UUID",
-                "url": "URL",
-                "timestamp": "Timestamp",
-                "author": "Author",
-                "author_id": "Author ID",
-                "vanity": "Vanity Name",
-                "text": "Text Content",
-                "text_id": "Posting ID",
-                "anchor_text": None,
-                "parent_text": None,
-            },
-        ),
-    )
 
     def __post_init__(self) -> None:
         """Normalize configuration options."""
@@ -358,69 +187,13 @@ class TableReader(BaseReader):
         detected = max(counts, key=lambda delimiter: counts[delimiter])
         return detected if counts[detected] > 0 else default_separator
 
-    @classmethod
-    def _detect_schema_profile(cls, columns: list[str] | pd.Index) -> tuple[TableSchemaProfile | None, dict[str, str]]:
-        """Return the matching specialized schema profile for a table, if any.
-
-        Args:
-            columns (list[str] | pd.Index): The list of column names to match against known
-                schema profiles.
-
-        Returns:
-            tuple[TableSchemaProfile | None, dict[str, str]]: A tuple containing the matching
-            schema profile (or None if no match is found) and a mapping of normalized column
-            names to their original names.
-        """
-        original_columns = [str(column) for column in columns]
-        normalized_map = {_normalize_column_name(column): column for column in original_columns}
-        normalized_headers = set(normalized_map)
-        for profile in cls.schema_profiles:
-            if normalized_headers == profile.normalized_headers:
-                return profile, normalized_map
-        return None, normalized_map
-
-    @staticmethod
-    def _build_reference_metadata(
-        *,
-        profile: TableSchemaProfile,
-        row_dict: dict[str, Any],
-        normalized_map: dict[str, str],
-    ) -> dict[str, Any]:
-        """Build the stable reference-metadata block for a specialized row.
-
-        Args:
-            profile (TableSchemaProfile): The matched schema profile for the table.
-            row_dict (dict[str, Any]): The dictionary representation of the current row.
-            normalized_map (dict[str, str]): A mapping of normalized column names to their original names
-
-        Returns:
-            dict[str, Any]: A dictionary containing the extracted reference metadata fields based on the profile's
-                ``reference_mapping`` keys.
-        """
-        # Iterate the profile's declared reference keys rather than the global
-        # reference-metadata registry, so adding transcript-specific fields to
-        # the registry does not leak ``None`` placeholders into social-table
-        # rows — only keys declared by the profile are emitted.
-        metadata: dict[str, Any] = {}
-        for key in profile.reference_mapping.keys():
-            if key == "type":
-                metadata[key] = profile.style.rstrip("s")
-                continue
-            source_column = profile.reference_mapping.get(key)
-            if source_column is None:
-                metadata[key] = None
-                continue
-            original_column = normalized_map.get(_normalize_column_name(source_column))
-            metadata[key] = row_dict.get(original_column) if original_column else None
-        return metadata
-
     def iter_documents(self, file: str | Path, **kwargs: Any) -> Iterator[Document]:
         """Yield ``Document`` objects from a tabular file row by row.
 
         Streaming variant of :meth:`load_data` introduced in Phase 2 of
         the ingestion-streaming generalisation. The underlying DataFrame
-        is still loaded eagerly (pandas / pyarrow do not expose a
-        stream-friendly schema-profile inference), but per-row yield
+        is still loaded eagerly (pandas / pyarrow expose no stream-friendly
+        reader for every format), but per-row yield
         lets the ingestion pipeline flush enrichment batches mid-file
         — large CSVs and Parquet files no longer materialise every
         ``Document`` before any node persistence happens.
@@ -489,21 +262,15 @@ class TableReader(BaseReader):
                     exc,
                 )
 
-        schema_profile, normalized_columns = self._detect_schema_profile(df.columns)
         df[ORIGINAL_INDEX_COL] = df.index
         df = df.reset_index(drop=True)
-        effective_id_col: str | None
-        if schema_profile is not None:
-            text_cols = [normalized_columns[_normalize_column_name(schema_profile.text_col)]]
-            effective_id_col = normalized_columns[_normalize_column_name(schema_profile.id_col)]
+        if self.text_cols is None:
+            text_cols = self._guess_text_cols(df)
+        elif isinstance(self.text_cols, str):
+            text_cols = [self.text_cols]
         else:
-            if self.text_cols is None:
-                text_cols = self._guess_text_cols(df)
-            elif isinstance(self.text_cols, str):
-                text_cols = [self.text_cols]
-            else:
-                text_cols = self.text_cols
-            effective_id_col = self.id_col
+            text_cols = self.text_cols
+        effective_id_col = self.id_col
         meta_cols = (
             [c for c in df.columns if c not in set(text_cols)]
             if self.metadata_cols is None
@@ -541,8 +308,6 @@ class TableReader(BaseReader):
             }
             if row_query_error:
                 table_info["row_query_error"] = row_query_error
-            if schema_profile is not None:
-                table_info["style"] = schema_profile.style
 
             metadata: dict[str, Any] = {
                 "origin": {
@@ -555,12 +320,6 @@ class TableReader(BaseReader):
             }
             if extra_info:
                 metadata.update(extra_info)
-            if schema_profile is not None:
-                metadata["reference_metadata"] = self._build_reference_metadata(
-                    profile=schema_profile,
-                    row_dict=cast(dict[str, Any], row_dict),
-                    normalized_map=normalized_columns,
-                )
 
             for k in meta_cols:
                 metadata[k] = row_dict.get(k, "")

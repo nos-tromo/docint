@@ -55,8 +55,9 @@ inside a PDF, a video keyframe — is retrieved by CLIP, reranked against the te
 chunks on the same scale, and cited by number like any other source; where an
 OCR model is configured, the text printed *inside* it is indexed too. Audio and
 video are transcribed by an external Nextext service and keyframe-extracted.
-Social-media exports that pair `postings.csv` with a `media.csv` manifest are
-linked, so a post and all of its media cite as one thing. See
+Social-media exports (the crawler's `me-dossier/1` dossiers) are linked, so a
+post, its comments and all of its media are ingested together and the media
+cite as one thing with the post. See
 [ingestion.md](docs/ingestion.md) and
 [retrieval-and-agents.md](docs/retrieval-and-agents.md#image-retrieval-lane).
 

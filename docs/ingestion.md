@@ -181,7 +181,7 @@ that stopped early, so what is on disk is an arbitrary fraction of what the
 user picked and the client no longer knows what the whole was. A button there
 silently indexed that fraction.
 
-An image or keyframe stored before a social export's manifest arrived carries
+An image or keyframe stored before its social export's dossier was read carries
 no posting link, so the linker's cache hit **re-upserts** such a point with
 the posting's identity (top-level `posting_uuid`, `source_type`, the
 `posting_*` reference fields) reusing the stored vector, caption and OCR
@@ -209,7 +209,7 @@ The default list lives in `load_ingestion_env()` in
 Only the file types listed above are ingested when uploaded standalone; all
 other extensions are silently skipped.
 
-Audio and video need no `postings.csv` / `media.csv` at all: drop loose
+Audio and video need no social export at all: drop loose
 media files anywhere in the ingest batch (SPA folder upload or `DATA_PATH`)
 and docint forwards each one to a remote
 [Nextext](https://github.com/nos-tromo/nextext) service that transcribes it
@@ -219,16 +219,13 @@ artifact anchors to the media file's own content hash and filename; there
 is no posting to link it to, so transcript segments and keyframes retrieve
 and cite as independent, normally-ranked sources naming the source clip.
 
-A social export's `postings.csv` / `media.csv` manifest changes *linking*,
-not *whether* transcription happens: media resolved from the manifest is
-**additionally** stamped with its parent posting's `posting_uuid` so it
-groups with that posting at citation time (see
+A social export's `dossier.json` changes *linking*, not *whether*
+transcription happens: media a dossier links to a posting is
+**additionally** stamped with that posting's `posting_uuid` so it
+groups with the posting at citation time (see
 [Social media exports](#social-media-exports) below), while any other loose
 audio/video elsewhere in the batch still goes through the standalone path
-above. The tables and the media they reference may sit anywhere in the batch
-tree — the default export shape (`./postings.csv`, `./media.csv`,
-`./dir/photos/*`, `./dir/videos/*`) is ingested by dropping in the whole
-directory. Both require `NEXTEXT_API_BASE`;
+above. Both require `NEXTEXT_API_BASE`;
 when it is unset, audio/video files are skipped with a one-line warning and
 the rest of the batch still ingests normally. A pre-made Nextext `.jsonl`
 transcript still ingests directly as a structured file if you prefer to
@@ -239,87 +236,103 @@ Every other extension is dispatched to the reader that knows how to parse it
 
 ## Social media exports
 
-Docint can ingest social-media exports that pair text **postings** with linked
-**media files** (images, video, audio). The ingestion pipeline reads a
-`media.csv` manifest, joins each media file to its parent posting (by `Network
-ID`, else `Media ID`, matched against the postings' `Posting ID`), and routes
-each artifact to the right backend — images go through
-CLIP, video/audio are transcribed by Nextext and keyframe-extracted.
+Docint ingests a crawler's **dossier export** (`me-dossier/1`). Per account, it
+holds the postings the account published, the comments each one received, and
+the media attached to them. Postings and comments become text nodes. Images go
+through CLIP, and video/audio are transcribed by Nextext and keyframe-extracted;
+every artifact is stamped with the posting it belongs to. Table exports
+(`postings.csv` + `media.csv`) are no longer linked: such a CSV now ingests as an
+ordinary table.
 
-**Drop in the whole export directory.** `postings.csv` and `media.csv` may sit
-anywhere in the batch, and the media files anywhere beneath it — the default
-export shape (`./postings.csv`, `./media.csv`, `./dir/photos/*`,
-`./dir/videos/*`) works as-is. Upload the directory with the SPA's folder
-picker, or point `DATA_PATH` at it.
-
-Only the **basename** of `Exported media filename` is ever used, looked up
-within the batch tree, so a manifest carrying an absolute path or a `../`
-traversal cannot reach a file outside the batch. Because the manifest supplies
-no directory of its own, the same basename occurring in two subfolders is
-*ambiguous*: a copy sitting beside the manifest wins, and otherwise the row is
-skipped rather than linked to a guess.
-
-**Albums (multi-item posts).** Some exports carry no media→posting key at all:
-`Media ID` and `Network ID` both hold the media's *own* network message id. A
-Telegram album is then N consecutive messages recorded as N media rows but a
-single posting, filed under the group's **last** message id — so all but one
-row names no posting. Rows the manifest cannot join are attached to the first
-posting in the same channel whose message number is at or above their own,
-**and only when the two timestamps agree** within `SOCIAL_ALBUM_TOLERANCE_S`
-(default 5 s). That corroboration is what keeps the inference honest: when the
-owning posting is missing from the export, the next one along is hours away and
-the row is left unlinked rather than attributed to the wrong post. Exports that
-do carry a key are untouched — the inference runs only after the declared key
-fails, and needs `Posting ID` to start with the row's own `Author ID`, which a
-Meta-style `<postingId>_<accountId>` id does not. Set
-`SOCIAL_ALBUM_LINK_ENABLED=false` to switch it off. The counts land in one
-ingest log line:
+**Drop in the whole export folder.** Upload it with the SPA's folder picker, or
+point `DATA_PATH` at it. The layout is one folder per profile:
 
 ```
-Social linker: 352 media linked (94 by manifest key, 258 by album inference, 0 by timestamp, 0 by text match), 0 skipped
-(0 with no matching posting, 0 with no local file, 0 with an ambiguous filename)
-across 352 manifest rows.
+<export root>/
+  _<run files>            underscore-prefixed bookkeeping of the export run
+  <profile folder>/
+    dossier.json          "schema": "me-dossier/1"
+    progress.json         the crawl's own progress record
+    media/…/<media id>.<ext>
 ```
 
-**Exports whose postings table is a messages table.** A chat-style export
-(X/Twitter and friends) carries its posts in the *messages* schema — `Chat ID` /
-`Sender` / `Text` where a postings table has `Posting ID` / `Author` /
-`Text Content`. Such a table is accepted in the postings role and renamed before
-any rule runs, so all five apply unchanged. A real postings table wins when both
-are present.
+The export root may be the batch folder itself or any folder inside it. A
+profile folder uploaded on its own works too.
 
-**How a media row finds its posting.** Five rules, tried in order; the first
-that names a known posting wins, and each is consulted only once the ones above
-it have failed:
+**What becomes a node.**
 
-1. **The manifest's declared key** — `Network ID`, else `Media ID`, else
-   `Media ID` with a trailing `_<counter>` stripped, matched against
-   `Posting ID`. The ordinary path; most exports never leave it.
-2. **The posting's network-level id** — some exports mint an internal
-   `Posting ID` (a crawler UUID) that the manifest never carries, and name the
-   posting by the id its own network uses. That id is read from
-   `Network Posting ID`, or from the long numeric id in the permalink when the
-   column is empty, as it is for reel-style posts. An id that two postings both
-   advertise, or one that is an `Author ID`, is refused rather than resolved to
-   a guess.
-3. **Album inference** — for exports carrying no key at all; see above.
-4. **Timestamp** — the single posting by the same author stamped at the same
-   instant. Two such postings, or none, leave the row unlinked. The second case
-   is what a partial export looks like, and it must not be papered over with a
-   neighbouring post. Switch it off with `SOCIAL_TIMESTAMP_LINK_ENABLED=false`.
-5. **Text** — the last resort, for the shape no author-scoped rule reaches: a
-   **shared post**, whose manifest names the *original* author while the
-   export's row is the sharer's. A row whose text exactly matches that of a
-   single posting on the same network attaches to it; equality is exact and
-   case-sensitive. Ambiguity and absence both leave the row unlinked, and a
-   posting with no text is never indexed — an empty text is shared by every
-   media-only post. Switch it off with `SOCIAL_TEXT_LINK_ENABLED=false`.
+- **A posting becomes one text node.** It carries the same
+  `reference_metadata` a social table row carried, so citations, Analysis
+  pills, reports, search and filters read it unchanged:
+  - `network` and `type: posting`;
+  - `uuid`, the export's posting id;
+  - `url`;
+  - `timestamp`, which is `publishedAt` as exported (ISO-8601);
+  - `author`, `author_id` and `vanity`;
+  - `text_id`, the network's own id;
+  - `text`.
+- **A received comment (`postings[].comments[]`) becomes one node** with
+  `type: comment`, the comment's own author and ids, `anchor_text` (the post it
+  was left on) and `parent_text` (the comment it answers, if any).
+- **Rows are table-shaped**: `source: "table"` and `table.style` set to
+  `postings` or `comments`. That shape is what one-node-per-row parsing,
+  social detection and extracts key on.
+- **Rows name their file by its path within the batch**
+  (`<profile folder>/dossier.json`), so every profile is its own document.
+- **An empty text makes no node.** A posting's media still links to it.
 
-The ingest log reports the split, so an operator can see at a glance how much of
-a run rested on inference rather than on a declared key:
+**How a media item finds its posting.** The dossier names the link from both
+sides: a posting's `mediaIds` and a media item's `attachedTo.postings`. Either
+one is enough. Only postings in the same dossier count.
+
+The one link the format still leaves out is a **Telegram photo's**. Telegram
+names a photo only by its own message id (`<channel id><message number>`), and
+a multi-photo post (an album) is N consecutive messages whose text sits on the
+**last** one. So a media item no posting names is attached to the first posting
+in its dossier whose message number is at or above its own. A single-photo post
+is the same rule at distance zero.
+
+The rule has three guards:
+
+- **The timestamps must agree** within `SOCIAL_ALBUM_TOLERANCE_S` (default
+  5 s). This is what keeps the inference honest: when the owning posting is
+  missing from the export, the next one along is hours away, so the photo is
+  left unlinked rather than attributed to the wrong post.
+- **The posting id must have the form `<author id><digits>`.** Instagram's
+  `<post id>_<account id>` and Facebook's opaque ids never do, so the rule is
+  inert there.
+- **An explicit link always wins over it**, even one naming a posting the
+  export did not include: such a media item stays unlinked rather than being
+  re-homed to a neighbouring post.
+
+Set `SOCIAL_ALBUM_LINK_ENABLED=false` to switch the rule off.
+
+**Resolving the file.** Only the **basename** of a media item's `file` is
+used, and it is looked up only inside the dossier's own profile folder, so a
+path in the export cannot reach outside it. The same basename twice in that
+folder is ambiguous and skipped rather than guessed at.
+
+**What is skipped.**
+
+- **Media that cannot be ingested** are counted, not linked. That covers:
+  - media the export marks `missing` (the crawler never fetched them);
+  - media whose file is not in the upload;
+  - ambiguous filenames.
+- **Media no posting links** are not claimed, so the standalone paths ingest
+  them as loose images or clips without posting identity.
+- **The export's bookkeeping** (each dossier's `progress.json` and the
+  underscore-prefixed run files in the export root) is claimed and never
+  ingested.
+- **A `dossier.json` that is not valid JSON, or declares another schema,** is
+  claimed and skipped with a warning. The rest of the export still ingests.
+- **`messages[]` and `ownComments[]`** have no sample in the format yet; a
+  warning says how many were not ingested.
+- **Account profile data, `locations` and `contacts`** are not ingested.
+
+The counts land in one ingest log line:
 
 ```
-Social linker: 2019 media linked (1983 by manifest key, 13 by network id, 0 by album inference, 23 by timestamp, 0 by text match), 101 skipped …
+Social linker: 3 dossiers (0 unreadable), 120 postings and 14 comments; 115 media linked (109 explicitly, 6 by album inference), 9 skipped (7 missing from the export, 0 with no local file, 0 with an ambiguous filename, 2 with no posting).
 ```
 
 **Linker.** During ingestion, `posting_uuid` is written into every artifact
@@ -537,7 +550,9 @@ configured id/text/metadata columns.
 detects the Nextext transcript schema (a JSONL stream whose segments have
 `text` plus either `start_ts`/`end_ts` or `start_seconds`/`end_seconds`)
 and emits one segment document per line with timing, speaker, and source
-metadata preserved.
+metadata preserved. A social export's `dossier.json` and its bookkeeping never
+reach this reader: the social linker claims them (see
+[Social media exports](#social-media-exports)).
 
 #### Ingestion granularity
 
