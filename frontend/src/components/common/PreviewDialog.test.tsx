@@ -195,3 +195,23 @@ describe('PreviewDialog — frozen evidence', () => {
     expect(screen.getByRole('img', { name: 'clip.mp4' })).toHaveAttribute('src', DATA_URI)
   })
 })
+
+describe('PreviewDialog — a stored image', () => {
+  const IMAGE_URL = '/sources/thumbnail?collection=alpha&image_id=frame'
+
+  it('enlarges a keyframe as an image although its name is the clip it was cut from', async () => {
+    render(<PreviewDialog />)
+    useUiStore.getState().openPreview({ filename: 'talk.mp4', image_url: IMAGE_URL })
+
+    await screen.findByRole('dialog')
+    expect(screen.getByRole('img', { name: 'talk.mp4' })).toHaveAttribute('src', IMAGE_URL)
+  })
+
+  it('offers the stored image in a new tab, since it is a real URL', async () => {
+    render(<PreviewDialog />)
+    useUiStore.getState().openPreview({ filename: 'talk.mp4', image_url: IMAGE_URL })
+
+    await screen.findByRole('dialog')
+    expect(screen.getByRole('link')).toHaveAttribute('href', IMAGE_URL)
+  })
+})

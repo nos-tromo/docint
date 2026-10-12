@@ -143,7 +143,6 @@ from docint.core.ingest.image_enrichment import (
     enrich_pending_images,
     entity_text,
     finding_basis,
-    has_text_twin,
     image_text_fields,
 )
 from docint.core.ingest.images_service import ImageIngestionService
@@ -6477,6 +6476,7 @@ class RAG:
             return []
 
         sources: list[dict[str, Any]] = []
+        twins: set[str] = set()
         for page in iter_scroll(
             self.qdrant_client,
             collection_name=self.qdrant_collection,
@@ -6488,6 +6488,8 @@ class RAG:
                 payload = getattr(point, "payload", None)
                 if not isinstance(payload, dict):
                     continue
+                if payload.get("image_id"):
+                    twins.add(str(payload["image_id"]))
                 if "entities" not in payload and "relations" not in payload:
                     continue
 
@@ -6502,7 +6504,7 @@ class RAG:
                 source.update(image_text_fields(payload))
                 sources.append(source)
 
-        for point_id, payload in self._image_finding_points(qdrant_filter):
+        for point_id, payload in self._image_finding_points(twins, qdrant_filter):
             if not payload.get("entities") and not payload.get("relations"):
                 continue
             # The text the entities were read from: the image's words, then its caption.
@@ -6517,16 +6519,21 @@ class RAG:
         return sources
 
     def _image_finding_points(
-        self, qdrant_filter: qdrant_models.Filter | None = None
+        self, twins: set[str], qdrant_filter: qdrant_models.Filter | None = None
     ) -> Iterator[tuple[str, dict[str, Any]]]:
         """Yield the enriched points of the ``_images`` companion, as ``(point id, payload)``.
 
-        A point whose image file is also a main-collection document is
-        skipped: that document carries its findings, and listing both would
-        count every finding twice. The stored thumbnail and node copy are left
-        out of the scroll; no finding row reads them.
+        A point whose image is also a main-collection document is skipped:
+        that document carries its findings, and listing both would count
+        every finding twice. Which images have one is read off the main
+        collection itself (*twins*, the ``image_id`` its points carry — only
+        ``ImageReader`` stamps one), never inferred from how the image was
+        stored: the preprocessing pool stores every image as a standalone
+        file's before the export claiming it is read. The stored thumbnail
+        and node copy are left out of the scroll; no finding row reads them.
 
         Args:
+            twins (set[str]): The ``image_id`` of every main-collection point.
             qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant
                 filter, applied alongside the enriched-points condition.
 
@@ -6550,7 +6557,7 @@ class RAG:
         ):
             for point in page:
                 payload = getattr(point, "payload", None)
-                if isinstance(payload, dict) and not has_text_twin(payload):
+                if isinstance(payload, dict) and str(payload.get("image_id") or "") not in twins:
                     yield str(getattr(point, "id", "") or ""), payload
 
     def list_collections(self) -> list[str]:
@@ -9907,6 +9914,7 @@ class RAG:
             source.update(image_text_fields(payload))
             findings.append(source)
 
+        twins: set[str] = set()
         for page in iter_scroll(
             self.qdrant_client,
             collection_name=self.qdrant_collection,
@@ -9916,6 +9924,8 @@ class RAG:
             for point in page:
                 payload = getattr(point, "payload", None)
                 if isinstance(payload, dict):
+                    if payload.get("image_id"):
+                        twins.add(str(payload["image_id"]))
                     _add(str(getattr(point, "id", "") or ""), payload, finding_basis(payload))
 
         flagged = qdrant_models.Filter(
@@ -9923,7 +9933,7 @@ class RAG:
                 qdrant_models.FieldCondition(key="hate_speech.hate_speech", match=qdrant_models.MatchValue(value=True))
             ]
         )
-        for point_id, payload in self._image_finding_points(flagged):
+        for point_id, payload in self._image_finding_points(twins, flagged):
             _add(point_id, payload, FINDING_BASIS_IMAGE)
 
         findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))

@@ -296,7 +296,7 @@ describe('HateSpeechTable — evidence thumbnail', () => {
 
     expect(screen.getByRole('button', { name: /poster\.png/ })).toBeInTheDocument()
     expect(document.querySelector('[data-testid="hate-speech-row"] img')?.getAttribute('src')).toContain(
-      'file_hash=ph'
+      'image_id=ph'
     )
   })
 

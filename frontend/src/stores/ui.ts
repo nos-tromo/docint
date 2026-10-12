@@ -5,14 +5,16 @@ import { useReportStore } from '@/stores/report'
 
 /**
  * What the app-wide preview is showing. Either the stored source file,
- * addressed by collection and content hash, or frozen evidence carried in a
+ * addressed by collection and content hash; frozen evidence carried in a
  * report snapshot — a self-contained data URI, which is what lets a report be
- * enlarged after the collection it came from is gone. The two arms are
- * exclusive: frozen evidence has no collection to resolve against.
+ * enlarged after the collection it came from is gone; or a stored image by
+ * URL — the picture behind a keyframe or figure finding, whose source file is
+ * a clip or a document. The arms are exclusive.
  */
 export type PreviewModal =
-  | { filename: string; collection: string; file_hash: string; data_uri?: never }
-  | { filename: string; data_uri: string; collection?: never; file_hash?: never }
+  | { filename: string; collection: string; file_hash: string; data_uri?: never; image_url?: never }
+  | { filename: string; data_uri: string; collection?: never; file_hash?: never; image_url?: never }
+  | { filename: string; image_url: string; collection?: never; file_hash?: never; data_uri?: never }
 
 interface UiState {
   selectedCollection: string | null

@@ -251,6 +251,40 @@ def test_preview_source_is_owner_gated_and_uses_physical(
     assert captured == {}  # gate rejected before any source lookup
 
 
+def test_source_thumbnail_is_owner_gated_and_uses_physical(
+    client: TestClient, _patch_rag: _OwnRAG, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """/sources/thumbnail owner-gates the logical name and resolves it to physical.
+
+    The stand-in has no image companion, so the owner's request reaches the
+    image-file fallback, which must be asked about the physical collection; a
+    non-owner gets 404 before any lookup.
+    """
+    _ingest(client, "alice", "docs")
+    captured: dict[str, str] = {}
+    src = tmp_path / "poster.png"
+    src.write_bytes(b"\x89PNG")
+
+    def _fake_resolve(collection: str, file_hash: str, **_kw: Any) -> Path:
+        captured["collection"] = collection
+        return src
+
+    monkeypatch.setattr(api_module, "_resolve_source_file_path", _fake_resolve)
+
+    ok = client.get(
+        "/sources/thumbnail", params={"collection": "docs", "image_id": "h"}, headers={"X-Auth-User": "alice"}
+    )
+    assert ok.status_code == 200, ok.text
+    assert captured["collection"] != "docs"  # resolved to the owner-namespaced physical name
+
+    captured.clear()
+    denied = client.get(
+        "/sources/thumbnail", params={"collection": "docs", "image_id": "h"}, headers={"X-Auth-User": "bob"}
+    )
+    assert denied.status_code == 404
+    assert captured == {}  # gate rejected before any lookup
+
+
 def test_upload_registers_ownership(
     client: TestClient, _patch_rag: _OwnRAG, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -407,7 +407,14 @@ def _analysed_collection() -> QdrantClient:
                 "filename": "notes.txt",
                 "entities": [{"text": "Acme", "type": "org"}],
                 "hate_speech": {**finding, "chunk_text": "Chunk text naming Acme."},
-            }
+            },
+            # The document ``ImageReader`` wrote for TWIN's file: it carries
+            # the image's findings, so the companion point must not repeat them.
+            _point_id("twin-document"): {
+                "text": f"{_FIGURE_OCR}\n\n{_FIGURE_CAPTION}",
+                "filename": "poster.png",
+                "image_id": "img-twin",
+            },
         },
     )
     _store(
@@ -419,8 +426,8 @@ def _analysed_collection() -> QdrantClient:
                 entities=[{"text": "Berlin", "type": "location"}],
                 hate_speech={**finding, "chunk_id": FIGURE, "chunk_text": _FIGURE_OCR, "source_ref": ""},
             ),
-            # A standalone file is also a main-collection document; that
-            # document carries its findings.
+            # A standalone file is also a main-collection document (above);
+            # that document carries its findings.
             TWIN: _figure_payload(
                 image_id="img-twin",
                 source_type="social_media",
@@ -505,6 +512,86 @@ def test_entity_sources_include_the_words_and_caption_of_images(monkeypatch: pyt
     assert figure["chunk_text"] == f"{_FIGURE_OCR}\n\n{_FIGURE_CAPTION}"
     assert figure["filename"] == "report.pdf"
     assert figure["image_id"] == "img-figure"
+
+
+def _with_claimed_image(client: QdrantClient, point: str, image_id: str, occurrences: list[str]) -> None:
+    """Add an analysed image a posting claimed to *client*'s companion.
+
+    Args:
+        client: The in-memory client.
+        point: The image point's id.
+        image_id: Its content hash.
+        occurrences: The ``source_type`` of each source that stored the image.
+    """
+    _store(
+        client,
+        _COMPANION,
+        {
+            point: _figure_payload(
+                image_id=image_id,
+                source_type="social_media",
+                source_doc_id="post-1",
+                posting_uuid="post-1",
+                occurrences=[{"source_type": source_type} for source_type in occurrences],
+                enrichment="done",
+                entities=[{"text": "Hamburg", "type": "location"}],
+                hate_speech={
+                    "hate_speech": True,
+                    "category": "religion",
+                    "confidence": "high",
+                    "reason": "Endorses excluding a group.",
+                    "chunk_id": point,
+                    "chunk_text": _FIGURE_OCR,
+                    "source_ref": "",
+                },
+            )
+        },
+    )
+
+
+def test_an_image_a_posting_claimed_after_the_pool_stored_it_is_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A posting's image keeps the standalone record of its upload, yet no document carries its findings.
+
+    The preprocessing pool stores every image as a standalone file's before
+    the export is read. Once the linker claims it, the generic lane never
+    reads the file, so the image's findings exist on its companion point only.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    client = _analysed_collection()
+    claimed = _point_id("claimed")
+    _with_claimed_image(client, claimed, "img-claimed", ["standalone", "social_media"])
+    rag = _rag_over(client, monkeypatch)
+
+    entity_rows = {row["chunk_id"] for row in rag._load_collection_ner_sources()}
+    hate_rows = {row["chunk_id"] for row in rag.get_collection_hate_speech()}
+
+    assert claimed in entity_rows
+    assert claimed in hate_rows
+
+
+def test_an_image_whose_document_found_nothing_is_still_not_listed_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image with a main-collection document is listed through that document alone.
+
+    Its document found nothing here; the companion point's own run did. The
+    two read different text, so their verdicts can differ, and the document
+    is the image's record either way.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    client = _analysed_collection()
+    claimed = _point_id("claimed-twin")
+    _with_claimed_image(client, claimed, "img-claimed-twin", ["social_media"])
+    _store(client, "docs", {_point_id("claimed-twin-document"): {"text": "Words.", "image_id": "img-claimed-twin"}})
+    rag = _rag_over(client, monkeypatch)
+
+    entity_rows = {row["chunk_id"] for row in rag._load_collection_ner_sources()}
+    hate_rows = {row["chunk_id"] for row in rag.get_collection_hate_speech()}
+
+    assert claimed not in entity_rows
+    assert claimed not in hate_rows
 
 
 def test_image_text_fields_keep_an_images_words_description_and_tags_apart() -> None:

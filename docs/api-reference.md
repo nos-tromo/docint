@@ -89,6 +89,7 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `DELETE` | `/ingest/jobs/{job_id}` | `Ingestion` | Dismiss a finished job (409 while running). |
 | `POST` | `/ingest` | `Ingestion` | Ingest the configured `DATA_PATH` directly (CLI/batch path). |
 | `GET`  | `/sources/preview` | `Sources` | Return a preview of a source file staged under `QDRANT_SRC_DIR`. |
+| `GET`  | `/sources/thumbnail` | `Sources` | Return the picture behind an image finding, addressed by its `image_id`. |
 | `POST` | `/translate` | `Translate` | Translate a caller-supplied snippet into the operator's locale. Fail-soft. |
 
 ## Meta
@@ -1138,6 +1139,19 @@ Returns when the run completes; follow progress via logs.
 Returns a preview (or download) of a source file staged under
 `QDRANT_SRC_DIR`. Takes query parameters for the source identifier /
 path. Used by the UI Inspector page to render citations.
+
+### `GET /sources/thumbnail`
+
+Returns the picture behind an image finding, addressed by the image itself.
+Query parameters: `collection` (the logical name, owner-gated like the
+preview) and `image_id` (the image's content hash, as an entity or
+hate-speech row carries it). Answers with the stored thumbnail on the
+`_images` companion, which every kind of image point carries and which is the
+only copy of a video keyframe's pixels. A point stored before thumbnails
+existed falls back to its own image file. A clip or a document is never
+served: a keyframe's or figure's `file_hash` names the file it was cut from,
+and `/sources/preview` is the route for that. `404` when the image has no
+picture to show. Used by the Entities and Hate speech tables.
 
 ## Translate
 

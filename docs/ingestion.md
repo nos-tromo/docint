@@ -506,10 +506,13 @@ ingestion path:
   (`entities`, `relations`, `hate_speech`) are written payload-only and are
   listed beside the chunks' in the Entities and Hate speech views, the entity
   graph, entity resolution and the findings CSVs. This covers PDF figures,
-  images attached to social postings and video keyframes. A standalone image
-  file is left out, because its words and caption are also a main-collection
-  document, which the generic lane enriches; listing both would count each
-  finding twice.
+  images attached to social postings and video keyframes. An image whose words
+  and caption are also a main-collection document — a standalone image file,
+  which the generic lane enriches — is listed through that document only, so
+  no finding is counted twice. That is read off the main collection (a
+  document carrying the image's `image_id`), not off how the image was
+  stored: the preprocessing pool stores every image as a standalone file's
+  before the export that claims it is read.
 - Every hate-speech row carries a `basis`: `image` for a verdict judged from
   an image (on the `_images` companion, or a standalone file's document),
   `text` otherwise. The Hate speech view shows it as a **From an image** pill,
@@ -524,17 +527,26 @@ ingestion path:
   are cached by content hash, so images already in a collection keep the
   caption they were stored with; ingest into a fresh collection to caption
   them again.
-- Every point written fresh carries `enrichment: "pending"`. Once its lanes
+- Every point written fresh carries `enrichment: "pending"`, except a
+  standalone file's, whose analysis belongs to its document. Once its lanes
   are done, the ingest job enriches the pending points with its own stages and
   per-request overrides and marks them `done`, including points written at
   upload time, before the job existed. A keyframe rewritten for another
   posting keeps the results it already has. If the pass fails, the points stay
   pending for the next run; `INGEST_FAIL_FAST=true` aborts the run instead.
-  Images ingested before the marker existed carry none and are not enriched
-  retroactively; re-ingest into a fresh collection to analyse them.
-- In the Analysis tables, a finding read off a PDF figure or a keyframe shows
-  no thumbnail: the preview route serves source files, and its source is the
-  PDF or the clip. Report exports still carry the stored image.
+- An image a posting claims waits for the pass unless it already has an
+  enrichment state. That covers an image the preprocessing pool stored before
+  the export was read (as a standalone file's, which is never queued, since a
+  standalone file's analysis belongs to its document), and one stored before
+  the marker existed. Every job re-reads the collection's whole source folder,
+  so the next job repairs both. That job must run with NER and hate speech on:
+  a stage switched off settles an image with nothing found, as it does a text
+  chunk. PDF figures and keyframes ingested before the marker existed are not
+  enriched retroactively; re-ingest into a fresh collection to analyse them.
+- In the Analysis tables, every finding read off an image shows the picture:
+  `/sources/thumbnail` serves the stored thumbnail by `image_id`, so a PDF
+  figure or a keyframe shows its own pixels rather than the document or the
+  clip it came from. Report exports carry the same stored image.
 - Failures are soft unless `IMAGE_FAIL_ON_EMBED_ERROR` /
   `IMAGE_FAIL_ON_TAG_ERROR` are set.
 
