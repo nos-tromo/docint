@@ -95,7 +95,9 @@ def translate(text: str, *, target_lang: str | None = None) -> TranslateResult:
     Text needing no translation comes back with ``same_language`` set and no
     translation, so no caller can show a copy of the source as one. The model
     answers :data:`_SAME_LANGUAGE` for it, and a reply repeating the source
-    word for word counts the same.
+    word for word counts the same. The marker only counts leading the reply,
+    and never when the source itself carries it, so no text can suppress its
+    own translation.
 
     Args:
         text: The source snippet (already held by the caller).
@@ -113,8 +115,12 @@ def translate(text: str, *, target_lang: str | None = None) -> TranslateResult:
     except Exception as exc:  # fail-soft: degrade, never crash the caller
         logger.warning("Translation unavailable: {}", exc)
         return TranslateResult(ok=False, translation=None, model=model, target_lang=target_lang, error="unavailable")
-    # The marker is matched without its brackets and in any case: models
-    # re-bracket, quote or annotate it.
-    if _SAME_LANGUAGE.strip("[]").casefold() in translated.casefold() or _words(translated) == _words(text):
+    # Models re-bracket, quote or annotate the marker, so it counts as the
+    # reply's first word — but only there, and never when the source holds it
+    # too: matched anywhere, a hashtag or URL carrying it would let a text's
+    # author suppress its faithful translation.
+    marker = _SAME_LANGUAGE.strip("[]").casefold()
+    reply, source = _words(translated), _words(text)
+    if (reply[:1] == [marker] and marker not in source) or reply == source:
         return TranslateResult(ok=True, translation=None, model=model, target_lang=target_lang, same_language=True)
     return TranslateResult(ok=True, translation=translated, model=model, target_lang=target_lang)

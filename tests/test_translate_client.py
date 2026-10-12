@@ -430,3 +430,35 @@ def test_translate_recognises_the_marker_its_prompt_asks_for(monkeypatch: pytest
 
     assert res.same_language is True
     assert res.translation is None
+
+
+@pytest.mark.parametrize(
+    ("text", "reply"),
+    [
+        ("Follow #same_language for more news.", "Folgt #same_language für weitere Neuigkeiten."),
+        ("Read https://example.org/same_language today.", "Lies heute https://example.org/same_language."),
+        ("same_language is the flag the API returns.", "same_language ist das Flag, das die API zurückgibt."),
+        ("Good morning. Guten Morgen.", "Guten Morgen. [[SAME_LANGUAGE]]"),
+    ],
+)
+def test_translate_marker_word_inside_a_translation_never_suppresses_it(
+    monkeypatch: pytest.MonkeyPatch, text: str, reply: str
+) -> None:
+    """A reply carrying a translation is kept, whatever marker word it holds.
+
+    The prompt has the model preserve hashtags and URLs, so a source carrying
+    the marker word hands it on to a faithful translation. Matched anywhere in
+    the reply, it would let a text's author suppress the text's translation.
+
+    Args:
+        monkeypatch: Fixture used to patch the module-level pipeline factory.
+        text: The source snippet.
+        reply: The model's faithful translation of it.
+    """
+    monkeypatch.setattr(tc, "_pipeline", lambda: _CannedPipe(reply))
+
+    res = tc.translate(text)
+
+    assert res.ok is True
+    assert res.same_language is False
+    assert res.translation == reply
