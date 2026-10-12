@@ -155,7 +155,14 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   with the linked asset's identity (`_relink_point`: stored vector, caption,
   OCR text and thumbnail reused, no model call) rather than only appending an
   `occurrences` entry — a payload-only write would leave `_node_content`,
-  which retrieval rebuilds nodes from, stale. The linker keys each image by
+  which retrieval rebuilds nodes from, stale. **A posting's claim also queues
+  a point no NER + hate-speech pass has reached** (`enrichment: pending`): the
+  pool stored it as a standalone file's, and a standalone file's analysis
+  belongs to its `ImageReader` document, which a linked file never gets — so
+  without the claim its words reach neither Analysis view. For the same
+  reason the views decide that an image has such a document from the main
+  collection itself (a point carrying its flat `image_id`), never from the
+  `standalone` occurrence every pooled image keeps. The linker keys each image by
   `image-link:…:hash:posting` and `join`s the file's loose `image:` key first,
   so an upload-time task is waited on and then relinked, never replaced; a
   cached clip claimed by a posting gets `relink_keyframes` by

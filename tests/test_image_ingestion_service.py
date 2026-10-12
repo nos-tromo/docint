@@ -1645,3 +1645,90 @@ def test_a_rewritten_keyframe_keeps_the_enrichment_it_already_has() -> None:
     assert stored["enrichment"] == "done"
     assert stored["entities"] == [{"text": "Acme", "type": "org"}]
     assert stored["hate_speech"] == finding
+
+
+def _store_loose(service: ImageIngestionService, image_bytes: bytes) -> str:
+    """Store an image the way the preprocessing pool does: as a standalone file's.
+
+    Args:
+        service: The image service.
+        image_bytes: The image.
+
+    Returns:
+        The point id.
+    """
+    record = service.ingest_image(
+        ImageAsset(source_type="standalone", image_bytes=image_bytes, mime_type="image/png"),
+        context=IngestContext(source_collection="att-5"),
+    )
+    return record.point_id or ""
+
+
+def _claim(service: ImageIngestionService, image_bytes: bytes, posting_uuid: str) -> None:
+    """Claim an image for a posting, the way the social linker does.
+
+    Args:
+        service: The image service.
+        image_bytes: The image.
+        posting_uuid: The posting claiming it.
+    """
+    service.ingest_image(
+        ImageAsset(
+            source_type="social_media",
+            image_bytes=image_bytes,
+            mime_type="image/png",
+            source_doc_id=posting_uuid,
+            extra_metadata={"posting_uuid": posting_uuid, "source_type": "social_media"},
+        ),
+        context=IngestContext(source_collection="att-5"),
+    )
+
+
+def test_a_loose_image_a_posting_claims_waits_for_the_jobs_enrichment() -> None:
+    """The pool stores every image as a standalone file's; once a posting claims one, no document carries its words.
+
+    A standalone file's point is not queued, because ``ImageReader`` writes
+    its words into the main collection. The linker's files never reach that
+    reader, so the point a posting claims must wait for the pass like a
+    freshly written linked image, or its words reach neither the Entities nor
+    the Hate speech view.
+    """
+    service, client, _ = _build_service()
+    image = _make_png_bytes((10, 20, 30))
+    point_id = _store_loose(service, image)
+
+    _claim(service, image, "u1")
+
+    assert client.records[point_id]["posting_uuid"] == "u1"
+    assert client.records[point_id].get("enrichment") == "pending"
+
+
+def test_a_linked_image_never_queued_is_queued_when_a_posting_claims_it_again() -> None:
+    """A linked point no pass ever reached is queued by the next claim.
+
+    That is a point stored before the marker existed, or one this rule came
+    too late for; every job re-reads its export, so the next one repairs it.
+    """
+    service, client, _ = _build_service()
+    image = _make_png_bytes((11, 21, 31))
+    point_id = _store_loose(service, image)
+    _claim(service, image, "u1")
+    client.records[point_id].pop("enrichment", None)
+
+    _claim(service, image, "u1")
+
+    assert client.records[point_id].get("enrichment") == "pending"
+
+
+def test_a_claimed_image_keeps_the_enrichment_it_already_has() -> None:
+    """A point the pass already settled is not queued again by a later claim."""
+    service, client, _ = _build_service()
+    image = _make_png_bytes((12, 22, 32))
+    point_id = _store_loose(service, image)
+    _claim(service, image, "u1")
+    client.records[point_id].update({"enrichment": "done", "entities": [{"text": "Acme", "type": "org"}]})
+
+    _claim(service, image, "u2")
+
+    assert client.records[point_id]["enrichment"] == "done"
+    assert client.records[point_id]["entities"] == [{"text": "Acme", "type": "org"}]

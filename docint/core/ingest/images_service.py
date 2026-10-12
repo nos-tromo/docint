@@ -25,7 +25,6 @@ from docint.core.ingest.image_enrichment import (
     ENRICHMENT_FIELD,
     ENRICHMENT_PENDING,
     enrichment_carryover,
-    has_text_twin,
 )
 from docint.core.ocr import DocumentOcrEngine, build_engine
 from docint.core.search.fields import ensure_field_indexes
@@ -1399,6 +1398,20 @@ class ImageIngestionService:
                         payload=existing_payload,
                         occurrence=occurrence,
                     )
+                if (
+                    self._link_value(asset)
+                    and ENRICHMENT_FIELD not in existing_payload
+                    and self.qdrant_client is not None
+                ):
+                    # A posting's image waits for the job's pass like a fresh
+                    # linked write. Nothing queued one stored loose — as a
+                    # standalone file's, whose document the linker's files
+                    # never get — or one stored before the marker existed.
+                    self.qdrant_client.set_payload(
+                        collection_name=target_collection,
+                        payload={ENRICHMENT_FIELD: ENRICHMENT_PENDING},
+                        points=[existing_point_id],
+                    )
                 self._backfill_thumbnail(
                     collection_name=target_collection,
                     point_id=existing_point_id,
@@ -1482,7 +1495,9 @@ class ImageIngestionService:
         }
         if tag_error:
             image_payload["tagging_error"] = tag_error
-        if not has_text_twin(image_payload):
+        # A standalone file's words are also a main-collection document
+        # (``ImageReader``), which the generic lane enriches.
+        if image_payload.get("source_type") != "standalone":
             image_payload[ENRICHMENT_FIELD] = ENRICHMENT_PENDING
 
         node_text = self._node_text(ocr_text, description, tags)

@@ -8,12 +8,16 @@ collection as a document — so the words on a poster in a posting, a slide in
 a video or a figure in a PDF reached neither the Entities nor the Hate speech
 view.
 
-The image service marks every point it writes fresh ``pending``, and the job
+The image service marks every point it writes fresh ``pending`` — except a
+standalone file's, whose document carries its analysis — and so does a
+posting's claim on a point nothing has queued: one the preprocessing pool
+stored loose, as a standalone file's, before the export was read. The job
 runs this pass once its lanes are done. Points written at upload time, before
 any job existed to say which stages are on, are therefore enriched with the
 stages of the job that ingests them. Points stored before the marker existed
 carry none and are left as they were ingested, like the text chunks of a
-collection ingested before a stage was switched on.
+collection ingested before a stage was switched on — unless a posting claims
+them, which every job re-reading the export does.
 """
 
 from __future__ import annotations
@@ -68,30 +72,6 @@ class NodeEnricher(Protocol):
             progress_offset (int): Processed count offset for cumulative progress.
             progress_total (int | None): Total count for progress display.
         """
-
-
-def has_text_twin(payload: dict[str, Any]) -> bool:
-    """Report whether an image point is also a main-collection document.
-
-    A standalone image file is read twice: ``ImageReader`` writes its words
-    and caption into the main collection as a document, which the generic
-    lane enriches, and the image service writes this point. Identity is
-    first-wins, so a file seen standalone after a posting claimed it keeps the
-    posting's ``source_type``; its occurrences still record the standalone
-    copy.
-
-    Args:
-        payload (dict[str, Any]): The image point's payload.
-
-    Returns:
-        bool: ``True`` when the point's findings belong to its document.
-    """
-    if payload.get("source_type") == "standalone":
-        return True
-    occurrences = payload.get("occurrences")
-    return isinstance(occurrences, list) and any(
-        isinstance(occurrence, dict) and occurrence.get("source_type") == "standalone" for occurrence in occurrences
-    )
 
 
 def _tag_list(payload: dict[str, Any]) -> list[str]:
