@@ -238,6 +238,22 @@ def test_api_proxy_streams_request_body() -> None:
     assert "proxy_http_version 1.1;" in block
 
 
+def test_proxied_responses_never_spill_to_tmp() -> None:
+    """Large downloads must not be spooled to the 16m /tmp tmpfs.
+
+    With nginx's default 1024m temp-file ceiling, a response the client reads
+    slower than the backend sends overflowed the tmpfs (``pwritev() has
+    written only 4096 of 8192``) and the browser got a truncated 200 — an
+    extract ZIP failed with ``NS_ERROR_PARTIAL_TRANSFER``. Set once at server
+    scope so every proxied location, present and future, inherits it.
+    """
+    conf = _nginx_conf()
+    server_head = conf[conf.index("server {") : conf.index("\n    location ")]
+
+    assert "proxy_max_temp_file_size 0;" in server_head
+    assert conf.count("proxy_max_temp_file_size") == 1
+
+
 def test_frontend_image_defaults_api_body_limit() -> None:
     """The image must default DOCINT_API_MAX_BODY_SIZE.
 
