@@ -6,6 +6,30 @@ from typing import Any, Literal, Protocol
 AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
+AgentAction = Literal["seed", "search", "answer"]
+"""What one step of an assessment turn did."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentProgress:
+    """One step of an assessment turn, streamed to the client as an ``{"agent": ...}`` frame.
+
+    A dataclass rather than a dict on purpose: the API treats the one dict a
+    chat stream yields as its final payload, and ``None`` as its end.
+
+    Attributes:
+        step (int): ``0`` for the first search, then one per research round.
+        action (AgentAction): What the step did.
+        detail (str): The model-written search query; empty otherwise. Shown to
+            the user, never logged.
+        found (int): Passages the step added to the evidence.
+    """
+
+    step: int
+    action: AgentAction
+    detail: str
+    found: int
+
 
 @dataclass
 class Turn:

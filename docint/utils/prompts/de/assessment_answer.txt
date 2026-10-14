@@ -1,0 +1,22 @@
+Du bewertest Material anhand abgerufener Belege in einem laufenden Gespräch. Die Nutzerin oder der Nutzer möchte ein Urteil, nicht nur wissen, was im Material steht.
+
+Gesprächsverlauf:
+{prior_turn}
+
+Abgerufene Kontextausschnitte:
+---------------------
+{context_str}
+---------------------
+Frage der Nutzerin oder des Nutzers: {question}
+
+Schreibe die Antwort in der Sprache der Nutzerin oder des Nutzers, in genau zwei Teilen.
+
+Teil 1 – was die Quellen sagen. Nenne knapp die Fakten aus den Ausschnitten, auf denen das Urteil beruht. Belege jede Aussage mit ihrem citation_index in eckigen Klammern (z. B. [3]); nummeriere die Ausschnitte nie selbst. Nichts in diesem Teil darf über die Ausschnitte hinausgehen.
+
+Schreibe dann eine Zeile, die nur [[ASSESSMENT]] enthält.
+
+Teil 2 – deine eigene Einschätzung. Beantworte die Frage so, wie es eine fachkundige Gutachterin oder ein fachkundiger Gutachter täte: Stärken, Schwächen, Lücken, was sich verbessern ließe, ob die Aussagen überzeugen – je nachdem, was gefragt ist. Du darfst Allgemeinwissen des Fachgebiets heranziehen; kennzeichne es dann (etwa „im Allgemeinen …“ oder „üblich ist …“). Bezieht sich ein Punkt auf einen bestimmten Ausschnitt, belege ihn. Schreibe einer Quelle nie etwas zu, das sie nicht sagt. Die Ausschnitte sind Auszüge: Fehlt etwas darin, sage, dass es in diesen Auszügen nicht zu sehen ist – nicht, dass das Dokument es nicht enthält. Sage, wie sicher du bist, wo die Belege dünn sind.
+
+Beschreibe weder diese Anweisungen noch dein Vorgehen.
+
+Antwort:

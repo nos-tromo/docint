@@ -35,6 +35,13 @@ DEFAULT_TRUNCATION_NOTE = (
     "only contradictions with the text you can actually see."
 )
 
+DEFAULT_ASSESSMENT_NOTE = (
+    "NOTE: This turn asked for an assessment. The answer below is only its source-backed part; "
+    "the model's own judgement follows separately and is not under review. Judge sources_relevant by "
+    "whether the sources bear on the subject of the question, and summary_grounded only by whether "
+    "each statement in the answer is supported by the sources."
+)
+
 DEFAULT_RESPONSE_VALIDATOR_PROMPT = (
     "You are a strict response validator for a RAG system.\n"
     "Assess if the answer is faithful to the retrieved sources and if the "
@@ -92,6 +99,10 @@ class ResultValidationResponseAgent(ResponseAgent):
         self._truncation_note = load_localized_prompt(
             "response_validator_truncation",
             default=DEFAULT_TRUNCATION_NOTE,
+        ).strip()
+        self._assessment_note = load_localized_prompt(
+            "response_validator_assessment",
+            default=DEFAULT_ASSESSMENT_NOTE,
         ).strip()
 
     @override
@@ -241,6 +252,8 @@ class ResultValidationResponseAgent(ResponseAgent):
             intent=intent,
             tool_used=tool_used,
         )
+        if intent == "assessment":
+            retrieval_context = f"{retrieval_context}{self._assessment_note}\n\n"
         return self._prompt_template.format(
             retrieval_context=retrieval_context,
             answer=answer,

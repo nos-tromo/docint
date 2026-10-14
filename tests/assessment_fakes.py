@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from typing import Any
+from unittest.mock import MagicMock
 
+from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
 
 #: What the production LLM view lets through for these doubles.
@@ -36,3 +39,24 @@ def llm_view(node: BaseNode) -> BaseNode:
     clone = node.model_copy(deep=True)
     clone.excluded_llm_metadata_keys = [key for key in clone.metadata if key not in _VISIBLE]
     return clone
+
+
+def streaming_llm(tokens: Sequence[str]) -> MagicMock:
+    """Build a chat model whose ``stream_chat`` streams ``tokens``, recording each call.
+
+    Args:
+        tokens (Sequence[str]): The answer, token by token.
+
+    Returns:
+        MagicMock: The model double; ``stream_chat.call_args`` holds the messages and kwargs.
+    """
+    llm = MagicMock()
+
+    def _stream(messages: Sequence[ChatMessage], **kwargs: Any) -> Iterator[ChatResponse]:
+        text = ""
+        for token in tokens:
+            text += token
+            yield ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=text), delta=token)
+
+    llm.stream_chat.side_effect = _stream
+    return llm
