@@ -480,4 +480,18 @@ describe('ChatTurn', () => {
     expect(screen.getByRole('status')).toBe(region)
     expect(region).toContainElement(screen.getByTestId('agent-trail-live'))
   })
+
+  it.each([
+    ['no actions key', undefined],
+    ['a null actions value', null],
+    ['an actions value that is not a list', {}]
+  ])('still renders the notice, with no search list, for a stored trail with %s', (_name, actions) => {
+    // The backend only checks that a stored trail is an object, so its shape is not guaranteed.
+    const stored: Record<string, unknown> = { ...TRAIL, actions }
+    if (actions === undefined) delete stored.actions
+    renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta(stored as unknown as AgentTrail) })
+
+    expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+  })
 })

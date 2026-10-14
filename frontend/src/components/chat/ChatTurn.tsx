@@ -166,7 +166,7 @@ function AssessmentNotice({ trail }: { trail: AgentTrail }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const listId = useId()
-  const searches = trail.actions.filter((action) => action.action === 'search')
+  const searches = Array.isArray(trail.actions) ? trail.actions.filter((action) => action.action === 'search') : []
   const shortened =
     trail.shortened > 0
       ? t(trail.shortened === 1 ? 'chat.assessment_shortened_one' : 'chat.assessment_shortened_other', {
