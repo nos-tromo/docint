@@ -17,13 +17,13 @@ The sparse model changed from BM42
 (`Qdrant/all_miniLM_L6_v2_with_attentions`) to `BAAI/bge-m3` for
 non-vLLM providers, and dense embeddings on the `embed-only` shape now
 come from that same bge-m3 instance (fp32 transformers) instead of
-Ollama's quantised GGUF build. Dev collections created before this
+a quantised GGUF build. Dev collections created before this
 change need **bge-m3 vectors, which a plain re-ingest will not give
 them** — for two reasons: file-hash dedup skips any source file
 already recorded as ingested, and swapping models mid-collection would
 leave old and new points computed by different models side by side
 with no way to tell them apart. The dense dimension itself doesn't
-change — bge-m3 is 1024-wide both as Ollama's GGUF build and as fp32
+change — bge-m3 is 1024-wide both as a GGUF build and as fp32
 transformers — so checking the vector width is not a valid way to
 confirm this migration is unnecessary; the drift is in the numeric
 values (quantised vs. fp32) and, for sparse, the switch away from BM42

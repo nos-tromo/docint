@@ -717,8 +717,8 @@ Two operator-side deployment shapes for the upstream NER service:
 - Full `vllm-service` stack (CUDA): docint reaches the router at
   `http://vllm-router:4000/gliner`; set
   `NER_API_KEY=$OPENAI_API_KEY` to satisfy the router's Bearer auth.
-- `vllm-service` NER-only stack (Mac, CPU-only Linux running Ollama for
-  chat/embed): docint reaches the GLiNER container directly at
+- `vllm-service` NER-only stack (Mac or CPU-only Linux, with chat and
+  embeddings served elsewhere): docint reaches the GLiNER container directly at
   `http://gliner-ner:8000/gliner`; no Bearer auth needed.
 
 Hate-speech detection is an optional parallel stage governed by
@@ -783,10 +783,9 @@ Stopping the job cancels the queued ones, and three consecutive failed
 window requests end the pass instead of calling a dead endpoint once per
 window.
 
-The prompts run to 3–5k tokens, so the chat model needs a context of at
-least 8k tokens. Ollama's default `num_ctx` of 2048 silently drops the
-start of the prompt; raise it with a Modelfile `PARAMETER num_ctx` or
-`OLLAMA_CONTEXT_LENGTH`.
+The prompts run to 3–5k tokens, so the chat endpoint must serve a context
+of at least 8k tokens. One that serves less rejects the request or silently
+drops the start of the prompt; raise the context length the endpoint serves.
 
 Gaps and caveats:
 - Existing collections keep the verdicts they were ingested with.

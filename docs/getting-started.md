@@ -19,7 +19,8 @@ extra context a new user needs to understand what they just started.
 - **Node 20 + pnpm** — only if you want to run the React frontend dev
   server locally.
 - A running **inference backend** reachable from Docint:
-  - any OpenAI-compatible endpoint (Ollama, vLLM, the public OpenAI API, …),
+  - any OpenAI-compatible endpoint (the federation's `vllm-service` router,
+    the public OpenAI API, …),
   - configured via `INFERENCE_PROVIDER`, `OPENAI_API_BASE`, and
     `OPENAI_API_KEY` (see [configuration.md](configuration.md)).
 - **Qdrant** — provided by the sibling `data-plane` project
@@ -38,10 +39,11 @@ extra context a new user needs to understand what they just started.
    Edit `.env` to point at your inference backend. Two common shapes:
 
    ```bash
-   # Using Ollama
-   INFERENCE_PROVIDER=ollama
-   OPENAI_API_BASE=http://ollama:11434/v1
-   TEXT_MODEL=gpt-oss:20b
+   # Using the federation's vllm-service router
+   INFERENCE_PROVIDER=vllm
+   OPENAI_API_BASE=http://vllm-router:4000/v1
+   OPENAI_API_KEY=sk-no-key-required
+   TEXT_MODEL=Qwen/Qwen3.5-2B
 
    # Using the OpenAI API
    INFERENCE_PROVIDER=openai
@@ -102,7 +104,7 @@ without going through Docker.
    - Qdrant at `http://localhost:6333` — start the `data-plane`
      project with `cd ../data-plane && make up-dev`, which publishes
      Qdrant on the host port.
-   - An OpenAI-compatible endpoint (Ollama, vLLM, OpenAI, …).
+   - An OpenAI-compatible endpoint (the `vllm-service` router, OpenAI, …).
 
 3. **Install Python dependencies:**
 

@@ -291,27 +291,30 @@ one OpenAI-compatible base URL ending in `/v1`, plus the vLLM sparse routes at
 For a remote vLLM router, drop `INFERENCE_NET` and point
 `OPENAI_API_BASE` at the external URL.
 
-## Co-deployment with Ollama
+## Co-deployment with another OpenAI-compatible endpoint
 
-Similar to vLLM, but point at the Ollama OpenAI-compatible endpoint:
+Any endpoint that speaks the OpenAI API can serve docint. Point
+`OPENAI_API_BASE` at its base URL, ending in `/v1`, and name the models it
+serves:
 
 ```bash
-INFERENCE_PROVIDER=ollama
-OPENAI_API_BASE=http://ollama:11434/v1
-TEXT_MODEL=gpt-oss:20b
-VISION_MODEL=qwen3.5:9b
-EMBED_MODEL=bge-m3
+OPENAI_API_BASE=http://<endpoint>/v1
+OPENAI_API_KEY=<key, if the endpoint needs one>
+TEXT_MODEL=<chat model>
+VISION_MODEL=<vision model>
+EMBED_MODEL=<embedding model>
 ```
 
-Give the Ollama container its own model-cache volume; docint holds no
-model weights of its own.
+`INFERENCE_PROVIDER` selects only the defaults docint starts from (batch
+sizes, timeouts, context windows and the embedding tokenizer, listed per value
+in [configuration.md](configuration.md)), so set explicitly whatever the
+endpoint needs differently. The endpoint holds the model weights; docint holds
+none of its own.
 
-### Embedding throughput with Ollama
+### Embedding throughput on a CPU-served endpoint
 
-CPU-resident embedding models can take minutes per batch. The default tuning
-(`EMBED_BATCH_SIZE=16`, `EMBED_TIMEOUT_SECONDS=1800`) is conservative to
-minimize timeout risk on slower machines. Adjust based on your hardware and
-corpus size:
+CPU-resident embedding models can take minutes per batch. Tune the batch size
+and the timeout to the hardware and the corpus size:
 
 - **Slow CPU or very large batches**: increase `EMBED_TIMEOUT_SECONDS` or
   reduce `EMBED_BATCH_SIZE`.
@@ -319,39 +322,21 @@ corpus size:
   `32–64` for better throughput, keeping `timeout × (1 + max_retries) ≤ 3600`
   to avoid potential multi-hour stalls.
 
-### Ollama context window — match the serving ceiling
+### Context window — match the serving ceiling
 
-Ollama serves `bge-m3` with `num_ctx=2048` by default, independent of the
-model's 8192-token capacity. `/api/show` does not advertise the runtime value,
-so Docint cannot probe it — operators must align the two sides explicitly.
+An endpoint can serve a model with a smaller context window than the model
+supports, and docint does not probe the served value, so align the two sides
+explicitly: set `EMBED_CTX_TOKENS` to the window the endpoint serves for the
+embedding model, and `OPENAI_CTX_WINDOW` to the one it serves for the chat
+model. The pre-embed re-splitter then bounds every outbound payload to
+`int(EMBED_CTX_TOKENS × EMBED_CTX_SAFETY_MARGIN)` tokens. A small window makes
+ingest slower, because payloads are smaller and more numerous, but not wrong.
 
-Recommended default when serving embeddings through Ollama:
-`EMBED_CTX_TOKENS=2048`.
-The pre-embed re-splitter bounds every outbound payload to
-`int(2048 × EMBED_CTX_SAFETY_MARGIN) = 1945` tokens, which ollama accepts
-unconditionally. Ingest completes — slower than an 8192 budget would imply
-because payloads are smaller and more numerous, but correct.
-
-**Reclaim the full 8192-token window** with a one-line custom Modelfile. Docint
-ships it at `deploy/Modelfile.bge-m3`:
-
-```bash
-ollama pull bge-m3
-ollama create docint-bge-m3 -f deploy/Modelfile.bge-m3
-```
-
-Then in `.env`:
-
-```
-EMBED_MODEL=docint-bge-m3
-EMBED_CTX_TOKENS=8192
-```
-
-Verify with `ollama show docint-bge-m3 --modelfile` — the output must include
-`PARAMETER num_ctx 8192`. Any mismatch between the served `num_ctx` and the
-configured `EMBED_CTX_TOKENS` surfaces as an `EmbeddingInputTooLongError` at
-ingest time; the error message names the mismatch and points back to this
-section.
+To use more of a model's window, raise the context length the endpoint serves,
+in the endpoint's own configuration, then raise `EMBED_CTX_TOKENS` or
+`OPENAI_CTX_WINDOW` to match. A mismatch between the served window and
+`EMBED_CTX_TOKENS` surfaces as an `EmbeddingInputTooLongError` at ingest time;
+the error message names the mismatch and points back to this section.
 
 ## Distributable image bundles
 
