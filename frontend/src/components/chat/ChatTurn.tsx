@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import { DisclosureButton, InfoIcon, SearchIcon, WarningIcon } from '@infra/ui'
-import type { AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
+import type { AgentReason, AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
+import type { Strings } from '@/i18n'
 import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
@@ -117,23 +118,39 @@ function dedupeSources(sources: Source[]): Source[] {
   return out
 }
 
+/** Catalog copy per trail token. A token missing here renders no notice, never a crash. */
+const REASON_COPY: Record<AgentReason, keyof Strings> = {
+  tools_unavailable: 'chat.assessment_reason.tools_unavailable',
+  research_failed: 'chat.assessment_reason.research_failed',
+  context_budget: 'chat.assessment_reason.context_budget',
+  time_budget: 'chat.assessment_reason.time_budget',
+  no_evidence: 'chat.assessment_reason.no_evidence'
+}
+
+const ANSWER_COPY: Partial<Record<AgentTrail['answer'], keyof Strings>> = {
+  unsplit: 'chat.assessment_answer.unsplit',
+  empty: 'chat.assessment_answer.empty'
+}
+
 type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found'>
 
 function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
-  if (step.action === 'seed') return t('chat.assessment_trail_seed', { count: step.found })
+  const single = step.found === 1
+  if (step.action === 'seed') {
+    return t(single ? 'chat.assessment_trail_seed_one' : 'chat.assessment_trail_seed_other', { count: step.found })
+  }
   if (step.action === 'answer') return t('chat.assessment_trail_answer')
-  return t('chat.assessment_trail_search', { query: step.detail, count: step.found })
+  return t(single ? 'chat.assessment_trail_search_one' : 'chat.assessment_trail_search_other', {
+    query: step.detail,
+    count: step.found
+  })
 }
 
 /** The research steps of an assessment turn while it runs. */
 function AgentTrailLive({ steps }: { steps: AgentStep[] }) {
   const t = useT()
   return (
-    <ul
-      className="mt-3 space-y-1 text-xs text-muted-foreground"
-      data-testid="agent-trail-live"
-      aria-live="polite"
-    >
+    <ul className="mt-3 space-y-1 text-xs text-muted-foreground" data-testid="agent-trail-live">
       {steps.map((step) => (
         <li key={`${step.step}-${step.action}`} className="flex items-center gap-2">
           <SearchIcon className="h-3.5 w-3.5 shrink-0" />
@@ -150,6 +167,12 @@ function AssessmentNotice({ trail }: { trail: AgentTrail }) {
   const [open, setOpen] = useState(false)
   const listId = useId()
   const searches = trail.actions.filter((action) => action.action === 'search')
+  const shortened =
+    trail.shortened > 0
+      ? t(trail.shortened === 1 ? 'chat.assessment_shortened_one' : 'chat.assessment_shortened_other', {
+          count: trail.shortened
+        })
+      : null
   return (
     <div
       className="mt-3 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground"
@@ -160,7 +183,7 @@ function AssessmentNotice({ trail }: { trail: AgentTrail }) {
         <InfoIcon className="h-3.5 w-3.5 shrink-0" />
         <span className="flex-1">
           {t('chat.assessment_notice')}
-          {trail.shortened > 0 && ` ${t('chat.assessment_shortened', { count: trail.shortened })}`}
+          {shortened && ` ${shortened}`}
         </span>
         {searches.length > 0 && (
           <DisclosureButton
@@ -211,6 +234,10 @@ export function ChatTurn({
       : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   const trail = turn.done && turn.meta?.answer_mode === 'assessment' ? (turn.meta.agent ?? null) : null
+  // Wire tokens reach `t()` only through the tables above, by own key: "constructor" is not copy.
+  const reasonKey =
+    trail?.reason && Object.hasOwn(REASON_COPY, trail.reason) ? REASON_COPY[trail.reason] : undefined
+  const answerKey = trail && Object.hasOwn(ANSWER_COPY, trail.answer) ? ANSWER_COPY[trail.answer] : undefined
   return (
     <article className="space-y-3">
       <div className="rounded-md bg-muted px-4 py-2 self-end max-w-2xl ml-auto">
@@ -227,8 +254,12 @@ export function ChatTurn({
         ) : (
           <div className="text-muted-foreground">{turn.done ? t('chat.no_answer') : '…'}</div>
         )}
-        {!turn.done && turn.agentSteps && turn.agentSteps.length > 0 && (
-          <AgentTrailLive steps={turn.agentSteps} />
+        {!turn.done && (
+          // Mounted before the first step arrives, so a screen reader announces it; `atomic` off keeps
+          // each new step from re-reading the whole list.
+          <div role="status" aria-live="polite" aria-atomic="false">
+            {turn.agentSteps && turn.agentSteps.length > 0 && <AgentTrailLive steps={turn.agentSteps} />}
+          </div>
         )}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
@@ -237,24 +268,24 @@ export function ChatTurn({
           </div>
         )}
         {trail && <AssessmentNotice trail={trail} />}
-        {trail?.reason && (
+        {reasonKey && (
           <div
             className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
             data-testid="assessment-research-degraded"
             role="alert"
           >
             <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
-            {t(`chat.assessment_reason.${trail.reason}`)}
+            {t(reasonKey)}
           </div>
         )}
-        {trail && trail.answer !== 'split' && (
+        {answerKey && (
           <div
             className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
             data-testid="assessment-answer-degraded"
             role="alert"
           >
             <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
-            {t(`chat.assessment_answer.${trail.answer}`)}
+            {t(answerKey)}
           </div>
         )}
         {retryQuery(turn) && (

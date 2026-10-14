@@ -183,12 +183,15 @@ export const en = {
   'chat.validation_skipped_assessment_title':
     'Not validated — the answer has no separate source-backed part',
   'chat.assessment_notice':
-    "This answer includes the model's own assessment, marked in the text. It may draw on general knowledge and is not checked against the sources.",
-  'chat.assessment_shortened': '{count} passages were shortened to fit the model’s context.',
+    'This answer includes the model’s own assessment, marked in the text. It may draw on general knowledge and is not checked against the sources.',
+  'chat.assessment_shortened_one': '{count} passage was shortened to fit the model’s context.',
+  'chat.assessment_shortened_other': '{count} passages were shortened to fit the model’s context.',
   'chat.assessment_trail_show': 'Show the searches behind this assessment',
   'chat.assessment_trail_hide': 'Hide the searches behind this assessment',
-  'chat.assessment_trail_seed': 'Initial search: {count} passages',
-  'chat.assessment_trail_search': 'Searched “{query}”: {count} new passages',
+  'chat.assessment_trail_seed_one': 'Initial search: {count} passage',
+  'chat.assessment_trail_seed_other': 'Initial search: {count} passages',
+  'chat.assessment_trail_search_one': 'Searched “{query}”: {count} new passage',
+  'chat.assessment_trail_search_other': 'Searched “{query}”: {count} new passages',
   'chat.assessment_trail_answer': 'Writing the assessment…',
   'chat.assessment_reason.tools_unavailable':
     'The model could not run its own searches (the chat model rejected tool calls), so this assessment rests on the first search’s passages only.',

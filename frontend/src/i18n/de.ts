@@ -194,13 +194,17 @@ export const de: Strings = {
     'Nicht validiert – die Antwort hat keinen getrennten quellengestützten Teil',
   'chat.assessment_notice':
     'Diese Antwort enthält eine eigene Einschätzung des Modells, im Text markiert. Sie kann auf Allgemeinwissen beruhen und wird nicht gegen die Quellen geprüft.',
-  'chat.assessment_shortened':
+  'chat.assessment_shortened_one':
+    '{count} Passage wurde gekürzt, damit sie in den Kontext des Modells passt.',
+  'chat.assessment_shortened_other':
     '{count} Passagen wurden gekürzt, damit sie in den Kontext des Modells passen.',
   'chat.assessment_trail_show': 'Suchen hinter dieser Einschätzung anzeigen',
   'chat.assessment_trail_hide': 'Suchen hinter dieser Einschätzung ausblenden',
-  'chat.assessment_trail_seed': 'Erste Suche: {count} Passagen',
-  'chat.assessment_trail_search': 'Gesucht nach „{query}“: {count} neue Passagen',
-  'chat.assessment_trail_answer': 'Einschätzung wird geschrieben …',
+  'chat.assessment_trail_seed_one': 'Erste Suche: {count} Passage',
+  'chat.assessment_trail_seed_other': 'Erste Suche: {count} Passagen',
+  'chat.assessment_trail_search_one': 'Gesucht nach „{query}“: {count} neue Passage',
+  'chat.assessment_trail_search_other': 'Gesucht nach „{query}“: {count} neue Passagen',
+  'chat.assessment_trail_answer': 'Einschätzung wird geschrieben…',
   'chat.assessment_reason.tools_unavailable':
     'Das Modell konnte keine eigenen Suchen ausführen (das Chat-Modell hat Tool-Aufrufe abgelehnt); diese Einschätzung beruht nur auf den Passagen der ersten Suche.',
   'chat.assessment_reason.research_failed':

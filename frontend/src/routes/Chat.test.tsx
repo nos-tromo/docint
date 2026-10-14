@@ -985,6 +985,18 @@ describe('Chat session switching', () => {
     expect(next.turns[0].agentSteps).toEqual([step])
   })
 
+  it('keeps successive research steps on the open turn in arrival order', () => {
+    const open = { turns: [{ user: 'q', assistant: '', done: false, meta: null }], inflight: true }
+    const first = { step: 0, action: 'seed' as const, detail: '', found: 2 }
+    const second = { step: 1, action: 'search' as const, detail: 'evaluation datasets', found: 1 }
+
+    const next = chatReducer(chatReducer(open, { type: 'agent', step: first }), { type: 'agent', step: second })
+
+    expect(next.turns[0].agentSteps).toEqual([first, second])
+    expect(next.turns[0].done).toBe(false)
+    expect(next.inflight).toBe(true)
+  })
+
   it('streams an assessment turn through its research steps to the final notice', async () => {
     const trail =
       '{"steps":1,"actions":[{"action":"seed","detail":"","found":2},' +

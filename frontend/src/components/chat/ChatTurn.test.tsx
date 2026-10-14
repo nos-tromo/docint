@@ -5,21 +5,30 @@ import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatTurn, type ChatTurnData } from './ChatTurn'
 import type { AgentTrail, ChatFinalEvent } from '@/api/types'
+import { LanguageContext } from '@/i18n/LanguageContext'
 import { useUiStore } from '@/stores/ui'
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
 })
 
-function renderTurn(turn: ChatTurnData, props: Omit<Parameters<typeof ChatTurn>[0], 'turn'> = {}) {
+function renderTurn(
+  turn: ChatTurnData,
+  lang: 'en' | 'de' = 'en',
+  props: Omit<Parameters<typeof ChatTurn>[0], 'turn'> = {}
+) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const ui = (current: ChatTurnData) => (
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <ChatTurn turn={turn} {...props} />
+        <LanguageContext value={lang}>
+          <ChatTurn turn={current} {...props} />
+        </LanguageContext>
       </MemoryRouter>
     </QueryClientProvider>
   )
+  const view = render(ui(turn))
+  return { ...view, update: (next: ChatTurnData) => view.rerender(ui(next)) }
 }
 
 describe('ChatTurn', () => {
@@ -202,6 +211,7 @@ describe('ChatTurn', () => {
 
     renderTurn(
       { user: 'who?', assistant: 'Alice.', done: true, meta, unsavedId: 'k1' },
+      'en',
       { turnIdx: 0, reportDedupeKeys: new Set(['chat:stateless:0']) }
     )
 
@@ -288,7 +298,7 @@ describe('ChatTurn', () => {
   it('marks a finished assessment and lists its searches behind a disclosure', async () => {
     renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta() })
 
-    expect(screen.getByTestId('assessment-notice')).toHaveTextContent(/model's own assessment/i)
+    expect(screen.getByTestId('assessment-notice')).toHaveTextContent(/model’s own assessment/i)
     expect(screen.queryByTestId('agent-trail-live')).not.toBeInTheDocument()
     const toggle = screen.getByRole('button', { name: /show the searches/i })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
@@ -338,16 +348,6 @@ describe('ChatTurn', () => {
     expect(screen.getByTestId('agent-trail-live')).toHaveTextContent('Writing the assessment…')
   })
 
-  it('says how many passages were shortened to fit the context', () => {
-    renderTurn({
-      user: 'q',
-      assistant: 'Fact [1].',
-      done: true,
-      meta: assessmentMeta({ ...TRAIL, shortened: 3 })
-    })
-    expect(screen.getByTestId('assessment-notice')).toHaveTextContent(/3 passages were shortened/i)
-  })
-
   it('does not mention shortening when nothing was shortened', () => {
     renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta() })
     expect(screen.getByTestId('assessment-notice')).not.toHaveTextContent(/shortened/i)
@@ -362,5 +362,122 @@ describe('ChatTurn', () => {
     })
     expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['brand_new_reason', 'brand_new_answer'],
+    ['constructor', 'toString']
+  ])('renders the unknown trail tokens %s and %s without crashing or an amber notice', (reason, answer) => {
+    // A token this build does not know (version skew, a persisted trail) must not take the SPA down.
+    const unknown = { ...TRAIL, reason, answer } as unknown as AgentTrail
+    renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta(unknown) })
+
+    expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    expect(screen.queryByTestId('assessment-research-degraded')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('assessment-answer-degraded')).not.toBeInTheDocument()
+  })
+
+  it('uses the singular for a single passage in the live trail', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 0, action: 'seed', detail: '', found: 1 },
+        { step: 1, action: 'search', detail: 'evaluation datasets', found: 1 }
+      ]
+    })
+    expect(screen.getByText('Initial search: 1 passage')).toBeInTheDocument()
+    expect(screen.getByText('Searched “evaluation datasets”: 1 new passage')).toBeInTheDocument()
+  })
+
+  it('keeps the plural for no passages', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 0, action: 'seed', detail: '', found: 0 },
+        { step: 1, action: 'search', detail: 'evaluation datasets', found: 0 }
+      ]
+    })
+    expect(screen.getByText('Initial search: 0 passages')).toBeInTheDocument()
+    expect(screen.getByText('Searched “evaluation datasets”: 0 new passages')).toBeInTheDocument()
+  })
+
+  it.each([
+    [1, /1 passage was shortened/i],
+    [3, /3 passages were shortened/i]
+  ])('words %i shortened passage(s) with the right number', (shortened, expected) => {
+    renderTurn({
+      user: 'q',
+      assistant: 'Fact [1].',
+      done: true,
+      meta: assessmentMeta({ ...TRAIL, shortened })
+    })
+    expect(screen.getByTestId('assessment-notice')).toHaveTextContent(expected)
+  })
+
+  it('uses the German singular and plural for passage counts in the live trail', () => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [
+          { step: 0, action: 'seed', detail: '', found: 1 },
+          { step: 1, action: 'search', detail: 'Bewertungsdaten', found: 1 },
+          { step: 2, action: 'search', detail: 'Messreihen', found: 3 },
+          { step: 3, action: 'answer', detail: '', found: 0 }
+        ]
+      },
+      'de'
+    )
+    expect(screen.getByText('Erste Suche: 1 Passage')).toBeInTheDocument()
+    expect(screen.getByText('Gesucht nach „Bewertungsdaten“: 1 neue Passage')).toBeInTheDocument()
+    expect(screen.getByText('Gesucht nach „Messreihen“: 3 neue Passagen')).toBeInTheDocument()
+    expect(screen.getByText('Einschätzung wird geschrieben…')).toBeInTheDocument()
+  })
+
+  it.each([
+    [1, /1 Passage wurde gekürzt/],
+    [4, /4 Passagen wurden gekürzt/]
+  ])('uses the German wording for %i shortened passage(s)', (shortened, expected) => {
+    renderTurn(
+      { user: 'q', assistant: 'Fakt [1].', done: true, meta: assessmentMeta({ ...TRAIL, shortened }) },
+      'de'
+    )
+    expect(screen.getByTestId('assessment-notice')).toHaveTextContent(expected)
+  })
+
+  it('has a status region from the first moment a turn runs, and none once it is done', () => {
+    const running = renderTurn({ user: 'q', assistant: '', done: false, meta: null })
+    expect(screen.getByRole('status')).toHaveAttribute('aria-live', 'polite')
+    // `status` implies atomic; each new step must be announced alone, not re-read with the whole list.
+    expect(screen.getByRole('status')).toHaveAttribute('aria-atomic', 'false')
+    expect(screen.queryByTestId('agent-trail-live')).not.toBeInTheDocument()
+    running.unmount()
+
+    renderTurn({ user: 'q', assistant: 'Alice.', done: true, meta: assessmentMeta() })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('puts the first research step inside the status region that was already mounted', () => {
+    const view = renderTurn({ user: 'q', assistant: '', done: false, meta: null })
+    const region = screen.getByRole('status')
+
+    view.update({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [{ step: 0, action: 'seed', detail: '', found: 2 }]
+    })
+
+    expect(screen.getByRole('status')).toBe(region)
+    expect(region).toContainElement(screen.getByTestId('agent-trail-live'))
   })
 })
