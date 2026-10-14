@@ -77,7 +77,8 @@ def classify_turn(llm: LLM | None, *, question: str, prior_turn: PriorTurn | Non
     assessment turns.
 
     Args:
-        llm (LLM | None): The plain (non-reasoning) chat model.
+        llm (LLM | None): The plain (non-reasoning) chat model; one that makes a
+            single attempt per call, so ``CLASSIFY_TIMEOUT_S`` is absolute.
         question (str): The user's message, verbatim.
         prior_turn (PriorTurn | None): The previous exchange, for follow-ups.
 

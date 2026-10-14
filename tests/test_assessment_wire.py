@@ -7,6 +7,8 @@ import time
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
+import openai
 import pytest
 from assessment_fakes import scored_node
 from llama_index.core.schema import QueryBundle
@@ -18,6 +20,7 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
     Function,
 )
 
+import docint.core.api as api_module
 from docint.agents.assessment.classify import classify_turn
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
@@ -25,8 +28,11 @@ from docint.core.rag import RAG
 from docint.utils.env_cfg import OpenAIConfig
 
 
-def _rag() -> RAG:
+def _rag(*, max_retries: int = 0) -> RAG:
     """Build a RAG whose text model targets a vLLM-style endpoint.
+
+    Args:
+        max_retries (int): ``OPENAI_MAX_RETRIES``; two is the production default.
 
     Returns:
         RAG: The engine, with only the OpenAI knobs set.
@@ -38,7 +44,7 @@ def _rag() -> RAG:
         api_key="sk-test",
         ctx_window=32768,
         dimensions=1024,
-        max_retries=0,
+        max_retries=max_retries,
         num_output=256,
         inference_provider="vllm",
         reuse_client=False,
@@ -265,9 +271,126 @@ def test_research_picks_queries_on_the_plain_model_and_the_toggle_chooses_the_an
 
     for runner in (thinking, plain):
         assert isinstance(runner._researcher, ResearchLoop)
-        assert runner._researcher._llm is rag.text_model
+        assert runner._researcher._llm is rag.bounded_text_model
+        # Only research is bounded; the answer keeps the retries.
+        assert runner._answer_llm is not rag.bounded_text_model
     assert thinking._answer_llm is thinking_answer_llm
     assert thinking._answer_llm is not rag.text_model
     assert thinking._reasoning is True
     assert plain._answer_llm is rag.text_model
     assert plain._reasoning is False
+
+
+def _stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
+    """Make every request time out at the HTTP transport, recording each attempt that reaches it.
+
+    The SDK's own retries and llama-index's both sit above the transport, so the
+    count is every attempt a call makes. Backoff sleeps are skipped.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        list[httpx.Request]: The attempts, appended to as they happen.
+    """
+    attempts: list[httpx.Request] = []
+
+    def _stall(_transport: Any, request: httpx.Request) -> httpx.Response:
+        """Record one attempt and time it out.
+
+        Args:
+            _transport (Any): The transport, unused.
+            request (httpx.Request): The attempt.
+
+        Raises:
+            httpx.ReadTimeout: Always.
+        """
+        attempts.append(request)
+        raise httpx.ReadTimeout("The endpoint stalled.", request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _stall)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    return attempts
+
+
+def test_the_bounded_model_makes_one_attempt_at_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retries are off for the bounded model, in the SDK and in llama-index alike.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    attempts = _stalled_endpoint(monkeypatch)
+
+    with pytest.raises(openai.APITimeoutError):
+        _rag(max_retries=2).bounded_text_model.complete("Is this a judgement?", timeout=15.0)
+
+    assert len(attempts) == 1
+
+
+def test_the_plain_model_retries_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: the same stall costs the plain model several attempts, which a time bound cannot afford.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    attempts = _stalled_endpoint(monkeypatch)
+
+    with pytest.raises(openai.APITimeoutError):
+        _rag(max_retries=2).text_model.complete("Is this a judgement?", timeout=15.0)
+
+    assert len(attempts) > 1
+
+
+def test_the_turn_classifier_makes_one_attempt_at_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its 15-second bound holds for the whole call, not for each retry of it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    attempts = _stalled_endpoint(monkeypatch)
+    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
+    monkeypatch.setattr(api_module, "rag", _rag(max_retries=2))
+
+    assert api_module._classify_turn("Is the method convincing?", None, "all") == "lookup"
+    assert len(attempts) == 1
+
+
+def test_research_makes_one_attempt_per_call_at_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The two-minute research budget is absolute only when no call retries inside it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    attempts = _stalled_endpoint(monkeypatch)
+    researcher = _rag(max_retries=2).assessment_runner(MagicMock(), scoped=False)._researcher
+    assert isinstance(researcher, ResearchLoop)
+
+    items = list(researcher.run(question="Is the method convincing?", prior_turn=None, ledger=EvidenceLedger(cap=5)))
+
+    assert getattr(items[-1], "reason", None) == "research_failed"
+    assert len(attempts) == 1
+
+
+def test_the_bounded_model_is_the_plain_one_with_retries_off_and_the_answer_keeps_its_retries() -> None:
+    """Only the retry count differs from the plain model; the answer models keep ``OPENAI_MAX_RETRIES``."""
+    rag = _rag(max_retries=2)
+
+    bounded = rag.bounded_text_model
+    with rag.reasoning_scope(True):
+        thinking_answer = rag.post_retrieval_text_model
+    with rag.reasoning_scope(False):
+        plain_answer = rag.post_retrieval_text_model
+
+    assert bounded is rag.bounded_text_model
+    assert bounded is not rag.text_model
+    assert bounded.max_retries == 0
+    assert bounded.additional_kwargs == rag.text_model.additional_kwargs
+    assert bounded.additional_kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert (bounded.model, bounded.api_base, bounded.timeout) == (
+        rag.text_model.model,
+        rag.text_model.api_base,
+        rag.text_model.timeout,
+    )
+    assert rag.text_model.max_retries == 2
+    assert plain_answer is rag.text_model
+    assert thinking_answer.max_retries == 2

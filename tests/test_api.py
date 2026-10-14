@@ -5763,15 +5763,31 @@ def test_classify_turn_is_gated_before_any_model_call(monkeypatch: pytest.Monkey
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
     called: list[str] = []
+    models: list[Any] = []
+
+    def _classify(llm: Any, *, question: str, prior_turn: Any) -> str:
+        """Record the call and classify it as an assessment.
+
+        Args:
+            llm (Any): The model the classifier was given.
+            question (str): The question.
+            prior_turn (Any): The prior turn, unused.
+
+        Returns:
+            str: Always ``assessment``.
+        """
+        called.append(question)
+        models.append(llm)
+        return "assessment"
+
     monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
-    monkeypatch.setattr(
-        api_module, "classify_turn", lambda llm, *, question, prior_turn: called.append(question) or "assessment"
-    )
+    monkeypatch.setattr(api_module, "classify_turn", _classify)
     rag = cast(Any, api_module.rag)
 
     assert api_module._classify_turn("Q", None, "all") == "lookup"  # the stub has no text_model_id
     rag.text_model_id = "m"
     rag.text_model = object()
+    rag.bounded_text_model = object()
     rag.openai_ctx_window = 4096
     assert api_module._classify_turn("Q", None, "all") == "lookup"
     rag.openai_ctx_window = 8192
@@ -5779,6 +5795,9 @@ def test_classify_turn_is_gated_before_any_model_call(monkeypatch: pytest.Monkey
     assert called == []
     assert api_module._classify_turn("Q", None, "all") == "assessment"
     assert called == ["Q"]
+    # The classifier's 15 s bound is for one attempt, so it never gets the retrying model.
+    assert models == [rag.bounded_text_model]
+    assert models[0] is not rag.text_model
 
 
 def test_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -5984,9 +6003,9 @@ def test_classify_turn_answers_as_a_lookup_when_a_step_fails(
     if broken == "gate":
         monkeypatch.setattr(api_module, "assessment_available", _fail)
     elif broken == "model":
-        monkeypatch.setattr(type(rag), "text_model", property(_fail), raising=False)
+        monkeypatch.setattr(type(rag), "bounded_text_model", property(_fail), raising=False)
     else:
-        rag.text_model = object()
+        rag.bounded_text_model = object()
         monkeypatch.setattr(api_module, "classify_turn", _fail)
 
     assert api_module._classify_turn("Q", None, "all") == "lookup"

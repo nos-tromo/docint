@@ -31,7 +31,7 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 | `OPENAI_API_KEY` | `sk-no-key-required` | Bearer token. Required for the `openai` provider. |
 | `OPENAI_CTX_WINDOW` | `4096` (8192 min when provider is `vllm`) | Context window for the text model. Falls back to `CHAT_MAX_MODEL_LEN` when `vllm`. |
 | `OPENAI_DIMENSIONS` | *unset* | Optional override for embedding dimension. |
-| `OPENAI_MAX_RETRIES` | `2` | Retry count for OpenAI HTTP calls. |
+| `OPENAI_MAX_RETRIES` | `2` | Retry count for OpenAI HTTP calls. The assessment classifier and research calls ignore it and make one attempt each. |
 | `OPENAI_NUM_OUTPUT` | `256` | Max tokens reserved for the model response by the LlamaIndex prompt helper. |
 | `OPENAI_REUSE_CLIENT` | `false` | Reuse the OpenAI client across calls. |
 | `OPENAI_SEED` | `42` | Sampling seed. |

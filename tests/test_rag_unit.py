@@ -573,6 +573,16 @@ def test_unload_models_releases_dir_reader() -> None:
     assert rag._image_ingestion_service is None
 
 
+def test_unload_models_releases_the_bounded_text_model() -> None:
+    """The retry-free chat client is a cached model like the others, so unloading drops it too."""
+    rag = RAG(qdrant_collection="test")
+    rag._bounded_text_model = cast(Any, object())
+
+    rag.unload_models()
+
+    assert rag._bounded_text_model is None
+
+
 def test_unload_models_is_idempotent() -> None:
     """Calling ``unload_models`` twice in a row must not raise."""
     rag = RAG(qdrant_collection="test")

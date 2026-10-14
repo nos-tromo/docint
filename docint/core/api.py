@@ -964,6 +964,7 @@ def _classify_turn(question: str, prior_turn: PriorTurn | None, retrieval_target
     and below the minimum context window there is no room for a judgement.
     Fail-soft: a misconfigured assessment setting or an unavailable model
     answers the turn as a lookup, so lookup chat never breaks on this feature.
+    The call makes a single attempt, so the classifier's time bound is absolute.
 
     Args:
         question (str): The user's message, verbatim.
@@ -978,7 +979,7 @@ def _classify_turn(question: str, prior_turn: PriorTurn | None, retrieval_target
     try:
         if not assessment_available(int(getattr(rag, "openai_ctx_window", 0) or 0)):
             return "lookup"
-        return classify_turn(rag.text_model, question=question, prior_turn=prior_turn)
+        return classify_turn(rag.bounded_text_model, question=question, prior_turn=prior_turn)
     except Exception as exc:
         logger.warning("Assessment classification unavailable ({}); answering as a lookup", type(exc).__name__)
         return "lookup"

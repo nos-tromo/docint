@@ -2801,6 +2801,7 @@ class RAG:
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
+    _bounded_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
     sparse_client_config: SparseClientConfig | None = field(default=None, init=False, repr=False)
     embed_client_config: EmbedClientConfig | None = field(default=None, init=False, repr=False)
@@ -3345,12 +3346,14 @@ class RAG:
             )
         return self._reranker
 
-    def _create_text_model(self, *, enable_reasoning: bool = False) -> OpenAI:
+    def _create_text_model(self, *, enable_reasoning: bool = False, max_retries: int | None = None) -> OpenAI:
         """Helper to create an OpenAI (or compatible) model instance.
 
         Args:
             enable_reasoning (bool): Whether this model instance should request the
                 provider reasoning/thinking mode.
+            max_retries (int | None): Retries after a failed call, in the SDK and in
+                llama-index alike; ``None`` uses ``OPENAI_MAX_RETRIES``.
 
         Returns:
             OpenAI: The initialized model.
@@ -3389,7 +3392,7 @@ class RAG:
             api_base=self.openai_api_base,
             api_key=self.openai_api_key,
             context_window=self.openai_ctx_window,
-            max_retries=self.openai_max_retries,
+            max_retries=self.openai_max_retries if max_retries is None else max_retries,
             model=self.text_model_id,
             num_output=self.openai_num_output,
             reuse_client=self.openai_reuse_client,
@@ -3441,6 +3444,23 @@ class RAG:
         if self._post_retrieval_text_model is None:
             self._post_retrieval_text_model = self._create_text_model(enable_reasoning=True)
         return self._post_retrieval_text_model
+
+    @property
+    def bounded_text_model(self) -> OpenAI:
+        """Return the plain chat model with retries off, for calls that promise a time bound.
+
+        The SDK retries a failed call and llama-index retries it again, so with
+        ``OPENAI_MAX_RETRIES`` set one call can outlast its own ``timeout`` several
+        times over. The turn classifier and the research step use this instance
+        instead: a failure ends the call and each degrades on its own. Lookups and
+        the answer keep ``OPENAI_MAX_RETRIES``.
+
+        Returns:
+            OpenAI: The non-reasoning model, making a single attempt per call.
+        """
+        if self._bounded_text_model is None:
+            self._bounded_text_model = self._create_text_model(max_retries=0)
+        return self._bounded_text_model
 
     @property
     def qdrant_client(self) -> QdrantClient:
@@ -8118,8 +8138,8 @@ class RAG:
         """Build the runner for one assessment turn over this turn's engine.
 
         Research runs on the plain (non-reasoning) chat model, which picks the
-        queries; the answer is written by whichever model the request's
-        reasoning toggle selects.
+        queries, with retries off so its time budget holds; the answer is
+        written by whichever model the request's reasoning toggle selects.
 
         Args:
             engine (Any): The turn's query engine; research searches through its
@@ -8131,7 +8151,7 @@ class RAG:
         Returns:
             AssessmentRunner: A runner bound to this request's models and limits.
         """
-        research_llm = self.text_model
+        research_llm = self.bounded_text_model
         answer_llm = self.post_retrieval_text_model
         ratio = float(self.embed_char_token_ratio or 3.5)
         counter = self._embed_token_counter
@@ -8151,7 +8171,7 @@ class RAG:
             llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
             ctx_window=int(self.openai_ctx_window),
             char_token_ratio=ratio,
-            reasoning=answer_llm is not research_llm,
+            reasoning=answer_llm is not self.text_model,
             researcher=researcher,
             count_tokens=(lambda text: len(counter(text))) if counter is not None else None,
         )
@@ -10518,7 +10538,7 @@ class RAG:
         """Unload models to free up memory.
 
         Releases the lazily-loaded embed / text / post-retrieval-text /
-        reranker / image-ingestion services, invalidates the NER cache,
+        bounded-text / reranker / image-ingestion services, invalidates the NER cache,
         and drops the captured ``dir_reader`` handle so Python's
         ref-count collector can reclaim it immediately instead of
         waiting for a later cycle. Pure null-and-``gc.collect``
@@ -10527,6 +10547,7 @@ class RAG:
         self._embed_model = None
         self._text_model = None
         self._post_retrieval_text_model = None
+        self._bounded_text_model = None
         self._reranker = None
         self._image_ingestion_service = None
         self._invalidate_ner_cache()

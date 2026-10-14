@@ -423,6 +423,9 @@ which is the behaviour without this feature. No classifier call is made when
 `ASSESSMENT_ENABLED=false`, when the resolved context window is below 8192
 tokens (`agents/assessment/gate.py` logs one warning naming
 `OPENAI_CTX_WINDOW`), on the `visual` target, or on a corrective retry.
+Classification and research make a single attempt per call, whatever
+`OPENAI_MAX_RETRIES` says, so retries never stretch their 15-second and
+two-minute bounds; lookups and the answer keep the retries.
 
 **Evidence.** An assessment seeds its evidence with exactly the passages a
 lookup would have used — the turn's own engine, filters, rerank and

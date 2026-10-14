@@ -117,7 +117,8 @@ class ResearchLoop:
         """Bind the model, the search and the limits.
 
         Args:
-            llm (FunctionCallingLLM): The plain (non-reasoning) chat model.
+            llm (FunctionCallingLLM): The plain (non-reasoning) chat model; one
+                that makes a single attempt per call, so ``wall_clock_s`` is absolute.
             search (SearchFn): Runs one search through the turn's engine.
             max_steps (int): The most model rounds research may take.
             ctx_window (int): The chat model's context window in tokens.
