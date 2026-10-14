@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -551,7 +552,7 @@ def test_a_search_that_outlasts_the_budget_ends_research_on_time(
     assert (outcome.reason, progress, outcome.actions) == ("time_budget", [], [])
     assert [scored.node.node_id for scored in ledger.entries()] == ["seed"]
     assert loguru_caplog.messages == [
-        "Assessment research stopped (time_budget): a search outlasted the research budget"
+        "Assessment research stopped (time_budget): no search result arrived within the research budget"
     ]
 
 
@@ -795,6 +796,57 @@ def test_a_search_ending_in_a_base_exception_gives_its_slot_back() -> None:
     slots.release()
 
 
+@pytest.mark.parametrize("failure", ["clock", "context", "thread"])
+def test_a_search_that_fails_before_its_thread_runs_gives_its_slot_back(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever fails between taking a slot and starting the search's thread gives the slot back.
+
+    Args:
+        failure (str): The failing step: the clock read after the wait, copying the context, or building the thread.
+        monkeypatch (pytest.MonkeyPatch): Makes that step fail.
+    """
+    slots = threading.BoundedSemaphore(1)
+    reads: list[float] = []
+
+    def _clock() -> float:
+        """Read the time once, then fail on the read after the wait when the clock is the failing step.
+
+        Returns:
+            float: Zero.
+
+        Raises:
+            _Abort: On the second read, when the clock is the failing step.
+        """
+        if reads and failure == "clock":
+            raise _Abort
+        reads.append(0.0)
+        return 0.0
+
+    def _abort(*args: object, **kwargs: object) -> None:
+        """Fail the way the selected step would.
+
+        Args:
+            *args (object): Ignored.
+            **kwargs (object): Ignored.
+
+        Raises:
+            _Abort: Always.
+        """
+        raise _Abort
+
+    if failure == "context":
+        monkeypatch.setattr(contextvars, "copy_context", _abort)
+    if failure == "thread":
+        monkeypatch.setattr(threading.Thread, "__init__", _abort)
+
+    with pytest.raises(_Abort):
+        _bounded(_search({}), "method", 5.0, slots=slots, clock=_clock)
+
+    assert slots.acquire(blocking=False) is True
+    slots.release()
+
+
 class _SlowRelease(threading.BoundedSemaphore):
     """Search slots whose release takes a moment, so its order against the result shows."""
 
@@ -873,8 +925,12 @@ def test_the_slot_wait_comes_out_of_the_research_budget(held_search: tuple[threa
     assert time.monotonic() - started < 3.0
 
 
-def test_a_slot_that_frees_only_after_the_budget_never_starts_the_search() -> None:
-    """Once the wait for a slot has used the whole budget, the slot goes back unused."""
+def test_a_slot_that_frees_only_after_the_budget_never_starts_the_search(loguru_caplog: LogCaptureFixture) -> None:
+    """Once the wait for a slot has used the whole budget, the slot goes back unused.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
     now = [0.0]
     slots = _SlowSlots(now, 150.0)
     searched: list[str] = []
@@ -890,6 +946,9 @@ def test_a_slot_that_frees_only_after_the_budget_never_starts_the_search() -> No
     )
 
     assert (outcome.reason, searched) == ("time_budget", [])
+    assert loguru_caplog.messages == [
+        "Assessment research stopped (time_budget): no search result arrived within the research budget"
+    ]
     assert threading.BoundedSemaphore.acquire(slots, blocking=False) is True
 
 

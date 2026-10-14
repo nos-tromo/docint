@@ -145,35 +145,35 @@ def _bounded(
     Raises:
         _NoSearchSlot: When no slot frees up in time; the search is never called
             and no thread is started.
-        Exception: Whatever stops the search thread from starting, once its slot
-            has been given back.
+        Exception: Whatever stops the search from starting, its thread included,
+            once its slot has been given back.
     """
     began = clock()
     if not slots.acquire(timeout=min(timeout, SEARCH_SLOT_WAIT_S)):
         raise _NoSearchSlot
-    left = timeout - (clock() - began)
-    if left <= 0:
-        slots.release()
-        return None
-    future: concurrent.futures.Future[list[NodeWithScore]] = concurrent.futures.Future()
-    context = contextvars.copy_context()
-
-    def _run() -> None:
-        """Run the search, give its slot back, then hand its outcome to the future."""
-        try:
-            try:
-                found = context.run(search, query)
-            finally:
-                slots.release()
-        except BaseException as exc:
-            future.set_exception(exc)
-        else:
-            future.set_result(found)
-
-    thread = threading.Thread(target=_run, name=SEARCH_THREAD_NAME, daemon=True)
     try:
-        thread.start()
+        left = timeout - (clock() - began)
+        if left <= 0:
+            slots.release()
+            return None
+        future: concurrent.futures.Future[list[NodeWithScore]] = concurrent.futures.Future()
+        context = contextvars.copy_context()
+
+        def _run() -> None:
+            """Run the search, give its slot back, then hand its outcome to the future."""
+            try:
+                try:
+                    found = context.run(search, query)
+                finally:
+                    slots.release()
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(found)
+
+        threading.Thread(target=_run, name=SEARCH_THREAD_NAME, daemon=True).start()
     except BaseException:
+        # Until its thread runs, the slot is this call's to give back.
         slots.release()
         raise
     done, _ = concurrent.futures.wait([future], timeout=left)
@@ -346,13 +346,16 @@ class ResearchLoop:
                 logger.warning("Assessment research stopped (research_failed): no search capacity")
                 break
             except Exception as exc:
-                # The search thread could not start; its slot is already back, and what research found stays.
+                # The search could not start; its slot is already back, and what research found stays.
                 reason = "research_failed"
                 logger.warning("Assessment research search could not start: {}", type(exc).__name__)
                 break
             if finished is None:
+                # The slot wait spent the budget, or the search outlasted it.
                 reason = "time_budget"
-                logger.warning("Assessment research stopped (time_budget): a search outlasted the research budget")
+                logger.warning(
+                    "Assessment research stopped (time_budget): no search result arrived within the research budget"
+                )
                 break
             try:
                 found = finished.result()

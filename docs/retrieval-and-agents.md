@@ -439,7 +439,8 @@ The research budget covers the searches as well as the model calls: a search
 still running when it runs out is abandoned and the turn reports `time_budget`.
 Research searches share a per-process bound of eight: a timed-out search holds
 its slot until it ends, and when no slot frees within five seconds (or the time
-left, if less) research stops with `research_failed`.
+left, if less) research stops with `research_failed`; a slot that frees only as
+the time runs out ends research with `time_budget`, the search never started.
 Research admits a passage only while every passage stays legible in the answer,
 headers included; a result that would crowd the others is refused, and the
 ledger counts as full once not even a bare 300-character passage would fit.
