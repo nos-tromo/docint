@@ -10,9 +10,15 @@ from unittest.mock import MagicMock
 import pytest
 from _pytest.logging import LogCaptureFixture
 from assessment_fakes import llm_view, scored_node, social_post, streaming_llm
-from llama_index.core.schema import BaseNode, NodeWithScore
+from llama_index.core import PromptTemplate
+from llama_index.core.llms import MockLLM
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.response_synthesizers import Refine
+from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.schema import BaseNode, NodeWithScore, QueryBundle
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from typing_extensions import override
 
 from docint.agents.assessment.runner import AssessmentRunner
 from docint.agents.assessment.split import SENTINEL
@@ -454,12 +460,21 @@ def _arm_oversized_scope(sm: SessionManager, monkeypatch: pytest.MonkeyPatch) ->
     return engine, bound
 
 
-@pytest.mark.parametrize("entry", ["stream_chat", "chat"])
+@pytest.mark.parametrize(
+    ("entry", "bound_prior"),
+    [
+        # A streaming turn builds its own engine, so the source-backed part may ride along.
+        ("stream_chat", PriorTurn(user_text="Is the schedule reliable?", assistant_text="It changed twice [1].")),
+        # /query may run on the shared cached engine, and its lookups bind no prior turn.
+        ("chat", None),
+    ],
+)
 def test_a_scope_too_large_to_show_legibly_is_answered_as_a_lookup(
     session_manager: SessionManager,
     monkeypatch: pytest.MonkeyPatch,
     loguru_caplog: LogCaptureFixture,
     entry: str,
+    bound_prior: PriorTurn | None,
 ) -> None:
     """Lookup is the floor: no research steps, no assessment keys, the engine answers, the judgement stays out.
 
@@ -468,6 +483,7 @@ def test_a_scope_too_large_to_show_legibly_is_answered_as_a_lookup(
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
         entry (str): The session manager method under test.
+        bound_prior (PriorTurn | None): The prior turn the lookup may bind.
     """
     engine, bound = _arm_oversized_scope(session_manager, monkeypatch)
     prior = PriorTurn(
@@ -493,7 +509,7 @@ def test_a_scope_too_large_to_show_legibly_is_answered_as_a_lookup(
     assert "answer_mode" not in final
     assert final["response"] == LOOKUP_ANSWER
     engine.query.assert_called_once()
-    assert bound == [PriorTurn(user_text="Is the schedule reliable?", assistant_text="It changed twice [1].")]
+    assert bound == [bound_prior]
     assert "does not fit the context window (50 passages); answering as a lookup" in loguru_caplog.text
     assert "Harbour festival" not in loguru_caplog.text
 
@@ -542,3 +558,73 @@ def test_a_stateless_scope_too_large_to_show_legibly_falls_back_to_run_query(
         retrieval_target="documents",
     )
     assert "(50 passages); answering as a lookup" in loguru_caplog.text
+
+
+#: A grounded template whose rendering shows which prior turn, if any, was bound.
+ECHO_TEMPLATE = "PRIOR<<{prior_turn_context}>> CTX<<{context_str}>> Q<<{query_str}>>"
+PRIOR_QUESTION = "Which invented survey wave lost respondents?"
+
+
+class _SeedRetriever(BaseRetriever):
+    """Return the invented study passages for any query."""
+
+    @override
+    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
+        """Return the seed passages.
+
+        Args:
+            query_bundle (QueryBundle): The query, unused.
+
+        Returns:
+            list[NodeWithScore]: The seed evidence.
+        """
+        return _seed()
+
+
+def _echo_template(social_table: bool) -> PromptTemplate:
+    """Build the grounded template with its default "no prior turn" binding.
+
+    Args:
+        social_table (bool): Whether the collection is a social table, unused.
+
+    Returns:
+        PromptTemplate: The partially formatted template.
+    """
+    return PromptTemplate(ECHO_TEMPLATE).partial_format(prior_turn_context="(no prior turn)")
+
+
+def test_a_query_fallback_never_binds_a_prior_turn_onto_the_shared_engine(session_manager: SessionManager) -> None:
+    """The cached engine serves every session, so a fallback's prior turn must not stay bound on it.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag._build_grounded_text_qa_template.side_effect = _echo_template
+    rag._build_grounded_refine_template.side_effect = _echo_template
+    # MockLLM echoes its prompt, so each answer shows the template the synthesizer used.
+    shared = RetrieverQueryEngine(
+        retriever=_SeedRetriever(),
+        response_synthesizer=Refine(llm=MockLLM(), text_qa_template=_echo_template(False)),
+    )
+    rag.query_engine = shared
+    rag.assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
+        answer_llm=cast(Any, streaming_llm(["unused"])),
+        llm_view=llm_view,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        reasoning=False,
+    )
+    prior = PriorTurn(user_text=PRIOR_QUESTION, assistant_text="The second wave [2].")
+
+    # Session A: an assessment question too long to leave any room for evidence.
+    first = session_manager.chat(
+        "Assess the survey. " + "invented filler " * 2500, session_id="a", prior_turn=prior, answer_mode="assessment"
+    )
+    # Session B: an ordinary lookup on the same cached engine.
+    second = session_manager.chat("Where was the survey run?", session_id="b")
+
+    assert "answer_mode" not in first
+    assert rag.query_engine is shared
+    assert PRIOR_QUESTION not in second["response"]
+    assert PRIOR_QUESTION not in first["response"]

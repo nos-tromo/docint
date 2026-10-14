@@ -532,7 +532,8 @@ class SessionManager:
                     "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
                     exc.passages,
                 )
-                prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
+                # Bind none, like any /query lookup: the cached engine is shared and would keep it.
+                prior_turn = None
             else:
                 return final
 
