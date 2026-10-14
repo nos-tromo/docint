@@ -2464,6 +2464,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     rag.create_index()
                 rag.create_query_engine()
 
+            data: dict[str, Any]
             if payload.retrieval_mode == "stateless":
                 # Stateless mode has no session to pin a scope to, so the
                 # request is the only place one can come from.
@@ -2486,14 +2487,29 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                             exc,
                         )
 
-                data = rag.run_query(
-                    retrieval_query,
-                    metadata_filters=metadata_filters,
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                    scoped_node_ids=stateless_scope or None,
-                    retrieval_target=payload.retrieval_target,
-                )
+                data = {}
+                if _classify_turn(payload.question, None, payload.retrieval_target) == "assessment":
+                    for item in rag.stream_stateless_assessment(
+                        payload.question,
+                        expanded_query=retrieval_query,
+                        graph_debug=graph_debug or {},
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                        scoped_node_ids=stateless_scope or None,
+                        retrieval_target=payload.retrieval_target,
+                    ):
+                        if isinstance(item, dict):
+                            data = item
+                else:
+                    data = rag.run_query(
+                        retrieval_query,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                        scoped_node_ids=stateless_scope or None,
+                        retrieval_target=payload.retrieval_target,
+                    )
                 if graph_debug is not None:
                     data["graph_debug"] = graph_debug
                 session_id = payload.session_id
@@ -2696,33 +2712,65 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             exc,
                         )
 
-                stateless_data = await rag.run_query_async(
-                    retrieval_query,
-                    metadata_filters=metadata_filters,
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                    scoped_node_ids=stateless_scope or None,
-                    retrieval_target=payload.retrieval_target,
-                )
-                if graph_debug is not None:
-                    stateless_data["graph_debug"] = graph_debug
+                answer_mode = await to_thread.run_sync(_classify_turn, payload.question, None, payload.retrieval_target)
+                if answer_mode == "assessment":
 
-                answer_text = str(stateless_data.get("response") or stateless_data.get("answer") or "")
-                async for event in _stream_simulated_text(answer_text):
-                    event_payload = json.loads(event[6:].strip())
-                    token = str(event_payload.get("token") or "")
-                    full_answer += token
-                    yield event
+                    def _make_stateless_assessment() -> Iterator[Any]:
+                        """Build the stateless assessment stream off the event loop.
 
-                final_payload = {
-                    "response": answer_text,
-                    "sources": stateless_data.get("sources") or [],
-                    "session_id": payload.session_id,
-                    "reasoning": stateless_data.get("reasoning"),
-                    "graph_debug": stateless_data.get("graph_debug"),
-                    "retrieval_target": stateless_data.get("retrieval_target") or payload.retrieval_target,
-                    "visual": stateless_data.get("visual"),
-                }
+                        Returns:
+                            Iterator[Any]: Research steps, answer text, then the final payload.
+                        """
+                        return cast(
+                            "Iterator[Any]",
+                            rag.stream_stateless_assessment(
+                                payload.question,
+                                expanded_query=retrieval_query,
+                                graph_debug=graph_debug or {},
+                                metadata_filters=metadata_filters,
+                                metadata_filter_rules=payload.metadata_filters,
+                                vector_store_kwargs=vector_store_kwargs or None,
+                                scoped_node_ids=stateless_scope or None,
+                                retrieval_target=payload.retrieval_target,
+                            ),
+                        )
+
+                    async for chunk in _aiter_sync_gen(_make_stateless_assessment, request):
+                        if isinstance(chunk, str):
+                            full_answer += chunk
+                            yield f"data: {json.dumps({'token': chunk})}\n\n"
+                        elif isinstance(chunk, AgentProgress):
+                            yield _sse_agent_frame(chunk)
+                        elif isinstance(chunk, dict):
+                            final_payload = {**chunk, "session_id": payload.session_id}
+                else:
+                    stateless_data = await rag.run_query_async(
+                        retrieval_query,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                        scoped_node_ids=stateless_scope or None,
+                        retrieval_target=payload.retrieval_target,
+                    )
+                    if graph_debug is not None:
+                        stateless_data["graph_debug"] = graph_debug
+
+                    answer_text = str(stateless_data.get("response") or stateless_data.get("answer") or "")
+                    async for event in _stream_simulated_text(answer_text):
+                        event_payload = json.loads(event[6:].strip())
+                        token = str(event_payload.get("token") or "")
+                        full_answer += token
+                        yield event
+
+                    final_payload = {
+                        "response": answer_text,
+                        "sources": stateless_data.get("sources") or [],
+                        "session_id": payload.session_id,
+                        "reasoning": stateless_data.get("reasoning"),
+                        "graph_debug": stateless_data.get("graph_debug"),
+                        "retrieval_target": stateless_data.get("retrieval_target") or payload.retrieval_target,
+                        "visual": stateless_data.get("visual"),
+                    }
             else:
                 # Resolved once, on the first pass, and reused by the corrective
                 # retry. The prior turn especially: recomputing it after the

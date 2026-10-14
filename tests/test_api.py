@@ -350,6 +350,7 @@ class DummyRAG:
         self.seen_collections: list[str] = []
         self.stateless_queries: list[str] = []
         self.stateless_query_filters: list[dict[str, Any]] = []
+        self.stateless_assessments: list[dict[str, Any]] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
         # One entry per stream_chat call, so the corrective-retry tests can
@@ -703,6 +704,29 @@ class DummyRAG:
             vector_store_kwargs=vector_store_kwargs,
             scoped_node_ids=scoped_node_ids,
         )
+
+    def stream_stateless_assessment(self, question: str, **kwargs: Any) -> Generator[Any, None, None]:
+        """Stream a canned stateless assessment and record the call.
+
+        Args:
+            question (str): The user's question.
+            **kwargs (Any): The forwarded request settings.
+
+        Yields:
+            Any: One research step, one token, then the final payload.
+        """
+        self.stateless_assessments.append({"question": question, **kwargs})
+        yield AgentProgress(step=0, action="seed", detail="", found=1)
+        yield "Fact [1]."
+        yield {
+            "response": "Fact [1].",
+            "sources": [{"id": "a", "citation_index": 1}],
+            "session_id": None,
+            "turn_idx": None,
+            "retrieval_mode": "agent",
+            "answer_mode": "assessment",
+            "agent": {**SPLIT_AGENT, "steps": 0},
+        }
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
         """Return deterministic GraphRAG expansion metadata for tests.
@@ -5964,3 +5988,76 @@ def test_classify_turn_answers_as_a_lookup_when_a_step_fails(
     warnings = [message for message in loguru_caplog.messages if "Assessment classification unavailable" in message]
     assert warnings == [f"Assessment classification unavailable ({error.__name__}); answering as a lookup"]
     assert "bad config" not in loguru_caplog.text
+
+
+def test_stateless_stream_query_answers_an_assessment(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """The stateless toggle streams the same agent frames and never touches run_query.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+
+    with client.stream(
+        "POST", "/stream_query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}
+    ) as resp:
+        frames = _sse_frames("".join(chunk.decode() for chunk in resp.iter_raw()))
+
+    rag = cast(Any, api_module.rag)
+    assert frames[0] == {"agent": {"step": 0, "action": "seed", "detail": "", "found": 1}}
+    assert frames[-1]["answer_mode"] == "assessment"
+    assert frames[-1]["session_id"] is None
+    assert rag.stateless_queries == []
+    assert rag.stateless_assessments[0]["expanded_query"].startswith("What could be improved?")
+
+
+def test_stateless_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """``/query`` in stateless mode drains the same stream to its final payload.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+
+    body = client.post("/query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}).json()
+
+    assert body["answer_mode"] == "assessment"
+    assert body["answer"] == "Fact [1]."
+    assert cast(Any, api_module.rag).stateless_queries == []
+
+
+@pytest.mark.parametrize("path", ["/query", "/stream_query"])
+def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_request(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """Stateless has no session to supply them, and a dropped scope would let research widen a pinned set.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    classified: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *args: classified.append(args) or "assessment")
+
+    response = client.post(
+        path,
+        json={
+            "question": "What could be improved?",
+            "retrieval_mode": "stateless",
+            "retrieval_target": "documents",
+            "scope_chunk_ids": ["c1"],
+            "metadata_filters": [{"field": "mimetype", "operator": "mime_match", "value": "image/*"}],
+        },
+    )
+
+    call = cast(Any, api_module.rag).stateless_assessments[0]
+    assert response.status_code == 200
+    assert classified == [("What could be improved?", None, "documents")]
+    assert (call["scoped_node_ids"], call["retrieval_target"]) == (["c1"], "documents")
+    assert call["expanded_query"] == "What could be improved?"
+    assert [rule.field for rule in call["metadata_filter_rules"]] == ["mimetype"]
+    assert call["metadata_filters"] is not None
+    assert "qdrant_filters" in call["vector_store_kwargs"]

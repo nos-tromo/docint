@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from docint.agents.assessment.runner import AssessmentRunner
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.types import AgentProgress
+from docint.core.rag import RAG
 from docint.core.state.base import Base
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.turn import Turn
@@ -312,5 +313,48 @@ def test_a_stateless_assessment_persists_nothing(session_manager: SessionManager
 
     assert isinstance(final, dict)
     assert final["turn_idx"] is None
+    with session_manager._session_scope() as s:
+        assert s.query(Turn).count() == 0
+
+
+def test_a_stateless_assessment_runs_without_a_session() -> None:
+    """The stateless entry point builds the turn's engine and never persists."""
+    rag = MagicMock()
+    rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
+    manager = rag.ensure_session_manager.return_value
+    manager.stream_assessment.return_value = iter(["text", {"answer_mode": "assessment"}])
+
+    items = list(RAG.stream_stateless_assessment(rag, QUESTION, expanded_query="expanded", graph_debug={}))
+
+    kwargs = manager.stream_assessment.call_args.kwargs
+    assert items[-1] == {"answer_mode": "assessment"}
+    assert (kwargs["persist"], kwargs["session_id"], kwargs["prior_turn"]) == (False, None, None)
+    assert kwargs["engine"] is rag.build_query_engine.return_value
+    assert kwargs["expanded_query"] == "expanded"
+    assert rag.build_query_engine.call_args.kwargs["streaming"] is True
+
+
+def test_a_stateless_assessment_streams_through_the_real_manager(session_manager: SessionManager) -> None:
+    """The entry point's keywords fit ``stream_assessment``, filters count as active, nothing is written.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.ensure_session_manager.return_value = session_manager
+    _arm(session_manager, nodes=_seed())
+
+    items = list(
+        RAG.stream_stateless_assessment(
+            rag, QUESTION, expanded_query="expanded", graph_debug={}, vector_store_kwargs={"qdrant_filters": object()}
+        )
+    )
+
+    final = items[-1]
+    assert isinstance(final, dict)
+    assert [item.action for item in items if isinstance(item, AgentProgress)] == ["seed", "answer"]
+    assert (final["answer_mode"], final["session_id"], final["turn_idx"]) == ("assessment", None, None)
+    assert rag.build_query_engine.call_args.kwargs["metadata_filters_active"] is True
+    assert rag._normalize_response_data.call_args.kwargs["metadata_filters_active"] is True
     with session_manager._session_scope() as s:
         assert s.query(Turn).count() == 0

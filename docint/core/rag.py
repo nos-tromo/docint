@@ -8154,6 +8154,65 @@ class RAG:
             researcher=researcher,
         )
 
+    def stream_stateless_assessment(
+        self,
+        question: str,
+        *,
+        expanded_query: str,
+        graph_debug: dict[str, Any],
+        metadata_filters: MetadataFilters | None = None,
+        metadata_filter_rules: Sequence[Any] | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+    ) -> Iterator[Any]:
+        """Answer one stateless turn as an assessment.
+
+        A stateless turn has no session: no prior turn and nothing persisted.
+        Otherwise it is the session path exactly, with the same runner and frames.
+
+        Args:
+            question (str): The user's message, verbatim.
+            expanded_query (str): The graph-expanded query to seed with.
+            graph_debug (dict[str, Any]): The expansion's debug payload.
+            metadata_filters (MetadataFilters | None): Compiled request filters.
+            metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
+            vector_store_kwargs (dict[str, Any] | None): Native vector-store kwargs.
+            scoped_node_ids (Sequence[str] | None): Hand-picked chunk ids, if any.
+            retrieval_target (RetrievalTarget): Which evidence may answer.
+
+        Yields:
+            Any: Research steps, answer text, then the final payload.
+        """
+        metadata_filters_active = metadata_filters is not None or bool(vector_store_kwargs)
+        engine = self.build_query_engine(
+            metadata_filters=metadata_filters,
+            streaming=True,
+            vector_store_kwargs=vector_store_kwargs,
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            scoped_node_ids=scoped_node_ids,
+            retrieval_target=retrieval_target,
+        )
+        yield from self.ensure_session_manager().stream_assessment(
+            question,
+            engine=engine,
+            expanded_query=expanded_query,
+            retrieval_query=expanded_query,
+            prior_turn=None,
+            scoped_node_ids=scoped_node_ids,
+            graph_debug=graph_debug,
+            coverage_unit=str(self._infer_collection_profile().get("coverage_unit") or "documents"),
+            metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
+            retrieval_target=retrieval_target,
+            session_id=None,
+            owner=None,
+            replace_turn_idx=None,
+            turn_started_at=time.monotonic(),
+            persist=False,
+        )
+
     def _graph_debug_base(self, query: str) -> dict[str, Any]:
         """Build the not-yet-applied GraphRAG debug payload for a query.
 
