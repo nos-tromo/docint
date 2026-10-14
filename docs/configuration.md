@@ -773,6 +773,25 @@ Loaded by `load_corrective_retry_env()`.
 |---|---|---|
 | `CORRECTIVE_RETRY_ENABLED` | `true` | Re-answer once with a reformulated query when validation flags a mismatch *and* the answer is weak. Depends on response validation being on — without a mismatch verdict there is nothing to retry. A triggered retry costs up to three extra LLM round-trips (reformulate, regenerate, re-validate) inside the same request, so a turn that fires it is noticeably slower; untriggered turns are unaffected. |
 
+## Assessment turns — `AssessmentConfig`
+
+Loaded by `load_assessment_env()`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ASSESSMENT_ENABLED` | `true` | Classify each chat turn and answer evaluative questions with a researched, labelled model assessment. Off means every turn is a lookup and no classifier call is made. Needs a chat context window of at least 8192 tokens (`OPENAI_CTX_WINDOW`; on Ollama also the model's `num_ctx`); below that the feature stays off and logs one warning. |
+| `ASSESSMENT_MAX_STEPS` | `6` | Research rounds per assessment turn. Each round is one tool-calling request on the plain chat model plus one search; `0` answers from the first search alone. |
+
+The research step calls tools with `tool_choice="required"`, which vLLM serves
+through guided decoding without `--enable-auto-tool-choice`; on Ollama the model
+needs a tool-capable template. Each later research round sends the model's own
+tool calls back with their results, so the chat template must render both; a
+template that cannot fails that round, and the turn answers from what research
+found so far, flagged as `research_failed`. When the endpoint rejects tool calls
+the turn still answers — from the first search's passages — and says so. The
+quality of a judgement follows the chat model: a ~2B model keeps the format, but
+its assessments are shallow.
+
 ## Offline mode
 
 - `DOCINT_OFFLINE` — default `1`. When truthy, Docint sets

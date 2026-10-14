@@ -113,6 +113,16 @@ match nothing and silently empty the answer. A visual turn that could not
 load its pictures says so above the sources, the same way a skipped rerank
 does.
 
+A question that asks for a judgement — what could be improved, whether a
+method convinces — gets an **assessment**. While it is researched, the turn
+lists each search the model makes. The answer then opens with what the sources
+say, cited as usual, and continues under a **Model assessment** label with the
+model's own judgement, which may draw on general knowledge and is not checked
+against the sources. A note under the answer says so and, behind a disclosure
+caret, lists the searches; the validation banner speaks of the source-backed
+part only. A turn whose research could not run, or whose model did not separate
+the two parts, says so in an amber notice.
+
 A **Search in** picker under the query field chooses what the keywords
 match: Text (the chunk body, the default), Author, Network or UUID. The
 result is always chunks, so "everything this author wrote" is an ordinary

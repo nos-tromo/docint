@@ -405,6 +405,62 @@ The cost is up to three extra LLM round-trips (reformulate, regenerate,
 re-validate) inside the one request, so a turn that triggers a retry is
 noticeably slower than one that does not.
 
+## Assessment turns
+
+A question that asks for a judgement — "what could be improved in this
+paper?", "is the method convincing?", "which option is better?" — is not a
+lookup. Its answer is written nowhere in the collection, and the passages that
+best match its wording are rarely the ones a judgement rests on: asked what
+could be improved, plain retrieval returns the paper's own "improvements over
+prior work". Such turns are answered differently, and say so.
+
+**Classification.** `/stream_query` and `/query` classify every turn once,
+before retrieval, with one short call on the plain chat model
+(`agents/assessment/classify.py`, prompt `prompts/{en,de}/assessment_classify.txt`).
+Any failure — no model, no JSON, a transport error — classifies as a lookup,
+which is the behaviour without this feature. No classifier call is made when
+`ASSESSMENT_ENABLED=false`, when the resolved context window is below 8192
+tokens (`agents/assessment/gate.py` logs one warning naming
+`OPENAI_CTX_WINDOW`), on the `visual` target, or on a corrective retry.
+
+**Evidence.** An assessment seeds its evidence with exactly the passages a
+lookup would have used — the turn's own engine, filters, rerank and
+parent-context chain — then lets the plain model search further through a
+`search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
+prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
+`ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute wall clock, on a
+repeated query, or after two searches that add nothing new. Each step reaches
+the SPA as an `{"agent": {...}}` frame. A pinned scope is never widened: a
+scoped assessment answers from its chunks with no research.
+
+**Answer.** One streamed call on the answer model (the reasoning toggle
+applies) writes two parts separated by a `[[ASSESSMENT]]` line
+(`assessment_answer.txt`): what the sources say, every claim cited, then the
+model's own assessment, which may draw on general knowledge and must say so.
+The backend replaces the sentinel with a localized label (`ui_strings`
+`assessment_heading` / `assessment_disclaimer`) in the stream and in the
+persisted text, so the boundary survives into history, transcripts and report
+exports without any of them knowing the protocol. Sources are the evidence
+ledger, numbered 1..N in the order it was found; an entry is shortened to fit
+the context, never dropped, because replay numbers citations by position.
+
+**Validation.** Only the source-backed part is validated, against the sources it
+cites, with a note (`response_validator_assessment.txt`) that puts the
+judgement out of scope. An answer that did not separate the two parts is
+labelled as a whole and not validated. Assessments never take the corrective
+retry: their evidence was gathered on purpose, not by one query that a
+reformulation could improve.
+
+**Degraded turns** say why. `agent.reason` is `tools_unavailable` (the endpoint
+rejected tool calls; the answer rests on the seed passages), `research_failed`,
+`context_budget`, `time_budget` or `no_evidence`; `agent.answer` is `unsplit`
+or `empty`. These are protocol tokens; the SPA maps each to catalog copy.
+
+**Follow-ups.** A lookup asked after an assessment receives only the
+source-backed part of that answer as its prior turn, so the model's judgement is
+never restated as sourced fact. The prior turn is read by
+`SessionManager.get_prior_turn`, without rehydrating any citation.
+
 ## Citation numbering
 
 Answers refer to their evidence by number ("source 3"), and the chat window's
