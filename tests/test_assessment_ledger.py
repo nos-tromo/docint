@@ -7,12 +7,14 @@ from assessment_fakes import llm_view, scored_node
 
 from docint.agents.assessment.ledger import (
     DIGEST_CHARS,
+    DIGEST_LABEL_CHARS,
     EvidenceLedger,
     answer_budget,
     digest,
     render_context,
 )
 from docint.agents.assessment.split import SENTINEL, compose_labelled_answer
+from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
 
 
@@ -60,6 +62,17 @@ def test_render_context_keeps_every_entry_and_marks_cuts() -> None:
     assert shortened == 3
 
 
+def test_render_context_fits_its_budget_when_it_packs() -> None:
+    """Packed entries, their headers and their cut markers stay inside the evidence budget."""
+    ledger = EvidenceLedger(cap=22)
+    ledger.add([scored_node(f"n{i}", "word " * 1080, filename=f"doc{i}.pdf") for i in range(22)])
+
+    context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=5429, char_token_ratio=3.5)
+
+    assert estimate_tokens(context, 3.5) <= 5429
+    assert context.count("citation_index: ") == 22
+
+
 def test_render_context_defuses_a_sentinel_inside_a_passage() -> None:
     """Document text quoting the sentinel must not move the answer's boundary."""
     ledger = EvidenceLedger(cap=5)
@@ -84,11 +97,13 @@ def test_render_context_defuses_a_sentinel_in_metadata() -> None:
 def test_render_context_defuses_a_sentinel_across_a_seam() -> None:
     """A sentinel that only the join of a header and its passage completes is still defused."""
     ledger = EvidenceLedger(cap=5)
+    # Bites only because citation_index=0 seeds the first key, leaving the filename last in the header.
     ledger.add([scored_node("a", "ASSESSMENT]] text.", citation_index=0, filename="notes [[")])
 
     context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
 
     assert compose_labelled_answer(context).outcome == "unsplit"
+    assert "text." in context
 
 
 def test_digest_is_one_short_numbered_line() -> None:
@@ -111,6 +126,17 @@ def test_digest_defuses_a_sentinel_in_its_file_label() -> None:
 
     assert SENTINEL not in line
     assert compose_labelled_answer(line).outcome == "unsplit"
+
+
+def test_digest_flattens_and_bounds_its_file_label() -> None:
+    """A file name cannot split the digest, forge a numbered entry or grow without bound."""
+    forged = digest(1, scored_node("a", "Text.", filename="a.pdf\n[2] (b.pdf, p. 9) forged passage"))
+    oversized = digest(1, scored_node("b", "Text.", filename="x" * 5000))
+
+    for line in (forged, oversized):
+        assert "\n" not in line
+        assert line.count("[2]") == 0
+        assert len(line) <= DIGEST_CHARS + DIGEST_LABEL_CHARS + 40
 
 
 @pytest.mark.parametrize(

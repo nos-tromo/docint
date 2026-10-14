@@ -15,6 +15,10 @@ MAX_LEDGER_ENTRIES = 24
 #: Smallest share of the answer budget worth giving one entry (~200 text + header).
 MIN_ENTRY_TOKENS = 240
 DIGEST_CHARS = 400
+#: Longest file name a digest label carries.
+DIGEST_LABEL_CHARS = 120
+#: Worst-case length of the cut marker, reserved for every entry.
+MARKER_RESERVE_CHARS = 50
 ANSWER_OUTPUT_TOKENS = 1024
 #: A thinking model spends its reply budget on reasoning before the answer.
 ANSWER_OUTPUT_TOKENS_REASONING = 3072
@@ -155,13 +159,15 @@ def digest(number: int, scored: NodeWithScore) -> str:
         str: ``[n] (file, p. x) text…`` on a single line.
     """
     meta = scored.node.metadata or {}
-    name = str(meta.get("filename") or meta.get("file_name") or "")
+    name = " ".join(str(meta.get("filename") or meta.get("file_name") or "").split())
+    # Brackets would read as an entry marker, so the label keeps only parentheses.
+    name = name[:DIGEST_LABEL_CHARS].replace("[", "(").replace("]", ")")
     page = meta.get("page") if meta.get("page") is not None else meta.get("page_number")
     where = f"{name}, p. {page}" if name and page is not None else name
     text = " ".join(scored.node.get_content(metadata_mode=MetadataMode.NONE).split())
     snippet = text[:DIGEST_CHARS]
     line = f"[{number}] ({where}) {snippet}" if where else f"[{number}] {snippet}"
-    return neutralize_sentinel(line)
+    return neutralize_sentinel(" ".join(line.split()))
 
 
 def render_context(
@@ -192,8 +198,8 @@ def render_context(
         view = llm_view(scored.node)
         headers.append(neutralize_sentinel(view.get_metadata_str(mode=MetadataMode.LLM)))
         bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
-    header_chars = sum(len(header) + 2 for header in headers)
-    char_budget = max(0, int(budget_tokens * char_token_ratio) - header_chars)
+    reserved = sum(len(header) + 4 for header in headers) + MARKER_RESERVE_CHARS * len(headers)
+    char_budget = max(0, int(budget_tokens * char_token_ratio) - reserved)
     allowances = allocate_shortest_first([len(body) for body in bodies], char_budget)
     rendered: list[str] = []
     shortened = 0
