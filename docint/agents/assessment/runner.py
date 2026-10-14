@@ -28,11 +28,11 @@ from docint.agents.assessment.ledger import (
     is_context_overflow,
     render_context,
 )
-from docint.agents.assessment.split import SentinelStreamSplitter
+from docint.agents.assessment.split import ASSESSMENT_RULE, SentinelStreamSplitter
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
-from docint.utils.text_budget import fit_with_marker
+from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
 
 if TYPE_CHECKING:
     from llama_index.core.llms import LLM
@@ -52,7 +52,14 @@ DEFAULT_ASSESSMENT_ANSWER_PROMPT = (
 )
 
 PRIOR_ANSWER_CHARS = 4000
-"""Longest earlier assistant answer, in characters, that the answer step is shown."""
+"""Longest earlier assistant answer, in characters, that research and the answer step are shown.
+
+An earlier assessment's two parts share it.
+"""
+
+#: How the prior-turn block labels the two parts of an earlier assessment.
+PRIOR_SOURCED_LABEL = "Previous assistant answer, source-backed part (its [n] refer to the previous turn's sources)"
+PRIOR_ASSESSMENT_LABEL = "Previous assistant answer, the model's own assessment"
 
 
 class AssessmentDoesNotFit(ValueError):
@@ -132,6 +139,31 @@ class AssessmentResult:
     shortened: int = 0
 
 
+def _prior_answer(prior_turn: PriorTurn) -> str:
+    """Render the earlier answer's lines of the prior-turn block.
+
+    An assessment whose stored boundary is ``0``, or sits on its rule, is shown as
+    two labelled parts that share ``PRIOR_ANSWER_CHARS`` shortest-first, so a long
+    source-backed part cannot push the judgement out; the assessment part keeps its
+    localized heading and disclaimer, and an empty part is left out. Any other
+    answer, a boundary out of range or off the rule included, is shown as before.
+
+    Args:
+        prior_turn (PriorTurn): The previous exchange.
+
+    Returns:
+        str: One labelled line per part shown.
+    """
+    text, cut = prior_turn.assistant_text, prior_turn.evidence_chars
+    aligned = cut is not None and 0 <= cut <= len(text) and (cut == 0 or text.startswith(ASSESSMENT_RULE, cut))
+    parts = (text[:cut], text[cut:].removeprefix(ASSESSMENT_RULE)) if aligned else ("", "")
+    if not any(parts):
+        return f"Previous assistant answer: {fit_with_marker(text, PRIOR_ANSWER_CHARS)[0]}"
+    shares = allocate_shortest_first([len(part) for part in parts], PRIOR_ANSWER_CHARS)
+    labelled = zip((PRIOR_SOURCED_LABEL, PRIOR_ASSESSMENT_LABEL), parts, shares, strict=True)
+    return "\n".join(f"{label}: {fit_with_marker(part, share)[0]}" for label, part, share in labelled if part)
+
+
 def prior_turn_block(prior_turn: PriorTurn | None) -> str:
     """Render the previous exchange for an assessment prompt.
 
@@ -139,12 +171,13 @@ def prior_turn_block(prior_turn: PriorTurn | None) -> str:
         prior_turn (PriorTurn | None): The previous exchange, if any.
 
     Returns:
-        str: The block, with the earlier answer capped at ``PRIOR_ANSWER_CHARS``, or a placeholder when there is none.
+        str: The block, its earlier answer within ``PRIOR_ANSWER_CHARS`` and an earlier
+        assessment's two parts each labelled (see :func:`_prior_answer`), or a
+        placeholder when there is none.
     """
     if prior_turn is None:
         return "(no prior turn)"
-    answer = fit_with_marker(prior_turn.assistant_text, PRIOR_ANSWER_CHARS)[0]
-    return f"Previous user question: {prior_turn.user_text}\nPrevious assistant answer: {answer}"
+    return f"Previous user question: {prior_turn.user_text}\n{_prior_answer(prior_turn)}"
 
 
 class AssessmentRunner:

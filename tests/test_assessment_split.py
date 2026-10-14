@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from docint.agents.assessment.split import (
+    ASSESSMENT_RULE,
     SENTINEL,
     SentinelStreamSplitter,
     assessment_label,
@@ -125,6 +126,22 @@ def test_the_label_follows_the_response_language(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
 
     assert "**Einschätzung des Modells**" in assessment_label(with_rule=True)
+
+
+@pytest.mark.parametrize("lang", ["en", "de"])
+def test_the_rule_before_the_label_is_the_same_in_every_language(lang: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stored answers are split back at this rule, so it must not change with the locale that wrote them.
+
+    Args:
+        lang (str): The response language.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", lang)
+    labelled = compose_labelled_answer(STREAM)
+
+    assert ASSESSMENT_RULE == "\n\n---\n\n"
+    assert assessment_label(with_rule=True) == f"{ASSESSMENT_RULE}{assessment_label(with_rule=False)}"
+    assert labelled.text.startswith(ASSESSMENT_RULE, labelled.evidence_chars or 0)
 
 
 def test_neutralize_sentinel_defuses_document_text() -> None:

@@ -18,6 +18,8 @@ from typing import Any, Literal
 from docint.utils.ui_strings import ui_string
 
 SENTINEL = "[[ASSESSMENT]]"
+#: The rule a stored answer carries between its source-backed part and the label; the same in every language.
+ASSESSMENT_RULE = "\n\n---\n\n"
 
 # Tolerates what models do to a marker: case, single brackets, bold, heading marks.
 _SENTINEL_RE = re.compile(r"(?:#{1,6}\s*)?(?:\*\*|__)?\[{1,2}\s*assessment\s*\]{1,2}(?:\*\*|__)?", re.IGNORECASE)
@@ -61,7 +63,7 @@ def assessment_label(*, with_rule: bool) -> str:
         paragraph above as a setext heading.
     """
     label = f"**{ui_string('assessment_heading')}**\n\n*{ui_string('assessment_disclaimer')}*\n\n"
-    return f"\n\n---\n\n{label}" if with_rule else label
+    return f"{ASSESSMENT_RULE}{label}" if with_rule else label
 
 
 def neutralize_sentinel(text: str) -> str:

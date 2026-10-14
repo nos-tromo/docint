@@ -32,18 +32,19 @@ from docint.agents.assessment.ledger import (
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import (
     DEFAULT_ASSESSMENT_ANSWER_PROMPT,
+    PRIOR_ANSWER_CHARS,
     AssessmentDoesNotFit,
     AssessmentResult,
     AssessmentRunner,
     ResearchOutcome,
     prior_turn_block,
 )
-from docint.agents.assessment.split import SENTINEL, assessment_label
+from docint.agents.assessment.split import ASSESSMENT_RULE, SENTINEL, assessment_label, compose_labelled_answer
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
-from docint.utils.text_budget import MATCH_SPANS_KEY
+from docint.utils.text_budget import MATCH_SPANS_KEY, allocate_shortest_first, fit_with_marker
 
 QUESTION = "What could be improved in this study?"
 ANSWER = ["The study evaluates on one dataset [1].", f"\n{SENTINEL}\n", "A second dataset would help."]
@@ -931,3 +932,149 @@ def test_passages_the_overflow_retry_leaves_out_are_reported() -> None:
     assert 2 < len(result.nodes) < 22
     assert llm.stream_chat.call_count == 2
     assert result.reason == "context_budget"
+
+
+PRIOR_QUESTION = "Is the harbour survey sound?"
+#: An invented source-backed part of 4,439 characters, longer than the prior-answer budget on its own.
+SOURCED = ("The survey interviewed invented respondents at three piers [1]. " * 70)[:4438] + "."
+RECOMMENDATIONS = (
+    "Recommendation one: rerun the survey with a second cohort. Recommendation two: publish the questionnaire."
+)
+SOURCED_LABEL = "Previous assistant answer, source-backed part (its [n] refer to the previous turn's sources): "
+ASSESSMENT_LABEL = "Previous assistant answer, the model's own assessment: "
+
+
+def _prior_assessment(sourced: str, judgement: str) -> PriorTurn:
+    """Store an invented assessment the way a turn persists it and read it back as the prior turn.
+
+    Args:
+        sourced (str): The source-backed part.
+        judgement (str): The model's own assessment.
+
+    Returns:
+        PriorTurn: The exchange, with the boundary between its parts.
+    """
+    labelled = compose_labelled_answer(f"{sourced}\n{SENTINEL}\n{judgement}")
+    return PriorTurn(user_text=PRIOR_QUESTION, assistant_text=labelled.text, evidence_chars=labelled.evidence_chars)
+
+
+def test_a_follow_up_sees_recommendations_behind_a_long_source_part_in_both_prompts() -> None:
+    """Codex's reproduction: past 4,000 characters of sources, the earlier judgement still reaches both prompts."""
+    prior = _prior_assessment(SOURCED, RECOMMENDATIONS)
+    assert prior.evidence_chars == 4439
+    research_llm = tool_llm([])
+    researcher = ResearchLoop(
+        llm=cast(Any, research_llm),
+        search=lambda query: [],
+        max_steps=6,
+        ctx_window=32768,
+        char_token_ratio=3.5,
+        prompt="{question}\n{prior_turn}\n{digest}",
+    )
+    runner, llm = _runner(researcher=researcher, ctx_window=32768)
+
+    list(runner.run(question="Which recommendations should we prioritise?", prior_turn=prior, seed=_seed()))
+
+    research_prompt = str(research_llm.chat_with_tools.call_args_list[0].kwargs["chat_history"][0].content)
+    answer_prompt = str(llm.stream_chat.call_args.args[0][0].content)
+    judgement = f"{assessment_label(with_rule=False)}{RECOMMENDATIONS}"
+    # Shortest first: the judgement is shown whole and the sources get everything it leaves.
+    sourced = fit_with_marker(SOURCED, PRIOR_ANSWER_CHARS - len(judgement))[0]
+    for prompt in (research_prompt, answer_prompt):
+        assert f"{SOURCED_LABEL}{sourced}\n{ASSESSMENT_LABEL}{judgement}" in prompt
+
+
+def test_a_short_prior_assessment_shows_both_parts_whole_and_labelled() -> None:
+    """Each part keeps its own label; the source-backed one says whose sources its numbers cite."""
+    prior = _prior_assessment("The survey covered three piers [1].", "Rerun it with a second cohort.")
+
+    assert prior_turn_block(prior) == (
+        f"Previous user question: {PRIOR_QUESTION}\n"
+        f"{SOURCED_LABEL}The survey covered three piers [1].\n"
+        f"{ASSESSMENT_LABEL}{assessment_label(with_rule=False)}Rerun it with a second cohort."
+    )
+
+
+def test_a_prior_assessment_with_no_source_backed_part_shows_only_the_judgement() -> None:
+    """A boundary of ``0`` means the whole answer is the model's own assessment."""
+    labelled = compose_labelled_answer("Rerun it with a second cohort.")
+    assert labelled.evidence_chars == 0
+    prior = PriorTurn(user_text=PRIOR_QUESTION, assistant_text=labelled.text, evidence_chars=0)
+
+    assert prior_turn_block(prior) == f"Previous user question: {PRIOR_QUESTION}\n{ASSESSMENT_LABEL}{labelled.text}"
+
+
+def _today(prior: PriorTurn) -> str:
+    """Render a prior turn the way the block rendered every earlier answer before the split.
+
+    Args:
+        prior (PriorTurn): The exchange.
+
+    Returns:
+        str: The block.
+    """
+    answer = fit_with_marker(prior.assistant_text, PRIOR_ANSWER_CHARS)[0]
+    return f"Previous user question: {prior.user_text}\nPrevious assistant answer: {answer}"
+
+
+@pytest.mark.parametrize("answer", ["It has one experiment [1].", "The study reports a result. " * 300, ""])
+def test_a_prior_lookup_renders_exactly_as_before(answer: str) -> None:
+    """With no boundary the whole answer is source-backed and is shown as it always was.
+
+    Args:
+        answer (str): The earlier answer.
+    """
+    prior = PriorTurn(user_text=PRIOR_QUESTION, assistant_text=answer)
+
+    assert prior_turn_block(prior) == _today(prior)
+
+
+@pytest.mark.parametrize(
+    "cut",
+    [-5, None, 4439 + 10_000, 10, 4439 - 1, 4439 + 1],
+    ids=["negative", "negative-on-the-rule", "past-the-end", "misaligned", "one-early", "one-late"],
+)
+def test_a_boundary_that_does_not_sit_on_the_rule_renders_exactly_as_before(cut: int | None) -> None:
+    """A boundary out of range or off the rule is not trusted to split anything.
+
+    Args:
+        cut (int | None): The stored boundary; ``None`` stands for the negative one that lands on the rule.
+    """
+    stored = _prior_assessment(SOURCED, RECOMMENDATIONS)
+    boundary = 4439 - len(stored.assistant_text) if cut is None else cut
+    prior = PriorTurn(user_text=PRIOR_QUESTION, assistant_text=stored.assistant_text, evidence_chars=boundary)
+
+    assert prior_turn_block(prior) == _today(prior)
+
+
+def test_an_assessment_with_nothing_on_either_side_renders_as_before() -> None:
+    """Splitting an empty answer would leave no answer line at all."""
+    prior = PriorTurn(user_text=PRIOR_QUESTION, assistant_text="", evidence_chars=0)
+
+    assert prior_turn_block(prior) == _today(prior)
+
+
+def test_both_long_parts_share_the_prior_answer_budget() -> None:
+    """The two parts split ``PRIOR_ANSWER_CHARS`` between them shortest-first, so the total is what it was."""
+    judgement = ("Recommendation: an invented improvement to the survey design. " * 60)[:3000].strip()
+    prior = _prior_assessment(SOURCED, judgement)
+    sourced, cut = prior.assistant_text[: prior.evidence_chars], prior.evidence_chars or 0
+    part = prior.assistant_text[cut:].removeprefix(ASSESSMENT_RULE)
+    assert allocate_shortest_first([len(sourced), len(part)], PRIOR_ANSWER_CHARS) == [2000, 2000]
+
+    block = prior_turn_block(prior)
+
+    assert f"{SOURCED_LABEL}{fit_with_marker(sourced, 2000)[0]}\n" in block
+    assert block.endswith(f"{ASSESSMENT_LABEL}{fit_with_marker(part, 2000)[0]}")
+
+
+def test_a_long_prior_assessment_still_fits_the_window() -> None:
+    """Both parts at their share, with their labels and markers, still leave the answer inside its window."""
+    judgement = ("Recommendation: an invented improvement to the survey design. " * 60)[:3000].strip()
+    prior = _prior_assessment(SOURCED, judgement)
+    runner, llm = _runner()
+
+    list(runner.run(question=QUESTION, prior_turn=prior, seed=_long_seed(23)))
+
+    prompt = llm.stream_chat.call_args.args[0][0].content
+    assert estimate_tokens(prompt, 3.5) + 1024 <= 8192
