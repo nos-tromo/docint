@@ -437,16 +437,24 @@ on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
 The research budget covers the searches as well as the model calls: a search
 still running when it runs out is abandoned and the turn reports `time_budget`.
+Research searches share a per-process bound of eight: a timed-out search holds
+its slot until it ends, and when no slot frees within five seconds (or the time
+left, if less) research stops with `research_failed`.
 Research admits a passage only while every passage stays legible in the answer,
 headers included; a result that would crowd the others is refused, and the
 ledger counts as full once not even a bare 300-character passage would fit.
+Every match an entry holds keeps room in the answer: each costs 250 characters
+(200 of text and a cut marker) in its window, each further window 55, and an
+extension whose matches would no longer fit is refused.
 A new window of a section the ledger already holds is not dropped. Text the entry
 lacks extends it after a `…` line, a window that repeats it adds at most its
 match, and the entry keeps its number. When the answer has to shorten such an entry, the cut is
 shared across its windows rather than taken from the end. Shortening keeps the
 text around each passage's retrieved match, so a section promoted from a matched
 chunk is cut around that chunk rather than to its opening; the research model's
-digest of a passage shows the same place.
+digest of a passage shows the same place. A match longer than 200 characters,
+typically a whole retrieved child chunk, keeps only its first 200 when it has to
+be cut.
 Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
 never widened: a scoped assessment answers from its chunks with no research.
 Evidence too large to show legibly in one answer — typically a large pinned
@@ -463,7 +471,8 @@ exports without any of them knowing the protocol. Sources are the evidence
 ledger, numbered 1..N in the order it was found; an entry is shortened to fit
 the context rather than dropped, because replay numbers citations by position.
 If the final estimate still does not fit, the latest research additions are
-left out, never the seed, so the numbering stays contiguous. If the prompt
+left out, never the seed, so the numbering stays contiguous, and the turn
+reports `context_budget`. If the prompt
 still overflows the model's context, it is rebuilt once with less evidence and
 compacted metadata headers, each passage's citation line kept whole; a second
 overflow, or compact headers that alone fill the room, ends the turn with
@@ -479,7 +488,10 @@ reformulation could improve.
 
 **Degraded turns** say why. `agent.reason` is `tools_unavailable` (the endpoint
 rejected tool calls or answered without one; the answer rests on the seed
-passages), `research_failed`, `context_budget`, `time_budget` or `no_evidence`;
+passages), `research_failed`, `context_budget` (the context window ended
+research before its step cap, left it no room to run, or left out passages it
+found; a refusal that did not end research is not reported, and an earlier
+reason is kept), `time_budget` or `no_evidence`;
 `agent.answer` is `unsplit` or `empty`. These are protocol tokens; the SPA maps
 each to catalog copy.
 
@@ -488,7 +500,11 @@ source-backed part of that answer as its prior turn, so the model's judgement is
 never restated as sourced fact. The cut is made where the prior turn is bound to
 the generation prompt, so the legacy `/agent/*` endpoints, which build theirs
 from stored history, get it too. The prior turn is read by
-`SessionManager.get_prior_turn`, without rehydrating any citation.
+`SessionManager.get_prior_turn`, without rehydrating any citation. An assessment
+asked after one sees both parts of it, each labelled: the source-backed part,
+whose `[n]` refer to the previous turn's sources, and the model's own
+assessment. They share the 4,000-character prior-answer budget shortest-first,
+so a long source-backed part cannot push the judgement out.
 
 ## Citation numbering
 
