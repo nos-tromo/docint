@@ -153,12 +153,22 @@ function AgentTrailLive({ steps }: { steps: AgentStep[] }) {
     <ul className="mt-3 space-y-1 text-xs text-muted-foreground" data-testid="agent-trail-live">
       {steps.map((step) => (
         <li key={`${step.step}-${step.action}`} className="flex items-center gap-2">
-          <SearchIcon className="h-3.5 w-3.5 shrink-0" />
+          {/* Writing is not a search; a same-size spacer keeps its text aligned with the searches. */}
+          {step.action === 'answer' ? (
+            <span aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <SearchIcon className="h-3.5 w-3.5 shrink-0" />
+          )}
           <span>{stepLabel(step, t)}</span>
         </li>
       ))}
     </ul>
   )
+}
+
+/** Whether the answer text carries the assessment label the notice points to. */
+function carriesLabel(trail: AgentTrail): boolean {
+  return trail.answer === 'unsplit' || (trail.answer === 'split' && trail.evidence_chars !== null)
 }
 
 /** Says the answer carries the model's own judgement; the searches sit behind a disclosure. */
@@ -267,7 +277,7 @@ export function ChatTurn({
             <div className="mt-1 whitespace-pre-wrap">{turn.error}</div>
           </div>
         )}
-        {trail && <AssessmentNotice trail={trail} />}
+        {trail && carriesLabel(trail) && <AssessmentNotice trail={trail} />}
         {reasonKey && (
           <div
             className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"

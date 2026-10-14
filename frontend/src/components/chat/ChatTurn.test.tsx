@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -367,14 +367,73 @@ describe('ChatTurn', () => {
   it.each([
     ['brand_new_reason', 'brand_new_answer'],
     ['constructor', 'toString']
-  ])('renders the unknown trail tokens %s and %s without crashing or an amber notice', (reason, answer) => {
+  ])('renders the unknown trail tokens %s and %s without crashing or a notice', (reason, answer) => {
     // A token this build does not know (version skew, a persisted trail) must not take the SPA down.
     const unknown = { ...TRAIL, reason, answer } as unknown as AgentTrail
     renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta(unknown) })
 
-    expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    // An unknown answer token cannot say whether the text carries the label.
+    expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
     expect(screen.queryByTestId('assessment-research-degraded')).not.toBeInTheDocument()
     expect(screen.queryByTestId('assessment-answer-degraded')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['empty', null, false],
+    ['split', null, false],
+    ['unsplit', 0, true],
+    ['split', 9, true]
+  ] as const)(
+    'shows the assessment notice for a %s answer with evidence_chars %s only when the label is in the text: %s',
+    (answer, evidenceChars, shown) => {
+      renderTurn({
+        user: 'q',
+        assistant: 'Fact [1].',
+        done: true,
+        meta: assessmentMeta({ ...TRAIL, answer, evidence_chars: evidenceChars })
+      })
+
+      expect(screen.queryByTestId('assessment-notice') !== null).toBe(shown)
+    }
+  )
+
+  it.each([
+    ['en', /whole answer is marked as its assessment\.$/, /not validated/i],
+    ['de', /als seine Einschätzung markiert\.$/, /nicht validiert/i]
+  ] as const)('leaves "not validated" to the banner in the %s unsplit notice', (lang, sentence, banned) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: 'View.',
+        done: true,
+        meta: assessmentMeta({ ...TRAIL, answer: 'unsplit', evidence_chars: 0 })
+      },
+      lang
+    )
+
+    const notice = screen.getByTestId('assessment-answer-degraded')
+    expect(notice).toHaveTextContent(sentence)
+    expect(notice).not.toHaveTextContent(banned)
+  })
+
+  it('marks only the searches in the live trail with a magnifier', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 0, action: 'seed', detail: '', found: 2 },
+        { step: 1, action: 'search', detail: 'evaluation datasets', found: 1 },
+        { step: 2, action: 'answer', detail: '', found: 3 }
+      ]
+    })
+
+    const rows = within(screen.getByTestId('agent-trail-live')).getAllByRole('listitem')
+    expect(rows.map((row) => row.querySelector('svg') !== null)).toEqual([true, true, false])
+    // A spacer of the icon's size keeps the answer row's text aligned with the searches.
+    expect(rows[2].firstElementChild).toHaveAttribute('aria-hidden', 'true')
+    expect(rows[2].firstElementChild).toHaveClass('h-3.5', 'w-3.5', 'shrink-0')
   })
 
   it('uses the singular for a single passage in the live trail', () => {

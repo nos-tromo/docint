@@ -202,7 +202,7 @@ export const en = {
   'chat.assessment_reason.time_budget': 'The research stopped early because it ran out of time.',
   'chat.assessment_reason.no_evidence': 'No passages were found to assess.',
   'chat.assessment_answer.unsplit':
-    'The model did not separate what the sources say from its own judgement, so the whole answer is marked as its assessment and was not validated.',
+    'The model did not separate what the sources say from its own judgement, so the whole answer is marked as its assessment.',
   'chat.assessment_answer.empty': 'The model returned no assessment.',
 
   // chat search panel + session scope

@@ -215,7 +215,7 @@ export const de: Strings = {
     'Die Recherche endete vorzeitig, weil die Zeit abgelaufen war.',
   'chat.assessment_reason.no_evidence': 'Es wurden keine Passagen gefunden, die sich bewerten ließen.',
   'chat.assessment_answer.unsplit':
-    'Das Modell hat nicht getrennt, was die Quellen sagen und was es selbst urteilt; die ganze Antwort ist daher als seine Einschätzung markiert und wurde nicht validiert.',
+    'Das Modell hat nicht getrennt, was die Quellen sagen und was es selbst urteilt; die ganze Antwort ist daher als seine Einschätzung markiert.',
   'chat.assessment_answer.empty': 'Das Modell hat keine Einschätzung geliefert.',
 
   // chat search panel + session scope
