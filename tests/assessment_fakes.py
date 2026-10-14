@@ -65,6 +65,36 @@ def social_post(number: int, text: str = POST_TEXT) -> NodeWithScore:
     return NodeWithScore(node=TextNode(id_=f"post-{number}", text=text, metadata=metadata), score=1.0)
 
 
+#: About a thousand characters, under the 1 KiB clamp the production LLM view puts on each metadata leaf.
+LONG_LEAF = ("Harbour Events community calendar entry for the spring festival. " * 16)[:990]
+
+
+def heavy_post(number: int) -> NodeWithScore:
+    """Build a short post whose visible metadata renders a header of about 3 KB.
+
+    Each ``reference_metadata`` leaf stays under the per-leaf clamp, so nothing
+    bounds the header but the number of leaves.
+
+    Args:
+        number (int): The post's position; it also varies its id and text.
+
+    Returns:
+        NodeWithScore: The post with a neutral score.
+    """
+    metadata = {
+        "filename": "example_profile/dossier.json",
+        "reference_metadata": {
+            "network": "examplenet",
+            "author": LONG_LEAF,
+            "text_id": f"{9876543210 + number}",
+            "description": LONG_LEAF,
+            "summary": LONG_LEAF,
+        },
+    }
+    text = f"Harbour post {number}: the stalls open at ten."
+    return NodeWithScore(node=TextNode(id_=f"heavy-{number}", text=text, metadata=metadata), score=1.0)
+
+
 def llm_view(node: BaseNode) -> BaseNode:
     """Mirror the production LLM view: hide every key but the whitelisted ones.
 

@@ -14,6 +14,7 @@ from docint.utils.text_budget import (
     MATCH_SPANS_KEY,
     allocate_shortest_first,
     excerpt,
+    fit_with_marker,
     merge_spans,
     place,
 )
@@ -28,6 +29,8 @@ DIGEST_LABEL_CHARS = 120
 WINDOW_JOIN = "\n\n…\n\n"
 #: Fewest characters a shortened passage may keep and still be read.
 MIN_TEXT_CHARS = 300
+#: Metadata a compact header keeps after its citation line; compaction is the overflow retry's fallback only.
+COMPACT_HEADER_CHARS = 240
 ANSWER_OUTPUT_TOKENS = 1024
 #: A thinking model spends its reply budget on reasoning before the answer.
 ANSWER_OUTPUT_TOKENS_REASONING = 3072
@@ -189,6 +192,22 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     return NodeWithScore(node=node, score=max(scores, default=None))
 
 
+def _stamp(scored: NodeWithScore, number: int) -> NodeWithScore:
+    """Clone a passage stamped with the ledger number it is cited by.
+
+    Args:
+        scored (NodeWithScore): The passage; a cached node is never written to.
+        number (int): Its ledger number.
+
+    Returns:
+        NodeWithScore: The clone, its ``citation_index`` visible to the prompt.
+    """
+    clone = scored.node.model_copy(deep=True)
+    clone.metadata["citation_index"] = number
+    clone.excluded_llm_metadata_keys = [k for k in clone.excluded_llm_metadata_keys if k != "citation_index"]
+    return NodeWithScore(node=clone, score=scored.score)
+
+
 class EvidenceLedger:
     """Evidence numbered in the order it was found; an entry keeps its number and can only grow."""
 
@@ -201,6 +220,7 @@ class EvidenceLedger:
         self._cap = max(1, cap)
         self._entries: list[NodeWithScore] = []
         self._positions: dict[str, int] = {}
+        self._room: Room | None = None
 
     def __len__(self) -> int:
         """Return how many entries the ledger holds.
@@ -215,9 +235,32 @@ class EvidenceLedger:
         """Whether the ledger admits no more entries.
 
         Returns:
-            bool: ``True`` at the cap.
+            bool: ``True`` at the cap, or once its room cannot hold even one more legible passage.
         """
-        return len(self._entries) >= self._cap
+        return len(self._entries) >= self._cap or (self._room is not None and self._room.closed)
+
+    def restrict(self, admits: Room) -> None:
+        """Admit from now on only what keeps the evidence legible.
+
+        Installed once the seed is in: research may then add an entry, or extend
+        one, only while ``admits`` says every passage still fits legibly.
+
+        Args:
+            admits (Room): The room the evidence must stay legible in, holding the entries so far.
+        """
+        self._room = admits
+
+    def _admitted(self, number: int, candidate: NodeWithScore) -> bool:
+        """Ask the room, if one is installed, whether a new or extended entry keeps the evidence legible.
+
+        Args:
+            number (int): The ledger number the entry carries.
+            candidate (NodeWithScore): The new entry, or the merged one replacing it.
+
+        Returns:
+            bool: ``True`` when it may be taken; the room then counts it.
+        """
+        return self._room is None or self._room(number, candidate)
 
     def add(self, nodes: Iterable[NodeWithScore]) -> list[tuple[int, NodeWithScore]]:
         """Admit passages not seen before, up to the cap, and fold in new windows of passages held.
@@ -226,7 +269,9 @@ class EvidenceLedger:
         later window of a held id is new evidence: it extends that entry, which
         keeps its number. So is a window the entry already shows when it carries
         a match the entry lacks. A full ledger admits no new entry but still
-        extends one.
+        extends one. Once :meth:`restrict` is installed, a passage or extension
+        that would leave the evidence illegible is refused and the rest of the
+        batch is still considered.
 
         Args:
             nodes (Iterable[NodeWithScore]): Passages in ranked order.
@@ -242,10 +287,10 @@ class EvidenceLedger:
             position = self._positions.get(node_id)
             if position is not None:
                 merged = _merge_windows(self._entries[position], scored)
-                if merged is not None:
+                if merged is not None and self._admitted(position + 1, merged):
                     self._entries[position] = merged
                     changed.append((position + 1, scored))
-            elif not self.full:
+            elif not self.full and self._admitted(len(self._entries) + 1, scored):
                 self._positions[node_id] = len(self._entries)
                 self._entries.append(scored)
                 changed.append((len(self._entries), scored))
@@ -266,13 +311,7 @@ class EvidenceLedger:
             list[NodeWithScore]: Clones carrying ``citation_index``; the cached
             originals are never written to.
         """
-        numbered: list[NodeWithScore] = []
-        for number, scored in enumerate(self._entries, start=1):
-            clone = scored.node.model_copy(deep=True)
-            clone.metadata["citation_index"] = number
-            clone.excluded_llm_metadata_keys = [k for k in clone.excluded_llm_metadata_keys if k != "citation_index"]
-            numbered.append(NodeWithScore(node=clone, score=scored.score))
-        return numbered
+        return [_stamp(scored, number) for number, scored in enumerate(self._entries, start=1)]
 
 
 def digest(number: int, scored: NodeWithScore) -> str:
@@ -338,12 +377,33 @@ def effective_ratio(
     return min(char_token_ratio, len(sample) / tokens)
 
 
-def _parts(nodes: list[NodeWithScore], llm_view: Callable[[BaseNode], BaseNode]) -> tuple[list[str], list[str]]:
+def _compact_header(view: BaseNode) -> str:
+    """Render a header whose citation line comes first, whole, and whose other keys are cut short.
+
+    Args:
+        view (BaseNode): A numbered passage's LLM view.
+
+    Returns:
+        str: The ``citation_index`` line, then the remaining visible metadata cut
+        to ``COMPACT_HEADER_CHARS`` with a marker.
+    """
+    number = view.metadata.get("citation_index")
+    first = "" if number is None else view.metadata_template.format(key="citation_index", value=str(number))
+    rest = view.model_copy()
+    rest.excluded_llm_metadata_keys = [*view.excluded_llm_metadata_keys, "citation_index"]
+    tail, _ = fit_with_marker(rest.get_metadata_str(mode=MetadataMode.LLM), COMPACT_HEADER_CHARS)
+    return view.metadata_separator.join(part for part in (first, tail) if part)
+
+
+def _parts(
+    nodes: list[NodeWithScore], llm_view: Callable[[BaseNode], BaseNode], *, compact: bool = False
+) -> tuple[list[str], list[str]]:
     """Split each passage's LLM view into its metadata header and its text.
 
     Args:
         nodes (list[NodeWithScore]): The numbered ledger.
         llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
+        compact (bool): Whether headers are compacted (see :func:`_compact_header`).
 
     Returns:
         tuple[list[str], list[str]]: The headers and the texts, sentinels defused.
@@ -352,9 +412,128 @@ def _parts(nodes: list[NodeWithScore], llm_view: Callable[[BaseNode], BaseNode])
     bodies: list[str] = []
     for scored in nodes:
         view = llm_view(scored.node)
-        headers.append(neutralize_sentinel(view.get_metadata_str(mode=MetadataMode.LLM)))
+        header = _compact_header(view) if compact else view.get_metadata_str(mode=MetadataMode.LLM)
+        headers.append(neutralize_sentinel(header))
         bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
     return headers, bodies
+
+
+def _costs(header: str, body: str) -> tuple[int, int]:
+    """Price one passage as packing does.
+
+    Args:
+        header (str): Its rendered header.
+        body (str): Its rendered text.
+
+    Returns:
+        tuple[int, int]: What it reserves (header, joins, cut marker) and the
+        least text it must keep to stay legible.
+    """
+    return len(header) + 4 + MARKER_RESERVE_CHARS, min(len(body), MIN_TEXT_CHARS)
+
+
+class Room:
+    """Legibility of growing evidence, kept as running sums.
+
+    With ``room = int(budget * ratio) - sum(header + 4 + MARKER_RESERVE_CHARS)``, the
+    evidence is legible exactly when ``room > 0`` and ``room >= sum(min(len, MIN_TEXT_CHARS))``,
+    which is what :func:`evidence_fits` finds by packing it. The ratio is measured
+    once, on the evidence the room starts from, and then held, so each candidate
+    costs one header render.
+    """
+
+    def __init__(
+        self,
+        nodes: list[NodeWithScore],
+        *,
+        llm_view: Callable[[BaseNode], BaseNode],
+        budget_tokens: int,
+        char_token_ratio: float,
+        count_tokens: Callable[[str], int] | None = None,
+        compact: bool = False,
+    ) -> None:
+        """Measure the evidence so far.
+
+        Args:
+            nodes (list[NodeWithScore]): The numbered entries held so far.
+            llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
+            budget_tokens (int): Tokens the rendered evidence may use.
+            char_token_ratio (float): The configured characters per token.
+            count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
+            compact (bool): Whether headers are priced compacted.
+        """
+        headers, bodies = _parts(nodes, llm_view, compact=compact)
+        ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
+        self._llm_view = llm_view
+        self._compact = compact
+        self._chars = int(budget_tokens * ratio)
+        self._costs = [_costs(header, body) for header, body in zip(headers, bodies, strict=True)]
+        self._reserved = sum(reserve for reserve, _ in self._costs)
+        self._floor = sum(floor for _, floor in self._costs)
+
+    def _fits(self, reserved: int, floor: int) -> bool:
+        """Apply the closed form.
+
+        Args:
+            reserved (int): Characters every header, join and marker reserves.
+            floor (int): Text every passage must keep.
+
+        Returns:
+            bool: Whether text room remains and covers the floor.
+        """
+        room = self._chars - reserved
+        return room > 0 and room >= floor
+
+    @property
+    def legible(self) -> bool:
+        """Whether every passage held can be shown legibly.
+
+        Returns:
+            bool: The closed form over the entries so far.
+        """
+        return self._fits(self._reserved, self._floor)
+
+    @property
+    def headers_fit(self) -> bool:
+        """Whether any text room is left once the headers, joins and markers are reserved.
+
+        Returns:
+            bool: ``True`` while the headers alone do not exhaust the budget.
+        """
+        return self._chars - self._reserved > 0
+
+    @property
+    def closed(self) -> bool:
+        """Whether not even a header-less passage of ``MIN_TEXT_CHARS`` would still fit.
+
+        Returns:
+            bool: ``True`` once research can add nothing worth reading.
+        """
+        return self._chars - self._reserved - self._floor < 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS
+
+    def __call__(self, number: int, candidate: NodeWithScore) -> bool:
+        """Admit a new entry, or the merged form of a held one, when the evidence stays legible.
+
+        Args:
+            number (int): The ledger number it carries; one past the last for a new entry.
+            candidate (NodeWithScore): The entry as it would be held.
+
+        Returns:
+            bool: ``True`` when it fits; its cost is then counted in place of the entry it replaces.
+        """
+        headers, bodies = _parts([_stamp(candidate, number)], self._llm_view, compact=self._compact)
+        reserve, floor = _costs(headers[0], bodies[0])
+        held_reserve, held_floor = self._costs[number - 1] if number <= len(self._costs) else (0, 0)
+        reserved = self._reserved - held_reserve + reserve
+        floors = self._floor - held_floor + floor
+        if not self._fits(reserved, floors):
+            return False
+        if number <= len(self._costs):
+            self._costs[number - 1] = (reserve, floor)
+        else:
+            self._costs.append((reserve, floor))
+        self._reserved, self._floor = reserved, floors
+        return True
 
 
 def _allowances(
@@ -391,6 +570,7 @@ def evidence_fits(
     budget_tokens: int,
     char_token_ratio: float,
     count_tokens: Callable[[str], int] | None = None,
+    compact: bool = False,
 ) -> bool:
     """Return whether the evidence can be shown legibly in its budget, packed as :func:`render_context` packs it.
 
@@ -400,13 +580,14 @@ def evidence_fits(
         budget_tokens (int): Tokens the rendered evidence may use.
         char_token_ratio (float): The configured characters per token.
         count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
+        compact (bool): Whether headers are compacted, as the overflow retry renders them.
 
     Returns:
         bool: ``True`` when text room remains after the headers and every passage
         that must be cut keeps at least ``MIN_TEXT_CHARS``; a passage shown whole
         fits however short it is.
     """
-    headers, bodies = _parts(nodes, llm_view)
+    headers, bodies = _parts(nodes, llm_view, compact=compact)
     char_budget, allowances = _allowances(
         headers, bodies, budget_tokens=budget_tokens, char_token_ratio=char_token_ratio, count_tokens=count_tokens
     )
@@ -416,6 +597,48 @@ def evidence_fits(
         allowance >= len(body) or allowance >= MIN_TEXT_CHARS
         for body, allowance in zip(bodies, allowances, strict=True)
     )
+
+
+def fit_ledger(
+    nodes: list[NodeWithScore],
+    *,
+    keep: int,
+    llm_view: Callable[[BaseNode], BaseNode],
+    budget_tokens: int,
+    char_token_ratio: float,
+    count_tokens: Callable[[str], int] | None = None,
+    compact: bool = False,
+) -> list[NodeWithScore]:
+    """Leave out the latest research additions until every passage can be shown legibly.
+
+    Density is measured afresh on each candidate set, so evidence denser than the
+    seed it was admitted against still fits. Entries go from the tail, which keeps
+    the numbering contiguous; the first ``keep`` (the seed) are never left out, even
+    when they alone are not legible.
+
+    Args:
+        nodes (list[NodeWithScore]): The numbered ledger.
+        keep (int): How many leading entries must stay.
+        llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
+        budget_tokens (int): Tokens the rendered evidence may use.
+        char_token_ratio (float): The configured characters per token.
+        count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
+        compact (bool): Whether headers are compacted.
+
+    Returns:
+        list[NodeWithScore]: The leading entries that will be rendered.
+    """
+    kept = list(nodes)
+    while len(kept) > keep and not evidence_fits(
+        kept,
+        llm_view=llm_view,
+        budget_tokens=budget_tokens,
+        char_token_ratio=char_token_ratio,
+        count_tokens=count_tokens,
+        compact=compact,
+    ):
+        kept.pop()
+    return kept
 
 
 def _fit_windows(body: str, allowance: int, anchors: Sequence[tuple[int, int]] = ()) -> tuple[str, bool]:
@@ -462,6 +685,7 @@ def render_context(
     budget_tokens: int,
     char_token_ratio: float,
     count_tokens: Callable[[str], int] | None = None,
+    compact: bool = False,
 ) -> tuple[str, int]:
     """Render numbered nodes like the grounded prompt's context, shortened to fit.
 
@@ -478,11 +702,13 @@ def render_context(
         char_token_ratio (float): Characters per token for the budget.
         count_tokens (Callable[[str], int] | None): A tokenizer; when given, the
             evidence is packed at its measured density (see :func:`effective_ratio`).
+        compact (bool): Whether headers are compacted (see :func:`_compact_header`);
+            only the overflow retry compacts them.
 
     Returns:
         tuple[str, int]: The context block and how many entries were shortened.
     """
-    headers, bodies = _parts(nodes, llm_view)
+    headers, bodies = _parts(nodes, llm_view, compact=compact)
     _, allowances = _allowances(
         headers, bodies, budget_tokens=budget_tokens, char_token_ratio=char_token_ratio, count_tokens=count_tokens
     )

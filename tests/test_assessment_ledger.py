@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ from assessment_fakes import llm_view, scored_node, social_post
 from llama_index.core.schema import Document, MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import (
+    COMPACT_HEADER_CHARS,
     CONTEXT_ERROR_MARKERS,
     DIGEST_CHARS,
     DIGEST_LABEL_CHARS,
@@ -16,10 +18,12 @@ from docint.agents.assessment.ledger import (
     MIN_TEXT_CHARS,
     WINDOW_JOIN,
     EvidenceLedger,
+    Room,
     answer_budget,
     digest,
     effective_ratio,
     evidence_fits,
+    fit_ledger,
     is_context_overflow,
     render_context,
 )
@@ -818,3 +822,209 @@ def test_digest_of_a_match_near_the_start_reads_from_the_start() -> None:
 
     assert line.startswith("[1] (paper.pdf, p. 2) Background filler sentence.")
     assert "…" not in line
+
+
+def _sized(count: int, body: int, *, label: int = 0, start: int = 1) -> list[NodeWithScore]:
+    """Build invented passages of a given text length whose visible header grows with ``label``.
+
+    Args:
+        count (int): How many passages.
+        body (int): Characters of text each carries.
+        label (int): Characters of file name each header shows.
+        start (int): The first passage's page number, which also varies its id.
+
+    Returns:
+        list[NodeWithScore]: The passages, unnumbered.
+    """
+    return [
+        scored_node(f"p{page}", "w" * body, filename="f" * label, page=page) for page in range(start, start + count)
+    ]
+
+
+@pytest.mark.parametrize("bodies", [[], [0], [10, 299, 300, 301], [1000] * 6, [5, 2000, 40, 300, 700]])
+@pytest.mark.parametrize("label", [0, 40, 400])
+@pytest.mark.parametrize("budget", [0, 20, 100, 300, 600, 1200, 3000])
+@pytest.mark.parametrize("count_tokens", [None, _two_chars_a_token], ids=["ratio", "tokenizer"])
+def test_the_closed_form_agrees_with_packing(bodies: list[int], label: int, budget: int, count_tokens: Any) -> None:
+    """``Room`` says legible exactly when the shortest-first packing keeps every cut passage legible.
+
+    Args:
+        bodies (list[int]): Each passage's text length.
+        label (int): Characters of file name in each header.
+        budget (int): The evidence budget in tokens.
+        count_tokens (Any): The tokenizer double, or ``None``.
+    """
+    nodes = _numbered(
+        [scored_node(f"p{i}", "w" * length, page=i, filename="f" * label) for i, length in enumerate(bodies)]
+    )
+    kwargs: dict[str, Any] = {"llm_view": llm_view, "budget_tokens": budget, "char_token_ratio": 3.5}
+
+    assert Room(nodes, count_tokens=count_tokens, **kwargs).legible is evidence_fits(
+        nodes, count_tokens=count_tokens, **kwargs
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "slack", "legible"),
+    [(1000, -1, False), (1000, 0, True), (1000, 1, True), (0, 0, False), (0, 1, True)],
+    ids=["one-short-of-the-minimum", "exactly-the-minimum", "one-over", "no-text-room", "one-character-of-room"],
+)
+def test_the_closed_form_agrees_with_packing_at_its_boundaries(body: int, slack: int, legible: bool) -> None:
+    """At exactly the legible minimum, and at exactly no room for text, both answers match.
+
+    Args:
+        body (int): Each passage's text length.
+        slack (int): Characters beyond the boundary the budget allows.
+        legible (bool): The expected answer.
+    """
+    nodes = _numbered(_sized(4, body))
+    reserved = sum(
+        len(llm_view(scored.node).get_metadata_str(mode=MetadataMode.LLM)) + 4 + MARKER_RESERVE_CHARS
+        for scored in nodes
+    )
+    kwargs: dict[str, Any] = {
+        "llm_view": llm_view,
+        "budget_tokens": reserved + 4 * min(body, MIN_TEXT_CHARS) + slack,
+        "char_token_ratio": 1.0,
+    }
+
+    assert Room(nodes, **kwargs).legible is legible
+    assert evidence_fits(nodes, **kwargs) is legible
+
+
+def _restricted(seed: list[NodeWithScore], budget: int, *, cap: int = 50) -> EvidenceLedger:
+    """Build a ledger holding ``seed`` that admits nothing which would leave the evidence illegible.
+
+    Args:
+        seed (list[NodeWithScore]): The seed passages.
+        budget (int): The evidence budget, in characters (one per token).
+        cap (int): The ledger cap.
+
+    Returns:
+        EvidenceLedger: The ledger, restricted.
+    """
+    ledger = EvidenceLedger(cap=cap)
+    ledger.add(seed)
+    ledger.restrict(Room(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0))
+    return ledger
+
+
+def test_a_candidate_whose_header_would_break_legibility_is_refused_and_the_batch_goes_on() -> None:
+    """A metadata-heavy passage is refused; the lighter one after it in the same batch is admitted."""
+    ledger = _restricted([scored_node("seed", "Seed passage text. " * 20, page=1)], 2000)
+    heavy = scored_node("heavy", "Heavy passage.", page=2, filename="h" * 1800)
+    light = scored_node("light", "Light passage.", page=3, filename="light.pdf")
+
+    changed = ledger.add([heavy, light])
+
+    assert changed == [(2, light)]
+    assert [scored.node.node_id for scored in ledger.entries()] == ["seed", "light"]
+    assert evidence_fits(ledger.numbered(), llm_view=llm_view, budget_tokens=2000, char_token_ratio=1.0)
+
+
+def test_an_extension_that_would_break_legibility_is_refused() -> None:
+    """Admission prices a merged entry too; a window it refuses leaves the entry as it was."""
+    # The header leaves about 210 characters: the 64-character window fits, a merge needing 300 does not.
+    held = scored_node("sec", "Opening window. " * 4, page=1, filename="f" * 1700)
+    ledger = _restricted([held], 2000)
+
+    assert ledger.add([scored_node("sec", "Closing window. " * 40, page=1, filename="f" * 1700)]) == []
+    assert ledger.entries()[0] is held
+
+
+def test_an_extension_is_priced_in_place_of_the_entry_it_replaces() -> None:
+    """A later window of a passage near the limit still fits: the merged entry's cost replaces the held one's."""
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([scored_node("sec", "Opening window. " * 20, page=1)])
+    header = len(llm_view(ledger.numbered()[0].node).get_metadata_str(mode=MetadataMode.LLM))
+    budget = header + 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS + 100
+    ledger.restrict(Room(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0))
+    arriving = scored_node("sec", "Closing window. " * 20, page=1)
+
+    assert ledger.add([arriving]) == [(1, arriving)]
+    assert _text(ledger.entries()[0]) == f"{'Opening window. ' * 20}{WINDOW_JOIN}{'Closing window. ' * 20}"
+
+
+def test_admission_keeps_every_state_legible() -> None:
+    """Whatever arrives, in whatever order, what the ledger holds stays legible; some arrivals are refused."""
+    rng = random.Random(7)
+    ledger = _restricted([scored_node("s0", "Seed passage. " * 30, page=0)], 9000)
+    refused = 0
+
+    for step in range(300):
+        body = "w" * rng.choice([5, 120, 299, 300, 900, 2500])
+        label = "f" * rng.choice([0, 60, 600, 2500])
+        node_id = f"c{rng.randrange(30)}"
+        known = node_id in {scored.node.node_id for scored in ledger.entries()}
+        if not ledger.add([scored_node(node_id, body, page=step, filename=label)]) and not known and not ledger.full:
+            refused += 1
+
+        assert evidence_fits(ledger.numbered(), llm_view=llm_view, budget_tokens=9000, char_token_ratio=1.0)
+    assert len(ledger) > 4
+    assert refused > 0
+
+
+def test_the_ledger_closes_when_not_even_a_bare_legible_passage_would_fit() -> None:
+    """The room left must hold a header-less 300-character text, its marker and its joins, or research stops."""
+    seed = _sized(1, 300, label=10)
+    header = len(llm_view(_numbered(seed)[0].node).get_metadata_str(mode=MetadataMode.LLM))
+    spent = header + 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS
+    bare = 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS
+
+    assert _restricted(seed, spent + bare).full is False
+    assert _restricted(seed, spent + bare - 1).full is True
+
+
+def test_fit_ledger_leaves_out_the_latest_additions_until_every_passage_is_legible() -> None:
+    """The newest passages go first, so numbering stays contiguous and the earliest evidence stays."""
+    nodes = _numbered(_sized(8, 1000))
+    header = len(llm_view(nodes[0].node).get_metadata_str(mode=MetadataMode.LLM))
+    budget = 5 * (header + 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS)
+
+    kept = fit_ledger(nodes, keep=2, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+
+    assert kept == nodes[:5]
+
+
+def test_fit_ledger_never_leaves_out_the_seed() -> None:
+    """A seed too large to show legibly is kept whole; research additions are all that may go."""
+    nodes = _numbered(_sized(6, 1000))
+
+    assert fit_ledger(nodes, keep=6, llm_view=llm_view, budget_tokens=100, char_token_ratio=1.0) == nodes
+    assert fit_ledger(nodes, keep=4, llm_view=llm_view, budget_tokens=100, char_token_ratio=1.0) == nodes[:4]
+
+
+def test_a_compact_header_keeps_its_citation_line_first_and_caps_the_rest() -> None:
+    """Under compaction the number always survives; the rest of the metadata is cut with a marker."""
+    nodes = _numbered(_sized(1, 40, label=2000))
+
+    context, _ = render_context(nodes, llm_view=llm_view, budget_tokens=10_000, char_token_ratio=1.0, compact=True)
+
+    header, body = context.split("\n\n", 1)
+    assert header.startswith("citation_index: 1\nfilename: fff")
+    assert "characters not shown" in header
+    assert len(header) <= len("citation_index: 1\n") + COMPACT_HEADER_CHARS + MARKER_RESERVE_CHARS
+    assert body == "w" * 40
+
+
+def test_a_compact_header_short_enough_is_only_reordered() -> None:
+    """Compaction cuts nothing it does not have to."""
+    nodes = _numbered(_sized(1, 40, label=10))
+
+    context, _ = render_context(nodes, llm_view=llm_view, budget_tokens=10_000, char_token_ratio=1.0, compact=True)
+
+    assert context.split("\n\n", 1)[0] == f"citation_index: 1\nfilename: {'f' * 10}\npage: 1"
+
+
+def test_compact_legibility_is_judged_on_the_headers_it_renders() -> None:
+    """The check and the render use the same compact headers, so a budget exactly legible renders within itself."""
+    nodes = _numbered(_sized(4, 1000, label=2000))
+    context, _ = render_context(nodes, llm_view=llm_view, budget_tokens=100_000, char_token_ratio=1.0, compact=True)
+    headers = [block for block in context.split("\n\n") if block.startswith("citation_index: ")]
+    budget = sum(len(header) + 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS for header in headers)
+
+    assert len(headers) == 4
+    assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
+    assert not evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget - 1, char_token_ratio=1.0, compact=True)
+    packed, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
+    assert len(packed) <= budget

@@ -22,8 +22,9 @@ from docint.agents.assessment.ledger import (
     PRIOR_TURN_TOKENS,
     QUESTION_TOKENS,
     EvidenceLedger,
+    Room,
     answer_budget,
-    evidence_fits,
+    fit_ledger,
     is_context_overflow,
     render_context,
 )
@@ -114,7 +115,8 @@ class AssessmentResult:
 
     Attributes:
         raw_text (str): The answer exactly as streamed, sentinel included.
-        nodes (list[NodeWithScore]): The evidence, numbered in ledger order.
+        nodes (list[NodeWithScore]): The evidence the answer was shown, numbered in
+            ledger order; research additions left out to fit are not among them.
         steps (int): Research rounds that ran.
         actions (list[dict[str, Any]]): The seed and every search, in order.
         reason (str | None): Why research stopped short, or ``None``.
@@ -202,8 +204,52 @@ class AssessmentRunner:
                 return self._count_tokens(text)
         return estimate_tokens(text, self._ratio)
 
+    def _fit(
+        self, nodes: list[NodeWithScore], *, keep: int, budget_tokens: int, compact: bool = False
+    ) -> list[NodeWithScore]:
+        """Leave out the latest research additions until every passage is legible in the budget.
+
+        Args:
+            nodes (list[NodeWithScore]): The numbered evidence.
+            keep (int): The seed count, never left out.
+            budget_tokens (int): Tokens the rendered evidence may use.
+            compact (bool): Whether headers are compacted.
+
+        Returns:
+            list[NodeWithScore]: The evidence to render.
+        """
+        return fit_ledger(
+            nodes,
+            keep=keep,
+            llm_view=self._llm_view,
+            budget_tokens=budget_tokens,
+            char_token_ratio=self._ratio,
+            count_tokens=self._count_tokens,
+            compact=compact,
+        )
+
+    def _room(self, nodes: list[NodeWithScore], *, budget_tokens: int, compact: bool = False) -> Room:
+        """Measure how the evidence sits in a budget.
+
+        Args:
+            nodes (list[NodeWithScore]): The numbered evidence.
+            budget_tokens (int): Tokens the rendered evidence may use.
+            compact (bool): Whether headers are compacted.
+
+        Returns:
+            Room: The room, its density measured on ``nodes``.
+        """
+        return Room(
+            nodes,
+            llm_view=self._llm_view,
+            budget_tokens=budget_tokens,
+            char_token_ratio=self._ratio,
+            count_tokens=self._count_tokens,
+            compact=compact,
+        )
+
     def _open_answer(
-        self, nodes: list[NodeWithScore], *, block: str, question: str, budget_tokens: int
+        self, nodes: list[NodeWithScore], *, block: str, question: str, budget_tokens: int, compact: bool = False
     ) -> tuple[Iterator[str], int]:
         """Render the evidence into the answer prompt, send it and pull the first token.
 
@@ -215,6 +261,7 @@ class AssessmentRunner:
             block (str): The rendered prior turn.
             question (str): The user's message, stripped.
             budget_tokens (int): Tokens the rendered evidence may use.
+            compact (bool): Whether headers are compacted, as on the overflow retry.
 
         Returns:
             tuple[Iterator[str], int]: The answer tokens, the first one included,
@@ -226,6 +273,7 @@ class AssessmentRunner:
             budget_tokens=budget_tokens,
             char_token_ratio=self._ratio,
             count_tokens=self._count_tokens,
+            compact=compact,
         )
         prompt = self._answer_prompt.format(prior_turn=block, context_str=context, question=question)
         tokens = stream_chat_response_to_tokens(
@@ -252,6 +300,8 @@ class AssessmentRunner:
         Raises:
             AssessmentDoesNotFit: Before anything is yielded, when the seed
                 cannot be shown legibly in the answer's context.
+            ValueError: Naming the context window, when the answer overflows it
+                twice, or when on the retry even compact headers leave no room.
         """
         budget = answer_budget(
             ctx_window=self._ctx_window,
@@ -267,15 +317,12 @@ class AssessmentRunner:
         # Pinned or seeded evidence is never dropped; packing shortens it instead.
         ledger = EvidenceLedger(cap=max(budget.max_entries, len({scored.node.node_id for scored in seed})))
         seeded = ledger.add(seed)
-        # Research only adds entries up to the budget's cap, so the seed is the one check.
-        if not evidence_fits(
-            ledger.numbered(),
-            llm_view=self._llm_view,
-            budget_tokens=evidence_budget,
-            char_token_ratio=self._ratio,
-            count_tokens=self._count_tokens,
-        ):
+        seed_count = len(ledger)
+        # Measured on the seed and held, so research is admitted only while the evidence stays legible.
+        room = self._room(ledger.numbered(), budget_tokens=evidence_budget)
+        if not room.legible:
             raise AssessmentDoesNotFit(len(ledger))
+        ledger.restrict(room)
         actions: list[dict[str, Any]] = [{"action": "seed", "detail": "", "found": len(seeded)}]
         yield AgentProgress(step=0, action="seed", detail="", found=len(seeded))
         steps, reason = 0, None
@@ -293,7 +340,8 @@ class AssessmentRunner:
         if len(ledger) == 0:
             yield AssessmentResult(raw_text="", nodes=[], steps=steps, actions=actions, reason="no_evidence")
             return
-        nodes = ledger.numbered()
+        # Remeasured on everything found, which catches research denser than the seed.
+        nodes = self._fit(ledger.numbered(), keep=seed_count, budget_tokens=evidence_budget)
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
         try:
             tokens, shortened = self._open_answer(
@@ -307,12 +355,14 @@ class AssessmentRunner:
                 "Assessment answer overflowed the context window ({}); retrying with less evidence",
                 type(exc).__name__,
             )
+            retry_budget = int(evidence_budget * OVERFLOW_RETRY_SHARE)
+            nodes = self._fit(nodes, keep=seed_count, budget_tokens=retry_budget, compact=True)
+            # Texts below the legible minimum are still sent; headers with no room left are not.
+            if not self._room(nodes, budget_tokens=retry_budget, compact=True).headers_fit:
+                raise ValueError("The assessment prompt exceeds the model's context window.") from exc
             try:
                 tokens, shortened = self._open_answer(
-                    nodes,
-                    block=block,
-                    question=question.strip(),
-                    budget_tokens=int(evidence_budget * OVERFLOW_RETRY_SHARE),
+                    nodes, block=block, question=question.strip(), budget_tokens=retry_budget, compact=True
                 )
             except Exception as retry_exc:
                 if is_context_overflow(retry_exc):

@@ -8,7 +8,17 @@ from typing import Any, cast
 
 import openai
 import pytest
-from assessment_fakes import bad_request, llm_view, scored_node, search_call, social_post, streaming_llm, tool_llm
+from assessment_fakes import (
+    LONG_LEAF,
+    bad_request,
+    heavy_post,
+    llm_view,
+    scored_node,
+    search_call,
+    social_post,
+    streaming_llm,
+    tool_llm,
+)
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
 
@@ -577,3 +587,140 @@ def test_a_fact_deep_in_a_promoted_section_survives_a_full_ledger() -> None:
     digest_reply = research_llm.chat_with_tools.call_args_list[1].kwargs["chat_history"][2]
     assert DEEP_FACT in str(digest_reply.content)
     assert DEEP_FACT in llm.stream_chat.call_args.args[0][0].content
+
+
+class _AddsOneBatch:
+    """Research that adds one batch of passages in a single search."""
+
+    def __init__(self, batch: list[NodeWithScore]) -> None:
+        """Hold the batch.
+
+        Args:
+            batch (list[NodeWithScore]): What the search finds.
+        """
+        self._batch = batch
+
+    def run(
+        self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
+    ) -> Iterator[AgentProgress | ResearchOutcome]:
+        """Offer the whole batch to the ledger at once.
+
+        Args:
+            question (str): The user's message.
+            prior_turn (PriorTurn | None): The previous exchange.
+            ledger (EvidenceLedger): The evidence so far.
+
+        Yields:
+            AgentProgress | ResearchOutcome: One search, then the outcome.
+        """
+        added = ledger.add(self._batch)
+        yield AgentProgress(step=1, action="search", detail="invented query", found=len(added))
+        yield ResearchOutcome(steps=1, actions=[{"action": "search", "detail": "invented query", "found": len(added)}])
+
+
+def _citation_lines(prompt: str) -> list[str]:
+    """Return the citation-number lines of a prompt, in order.
+
+    Args:
+        prompt (str): The answer prompt.
+
+    Returns:
+        list[str]: Every line that starts with ``citation_index:``.
+    """
+    return [line for line in prompt.splitlines() if line.startswith("citation_index: ")]
+
+
+def test_research_admits_metadata_heavy_passages_only_while_the_answer_still_fits() -> None:
+    """Codex's reproduction: research passages with ~3 KB headers once grew an 8k answer's context to ~69k characters.
+
+    Admission prices each header, so the turn takes what stays legible and the prompt fits its window.
+    """
+    researcher = _AddsOneBatch([heavy_post(number) for number in range(1, 23)])
+    runner, llm = _runner(researcher=researcher, view=ParentContextPostprocessor._emit_with_llm_exclusion)
+
+    items = list(runner.run(question=QUESTION, prior_turn=None, seed=_seed()))
+
+    result = items[-1]
+    assert isinstance(result, AssessmentResult)
+    prompt = llm.stream_chat.call_args.args[0][0].content
+    assert estimate_tokens(prompt, 3.5) + 1024 <= 8192
+    assert 2 < len(result.nodes) < 10
+    assert _citation_lines(prompt) == [f"citation_index: {number}" for number in range(1, len(result.nodes) + 1)]
+    search = next(item for item in items if isinstance(item, AgentProgress) and item.action == "search")
+    assert search.found == len(result.nodes) - 2
+
+
+def _denser(text: str) -> int:
+    """Count tokens like a tokenizer meeting dense research text: each ``§`` costs one token more.
+
+    Args:
+        text (str): The text to count.
+
+    Returns:
+        int: A token per four characters, plus one per ``§``.
+    """
+    return len(text) // 4 + text.count("§")
+
+
+def test_a_ledger_denser_than_its_seed_leaves_out_its_latest_research_passages() -> None:
+    """Admission priced research at the seed's density; the final measure trims the newest additions, never the seed."""
+    dense = [scored_node(f"d{number}", "§" * 1500, page=100 + number) for number in range(1, 21)]
+    runner, llm = _runner(researcher=_AddsOneBatch(dense), count_tokens=_denser)
+
+    items = list(runner.run(question=QUESTION, prior_turn=None, seed=_long_seed(3)))
+
+    result = items[-1]
+    assert isinstance(result, AssessmentResult)
+    kept = [scored.node.node_id for scored in result.nodes]
+    assert 3 < len(kept) < 23
+    assert kept == ["n1", "n2", "n3"] + [f"d{number}" for number in range(1, len(kept) - 2)]
+    prompt = llm.stream_chat.call_args.args[0][0].content
+    assert _citation_lines(prompt) == [f"citation_index: {number}" for number in range(1, len(kept) + 1)]
+    answer = [item for item in items if isinstance(item, AgentProgress)][-1]
+    assert (answer.action, answer.found) == ("answer", len(kept))
+
+
+def test_the_overflow_retry_compacts_headers_so_every_passage_keeps_its_text() -> None:
+    """At 60% of the budget five full ~3 KB headers would leave no text at all; compact ones leave every post whole."""
+    runner, llm = _runner(failures=[bad_request(OVERFLOW)], view=ParentContextPostprocessor._emit_with_llm_exclusion)
+    seed = [heavy_post(number) for number in range(1, 6)]
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=seed))[-1]
+
+    first, second = (call.args[0][0].content for call in llm.stream_chat.call_args_list)
+    assert len(second) < len(first)
+    assert LONG_LEAF in first
+    assert LONG_LEAF not in second
+    assert _citation_lines(second) == [f"citation_index: {number}" for number in range(1, 6)]
+    assert all(f"Harbour post {number}: the stalls open at ten." in second for number in range(1, 6))
+    assert isinstance(result, AssessmentResult)
+    assert len(result.nodes) == 5
+
+
+@pytest.mark.parametrize(
+    ("posts", "body", "gives_up"),
+    [(38, 5, True), (20, 400, False)],
+    ids=["compact-headers-exhaust-the-room", "texts-below-the-legible-minimum-still-sent"],
+)
+def test_the_retry_gives_up_only_when_compact_headers_alone_exhaust_the_room(
+    posts: int, body: int, gives_up: bool
+) -> None:
+    """Short texts are allowed on the retry, as before; only headers with no room left end the turn unsent.
+
+    Args:
+        posts (int): How many pinned passages, each with a header of about 420 characters.
+        body (int): Characters of text each carries.
+        gives_up (bool): Whether the retry ends the turn without a second call.
+    """
+    seed = [scored_node(f"n{number}", "w" * body, filename="f" * 380, page=number) for number in range(1, posts + 1)]
+    runner, llm = _runner(failures=[bad_request(OVERFLOW)])
+
+    if gives_up:
+        with pytest.raises(ValueError, match="context window"):
+            list(runner.run(question=QUESTION, prior_turn=None, seed=seed))
+        assert llm.stream_chat.call_count == 1
+    else:
+        result = list(runner.run(question=QUESTION, prior_turn=None, seed=seed))[-1]
+        assert llm.stream_chat.call_count == 2
+        assert isinstance(result, AssessmentResult)
+        assert len(_citation_lines(llm.stream_chat.call_args.args[0][0].content)) == posts
