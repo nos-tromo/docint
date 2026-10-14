@@ -137,8 +137,12 @@ def test_the_transcript_carries_the_call_and_its_result() -> None:
     assert "[1] (study.pdf) Method section." in str(history[2].content)
 
 
-def test_a_text_reply_ends_research_without_leaking_into_the_answer() -> None:
-    """A model that answers in prose instead of calling a tool simply stops researching."""
+def test_a_text_reply_ends_research_without_leaking_into_the_answer(loguru_caplog: LogCaptureFixture) -> None:
+    """Prose instead of a first tool call means the endpoint treated ``required`` as optional.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
     llm = tool_llm(["Here is my assessment already."])
 
     progress, outcome = _drain(
@@ -146,7 +150,23 @@ def test_a_text_reply_ends_research_without_leaking_into_the_answer() -> None:
     )
 
     assert progress == []
-    assert (outcome.steps, outcome.reason) == (0, None)
+    assert (outcome.steps, outcome.reason) == (0, "tools_unavailable")
+    assert loguru_caplog.messages == [
+        "Assessment research stopped (tools_unavailable): the model replied without a tool call"
+    ]
+
+
+def test_a_text_reply_after_a_search_ends_research_normally() -> None:
+    """Once the model has searched, answering in prose is a choice to stop, not missing tool support."""
+    llm = tool_llm([search_call("method"), "Here is my assessment already."])
+
+    _, outcome = _drain(
+        _loop(llm, _search({"method": [scored_node("m", "M.")]})).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert (outcome.steps, outcome.reason) == (1, None)
 
 
 def test_the_step_cap_bounds_research() -> None:

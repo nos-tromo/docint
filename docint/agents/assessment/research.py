@@ -2,7 +2,8 @@
 
 Calls tools with ``tool_choice="required"``, which vLLM serves through guided
 decoding without ``--enable-auto-tool-choice``; a model that answers in prose
-anyway (Ollama treats ``required`` as ``auto``) simply ends research.
+anyway (Ollama treats ``required`` as ``auto``) ends research, reported as
+``tools_unavailable`` when it never searched at all.
 """
 
 from __future__ import annotations
@@ -199,6 +200,12 @@ class ResearchLoop:
                 logger.warning("Assessment research stopped ({}): {}", reason, type(exc).__name__)
                 break
             if not calls:
+                if steps == 0:
+                    # Prose before any search: the endpoint served ``required`` as ``auto``.
+                    reason = "tools_unavailable"
+                    logger.warning(
+                        "Assessment research stopped (tools_unavailable): the model replied without a tool call"
+                    )
                 break
             steps += 1
             call = calls[0]

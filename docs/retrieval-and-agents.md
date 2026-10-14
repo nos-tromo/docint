@@ -456,9 +456,10 @@ retry: their evidence was gathered on purpose, not by one query that a
 reformulation could improve.
 
 **Degraded turns** say why. `agent.reason` is `tools_unavailable` (the endpoint
-rejected tool calls; the answer rests on the seed passages), `research_failed`,
-`context_budget`, `time_budget` or `no_evidence`; `agent.answer` is `unsplit`
-or `empty`. These are protocol tokens; the SPA maps each to catalog copy.
+rejected tool calls or answered without one; the answer rests on the seed
+passages), `research_failed`, `context_budget`, `time_budget` or `no_evidence`;
+`agent.answer` is `unsplit` or `empty`. These are protocol tokens; the SPA maps
+each to catalog copy.
 
 **Follow-ups.** A lookup asked after an assessment receives only the
 source-backed part of that answer as its prior turn, so the model's judgement is
