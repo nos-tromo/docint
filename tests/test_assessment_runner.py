@@ -20,9 +20,15 @@ from assessment_fakes import (
     tool_llm,
 )
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
-from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
+from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
 
-from docint.agents.assessment.ledger import EvidenceLedger, answer_budget
+from docint.agents.assessment.ledger import (
+    MARKER_RESERVE_CHARS,
+    MIN_TEXT_CHARS,
+    EvidenceLedger,
+    Room,
+    answer_budget,
+)
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import (
     DEFAULT_ASSESSMENT_ANSWER_PROMPT,
@@ -37,6 +43,7 @@ from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
+from docint.utils.text_budget import MATCH_SPANS_KEY
 
 QUESTION = "What could be improved in this study?"
 ANSWER = ["The study evaluates on one dataset [1].", f"\n{SENTINEL}\n", "A second dataset would help."]
@@ -592,13 +599,15 @@ def test_a_fact_deep_in_a_promoted_section_survives_a_full_ledger() -> None:
 class _AddsOneBatch:
     """Research that adds one batch of passages in a single search."""
 
-    def __init__(self, batch: list[NodeWithScore]) -> None:
+    def __init__(self, batch: list[NodeWithScore], reason: str | None = None) -> None:
         """Hold the batch.
 
         Args:
             batch (list[NodeWithScore]): What the search finds.
+            reason (str | None): Why research says it stopped.
         """
         self._batch = batch
+        self._reason = reason
 
     def run(
         self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
@@ -615,7 +624,11 @@ class _AddsOneBatch:
         """
         added = ledger.add(self._batch)
         yield AgentProgress(step=1, action="search", detail="invented query", found=len(added))
-        yield ResearchOutcome(steps=1, actions=[{"action": "search", "detail": "invented query", "found": len(added)}])
+        yield ResearchOutcome(
+            steps=1,
+            actions=[{"action": "search", "detail": "invented query", "found": len(added)}],
+            reason=self._reason,
+        )
 
 
 def _citation_lines(prompt: str) -> list[str]:
@@ -678,6 +691,20 @@ def test_a_ledger_denser_than_its_seed_leaves_out_its_latest_research_passages()
     assert _citation_lines(prompt) == [f"citation_index: {number}" for number in range(1, len(kept) + 1)]
     answer = [item for item in items if isinstance(item, AgentProgress)][-1]
     assert (answer.action, answer.found) == ("answer", len(kept))
+    # What research found and the answer could not show is a reduction the turn reports.
+    assert result.reason == "context_budget"
+
+
+def test_a_reason_research_already_gave_is_kept_when_passages_are_left_out() -> None:
+    """The first cause wins: research that ran out of time still says so after the fit leaves passages out."""
+    dense = [scored_node(f"d{number}", "§" * 1500, page=100 + number) for number in range(1, 21)]
+    runner, _ = _runner(researcher=_AddsOneBatch(dense, reason="time_budget"), count_tokens=_denser)
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=_long_seed(3)))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert len(result.nodes) < 23
+    assert result.reason == "time_budget"
 
 
 def test_the_overflow_retry_compacts_headers_so_every_passage_keeps_its_text() -> None:
@@ -724,3 +751,183 @@ def test_the_retry_gives_up_only_when_compact_headers_alone_exhaust_the_room(
         assert llm.stream_chat.call_count == 2
         assert isinstance(result, AssessmentResult)
         assert len(_citation_lines(llm.stream_chat.call_args.args[0][0].content)) == posts
+
+
+SECTIONS = 5
+
+
+def _decisive(section: int, window: int) -> str:
+    """Return the decisive sentence of one window of an invented section.
+
+    Args:
+        section (int): The section.
+        window (int): The window.
+
+    Returns:
+        str: The sentence the window was retrieved for.
+    """
+    return f"Decisive finding {section}-{window}: the invented cohort {section}{window} left in week {window + 2}."
+
+
+def _section_window(section: int, window: int) -> NodeWithScore:
+    """Build one window of an invented section as parent context emits it, its match in the middle.
+
+    Args:
+        section (int): The section; every window of it shares its node id.
+        window (int): The window.
+
+    Returns:
+        NodeWithScore: The window, saying where its match sits.
+    """
+    before = (f"Lead-in filler for section {section} window {window}. " * 20)[:600]
+    after = (f" Trailing filler for section {section} window {window}." * 20)[:600]
+    fact = _decisive(section, window)
+    metadata = {
+        "filename": f"report-{section}.pdf",
+        "page": section,
+        MATCH_SPANS_KEY: [[len(before), len(before) + len(fact)]],
+    }
+    return NodeWithScore(
+        node=TextNode(id_=f"section-{section}", text=before + fact + after, metadata=metadata), score=0.9
+    )
+
+
+#: About four thousand characters of an earlier lookup answer.
+PRIOR_LOOKUP = PriorTurn(
+    user_text="Summarise the report.", assistant_text=("The report covers an invented cohort. " * 110)[:4000]
+)
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "max_steps", "held_at_least", "reason"),
+    [(True, 6, 30, None), (True, 8, 30, "context_budget"), (False, 6, 35, None)],
+    ids=["8k-reasoning-stops-at-its-step-cap", "8k-reasoning-runs-out-of-room", "8k-everything-fits"],
+)
+def test_every_match_research_keeps_reaches_the_answer(
+    reasoning: bool, max_steps: int, held_at_least: int, reason: str | None
+) -> None:
+    """Codex's reproduction: five seeded sections, each search a new window of every one, and a 4K prior answer.
+
+    Every match the evidence holds reaches the answer prompt. Research the room stopped says so; research that
+    ran to its step cap does not, though its last search may have offered more than the room took.
+
+    Args:
+        reasoning (bool): Whether the answer model thinks first.
+        max_steps (int): The research step cap, and how many searches are scripted.
+        held_at_least (int): The fewest matches the evidence must hold, so the check is never vacuous.
+        reason (str | None): The reason the turn must report.
+    """
+    results = {f"q{w}": [_section_window(s, w) for s in range(1, SECTIONS + 1)] for w in range(1, max_steps + 1)}
+    research_llm = tool_llm([search_call(f"q{w}") for w in range(1, max_steps + 1)])
+    researcher = ResearchLoop(
+        llm=cast(Any, research_llm),
+        search=lambda query: results[query],
+        max_steps=max_steps,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        prompt="{question}{prior_turn}{digest}",
+    )
+    runner, llm = _runner(
+        researcher=researcher, reasoning=reasoning, view=ParentContextPostprocessor._emit_with_llm_exclusion
+    )
+    seed = [_section_window(s, 0) for s in range(1, SECTIONS + 1)]
+
+    items = list(runner.run(question=QUESTION, prior_turn=PRIOR_LOOKUP, seed=seed))
+
+    result = items[-1]
+    assert isinstance(result, AssessmentResult)
+    prompt = llm.stream_chat.call_args.args[0][0].content
+    texts = " ".join(scored.node.get_content(metadata_mode=MetadataMode.NONE) for scored in result.nodes)
+    held = [_decisive(s, w) for s in range(1, SECTIONS + 1) for w in range(max_steps + 1) if _decisive(s, w) in texts]
+    assert len(held) >= held_at_least
+    assert [fact for fact in held if fact not in prompt] == []
+    assert len(result.nodes) == SECTIONS
+    assert result.reason == reason
+
+
+class _Spy:
+    """A research step that records being asked to run."""
+
+    def __init__(self) -> None:
+        """Start uncalled."""
+        self.calls = 0
+
+    def run(
+        self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
+    ) -> Iterator[AgentProgress | ResearchOutcome]:
+        """Record the call and end at once.
+
+        Args:
+            question (str): The user's message.
+            prior_turn (PriorTurn | None): The previous exchange.
+            ledger (EvidenceLedger): The evidence so far.
+
+        Yields:
+            AgentProgress | ResearchOutcome: The outcome alone.
+        """
+        self.calls += 1
+        yield ResearchOutcome(steps=1)
+
+
+def _seed_leaving(left: int) -> list[NodeWithScore]:
+    """Build a legible seed that leaves ``left`` characters of room once each of its passages keeps its minimum.
+
+    Args:
+        left (int): The text room to leave, at the default 8k window with the English template.
+
+    Returns:
+        list[NodeWithScore]: Two passages, the second with a file name sized to use up the rest.
+    """
+    template = load_localized_prompt("assessment_answer", default=DEFAULT_ASSESSMENT_ANSWER_PROMPT, lang="en")
+    budget = answer_budget(ctx_window=8192, template=template, reasoning=False, char_token_ratio=3.5)
+    probe = EvidenceLedger(cap=2)
+    probe.add([scored_node("n1", "x" * 1000, page=1), scored_node("n2", "y" * 1000, page=2, filename="")])
+    spent = sum(
+        len(llm_view(scored.node).get_metadata_str(mode=MetadataMode.LLM)) + 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS
+        for scored in probe.numbered()
+    )
+    name = "f" * (int(budget.evidence_tokens * 3.5) - spent - left)
+    seed = [scored_node("n1", "x" * 1000, page=1), scored_node("n2", "y" * 1000, page=2, filename=name)]
+    numbered = EvidenceLedger(cap=2)
+    numbered.add(seed)
+    room = Room(numbered.numbered(), llm_view=llm_view, budget_tokens=budget.evidence_tokens, char_token_ratio=3.5)
+    assert (room.legible, room.closed) == (True, True)
+    return seed
+
+
+def test_research_that_never_runs_for_lack_of_room_says_so() -> None:
+    """A seed that leaves no room for another legible passage skips research, and the turn reports why."""
+    researcher = _Spy()
+    runner, _ = _runner(researcher=researcher)
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=_seed_leaving(177)))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert researcher.calls == 0
+    assert (len(result.nodes), result.reason) == (2, "context_budget")
+
+
+def test_a_scoped_turn_never_researches_so_a_full_room_is_no_reduction() -> None:
+    """Without a research step there is nothing the room stopped."""
+    runner, _ = _runner()
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=_seed_leaving(177)))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert result.reason is None
+
+
+def test_passages_the_overflow_retry_leaves_out_are_reported() -> None:
+    """The retry's tighter fit drops research additions the first fit kept, and the turn says so."""
+    batch = [scored_node(f"r{number}", "w" * 1500, filename="f" * 220, page=100 + number) for number in range(1, 21)]
+    runner, llm = _runner(researcher=_AddsOneBatch(batch), failures=[bad_request(OVERFLOW)])
+
+    items = list(runner.run(question=QUESTION, prior_turn=None, seed=_seed()))
+
+    result = items[-1]
+    answer = [item for item in items if isinstance(item, AgentProgress)][-1]
+    assert isinstance(result, AssessmentResult)
+    assert answer.found == 22
+    assert 2 < len(result.nodes) < 22
+    assert llm.stream_chat.call_count == 2
+    assert result.reason == "context_budget"

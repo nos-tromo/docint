@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import re
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 from docint.utils.text_budget import (
     MARKER_RESERVE_CHARS,
     MIN_REGION_CHARS,
+    allocate_shortest_first,
+    allocate_with_floors,
     excerpt,
     fit_with_marker,
     place,
@@ -209,3 +212,66 @@ def test_excerpt_never_renders_past_its_allowance_and_one_marker(
         _walk(text, rendered)
     else:
         assert rendered == text
+
+
+def test_a_long_match_keeps_only_its_first_region_when_it_has_to_be_cut() -> None:
+    """The known limit: a match longer than one region, such as a whole retrieved chunk, keeps its opening only."""
+    first = SECTION.index("Background", 1000)
+    spans = [(first, first + 600), (FACT_AT - 600, FACT_AT)]
+
+    rendered, _ = excerpt(SECTION, spans, 2 * (MIN_REGION_CHARS + MARKER_RESERVE_CHARS))
+
+    for start, _end in spans:
+        assert SECTION[start : start + MIN_REGION_CHARS] in rendered
+        assert SECTION[start : start + MIN_REGION_CHARS + 1] not in rendered
+
+
+def test_allocate_with_floors_grants_every_floor_before_sharing_the_rest() -> None:
+    """A text with a floor gets it first; the rest goes shortest-first to what each text still lacks."""
+    assert allocate_shortest_first([1000, 1000, 100], 1200) == [550, 550, 100]
+
+    assert allocate_with_floors([1000, 1000, 100], [750, 0, 100], 1200) == [925, 175, 100]
+
+
+def test_allocate_with_floors_below_its_floors_is_todays_allocation() -> None:
+    """A budget that cannot cover every floor is shared exactly as before, so a retry or a denser seed still renders."""
+    lengths, floors = [1000, 1000, 100], [750, 400, 100]
+
+    assert allocate_with_floors(lengths, floors, 1249) == allocate_shortest_first(lengths, 1249)
+    assert allocate_with_floors(lengths, floors, 1250)[:2] == [750, 400]
+
+
+def test_a_floor_longer_than_its_text_asks_only_for_the_text() -> None:
+    """Floors count up to their text's length, both for the grant and for whether the budget covers them."""
+    # Counted whole, the floors (500) would exceed the budget and fall back to [120, 140, 140].
+    assert allocate_with_floors([120, 2000, 2000], [250, 250, 0], 400) == [120, 265, 15]
+
+
+def test_allocate_with_floors_is_todays_allocation_when_every_floor_is_the_legible_minimum() -> None:
+    """With each floor at ``min(len, 300)`` the result is exactly what shortest-first sharing gave before floors."""
+    rng = random.Random(11)
+    for _ in range(4000):
+        lengths = [rng.choice([0, 1, 5, 120, 299, 300, 301, 450, 900, 2500, 7000]) for _ in range(rng.randrange(0, 12))]
+        legible = sum(min(length, 300) for length in lengths)
+        for budget in {0, max(0, legible - 1), legible, legible + 1, rng.randrange(0, sum(lengths) + 600)}:
+            floors = [min(length, 300) for length in lengths]
+
+            assert allocate_with_floors(lengths, floors, budget) == allocate_shortest_first(lengths, budget)
+
+
+def test_allocate_with_floors_keeps_every_floor_and_shares_the_whole_budget() -> None:
+    """Whenever the budget covers the floors, each text keeps its floor, none passes its length, nothing is wasted."""
+    rng = random.Random(23)
+    for _ in range(4000):
+        count = rng.randrange(1, 10)
+        lengths = [rng.randrange(0, 3000) for _ in range(count)]
+        floors = [rng.choice([0, 250, 300, 500, 2080, 4000]) for _ in range(count)]
+        needed = sum(min(length, floor) for length, floor in zip(lengths, floors, strict=True))
+        budget = needed + rng.randrange(0, 4000)
+
+        shares = allocate_with_floors(lengths, floors, budget)
+
+        assert all(
+            min(length, floor) <= share <= length for length, floor, share in zip(lengths, floors, shares, strict=True)
+        )
+        assert sum(shares) == min(budget, sum(lengths))

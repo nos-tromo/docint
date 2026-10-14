@@ -8,6 +8,8 @@ MATCH_SPANS_KEY = "docint_match_spans"
 MARKER_RESERVE_CHARS = 50
 #: Fewest characters a region kept around a match may show; a passage cut to 300 characters still keeps one.
 MIN_REGION_CHARS = 200
+#: Least allowance one kept region costs: its text and its marker.
+REGION_CHARS = MIN_REGION_CHARS + MARKER_RESERVE_CHARS
 
 
 def allocate_shortest_first(lengths: Sequence[int], budget: int) -> list[int]:
@@ -33,6 +35,31 @@ def allocate_shortest_first(lengths: Sequence[int], budget: int) -> list[int]:
         allocation[index] = granted
         remaining_budget -= granted
     return allocation
+
+
+def allocate_with_floors(lengths: Sequence[int], floors: Sequence[int], budget: int) -> list[int]:
+    """Split a shared character budget so that each text first gets its floor.
+
+    When the budget covers every floor, each counted up to its text's length,
+    each text is granted its floor and the rest is shared shortest-first over
+    what each still lacks. A budget that cannot cover them is shared as
+    :func:`allocate_shortest_first` shares it, so floors of ``min(len, 300)``
+    reproduce that allocation exactly.
+
+    Args:
+        lengths (Sequence[int]): Length of each text, in order.
+        floors (Sequence[int]): The least each text should get, aligned with ``lengths``.
+        budget (int): Total characters available across all texts.
+
+    Returns:
+        list[int]: Characters granted to each text, aligned with ``lengths``.
+    """
+    granted = [min(length, floor) for length, floor in zip(lengths, floors, strict=True)]
+    if budget < sum(granted):
+        return allocate_shortest_first(lengths, budget)
+    lacking = [length - grant for length, grant in zip(lengths, granted, strict=True)]
+    extra = allocate_shortest_first(lacking, budget - sum(granted))
+    return [grant + more for grant, more in zip(granted, extra, strict=True)]
 
 
 def _marker(hidden: int, total: int) -> str:
@@ -127,7 +154,7 @@ def excerpt(text: str, anchors: Sequence[Sequence[int]], allowance: int) -> tupl
         tuple[str, bool]: The rendered text and whether it was trimmed.
     """
     spans = merge_spans(anchors, len(text))
-    while spans and allowance < len(spans) * (MIN_REGION_CHARS + MARKER_RESERVE_CHARS):
+    while spans and allowance < len(spans) * REGION_CHARS:
         spans.pop()
     if len(text) <= allowance or all(end <= allowance for _, end in spans):
         return fit_with_marker(text, allowance)

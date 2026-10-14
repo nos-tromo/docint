@@ -201,6 +201,9 @@ class ResearchLoop:
     ) -> Iterator[AgentProgress | ResearchOutcome]:
         """Search until the evidence suffices, yielding each search, then one outcome.
 
+        Research that ends with the ledger out of room before its step cap reports
+        ``context_budget``; a passage refused while research goes on is not reported.
+
         Args:
             question (str): The user's message, verbatim.
             prior_turn (PriorTurn | None): The previous exchange, if any.
@@ -300,4 +303,7 @@ class ResearchLoop:
             idle = 0 if added else idle + 1
             if idle >= 2:
                 break
+        if reason is None and steps < self._max_steps and ledger.out_of_room:
+            # The room, not the step cap or the entry cap, ended research early.
+            reason = "context_budget"
         yield ResearchOutcome(steps=steps, actions=actions, reason=reason)

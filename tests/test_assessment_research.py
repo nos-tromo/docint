@@ -13,12 +13,12 @@ import httpx
 import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
-from assessment_fakes import bad_request, scored_node, search_call, tool_llm
+from assessment_fakes import bad_request, llm_view, scored_node, search_call, tool_llm
 from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
 from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 
-from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.assessment.ledger import EvidenceLedger, Room
 from docint.agents.assessment.research import SEARCH_THREAD_NAME, ResearchLoop
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn
 from docint.agents.types import AgentProgress
@@ -645,3 +645,94 @@ def test_a_full_ledger_stops_research() -> None:
 
     assert outcome.steps == 0
     llm.chat_with_tools.assert_not_called()
+
+
+def _closing_ledger(*, cap: int = 50) -> EvidenceLedger:
+    """Hold one seed passage in a room that two passages of :func:`_wide` close.
+
+    Each passage reserves 79 characters for its header, joins and marker and keeps 300: 1,480
+    characters leave 343 once two follow the seed, short of the 354 one more bare passage needs.
+
+    Args:
+        cap (int): The ledger cap.
+
+    Returns:
+        EvidenceLedger: The ledger, restricted.
+    """
+    ledger = EvidenceLedger(cap=cap)
+    ledger.add([scored_node("seed", "Seed passage. " * 30, page=0)])
+    ledger.restrict(Room(ledger.numbered(), llm_view=llm_view, budget_tokens=1480, char_token_ratio=1.0))
+    return ledger
+
+
+def _wide(count: int) -> list[NodeWithScore]:
+    """Return invented passages too long to show whole.
+
+    Args:
+        count (int): How many.
+
+    Returns:
+        list[NodeWithScore]: The passages.
+    """
+    return [scored_node(f"m{number}", "w" * 1000, page=number) for number in range(1, count + 1)]
+
+
+def test_research_that_runs_out_of_room_before_its_step_cap_says_so() -> None:
+    """The room closing ends research early, and the turn reports it as ``context_budget``."""
+    ledger = _closing_ledger()
+    llm = tool_llm([search_call("method"), search_call("results")])
+
+    progress, outcome = _drain(
+        _loop(llm, _search({"method": _wide(3), "results": _wide(6)[3:]})).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert [(step.detail, step.found) for step in progress] == [("method", 2)]
+    assert ledger.out_of_room is True
+    assert (outcome.steps, outcome.reason) == (1, "context_budget")
+    assert llm.chat_with_tools.call_count == 1
+
+
+def test_research_that_reaches_its_step_cap_as_the_room_closes_reports_nothing() -> None:
+    """The step cap ended research, not the room."""
+    ledger = _closing_ledger()
+
+    _, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), _search({"method": _wide(3)}), max_steps=1).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert ledger.out_of_room is True
+    assert (outcome.steps, outcome.reason) == (1, None)
+
+
+def test_research_that_fills_the_entry_cap_reports_nothing() -> None:
+    """A ledger stopped by its entry cap is not out of room."""
+    ledger = _closing_ledger(cap=2)
+
+    _, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), _search({"method": _wide(3)})).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert (len(ledger), ledger.out_of_room) == (2, False)
+    assert (outcome.steps, outcome.reason) == (1, None)
+
+
+def test_a_refusal_that_does_not_end_research_goes_unreported() -> None:
+    """A passage too heavy to admit is passed over; research goes on and ends as it would have."""
+    ledger = _closing_ledger()
+    heavy = scored_node("heavy", "Heavy passage.", page=1, filename="h" * 1200)
+
+    progress, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), _search({"method": [heavy]})).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert [step.found for step in progress] == [0]
+    assert ledger.full is False
+    assert (outcome.steps, outcome.reason) == (2, None)

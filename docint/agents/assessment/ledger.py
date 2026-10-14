@@ -12,7 +12,8 @@ from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.text_budget import (
     MARKER_RESERVE_CHARS,
     MATCH_SPANS_KEY,
-    allocate_shortest_first,
+    REGION_CHARS,
+    allocate_with_floors,
     excerpt,
     fit_with_marker,
     merge_spans,
@@ -27,6 +28,8 @@ DIGEST_CHARS = 400
 DIGEST_LABEL_CHARS = 120
 #: Seam between two windows of one passage; no brackets, so it never reads as a citation.
 WINDOW_JOIN = "\n\n…\n\n"
+#: What a passage pays for each window past its first when it is cut: the join and that window's marker.
+SEAM_CHARS = len(WINDOW_JOIN) + MARKER_RESERVE_CHARS
 #: Fewest characters a shortened passage may keep and still be read.
 MIN_TEXT_CHARS = 300
 #: Metadata a compact header keeps after its citation line; compaction is the overflow retry's fallback only.
@@ -231,6 +234,16 @@ class EvidenceLedger:
         return len(self._entries)
 
     @property
+    def out_of_room(self) -> bool:
+        """Whether the room, and not the entry cap, has closed the ledger.
+
+        Returns:
+            bool: ``True`` while the ledger is below its cap but its room cannot
+            hold one more legible passage; never without a room installed.
+        """
+        return len(self._entries) < self._cap and self._room is not None and self._room.closed
+
+    @property
     def full(self) -> bool:
         """Whether the ledger admits no more entries.
 
@@ -395,10 +408,65 @@ def _compact_header(view: BaseNode) -> str:
     return view.metadata_separator.join(part for part in (first, tail) if part)
 
 
+def _windows(body: str, anchors: Sequence[tuple[int, int]]) -> list[tuple[str, list[tuple[int, int]]]]:
+    """Split a passage at its window joins, each window with the matches inside it, as :func:`excerpt` sees them.
+
+    A match crossing a ``WINDOW_JOIN`` that the source text itself holds is clipped
+    into the windows on both sides, so it counts in both.
+
+    Args:
+        body (str): The passage text.
+        anchors (Sequence[tuple[int, int]]): Where its retrieved matches sit in ``body``.
+
+    Returns:
+        list[tuple[str, list[tuple[int, int]]]]: Each window and its matches, moved
+        into the window, clipped to it and merged.
+    """
+    windows: list[tuple[str, list[tuple[int, int]]]] = []
+    offset = 0
+    for window in body.split(WINDOW_JOIN):
+        windows.append((window, merge_spans(_shifted(anchors, -offset), len(window))))
+        offset += len(window) + len(WINDOW_JOIN)
+    return windows
+
+
+def _window_floor(window: str, spans: Sequence[tuple[int, int]]) -> int:
+    """Return the least a window must keep so that :func:`excerpt` holds on to every match in it.
+
+    Args:
+        window (str): The window's text.
+        spans (Sequence[tuple[int, int]]): Its merged matches.
+
+    Returns:
+        int: A region and its marker per match, or the whole window when that is less.
+    """
+    return min(len(window), REGION_CHARS * len(spans))
+
+
+def text_floor(body: str, anchors: Sequence[tuple[int, int]]) -> int:
+    """Return the least text a passage must keep so that every retrieved match it holds stays in it.
+
+    ``min(L, max(MIN_TEXT_CHARS, (W - 1) * SEAM_CHARS + max(W, sum(window floors))))``
+    over its ``W`` windows, which for one window is ``min(L, max(300, 250 * k))``. Each
+    region's 250 includes its marker, and the first marker is in the entry's reserve.
+
+    Args:
+        body (str): The passage text, as packing cuts it.
+        anchors (Sequence[tuple[int, int]]): Where its retrieved matches sit in ``body``.
+
+    Returns:
+        int: The floor; never more than the passage, never less than the legible
+        minimum a passage without matches keeps.
+    """
+    windows = _windows(body, anchors)
+    needed = sum(_window_floor(window, spans) for window, spans in windows)
+    return min(len(body), max(MIN_TEXT_CHARS, (len(windows) - 1) * SEAM_CHARS + max(len(windows), needed)))
+
+
 def _parts(
     nodes: list[NodeWithScore], llm_view: Callable[[BaseNode], BaseNode], *, compact: bool = False
-) -> tuple[list[str], list[str]]:
-    """Split each passage's LLM view into its metadata header and its text.
+) -> tuple[list[str], list[str], list[list[tuple[int, int]]]]:
+    """Split each passage's LLM view into its metadata header, its text and where its matches sit.
 
     Args:
         nodes (list[NodeWithScore]): The numbered ledger.
@@ -406,37 +474,42 @@ def _parts(
         compact (bool): Whether headers are compacted (see :func:`_compact_header`).
 
     Returns:
-        tuple[list[str], list[str]]: The headers and the texts, sentinels defused.
+        tuple[list[str], list[str], list[list[tuple[int, int]]]]: The headers, sentinels
+        defused; the texts as stored, which their spans index (a text is defused once
+        it is cut, see :func:`render_context`); and each text's match spans.
     """
     headers: list[str] = []
     bodies: list[str] = []
+    anchors: list[list[tuple[int, int]]] = []
     for scored in nodes:
         view = llm_view(scored.node)
         header = _compact_header(view) if compact else view.get_metadata_str(mode=MetadataMode.LLM)
         headers.append(neutralize_sentinel(header))
-        bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
-    return headers, bodies
+        bodies.append(view.get_content(metadata_mode=MetadataMode.NONE))
+        anchors.append(_anchors(scored.node))
+    return headers, bodies, anchors
 
 
-def _costs(header: str, body: str) -> tuple[int, int]:
+def _costs(header: str, body: str, anchors: Sequence[tuple[int, int]]) -> tuple[int, int]:
     """Price one passage as packing does.
 
     Args:
         header (str): Its rendered header.
-        body (str): Its rendered text.
+        body (str): Its text.
+        anchors (Sequence[tuple[int, int]]): Where its retrieved matches sit in ``body``.
 
     Returns:
         tuple[int, int]: What it reserves (header, joins, cut marker) and the
-        least text it must keep to stay legible.
+        least text it must keep, every match it holds included (see :func:`text_floor`).
     """
-    return len(header) + 4 + MARKER_RESERVE_CHARS, min(len(body), MIN_TEXT_CHARS)
+    return len(header) + 4 + MARKER_RESERVE_CHARS, text_floor(body, anchors)
 
 
 class Room:
     """Legibility of growing evidence, kept as running sums.
 
     With ``room = int(budget * ratio) - sum(header + 4 + MARKER_RESERVE_CHARS)``, the
-    evidence is legible exactly when ``room > 0`` and ``room >= sum(min(len, MIN_TEXT_CHARS))``,
+    evidence is legible exactly when ``room > 0`` and ``room >= sum(text_floor)``,
     which is what :func:`evidence_fits` finds by packing it. The ratio is measured
     once, on the evidence the room starts from, and then held, so each candidate
     costs one header render.
@@ -462,12 +535,12 @@ class Room:
             count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
             compact (bool): Whether headers are priced compacted.
         """
-        headers, bodies = _parts(nodes, llm_view, compact=compact)
+        headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
         ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
         self._llm_view = llm_view
         self._compact = compact
         self._chars = int(budget_tokens * ratio)
-        self._costs = [_costs(header, body) for header, body in zip(headers, bodies, strict=True)]
+        self._costs = [_costs(*part) for part in zip(headers, bodies, anchors, strict=True)]
         self._reserved = sum(reserve for reserve, _ in self._costs)
         self._floor = sum(floor for _, floor in self._costs)
 
@@ -521,8 +594,8 @@ class Room:
         Returns:
             bool: ``True`` when it fits; its cost is then counted in place of the entry it replaces.
         """
-        headers, bodies = _parts([_stamp(candidate, number)], self._llm_view, compact=self._compact)
-        reserve, floor = _costs(headers[0], bodies[0])
+        headers, bodies, anchors = _parts([_stamp(candidate, number)], self._llm_view, compact=self._compact)
+        reserve, floor = _costs(headers[0], bodies[0], anchors[0])
         held_reserve, held_floor = self._costs[number - 1] if number <= len(self._costs) else (0, 0)
         reserved = self._reserved - held_reserve + reserve
         floors = self._floor - held_floor + floor
@@ -539,28 +612,33 @@ class Room:
 def _allowances(
     headers: list[str],
     bodies: list[str],
+    anchors: list[list[tuple[int, int]]],
     *,
     budget_tokens: int,
     char_token_ratio: float,
     count_tokens: Callable[[str], int] | None,
-) -> tuple[int, list[int]]:
-    """Share the characters left once every header, join and cut marker is reserved.
+) -> tuple[int, list[int], list[int]]:
+    """Share the characters left once every header, join and cut marker is reserved, floors first.
 
     Args:
         headers (list[str]): The metadata headers, kept whole.
         bodies (list[str]): The texts that share what is left.
+        anchors (list[list[tuple[int, int]]]): Where each text's retrieved matches sit.
         budget_tokens (int): Tokens the rendered evidence may use.
         char_token_ratio (float): The configured characters per token.
         count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
 
     Returns:
-        tuple[int, list[int]]: The text budget, zero or less when the headers use
-        it all, and each text's allowance in input order, shared shortest-first.
+        tuple[int, list[int], list[int]]: The text budget, zero or less when the
+        headers use it all; each text's floor (see :func:`text_floor`); and each
+        text's allowance in input order, every floor granted first when the budget
+        covers them all (see :func:`allocate_with_floors`).
     """
     ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
     reserved = sum(len(header) + 4 for header in headers) + MARKER_RESERVE_CHARS * len(headers)
     char_budget = int(budget_tokens * ratio) - reserved
-    return char_budget, allocate_shortest_first([len(body) for body in bodies], max(0, char_budget))
+    floors = [text_floor(body, spans) for body, spans in zip(bodies, anchors, strict=True)]
+    return char_budget, floors, allocate_with_floors([len(body) for body in bodies], floors, max(0, char_budget))
 
 
 def evidence_fits(
@@ -584,19 +662,21 @@ def evidence_fits(
 
     Returns:
         bool: ``True`` when text room remains after the headers and every passage
-        that must be cut keeps at least ``MIN_TEXT_CHARS``; a passage shown whole
-        fits however short it is.
+        keeps its :func:`text_floor`: at least ``MIN_TEXT_CHARS``, and a region for
+        every retrieved match it holds; a passage shown whole fits however short it is.
     """
-    headers, bodies = _parts(nodes, llm_view, compact=compact)
-    char_budget, allowances = _allowances(
-        headers, bodies, budget_tokens=budget_tokens, char_token_ratio=char_token_ratio, count_tokens=count_tokens
+    headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
+    char_budget, floors, allowances = _allowances(
+        headers,
+        bodies,
+        anchors,
+        budget_tokens=budget_tokens,
+        char_token_ratio=char_token_ratio,
+        count_tokens=count_tokens,
     )
     if char_budget <= 0:
         return False
-    return all(
-        allowance >= len(body) or allowance >= MIN_TEXT_CHARS
-        for body, allowance in zip(bodies, allowances, strict=True)
-    )
+    return all(allowance >= floor for floor, allowance in zip(floors, allowances, strict=True))
 
 
 def fit_ledger(
@@ -647,11 +727,12 @@ def _fit_windows(body: str, allowance: int, anchors: Sequence[tuple[int, int]] =
     Cut from the tail, a passage extended by :meth:`EvidenceLedger.add` would lose
     its newest window first, so each window is shortened on its own. The joins and
     one cut marker per window beyond the first come out of the allowance (the
-    caller's reserve covers the first marker); the rest is shared shortest-first.
+    caller's reserve covers the first marker); the rest is shared with each
+    window's floor granted first, a region per match it holds, then shortest-first.
     Each window, or the passage as a whole, is cut by :func:`excerpt` around the
-    match spans that fall inside it, so a match deep in a section is not cut away.
-    The result stays within the allowance plus one marker reserve, as a
-    whole-passage cut does.
+    match spans that fall inside it, so a match deep in a section is not cut away;
+    an allowance of at least :func:`text_floor` keeps every one. The result stays
+    within the allowance plus one marker reserve, as a whole-passage cut does.
 
     Args:
         body (str): The passage text.
@@ -663,18 +744,13 @@ def _fit_windows(body: str, allowance: int, anchors: Sequence[tuple[int, int]] =
         that fits, joins no windows, or leaves less than a character per window is
         cut as a whole.
     """
-    windows = body.split(WINDOW_JOIN)
-    seams = len(windows) - 1
-    remainder = allowance - seams * (len(WINDOW_JOIN) + MARKER_RESERVE_CHARS)
-    if len(body) <= allowance or seams == 0 or remainder < len(windows):
+    windows = _windows(body, anchors)
+    remainder = allowance - (len(windows) - 1) * SEAM_CHARS
+    if len(body) <= allowance or len(windows) == 1 or remainder < len(windows):
         return excerpt(body, anchors, allowance)
-    shares = allocate_shortest_first([len(window) for window in windows], remainder)
-    fitted: list[tuple[str, bool]] = []
-    offset = 0
-    for window, share in zip(windows, shares, strict=True):
-        # Spans are clipped to the window by ``excerpt``.
-        fitted.append(excerpt(window, _shifted(anchors, -offset), share))
-        offset += len(window) + len(WINDOW_JOIN)
+    floors = [_window_floor(window, spans) for window, spans in windows]
+    shares = allocate_with_floors([len(window) for window, _ in windows], floors, remainder)
+    fitted = [excerpt(window, spans, share) for (window, spans), share in zip(windows, shares, strict=True)]
     return WINDOW_JOIN.join(text for text, _ in fitted), any(cut for _, cut in fitted)
 
 
@@ -689,10 +765,12 @@ def render_context(
 ) -> tuple[str, int]:
     """Render numbered nodes like the grounded prompt's context, shortened to fit.
 
-    Headers are always kept; the text budget is shared shortest-first and every
-    cut is marked, so the model can tell a short excerpt from a short source. A
-    passage that joins several windows is cut window by window, so each keeps text,
-    and a passage is cut around its retrieved matches rather than to its opening.
+    Headers are always kept; the text budget is shared with each passage's
+    :func:`text_floor` granted first, then shortest-first, and every cut is marked,
+    so the model can tell a short excerpt from a short source. A passage that joins
+    several windows is cut window by window, so each keeps text, and a passage is
+    cut around its retrieved matches rather than to its opening. Texts are cut as
+    stored, where their match spans point, and defused afterwards with the context.
 
     Args:
         nodes (list[NodeWithScore]): The numbered ledger.
@@ -708,15 +786,20 @@ def render_context(
     Returns:
         tuple[str, int]: The context block and how many entries were shortened.
     """
-    headers, bodies = _parts(nodes, llm_view, compact=compact)
-    _, allowances = _allowances(
-        headers, bodies, budget_tokens=budget_tokens, char_token_ratio=char_token_ratio, count_tokens=count_tokens
+    headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
+    _, _, allowances = _allowances(
+        headers,
+        bodies,
+        anchors,
+        budget_tokens=budget_tokens,
+        char_token_ratio=char_token_ratio,
+        count_tokens=count_tokens,
     )
     rendered: list[str] = []
     shortened = 0
-    for scored, header, body, allowance in zip(nodes, headers, bodies, allowances, strict=True):
-        fitted, cut = _fit_windows(body, allowance, _anchors(scored.node))
+    for header, body, spans, allowance in zip(headers, bodies, anchors, allowances, strict=True):
+        fitted, cut = _fit_windows(body, allowance, spans)
         shortened += int(cut)
         rendered.append(f"{header}\n\n{fitted}" if header else fitted)
-    # The join can complete a sentinel that neither part holds alone.
+    # Texts are defused once cut, which only shortens them, and a join can complete a sentinel no part holds.
     return neutralize_sentinel("\n\n".join(rendered)), shortened

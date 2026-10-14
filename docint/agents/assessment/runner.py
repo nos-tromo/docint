@@ -119,7 +119,8 @@ class AssessmentResult:
             ledger order; research additions left out to fit are not among them.
         steps (int): Research rounds that ran.
         actions (list[dict[str, Any]]): The seed and every search, in order.
-        reason (str | None): Why research stopped short, or ``None``.
+        reason (str | None): Why research stopped short, or left out passages it
+            found (``context_budget``), or ``None``; the first cause is kept.
         shortened (int): Entries cut to fit the answer's context.
     """
 
@@ -287,6 +288,10 @@ class AssessmentRunner:
     ) -> Iterator[AgentProgress | str | AssessmentResult]:
         """Run the turn.
 
+        ``context_budget`` is reported when the room ended research before its step
+        cap, when the seed left no room for research to run, or when fewer passages
+        reach the answer than the ledger holds; a reason already given is kept.
+
         Args:
             question (str): The user's message, verbatim.
             prior_turn (PriorTurn | None): The previous exchange, in full.
@@ -326,7 +331,10 @@ class AssessmentRunner:
         actions: list[dict[str, Any]] = [{"action": "seed", "detail": "", "found": len(seeded)}]
         yield AgentProgress(step=0, action="seed", detail="", found=len(seeded))
         steps, reason = 0, None
-        if self._researcher is not None and not ledger.full:
+        if self._researcher is not None and ledger.out_of_room:
+            # The seed left no room for one more legible passage, so research never runs.
+            reason = "context_budget"
+        elif self._researcher is not None and not ledger.full:
             try:
                 for item in self._researcher.run(question=question, prior_turn=prior_turn, ledger=ledger):
                     if isinstance(item, ResearchOutcome):
@@ -378,6 +386,9 @@ class AssessmentRunner:
         tail = splitter.flush()
         if tail:
             yield tail
+        if reason is None and len(nodes) < len(ledger):
+            # Research found passages the answer had no room to show.
+            reason = "context_budget"
         yield AssessmentResult(
             raw_text="".join(raw), nodes=nodes, steps=steps, actions=actions, reason=reason, shortened=shortened
         )

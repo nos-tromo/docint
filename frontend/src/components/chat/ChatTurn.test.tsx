@@ -338,6 +338,27 @@ describe('ChatTurn', () => {
     expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(copy)
   })
 
+  it.each([
+    ['en', 'The model’s context window was full, so research stopped early or some of its passages were left out.'],
+    [
+      'de',
+      'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder einige ihrer Passagen wurden ausgelassen.'
+    ]
+  ] as const)('says in the %s notice that a full context window can also leave passages out', (lang, copy) => {
+    // The token covers research the room stopped and passages the answer had no room for.
+    renderTurn(
+      {
+        user: 'q',
+        assistant: 'Fact [1].',
+        done: true,
+        meta: assessmentMeta({ ...TRAIL, reason: 'context_budget' })
+      },
+      lang
+    )
+
+    expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(copy)
+  })
+
   it('says when the model did not separate its judgement', () => {
     renderTurn({
       user: 'q',

@@ -19,6 +19,8 @@ from docint.agents.assessment.ledger import (
     WINDOW_JOIN,
     EvidenceLedger,
     Room,
+    _allowances,
+    _parts,
     answer_budget,
     digest,
     effective_ratio,
@@ -26,13 +28,20 @@ from docint.agents.assessment.ledger import (
     fit_ledger,
     is_context_overflow,
     render_context,
+    text_floor,
 )
 from docint.agents.assessment.runner import DEFAULT_ASSESSMENT_ANSWER_PROMPT
 from docint.agents.assessment.split import SENTINEL, compose_labelled_answer
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
-from docint.utils.text_budget import MATCH_SPANS_KEY, allocate_shortest_first, fit_with_marker
+from docint.utils.text_budget import (
+    MATCH_SPANS_KEY,
+    MIN_REGION_CHARS,
+    allocate_shortest_first,
+    fit_with_marker,
+    merge_spans,
+)
 
 
 def test_ledger_numbers_in_insertion_order_and_dedupes() -> None:
@@ -1028,3 +1037,353 @@ def test_compact_legibility_is_judged_on_the_headers_it_renders() -> None:
     assert not evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget - 1, char_token_ratio=1.0, compact=True)
     packed, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
     assert len(packed) <= budget
+
+
+def _join(*windows: str) -> str:
+    """Join invented windows the way the ledger joins the windows of one passage.
+
+    Args:
+        *windows (str): The windows' texts.
+
+    Returns:
+        str: The passage text.
+    """
+    return WINDOW_JOIN.join(windows)
+
+
+#: Where the second window starts in a passage joining two windows of a thousand characters.
+SECOND = 1000 + len(WINDOW_JOIN)
+
+
+def _matched_windows(count: int, length: int = 1270) -> tuple[str, list[tuple[int, int]]]:
+    """Join ``count`` invented windows, each holding one match in its middle.
+
+    Args:
+        count (int): How many windows.
+        length (int): Characters per window.
+
+    Returns:
+        tuple[str, list[tuple[int, int]]]: The passage text and its match spans.
+    """
+    step = length + len(WINDOW_JOIN)
+    return _join(*["w" * length] * count), [(index * step + 600, index * step + 680) for index in range(count)]
+
+
+CODEX_ENTRY = _matched_windows(7)
+
+
+@pytest.mark.parametrize(
+    ("body", "anchors", "floor"),
+    [
+        ("x" * 1000, [], 300),
+        ("x" * 1000, [(800, 850)], 300),
+        ("x" * 120, [(10, 20)], 120),
+        ("x" * 1000, [(100, 120), (800, 820)], 500),
+        ("x" * 1000, [(100, 160), (150, 220)], 300),
+        ("x" * 1000, [(100, 150), (150, 220)], 300),
+        ("x" * 700, [(10, 20), (300, 310), (600, 610)], 700),
+        ("x" * 1000, [(-40, -10), (1005, 1050)], 300),
+        (_join("a" * 1000, "b" * 1000), [(800, 820), (SECOND + 300, SECOND + 320)], 555),
+        (_join("a" * 120, "b" * 2000), [(10, 20), (125 + 900, 125 + 920)], 425),
+        (_join("a" * 1000, "b" * 1000), [], 300),
+        (_join("a" * 1000, "b" * 1000), [(800, 820)], 305),
+        (_join("a" * 1000, "b" * 1000), [(990, SECOND + 10)], 555),
+        (_join("a" * 1000, "b" * 1000), [(990, SECOND - 2)], 305),
+        (_join("a" * 1000, "b" * 1000), [(100, 120), (800, 820), (SECOND + 300, SECOND + 320)], 805),
+        (_join("a" * 100, "b" * 100), [(10, 20), (115, 125)], 205),
+        (_join(*["w" * 100] * 6), [], 300),
+        (_join(*["w" * 100] * 7), [], 337),
+        (*CODEX_ENTRY, 2080),
+    ],
+    ids=[
+        "no-match",
+        "one-match",
+        "shorter-than-the-minimum",
+        "two-matches",
+        "overlapping-matches",
+        "touching-matches",
+        "three-matches-in-a-shorter-text",
+        "matches-outside-the-text",
+        "two-windows-a-match-each",
+        "a-short-matched-window-shown-whole",
+        "windows-without-matches",
+        "one-of-two-windows-matched",
+        "a-match-across-a-seam-in-the-text",
+        "a-match-ending-inside-the-seam",
+        "two-matches-in-one-of-two-windows",
+        "windows-shorter-than-their-floor",
+        "six-windows-without-matches",
+        "seven-windows-without-matches",
+        "seven-windows-a-match-each",
+    ],
+)
+def test_text_floor_reserves_a_region_for_every_match_and_a_seam_for_every_window(
+    body: str, anchors: list[tuple[int, int]], floor: int
+) -> None:
+    """Each window needs ``min(len, 250 * matches)``, each seam 55, and the passage never less than today's minimum.
+
+    Args:
+        body (str): The passage text.
+        anchors (list[tuple[int, int]]): Its match spans.
+        floor (int): The least text it must keep.
+    """
+    assert text_floor(body, anchors) == floor
+
+
+@pytest.mark.parametrize("length", [0, 1, 299, 300, 301, 5000])
+@pytest.mark.parametrize("span", [None, (0.0, 0.01), (0.5, 0.6), (0.9, 1.0)], ids=["none", "start", "middle", "end"])
+def test_a_seed_passage_keeps_todays_floor(length: int, span: tuple[float, float] | None) -> None:
+    """One window holding at most one match, as every seed passage does, is floored exactly as before.
+
+    Args:
+        length (int): The passage's length.
+        span (tuple[float, float] | None): Its match, as fractions of the text.
+    """
+    anchors: list[tuple[int, int]] = [] if span is None else [(int(span[0] * length), int(span[1] * length))]
+
+    assert text_floor("s" * length, anchors) == min(length, MIN_TEXT_CHARS)
+
+
+def _header_chars(nodes: list[NodeWithScore]) -> int:
+    """Return what the numbered passages' headers, joins and cut markers reserve.
+
+    Args:
+        nodes (list[NodeWithScore]): The numbered passages.
+
+    Returns:
+        int: The reserved characters.
+    """
+    return sum(
+        len(llm_view(scored.node).get_metadata_str(mode=MetadataMode.LLM)) + 4 + MARKER_RESERVE_CHARS
+        for scored in nodes
+    )
+
+
+def _facts_section(node_id: str, windows: int) -> tuple[list[NodeWithScore], list[str]]:
+    """Build the windows of one invented section, each holding its own decisive sentence in its middle.
+
+    Args:
+        node_id (str): The section's node id, shared by every window.
+        windows (int): How many windows.
+
+    Returns:
+        tuple[list[NodeWithScore], list[str]]: The windows and their sentences.
+    """
+    nodes: list[NodeWithScore] = []
+    facts: list[str] = []
+    for index in range(windows):
+        fact = f"Invented finding {index} of {node_id}: the cohort shrank in week {index + 2}."
+        before = (f"Filler {index} before the finding. " * 30)[:600]
+        after = (f" Filler {index} after the finding." * 30)[:600]
+        nodes.append(_anchored(before + fact + after, fact, node_id=node_id))
+        facts.append(fact)
+    return nodes, facts
+
+
+def test_a_merged_passage_keeps_every_match_beside_a_long_plain_one() -> None:
+    """Floored for all seven of its matches, a merged passage is not cut to an equal share with a plain one."""
+    windows, facts = _facts_section("sec", 7)
+    ledger = EvidenceLedger(cap=5)
+    for window in windows:
+        ledger.add([window])
+    ledger.add([scored_node("plain", "Plain invented passage text. " * 120, filename="notes.pdf", page=1)])
+    nodes = ledger.numbered()
+    merged = nodes[0]
+    floor = text_floor(_text(merged), [(start, end) for start, end in merged.node.metadata[MATCH_SPANS_KEY]])
+    budget = _header_chars(nodes) + floor + MIN_TEXT_CHARS
+    assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+
+    context, shortened = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+
+    assert shortened == 2
+    assert [fact for fact in facts if fact not in context] == []
+    assert len(context) <= budget
+
+
+@pytest.mark.parametrize(("slack", "admitted"), [(-1, False), (0, True)], ids=["one-short", "exactly-enough"])
+def test_an_extension_is_admitted_only_with_room_for_every_match_it_brings(slack: int, admitted: bool) -> None:
+    """A second matched window raises its passage's floor from 300 to 555; one character short, it is refused.
+
+    Args:
+        slack (int): Characters beyond the merged floor the budget allows.
+        admitted (bool): Whether the window is taken.
+    """
+    windows, facts = _facts_section("sec", 2)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add(windows[:1])
+    budget = _header_chars(ledger.numbered()) + 555 + slack
+    ledger.restrict(Room(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0))
+
+    changed = ledger.add(windows[1:])
+
+    assert bool(changed) is admitted
+    context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    assert facts[0] in context
+    assert (facts[1] in context) is admitted
+
+
+def test_defused_sentinels_before_a_match_do_not_move_the_text_kept_around_it() -> None:
+    """Spans index the stored text, so the cut is made there and the sentinels are defused in what it keeps."""
+    quoted = "The appendix quotes [[ ASSESSMENT ]] verbatim. " * 60
+    section = quoted + ("Filler sentence. " * 80) + DEEP_FACT + " Closing filler." * 40
+
+    context = _render_numbered([_anchored(section, DEEP_FACT)], MIN_TEXT_CHARS)
+
+    assert DEEP_FACT in context
+    assert compose_labelled_answer(context).outcome == "unsplit"
+
+
+def test_out_of_room_means_the_room_and_not_the_cap_closed_the_ledger() -> None:
+    """Research can only report running out of room when the room, not the entry cap, stopped it."""
+    seed = _sized(1, 300, label=10)
+    spent = _header_chars(_numbered(seed)) + MIN_TEXT_CHARS
+    bare = 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS
+    unrestricted = EvidenceLedger(cap=5)
+    unrestricted.add(seed)
+
+    assert _restricted(seed, spent + bare).out_of_room is False
+    assert _restricted(seed, spent + bare - 1).out_of_room is True
+    assert _restricted(seed, spent + bare - 1, cap=1).out_of_room is False
+    assert unrestricted.out_of_room is False
+
+
+@pytest.mark.parametrize("windows", [1, 2, 3, 7])
+@pytest.mark.parametrize("matches", [0, 1, 2])
+@pytest.mark.parametrize("budget", [0, 300, 900, 1800, 2600, 4000, 9000])
+@pytest.mark.parametrize("count_tokens", [None, _two_chars_a_token], ids=["ratio", "tokenizer"])
+def test_the_closed_form_agrees_with_packing_for_merged_matched_passages(
+    windows: int, matches: int, budget: int, count_tokens: Any
+) -> None:
+    """With a floor per retained match, ``Room`` still says legible exactly when packing keeps every floor.
+
+    Args:
+        windows (int): Windows per passage.
+        matches (int): Matches per window.
+        budget (int): The evidence budget in tokens.
+        count_tokens (Any): The tokenizer double, or ``None``.
+    """
+    ledger = EvidenceLedger(cap=5)
+    for entry in range(3):
+        for index in range(windows):
+            spans = [[40 + 200 * match, 60 + 200 * match] for match in range(matches)]
+            extra: dict[str, Any] = {MATCH_SPANS_KEY: spans} if spans else {}
+            ledger.add([scored_node(f"sec-{entry}", f"E{entry}W{index}: " + "invented window text " * 30, **extra)])
+    nodes = ledger.numbered()
+    kwargs: dict[str, Any] = {"llm_view": llm_view, "budget_tokens": budget, "char_token_ratio": 3.5}
+
+    assert Room(nodes, count_tokens=count_tokens, **kwargs).legible is evidence_fits(
+        nodes, count_tokens=count_tokens, **kwargs
+    )
+
+
+#: Random text from this alphabet never spells a sentinel, so every shown match reads verbatim.
+_ALPHABET = "abcdefgh "
+
+
+def _random_window(rng: random.Random, node_id: str, *, seam: bool) -> NodeWithScore:
+    """Build one invented window of random text carrying up to three match spans.
+
+    Args:
+        rng (random.Random): The seeded source.
+        node_id (str): The section's node id.
+        seam (bool): Whether the window's own text holds a ``WINDOW_JOIN`` with a match across it.
+
+    Returns:
+        NodeWithScore: The window.
+    """
+    text = "".join(rng.choice(_ALPHABET) for _ in range(rng.choice([30, 180, 260, 640, 1500])))
+    spans: list[list[int]] = []
+    if seam and len(text) > 60:
+        cut = rng.randrange(20, len(text) - 20)
+        text = f"{text[:cut]}{WINDOW_JOIN}{text[cut:]}"
+        spans.append([cut - rng.randrange(1, 20), cut + len(WINDOW_JOIN) + rng.randrange(1, 20)])
+    for _ in range(rng.randrange(0, 4)):
+        start = rng.randrange(0, len(text))
+        spans.append([start, min(len(text), start + rng.choice([1, 25, 120, 260]))])
+    metadata: dict[str, Any] = {"filename": "f" * rng.choice([0, 30, 300]), "page": rng.randrange(1, 9)}
+    if spans:
+        metadata[MATCH_SPANS_KEY] = spans
+    return scored_node(node_id, text, **metadata)
+
+
+def _held_prefixes(scored: NodeWithScore) -> list[str]:
+    """Return the opening of every match a passage holds, window by window, as packing must keep it.
+
+    Args:
+        scored (NodeWithScore): The passage.
+
+    Returns:
+        list[str]: The first ``MIN_REGION_CHARS`` characters, or fewer, of each merged match in each window.
+    """
+    spans = [(start, end) for start, end in scored.node.metadata.get(MATCH_SPANS_KEY, [])]
+    prefixes: list[str] = []
+    offset = 0
+    for window in _text(scored).split(WINDOW_JOIN):
+        local = merge_spans([(start - offset, end - offset) for start, end in spans], len(window))
+        prefixes += [window[start : start + min(MIN_REGION_CHARS, end - start)] for start, end in local]
+        offset += len(window) + len(WINDOW_JOIN)
+    return prefixes
+
+
+def _render_legibly(nodes: list[NodeWithScore], budget: int) -> int:
+    """Render legible evidence and check what legibility promises: every match, the minimum share and the budget.
+
+    Args:
+        nodes (list[NodeWithScore]): The numbered evidence, legible in ``budget``.
+        budget (int): The evidence budget, in characters (one per token).
+
+    Returns:
+        int: How many passages were shortened.
+    """
+    context, shortened = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    assert len(context) <= budget
+    assert [prefix for scored in nodes for prefix in _held_prefixes(scored) if prefix not in context] == []
+    headers, bodies, anchors = _parts(nodes, llm_view)
+    _, _, allowances = _allowances(
+        headers, bodies, anchors, budget_tokens=budget, char_token_ratio=1.0, count_tokens=None
+    )
+    kept = zip(bodies, allowances, strict=True)
+    assert all(allowance >= min(len(body), MIN_TEXT_CHARS) for body, allowance in kept)
+    return shortened
+
+
+def test_legible_evidence_renders_every_match_it_holds() -> None:
+    """Seeded fuzz: whenever the evidence is legible, packing keeps every match, every minimum share and the budget."""
+    rng = random.Random(41)
+    legible = shortened = 0
+
+    for _ in range(1500):
+        ledger = EvidenceLedger(cap=50)
+        for entry in range(rng.randrange(1, 6)):
+            for _ in range(rng.choice([1, 1, 2, 3, 5, 8])):
+                ledger.add([_random_window(rng, f"e{entry}", seam=rng.random() < 0.15)])
+        nodes = ledger.numbered()
+        budget = rng.randrange(200, 9000)
+        if evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0):
+            legible += 1
+            shortened += _render_legibly(nodes, budget) > 0
+
+    assert legible > 300
+    assert shortened > 150
+
+
+def test_admission_never_holds_a_match_the_answer_would_lose() -> None:
+    """Seeded walk: whatever research offers, what admission keeps renders with every match it holds."""
+    rng = random.Random(53)
+    refused = extended = 0
+
+    for _ in range(40):
+        budget = rng.randrange(1500, 9000)
+        ledger = _restricted([_random_window(rng, "seed", seam=False)], budget)
+        for _ in range(60):
+            node_id = f"e{rng.randrange(6)}"
+            known = node_id in {scored.node.node_id for scored in ledger.entries()}
+            changed = ledger.add([_random_window(rng, node_id, seam=rng.random() < 0.15)])
+            refused += not changed and (known or not ledger.full)
+            extended += bool(changed) and known
+            nodes = ledger.numbered()
+            assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+            _render_legibly(nodes, budget)
+
+    assert refused > 50
+    assert extended > 100
