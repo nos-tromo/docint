@@ -145,6 +145,8 @@ def _bounded(
     Raises:
         _NoSearchSlot: When no slot frees up in time; the search is never called
             and no thread is started.
+        Exception: Whatever stops the search thread from starting, once its slot
+            has been given back.
     """
     began = clock()
     if not slots.acquire(timeout=min(timeout, SEARCH_SLOT_WAIT_S)):
@@ -342,6 +344,11 @@ class ResearchLoop:
             except _NoSearchSlot:
                 reason = "research_failed"
                 logger.warning("Assessment research stopped (research_failed): no search capacity")
+                break
+            except Exception as exc:
+                # The search thread could not start; its slot is already back, and what research found stays.
+                reason = "research_failed"
+                logger.warning("Assessment research search could not start: {}", type(exc).__name__)
                 break
             if finished is None:
                 reason = "time_budget"

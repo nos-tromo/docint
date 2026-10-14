@@ -715,34 +715,46 @@ def test_a_timed_out_search_keeps_its_slot_until_it_ends(held_search: tuple[thre
     slots.release()
 
 
-def test_a_search_thread_that_cannot_start_gives_its_slot_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A thread the process cannot start must not take a slot with it.
+def test_a_search_thread_that_cannot_start_ends_research_and_keeps_what_it_found(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """The second search's thread cannot start: research fails there, keeping the first search and the slot.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): Makes thread starts fail.
+        monkeypatch (pytest.MonkeyPatch): Makes the second thread start fail.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
     """
     slots = threading.BoundedSemaphore(1)
+    started: list[str] = []
+    real_start = threading.Thread.start
 
     def _start(thread: threading.Thread) -> None:
-        """Fail as a process out of threads does.
+        """Start the first thread; fail the next as a process out of threads does.
 
         Args:
-            thread (threading.Thread): The thread, unused.
+            thread (threading.Thread): The thread.
 
         Raises:
-            RuntimeError: Always.
+            RuntimeError: From the second start on.
         """
-        raise RuntimeError("can't start new thread")
+        started.append(thread.name)
+        if len(started) > 1:
+            raise RuntimeError("can't start new thread")
+        real_start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", _start)
+    searches = _search({"method": [scored_node("m", "Method section.")], "zzsecretzz results": []})
 
-    with pytest.raises(RuntimeError, match="can't start new thread"):
-        _drain(
-            _loop(tool_llm([search_call("method")]), _search({}), slots=slots).run(
-                question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
-            )
+    progress, outcome = _drain(
+        _loop(tool_llm([search_call("method"), search_call("zzsecretzz results")]), searches, slots=slots).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
         )
+    )
 
+    assert [(step.detail, step.found) for step in progress] == [("method", 1)]
+    assert (outcome.steps, outcome.reason) == (2, "research_failed")
+    assert outcome.actions == [{"action": "search", "detail": "method", "found": 1}]
+    assert loguru_caplog.messages == ["Assessment research search could not start: RuntimeError"]
     assert slots.acquire(blocking=False) is True
     slots.release()
 
