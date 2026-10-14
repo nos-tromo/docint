@@ -254,7 +254,7 @@ sent as `retrieval_target` on `/query` and `/stream_query` and echoed back on
 the response and the final SSE frame. It is a separate field from
 `retrieval_mode`, which is session routing on the request (`session` /
 `stateless`) and a different vocabulary on the response (`scoped`,
-`rewrite_*`).
+`agent`, `rewrite_*`).
 
 | Target | Retrieves | Chain |
 |---|---|---|
@@ -394,7 +394,8 @@ Both chat paths run it:
 The gate is deliberately narrow. A mismatched but substantive answer is kept —
 discarding it to chase a better one trades a real answer for a coin flip. A
 scoped turn is skipped entirely, since it runs no retrieval for a new query to
-change. And the second attempt overwrites the first attempt's turn
+change, and so is an assessment turn (see [Assessment turns](#assessment-turns)).
+And the second attempt overwrites the first attempt's turn
 (`replace_turn_idx`) instead of appending, so one user message stays one turn.
 
 Failures degrade rather than escalate: no reformulation available, or a second
@@ -429,8 +430,10 @@ parent-context chain — then lets the plain model search further through a
 `search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
 prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
 `ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute wall clock, on a
-repeated query, or after two searches that add nothing new. Each step reaches
-the SPA as an `{"agent": {...}}` frame. A pinned scope is never widened: a
+repeated query, when the evidence ledger is full, when the model replies
+without calling a tool, or after two searches in a row that add nothing new.
+Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
+never widened: a
 scoped assessment answers from its chunks with no research.
 
 **Answer.** One streamed call on the answer model (the reasoning toggle
@@ -445,7 +448,8 @@ ledger, numbered 1..N in the order it was found; an entry is shortened to fit
 the context, never dropped, because replay numbers citations by position.
 
 **Validation.** Only the source-backed part is validated, against the sources it
-cites, with a note (`response_validator_assessment.txt`) that puts the
+cites (at most six; the first six when it cites none), with a note
+(`response_validator_assessment.txt`) that puts the
 judgement out of scope. An answer that did not separate the two parts is
 labelled as a whole and not validated. Assessments never take the corrective
 retry: their evidence was gathered on purpose, not by one query that a

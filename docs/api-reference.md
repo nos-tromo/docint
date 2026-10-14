@@ -230,8 +230,9 @@ Request (`QueryIn`):
   explicit boolean every turn.
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
-  `RAG.run_query()` directly and persists nothing, so its `session_id` is
-  `null` unless the request carried one.
+  `RAG.run_query()` directly, or `RAG.stream_stateless_assessment()` on an
+  assessment turn, and persists nothing, so its `session_id` is `null` unless
+  the request carried one.
 - `retrieval_target` — which evidence may answer the turn: `all` (default,
   documents and imagery fused), `documents` (no image lane), or `visual` (the
   `{collection}_images` companion alone, the one path that sends the stored
@@ -293,8 +294,9 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
 - `{"error": "Internal server error", "code": "..."}` — the turn failed;
   `code` is `embedding_unavailable`, `context_overflow` or `generation_failed`.
 - The final envelope — `/query`'s fields with the text under `response` instead
-  of `answer`, plus `session_id`. An assessment adds `answer_mode: "assessment"`
-  and `agent`; a lookup carries neither key.
+  of `answer`, plus `reasoning` (and `retried` / `retry_query` after a
+  corrective retry). An assessment adds `answer_mode: "assessment"` and
+  `agent`; a lookup carries neither key.
 
 ### `POST /search`
 
@@ -885,7 +887,8 @@ from `conversations` via `SessionManager.list_sessions()`.
 ### `GET /sessions/{session_id}/history`
 
 Returns `SessionHistoryOut` — `{"messages": [...]}` where each message
-comes from `Turn` / `Citation`.
+comes from `Turn` / `Citation`. An assessment turn's assistant message also
+carries `answer_mode: "assessment"` and its `agent` trail.
 
 ### `GET /sessions/{session_id}/sources.zip`
 
