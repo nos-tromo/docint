@@ -206,7 +206,7 @@ export const de: Strings = {
   'chat.assessment_trail_search_other': 'Gesucht nach „{query}“: {count} neue Passagen',
   'chat.assessment_trail_answer': 'Einschätzung wird geschrieben…',
   'chat.assessment_reason.tools_unavailable':
-    'Das Modell konnte keine eigenen Suchen ausführen (das Chat-Modell hat Tool-Aufrufe abgelehnt); diese Einschätzung beruht nur auf den Passagen der ersten Suche.',
+    'Das Modell konnte keine eigenen Suchen ausführen; diese Einschätzung beruht nur auf den Passagen der ersten Suche.',
   'chat.assessment_reason.research_failed':
     'Die Recherche brach unterwegs ab; diese Einschätzung beruht auf den bis dahin gefundenen Passagen.',
   'chat.assessment_reason.context_budget':

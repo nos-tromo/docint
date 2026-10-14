@@ -194,7 +194,7 @@ export const en = {
   'chat.assessment_trail_search_other': 'Searched “{query}”: {count} new passages',
   'chat.assessment_trail_answer': 'Writing the assessment…',
   'chat.assessment_reason.tools_unavailable':
-    'The model could not run its own searches (the chat model rejected tool calls), so this assessment rests on the first search’s passages only.',
+    'The model could not run its own searches, so this assessment rests on the first search’s passages only.',
   'chat.assessment_reason.research_failed':
     'The research step failed part-way, so this assessment rests on the passages found before it stopped.',
   'chat.assessment_reason.context_budget':

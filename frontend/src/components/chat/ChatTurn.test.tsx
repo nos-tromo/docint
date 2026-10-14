@@ -317,6 +317,27 @@ describe('ChatTurn', () => {
     expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(/could not run its own searches/i)
   })
 
+  it.each([
+    ['en', 'The model could not run its own searches, so this assessment rests on the first search’s passages only.'],
+    [
+      'de',
+      'Das Modell konnte keine eigenen Suchen ausführen; diese Einschätzung beruht nur auf den Passagen der ersten Suche.'
+    ]
+  ] as const)('names no single cause for unavailable tools in the %s notice', (lang, copy) => {
+    // The token covers a rejected tool call and a prose reply alike.
+    renderTurn(
+      {
+        user: 'q',
+        assistant: 'Fact [1].',
+        done: true,
+        meta: assessmentMeta({ ...TRAIL, reason: 'tools_unavailable' })
+      },
+      lang
+    )
+
+    expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(copy)
+  })
+
   it('says when the model did not separate its judgement', () => {
     renderTurn({
       user: 'q',
