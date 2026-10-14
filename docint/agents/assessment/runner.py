@@ -13,11 +13,20 @@ from typing import TYPE_CHECKING, Any, Protocol
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.llms.llm import stream_chat_response_to_tokens
 from llama_index.core.schema import BaseNode, NodeWithScore
+from loguru import logger
 
-from docint.agents.assessment.ledger import EvidenceLedger, answer_budget, render_context
+from docint.agents.assessment.ledger import (
+    PRIOR_TURN_TOKENS,
+    QUESTION_TOKENS,
+    EvidenceLedger,
+    answer_budget,
+    render_context,
+)
 from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.types import AgentProgress, PriorTurn
+from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
+from docint.utils.text_budget import fit_with_marker
 
 if TYPE_CHECKING:
     from llama_index.core.llms import LLM
@@ -35,6 +44,9 @@ DEFAULT_ASSESSMENT_ANSWER_PROMPT = (
     "Part 2: your own assessment; flag general knowledge, cite snippets you react to.\n\n"
     "Answer:\n"
 )
+
+PRIOR_ANSWER_CHARS = 4000
+"""Longest earlier assistant answer, in characters, that the answer step is shown."""
 
 
 @dataclass(frozen=True)
@@ -99,11 +111,12 @@ def prior_turn_block(prior_turn: PriorTurn | None) -> str:
         prior_turn (PriorTurn | None): The previous exchange, if any.
 
     Returns:
-        str: The block, or a placeholder when there is none.
+        str: The block, with the earlier answer capped at ``PRIOR_ANSWER_CHARS``, or a placeholder when there is none.
     """
     if prior_turn is None:
         return "(no prior turn)"
-    return f"Previous user question: {prior_turn.user_text}\nPrevious assistant answer: {prior_turn.assistant_text}"
+    answer = fit_with_marker(prior_turn.assistant_text, PRIOR_ANSWER_CHARS)[0]
+    return f"Previous user question: {prior_turn.user_text}\nPrevious assistant answer: {answer}"
 
 
 class AssessmentRunner:
@@ -167,28 +180,37 @@ class AssessmentRunner:
             char_token_ratio=self._ratio,
         )
         # Pinned or seeded evidence is never dropped; packing shortens it instead.
-        ledger = EvidenceLedger(cap=max(budget.max_entries, len(seed)))
+        ledger = EvidenceLedger(cap=max(budget.max_entries, len({scored.node.node_id for scored in seed})))
         seeded = ledger.add(seed)
         actions: list[dict[str, Any]] = [{"action": "seed", "detail": "", "found": len(seeded)}]
         yield AgentProgress(step=0, action="seed", detail="", found=len(seeded))
         steps, reason = 0, None
         if self._researcher is not None and not ledger.full:
-            for item in self._researcher.run(question=question, prior_turn=prior_turn, ledger=ledger):
-                if isinstance(item, ResearchOutcome):
-                    steps, reason = item.steps, item.reason
-                    actions.extend(item.actions)
-                else:
-                    yield item
+            try:
+                for item in self._researcher.run(question=question, prior_turn=prior_turn, ledger=ledger):
+                    if isinstance(item, ResearchOutcome):
+                        steps, reason = item.steps, item.reason
+                        actions.extend(item.actions)
+                    else:
+                        yield item
+            except Exception as exc:
+                reason = "research_failed"
+                logger.warning("Assessment research stopped (research_failed): {}", type(exc).__name__)
         if len(ledger) == 0:
-            yield AssessmentResult(raw_text="", nodes=[], steps=steps, actions=actions, reason=reason or "no_evidence")
+            yield AssessmentResult(raw_text="", nodes=[], steps=steps, actions=actions, reason="no_evidence")
             return
         nodes = ledger.numbered()
+        block = prior_turn_block(prior_turn)
+        # The prior turn and question can outgrow their reserve; the evidence gives way.
+        overhead = estimate_tokens(block + question.strip(), self._ratio)
+        extra = max(0, overhead - PRIOR_TURN_TOKENS - QUESTION_TOKENS)
         context, shortened = render_context(
-            nodes, llm_view=self._llm_view, budget_tokens=budget.evidence_tokens, char_token_ratio=self._ratio
+            nodes,
+            llm_view=self._llm_view,
+            budget_tokens=max(0, budget.evidence_tokens - extra),
+            char_token_ratio=self._ratio,
         )
-        prompt = self._answer_prompt.format(
-            prior_turn=prior_turn_block(prior_turn), context_str=context, question=question.strip()
-        )
+        prompt = self._answer_prompt.format(prior_turn=block, context_str=context, question=question.strip())
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
         splitter = SentinelStreamSplitter()
         raw: list[str] = []

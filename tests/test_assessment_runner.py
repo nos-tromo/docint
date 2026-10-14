@@ -13,6 +13,7 @@ from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.runner import AssessmentResult, AssessmentRunner, ResearchOutcome
 from docint.agents.assessment.split import SENTINEL, assessment_label
 from docint.agents.types import AgentProgress, PriorTurn
+from docint.utils.embed_chunking import estimate_tokens
 
 QUESTION = "What could be improved in this study?"
 ANSWER = ["The study evaluates on one dataset [1].", f"\n{SENTINEL}\n", "A second dataset would help."]
@@ -181,3 +182,83 @@ def test_a_seed_larger_than_the_cap_is_kept_whole_and_shortened() -> None:
     assert len(result.nodes) == 30
     assert result.shortened > 0
     assert sorted(node.node.metadata["citation_index"] for node in result.nodes) == list(range(1, 31))
+
+
+def test_a_long_prior_answer_still_fits_the_window() -> None:
+    """A long earlier answer is capped and the evidence gives way, so the prompt fits the window."""
+    seed = [
+        scored_node(f"n{number}", f"Passage {number}. " + "The result holds. " * 111, page=number)
+        for number in range(1, 24)
+    ]
+    prior = PriorTurn(user_text="Summarise it.", assistant_text="The study reports a result. " * 143)
+    runner, llm = _runner()
+
+    list(runner.run(question=QUESTION, prior_turn=prior, seed=seed))
+
+    prompt = llm.stream_chat.call_args.args[0][0].content
+    assert estimate_tokens(prompt, 3.5) + 1024 <= 8192
+
+
+def test_a_researcher_that_raises_degrades_to_research_failed() -> None:
+    """A failing research step ends the search; the answer streams from the ledger so far."""
+
+    class _Researcher:
+        """Adds one passage, then fails."""
+
+        def run(
+            self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
+        ) -> Iterator[AgentProgress | ResearchOutcome]:
+            """Add a limitations passage, then raise.
+
+            Args:
+                question (str): The user's message.
+                prior_turn (PriorTurn | None): The previous exchange.
+                ledger (EvidenceLedger): The evidence so far.
+
+            Yields:
+                AgentProgress | ResearchOutcome: One search, then a failure.
+            """
+            ledger.add([scored_node("n3", "Limitations: small sample.", filename="study.pdf", page=9)])
+            yield AgentProgress(step=1, action="search", detail="limitations", found=1)
+            raise RuntimeError("search backend unavailable")
+
+    runner, llm = _runner(researcher=_Researcher())
+
+    items = list(runner.run(question=QUESTION, prior_turn=None, seed=_seed()))
+
+    result = items[-1]
+    assert isinstance(result, AssessmentResult)
+    assert result.reason == "research_failed"
+    assert len(result.nodes) == 3
+    assert result.raw_text == "".join(ANSWER)
+    llm.stream_chat.assert_called_once()
+
+
+def test_an_empty_ledger_always_reports_no_evidence() -> None:
+    """Whatever stopped research, an empty ledger is reported as no evidence."""
+
+    class _Researcher:
+        """Adds nothing and reports a tool outage."""
+
+        def run(
+            self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
+        ) -> Iterator[AgentProgress | ResearchOutcome]:
+            """Stop at once with a tool outage.
+
+            Args:
+                question (str): The user's message.
+                prior_turn (PriorTurn | None): The previous exchange.
+                ledger (EvidenceLedger): The evidence so far.
+
+            Yields:
+                AgentProgress | ResearchOutcome: The outcome alone.
+            """
+            yield ResearchOutcome(steps=0, actions=[], reason="tools_unavailable")
+
+    runner, llm = _runner(researcher=_Researcher())
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=[]))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert result.reason == "no_evidence"
+    llm.stream_chat.assert_not_called()
