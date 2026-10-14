@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
+import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
 from assessment_fakes import bad_request, scored_node, search_call, tool_llm
@@ -14,12 +19,34 @@ from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 
 from docint.agents.assessment.ledger import EvidenceLedger
-from docint.agents.assessment.research import ResearchLoop
-from docint.agents.assessment.runner import ResearchOutcome
+from docint.agents.assessment.research import SEARCH_THREAD_NAME, ResearchLoop
+from docint.agents.assessment.runner import ResearchOutcome, SearchFn
 from docint.agents.types import AgentProgress
 from docint.core.rag import ParentContextPostprocessor
 
 QUESTION = "zzsecretzz What could be improved in this study?"
+
+
+def _ticking(*ticks: float) -> Callable[[], float]:
+    """Build a clock that reads ``ticks`` in turn, then keeps repeating the last one.
+
+    Args:
+        *ticks (float): The readings, in order.
+
+    Returns:
+        Callable[[], float]: The clock.
+    """
+    pending = list(ticks)
+
+    def _now() -> float:
+        """Read the next tick, or the last one again.
+
+        Returns:
+            float: The reading.
+        """
+        return pending.pop(0) if len(pending) > 1 else pending[0]
+
+    return _now
 
 
 def _search(results: dict[str, list[NodeWithScore]]) -> Any:
@@ -402,12 +429,164 @@ def test_a_later_failure_reports_research_failed() -> None:
 
 
 def test_the_wall_clock_bounds_research() -> None:
-    """A slow endpoint cannot hold the turn open indefinitely."""
-    ticks = iter([0.0, 0.0, 0.0, 200.0])
+    """A slow endpoint cannot hold the turn open indefinitely, and no search starts once the budget is spent."""
     llm = tool_llm([search_call("method"), search_call("results")])
+    searched: list[str] = []
+
+    def _search_recorded(query: str) -> list[NodeWithScore]:
+        """Record the query and find one passage.
+
+        Args:
+            query (str): The search query.
+
+        Returns:
+            list[NodeWithScore]: One invented passage.
+        """
+        searched.append(query)
+        return [scored_node("m", "M.")]
 
     _, outcome = _drain(
-        _loop(llm, _search({"method": [scored_node("m", "M.")]}), clock=lambda: next(ticks), wall_clock_s=120.0).run(
+        _loop(llm, _search_recorded, clock=_ticking(0.0, 0.0, 0.0, 200.0), wall_clock_s=120.0).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert outcome.reason == "time_budget"
+    assert searched == []
+
+
+def test_each_research_call_is_bounded_by_the_time_remaining() -> None:
+    """One hung call cannot outlast the research budget; a floor of a second keeps the last call possible."""
+    # Start; then per round: the budget check, the call's own timeout, the time left for its search, the check after.
+    clock = _ticking(0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 119.5, 200.0)
+    llm = tool_llm([search_call("method"), search_call("results")])
+
+    _drain(
+        _loop(llm, _search({"method": [scored_node("m", "M.")]}), clock=clock, wall_clock_s=120.0).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert [call.kwargs["timeout"] for call in llm.chat_with_tools.call_args_list] == [120.0, 1.0]
+
+
+@pytest.fixture
+def held_search() -> Iterator[tuple[threading.Event, SearchFn]]:
+    """A search that blocks until released; teardown releases it and joins its thread, so none outlives the test.
+
+    Yields:
+        tuple[threading.Event, SearchFn]: The release and the search.
+    """
+    release = threading.Event()
+
+    def _search(query: str) -> list[NodeWithScore]:
+        """Wait for the release, then find one invented passage.
+
+        Args:
+            query (str): The search query, unused.
+
+        Returns:
+            list[NodeWithScore]: The late passage.
+        """
+        release.wait(timeout=30)
+        return [scored_node("late", "A passage that arrives too late.")]
+
+    yield release, _search
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == SEARCH_THREAD_NAME:
+            thread.join(timeout=5)
+
+
+def test_a_search_that_outlasts_the_budget_ends_research_on_time(
+    held_search: tuple[threading.Event, SearchFn], loguru_caplog: LogCaptureFixture
+) -> None:
+    """A hung search is abandoned when the budget runs out; its result never reaches the ledger.
+
+    Args:
+        held_search (tuple[threading.Event, SearchFn]): The blocking search.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    _, search = held_search
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([scored_node("seed", "The seed passage.")])
+    started = time.monotonic()
+
+    progress, outcome = _drain(
+        _loop(tool_llm([search_call("zzsecretzz method")]), search, wall_clock_s=0.3).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert time.monotonic() - started < 3.0
+    assert (outcome.reason, progress, outcome.actions) == ("time_budget", [], [])
+    assert [scored.node.node_id for scored in ledger.entries()] == ["seed"]
+    assert loguru_caplog.messages == [
+        "Assessment research stopped (time_budget): a search outlasted the research budget"
+    ]
+
+
+_SCOPE: ContextVar[str | None] = ContextVar("invented_collection_scope", default=None)
+
+
+def test_a_search_runs_in_the_callers_context() -> None:
+    """Retrieval reads the request's collection and reasoning scope from context variables, so a search sees them."""
+    seen: list[str | None] = []
+
+    def _search(query: str) -> list[NodeWithScore]:
+        """Record the scope the search runs under.
+
+        Args:
+            query (str): The search query, unused.
+
+        Returns:
+            list[NodeWithScore]: Nothing.
+        """
+        seen.append(_SCOPE.get())
+        return []
+
+    token = _SCOPE.set("invented-collection")
+    try:
+        _drain(
+            _loop(tool_llm([search_call("method")]), _search).run(
+                question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+            )
+        )
+    finally:
+        _SCOPE.reset(token)
+
+    assert seen == ["invented-collection"]
+
+
+def test_a_search_raising_its_own_timeout_is_a_failed_search_not_a_spent_budget() -> None:
+    """A retrieval dependency's ``TimeoutError`` is the search failing; only the clock spends the budget."""
+
+    def _search(query: str) -> list[NodeWithScore]:
+        """Fail as a timed-out storage call would.
+
+        Args:
+            query (str): The search query, unused.
+
+        Raises:
+            TimeoutError: Always.
+        """
+        raise TimeoutError("invented storage timeout")
+
+    _, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), _search).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert outcome.reason == "research_failed"
+
+
+def test_a_model_call_that_times_out_with_the_budget_spent_reports_time_budget() -> None:
+    """The call's timeout is the time left, so its timeout error once the clock is spent is the budget running out."""
+    timeout = openai.APITimeoutError(request=httpx.Request("POST", "http://inference.invalid/v1/chat/completions"))
+
+    _, outcome = _drain(
+        _loop(tool_llm([timeout]), _search({}), clock=_ticking(0.0, 0.0, 0.0, 200.0), wall_clock_s=120.0).run(
             question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
         )
     )
@@ -415,19 +594,33 @@ def test_the_wall_clock_bounds_research() -> None:
     assert outcome.reason == "time_budget"
 
 
-def test_each_research_call_is_bounded_by_the_time_remaining() -> None:
-    """One hung call cannot outlast the research budget; a floor of a second keeps the last call possible."""
-    # Start, then per round: the budget check and the call's own timeout.
-    ticks = iter([0.0, 0.0, 0.0, 100.0, 119.5, 200.0])
-    llm = tool_llm([search_call("method"), search_call("results")])
+def test_a_slow_final_search_reports_time_budget() -> None:
+    """The last search a step cap allows is still timed: research that overran says so even though it found evidence."""
+    now = [0.0]
 
-    _drain(
-        _loop(llm, _search({"method": [scored_node("m", "M.")]}), clock=lambda: next(ticks), wall_clock_s=120.0).run(
-            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+    def _slow(query: str) -> list[NodeWithScore]:
+        """Take five minutes on the injected clock, then find one passage.
+
+        Args:
+            query (str): The search query, unused.
+
+        Returns:
+            list[NodeWithScore]: One invented passage.
+        """
+        now[0] += 300.0
+        return [scored_node("m", "Method section.")]
+
+    ledger = EvidenceLedger(cap=5)
+
+    progress, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), _slow, max_steps=1, clock=lambda: now[0], wall_clock_s=120.0).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
         )
     )
 
-    assert [call.kwargs["timeout"] for call in llm.chat_with_tools.call_args_list] == [120.0, 1.0]
+    assert outcome.reason == "time_budget"
+    assert [step.found for step in progress] == [1]
+    assert len(ledger) == 1
 
 
 def test_a_window_too_small_for_one_step_never_calls_the_model() -> None:

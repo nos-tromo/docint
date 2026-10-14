@@ -4,11 +4,15 @@ Calls tools with ``tool_choice="required"``, which vLLM serves through guided
 decoding without ``--enable-auto-tool-choice``; a model that answers in prose
 anyway (Ollama treats ``required`` as ``auto``) ends research. The turn reports
 ``tools_unavailable`` when the endpoint rejects the first call, or when the
-first round returns no tool call.
+first round returns no tool call. The time budget bounds every model call and
+every search; a search still running when it runs out is abandoned.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextvars
+import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
@@ -26,6 +30,7 @@ from docint.utils.prompt_loader import load_localized_prompt
 
 if TYPE_CHECKING:
     from llama_index.core.llms.function_calling import FunctionCallingLLM
+    from llama_index.core.schema import NodeWithScore
 
 RESEARCH_REPLY_TOKENS = 512
 TOOL_SCHEMA_TOKENS = 350
@@ -34,6 +39,8 @@ STEP_TOKENS = 700
 MESSAGE_OVERHEAD_TOKENS = 40
 RESEARCH_WALL_CLOCK_S = 120.0
 MAX_QUERY_CHARS = 300
+#: Name of the thread a search runs on, so an abandoned one can be found.
+SEARCH_THREAD_NAME = "assessment-research-search"
 
 DEFAULT_ASSESSMENT_RESEARCH_PROMPT = (
     "Gather the evidence a careful judgement of the material needs; do not answer yet.\n\n"
@@ -86,6 +93,40 @@ def _failure_reason(exc: Exception, *, first: bool) -> str:
     return "research_failed"
 
 
+def _bounded(search: SearchFn, query: str, timeout: float) -> concurrent.futures.Future[list[NodeWithScore]] | None:
+    """Run one search on its own thread and wait for it no longer than ``timeout``.
+
+    The search runs in a copy of the caller's context, since retrieval reads the
+    request's collection and reasoning scope from context variables. Its outcome,
+    result or exception, lands on a future that is only waited on, never asked
+    for a result with a timeout: a search's own ``TimeoutError`` must not read as
+    the budget running out.
+
+    Args:
+        search (SearchFn): Runs one search through the turn's engine.
+        query (str): What to search for.
+        timeout (float): Seconds to wait.
+
+    Returns:
+        concurrent.futures.Future[list[NodeWithScore]] | None: The finished
+        search, holding its passages or its exception; ``None`` when it outlasts
+        the timeout, in which case it finishes in the background, unread.
+    """
+    future: concurrent.futures.Future[list[NodeWithScore]] = concurrent.futures.Future()
+    context = contextvars.copy_context()
+
+    def _run() -> None:
+        """Run the search and hand its outcome to the future."""
+        try:
+            future.set_result(context.run(search, query))
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    threading.Thread(target=_run, name=SEARCH_THREAD_NAME, daemon=True).start()
+    done, _ = concurrent.futures.wait([future], timeout=timeout)
+    return future if done else None
+
+
 def _tool_reply(call_id: str, text: str) -> ChatMessage:
     """Build the tool message answering one call.
 
@@ -125,7 +166,8 @@ class ResearchLoop:
             char_token_ratio (float): Characters per token for budgeting.
             prompt (str | None): Template override; the localized
                 ``assessment_research`` prompt by default.
-            wall_clock_s (float): Seconds research may take in total.
+            wall_clock_s (float): Seconds research may take in total, its model
+                calls and its searches included.
             clock (Callable[[], float]): Monotonic clock, injectable for tests.
         """
         self._llm = llm
@@ -198,7 +240,9 @@ class ResearchLoop:
                 )
                 calls = self._llm.get_tool_calls_from_response(response, error_on_no_tool_call=False)
             except Exception as exc:
-                reason = _failure_reason(exc, first=steps == 0)
+                # The call's timeout is the time left, so failing once it is spent is the budget running out.
+                spent = self._clock() - started > self._wall_clock_s
+                reason = "time_budget" if spent else _failure_reason(exc, first=steps == 0)
                 logger.warning("Assessment research stopped ({}): {}", reason, type(exc).__name__)
                 break
             if not calls:
@@ -229,8 +273,17 @@ class ResearchLoop:
             if query.casefold() in seen:
                 break
             seen.add(query.casefold())
+            remaining = self._wall_clock_s - (self._clock() - started)
+            if remaining <= 0:
+                reason = "time_budget"
+                break
+            finished = _bounded(self._search, query, remaining)
+            if finished is None:
+                reason = "time_budget"
+                logger.warning("Assessment research stopped (time_budget): a search outlasted the research budget")
+                break
             try:
-                found = self._search(query)
+                found = finished.result()
             except Exception as exc:
                 reason = "research_failed"
                 logger.warning("Assessment research search failed: {}", type(exc).__name__)
@@ -240,6 +293,10 @@ class ResearchLoop:
             yield AgentProgress(step=steps, action="search", detail=query, found=len(added))
             reply = "\n".join(digest(number, scored) for number, scored in added) or "No new passages."
             transcript.append(_tool_reply(call_id, reply))
+            # Checked after every search, the last one a step cap allows included.
+            if self._clock() - started > self._wall_clock_s:
+                reason = "time_budget"
+                break
             idle = 0 if added else idle + 1
             if idle >= 2:
                 break
