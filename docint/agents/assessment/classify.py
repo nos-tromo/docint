@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 #: Enough of a prior answer to resolve "that" in a follow-up.
 _PRIOR_ANSWER_CHARS = 1500
 _JSON_RE = re.compile(r"\{.*?\}", re.DOTALL)
+#: Room for the one-line JSON verdict; a reply padded past it reads as a lookup.
+CLASSIFY_MAX_TOKENS = 64
+#: Seconds the classifier may take; it runs before every turn, so slowness fails soft.
+CLASSIFY_TIMEOUT_S = 15.0
 
 DEFAULT_ASSESSMENT_CLASSIFY_PROMPT = (
     "Decide whether the user's latest message asks for a judgement or for information.\n\n"
@@ -84,7 +88,7 @@ def classify_turn(llm: LLM | None, *, question: str, prior_turn: PriorTurn | Non
     template = load_localized_prompt("assessment_classify", default=DEFAULT_ASSESSMENT_CLASSIFY_PROMPT)
     prompt = template.format(question=question.strip(), prior_turn=_prior_turn_text(prior_turn))
     try:
-        reply = str(llm.complete(prompt).text or "")
+        reply = str(llm.complete(prompt, max_tokens=CLASSIFY_MAX_TOKENS, timeout=CLASSIFY_TIMEOUT_S).text or "")
     except Exception as exc:
         logger.warning("Turn classification failed ({}); answering as a lookup", type(exc).__name__)
         return "lookup"

@@ -18,6 +18,7 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
     Function,
 )
 
+from docint.agents.assessment.classify import classify_turn
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
 from docint.core.rag import RAG
@@ -84,6 +85,25 @@ def _completion(name: str, arguments: str, call_id: str) -> ChatCompletion:
         model="test-model",
         object="chat.completion",
         choices=[Choice(index=0, finish_reason="tool_calls", message=message)],
+    )
+
+
+def _text_completion(content: str) -> ChatCompletion:
+    """Build a chat completion in which the model answers in text.
+
+    Args:
+        content (str): The reply.
+
+    Returns:
+        ChatCompletion: The completion.
+    """
+    message = ChatCompletionMessage(role="assistant", content=content)
+    return ChatCompletion(
+        id="c2",
+        created=int(time.time()),
+        model="test-model",
+        object="chat.completion",
+        choices=[Choice(index=0, finish_reason="stop", message=message)],
     )
 
 
@@ -166,6 +186,21 @@ def test_the_second_request_answers_the_first_call_by_its_id(monkeypatch: pytest
     assert reply_message["role"] == "tool"
     assert reply_message["tool_call_id"] == "call_7"
     assert "[1] (study.pdf) Method section." in reply_message["content"]
+
+
+def test_the_turn_classifier_is_bounded_in_length_and_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It runs before every turn, so a verbose or slow model must fail soft quickly.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    sent = _serve(monkeypatch, [_text_completion('{"mode": "assessment"}')])
+
+    mode = classify_turn(_rag().text_model, question="What could be improved?", prior_turn=None)
+
+    assert mode == "assessment"
+    assert sent[0]["max_tokens"] == 64
+    assert sent[0]["timeout"] == 15.0
 
 
 def test_only_an_unscoped_turn_gets_a_researcher_that_searches_the_turns_engine() -> None:
