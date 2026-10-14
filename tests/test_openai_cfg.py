@@ -471,8 +471,13 @@ def test_budgeted_embedding_raises_on_oversize(
         context_window=8192,
     )
 
-    with pytest.raises(EmbeddingInputTooLongError):
+    with pytest.raises(EmbeddingInputTooLongError) as caught:
         embedding.get_text_embeddings_strict([original_text])
+
+    assert str(caught.value).endswith(
+        "Lower EMBED_CTX_TOKENS to the window the embedding endpoint serves, "
+        "or raise what it serves to match — see docs/deployment.md."
+    )
 
 
 def test_budgeted_embedding_raises_on_vllm_oversize(

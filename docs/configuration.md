@@ -56,7 +56,7 @@ When the snapshot is missing or `EMBED_TOKENIZER_REPO` is empty (e.g. OpenAI pro
 
 | Variable | Default | Description |
 |---|---|---|
-| `EMBED_CTX_TOKENS` | `2048` (ollama) / `8191` (openai + `text-embedding-3-*`) / `CHAT_MAX_MODEL_LEN` (vllm) / `8192` (fallback) | Embedding context window in tokens. Must match the provider's serving ceiling. Ollama's default is `num_ctx=2048`; operators who bake a custom Modelfile with `PARAMETER num_ctx 8192` can set this to `8192` to reclaim the full bge-m3 window — see `docs/deployment.md` for the `deploy/Modelfile.bge-m3` recipe. Must be between `256` and `32768`. |
+| `EMBED_CTX_TOKENS` | `2048` (ollama) / `8191` (openai + `text-embedding-3-*`) / `CHAT_MAX_MODEL_LEN` (vllm) / `8192` (fallback) | Embedding context window in tokens. Must match the window the embedding endpoint actually serves, which can be smaller than the model's own; to use more of it, raise both together — see `docs/deployment.md` § Context window. Must be between `256` and `32768`. |
 | `EMBED_CHAR_TOKEN_RATIO` | `3.5` | Characters-per-token estimator for mixed-language content (fallback when tokenizer is unavailable). Under-counts tokens intentionally to stay under budget. |
 | `EMBED_CTX_SAFETY_MARGIN` | `0.95` | Fraction of `EMBED_CTX_TOKENS` left for the payload after reserving BOS/EOS and estimator slack. Must lie in `(0, 1]`. |
 | `EMBED_TIMEOUT_SECONDS` | `1800` (ollama) / `600` (vllm) / `60` (openai) | HTTP request timeout in seconds for the embedding endpoint. Must be positive. Init-time warning logged if `timeout × (1 + max_retries) > 3600` (potential multi-hour stall). |
@@ -175,19 +175,9 @@ parent_context_windowed` in the logs surfaces when windowing fires and
 at what ratio.
 
 If windowing fires frequently and you want the full parent back,
-raise the chat context window at the provider. For Ollama, a
-Modelfile override is the cleanest path — mirror the
-`deploy/Modelfile.bge-m3` pattern already used for embeddings:
-
-```text
-FROM gemma4:31b-cloud
-PARAMETER num_ctx 32768
-```
-
-Save that as `deploy/Modelfile.gemma4`, run
-`ollama create docint-gemma4 -f deploy/Modelfile.gemma4`, set
-`TEXT_MODEL=docint-gemma4` and `OPENAI_CTX_WINDOW=32768`, and the
-packer automatically scales up.
+raise the context window the chat endpoint serves, in the endpoint's
+own configuration, and set `OPENAI_CTX_WINDOW` to the same value; the
+packer scales up automatically.
 
 #### What metadata reaches the chat LLM
 
@@ -584,9 +574,9 @@ Loaded by `load_hate_speech_env()` (`env_cfg.py:457`).
 | `HATE_SPEECH_WINDOW_TOKENS` | `1000` | Estimated tokens of Nextext transcript segments labelled per request (the window's core). |
 | `HATE_SPEECH_CONTEXT_TOKENS` | `300` | Estimated tokens of read-only neighbouring segments shown on each side of the core; `0` disables the context. |
 
-The hate-speech prompts need a chat context of at least 8k tokens. Ollama's
-default `num_ctx` of 2048 silently truncates them; see `docs/ingestion.md`
-§ NER and hate-speech.
+The hate-speech prompts need a chat context of at least 8k tokens; an endpoint
+that serves less rejects them or silently truncates them. See
+`docs/ingestion.md` § NER and hate-speech.
 
 ## Graph-RAG — `GraphRAGConfig`
 

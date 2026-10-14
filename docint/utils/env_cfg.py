@@ -166,9 +166,8 @@ def load_embedding_env(
 
     provider_default_ctx = default_ctx_tokens
     if inference_provider == "ollama":
-        # Ollama's default num_ctx is 2048 regardless of model capacity.
-        # Operators who raise it via a Modelfile set EMBED_CTX_TOKENS
-        # explicitly. See deploy/Modelfile.bge-m3 and docs/deployment.md.
+        # This provider serves 2048 tokens by default, whatever the model's capacity;
+        # raising the served window means setting EMBED_CTX_TOKENS to match (docs/deployment.md).
         provider_default_ctx = 2048
     elif inference_provider == "openai" and embed_model.startswith("text-embedding-3-"):
         provider_default_ctx = 8191

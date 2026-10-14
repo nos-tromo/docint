@@ -335,13 +335,11 @@ def test_embedding_config_default_ctx_tokens_for_ollama(
 ) -> None:
     """Ollama default ``ctx_tokens`` must be 2048.
 
-    Ollama serves ``bge-m3`` with ``num_ctx=2048`` by default and its
-    ``/api/show`` response does not publish ``num_ctx`` reliably across
-    versions, so probing the live server is unreliable. The embedding
-    loader therefore defaults the budget to 2048 on ollama; operators
-    who raise the window via a custom Modelfile
-    (``ollama create docint-bge-m3 -f deploy/Modelfile.bge-m3``) set
-    ``EMBED_CTX_TOKENS=8192`` in ``.env`` to reclaim the full window.
+    That provider serves ``bge-m3`` with a 2048-token window by default and
+    does not publish the served value reliably across versions, so probing
+    the live server is unreliable. The embedding loader therefore defaults
+    the budget to 2048 on ollama; operators who raise the served window set
+    ``EMBED_CTX_TOKENS`` to match in ``.env``.
 
     Args:
         monkeypatch: Fixture to override environment variables.
@@ -361,10 +359,9 @@ def test_embedding_config_env_var_override_reclaims_8192_on_ollama(
 ) -> None:
     """Operator env-var override must take precedence over the 2048 ollama default.
 
-    Pins the escape hatch: when an operator ships a custom Modelfile
-    that raises bge-m3's ``num_ctx`` to 8192 (see
-    ``deploy/Modelfile.bge-m3``), they set ``EMBED_CTX_TOKENS=8192`` in
-    ``.env`` and the loader honours that choice regardless of provider.
+    Pins the escape hatch: when an operator raises the window the endpoint
+    serves to 8192, they set ``EMBED_CTX_TOKENS=8192`` in ``.env`` and the
+    loader honours that choice regardless of provider.
 
     Args:
         monkeypatch: Fixture to override environment variables.

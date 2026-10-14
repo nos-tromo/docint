@@ -230,9 +230,8 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             f"configured={self._context_window}, "
             f"provider_limit={model_limit}, "
             f"provider_input_tokens={input_tokens}{batch_stats}. "
-            "Lower EMBED_CTX_TOKENS to match the provider's serving "
-            "ceiling, or raise ollama's num_ctx via a Modelfile "
-            "(PARAMETER num_ctx N) — see docs/deployment.md."
+            "Lower EMBED_CTX_TOKENS to the window the embedding endpoint "
+            "serves, or raise what it serves to match — see docs/deployment.md."
         )
 
     @staticmethod
