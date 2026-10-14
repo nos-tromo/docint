@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
 
@@ -661,6 +662,20 @@ def _allowances(
     return char_budget, floors, allocate_with_floors([len(body) for body in bodies], floors, max(0, char_budget))
 
 
+def _legible(char_budget: int, floors: Sequence[int], allowances: Sequence[int]) -> bool:
+    """Judge a packing legible: text room remains and every passage keeps its floor.
+
+    Args:
+        char_budget (int): The text budget left after headers, joins and markers.
+        floors (Sequence[int]): Each passage's :func:`text_floor`.
+        allowances (Sequence[int]): Each passage's allowance, aligned with ``floors``.
+
+    Returns:
+        bool: Whether the packing keeps every passage legible.
+    """
+    return char_budget > 0 and all(allowance >= floor for floor, allowance in zip(floors, allowances, strict=True))
+
+
 def evidence_fits(
     nodes: list[NodeWithScore],
     *,
@@ -686,17 +701,16 @@ def evidence_fits(
         every retrieved match it holds; a passage shown whole fits however short it is.
     """
     headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
-    char_budget, floors, allowances = _allowances(
-        headers,
-        bodies,
-        anchors,
-        budget_tokens=budget_tokens,
-        char_token_ratio=char_token_ratio,
-        count_tokens=count_tokens,
+    return _legible(
+        *_allowances(
+            headers,
+            bodies,
+            anchors,
+            budget_tokens=budget_tokens,
+            char_token_ratio=char_token_ratio,
+            count_tokens=count_tokens,
+        )
     )
-    if char_budget <= 0:
-        return False
-    return all(allowance >= floor for floor, allowance in zip(floors, allowances, strict=True))
 
 
 def fit_ledger(
@@ -774,6 +788,21 @@ def _fit_windows(body: str, allowance: int, anchors: Sequence[tuple[int, int]] =
     return WINDOW_JOIN.join(text for text, _ in fitted), any(cut for _, cut in fitted)
 
 
+class RenderedContext(NamedTuple):
+    """Evidence packed into the answer prompt's context.
+
+    Attributes:
+        context (str): The context block.
+        shortened (int): How many entries were shortened.
+        legible (bool): Whether every passage kept its :func:`text_floor`, as
+            :func:`evidence_fits` judges it for the same evidence and budget.
+    """
+
+    context: str
+    shortened: int
+    legible: bool
+
+
 def render_context(
     nodes: list[NodeWithScore],
     *,
@@ -782,7 +811,7 @@ def render_context(
     char_token_ratio: float,
     count_tokens: Callable[[str], int] | None = None,
     compact: bool = False,
-) -> tuple[str, int]:
+) -> RenderedContext:
     """Render numbered nodes like the grounded prompt's context, shortened to fit.
 
     Headers are always kept; the text budget is shared with each passage's
@@ -804,10 +833,11 @@ def render_context(
             only the overflow retry compacts them.
 
     Returns:
-        tuple[str, int]: The context block and how many entries were shortened.
+        RenderedContext: The context block, how many entries were shortened, and
+        whether the packing kept every passage legible.
     """
     headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
-    _, _, allowances = _allowances(
+    char_budget, floors, allowances = _allowances(
         headers,
         bodies,
         anchors,
@@ -822,4 +852,5 @@ def render_context(
         shortened += int(cut)
         rendered.append(f"{header}\n\n{fitted}" if header else fitted)
     # Texts are defused once cut, which only shortens them, and a join can complete a sentinel no part holds.
-    return neutralize_sentinel("\n\n".join(rendered)), shortened
+    context = neutralize_sentinel("\n\n".join(rendered))
+    return RenderedContext(context, shortened, _legible(char_budget, floors, allowances))

@@ -126,8 +126,8 @@ class AssessmentResult:
             ledger order; research additions left out to fit are not among them.
         steps (int): Research rounds that ran.
         actions (list[dict[str, Any]]): The seed and every search, in order.
-        reason (str | None): Why research stopped short, or left out passages it
-            found (``context_budget``), or ``None``; the first cause is kept.
+        reason (str | None): Why research stopped short, or why the evidence it
+            found was cut short (``context_budget``), or ``None``; the first cause is kept.
         shortened (int): Entries cut to fit the answer's context.
     """
 
@@ -284,7 +284,7 @@ class AssessmentRunner:
 
     def _open_answer(
         self, nodes: list[NodeWithScore], *, block: str, question: str, budget_tokens: int, compact: bool = False
-    ) -> tuple[Iterator[str], int]:
+    ) -> tuple[Iterator[str], int, bool]:
         """Render the evidence into the answer prompt, send it and pull the first token.
 
         The endpoint's HTTP error, a context overflow included, surfaces on that
@@ -298,10 +298,11 @@ class AssessmentRunner:
             compact (bool): Whether headers are compacted, as on the overflow retry.
 
         Returns:
-            tuple[Iterator[str], int]: The answer tokens, the first one included,
-            and how many entries were shortened.
+            tuple[Iterator[str], int, bool]: The answer tokens, the first one
+            included; how many entries were shortened; and whether the evidence
+            sent kept every passage legible (see :class:`RenderedContext`).
         """
-        context, shortened = render_context(
+        rendered = render_context(
             nodes,
             llm_view=self._llm_view,
             budget_tokens=budget_tokens,
@@ -309,12 +310,12 @@ class AssessmentRunner:
             count_tokens=self._count_tokens,
             compact=compact,
         )
-        prompt = self._answer_prompt.format(prior_turn=block, context_str=context, question=question)
+        prompt = self._answer_prompt.format(prior_turn=block, context_str=rendered.context, question=question)
         tokens = stream_chat_response_to_tokens(
             self._answer_llm.stream_chat([ChatMessage(role=MessageRole.USER, content=prompt)])
         )
         first = next(tokens, None)
-        return itertools.chain([] if first is None else [first], tokens), shortened
+        return itertools.chain([] if first is None else [first], tokens), rendered.shortened, rendered.legible
 
     def run(
         self, *, question: str, prior_turn: PriorTurn | None, seed: Sequence[NodeWithScore]
@@ -322,8 +323,9 @@ class AssessmentRunner:
         """Run the turn.
 
         ``context_budget`` is reported when the room ended research before its step
-        cap, when the seed left no room for research to run, or when fewer passages
-        reach the answer than the ledger holds; a reason already given is kept.
+        cap, when the seed left no room for research to run, when fewer passages
+        reach the answer than the ledger holds, or when the evidence sent, after the
+        first fit or the overflow retry's, is not legible; a reason already given is kept.
 
         Args:
             question (str): The user's message, verbatim.
@@ -385,7 +387,7 @@ class AssessmentRunner:
         nodes = self._fit(ledger.numbered(), keep=seed_count, budget_tokens=evidence_budget)
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
         try:
-            tokens, shortened = self._open_answer(
+            tokens, shortened, legible = self._open_answer(
                 nodes, block=block, question=question.strip(), budget_tokens=evidence_budget
             )
         except Exception as exc:
@@ -402,7 +404,7 @@ class AssessmentRunner:
             if not self._room(nodes, budget_tokens=retry_budget, compact=True).headers_fit:
                 raise ValueError("The assessment prompt exceeds the model's context window.") from exc
             try:
-                tokens, shortened = self._open_answer(
+                tokens, shortened, legible = self._open_answer(
                     nodes, block=block, question=question.strip(), budget_tokens=retry_budget, compact=True
                 )
             except Exception as retry_exc:
@@ -419,8 +421,8 @@ class AssessmentRunner:
         tail = splitter.flush()
         if tail:
             yield tail
-        if reason is None and len(nodes) < len(ledger):
-            # Research found passages the answer had no room to show.
+        if reason is None and (len(nodes) < len(ledger) or not legible):
+            # Passages were left out, or the evidence sent was cut below its legible minimum.
             reason = "context_budget"
         yield AssessmentResult(
             raw_text="".join(raw), nodes=nodes, steps=steps, actions=actions, reason=reason, shortened=shortened

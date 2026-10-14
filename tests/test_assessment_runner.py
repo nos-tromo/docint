@@ -28,6 +28,7 @@ from docint.agents.assessment.ledger import (
     EvidenceLedger,
     Room,
     answer_budget,
+    evidence_fits,
 )
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import (
@@ -245,6 +246,8 @@ def test_a_seed_larger_than_the_cap_is_kept_whole_and_shortened() -> None:
     assert len(result.nodes) == 30
     assert result.shortened > 0
     assert sorted(node.node.metadata["citation_index"] for node in result.nodes) == list(range(1, 31))
+    # Shortened, but each to no less than its minimum: no reduction to report.
+    assert result.reason is None
 
 
 def test_a_long_prior_answer_still_fits_the_window() -> None:
@@ -412,6 +415,8 @@ def test_an_overflowing_answer_prompt_is_rebuilt_once_with_less_evidence() -> No
     # The first prompt held every passage whole, so the count can only be the retry's.
     assert "characters not shown" not in first
     assert result.shortened == 8
+    # At 60% the eight passages still keep their minimum, so nothing is reported.
+    assert result.reason is None
 
 
 def test_a_second_overflow_ends_the_turn_as_a_context_window_error() -> None:
@@ -693,6 +698,72 @@ def test_a_ledger_denser_than_its_seed_leaves_out_its_latest_research_passages()
     answer = [item for item in items if isinstance(item, AgentProgress)][-1]
     assert (answer.action, answer.found) == ("answer", len(kept))
     # What research found and the answer could not show is a reduction the turn reports.
+    assert result.reason == "context_budget"
+
+
+def _thin_seed(count: int) -> list[NodeWithScore]:
+    """Return short invented passages, each the first window of its section.
+
+    Args:
+        count (int): How many passages.
+
+    Returns:
+        list[NodeWithScore]: The seed evidence.
+    """
+    return [scored_node(f"n{number}", f"Seed passage {number}.", page=number) for number in range(1, count + 1)]
+
+
+def _dense_windows(count: int) -> list[NodeWithScore]:
+    """Return a later window of each :func:`_thin_seed` section, in text :func:`_denser` counts as dense.
+
+    Args:
+        count (int): How many windows.
+
+    Returns:
+        list[NodeWithScore]: The windows, sharing the seed passages' node ids.
+    """
+    return [scored_node(f"n{number}", "§" * 3000, page=number) for number in range(1, count + 1)]
+
+
+@pytest.mark.parametrize(("given", "reported"), [(None, "context_budget"), ("time_budget", "time_budget")])
+def test_evidence_sent_below_its_legible_minimum_is_reported(given: str | None, reported: str) -> None:
+    """Research extends every seed passage with text denser than the seed it was admitted against.
+
+    Nothing can be left out (it is all seed), so the answer is sent with passages cut below their
+    minimum; the turn says so, unless research already gave its own reason.
+
+    Args:
+        given (str | None): Why research says it stopped.
+        reported (str): The reason the turn must report.
+    """
+    runner, _ = _runner(researcher=_AddsOneBatch(_dense_windows(20), reason=given), count_tokens=_denser)
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=_thin_seed(20)))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert len(result.nodes) == 20
+    assert all("§" in scored.node.get_content(metadata_mode=MetadataMode.NONE) for scored in result.nodes)
+    template = load_localized_prompt("assessment_answer", default=DEFAULT_ASSESSMENT_ANSWER_PROMPT, lang="en")
+    budget = answer_budget(ctx_window=8192, template=template, reasoning=False, char_token_ratio=3.5)
+    assert not evidence_fits(
+        result.nodes,
+        llm_view=llm_view,
+        budget_tokens=budget.evidence_tokens,
+        char_token_ratio=3.5,
+        count_tokens=_denser,
+    )
+    assert result.reason == reported
+
+
+def test_a_retry_that_cuts_the_seed_below_its_minimum_is_reported() -> None:
+    """At 60% of the budget forty pinned passages no longer keep their minimum; none can go, so the turn says so."""
+    runner, llm = _runner(failures=[bad_request(OVERFLOW)])
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=_long_seed(40)))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert llm.stream_chat.call_count == 2
+    assert len(result.nodes) == 40
     assert result.reason == "context_budget"
 
 

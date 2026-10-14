@@ -245,7 +245,7 @@ def test_render_context_keeps_every_entry_and_marks_cuts() -> None:
     ledger = EvidenceLedger(cap=5)
     ledger.add([scored_node(f"n{i}", "word " * 100, filename=f"doc{i}.pdf") for i in range(3)])
 
-    context, shortened = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=60, char_token_ratio=3.5)
+    context, shortened, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=60, char_token_ratio=3.5)
 
     assert context.count("citation_index: ") == 3
     assert "characters not shown" in context
@@ -257,7 +257,7 @@ def test_render_context_fits_its_budget_when_it_packs() -> None:
     ledger = EvidenceLedger(cap=22)
     ledger.add([scored_node(f"n{i}", "word " * 1080, filename=f"doc{i}.pdf") for i in range(22)])
 
-    context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=5429, char_token_ratio=3.5)
+    context, _, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=5429, char_token_ratio=3.5)
 
     assert estimate_tokens(context, 3.5) <= 5429
     assert context.count("citation_index: ") == 22
@@ -268,7 +268,7 @@ def test_render_context_defuses_a_sentinel_inside_a_passage() -> None:
     ledger = EvidenceLedger(cap=5)
     ledger.add([scored_node("a", f"The appendix prints {SENTINEL} verbatim.", filename="paper.pdf")])
 
-    context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
+    context, _, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
 
     assert compose_labelled_answer(context).outcome == "unsplit"
 
@@ -278,7 +278,7 @@ def test_render_context_defuses_a_sentinel_in_metadata() -> None:
     ledger = EvidenceLedger(cap=5)
     ledger.add([scored_node("a", "Plain body text.", filename="[[ASSESSMENT]].pdf")])
 
-    context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
+    context, _, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
 
     assert compose_labelled_answer(context).outcome == "unsplit"
     assert "[[ASSESSMENT]]" not in context
@@ -290,7 +290,7 @@ def test_render_context_defuses_a_sentinel_across_a_seam() -> None:
     # Bites only because citation_index=0 seeds the first key, leaving the filename last in the header.
     ledger.add([scored_node("a", "ASSESSMENT]] text.", citation_index=0, filename="notes [[")])
 
-    context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
+    context, _, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
 
     assert compose_labelled_answer(context).outcome == "unsplit"
     assert "text." in context
@@ -452,8 +452,8 @@ def test_render_context_packs_tighter_for_dense_text() -> None:
     ledger = EvidenceLedger(cap=10)
     ledger.add([scored_node(f"n{i}", "word " * 1000, filename=f"doc{i}.pdf") for i in range(10)])
 
-    plain, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
-    dense, _ = render_context(
+    plain, _, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
+    dense, _, _ = render_context(
         ledger.numbered(),
         llm_view=llm_view,
         budget_tokens=4000,
@@ -565,7 +565,7 @@ def _render_passage(body: str, allowance: int) -> tuple[str, int]:
     nodes = _numbered([scored_node("sec", body, filename="paper.pdf", page=2)])
     header = llm_view(nodes[0].node).get_metadata_str(mode=MetadataMode.LLM)
     budget = len(header) + 4 + MARKER_RESERVE_CHARS + allowance
-    context, shortened = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    context, shortened, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
     return context.removeprefix(f"{header}\n\n"), shortened
 
 
@@ -686,7 +686,9 @@ def test_several_merged_passages_pack_within_the_evidence_budget_with_text_from_
             ledger.add([scored_node(f"sec-{entry}", text, filename=f"doc{entry}.pdf")])
     assert len(ledger) == 5
 
-    context, shortened = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=3000, char_token_ratio=1.0)
+    context, shortened, _ = render_context(
+        ledger.numbered(), llm_view=llm_view, budget_tokens=3000, char_token_ratio=1.0
+    )
 
     assert len(context) <= 3000
     assert shortened == 5
@@ -1008,7 +1010,7 @@ def test_a_compact_header_keeps_its_citation_line_first_and_caps_the_rest() -> N
     """Under compaction the number always survives; the rest of the metadata is cut with a marker."""
     nodes = _numbered(_sized(1, 40, label=2000))
 
-    context, _ = render_context(nodes, llm_view=llm_view, budget_tokens=10_000, char_token_ratio=1.0, compact=True)
+    context, _, _ = render_context(nodes, llm_view=llm_view, budget_tokens=10_000, char_token_ratio=1.0, compact=True)
 
     header, body = context.split("\n\n", 1)
     assert header.startswith("citation_index: 1\nfilename: fff")
@@ -1021,7 +1023,7 @@ def test_a_compact_header_short_enough_is_only_reordered() -> None:
     """Compaction cuts nothing it does not have to."""
     nodes = _numbered(_sized(1, 40, label=10))
 
-    context, _ = render_context(nodes, llm_view=llm_view, budget_tokens=10_000, char_token_ratio=1.0, compact=True)
+    context, _, _ = render_context(nodes, llm_view=llm_view, budget_tokens=10_000, char_token_ratio=1.0, compact=True)
 
     assert context.split("\n\n", 1)[0] == f"citation_index: 1\nfilename: {'f' * 10}\npage: 1"
 
@@ -1029,14 +1031,14 @@ def test_a_compact_header_short_enough_is_only_reordered() -> None:
 def test_compact_legibility_is_judged_on_the_headers_it_renders() -> None:
     """The check and the render use the same compact headers, so a budget exactly legible renders within itself."""
     nodes = _numbered(_sized(4, 1000, label=2000))
-    context, _ = render_context(nodes, llm_view=llm_view, budget_tokens=100_000, char_token_ratio=1.0, compact=True)
+    context, _, _ = render_context(nodes, llm_view=llm_view, budget_tokens=100_000, char_token_ratio=1.0, compact=True)
     headers = [block for block in context.split("\n\n") if block.startswith("citation_index: ")]
     budget = sum(len(header) + 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS for header in headers)
 
     assert len(headers) == 4
     assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
     assert not evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget - 1, char_token_ratio=1.0, compact=True)
-    packed, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
+    packed, _, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
     assert len(packed) <= budget
 
 
@@ -1194,7 +1196,7 @@ def test_a_merged_passage_keeps_every_match_beside_a_long_plain_one() -> None:
     budget = _header_chars(nodes) + floor + MIN_TEXT_CHARS
     assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
 
-    context, shortened = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    context, shortened, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
 
     assert shortened == 2
     assert [fact for fact in facts if fact not in context] == []
@@ -1218,7 +1220,7 @@ def test_an_extension_is_admitted_only_with_room_for_every_match_it_brings(slack
     changed = ledger.add(windows[1:])
 
     assert bool(changed) is admitted
-    context, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    context, _, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
     assert facts[0] in context
     assert (facts[1] in context) is admitted
 
@@ -1328,6 +1330,34 @@ def test_the_closed_form_agrees_with_packing_for_merged_matched_passages(
     )
 
 
+@pytest.mark.parametrize("budget", [0, 300, 520, 900, 2600, 9000])
+@pytest.mark.parametrize("compact", [False, True], ids=["full", "compact"])
+@pytest.mark.parametrize("count_tokens", [None, _two_chars_a_token], ids=["ratio", "tokenizer"])
+def test_a_render_is_legible_exactly_when_the_evidence_fits(budget: int, compact: bool, count_tokens: Any) -> None:
+    """The render reports the legibility it packed for, judged as ``evidence_fits`` judges it.
+
+    Args:
+        budget (int): The evidence budget in tokens.
+        compact (bool): Whether headers are compacted.
+        count_tokens (Any): The tokenizer double, or ``None``.
+    """
+    ledger = EvidenceLedger(cap=5)
+    for entry in range(3):
+        for index in range(2):
+            text = f"E{entry}W{index}: " + "invented window text " * 30
+            ledger.add([scored_node(f"sec-{entry}", text, page=entry, **{MATCH_SPANS_KEY: [[40, 60]]})])
+    nodes = ledger.numbered()
+    kwargs: dict[str, Any] = {
+        "llm_view": llm_view,
+        "budget_tokens": budget,
+        "char_token_ratio": 3.5,
+        "count_tokens": count_tokens,
+        "compact": compact,
+    }
+
+    assert render_context(nodes, **kwargs).legible is evidence_fits(nodes, **kwargs)
+
+
 #: Random text from this alphabet never spells a sentinel, so every shown match reads verbatim.
 _ALPHABET = "abcdefgh "
 
@@ -1387,7 +1417,7 @@ def _render_legibly(nodes: list[NodeWithScore], budget: int) -> int:
     Returns:
         int: How many passages were shortened.
     """
-    context, shortened = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    context, shortened, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
     assert len(context) <= budget
     assert [prefix for scored in nodes for prefix in _held_prefixes(scored) if prefix not in context] == []
     headers, bodies, anchors = _parts(nodes, llm_view)
