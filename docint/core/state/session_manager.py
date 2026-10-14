@@ -109,6 +109,24 @@ def _log_turn_summary(
         pass
 
 
+def _load_trail(raw: str | None) -> dict[str, Any] | None:
+    """Parse a turn's persisted assessment trail.
+
+    Args:
+        raw (str | None): The stored JSON, or ``None`` on a lookup turn.
+
+    Returns:
+        dict[str, Any] | None: The trail, or ``None`` when absent or unreadable.
+    """
+    if not raw:
+        return None
+    try:
+        trail = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return trail if isinstance(trail, dict) else None
+
+
 class SessionCollectionMismatchError(Exception):
     """Raised when a chat turn targets a session pinned to another collection.
 
@@ -715,7 +733,7 @@ class SessionManager:
 
             rolling_summary = cast(str | None, conv.rolling_summary) or ""
             session_meta = {
-                "schema_version": "1.0.0",
+                "schema_version": "1.1.0",
                 "session_id": conv.id,
                 "created_at": conv.created_at.replace(tzinfo=UTC).isoformat(),
                 "turn_count": len(conv.turns),
@@ -749,6 +767,8 @@ class SessionManager:
                         "rewritten_query": t.rewritten_query,
                         "assistant_text": t.model_response,
                         "reasoning": t.reasoning,
+                        "answer_mode": "assessment" if t.agent_trail else "lookup",
+                        "agent": _load_trail(t.agent_trail),
                     }
                     f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
@@ -927,6 +947,7 @@ class SessionManager:
         *,
         owner: str | None = None,
         replace_idx: int | None = None,
+        agent_trail: dict[str, Any] | None = None,
     ) -> int:
         """Persist a user message and the assistant's response in the database.
 
@@ -944,6 +965,9 @@ class SessionManager:
                 ``user_text`` is deliberately preserved: the retry's
                 ``user_msg`` is a machine-reformulated query the user never
                 typed. Falls back to appending when the row is missing.
+            agent_trail (dict[str, Any] | None): The assessment trail to store;
+                ``None`` on a lookup turn, which also clears a replaced turn's
+                trail.
 
         Returns:
             int: The 0-based index of the persisted turn within the
@@ -951,6 +975,7 @@ class SessionManager:
                 results that complete after this row is written.
         """
         with self._session_scope() as s:
+            trail_json = json.dumps(agent_trail, ensure_ascii=False) if agent_trail is not None else None
             conv = self._load_or_create_convo(s, session_id, owner)
 
             meta = getattr(resp, "metadata", {}) or {}
@@ -978,6 +1003,7 @@ class SessionManager:
                 t.rewritten_query = rewritten  # type: ignore[assignment]
                 t.model_response = data.get("response") or ""  # type: ignore[assignment]
                 t.reasoning = reasoning  # type: ignore[assignment]
+                t.agent_trail = trail_json
                 # Flush the delete-orphan cascade before the replacements are
                 # inserted, so the turn never momentarily holds both sets and
                 # replay cannot renumber citations against a stale row.
@@ -992,6 +1018,7 @@ class SessionManager:
                     rewritten_query=rewritten,
                     model_response=data.get("response") or "",
                     reasoning=reasoning,
+                    agent_trail=trail_json,
                 )
                 s.add(t)
             s.flush()
@@ -1249,9 +1276,43 @@ class SessionManager:
                     if t.retried:
                         msg_entry["retried"] = True
                         msg_entry["retry_query"] = t.retry_query
+                    trail = _load_trail(t.agent_trail)
+                    if trail is not None:
+                        msg_entry["answer_mode"] = "assessment"
+                        msg_entry["agent"] = trail
                     messages.append(msg_entry)
 
             return messages
+
+    def get_prior_turn(self, session_id: str, owner: str | None) -> PriorTurn | None:
+        """Read the last exchange of a session the caller owns.
+
+        Reads only the newest turn's text and trail. Building it from the full
+        history rehydrated every citation of every turn just to look at one.
+
+        Args:
+            session_id (str): The ID of the session.
+            owner (str | None): The principal requesting it; ``None`` matches
+                legacy un-owned rows.
+
+        Returns:
+            PriorTurn | None: The previous exchange, or ``None`` for a new,
+            missing or foreign session.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return None
+            turn = s.query(Turn).filter_by(conversation_id=session_id).order_by(Turn.idx.desc()).first()
+            if turn is None or not (turn.model_response or "").strip():
+                return None
+            trail = _load_trail(turn.agent_trail)
+            evidence_chars = trail.get("evidence_chars") if trail else None
+            return PriorTurn(
+                user_text=(turn.user_text or "").strip(),
+                assistant_text=turn.model_response.strip(),
+                evidence_chars=evidence_chars if isinstance(evidence_chars, int) else None,
+            )
 
     def _pinned_collection_scope(self, conv: Conversation) -> AbstractContextManager[Any]:
         """Bind the collection a conversation was pinned to on creation.

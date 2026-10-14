@@ -50,6 +50,28 @@ class PriorTurn:
 
     user_text: str
     assistant_text: str
+    evidence_chars: int | None = None
+    """Length of the source-backed part when the answer was an assessment.
+
+    ``None`` means the whole answer is source-backed, as on an ordinary lookup.
+    """
+
+    def evidence_only(self) -> "PriorTurn | None":
+        """Return this exchange without the model's own assessment.
+
+        A lookup turn may restate its prior answer, so it must never be handed
+        the general-knowledge part of an assessment as if it were sourced.
+
+        Returns:
+            PriorTurn | None: The exchange cut to its source-backed part, or
+            ``None`` when nothing source-backed remains.
+        """
+        if self.evidence_chars is None:
+            return self
+        evidence = self.assistant_text[: self.evidence_chars].strip()
+        if not evidence:
+            return None
+        return PriorTurn(user_text=self.user_text, assistant_text=evidence)
 
 
 @dataclass
