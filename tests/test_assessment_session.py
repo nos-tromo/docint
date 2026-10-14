@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -358,3 +359,57 @@ def test_a_stateless_assessment_streams_through_the_real_manager(session_manager
     assert rag._normalize_response_data.call_args.kwargs["metadata_filters_active"] is True
     with session_manager._session_scope() as s:
         assert s.query(Turn).count() == 0
+
+
+@pytest.mark.parametrize(("scope", "expected_reason"), [(["n1", "n2"], "scoped"), (None, "unavailable")])
+def test_a_stateless_assessment_reports_why_graph_expansion_did_not_run(
+    session_manager: SessionManager, scope: list[str] | None, expected_reason: str
+) -> None:
+    """A missing expansion payload is owed the skipped shape the session path reports, not an empty one.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        scope (list[str] | None): The pinned chunk ids, if any.
+        expected_reason (str): The reason the panel must name.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.ensure_session_manager.return_value = session_manager
+    rag.graphrag_enabled = True
+    rag._graph_debug_base.side_effect = lambda query: RAG._graph_debug_base(rag, query)
+    rag.graph_debug_skipped.side_effect = lambda query, reason: RAG.graph_debug_skipped(rag, query, reason)
+    _arm(session_manager, nodes=_seed())
+
+    final = list(
+        RAG.stream_stateless_assessment(
+            rag, QUESTION, expanded_query="expanded", graph_debug=None, scoped_node_ids=scope
+        )
+    )[-1]
+
+    assert isinstance(final, dict)
+    graph_debug = final["graph_debug"]
+    assert (graph_debug["applied"], graph_debug["reason"]) == (False, expected_reason)
+    assert graph_debug["original_query"] == "expanded"
+
+
+def test_a_stateless_assessment_starts_its_clock_before_the_engine_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The logged duration covers the engine build, as it does on the session path.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    now = [100.0]
+    monkeypatch.setattr("docint.core.rag.time", SimpleNamespace(monotonic=lambda: now[0]))
+    rag = MagicMock()
+    rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
+    manager = rag.ensure_session_manager.return_value
+    manager.stream_assessment.return_value = iter([])
+
+    def _build_engine(**_kwargs: Any) -> MagicMock:
+        now[0] = 105.0
+        return MagicMock()
+
+    rag.build_query_engine.side_effect = _build_engine
+
+    list(RAG.stream_stateless_assessment(rag, QUESTION, expanded_query="expanded", graph_debug={}))
+
+    assert manager.stream_assessment.call_args.kwargs["turn_started_at"] == 100.0

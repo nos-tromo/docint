@@ -2492,7 +2492,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     for item in rag.stream_stateless_assessment(
                         payload.question,
                         expanded_query=retrieval_query,
-                        graph_debug=graph_debug or {},
+                        graph_debug=graph_debug,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
@@ -2726,7 +2726,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             rag.stream_stateless_assessment(
                                 payload.question,
                                 expanded_query=retrieval_query,
-                                graph_debug=graph_debug or {},
+                                graph_debug=graph_debug,
                                 metadata_filters=metadata_filters,
                                 metadata_filter_rules=payload.metadata_filters,
                                 vector_store_kwargs=vector_store_kwargs or None,

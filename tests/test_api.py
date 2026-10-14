@@ -708,6 +708,8 @@ class DummyRAG:
     def stream_stateless_assessment(self, question: str, **kwargs: Any) -> Generator[Any, None, None]:
         """Stream a canned stateless assessment and record the call.
 
+        Like the real entry point, it reports a missing expansion payload as skipped, with a reason.
+
         Args:
             question (str): The user's question.
             **kwargs (Any): The forwarded request settings.
@@ -716,6 +718,9 @@ class DummyRAG:
             Any: One research step, one token, then the final payload.
         """
         self.stateless_assessments.append({"question": question, **kwargs})
+        graph_debug = kwargs["graph_debug"]
+        if graph_debug is None:
+            graph_debug = {"applied": False, "reason": "scoped" if kwargs.get("scoped_node_ids") else "unavailable"}
         yield AgentProgress(step=0, action="seed", detail="", found=1)
         yield "Fact [1]."
         yield {
@@ -725,6 +730,7 @@ class DummyRAG:
             "turn_idx": None,
             "retrieval_mode": "agent",
             "answer_mode": "assessment",
+            "graph_debug": graph_debug,
             "agent": {**SPLIT_AGENT, "steps": 0},
         }
 
@@ -6034,6 +6040,8 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
 ) -> None:
     """Stateless has no session to supply them, and a dropped scope would let research widen a pinned set.
 
+    Expansion is skipped under a scope, so the panel is told why instead of receiving an empty payload.
+
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
@@ -6054,6 +6062,7 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
     )
 
     call = cast(Any, api_module.rag).stateless_assessments[0]
+    final = response.json() if path == "/query" else _sse_frames(response.text)[-1]
     assert response.status_code == 200
     assert classified == [("What could be improved?", None, "documents")]
     assert (call["scoped_node_ids"], call["retrieval_target"]) == (["c1"], "documents")
@@ -6061,3 +6070,6 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
     assert [rule.field for rule in call["metadata_filter_rules"]] == ["mimetype"]
     assert call["metadata_filters"] is not None
     assert "qdrant_filters" in call["vector_store_kwargs"]
+    assert call["graph_debug"] is None
+    assert isinstance(final["graph_debug"], dict)
+    assert final["graph_debug"]["reason"] == "scoped"

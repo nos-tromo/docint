@@ -8159,7 +8159,7 @@ class RAG:
         question: str,
         *,
         expanded_query: str,
-        graph_debug: dict[str, Any],
+        graph_debug: dict[str, Any] | None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -8174,7 +8174,9 @@ class RAG:
         Args:
             question (str): The user's message, verbatim.
             expanded_query (str): The graph-expanded query to seed with.
-            graph_debug (dict[str, Any]): The expansion's debug payload.
+            graph_debug (dict[str, Any] | None): The expansion's debug payload;
+                ``None`` when expansion did not run, which is reported as skipped
+                (``scoped`` under a pinned scope, otherwise ``unavailable``).
             metadata_filters (MetadataFilters | None): Compiled request filters.
             metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
             vector_store_kwargs (dict[str, Any] | None): Native vector-store kwargs.
@@ -8184,7 +8186,10 @@ class RAG:
         Yields:
             Any: Research steps, answer text, then the final payload.
         """
+        turn_started_at = time.monotonic()
         metadata_filters_active = metadata_filters is not None or bool(vector_store_kwargs)
+        if graph_debug is None:
+            graph_debug = self.graph_debug_skipped(expanded_query, "scoped" if scoped_node_ids else "unavailable")
         engine = self.build_query_engine(
             metadata_filters=metadata_filters,
             streaming=True,
@@ -8209,7 +8214,7 @@ class RAG:
             session_id=None,
             owner=None,
             replace_turn_idx=None,
-            turn_started_at=time.monotonic(),
+            turn_started_at=turn_started_at,
             persist=False,
         )
 
