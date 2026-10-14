@@ -435,10 +435,18 @@ prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
 `ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
 on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
+The research budget covers the searches as well as the model calls: a search
+still running when it runs out is abandoned and the turn reports `time_budget`.
+Research admits a passage only while every passage stays legible in the answer,
+headers included; a result that would crowd the others is refused, and the
+ledger counts as full once not even a bare 300-character passage would fit.
 A new window of a section the ledger already holds is not dropped. Text the entry
-lacks extends it after a `…` line, a window that repeats it adds nothing, and the
-entry keeps its number. When the answer has to shorten such an entry, the cut is
-shared across its windows rather than taken from the end.
+lacks extends it after a `…` line, a window that repeats it adds at most its
+match, and the entry keeps its number. When the answer has to shorten such an entry, the cut is
+shared across its windows rather than taken from the end. Shortening keeps the
+text around each passage's retrieved match, so a section promoted from a matched
+chunk is cut around that chunk rather than to its opening; the research model's
+digest of a passage shows the same place.
 Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
 never widened: a scoped assessment answers from its chunks with no research.
 Evidence too large to show legibly in one answer — typically a large pinned
@@ -453,10 +461,13 @@ The backend replaces the sentinel with a localized label (`ui_strings`
 persisted text, so the boundary survives into history, transcripts and report
 exports without any of them knowing the protocol. Sources are the evidence
 ledger, numbered 1..N in the order it was found; an entry is shortened to fit
-the context, never dropped, because replay numbers citations by position.
-If the prompt still overflows the model's context, it is rebuilt once with
-less evidence; a second overflow ends the turn with `context_overflow` on
-`/stream_query` (`/query` answers HTTP 500, as for a lookup).
+the context rather than dropped, because replay numbers citations by position.
+If the final estimate still does not fit, the latest research additions are
+left out, never the seed, so the numbering stays contiguous. If the prompt
+still overflows the model's context, it is rebuilt once with less evidence and
+compacted metadata headers, each passage's citation line kept whole; a second
+overflow, or compact headers that alone fill the room, ends the turn with
+`context_overflow` on `/stream_query` (`/query` answers HTTP 500, as for a lookup).
 
 **Validation.** Only the source-backed part is validated, against the sources it
 cites (at most six; the first six when it cites none), with a note
