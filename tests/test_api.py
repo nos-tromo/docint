@@ -6018,6 +6018,47 @@ def test_stateless_stream_query_answers_an_assessment(monkeypatch: pytest.Monkey
     assert rag.stateless_assessments[0]["expanded_query"].startswith("What could be improved?")
 
 
+def test_a_stateless_stream_query_assessment_is_validated_as_one_and_never_retried(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The stateless final frame goes through the assessment validator, carries no turn index, and never retries.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient."])
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+
+    def _fake_validation(**kwargs: Any) -> dict[str, Any]:
+        """Record the validator's inputs and reject the answer, as would invite a retry.
+
+        Args:
+            **kwargs (Any): Validation inputs.
+
+        Returns:
+            dict[str, Any]: A mismatch verdict.
+        """
+        seen.update(kwargs)
+        return {"validation_checked": True, "validation_mismatch": True, "validation_reason": "r"}
+
+    monkeypatch.setattr(api_module, "_validation_payload", _fake_validation)
+
+    with client.stream(
+        "POST", "/stream_query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}
+    ) as resp:
+        frames = _sse_frames("".join(chunk.decode() for chunk in resp.iter_raw()))
+
+    final = frames[-1]
+    assert seen["intent"] == "assessment"
+    assert seen["answer"] == "Fact [1]."
+    assert "turn_idx" not in final
+    assert final["validation_mismatch"] is True
+    assert not any("retry" in frame for frame in frames)
+    assert calls == []
+
+
 def test_stateless_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """``/query`` in stateless mode drains the same stream to its final payload.
 

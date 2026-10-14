@@ -251,3 +251,23 @@ def test_the_runner_counts_with_the_embedding_tokenizer_when_one_is_loaded() -> 
     assert with_tokenizer._count_tokens is not None
     assert with_tokenizer._count_tokens("abcdefgh") == 4
     assert without._count_tokens is None
+
+
+def test_research_picks_queries_on_the_plain_model_and_the_toggle_chooses_the_answer_model() -> None:
+    """The reasoning toggle reaches the answer only; a thinking model never drives research."""
+    rag = _rag()
+
+    with rag.reasoning_scope(True):
+        thinking = rag.assessment_runner(MagicMock(), scoped=False)
+        thinking_answer_llm = rag.post_retrieval_text_model
+    with rag.reasoning_scope(False):
+        plain = rag.assessment_runner(MagicMock(), scoped=False)
+
+    for runner in (thinking, plain):
+        assert isinstance(runner._researcher, ResearchLoop)
+        assert runner._researcher._llm is rag.text_model
+    assert thinking._answer_llm is thinking_answer_llm
+    assert thinking._answer_llm is not rag.text_model
+    assert thinking._reasoning is True
+    assert plain._answer_llm is rag.text_model
+    assert plain._reasoning is False
