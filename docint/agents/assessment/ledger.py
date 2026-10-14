@@ -224,6 +224,7 @@ class EvidenceLedger:
         self._entries: list[NodeWithScore] = []
         self._positions: dict[str, int] = {}
         self._room: Room | None = None
+        self._refusals = 0
 
     def __len__(self) -> int:
         """Return how many entries the ledger holds.
@@ -232,6 +233,17 @@ class EvidenceLedger:
             int: The entry count.
         """
         return len(self._entries)
+
+    @property
+    def refusals(self) -> int:
+        """How many passages the room has turned away.
+
+        Returns:
+            int: Extensions and new passages the room refused, and new passages
+            skipped while it was out of room; none skipped at the entry cap, and
+            none before a room is installed.
+        """
+        return self._refusals
 
     @property
     def out_of_room(self) -> bool:
@@ -284,7 +296,7 @@ class EvidenceLedger:
         a match the entry lacks. A full ledger admits no new entry but still
         extends one. Once :meth:`restrict` is installed, a passage or extension
         that would leave the evidence illegible is refused and the rest of the
-        batch is still considered.
+        batch is still considered; :attr:`refusals` counts what the room turns away.
 
         Args:
             nodes (Iterable[NodeWithScore]): Passages in ranked order.
@@ -300,13 +312,21 @@ class EvidenceLedger:
             position = self._positions.get(node_id)
             if position is not None:
                 merged = _merge_windows(self._entries[position], scored)
-                if merged is not None and self._admitted(position + 1, merged):
+                if merged is None:
+                    continue
+                if self._admitted(position + 1, merged):
                     self._entries[position] = merged
                     changed.append((position + 1, scored))
+                else:
+                    self._refusals += 1
+            elif self.out_of_room:
+                self._refusals += 1
             elif not self.full and self._admitted(len(self._entries) + 1, scored):
                 self._positions[node_id] = len(self._entries)
                 self._entries.append(scored)
                 changed.append((len(self._entries), scored))
+            elif not self.full:
+                self._refusals += 1
         return changed
 
     def entries(self) -> list[NodeWithScore]:

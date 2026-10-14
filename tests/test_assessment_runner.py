@@ -801,16 +801,16 @@ PRIOR_LOOKUP = PriorTurn(
 
 @pytest.mark.parametrize(
     ("reasoning", "max_steps", "held_at_least", "reason"),
-    [(True, 6, 30, None), (True, 8, 30, "context_budget"), (False, 6, 35, None)],
-    ids=["8k-reasoning-stops-at-its-step-cap", "8k-reasoning-runs-out-of-room", "8k-everything-fits"],
+    [(True, 6, 30, "context_budget"), (True, 8, 30, "context_budget"), (False, 6, 35, None)],
+    ids=["8k-reasoning-loses-a-window-at-its-step-cap", "8k-reasoning-runs-out-of-room", "8k-everything-fits"],
 )
 def test_every_match_research_keeps_reaches_the_answer(
     reasoning: bool, max_steps: int, held_at_least: int, reason: str | None
 ) -> None:
     """Codex's reproduction: five seeded sections, each search a new window of every one, and a 4K prior answer.
 
-    Every match the evidence holds reaches the answer prompt. Research the room stopped says so; research that
-    ran to its step cap does not, though its last search may have offered more than the room took.
+    Every match the evidence holds reaches the answer prompt. A turn whose research the room stopped says so, and
+    so does one whose last search, at the step cap, offered a window the room could not take.
 
     Args:
         reasoning (bool): Whether the answer model thinks first.

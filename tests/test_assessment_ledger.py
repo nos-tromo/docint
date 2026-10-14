@@ -139,13 +139,14 @@ def test_a_window_the_entry_already_shows_is_not_new(held: str, arriving: str) -
         held (str): The text the ledger holds.
         arriving (str): The text of the window that arrives.
     """
-    ledger = EvidenceLedger(cap=5)
-    first = _window(held)
-    ledger.add([first])
+    ledger = _restricted([_window(held)], 100_000)
+    first = ledger.entries()[0]
 
     assert ledger.add([_window(arriving)]) == []
     assert ledger.entries()[0] is first
     assert _text(ledger.numbered()[0]) == held
+    # Nothing new is not something the room turned away.
+    assert ledger.refusals == 0
 
 
 def test_a_fuller_window_replaces_the_one_it_contains() -> None:
@@ -1231,6 +1232,57 @@ def test_defused_sentinels_before_a_match_do_not_move_the_text_kept_around_it() 
 
     assert DEEP_FACT in context
     assert compose_labelled_answer(context).outcome == "unsplit"
+
+
+def test_the_room_counts_an_extension_it_refuses() -> None:
+    """A window whose matches would no longer fit is a refusal, and the entry stays as it was."""
+    windows, _ = _facts_section("sec", 2)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add(windows[:1])
+    budget = _header_chars(ledger.numbered()) + 555 - 1
+    ledger.restrict(Room(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0))
+
+    assert (ledger.add(windows[1:]), ledger.refusals) == ([], 1)
+
+
+def test_the_room_counts_a_new_passage_it_refuses() -> None:
+    """A passage whose header would crowd the others out is a refusal; the one admitted after it is not."""
+    ledger = _restricted([scored_node("seed", "Seed passage text. " * 20, page=1)], 2000)
+    heavy = scored_node("heavy", "Heavy passage.", page=2, filename="h" * 1800)
+    light = scored_node("light", "Light passage.", page=3, filename="light.pdf")
+
+    assert ([number for number, _ in ledger.add([heavy, light])], ledger.refusals) == ([2], 1)
+
+
+def test_the_room_counts_a_passage_skipped_while_it_is_out_of_room() -> None:
+    """Once the room has closed the ledger, every new passage it skips is a refusal."""
+    seed = _sized(1, 300, label=10)
+    ledger = _restricted(seed, _header_chars(_numbered(seed)) + MIN_TEXT_CHARS + 353)
+    assert ledger.out_of_room is True
+
+    assert (ledger.add(_sized(2, 40, start=5)), ledger.refusals) == ([], 2)
+
+
+@pytest.mark.parametrize("slack", [353, 100_000], ids=["closed-room", "open-room"])
+def test_a_passage_skipped_at_the_entry_cap_is_no_refusal(slack: int) -> None:
+    """The cap, not the room, stops the passage, whatever the room says.
+
+    Args:
+        slack (int): Characters of room beyond what the seed keeps.
+    """
+    seed = _sized(1, 300, label=10)
+    ledger = _restricted(seed, _header_chars(_numbered(seed)) + MIN_TEXT_CHARS + slack, cap=1)
+
+    assert (ledger.add(_sized(2, 40, start=5)), ledger.refusals) == ([], 0)
+
+
+def test_without_a_room_nothing_is_refused() -> None:
+    """The seed is admitted before any room is installed, and the entry cap alone limits it."""
+    ledger = EvidenceLedger(cap=2)
+
+    ledger.add([scored_node("heavy", "Heavy passage.", page=1, filename="h" * 50_000), *_sized(3, 40, start=5)])
+
+    assert (len(ledger), ledger.refusals) == (2, 0)
 
 
 def test_out_of_room_means_the_room_and_not_the_cap_closed_the_ledger() -> None:

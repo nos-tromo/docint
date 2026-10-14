@@ -1046,8 +1046,24 @@ def test_research_that_runs_out_of_room_before_its_step_cap_says_so() -> None:
     assert llm.chat_with_tools.call_count == 1
 
 
-def test_research_that_reaches_its_step_cap_as_the_room_closes_reports_nothing() -> None:
-    """The step cap ended research, not the room."""
+def test_a_room_that_closes_before_the_step_cap_says_so_with_nothing_refused() -> None:
+    """Research stops early because the room is full, though its last search fitted whole."""
+    ledger = _closing_ledger()
+    llm = tool_llm([search_call("method"), search_call("results")])
+
+    _, outcome = _drain(
+        _loop(llm, _search({"method": _wide(2), "results": _wide(4)[2:]})).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert (len(ledger), ledger.out_of_room, ledger.refusals) == (3, True, 0)
+    assert (outcome.steps, outcome.reason) == (1, "context_budget")
+    assert llm.chat_with_tools.call_count == 1
+
+
+def test_a_last_search_that_lost_a_passage_to_the_room_says_so_at_the_step_cap() -> None:
+    """The step cap ended research, but its last search offered a passage the closed room turned away."""
     ledger = _closing_ledger()
 
     _, outcome = _drain(
@@ -1056,7 +1072,21 @@ def test_research_that_reaches_its_step_cap_as_the_room_closes_reports_nothing()
         )
     )
 
-    assert ledger.out_of_room is True
+    assert (len(ledger), ledger.out_of_room, ledger.refusals) == (3, True, 1)
+    assert (outcome.steps, outcome.reason) == (1, "context_budget")
+
+
+def test_an_exit_at_the_step_cap_with_nothing_refused_reports_nothing() -> None:
+    """The last search fitted whole; that the room is now closed is no reduction."""
+    ledger = _closing_ledger()
+
+    _, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), _search({"method": _wide(2)}), max_steps=1).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert (len(ledger), ledger.out_of_room, ledger.refusals) == (3, True, 0)
     assert (outcome.steps, outcome.reason) == (1, None)
 
 
@@ -1070,21 +1100,56 @@ def test_research_that_fills_the_entry_cap_reports_nothing() -> None:
         )
     )
 
-    assert (len(ledger), ledger.out_of_room) == (2, False)
+    assert (len(ledger), ledger.out_of_room, ledger.refusals) == (2, False, 0)
     assert (outcome.steps, outcome.reason) == (1, None)
 
 
-def test_a_refusal_that_does_not_end_research_goes_unreported() -> None:
-    """A passage too heavy to admit is passed over; research goes on and ends as it would have."""
+#: A passage whose header alone outweighs the room :func:`_closing_ledger` has left.
+HEAVY = scored_node("heavy", "Heavy passage.", page=1, filename="h" * 1200)
+
+
+def test_a_last_search_whose_passage_the_room_refused_says_so_after_finish() -> None:
+    """Research ended with ``finish``, but the evidence its last search found did not all fit."""
     ledger = _closing_ledger()
-    heavy = scored_node("heavy", "Heavy passage.", page=1, filename="h" * 1200)
 
     progress, outcome = _drain(
-        _loop(tool_llm([search_call("method")]), _search({"method": [heavy]})).run(
+        _loop(tool_llm([search_call("method")]), _search({"method": [HEAVY]})).run(
             question=QUESTION, prior_turn=None, ledger=ledger
         )
     )
 
     assert [step.found for step in progress] == [0]
-    assert ledger.full is False
-    assert (outcome.steps, outcome.reason) == (2, None)
+    assert (ledger.full, ledger.refusals) == (False, 1)
+    assert (outcome.steps, outcome.reason) == (2, "context_budget")
+
+
+def test_a_refusal_followed_by_a_search_that_adds_goes_unreported() -> None:
+    """A later search that fits whole means research went on past the refusal."""
+    ledger = _closing_ledger()
+    light = [scored_node("light", "Light passage.", page=2)]
+
+    progress, outcome = _drain(
+        _loop(
+            tool_llm([search_call("method"), search_call("results")]), _search({"method": [HEAVY], "results": light})
+        ).run(question=QUESTION, prior_turn=None, ledger=ledger)
+    )
+
+    assert [step.found for step in progress] == [0, 1]
+    assert ledger.refusals == 1
+    assert (outcome.steps, outcome.reason) == (3, None)
+
+
+def test_a_reason_research_already_gave_outranks_a_last_refusal() -> None:
+    """The first cause is kept: a last search that lost a passage and ran out of time reports the time."""
+    ledger = _closing_ledger()
+    # Start; the budget check, the call's timeout, the time left, the slot wait's start and end; then the check after.
+    clock = _ticking(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 200.0)
+
+    _, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), _search({"method": _wide(3)}), clock=clock).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert ledger.refusals == 1
+    assert outcome.reason == "time_budget"

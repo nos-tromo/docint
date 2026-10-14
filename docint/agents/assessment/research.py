@@ -256,8 +256,9 @@ class ResearchLoop:
     ) -> Iterator[AgentProgress | ResearchOutcome]:
         """Search until the evidence suffices, yielding each search, then one outcome.
 
-        Research that ends with the ledger out of room before its step cap reports
-        ``context_budget``; a passage refused while research goes on is not reported.
+        Research reports ``context_budget`` when it ends with the ledger out of room
+        before its step cap, or when its last search lost a passage to the room,
+        whatever then ended it; a refusal that a later search follows is not reported.
 
         Args:
             question (str): The user's message, verbatim.
@@ -276,6 +277,7 @@ class ResearchLoop:
         seen: set[str] = set()
         started = self._clock()
         steps, idle = 0, 0
+        refused_last = False
         reason: str | None = None
         while steps < self._max_steps and not ledger.full:
             if self._clock() - started > self._wall_clock_s:
@@ -351,7 +353,9 @@ class ResearchLoop:
                 reason = "research_failed"
                 logger.warning("Assessment research search failed: {}", type(exc).__name__)
                 break
+            refused_before = ledger.refusals
             added = ledger.add(found)
+            refused_last = ledger.refusals > refused_before
             actions.append({"action": "search", "detail": query, "found": len(added)})
             yield AgentProgress(step=steps, action="search", detail=query, found=len(added))
             reply = "\n".join(digest(number, scored) for number, scored in added) or "No new passages."
@@ -363,7 +367,7 @@ class ResearchLoop:
             idle = 0 if added else idle + 1
             if idle >= 2:
                 break
-        if reason is None and steps < self._max_steps and ledger.out_of_room:
-            # The room, not the step cap or the entry cap, ended research early.
+        if reason is None and (refused_last or (steps < self._max_steps and ledger.out_of_room)):
+            # The room turned away part of the last search, or ended research before its step cap.
             reason = "context_budget"
         yield ResearchOutcome(steps=steps, actions=actions, reason=reason)
