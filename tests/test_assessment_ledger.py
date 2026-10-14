@@ -5,21 +5,28 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from assessment_fakes import llm_view, scored_node
+from assessment_fakes import llm_view, scored_node, social_post
+from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import (
     CONTEXT_ERROR_MARKERS,
     DIGEST_CHARS,
     DIGEST_LABEL_CHARS,
+    MARKER_RESERVE_CHARS,
+    MIN_TEXT_CHARS,
     EvidenceLedger,
     answer_budget,
     digest,
     effective_ratio,
+    evidence_fits,
     is_context_overflow,
     render_context,
 )
+from docint.agents.assessment.runner import DEFAULT_ASSESSMENT_ANSWER_PROMPT
 from docint.agents.assessment.split import SENTINEL, compose_labelled_answer
+from docint.core.rag import ParentContextPostprocessor
 from docint.utils.embed_chunking import estimate_tokens
+from docint.utils.prompt_loader import load_localized_prompt
 from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
 
 
@@ -270,6 +277,81 @@ def test_render_context_packs_tighter_for_dense_text() -> None:
 
     assert len(dense) < len(plain)
     assert _two_chars_a_token(dense) <= 4000
+
+
+#: The LLM view the grounded synthesizer uses, which keeps ``table`` and ``reference_metadata``.
+PRODUCTION_VIEW = ParentContextPostprocessor._emit_with_llm_exclusion
+
+
+def _numbered(nodes: list[NodeWithScore]) -> list[NodeWithScore]:
+    """Number passages the way the answer step sees them.
+
+    Args:
+        nodes (list[NodeWithScore]): The passages.
+
+    Returns:
+        list[NodeWithScore]: Clones carrying ``citation_index``.
+    """
+    ledger = EvidenceLedger(cap=len(nodes))
+    ledger.add(nodes)
+    return ledger.numbered()
+
+
+def test_a_pinned_social_post_carries_a_header_of_about_335_characters() -> None:
+    """The header the legibility check is sized against, measured through the production view."""
+    header = PRODUCTION_VIEW(_numbered([social_post(12)])[0].node).get_metadata_str(mode=MetadataMode.LLM)
+
+    assert 325 <= len(header) <= 345
+
+
+@pytest.mark.parametrize(("posts", "fits"), [(50, False), (30, True)])
+def test_pinned_social_posts_fit_an_8k_window_only_while_every_one_stays_legible(posts: int, fits: bool) -> None:
+    """Fifty headers leave no room for the posts themselves; thirty leave every post whole.
+
+    Args:
+        posts (int): How many posts are pinned.
+        fits (bool): Whether the evidence can be shown legibly.
+    """
+    template = load_localized_prompt("assessment_answer", default=DEFAULT_ASSESSMENT_ANSWER_PROMPT, lang="en")
+    budget = answer_budget(ctx_window=8192, template=template, reasoning=False, char_token_ratio=3.5)
+
+    result = evidence_fits(
+        _numbered([social_post(number) for number in range(1, posts + 1)]),
+        llm_view=PRODUCTION_VIEW,
+        budget_tokens=budget.evidence_tokens,
+        char_token_ratio=3.5,
+    )
+
+    assert result is fits
+
+
+def test_every_cut_passage_must_keep_the_legible_minimum() -> None:
+    """A cut passage needs ``MIN_TEXT_CHARS`` of text; one character less and the evidence does not fit."""
+    nodes = _numbered([scored_node(f"n{number}", "x" * 1000, page=number) for number in range(1, 5)])
+    reserved = sum(
+        len(llm_view(scored.node).get_metadata_str(mode=MetadataMode.LLM)) + 4 + MARKER_RESERVE_CHARS
+        for scored in nodes
+    )
+
+    assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=reserved + 4 * MIN_TEXT_CHARS, char_token_ratio=1.0)
+    assert not evidence_fits(
+        nodes, llm_view=llm_view, budget_tokens=reserved + 4 * MIN_TEXT_CHARS - 1, char_token_ratio=1.0
+    )
+
+
+def test_passages_shown_whole_fit_however_short_they_are() -> None:
+    """The minimum applies to what was cut; a short passage shown in full is legible as it is."""
+    nodes = _numbered([scored_node(f"n{number}", "Short.", page=number) for number in range(1, 4)])
+
+    assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=200, char_token_ratio=3.5)
+
+
+def test_evidence_with_no_room_left_for_text_does_not_fit() -> None:
+    """When the headers alone use the budget there is nothing to read, even where no text was cut."""
+    nodes = _numbered([scored_node(f"n{number}", "", page=number) for number in range(1, 4)])
+
+    assert not evidence_fits(nodes, llm_view=llm_view, budget_tokens=10, char_token_ratio=3.5)
+    assert evidence_fits(nodes, llm_view=llm_view, budget_tokens=200, char_token_ratio=3.5)
 
 
 def test_shared_budget_helpers_keep_the_validator_semantics() -> None:

@@ -129,7 +129,7 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from docint.agents.assessment.research import ResearchLoop
-from docint.agents.assessment.runner import AssessmentRunner
+from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
     ResolutionSummary,
@@ -8172,6 +8172,8 @@ class RAG:
 
         A stateless turn has no session: no prior turn and nothing persisted.
         Otherwise it is the session path exactly, with the same runner and frames.
+        Evidence too large to show legibly is answered as a lookup through
+        :meth:`run_query` instead, as the session path does.
 
         Args:
             question (str): The user's message, verbatim.
@@ -8201,7 +8203,7 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             retrieval_target=retrieval_target,
         )
-        yield from self.ensure_session_manager().stream_assessment(
+        stream = self.ensure_session_manager().stream_assessment(
             question,
             engine=engine,
             expanded_query=expanded_query,
@@ -8219,6 +8221,27 @@ class RAG:
             turn_started_at=turn_started_at,
             persist=False,
         )
+        # The runner refuses before its first yield, so nothing has streamed yet.
+        try:
+            first = next(stream)
+        except AssessmentDoesNotFit as exc:
+            logger.warning(
+                "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
+                exc.passages,
+            )
+            data = self.run_query(
+                expanded_query,
+                metadata_filters=metadata_filters,
+                metadata_filter_rules=metadata_filter_rules,
+                vector_store_kwargs=vector_store_kwargs,
+                scoped_node_ids=scoped_node_ids,
+                retrieval_target=retrieval_target,
+            )
+            yield str(data.get("response") or "")
+            yield data
+            return
+        yield first
+        yield from stream
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:
         """Build the not-yet-applied GraphRAG debug payload for a query.

@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from assessment_fakes import llm_view, scored_node, streaming_llm
-from llama_index.core.schema import NodeWithScore
+from _pytest.logging import LogCaptureFixture
+from assessment_fakes import llm_view, scored_node, social_post, streaming_llm
+from llama_index.core.schema import BaseNode, NodeWithScore
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from docint.agents.assessment.runner import AssessmentRunner
 from docint.agents.assessment.split import SENTINEL
-from docint.agents.types import AgentProgress
-from docint.core.rag import RAG
+from docint.agents.types import AgentProgress, PriorTurn
+from docint.core.rag import RAG, ParentContextPostprocessor
 from docint.core.state.base import Base
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.turn import Turn
@@ -102,13 +103,20 @@ def _seed() -> list[NodeWithScore]:
     ]
 
 
-def _arm(sm: SessionManager, *, nodes: list[NodeWithScore], tokens: list[str] | None = None) -> MagicMock:
+def _arm(
+    sm: SessionManager,
+    *,
+    nodes: list[NodeWithScore],
+    tokens: list[str] | None = None,
+    view: Callable[[BaseNode], BaseNode] = llm_view,
+) -> MagicMock:
     """Route the turn's engine and runner to doubles.
 
     Args:
         sm (SessionManager): The session manager under test.
         nodes (list[NodeWithScore]): What the engine's ``retrieve`` returns.
         tokens (list[str] | None): The answer tokens; ``ANSWER`` by default.
+        view (Callable[[BaseNode], BaseNode]): The runner's LLM view; the test double by default.
 
     Returns:
         MagicMock: The engine double.
@@ -120,7 +128,7 @@ def _arm(sm: SessionManager, *, nodes: list[NodeWithScore], tokens: list[str] | 
     rag.query_engine = engine
     rag.assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
         answer_llm=cast(Any, streaming_llm(tokens or ANSWER)),
-        llm_view=llm_view,
+        llm_view=view,
         ctx_window=8192,
         char_token_ratio=3.5,
         reasoning=False,
@@ -402,7 +410,8 @@ def test_a_stateless_assessment_starts_its_clock_before_the_engine_is_built(monk
     rag = MagicMock()
     rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
     manager = rag.ensure_session_manager.return_value
-    manager.stream_assessment.return_value = iter([])
+    # Like the real stream, it ends with the final payload.
+    manager.stream_assessment.return_value = iter([{"answer_mode": "assessment"}])
 
     def _build_engine(**_kwargs: Any) -> MagicMock:
         now[0] = 105.0
@@ -413,3 +422,123 @@ def test_a_stateless_assessment_starts_its_clock_before_the_engine_is_built(monk
     list(RAG.stream_stateless_assessment(rag, QUESTION, expanded_query="expanded", graph_debug={}))
 
     assert manager.stream_assessment.call_args.kwargs["turn_started_at"] == 100.0
+
+
+#: Fifty pinned posts: too many to show legibly in one 8k answer.
+PINNED = [f"post-{number}" for number in range(1, 51)]
+LOOKUP_ANSWER = "The festival moved to Sunday [1]."
+
+
+def _arm_oversized_scope(sm: SessionManager, monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, list[Any]]:
+    """Pin fifty social posts and give the engine a lookup answer to fall back to.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        tuple[MagicMock, list[Any]]: The engine double and the prior turns the lookup was bound to.
+    """
+    engine = _arm(
+        sm,
+        nodes=[social_post(number) for number in range(1, 51)],
+        view=ParentContextPostprocessor._emit_with_llm_exclusion,
+    )
+    engine.query.return_value = SimpleNamespace(
+        response=LOOKUP_ANSWER, response_gen=iter([LOOKUP_ANSWER]), source_nodes=[]
+    )
+    bound: list[Any] = []
+    monkeypatch.setattr(
+        SessionManager, "_bind_prior_turn_context", lambda _self, _engine, prior_turn: bound.append(prior_turn)
+    )
+    return engine, bound
+
+
+@pytest.mark.parametrize("entry", ["stream_chat", "chat"])
+def test_a_scope_too_large_to_show_legibly_is_answered_as_a_lookup(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+    loguru_caplog: LogCaptureFixture,
+    entry: str,
+) -> None:
+    """Lookup is the floor: no research steps, no assessment keys, the engine answers, the judgement stays out.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        entry (str): The session manager method under test.
+    """
+    engine, bound = _arm_oversized_scope(session_manager, monkeypatch)
+    prior = PriorTurn(
+        user_text="Is the schedule reliable?",
+        assistant_text="It changed twice [1].\n\n---\n\n**Model assessment**\n\nIt seems unreliable.",
+        evidence_chars=21,
+    )
+    kwargs: dict[str, Any] = {
+        "session_id": "s1",
+        "scoped_node_ids": PINNED,
+        "prior_turn": prior,
+        "answer_mode": "assessment",
+    }
+
+    if entry == "stream_chat":
+        items = list(session_manager.stream_chat(QUESTION, **kwargs))
+        assert not any(isinstance(item, AgentProgress) for item in items)
+        final = items[-1]
+    else:
+        final = session_manager.chat(QUESTION, **kwargs)
+
+    assert isinstance(final, dict)
+    assert "answer_mode" not in final
+    assert final["response"] == LOOKUP_ANSWER
+    engine.query.assert_called_once()
+    assert bound == [PriorTurn(user_text="Is the schedule reliable?", assistant_text="It changed twice [1].")]
+    assert "does not fit the context window (50 passages); answering as a lookup" in loguru_caplog.text
+    assert "Harbour festival" not in loguru_caplog.text
+
+
+def test_a_stateless_scope_too_large_to_show_legibly_falls_back_to_run_query(
+    session_manager: SessionManager, loguru_caplog: LogCaptureFixture
+) -> None:
+    """Stateless has the same floor: the request's own scope, target and filters answer as a lookup.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.ensure_session_manager.return_value = session_manager
+    _arm(
+        session_manager,
+        nodes=[social_post(number) for number in range(1, 51)],
+        view=ParentContextPostprocessor._emit_with_llm_exclusion,
+    )
+    data = {"response": LOOKUP_ANSWER, "sources": [{"id": "post-1"}]}
+    rag.run_query.return_value = data
+    filters, store_kwargs = object(), {"qdrant_filters": object()}
+
+    items = list(
+        RAG.stream_stateless_assessment(
+            rag,
+            QUESTION,
+            expanded_query="expanded question",
+            graph_debug=None,
+            metadata_filters=cast(Any, filters),
+            metadata_filter_rules=["rule"],
+            vector_store_kwargs=store_kwargs,
+            scoped_node_ids=PINNED,
+            retrieval_target="documents",
+        )
+    )
+
+    assert items == [LOOKUP_ANSWER, data]
+    rag.run_query.assert_called_once_with(
+        "expanded question",
+        metadata_filters=filters,
+        metadata_filter_rules=["rule"],
+        vector_store_kwargs=store_kwargs,
+        scoped_node_ids=PINNED,
+        retrieval_target="documents",
+    )
+    assert "(50 passages); answering as a lookup" in loguru_caplog.text

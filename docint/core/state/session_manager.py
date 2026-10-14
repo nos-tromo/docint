@@ -21,7 +21,7 @@ from llama_index.core.vector_stores.types import MetadataFilters
 from loguru import logger
 from sqlalchemy.orm import Session
 
-from docint.agents.assessment.runner import AssessmentResult
+from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentResult
 from docint.agents.assessment.split import LabelledAnswer, compose_labelled_answer
 from docint.agents.context import TurnContext as AgentTurnContext
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
@@ -423,7 +423,8 @@ class SessionManager:
             answer_mode (AnswerMode): How to answer: ``lookup`` (default) runs
                 the grounded pipeline unchanged; ``assessment`` researches and
                 writes a labelled two-part answer (see
-                :meth:`stream_assessment`).
+                :meth:`stream_assessment`), or answers as a lookup when its
+                evidence is too large to show legibly.
 
         Returns:
             dict[str, Any]: The response data, including ``turn_idx`` — the
@@ -505,27 +506,35 @@ class SessionManager:
 
         if answer_mode == "assessment":
             final: dict[str, Any] = {}
-            for item in self.stream_assessment(
-                user_msg,
-                engine=engine,
-                expanded_query=expanded_query,
-                retrieval_query=retrieval_query,
-                prior_turn=prior_turn,
-                scoped_node_ids=scoped_node_ids,
-                graph_debug=graph_debug,
-                coverage_unit=coverage_unit,
-                metadata_filters_active=metadata_filters_active,
-                metadata_filter_rules=metadata_filter_rules,
-                retrieval_target=retrieval_target,
-                session_id=session_id,
-                owner=owner,
-                replace_turn_idx=replace_turn_idx,
-                turn_started_at=turn_started_at,
-                persist=True,
-            ):
-                if isinstance(item, dict):
-                    final = item
-            return final
+            try:
+                for item in self.stream_assessment(
+                    user_msg,
+                    engine=engine,
+                    expanded_query=expanded_query,
+                    retrieval_query=retrieval_query,
+                    prior_turn=prior_turn,
+                    scoped_node_ids=scoped_node_ids,
+                    graph_debug=graph_debug,
+                    coverage_unit=coverage_unit,
+                    metadata_filters_active=metadata_filters_active,
+                    metadata_filter_rules=metadata_filter_rules,
+                    retrieval_target=retrieval_target,
+                    session_id=session_id,
+                    owner=owner,
+                    replace_turn_idx=replace_turn_idx,
+                    turn_started_at=turn_started_at,
+                    persist=True,
+                ):
+                    if isinstance(item, dict):
+                        final = item
+            except AssessmentDoesNotFit as exc:
+                logger.warning(
+                    "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
+                    exc.passages,
+                )
+                prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
+            else:
+                return final
 
         self._bind_prior_turn_context(engine, prior_turn)
         resp = engine.query(expanded_query)
@@ -675,7 +684,7 @@ class SessionManager:
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
         if answer_mode == "assessment":
-            yield from self.stream_assessment(
+            stream = self.stream_assessment(
                 user_msg,
                 engine=streaming_engine,
                 expanded_query=expanded_query,
@@ -693,7 +702,19 @@ class SessionManager:
                 turn_started_at=turn_started_at,
                 persist=True,
             )
-            return
+            # The runner refuses before its first yield, so nothing has streamed yet.
+            try:
+                first = next(stream)
+            except AssessmentDoesNotFit as exc:
+                logger.warning(
+                    "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
+                    exc.passages,
+                )
+                prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
+            else:
+                yield first
+                yield from stream
+                return
 
         self._bind_prior_turn_context(streaming_engine, prior_turn)
         response = streaming_engine.query(expanded_query)

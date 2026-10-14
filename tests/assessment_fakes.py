@@ -30,6 +30,41 @@ def scored_node(node_id: str, text: str, **metadata: Any) -> NodeWithScore:
     return NodeWithScore(node=TextNode(id_=node_id, text=text, metadata=dict(metadata)), score=1.0)
 
 
+POST_TEXT = "Harbour festival moved to Sunday because of the storm warning. Stalls open at ten, music from noon."
+
+
+def social_post(number: int, text: str = POST_TEXT) -> NodeWithScore:
+    """Build one pinned post of an invented social export, shaped like a dossier row.
+
+    Its ``table`` and ``reference_metadata`` keys stay visible to the production
+    LLM view, which renders them as a header of about 335 characters.
+
+    Args:
+        number (int): The post's position; it also varies its ids.
+        text (str): The post's text.
+
+    Returns:
+        NodeWithScore: The post with a neutral score.
+    """
+    metadata = {
+        "file_name": "example_profile/dossier.json",
+        "filename": "example_profile/dossier.json",
+        "file_hash": "f" * 64,
+        "source": "table",
+        "table": {"style": "postings", "row_index": number, "n_rows": 120},
+        "reference_metadata": {
+            "network": "examplenet",
+            "type": "posting",
+            "uuid": f"{number:024x}",
+            "timestamp": "2026-03-14T09:30:00Z",
+            "author": "Harbour Events",
+            "author_id": "1234567890",
+            "text_id": f"{9876543210 + number}",
+        },
+    }
+    return NodeWithScore(node=TextNode(id_=f"post-{number}", text=text, metadata=metadata), score=1.0)
+
+
 def llm_view(node: BaseNode) -> BaseNode:
     """Mirror the production LLM view: hide every key but the whitelisted ones.
 

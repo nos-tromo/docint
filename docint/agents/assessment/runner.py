@@ -23,6 +23,7 @@ from docint.agents.assessment.ledger import (
     QUESTION_TOKENS,
     EvidenceLedger,
     answer_budget,
+    evidence_fits,
     is_context_overflow,
     render_context,
 )
@@ -51,6 +52,26 @@ DEFAULT_ASSESSMENT_ANSWER_PROMPT = (
 
 PRIOR_ANSWER_CHARS = 4000
 """Longest earlier assistant answer, in characters, that the answer step is shown."""
+
+
+class AssessmentDoesNotFit(ValueError):
+    """The evidence cannot be shown legibly in one answer, so the turn is answered as a lookup.
+
+    A ``ValueError`` naming the context window, so that if it ever escapes its
+    callers the API still reports ``context_overflow``.
+
+    Attributes:
+        passages (int): How many passages the evidence held.
+    """
+
+    def __init__(self, passages: int) -> None:
+        """Record how many passages did not fit.
+
+        Args:
+            passages (int): How many passages the evidence held.
+        """
+        super().__init__(f"{passages} passages cannot be shown legibly in the model's context window.")
+        self.passages = passages
 
 
 @dataclass(frozen=True)
@@ -227,6 +248,10 @@ class AssessmentRunner:
         Yields:
             AgentProgress | str | AssessmentResult: Progress steps, answer text
             with the label already swapped in, then exactly one result.
+
+        Raises:
+            AssessmentDoesNotFit: Before anything is yielded, when the seed
+                cannot be shown legibly in the answer's context.
         """
         budget = answer_budget(
             ctx_window=self._ctx_window,
@@ -234,9 +259,23 @@ class AssessmentRunner:
             reasoning=self._reasoning,
             char_token_ratio=self._ratio,
         )
+        block = prior_turn_block(prior_turn)
+        # The prior turn and question can outgrow their reserve; the evidence gives way.
+        overhead = self._overhead_tokens(block + question.strip())
+        extra = max(0, overhead - PRIOR_TURN_TOKENS - QUESTION_TOKENS)
+        evidence_budget = max(0, budget.evidence_tokens - extra)
         # Pinned or seeded evidence is never dropped; packing shortens it instead.
         ledger = EvidenceLedger(cap=max(budget.max_entries, len({scored.node.node_id for scored in seed})))
         seeded = ledger.add(seed)
+        # Research only adds entries up to the budget's cap, so the seed is the one check.
+        if not evidence_fits(
+            ledger.numbered(),
+            llm_view=self._llm_view,
+            budget_tokens=evidence_budget,
+            char_token_ratio=self._ratio,
+            count_tokens=self._count_tokens,
+        ):
+            raise AssessmentDoesNotFit(len(ledger))
         actions: list[dict[str, Any]] = [{"action": "seed", "detail": "", "found": len(seeded)}]
         yield AgentProgress(step=0, action="seed", detail="", found=len(seeded))
         steps, reason = 0, None
@@ -255,11 +294,6 @@ class AssessmentRunner:
             yield AssessmentResult(raw_text="", nodes=[], steps=steps, actions=actions, reason="no_evidence")
             return
         nodes = ledger.numbered()
-        block = prior_turn_block(prior_turn)
-        # The prior turn and question can outgrow their reserve; the evidence gives way.
-        overhead = self._overhead_tokens(block + question.strip())
-        extra = max(0, overhead - PRIOR_TURN_TOKENS - QUESTION_TOKENS)
-        evidence_budget = max(0, budget.evidence_tokens - extra)
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
         try:
             tokens, shortened = self._open_answer(

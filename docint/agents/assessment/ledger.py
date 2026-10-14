@@ -19,6 +19,8 @@ DIGEST_CHARS = 400
 DIGEST_LABEL_CHARS = 120
 #: Worst-case length of the cut marker, reserved for every entry.
 MARKER_RESERVE_CHARS = 50
+#: Fewest characters a shortened passage may keep and still be read.
+MIN_TEXT_CHARS = 300
 ANSWER_OUTPUT_TOKENS = 1024
 #: A thinking model spends its reply budget on reasoning before the answer.
 ANSWER_OUTPUT_TOKENS_REASONING = 3072
@@ -227,6 +229,86 @@ def effective_ratio(
     return min(char_token_ratio, len(sample) / tokens)
 
 
+def _parts(nodes: list[NodeWithScore], llm_view: Callable[[BaseNode], BaseNode]) -> tuple[list[str], list[str]]:
+    """Split each passage's LLM view into its metadata header and its text.
+
+    Args:
+        nodes (list[NodeWithScore]): The numbered ledger.
+        llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
+
+    Returns:
+        tuple[list[str], list[str]]: The headers and the texts, sentinels defused.
+    """
+    headers: list[str] = []
+    bodies: list[str] = []
+    for scored in nodes:
+        view = llm_view(scored.node)
+        headers.append(neutralize_sentinel(view.get_metadata_str(mode=MetadataMode.LLM)))
+        bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
+    return headers, bodies
+
+
+def _allowances(
+    headers: list[str],
+    bodies: list[str],
+    *,
+    budget_tokens: int,
+    char_token_ratio: float,
+    count_tokens: Callable[[str], int] | None,
+) -> tuple[int, list[int]]:
+    """Share the characters left once every header, join and cut marker is reserved.
+
+    Args:
+        headers (list[str]): The metadata headers, kept whole.
+        bodies (list[str]): The texts that share what is left.
+        budget_tokens (int): Tokens the rendered evidence may use.
+        char_token_ratio (float): The configured characters per token.
+        count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
+
+    Returns:
+        tuple[int, list[int]]: The text budget, zero or less when the headers use
+        it all, and each text's allowance, shortest first.
+    """
+    ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
+    reserved = sum(len(header) + 4 for header in headers) + MARKER_RESERVE_CHARS * len(headers)
+    char_budget = int(budget_tokens * ratio) - reserved
+    return char_budget, allocate_shortest_first([len(body) for body in bodies], max(0, char_budget))
+
+
+def evidence_fits(
+    nodes: list[NodeWithScore],
+    *,
+    llm_view: Callable[[BaseNode], BaseNode],
+    budget_tokens: int,
+    char_token_ratio: float,
+    count_tokens: Callable[[str], int] | None = None,
+) -> bool:
+    """Return whether the evidence can be shown legibly in its budget, packed as :func:`render_context` packs it.
+
+    Args:
+        nodes (list[NodeWithScore]): The numbered ledger.
+        llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
+        budget_tokens (int): Tokens the rendered evidence may use.
+        char_token_ratio (float): The configured characters per token.
+        count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
+
+    Returns:
+        bool: ``True`` when text room remains after the headers and every passage
+        that must be cut keeps at least ``MIN_TEXT_CHARS``; a passage shown whole
+        fits however short it is.
+    """
+    headers, bodies = _parts(nodes, llm_view)
+    char_budget, allowances = _allowances(
+        headers, bodies, budget_tokens=budget_tokens, char_token_ratio=char_token_ratio, count_tokens=count_tokens
+    )
+    if char_budget <= 0:
+        return False
+    return all(
+        allowance >= len(body) or allowance >= MIN_TEXT_CHARS
+        for body, allowance in zip(bodies, allowances, strict=True)
+    )
+
+
 def render_context(
     nodes: list[NodeWithScore],
     *,
@@ -252,16 +334,10 @@ def render_context(
     Returns:
         tuple[str, int]: The context block and how many entries were shortened.
     """
-    headers: list[str] = []
-    bodies: list[str] = []
-    for scored in nodes:
-        view = llm_view(scored.node)
-        headers.append(neutralize_sentinel(view.get_metadata_str(mode=MetadataMode.LLM)))
-        bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
-    ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
-    reserved = sum(len(header) + 4 for header in headers) + MARKER_RESERVE_CHARS * len(headers)
-    char_budget = max(0, int(budget_tokens * ratio) - reserved)
-    allowances = allocate_shortest_first([len(body) for body in bodies], char_budget)
+    headers, bodies = _parts(nodes, llm_view)
+    _, allowances = _allowances(
+        headers, bodies, budget_tokens=budget_tokens, char_token_ratio=char_token_ratio, count_tokens=count_tokens
+    )
     rendered: list[str] = []
     shortened = 0
     for header, body, allowance in zip(headers, bodies, allowances, strict=True):

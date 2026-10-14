@@ -7,15 +7,24 @@ from typing import Any, cast
 
 import openai
 import pytest
-from assessment_fakes import bad_request, llm_view, scored_node, streaming_llm
+from assessment_fakes import bad_request, llm_view, scored_node, social_post, streaming_llm
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
-from llama_index.core.schema import NodeWithScore
+from llama_index.core.schema import BaseNode, NodeWithScore
 
-from docint.agents.assessment.ledger import EvidenceLedger
-from docint.agents.assessment.runner import AssessmentResult, AssessmentRunner, ResearchOutcome, prior_turn_block
+from docint.agents.assessment.ledger import EvidenceLedger, answer_budget
+from docint.agents.assessment.runner import (
+    DEFAULT_ASSESSMENT_ANSWER_PROMPT,
+    AssessmentDoesNotFit,
+    AssessmentResult,
+    AssessmentRunner,
+    ResearchOutcome,
+    prior_turn_block,
+)
 from docint.agents.assessment.split import SENTINEL, assessment_label
 from docint.agents.types import AgentProgress, PriorTurn
+from docint.core.rag import ParentContextPostprocessor
 from docint.utils.embed_chunking import estimate_tokens
+from docint.utils.prompt_loader import load_localized_prompt
 
 QUESTION = "What could be improved in this study?"
 ANSWER = ["The study evaluates on one dataset [1].", f"\n{SENTINEL}\n", "A second dataset would help."]
@@ -38,6 +47,8 @@ def _runner(
     researcher: Any = None,
     count_tokens: Callable[[str], int] | None = None,
     failures: list[Exception] | None = None,
+    view: Callable[[BaseNode], BaseNode] = llm_view,
+    ctx_window: int = 8192,
 ) -> tuple[AssessmentRunner, Any]:
     """Build a runner over a streaming double.
 
@@ -47,6 +58,8 @@ def _runner(
         researcher (Any): An optional research step.
         count_tokens (Callable[[str], int] | None): An optional tokenizer.
         failures (list[Exception] | None): Errors the first answer calls raise.
+        view (Callable[[BaseNode], BaseNode]): The LLM view; the test double by default.
+        ctx_window (int): The context window in tokens.
 
     Returns:
         tuple[AssessmentRunner, Any]: The runner and its model double.
@@ -54,8 +67,8 @@ def _runner(
     llm = streaming_llm(tokens or ANSWER, failures=failures or [])
     runner = AssessmentRunner(
         answer_llm=cast(Any, llm),
-        llm_view=llm_view,
-        ctx_window=8192,
+        llm_view=view,
+        ctx_window=ctx_window,
         char_token_ratio=3.5,
         reasoning=reasoning,
         researcher=researcher,
@@ -413,3 +426,62 @@ def test_an_answer_that_fails_after_its_first_token_is_never_retried() -> None:
 
     assert "Fact" in streamed
     assert llm.stream_chat.call_count == 1
+
+
+def test_evidence_too_large_to_show_legibly_raises_before_anything_is_yielded() -> None:
+    """Fifty pinned posts at 8k leave no room to read them; the caller answers as a lookup instead."""
+    runner, llm = _runner(view=ParentContextPostprocessor._emit_with_llm_exclusion)
+    stream = runner.run(question=QUESTION, prior_turn=None, seed=[social_post(number) for number in range(1, 51)])
+
+    with pytest.raises(AssessmentDoesNotFit) as raised:
+        next(stream)
+
+    assert raised.value.passages == 50
+    assert isinstance(raised.value, ValueError)
+    assert "context window" in str(raised.value)
+    llm.stream_chat.assert_not_called()
+
+
+class _FinishAtOnce:
+    """A research step that searches nothing, as an unscoped turn's may."""
+
+    def run(
+        self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
+    ) -> Iterator[AgentProgress | ResearchOutcome]:
+        """End research at once.
+
+        Args:
+            question (str): The user's message.
+            prior_turn (PriorTurn | None): The previous exchange.
+            ledger (EvidenceLedger): The evidence so far.
+
+        Yields:
+            AgentProgress | ResearchOutcome: The outcome alone.
+        """
+        yield ResearchOutcome(steps=1)
+
+
+@pytest.mark.parametrize(("window", "reasoning"), [(8192, False), (8192, True), (32768, False)])
+def test_an_unscoped_seed_always_fits(window: int, reasoning: bool) -> None:
+    """A lookup's top-n never exceeds the ledger cap, and a full cap stays legible even with long social rows.
+
+    Args:
+        window (int): The context window in tokens.
+        reasoning (bool): Whether the answer model thinks first.
+    """
+    template = load_localized_prompt("assessment_answer", default=DEFAULT_ASSESSMENT_ANSWER_PROMPT)
+    cap = answer_budget(ctx_window=window, template=template, reasoning=reasoning, char_token_ratio=3.5).max_entries
+    seed = [social_post(number, text="The result holds. " * 111) for number in range(1, cap + 1)]
+    runner, llm = _runner(
+        reasoning=reasoning,
+        researcher=_FinishAtOnce(),
+        view=ParentContextPostprocessor._emit_with_llm_exclusion,
+        ctx_window=window,
+    )
+
+    items = list(runner.run(question=QUESTION, prior_turn=None, seed=seed))
+
+    assert isinstance(items[0], AgentProgress)
+    assert items[0].found == cap
+    assert isinstance(items[-1], AssessmentResult)
+    llm.stream_chat.assert_called_once()
