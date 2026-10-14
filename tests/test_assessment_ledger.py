@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 from assessment_fakes import llm_view, scored_node, social_post
-from llama_index.core.schema import MetadataMode, NodeWithScore
+from llama_index.core.schema import Document, MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import (
     CONTEXT_ERROR_MARKERS,
@@ -14,6 +14,7 @@ from docint.agents.assessment.ledger import (
     DIGEST_LABEL_CHARS,
     MARKER_RESERVE_CHARS,
     MIN_TEXT_CHARS,
+    WINDOW_JOIN,
     EvidenceLedger,
     answer_budget,
     digest,
@@ -48,6 +49,169 @@ def test_ledger_stops_at_its_cap() -> None:
 
     assert [number for number, _ in added] == [1, 2]
     assert ledger.full is True
+
+
+def _window(text: str, *, score: float = 1.0) -> NodeWithScore:
+    """Build one parent-context window of an invented section, as the postprocessor emits it.
+
+    Every window of a section carries the section's own node id.
+
+    Args:
+        text (str): The windowed text.
+        score (float): The hit's score.
+
+    Returns:
+        NodeWithScore: The window.
+    """
+    scored = scored_node(
+        "section-1",
+        text,
+        filename="paper.pdf",
+        page=2,
+        parent_context_windowed=True,
+        parent_full_chars=9000,
+        window_chars=len(text),
+    )
+    scored.score = score
+    return scored
+
+
+def _text(scored: NodeWithScore) -> str:
+    """Return a passage's text without metadata.
+
+    Args:
+        scored (NodeWithScore): The passage.
+
+    Returns:
+        str: Its text.
+    """
+    return scored.node.get_content(metadata_mode=MetadataMode.NONE)
+
+
+def test_another_window_of_a_held_section_extends_its_entry() -> None:
+    """Windows of one section share its id, so a later window is new evidence and must not be dropped."""
+    ledger = EvidenceLedger(cap=5)
+    opening, closing = _window("The study opens with a pilot."), _window("It closes with a limitations note.")
+    ledger.add([opening])
+
+    changed = ledger.add([closing])
+
+    assert len(changed) == 1
+    number, arriving = changed[0]
+    assert (number, arriving) == (1, closing)
+    assert len(ledger) == 1
+    numbered = ledger.numbered()
+    assert _text(numbered[0]) == f"The study opens with a pilot.{WINDOW_JOIN}It closes with a limitations note."
+    assert numbered[0].node.metadata["citation_index"] == 1
+
+
+def test_the_join_between_windows_cannot_read_as_a_citation_marker() -> None:
+    """The model cites by square brackets, so the seam between two windows carries none."""
+    assert "[" not in WINDOW_JOIN
+    assert "]" not in WINDOW_JOIN
+
+
+@pytest.mark.parametrize(
+    ("held", "arriving"),
+    [
+        ("The study opens with a pilot.", "The study opens with a pilot."),
+        ("The study opens with a pilot, then compares.", "opens with a pilot"),
+    ],
+    ids=["identical", "contained"],
+)
+def test_a_window_the_entry_already_shows_is_not_new(held: str, arriving: str) -> None:
+    """Repeating or narrowing what an entry shows adds nothing, so it is neither returned nor counted.
+
+    Args:
+        held (str): The text the ledger holds.
+        arriving (str): The text of the window that arrives.
+    """
+    ledger = EvidenceLedger(cap=5)
+    first = _window(held)
+    ledger.add([first])
+
+    assert ledger.add([_window(arriving)]) == []
+    assert ledger.entries()[0] is first
+    assert _text(ledger.numbered()[0]) == held
+
+
+def test_a_fuller_window_replaces_the_one_it_contains() -> None:
+    """A whole section arriving after a slice of it supersedes the slice instead of repeating it."""
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([_window("opens with a pilot")])
+    whole = scored_node("section-1", "The study opens with a pilot, then compares.", filename="paper.pdf", page=2)
+
+    changed = ledger.add([whole])
+
+    assert changed == [(1, whole)]
+    assert len(ledger) == 1
+    held = ledger.numbered()[0]
+    assert _text(held) == "The study opens with a pilot, then compares."
+    assert "parent_context_windowed" not in held.node.metadata
+
+
+def test_a_merge_leaves_the_cached_nodes_alone() -> None:
+    """Passages come out of cached stores, so folding one in must never write to it."""
+    ledger = EvidenceLedger(cap=5)
+    opening, closing = _window("The study opens with a pilot."), _window("It closes with a limitations note.")
+    ledger.add([opening])
+    ledger.add([closing])
+
+    assert _text(opening) == "The study opens with a pilot."
+    assert _text(closing) == "It closes with a limitations note."
+    assert opening.node.metadata["window_chars"] == len("The study opens with a pilot.")
+    assert ledger.entries()[0].node is not opening.node
+
+
+def test_a_merge_keeps_the_entry_number_the_higher_score_and_an_honest_window_size() -> None:
+    """The entry stays where citations number it; its window marker follows its text, and its score its best hit."""
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([scored_node("other", "Elsewhere."), _window("Opening.", score=0.4)])
+
+    ledger.add([_window("Closing.", score=0.9)])
+    ledger.add([_window("Middle.", score=0.1)])
+
+    entry = ledger.entries()[1]
+    assert entry.score == pytest.approx(0.9)
+    assert entry.node.metadata["window_chars"] == len(_text(entry))
+    assert entry.node.metadata["parent_full_chars"] == 9000
+    assert [scored.node.metadata["citation_index"] for scored in ledger.numbered()] == [1, 2]
+    assert _text(entry) == f"Opening.{WINDOW_JOIN}Closing.{WINDOW_JOIN}Middle."
+
+
+def test_a_merge_never_fills_the_ledger() -> None:
+    """The cap counts entries, and extending one adds none."""
+    ledger = EvidenceLedger(cap=2)
+    ledger.add([_window("Opening.")])
+
+    ledger.add([_window("Closing.")])
+
+    assert len(ledger) == 1
+    assert ledger.full is False
+    assert [number for number, _ in ledger.add([scored_node("other", "Elsewhere.")])] == [2]
+
+
+def test_a_full_ledger_still_extends_what_it_holds_but_admits_nothing_new() -> None:
+    """A section already cited keeps gaining windows at the cap; only new sections are refused."""
+    ledger = EvidenceLedger(cap=2)
+    ledger.add([scored_node("other", "Elsewhere."), _window("Opening.")])
+    assert ledger.full is True
+
+    changed = ledger.add([scored_node("late", "Too late."), _window("Closing.")])
+
+    assert [number for number, _ in changed] == [2]
+    assert len(ledger) == 2
+    assert _text(ledger.entries()[1]) == f"Opening.{WINDOW_JOIN}Closing."
+
+
+def test_a_node_that_is_not_a_text_node_keeps_its_first_emission() -> None:
+    """Only a ``TextNode`` can be rewritten, so any other kind stays as it was admitted."""
+    ledger = EvidenceLedger(cap=5)
+    first = NodeWithScore(node=Document(id_="doc-1", text="Opening."), score=1.0)
+    ledger.add([first])
+
+    assert ledger.add([NodeWithScore(node=Document(id_="doc-1", text="Closing."), score=1.0)]) == []
+    assert ledger.entries()[0] is first
 
 
 def test_numbered_returns_stamped_clones_and_leaves_originals_alone() -> None:

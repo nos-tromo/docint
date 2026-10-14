@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
+from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
 
 from docint.agents.assessment.split import neutralize_sentinel
 from docint.utils.embed_chunking import estimate_tokens
@@ -19,6 +19,8 @@ DIGEST_CHARS = 400
 DIGEST_LABEL_CHARS = 120
 #: Worst-case length of the cut marker, reserved for every entry.
 MARKER_RESERVE_CHARS = 50
+#: Seam between two windows of one passage; no brackets, so it never reads as a citation.
+WINDOW_JOIN = "\n\n…\n\n"
 #: Fewest characters a shortened passage may keep and still be read.
 MIN_TEXT_CHARS = 300
 ANSWER_OUTPUT_TOKENS = 1024
@@ -100,8 +102,42 @@ def answer_budget(*, ctx_window: int, template: str, reasoning: bool, char_token
     )
 
 
+def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScore | None:
+    """Fold another emission of a held passage into its entry.
+
+    The node supplying the text is the one the entry is copied from: the held
+    node when the arriving window extends it, the arriving one when it already
+    holds the held text. Anything but a ``TextNode`` keeps the held entry as is.
+
+    Args:
+        held (NodeWithScore): The ledger's entry.
+        arriving (NodeWithScore): Another emission under the same node id.
+
+    Returns:
+        NodeWithScore | None: A new entry with both excerpts and the higher score,
+        or ``None`` when the entry already shows the arriving text. Neither input
+        is written to.
+    """
+    held_text = held.node.get_content(metadata_mode=MetadataMode.NONE)
+    new_text = arriving.node.get_content(metadata_mode=MetadataMode.NONE)
+    if new_text in held_text:
+        return None
+    if held_text in new_text:
+        base, text = arriving.node, new_text
+    else:
+        base, text = held.node, f"{held_text}{WINDOW_JOIN}{new_text}"
+    if not isinstance(base, TextNode):
+        return None
+    node = base.model_copy(deep=True)
+    node.text = text
+    if "window_chars" in node.metadata:
+        node.metadata["window_chars"] = len(text)
+    scores = [score for score in (held.score, arriving.score) if score is not None]
+    return NodeWithScore(node=node, score=max(scores, default=None))
+
+
 class EvidenceLedger:
-    """Append-only evidence, numbered in the order it was found."""
+    """Evidence numbered in the order it was found; an entry keeps its number and can only grow."""
 
     def __init__(self, *, cap: int) -> None:
         """Start empty.
@@ -111,7 +147,7 @@ class EvidenceLedger:
         """
         self._cap = max(1, cap)
         self._entries: list[NodeWithScore] = []
-        self._ids: set[str] = set()
+        self._positions: dict[str, int] = {}
 
     def __len__(self) -> int:
         """Return how many entries the ledger holds.
@@ -131,26 +167,34 @@ class EvidenceLedger:
         return len(self._entries) >= self._cap
 
     def add(self, nodes: Iterable[NodeWithScore]) -> list[tuple[int, NodeWithScore]]:
-        """Admit passages not seen before, up to the cap.
+        """Admit passages not seen before, up to the cap, and fold in new windows of passages held.
+
+        Parent-context windows of one section share the section's node id, so a
+        later window of a held id is new evidence: it extends that entry, which
+        keeps its number. A full ledger admits no new entry but still extends one.
 
         Args:
             nodes (Iterable[NodeWithScore]): Passages in ranked order.
 
         Returns:
-            list[tuple[int, NodeWithScore]]: The newly admitted passages with
-            their ledger numbers.
+            list[tuple[int, NodeWithScore]]: An entry for each passage admitted or
+            extended: its ledger number and the arriving passage, whose text is
+            the new excerpt rather than the merged entry.
         """
-        added: list[tuple[int, NodeWithScore]] = []
+        changed: list[tuple[int, NodeWithScore]] = []
         for scored in nodes:
-            if self.full:
-                break
             node_id = scored.node.node_id
-            if node_id in self._ids:
-                continue
-            self._ids.add(node_id)
-            self._entries.append(scored)
-            added.append((len(self._entries), scored))
-        return added
+            position = self._positions.get(node_id)
+            if position is not None:
+                merged = _merge_windows(self._entries[position], scored)
+                if merged is not None:
+                    self._entries[position] = merged
+                    changed.append((position + 1, scored))
+            elif not self.full:
+                self._positions[node_id] = len(self._entries)
+                self._entries.append(scored)
+                changed.append((len(self._entries), scored))
+        return changed
 
     def entries(self) -> list[NodeWithScore]:
         """Return the entries in ledger order, unnumbered.

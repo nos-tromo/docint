@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -10,12 +11,13 @@ from _pytest.logging import LogCaptureFixture
 from assessment_fakes import bad_request, scored_node, search_call, tool_llm
 from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
 from llama_index.core.llms.llm import ToolSelection
-from llama_index.core.schema import NodeWithScore
+from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import ResearchOutcome
 from docint.agents.types import AgentProgress
+from docint.core.rag import ParentContextPostprocessor
 
 QUESTION = "zzsecretzz What could be improved in this study?"
 
@@ -101,6 +103,83 @@ def test_searches_extend_the_ledger_until_finish() -> None:
     ]
     assert (outcome.steps, outcome.reason) == (3, None)
     assert len(ledger) == 2
+
+
+def test_a_new_window_of_a_held_section_is_found_digested_and_resets_the_idle_count() -> None:
+    """A later window of a held section is evidence: it is not a repeat, and it does not idle research."""
+    opening = [scored_node("sec", "The study opens with a pilot.", filename="paper.pdf")]
+    closing = [scored_node("sec", "It closes with a limitations note.", filename="paper.pdf")]
+    # Four searches, then the scripted ``finish``: a repeat of the first window would have idled out at the third.
+    llm = tool_llm(
+        [search_call("opening"), search_call("nothing"), search_call("closing"), search_call("more nothing")]
+    )
+    ledger = EvidenceLedger(cap=10)
+
+    progress, outcome = _drain(
+        _loop(llm, _search({"opening": opening, "closing": closing})).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert [(step.detail, step.found) for step in progress] == [
+        ("opening", 1),
+        ("nothing", 0),
+        ("closing", 1),
+        ("more nothing", 0),
+    ]
+    assert (outcome.steps, outcome.reason) == (5, None)
+    reply = llm.chat_with_tools.call_args_list[3].kwargs["chat_history"][6]
+    assert reply.role == MessageRole.TOOL
+    assert "[1] (paper.pdf) It closes with a limitations note." in str(reply.content)
+    assert len(ledger) == 1
+
+
+def test_two_windows_of_one_oversize_section_reach_the_answer_as_one_entry() -> None:
+    """The reproduction: the real postprocessor windows a section twice under one id, and neither window may be lost."""
+    first_fact = "The first survey wave lost two respondents."
+    last_fact = "The final wave was rerun with a larger sample."
+    section_text = (
+        "Opening filler. " * 300 + first_fact + " Middle filler. " * 300 + last_fact + " Closing filler. " * 300
+    )
+    section = TextNode(id_="section-1", text=section_text, metadata={"filename": "survey.md", "page": 3})
+    hits = {
+        query: NodeWithScore(
+            node=TextNode(
+                id_=f"child-{query}",
+                text=fact,
+                metadata={"hier.parent_id": "section-1", "docint_hier_type": "fine", "filename": "survey.md"},
+            ),
+            score=0.8,
+        )
+        for query, fact in (("first wave", first_fact), ("final wave", last_fact))
+    }
+    postprocessor = ParentContextPostprocessor(
+        docstore=SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: section if node_id == "section-1" else None
+        ),
+        usable_tokens=300,
+        per_hit_floor=100,
+        char_token_ratio=3.5,
+        budget_enforced=True,
+    )
+    llm = tool_llm([search_call("first wave"), search_call("final wave")])
+    ledger = EvidenceLedger(cap=10)
+
+    progress, _ = _drain(
+        _loop(llm, lambda query: postprocessor._postprocess_nodes([hits[query]])).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert [step.found for step in progress] == [1, 1]
+    numbered = ledger.numbered()
+    assert len(numbered) == 1
+    merged = numbered[0].node.get_content(metadata_mode=MetadataMode.NONE)
+    assert first_fact in merged
+    assert last_fact in merged
+    # Still the two windows, not the section.
+    assert len(merged) < len(section_text) // 2
+    assert numbered[0].node.metadata["window_chars"] == len(merged)
 
 
 def test_each_call_requires_a_tool_and_forbids_parallel_calls() -> None:
