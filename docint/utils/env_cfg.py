@@ -2273,11 +2273,12 @@ def load_assessment_env(default_enabled: bool = True, default_max_steps: int = 6
           answered with a researched, labelled model assessment. Off means
           every turn is a lookup and no classifier call is made.
         - max_steps (int): Upper bound on tool-calling research rounds per
-          assessment turn; ``0`` answers from the first search alone.
+          assessment turn; ``0`` answers from the first search alone. A blank
+          value counts as unset.
     """
     return AssessmentConfig(
         enabled=str(os.getenv("ASSESSMENT_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
-        max_steps=max(0, int(os.getenv("ASSESSMENT_MAX_STEPS", default_max_steps))),
+        max_steps=max(0, int(os.getenv("ASSESSMENT_MAX_STEPS") or default_max_steps)),
     )
 
 

@@ -53,6 +53,17 @@ def test_max_steps_is_clamped_at_zero(monkeypatch: pytest.MonkeyPatch, raw: str,
     assert load_assessment_env().max_steps == expected
 
 
+def test_a_blank_max_steps_counts_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty ``ASSESSMENT_MAX_STEPS`` line in ``.env`` or compose means the default.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("ASSESSMENT_MAX_STEPS", "")
+
+    assert load_assessment_env().max_steps == 6
+
+
 def test_gate_needs_the_minimum_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """Below 8192 tokens the answer step cannot hold its evidence, so the gate closes.
 

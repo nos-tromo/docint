@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from conftest import run_ingest
 from fastapi.testclient import TestClient
 
@@ -5928,3 +5929,38 @@ def test_query_binds_the_prior_turn_only_for_an_assessment(monkeypatch: pytest.M
     assert "skip_query_rewrite" not in lookup
     assert assessment["prior_turn"] == prior
     assert assessment["skip_query_rewrite"] is False
+
+
+@pytest.mark.parametrize(("broken", "error"), [("gate", ValueError), ("model", RuntimeError), ("classifier", KeyError)])
+def test_classify_turn_answers_as_a_lookup_when_a_step_fails(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, broken: str, error: type[Exception]
+) -> None:
+    """A misconfigured assessment setting or a dead model must never break a lookup turn.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        broken (str): The step that fails: the gate, the model property or the classifier.
+        error (type[Exception]): What it raises; any class must degrade the same way.
+    """
+    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
+    rag = cast(Any, api_module.rag)
+    rag.text_model_id = "m"
+    rag.openai_ctx_window = 8192
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise error("bad config")
+
+    if broken == "gate":
+        monkeypatch.setattr(api_module, "assessment_available", _fail)
+    elif broken == "model":
+        monkeypatch.setattr(type(rag), "text_model", property(_fail), raising=False)
+    else:
+        rag.text_model = object()
+        monkeypatch.setattr(api_module, "classify_turn", _fail)
+
+    assert api_module._classify_turn("Q", None, "all") == "lookup"
+
+    warnings = [message for message in loguru_caplog.messages if "Assessment classification unavailable" in message]
+    assert warnings == [f"Assessment classification unavailable ({error.__name__}); answering as a lookup"]
+    assert "bad config" not in loguru_caplog.text
