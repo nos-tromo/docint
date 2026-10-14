@@ -28,7 +28,7 @@ from docint.agents.assessment.split import SENTINEL, compose_labelled_answer
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
-from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
+from docint.utils.text_budget import MATCH_SPANS_KEY, allocate_shortest_first, fit_with_marker
 
 
 def test_ledger_numbers_in_insertion_order_and_dedupes() -> None:
@@ -677,3 +677,144 @@ def test_several_merged_passages_pack_within_the_evidence_budget_with_text_from_
     assert len(context) <= 3000
     assert shortened == 5
     assert all(f"E{entry}W{window}:" in context for entry in range(5) for window in range(3))
+
+
+def _anchored(text: str, match: str, *, node_id: str = "section-1", score: float = 1.0) -> NodeWithScore:
+    """Build a passage of an invented section that says where its retrieved match sits.
+
+    Args:
+        text (str): The passage text.
+        match (str): The retrieved text inside it.
+        node_id (str): The section's node id.
+        score (float): The hit's score.
+
+    Returns:
+        NodeWithScore: The passage, stamped like the parent-context postprocessor stamps it.
+    """
+    start = text.index(match)
+    scored = scored_node(
+        node_id, text, filename="paper.pdf", page=2, **{MATCH_SPANS_KEY: [[start, start + len(match)]]}
+    )
+    scored.score = score
+    return scored
+
+
+def _matches(scored: NodeWithScore) -> list[str]:
+    """Return the text each of a passage's match spans points at.
+
+    Args:
+        scored (NodeWithScore): The passage.
+
+    Returns:
+        list[str]: The matched texts, in span order.
+    """
+    return [_text(scored)[start:end] for start, end in scored.node.metadata.get(MATCH_SPANS_KEY, [])]
+
+
+def test_an_extending_window_brings_its_match_along() -> None:
+    """The arriving window's match is shifted past the held text and the join."""
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([_anchored("The study opens with a pilot.", "pilot")])
+
+    ledger.add([_anchored("It closes with a limitations note.", "limitations")])
+
+    assert _matches(ledger.entries()[0]) == ["pilot", "limitations"]
+
+
+def test_a_fuller_window_keeps_the_match_of_the_slice_it_replaces() -> None:
+    """A section that supersedes a slice of itself also keeps the slice's match, shifted to where the slice sits."""
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([_anchored("opens with a pilot", "pilot")])
+
+    ledger.add([_anchored("The study opens with a pilot, then compares.", "compares")])
+
+    assert _matches(ledger.entries()[0]) == ["compares", "pilot"]
+
+
+def test_a_contained_window_with_a_new_match_is_news() -> None:
+    """A window the entry already shows still adds a match the entry did not have, so research hears of it."""
+    ledger = EvidenceLedger(cap=5)
+    whole = "The study opens with a pilot, then compares."
+    ledger.add([_anchored(whole, "pilot")])
+    arriving = _anchored("then compares.", "compares")
+
+    changed = ledger.add([arriving])
+
+    assert changed == [(1, arriving)]
+    entry = ledger.entries()[0]
+    assert _text(entry) == whole
+    assert _matches(entry) == ["pilot", "compares"]
+
+
+def test_a_contained_window_whose_match_is_covered_adds_nothing() -> None:
+    """A window repeating a match the entry already carries is not news."""
+    ledger = EvidenceLedger(cap=5)
+    first = _anchored("The study opens with a pilot, then compares.", "opens with a pilot")
+    ledger.add([first])
+
+    assert ledger.add([_anchored("with a pilot", "pilot")]) == []
+    assert ledger.entries()[0] is first
+
+
+#: An invented section whose decisive sentence sits deep inside it.
+DEEP_FACT = "The pilot excluded every respondent recruited after March."
+DEEP_SECTION = ("Background filler sentence. " * 190)[:5214] + DEEP_FACT + " Closing filler sentence." * 40
+
+
+def _render_numbered(nodes: list[NodeWithScore], allowance: int) -> str:
+    """Render one passage whose text may show exactly ``allowance`` characters before its cut marker.
+
+    Args:
+        nodes (list[NodeWithScore]): The passage, alone in its ledger.
+        allowance (int): Characters its text may show.
+
+    Returns:
+        str: The rendered context.
+    """
+    numbered = _numbered(nodes)
+    header = llm_view(numbered[0].node).get_metadata_str(mode=MetadataMode.LLM)
+    budget = len(header) + 4 + MARKER_RESERVE_CHARS + allowance
+    return render_context(numbered, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)[0]
+
+
+def test_a_shortened_passage_keeps_the_text_around_its_match() -> None:
+    """Cut to 700 characters, a promoted section shows its retrieved sentence, not its opening."""
+    context = _render_numbered([_anchored(DEEP_SECTION, DEEP_FACT)], 700)
+
+    assert DEEP_FACT in context
+    # The body opens on the gap before the match, not on the section's first characters.
+    assert context.split("\n\n", 1)[1].startswith("[... ")
+
+
+def test_each_window_of_a_shortened_merged_passage_keeps_its_own_match() -> None:
+    """The match spans are clipped into each window, so every window is cut around its own match."""
+    first_fact, last_fact = "The first wave lost two respondents.", "The final wave was rerun with more."
+    # The facts sit at different offsets of their windows, so a span left unshifted points at the wrong text.
+    first = ("Opening filler words. " * 40)[:800] + first_fact + " Trailing filler words." * 8
+    last = ("Middle filler words. " * 40)[:300] + last_fact + " Closing filler words." * 30
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([_anchored(first, first_fact)])
+    ledger.add([_anchored(last, last_fact)])
+
+    context = _render_numbered(ledger.entries(), 700)
+
+    assert first_fact in context
+    assert last_fact in context
+    assert WINDOW_JOIN in context
+
+
+def test_digest_reads_around_the_match() -> None:
+    """The research model's digest of a promoted section shows the retrieved sentence, and says it skipped ahead."""
+    line = digest(3, _anchored(DEEP_SECTION, DEEP_FACT))
+
+    assert line.startswith("[3] (paper.pdf, p. 2) … ")
+    assert DEEP_FACT in line
+    assert len(line) <= DIGEST_CHARS + 40
+
+
+def test_digest_of_a_match_near_the_start_reads_from_the_start() -> None:
+    """A match inside the opening needs no skip, so the digest starts where the passage does."""
+    line = digest(1, _anchored(DEEP_SECTION, "Background filler sentence. Background"))
+
+    assert line.startswith("[1] (paper.pdf, p. 2) Background filler sentence.")
+    assert "…" not in line

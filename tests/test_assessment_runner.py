@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any, cast
 
 import openai
 import pytest
-from assessment_fakes import bad_request, llm_view, scored_node, social_post, streaming_llm
+from assessment_fakes import bad_request, llm_view, scored_node, search_call, social_post, streaming_llm, tool_llm
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
-from llama_index.core.schema import BaseNode, NodeWithScore
+from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
 
 from docint.agents.assessment.ledger import EvidenceLedger, answer_budget
+from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import (
     DEFAULT_ASSESSMENT_ANSWER_PROMPT,
     AssessmentDoesNotFit,
@@ -515,3 +517,63 @@ def test_an_unscoped_seed_always_fits(window: int, reasoning: bool) -> None:
     assert items[0].found == cap
     assert isinstance(items[-1], AssessmentResult)
     llm.stream_chat.assert_called_once()
+
+
+#: An invented section whose decisive sentence sits deep inside it.
+DEEP_FACT = "The pilot excluded every respondent recruited after March."
+DEEP_SECTION = ("Background filler sentence. " * 190)[:5214] + DEEP_FACT + " Closing filler sentence." * 40
+
+
+def test_a_fact_deep_in_a_promoted_section_survives_a_full_ledger() -> None:
+    """Codex's reproduction: research fills 23 entries at 8k, and the retrieved fact at offset 5,214 stays.
+
+    The real parent-context postprocessor promotes the retrieved sentence to its whole section; both the
+    research digest and the packed answer context must still show that sentence.
+    """
+    assert DEEP_SECTION.index(DEEP_FACT) == 5214
+    section = TextNode(id_="section-7", text=DEEP_SECTION, metadata={"filename": "survey.pdf", "page": 3})
+    child = NodeWithScore(
+        node=TextNode(
+            id_="child-7", text=DEEP_FACT, metadata={"hier.parent_id": "section-7", "docint_hier_type": "fine"}
+        ),
+        score=0.8,
+    )
+    postprocessor = ParentContextPostprocessor(
+        docstore=SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: section if node_id == "section-7" else None
+        ),
+        usable_tokens=4000,
+        per_hit_floor=256,
+        char_token_ratio=3.5,
+        budget_enforced=True,
+    )
+    filler = [
+        scored_node(
+            f"n{number}", f"Passage {number}. " + "Invented filler text. " * 100, filename="notes.pdf", page=number
+        )
+        for number in range(1, 23)
+    ]
+    # The section arrives 22nd; one more search fills the 23-entry ledger after the model has read its digest.
+    results = {
+        "exclusion criteria": lambda: postprocessor._postprocess_nodes([child]),
+        "recruitment": lambda: filler[21:],
+    }
+    research_llm = tool_llm([search_call("exclusion criteria"), search_call("recruitment")])
+    researcher = ResearchLoop(
+        llm=cast(Any, research_llm),
+        search=lambda query: results[query](),
+        max_steps=6,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        prompt="{question}{prior_turn}{digest}",
+    )
+    runner, llm = _runner(researcher=researcher, view=ParentContextPostprocessor._emit_with_llm_exclusion)
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=filler[:21]))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert len(result.nodes) == 23
+    assert result.shortened == 23
+    digest_reply = research_llm.chat_with_tools.call_args_list[1].kwargs["chat_history"][2]
+    assert DEEP_FACT in str(digest_reply.content)
+    assert DEEP_FACT in llm.stream_chat.call_args.args[0][0].content

@@ -9,7 +9,14 @@ from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextN
 
 from docint.agents.assessment.split import neutralize_sentinel
 from docint.utils.embed_chunking import estimate_tokens
-from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
+from docint.utils.text_budget import (
+    MARKER_RESERVE_CHARS,
+    MATCH_SPANS_KEY,
+    allocate_shortest_first,
+    excerpt,
+    merge_spans,
+    place,
+)
 
 MAX_LEDGER_ENTRIES = 24
 #: Smallest share of the answer budget worth giving one entry (~200 text + header).
@@ -17,8 +24,6 @@ MIN_ENTRY_TOKENS = 240
 DIGEST_CHARS = 400
 #: Longest file name a digest label carries.
 DIGEST_LABEL_CHARS = 120
-#: Worst-case length of the cut marker, reserved for every entry.
-MARKER_RESERVE_CHARS = 50
 #: Seam between two windows of one passage; no brackets, so it never reads as a citation.
 WINDOW_JOIN = "\n\n…\n\n"
 #: Fewest characters a shortened passage may keep and still be read.
@@ -102,36 +107,84 @@ def answer_budget(*, ctx_window: int, template: str, reasoning: bool, char_token
     )
 
 
+def _anchors(node: BaseNode) -> list[tuple[int, int]]:
+    """Return where a passage's retrieved matches sit in its text, skipping malformed spans.
+
+    Args:
+        node (BaseNode): The passage.
+
+    Returns:
+        list[tuple[int, int]]: Its ``MATCH_SPANS_KEY`` spans as ``(start, end)``; none when unstamped.
+    """
+    raw = (node.metadata or {}).get(MATCH_SPANS_KEY)
+    if not isinstance(raw, list):
+        return []
+    return [
+        (item[0], item[1])
+        for item in raw
+        if isinstance(item, (list, tuple)) and len(item) == 2 and all(type(value) is int for value in item)
+    ]
+
+
+def _shifted(spans: Iterable[tuple[int, int]], by: int) -> list[tuple[int, int]]:
+    """Move spans to where their text sits in another, longer or shorter one.
+
+    Args:
+        spans (Iterable[tuple[int, int]]): The spans.
+        by (int): Characters to add to each offset; negative moves them back.
+
+    Returns:
+        list[tuple[int, int]]: The moved spans.
+    """
+    return [(start + by, end + by) for start, end in spans]
+
+
 def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScore | None:
-    """Fold another emission of a held passage into its entry.
+    """Fold another emission of a held passage into its entry, with its match.
 
     The node supplying the text is the one the entry is copied from: the held
-    node when the arriving window extends it, the arriving one when it already
-    holds the held text. Anything but a ``TextNode`` keeps the held entry as is.
+    node when the arriving window extends it or adds only a match, the arriving
+    one when it already holds the held text. Each side's match spans are moved
+    to where its text sits in the result. Anything but a ``TextNode`` keeps the
+    held entry as is.
 
     Args:
         held (NodeWithScore): The ledger's entry.
         arriving (NodeWithScore): Another emission under the same node id.
 
     Returns:
-        NodeWithScore | None: A new entry with both excerpts and the higher score,
-        or ``None`` when the entry already shows the arriving text. Neither input
-        is written to.
+        NodeWithScore | None: A new entry with both excerpts, every match and the
+        higher score, or ``None`` when the entry already shows the arriving text
+        and every match it carries. Neither input is written to.
     """
     held_text = held.node.get_content(metadata_mode=MetadataMode.NONE)
     new_text = arriving.node.get_content(metadata_mode=MetadataMode.NONE)
+    held_spans, new_spans = _anchors(held.node), _anchors(arriving.node)
     if new_text in held_text:
-        return None
-    if held_text in new_text:
-        base, text = arriving.node, new_text
+        covered = merge_spans(held_spans, len(held_text))
+        fresh = [
+            (start, end)
+            for start, end in _shifted(new_spans, held_text.find(new_text))
+            if not any(lo <= start and end <= hi for lo, hi in covered)
+        ]
+        if not fresh:
+            return None
+        base, text, spans = held.node, held_text, held_spans + fresh
+    elif held_text in new_text:
+        base, text, spans = arriving.node, new_text, new_spans + _shifted(held_spans, new_text.find(held_text))
     else:
-        base, text = held.node, f"{held_text}{WINDOW_JOIN}{new_text}"
+        shift = len(held_text) + len(WINDOW_JOIN)
+        base, text, spans = held.node, f"{held_text}{WINDOW_JOIN}{new_text}", held_spans + _shifted(new_spans, shift)
     if not isinstance(base, TextNode):
         return None
     node = base.model_copy(deep=True)
     node.text = text
     if "window_chars" in node.metadata:
         node.metadata["window_chars"] = len(text)
+    if spans:
+        node.metadata[MATCH_SPANS_KEY] = [[start, end] for start, end in spans]
+    else:
+        node.metadata.pop(MATCH_SPANS_KEY, None)
     scores = [score for score in (held.score, arriving.score) if score is not None]
     return NodeWithScore(node=node, score=max(scores, default=None))
 
@@ -171,7 +224,9 @@ class EvidenceLedger:
 
         Parent-context windows of one section share the section's node id, so a
         later window of a held id is new evidence: it extends that entry, which
-        keeps its number. A full ledger admits no new entry but still extends one.
+        keeps its number. So is a window the entry already shows when it carries
+        a match the entry lacks. A full ledger admits no new entry but still
+        extends one.
 
         Args:
             nodes (Iterable[NodeWithScore]): Passages in ranked order.
@@ -223,6 +278,10 @@ class EvidenceLedger:
 def digest(number: int, scored: NodeWithScore) -> str:
     """Render one bounded line the research model reads instead of the passage.
 
+    A passage that says where its retrieved match sits is read from a view of
+    ``DIGEST_CHARS`` placed on that match, led by ``…`` when the view skips the
+    passage's opening; any other passage is read from its start.
+
     Args:
         number (int): The passage's ledger number.
         scored (NodeWithScore): The passage.
@@ -236,8 +295,14 @@ def digest(number: int, scored: NodeWithScore) -> str:
     name = name[:DIGEST_LABEL_CHARS].replace("[", "(").replace("]", ")")
     page = meta.get("page") if meta.get("page") is not None else meta.get("page_number")
     where = f"{name}, p. {page}" if name and page is not None else name
-    text = " ".join(scored.node.get_content(metadata_mode=MetadataMode.NONE).split())
-    snippet = text[:DIGEST_CHARS]
+    raw = scored.node.get_content(metadata_mode=MetadataMode.NONE)
+    spans = merge_spans(_anchors(scored.node), len(raw))
+    if spans:
+        start, end = place(*spans[0], DIGEST_CHARS, len(raw))
+        snippet = " ".join(raw[start:end].split())
+        snippet = f"… {snippet}" if start > 0 else snippet
+    else:
+        snippet = " ".join(raw.split())[:DIGEST_CHARS]
     line = f"[{number}] ({where}) {snippet}" if where else f"[{number}] {snippet}"
     return neutralize_sentinel(" ".join(line.split()))
 
@@ -353,32 +418,40 @@ def evidence_fits(
     )
 
 
-def _fit_windows(body: str, allowance: int) -> tuple[str, bool]:
-    """Fit one passage to its allowance, window by window when it joins several.
+def _fit_windows(body: str, allowance: int, anchors: Sequence[tuple[int, int]] = ()) -> tuple[str, bool]:
+    """Fit one passage to its allowance, window by window when it joins several, around its matches.
 
     Cut from the tail, a passage extended by :meth:`EvidenceLedger.add` would lose
     its newest window first, so each window is shortened on its own. The joins and
     one cut marker per window beyond the first come out of the allowance (the
     caller's reserve covers the first marker); the rest is shared shortest-first.
+    Each window, or the passage as a whole, is cut by :func:`excerpt` around the
+    match spans that fall inside it, so a match deep in a section is not cut away.
     The result stays within the allowance plus one marker reserve, as a
     whole-passage cut does.
 
     Args:
         body (str): The passage text.
         allowance (int): Characters it may show before its cut marker.
+        anchors (Sequence[tuple[int, int]]): Where its retrieved matches sit in ``body``.
 
     Returns:
         tuple[str, bool]: The rendered text and whether it was shortened. A passage
         that fits, joins no windows, or leaves less than a character per window is
-        cut as :func:`fit_with_marker` cuts it.
+        cut as a whole.
     """
     windows = body.split(WINDOW_JOIN)
     seams = len(windows) - 1
     remainder = allowance - seams * (len(WINDOW_JOIN) + MARKER_RESERVE_CHARS)
     if len(body) <= allowance or seams == 0 or remainder < len(windows):
-        return fit_with_marker(body, allowance)
+        return excerpt(body, anchors, allowance)
     shares = allocate_shortest_first([len(window) for window in windows], remainder)
-    fitted = [fit_with_marker(window, share) for window, share in zip(windows, shares, strict=True)]
+    fitted: list[tuple[str, bool]] = []
+    offset = 0
+    for window, share in zip(windows, shares, strict=True):
+        # Spans are clipped to the window by ``excerpt``.
+        fitted.append(excerpt(window, _shifted(anchors, -offset), share))
+        offset += len(window) + len(WINDOW_JOIN)
     return WINDOW_JOIN.join(text for text, _ in fitted), any(cut for _, cut in fitted)
 
 
@@ -394,7 +467,8 @@ def render_context(
 
     Headers are always kept; the text budget is shared shortest-first and every
     cut is marked, so the model can tell a short excerpt from a short source. A
-    passage that joins several windows is cut window by window, so each keeps text.
+    passage that joins several windows is cut window by window, so each keeps text,
+    and a passage is cut around its retrieved matches rather than to its opening.
 
     Args:
         nodes (list[NodeWithScore]): The numbered ledger.
@@ -414,8 +488,8 @@ def render_context(
     )
     rendered: list[str] = []
     shortened = 0
-    for header, body, allowance in zip(headers, bodies, allowances, strict=True):
-        fitted, cut = _fit_windows(body, allowance)
+    for scored, header, body, allowance in zip(nodes, headers, bodies, allowances, strict=True):
+        fitted, cut = _fit_windows(body, allowance, _anchors(scored.node))
         shortened += int(cut)
         rendered.append(f"{header}\n\n{fitted}" if header else fitted)
     # The join can complete a sentinel that neither part holds alone.

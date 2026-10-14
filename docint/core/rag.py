@@ -245,6 +245,7 @@ from docint.utils.retry import (
     is_transient_qdrant_error,
     retry_with_backoff,
 )
+from docint.utils.text_budget import MATCH_SPANS_KEY
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -510,7 +511,9 @@ def _quantization_matches(
 # ``llm_description`` / ``llm_tags`` (image caption / tagging output —
 # bulky), pipeline artefacts, and our own
 # ``parent_context_windowed`` / ``parent_full_chars`` / ``window_chars``
-# debug markers. Any new metadata key added by a future reader defaults
+# debug markers and ``docint_match_spans`` (where the retrieved child sits
+# in an emitted parent; read by assessment packing, never by the prompt).
+# Any new metadata key added by a future reader defaults
 # to excluded — safer than accidentally reintroducing the overflow.
 LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
     {
@@ -1288,14 +1291,14 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             return None
 
     @staticmethod
-    def _find_match_offset(parent_text: str, sub_text: str) -> int:
-        r"""Return the offset of *sub_text* inside *parent_text*, or ``-1``.
+    def _find_match_span(parent_text: str, sub_text: str) -> tuple[int, int]:
+        r"""Return where *sub_text* sits inside *parent_text*, or ``(-1, -1)``.
 
         First tries an exact substring search. On miss, whitespace-
         normalizes both strings (``\\s+`` → single space, stripped) while
         tracking each normalized character's original parent offset, so a
         normalized hit can be mapped back to the original parent for
-        accurate slicing. Returns ``-1`` if even the normalized search
+        accurate slicing. Returns ``(-1, -1)`` if even the normalized search
         misses — callers treat that as a signal to fall back to the
         sub-node rather than guessing.
 
@@ -1305,19 +1308,20 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 *parent_text* anchors the window.
 
         Returns:
-            The character offset in *parent_text* where *sub_text* (or
-            its normalized equivalent) begins, or ``-1`` when the
+            The ``(start, end)`` offsets in *parent_text* of *sub_text*, or of
+            its normalized equivalent, whose end then comes from the original
+            text rather than from the sub-node's length; ``(-1, -1)`` when the
             sub-node cannot be located.
         """
         if not sub_text or not parent_text:
-            return -1
+            return -1, -1
         offset = parent_text.find(sub_text)
         if offset >= 0:
-            return offset
+            return offset, offset + len(sub_text)
 
         norm_sub = re.sub(r"\s+", " ", sub_text).strip()
         if not norm_sub:
-            return -1
+            return -1, -1
 
         # Build a parallel normalized parent + index map back to the
         # original offsets so we return an accurate slice boundary.
@@ -1341,8 +1345,21 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
         norm_offset = norm_parent.find(norm_sub)
         if norm_offset < 0:
-            return -1
-        return idx_map[norm_offset]
+            return -1, -1
+        return idx_map[norm_offset], idx_map[norm_offset + len(norm_sub) - 1] + 1
+
+    @staticmethod
+    def _find_match_offset(parent_text: str, sub_text: str) -> int:
+        """Return the offset of *sub_text* inside *parent_text*, or ``-1``.
+
+        Args:
+            parent_text: The full parent text loaded from the docstore.
+            sub_text: The matched sub-node text.
+
+        Returns:
+            Where the match found by :meth:`_find_match_span` begins.
+        """
+        return ParentContextPostprocessor._find_match_span(parent_text, sub_text)[0]
 
     @staticmethod
     def _snap_to_whitespace(text: str, start: int, end: int, scan: int = 80) -> tuple[int, int]:
@@ -1376,6 +1393,55 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     break
         return start, end
 
+    def _window_bounds(self, parent_text: str, offset: int, sub_len: int, budget_chars: int) -> tuple[int, int]:
+        """Return the bounds of a ~``budget_chars`` window centred on a located sub-node.
+
+        Args:
+            parent_text: The full parent text.
+            offset: Where the sub-node begins in *parent_text*.
+            sub_len: The sub-node text's length, which the window is centred on.
+            budget_chars: The character ceiling for the window.
+
+        Returns:
+            The window's ``(start, end)`` in *parent_text*, snapped to whitespace.
+        """
+        sub_end = offset + sub_len
+        half = max(0, (budget_chars - sub_len) // 2)
+        start = max(0, offset - half)
+        end = min(len(parent_text), sub_end + half)
+        return self._snap_to_whitespace(parent_text, start, end)
+
+    def _window_with_match(
+        self, parent_text: str, sub_text: str, budget_chars: int
+    ) -> tuple[str, list[list[int]]] | None:
+        """Return the window of :meth:`_window_parent_text` and where its match sits in it.
+
+        The sub-node is located once; its span in the parent is clipped to the
+        window's bounds, so the window text is never searched again.
+
+        Args:
+            parent_text: The full parent text.
+            sub_text: The matched sub-node text.
+            budget_chars: The character ceiling for the returned window.
+
+        Returns:
+            The windowed text and its window-relative match spans, which are
+            empty when the window is cut from the sub-node itself; ``None`` on
+            a location miss.
+        """
+        if budget_chars <= 0 or not parent_text or not sub_text:
+            return None
+        if len(sub_text) >= budget_chars:
+            return sub_text[:budget_chars], []
+
+        match_start, match_end = self._find_match_span(parent_text, sub_text)
+        if match_start < 0:
+            return None
+
+        start, end = self._window_bounds(parent_text, match_start, len(sub_text), budget_chars)
+        shown = (max(match_start, start) - start, min(match_end, end) - start)
+        return parent_text[start:end], [list(shown)] if shown[1] > shown[0] else []
+
     def _window_parent_text(self, parent_text: str, sub_text: str, budget_chars: int) -> str | None:
         """Return a ~``budget_chars``-sized window of *parent_text* around *sub_text*.
 
@@ -1395,24 +1461,15 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         Returns:
             The windowed parent slice, or ``None`` on location miss.
         """
-        if budget_chars <= 0 or not parent_text or not sub_text:
-            return None
-        if len(sub_text) >= budget_chars:
-            return sub_text[:budget_chars]
-
-        offset = self._find_match_offset(parent_text, sub_text)
-        if offset < 0:
-            return None
-
-        sub_end = offset + len(sub_text)
-        half = max(0, (budget_chars - len(sub_text)) // 2)
-        start = max(0, offset - half)
-        end = min(len(parent_text), sub_end + half)
-        start, end = self._snap_to_whitespace(parent_text, start, end)
-        return parent_text[start:end]
+        window = self._window_with_match(parent_text, sub_text, budget_chars)
+        return None if window is None else window[0]
 
     @staticmethod
-    def _emit_with_llm_exclusion(source: BaseNode, ner_fallback: BaseNode | None = None) -> TextNode:
+    def _emit_with_llm_exclusion(
+        source: BaseNode,
+        ner_fallback: BaseNode | None = None,
+        match_spans: Sequence[Sequence[int]] | None = None,
+    ) -> TextNode:
         r"""Clone *source* into a ``TextNode`` whose LLM view hides noisy metadata.
 
         The synthesiser splices each emitted node into the chat prompt
@@ -1443,6 +1500,10 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 answer's sources. A parent that has its own NER metadata
                 (fresh ingests mirror the full children union) always
                 wins over the single matched child's slice.
+            match_spans: Where the retrieved child sits in *source*'s text,
+                as ``[start, end]`` spans. Written under
+                ``MATCH_SPANS_KEY`` before the exclusion list is built, so
+                the prompt never sees it; only assessment packing reads it.
 
         Returns:
             A fresh ``TextNode`` preserving the original ``node_id`` and
@@ -1454,6 +1515,8 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         # cached parent node, and mutating its nested dicts in place would
         # leak policy into every future query that touches the same parent.
         metadata = copy.deepcopy(dict(source.metadata or {}))
+        if match_spans:
+            metadata[MATCH_SPANS_KEY] = [[int(start), int(end)] for start, end in match_spans]
 
         if ner_fallback is not None:
             fallback_meta = ner_fallback.metadata or {}
@@ -1531,6 +1594,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             base_node: BaseNode,
             score: float | None,
             ner_fallback: BaseNode | None = None,
+            match_spans: Sequence[Sequence[int]] | None = None,
         ) -> NodeWithScore:
             """Wrap *base_node* in a ``NodeWithScore`` with LLM-view exclusions applied.
 
@@ -1546,15 +1610,30 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 ner_fallback: The retrieved sub-node backfilling
                     ``entities`` / ``relations`` when *base_node* carries
                     none (see :meth:`_emit_with_llm_exclusion`).
+                match_spans: Where the retrieved child sits in
+                    *base_node*'s text, when it was located there.
 
             Returns:
                 A ``NodeWithScore`` whose underlying node hides noisy
                 metadata from ``get_content(MetadataMode.LLM)``.
             """
             return NodeWithScore(
-                node=self._emit_with_llm_exclusion(base_node, ner_fallback=ner_fallback),
+                node=self._emit_with_llm_exclusion(base_node, ner_fallback=ner_fallback, match_spans=match_spans),
                 score=score,
             )
+
+        def _parent_match(parent_text: str, sub_node: BaseNode) -> list[list[int]]:
+            """Locate the retrieved child inside a parent emitted whole.
+
+            Args:
+                parent_text: The parent's full text.
+                sub_node: The retrieved child.
+
+            Returns:
+                The child's span in *parent_text*, or none when it cannot be located.
+            """
+            start, end = self._find_match_span(parent_text, getattr(sub_node, "text", "") or "")
+            return [[start, end]] if start >= 0 else []
 
         def _llm_tokens(base_node: BaseNode) -> int:
             """Estimate the token cost of *base_node*'s rendered LLM payload.
@@ -1595,7 +1674,14 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
             # Legacy / unbounded path.
             if not budget_enforced:
-                expanded.append(_emit(parent_node, node.score, ner_fallback=node.node))
+                expanded.append(
+                    _emit(
+                        parent_node,
+                        node.score,
+                        ner_fallback=node.node,
+                        match_spans=_parent_match(parent_text, node.node),
+                    )
+                )
                 continue
 
             # Budget exhausted by earlier hits — emit the sub-node so the hit
@@ -1610,7 +1696,14 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
             parent_tokens = _llm_tokens(parent_node)
             if parent_tokens <= remaining_tokens:
-                expanded.append(_emit(parent_node, node.score, ner_fallback=node.node))
+                expanded.append(
+                    _emit(
+                        parent_node,
+                        node.score,
+                        ner_fallback=node.node,
+                        match_spans=_parent_match(parent_text, node.node),
+                    )
+                )
                 remaining_tokens -= parent_tokens
                 continue
 
@@ -1623,9 +1716,9 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             budget_tokens = max(self.per_hit_floor, remaining_tokens)
             budget_chars = max(1, int(budget_tokens * self.char_token_ratio))
             sub_text = getattr(getattr(node, "node", None), "text", "") or getattr(node, "text", "") or ""
-            windowed_text = self._window_parent_text(parent_text, sub_text, budget_chars)
+            window = self._window_with_match(parent_text, sub_text, budget_chars)
 
-            if windowed_text is None:
+            if window is None:
                 logger.debug(
                     "parent_context_fallback_subnode: parent_id={} sub_node_id={} sub_chars={} parent_chars={}",
                     parent_id,
@@ -1636,6 +1729,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 expanded.append(_emit(node.node, node.score))
                 continue
 
+            windowed_text, window_spans = window
             windowed_node = TextNode(
                 id_=parent_node.node_id,
                 text=windowed_text,
@@ -1646,7 +1740,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     "window_chars": len(windowed_text),
                 },
             )
-            windowed_emit = _emit(windowed_node, node.score, ner_fallback=node.node)
+            windowed_emit = _emit(windowed_node, node.score, ner_fallback=node.node, match_spans=window_spans)
             # Render once — the LLM payload is what both the log line and
             # the budget debit need, so compute it here and reuse.
             windowed_llm_payload = windowed_emit.node.get_content(metadata_mode=MetadataMode.LLM)

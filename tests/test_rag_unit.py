@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import types
 import urllib.error
 import urllib.request
@@ -50,6 +51,7 @@ from docint.utils.openai_cfg import (
     BudgetedOpenAIEmbedding,
     EmbeddingInputTooLongError,
 )
+from docint.utils.text_budget import MATCH_SPANS_KEY
 
 
 class DummyNode:
@@ -3420,6 +3422,309 @@ def test_parent_context_preserves_structural_locators_in_llm_payload() -> None:
     # Bulky / noisy siblings must be hidden.
     assert "0xabcdef" not in llm_payload
     assert "whisper_task" not in llm_payload
+
+
+#: An invented section whose decisive sentence sits deep inside it.
+SPAN_FACT = "The pilot excluded every respondent recruited after March."
+SPAN_SECTION = ("Background filler sentence. " * 190)[:5214] + SPAN_FACT + " Closing filler sentence." * 40
+
+
+def _span_hit(text: str = SPAN_FACT, parent_id: str = "section-7", node_id: str = "child-7") -> NodeWithScore:
+    """Build a retrieved child of an invented section.
+
+    Args:
+        text (str): The child's text.
+        parent_id (str): The section it belongs to.
+        node_id (str): The child's own id.
+
+    Returns:
+        NodeWithScore: The hit.
+    """
+    metadata: dict[str, Any] = {"hier.parent_id": parent_id, "docint_hier_type": "fine"} if parent_id else {}
+    return NodeWithScore(node=TextNode(text=text, id_=node_id, metadata=metadata), score=0.8)
+
+
+def _span_section(text: str = SPAN_SECTION) -> TextNode:
+    """Build the invented section a child is promoted to.
+
+    Args:
+        text (str): The section's text.
+
+    Returns:
+        TextNode: The section, as the docstore holds it.
+    """
+    return TextNode(text=text, id_="section-7", metadata={"filename": "survey.pdf", "page": 3})
+
+
+def _span_postprocessor(parent: TextNode, **overrides: Any) -> rag_module.ParentContextPostprocessor:
+    """Build a budgeted postprocessor over one section; a budget of 4,000 tokens lets the section through whole.
+
+    Args:
+        parent (TextNode): The section.
+        **overrides (Any): Constructor overrides.
+
+    Returns:
+        rag_module.ParentContextPostprocessor: The postprocessor.
+    """
+    kwargs: dict[str, Any] = {
+        "usable_tokens": 4000,
+        "per_hit_floor": 256,
+        "char_token_ratio": 3.5,
+        "budget_enforced": True,
+    }
+    kwargs.update(overrides)
+    return rag_module.ParentContextPostprocessor(docstore=_oversize_docstore(parent=parent), **kwargs)
+
+
+def test_a_promoted_section_carries_where_its_match_sits() -> None:
+    """A whole section says where the retrieved child is, and the prompt never sees that it does."""
+    emitted = _span_postprocessor(_span_section())._postprocess_nodes([_span_hit()])[0].node
+    start = SPAN_SECTION.index(SPAN_FACT)
+
+    assert emitted.get_content() == SPAN_SECTION
+    assert emitted.metadata[MATCH_SPANS_KEY] == [[start, start + len(SPAN_FACT)]]
+    assert MATCH_SPANS_KEY in emitted.excluded_llm_metadata_keys
+    assert MATCH_SPANS_KEY not in emitted.get_content(metadata_mode=MetadataMode.LLM)
+
+
+def test_an_unbudgeted_promotion_carries_its_match_too() -> None:
+    """The legacy whole-section path emits the same stamp."""
+    postprocessor = rag_module.ParentContextPostprocessor(docstore=_oversize_docstore(parent=_span_section()))
+    start = SPAN_SECTION.index(SPAN_FACT)
+
+    emitted = postprocessor._postprocess_nodes([_span_hit()])[0].node
+
+    assert emitted.metadata[MATCH_SPANS_KEY] == [[start, start + len(SPAN_FACT)]]
+
+
+def test_a_window_carries_its_match_relative_to_the_window() -> None:
+    """A windowed section's stamp points into the window it emits."""
+    postprocessor = _span_postprocessor(_span_section(), usable_tokens=300, per_hit_floor=100)
+
+    emitted = postprocessor._postprocess_nodes([_span_hit()])[0].node
+
+    assert emitted.metadata.get("parent_context_windowed") is True
+    [[start, end]] = emitted.metadata[MATCH_SPANS_KEY]
+    assert emitted.get_content()[start:end] == SPAN_FACT
+
+
+def test_a_window_whose_edges_cut_into_the_child_carries_only_what_it_shows() -> None:
+    """Snapping to whitespace can cut the child's edges; the stamp is clipped to the window, never searched again."""
+    child = "alpha beta gamma delta"
+    section = "Prefix-" + child + "-suffix and more invented closing text."
+    postprocessor = _span_postprocessor(
+        _span_section(section), usable_tokens=1, per_hit_floor=len(child) + 2, char_token_ratio=1.0
+    )
+
+    emitted = postprocessor._postprocess_nodes([_span_hit(child)])[0].node
+
+    assert emitted.get_content() == "beta gamma"
+    assert emitted.metadata[MATCH_SPANS_KEY] == [[0, len("beta gamma")]]
+
+
+def test_a_match_found_after_whitespace_normalization_ends_where_the_section_text_does() -> None:
+    """Drifted whitespace is mapped back, so the span covers the section's own text, not the child's length."""
+    drifted = "first    second\n\nthird fourth"
+    section = "Opening words here. " + drifted + " closing words."
+
+    processed = _span_postprocessor(_span_section(section))._postprocess_nodes([_span_hit("first second third fourth")])
+
+    [[start, end]] = processed[0].node.metadata[MATCH_SPANS_KEY]
+    assert section[start:end] == drifted
+    assert end - start != len("first second third fourth")
+
+
+@pytest.mark.parametrize(
+    ("hit", "overrides"),
+    [
+        (_span_hit("Kernsatz ohne Umbrüche"), {"usable_tokens": 300, "per_hit_floor": 100}),
+        (_span_hit("Kernsatz ohne Umbrüche"), {}),
+        (_span_hit(), {"usable_tokens": 0}),
+        (_span_hit(parent_id=""), {}),
+        (_span_hit(parent_id="missing-section"), {}),
+        (_span_hit(SPAN_SECTION[:2000]), {"usable_tokens": 300, "per_hit_floor": 100}),
+    ],
+    ids=[
+        "child-not-found-falls-back",
+        "child-not-found-in-a-fitting-section",
+        "budget-exhausted",
+        "no-parent",
+        "missing-parent",
+        "child-longer-than-the-window",
+    ],
+)
+def test_nothing_is_stamped_where_no_located_match_is_emitted(hit: NodeWithScore, overrides: dict[str, Any]) -> None:
+    """Sub-node fallbacks, unlocated children and windows cut from the child itself keep today's prefix behaviour.
+
+    Args:
+        hit (NodeWithScore): The retrieved child.
+        overrides (dict[str, Any]): Postprocessor overrides.
+    """
+    emitted = _span_postprocessor(_span_section(), **overrides)._postprocess_nodes([hit])[0].node
+
+    assert MATCH_SPANS_KEY not in emitted.metadata
+
+
+def _today_offset(parent_text: str, sub_text: str) -> int:
+    """Locate a child exactly as the lookup did before match spans existed (verbatim copy).
+
+    Args:
+        parent_text (str): The section.
+        sub_text (str): The child.
+
+    Returns:
+        int: The child's offset, or ``-1``.
+    """
+    if not sub_text or not parent_text:
+        return -1
+    offset = parent_text.find(sub_text)
+    if offset >= 0:
+        return offset
+    norm_sub = re.sub(r"\s+", " ", sub_text).strip()
+    if not norm_sub:
+        return -1
+    norm_chars: list[str] = []
+    idx_map: list[int] = []
+    prev_space = True
+    for i, ch in enumerate(parent_text):
+        if ch.isspace():
+            if not prev_space:
+                norm_chars.append(" ")
+                idx_map.append(i)
+                prev_space = True
+        else:
+            norm_chars.append(ch)
+            idx_map.append(i)
+            prev_space = False
+    if norm_chars and norm_chars[-1] == " ":
+        norm_chars.pop()
+        idx_map.pop()
+    norm_offset = "".join(norm_chars).find(norm_sub)
+    if norm_offset < 0:
+        return -1
+    return idx_map[norm_offset]
+
+
+def _today_window(parent_text: str, sub_text: str, budget_chars: int) -> str | None:
+    """Window a section exactly as the lookup did before match spans existed (verbatim copy).
+
+    Args:
+        parent_text (str): The section.
+        sub_text (str): The child.
+        budget_chars (int): The window's size.
+
+    Returns:
+        str | None: The window, or ``None`` when the child is not found.
+    """
+    if budget_chars <= 0 or not parent_text or not sub_text:
+        return None
+    if len(sub_text) >= budget_chars:
+        return sub_text[:budget_chars]
+    offset = _today_offset(parent_text, sub_text)
+    if offset < 0:
+        return None
+    sub_end = offset + len(sub_text)
+    half = max(0, (budget_chars - len(sub_text)) // 2)
+    start = max(0, offset - half)
+    end = min(len(parent_text), sub_end + half)
+    scan = 80
+    if start > 0:
+        for i in range(start, min(len(parent_text), start + scan)):
+            if parent_text[i].isspace():
+                start = i + 1
+                break
+    if end < len(parent_text):
+        for i in range(end, max(0, end - scan), -1):
+            if parent_text[i - 1].isspace():
+                end = i - 1
+                break
+    return parent_text[start:end]
+
+
+@pytest.mark.parametrize("budget_chars", [0, 1, 24, 60, 300, 1050, 7000, 40_000])
+@pytest.mark.parametrize(
+    ("parent_text", "sub_text"),
+    [
+        (SPAN_SECTION, SPAN_FACT),
+        (SPAN_SECTION, SPAN_SECTION[:120]),
+        (SPAN_SECTION, SPAN_SECTION[-90:]),
+        ("Prefix-alpha beta gamma delta-suffix and more invented closing text.", "alpha beta gamma delta"),
+        ("Opening words here. first    second\n\nthird fourth closing words.", "first second third fourth"),
+        (SPAN_SECTION, "Kernsatz ohne Umbrüche"),
+        ("", SPAN_FACT),
+        (SPAN_SECTION, ""),
+    ],
+    ids=["deep", "opening", "closing", "edge-snap", "drifted", "absent", "no-parent-text", "no-child-text"],
+)
+def test_the_windows_a_lookup_sees_are_byte_identical(parent_text: str, sub_text: str, budget_chars: int) -> None:
+    """Splitting out the window's bounds leaves every window exactly as it was.
+
+    Args:
+        parent_text (str): The section.
+        sub_text (str): The child.
+        budget_chars (int): The window's size.
+    """
+    postprocessor = _span_postprocessor(_span_section())
+
+    assert postprocessor._window_parent_text(parent_text, sub_text, budget_chars) == _today_window(
+        parent_text, sub_text, budget_chars
+    )
+    assert postprocessor._find_match_offset(parent_text, sub_text) == _today_offset(parent_text, sub_text)
+
+
+def test_a_lookup_packs_the_same_prompt_and_sources_with_and_without_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stamp is invisible to a lookup: the prompt view and every source dict are unchanged by it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    small = TextNode(text="Short invented summary.", id_="section-small", metadata={"filename": "s.md"})
+    big = _span_section()
+    hits = [
+        _span_hit("Short invented summary.", parent_id="section-small", node_id="child-small"),
+        _span_hit(),
+        _span_hit(parent_id="", node_id="loose"),
+    ]
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=_oversize_docstore(small=small, big=big),
+        usable_tokens=400,
+        per_hit_floor=100,
+        char_token_ratio=3.5,
+        budget_enforced=True,
+    )
+    rag = RAG(qdrant_collection="test")
+
+    def _view(nodes: list[NodeWithScore]) -> list[tuple[str, str, dict[str, Any] | None]]:
+        """Return what a lookup reads off each emitted node.
+
+        Args:
+            nodes (list[NodeWithScore]): The emitted nodes.
+
+        Returns:
+            list[tuple[str, str, dict[str, Any] | None]]: Id, prompt view and source dict per node.
+        """
+        return [
+            (
+                scored.node.node_id,
+                scored.node.get_content(metadata_mode=MetadataMode.LLM),
+                rag._source_from_node_with_score(scored),
+            )
+            for scored in nodes
+        ]
+
+    stamped = postprocessor._postprocess_nodes(hits)
+    emit = rag_module.ParentContextPostprocessor._emit_with_llm_exclusion
+    monkeypatch.setattr(
+        rag_module.ParentContextPostprocessor,
+        "_emit_with_llm_exclusion",
+        staticmethod(lambda source, ner_fallback=None, match_spans=None: emit(source, ner_fallback=ner_fallback)),
+    )
+    unstamped = postprocessor._postprocess_nodes(hits)
+
+    assert [MATCH_SPANS_KEY in scored.node.metadata for scored in stamped] == [True, True, False]
+    assert not any(MATCH_SPANS_KEY in scored.node.metadata for scored in unstamped)
+    assert stamped[1].node.metadata.get("parent_context_windowed") is True
+    assert _view(stamped) == _view(unstamped)
 
 
 def test_cached_summary_sources_gain_citation_numbers(
