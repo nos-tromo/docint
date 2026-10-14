@@ -165,6 +165,7 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.retrieval.evidence import EveryChildQuery
 from docint.core.retrieval.visual import (
     BLOB_PAYLOAD_KEYS,
     DEFAULT_RETRIEVAL_TARGET,
@@ -245,7 +246,7 @@ from docint.utils.retry import (
     is_transient_qdrant_error,
     retry_with_backoff,
 )
-from docint.utils.text_budget import MATCH_SPANS_KEY
+from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -1413,8 +1414,8 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
     def _window_with_match(
         self, parent_text: str, sub_text: str, budget_chars: int
-    ) -> tuple[str, list[list[int]]] | None:
-        """Return the window of :meth:`_window_parent_text` and where its match sits in it.
+    ) -> tuple[str, list[list[int]], tuple[int, int] | None] | None:
+        """Return the window of :meth:`_window_parent_text`, where its match sits in it, and where it sits.
 
         The sub-node is located once; its span in the parent is clipped to the
         window's bounds, so the window text is never searched again.
@@ -1425,14 +1426,15 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             budget_chars: The character ceiling for the returned window.
 
         Returns:
-            The windowed text and its window-relative match spans, which are
-            empty when the window is cut from the sub-node itself; ``None`` on
-            a location miss.
+            The windowed text; its window-relative match spans, which are empty
+            when the window is cut from the sub-node itself; and the window's
+            ``(start, end)`` in *parent_text*, ``None`` for such a cut. ``None``
+            on a location miss.
         """
         if budget_chars <= 0 or not parent_text or not sub_text:
             return None
         if len(sub_text) >= budget_chars:
-            return sub_text[:budget_chars], []
+            return sub_text[:budget_chars], [], None
 
         match_start, match_end = self._find_match_span(parent_text, sub_text)
         if match_start < 0:
@@ -1440,7 +1442,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
         start, end = self._window_bounds(parent_text, match_start, len(sub_text), budget_chars)
         shown = (max(match_start, start) - start, min(match_end, end) - start)
-        return parent_text[start:end], [list(shown)] if shown[1] > shown[0] else []
+        return parent_text[start:end], [list(shown)] if shown[1] > shown[0] else [], (start, end)
 
     def _window_parent_text(self, parent_text: str, sub_text: str, budget_chars: int) -> str | None:
         """Return a ~``budget_chars``-sized window of *parent_text* around *sub_text*.
@@ -1561,6 +1563,61 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         )
         return clone
 
+    def _fold_children(
+        self,
+        base: BaseNode,
+        parent_text: str,
+        bounds: tuple[int, int] | None,
+        group: Sequence[NodeWithScore],
+    ) -> tuple[TextNode, list[list[int]]]:
+        """Fold every retrieved child of a section into the one node emitted for it.
+
+        A child located in the section whose whole span lies inside the emitted
+        text is stamped where it sits there; the first child counts as held when
+        the emission is that child, or a cut of it. Any other child, one that
+        cannot be located or that the emitted text shows only in part or not at
+        all, is appended after a ``WINDOW_JOIN`` as its own text and stamped
+        whole, so a partial view of it is never stamped as well.
+
+        Args:
+            base: The node about to be emitted: the section, a window of it, or
+                the first child.
+            parent_text: The section's full text, in which each child is located.
+            bounds: Where *base*'s text sits in *parent_text*; ``None`` when it is
+                the first child or a cut of it.
+            group: The section's retrieved children in rank order, the one being
+                emitted first.
+
+        Returns:
+            A node carrying *base*'s id, metadata and text with the appended
+            children, ``window_chars`` following that text when *base* has the
+            key, and each child's span in it, in rank order.
+        """
+        main = base.get_content(metadata_mode=MetadataMode.NONE)
+        text = main
+        spans: list[list[int]] = []
+        for rank, child in enumerate(group):
+            if rank == 0 and bounds is None:
+                spans.append([0, len(main)])
+                continue
+            child_text = child.node.get_content(metadata_mode=MetadataMode.NONE)
+            start, end = self._find_match_span(parent_text, child_text)
+            if bounds is not None and start >= 0 and bounds[0] <= start and end <= bounds[1]:
+                spans.append([start - bounds[0], end - bounds[0]])
+            elif child_text:
+                text = f"{text}{WINDOW_JOIN}{child_text}"
+                spans.append([len(text) - len(child_text), len(text)])
+        metadata = dict(base.metadata or {})
+        if "window_chars" in metadata:
+            metadata["window_chars"] = len(text)
+        folded = TextNode(
+            id_=base.node_id,
+            text=text,
+            metadata=metadata,
+            excluded_embed_metadata_keys=list(getattr(base, "excluded_embed_metadata_keys", []) or []),
+        )
+        return folded, spans
+
     @override
     def _postprocess_nodes(
         self,
@@ -1569,19 +1626,27 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
     ) -> list[NodeWithScore]:
         """Expand reranked hits to their parents with a budget-aware packer.
 
+        A section is emitted once, for its first hit, and its later hits are
+        skipped. Under an :class:`EveryChildQuery` those later hits are folded
+        into that one emission instead (see :meth:`_fold_children`), so the
+        node list stays exactly the lookup's while every retrieved child
+        reaches the evidence; budget debits and logs are computed on the
+        emission before anything is folded in.
+
         Args:
             nodes: Retrieved hits in score order after reranking.
-            query_bundle: Unused; required by the postprocessor contract.
+            query_bundle: An :class:`EveryChildQuery` asks for every child to be
+                kept; any other bundle, or none, emits exactly what a lookup does.
 
         Returns:
             A list of ``NodeWithScore`` whose combined ``node.text``
             token count never exceeds ``self.usable_tokens`` when that
-            bound is set. Hits without a parent link, with a missing
-            parent, or whose sub-node text cannot be located in the
-            loaded parent pass through unchanged so retrieval always
-            returns something citable.
+            bound is set, folded children aside. Hits without a parent
+            link, with a missing parent, or whose sub-node text cannot be
+            located in the loaded parent pass through unchanged so
+            retrieval always returns something citable.
         """
-        _ = query_bundle
+        every_child = isinstance(query_bundle, EveryChildQuery)
         expanded: list[NodeWithScore] = []
         seen_parent_ids: set[str] = set()
         remaining_tokens = int(self.usable_tokens)
@@ -1635,6 +1700,32 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             start, end = self._find_match_span(parent_text, getattr(sub_node, "text", "") or "")
             return [[start, end]] if start >= 0 else []
 
+        def _fold(
+            base_node: BaseNode,
+            score: float | None,
+            parent_text: str,
+            bounds: tuple[int, int] | None,
+            group: Sequence[NodeWithScore],
+            ner_fallback: BaseNode | None = None,
+        ) -> NodeWithScore:
+            """Emit a section's one node with every child of *group* folded in.
+
+            Args:
+                base_node: The node a lookup emits for the section.
+                score: The emitting hit's score.
+                parent_text: The section's full text.
+                bounds: Where *base_node*'s text sits in *parent_text*;
+                    ``None`` when it is the first child or a cut of it.
+                group: The section's hits from the emitting one on, in rank order.
+                ner_fallback: As for :func:`_emit`.
+
+            Returns:
+                The lookup's node, its id, score and metadata kept, with every
+                child of *group* in its text and stamp (see :meth:`_fold_children`).
+            """
+            folded, spans = self._fold_children(base_node, parent_text, bounds, group)
+            return _emit(folded, score, ner_fallback=ner_fallback, match_spans=spans)
+
         def _llm_tokens(base_node: BaseNode) -> int:
             """Estimate the token cost of *base_node*'s rendered LLM payload.
 
@@ -1655,7 +1746,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             llm_payload = clone.get_content(metadata_mode=MetadataMode.LLM)
             return estimate_tokens(llm_payload, self.char_token_ratio)
 
-        for node in nodes:
+        for position, node in enumerate(nodes):
             parent_id = self._parent_id(node)
             if not parent_id:
                 expanded.append(_emit(node.node, node.score))
@@ -1671,11 +1762,17 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             seen_parent_ids.add(parent_id)
             parent_hits += 1
             parent_text = parent_node.get_content()
+            # An assessment folds this section's later hits into its one emission; a lookup skips them.
+            group: list[NodeWithScore] = (
+                [hit for hit in nodes[position:] if self._parent_id(hit) == parent_id] if every_child else []
+            )
 
             # Legacy / unbounded path.
             if not budget_enforced:
                 expanded.append(
-                    _emit(
+                    _fold(parent_node, node.score, parent_text, (0, len(parent_text)), group, ner_fallback=node.node)
+                    if group
+                    else _emit(
                         parent_node,
                         node.score,
                         ner_fallback=node.node,
@@ -1691,13 +1788,17 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             # ``per_hit_floor * remaining_hits`` tokens.
             if remaining_tokens <= 0:
                 budget_exhausted_hits += 1
-                expanded.append(_emit(node.node, node.score))
+                expanded.append(
+                    _fold(node.node, node.score, parent_text, None, group) if group else _emit(node.node, node.score)
+                )
                 continue
 
             parent_tokens = _llm_tokens(parent_node)
             if parent_tokens <= remaining_tokens:
                 expanded.append(
-                    _emit(
+                    _fold(parent_node, node.score, parent_text, (0, len(parent_text)), group, ner_fallback=node.node)
+                    if group
+                    else _emit(
                         parent_node,
                         node.score,
                         ner_fallback=node.node,
@@ -1726,10 +1827,12 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     len(sub_text),
                     len(parent_text),
                 )
-                expanded.append(_emit(node.node, node.score))
+                expanded.append(
+                    _fold(node.node, node.score, parent_text, None, group) if group else _emit(node.node, node.score)
+                )
                 continue
 
-            windowed_text, window_spans = window
+            windowed_text, window_spans, bounds = window
             windowed_node = TextNode(
                 id_=parent_node.node_id,
                 text=windowed_text,
@@ -1761,7 +1864,11 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 0,
                 remaining_tokens - estimate_tokens(windowed_llm_payload, self.char_token_ratio),
             )
-            expanded.append(windowed_emit)
+            expanded.append(
+                _fold(windowed_node, node.score, parent_text, bounds, group, ner_fallback=node.node)
+                if group
+                else windowed_emit
+            )
 
         if budget_enforced and parent_hits > 0 and (windowed_hits > 0 or budget_exhausted_hits > 0):
             logger.info(
@@ -8238,7 +8345,8 @@ class RAG:
         Args:
             engine (Any): The turn's query engine; research searches through its
                 ``retrieve``, so filters, rerank and parent context apply as on a
-                lookup without building a second engine.
+                lookup without building a second engine, every child the reranker
+                returns kept (see :class:`EveryChildQuery`).
             scoped (bool): Whether the turn answers from a pinned scope, which
                 forbids searching beyond it.
 
@@ -8254,7 +8362,7 @@ class RAG:
             if scoped
             else ResearchLoop(
                 llm=research_llm,
-                search=lambda query: list(engine.retrieve(QueryBundle(query))),
+                search=lambda query: list(engine.retrieve(EveryChildQuery(query))),
                 max_steps=load_assessment_env().max_steps,
                 ctx_window=int(self.openai_ctx_window),
                 char_token_ratio=ratio,

@@ -330,8 +330,9 @@ class AssessmentRunner:
         Args:
             question (str): The user's message, verbatim.
             prior_turn (PriorTurn | None): The previous exchange, in full.
-            seed (Sequence[NodeWithScore]): The lookup's own evidence for the
-                question, or a scoped turn's pinned chunks.
+            seed (Sequence[NodeWithScore]): The lookup's passages for the
+                question, each section keeping every child retrieved under it,
+                or a scoped turn's pinned chunks.
 
         Yields:
             AgentProgress | str | AssessmentResult: Progress steps, answer text

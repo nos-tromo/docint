@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import types
 import urllib.error
@@ -25,7 +26,7 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 from llama_index.core import Document
 from llama_index.core.base.response.schema import Response
-from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
+from llama_index.core.schema import MetadataMode, NodeWithScore, QueryBundle, TextNode
 from llama_index.core.schema import TextNode as _TN
 from llama_index.core.storage.docstore.keyval_docstore import (
     KVDocumentStore as _KVDocumentStore,
@@ -36,6 +37,7 @@ from qdrant_client import models
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, CollectionCleanupError, LazyRerankerPostprocessor
+from docint.core.retrieval.evidence import EveryChildQuery
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -51,7 +53,7 @@ from docint.utils.openai_cfg import (
     BudgetedOpenAIEmbedding,
     EmbeddingInputTooLongError,
 )
-from docint.utils.text_budget import MATCH_SPANS_KEY
+from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
 
 
 class DummyNode:
@@ -3725,6 +3727,315 @@ def test_a_lookup_packs_the_same_prompt_and_sources_with_and_without_the_stamp(m
     assert not any(MATCH_SPANS_KEY in scored.node.metadata for scored in unstamped)
     assert stamped[1].node.metadata.get("parent_context_windowed") is True
     assert _view(stamped) == _view(unstamped)
+
+
+def _fold_filler(label: str, count: int) -> str:
+    """Return invented filler whose sentences are numbered, so a child cut from it is found where it was cut.
+
+    Args:
+        label (str): A word that sets this filler apart from any other.
+        count (int): How many sentences.
+
+    Returns:
+        str: The filler.
+    """
+    return "".join(f"{label} filler {index:04d}. " for index in range(count))
+
+
+#: The decisive sentences of an invented section, about two thousand characters apart.
+FOLD_FACTS = (
+    "The pilot excluded every respondent recruited after March.",
+    "The second wave lost a fifth of its panel to attrition.",
+    "The final survey was rerun with a larger invented sample.",
+)
+FOLD_SECTION = " ".join(
+    (
+        _fold_filler("Opening", 10) + FOLD_FACTS[0],
+        _fold_filler("Middle", 110) + FOLD_FACTS[1],
+        _fold_filler("Late", 110) + FOLD_FACTS[2],
+        _fold_filler("Closing", 10),
+    )
+)
+
+
+def _located(text: str, *, origin: int = 0) -> list[int]:
+    """Return where a child of :data:`FOLD_SECTION` sits, relative to ``origin``.
+
+    Args:
+        text (str): The child's text.
+        origin (int): Where the emitted text starts in the section.
+
+    Returns:
+        list[int]: The child's ``[start, end]``.
+    """
+    start = FOLD_SECTION.index(text) - origin
+    return [start, start + len(text)]
+
+
+def test_an_assessment_stamps_every_child_of_a_whole_section_in_rank_order() -> None:
+    """A section shown whole holds every child it can locate: each is stamped where it sits, the top-ranked first."""
+    hits = [_span_hit(FOLD_FACTS[2], node_id="child-late"), _span_hit(FOLD_FACTS[0], node_id="child-early")]
+    postprocessor = _span_postprocessor(_span_section(FOLD_SECTION))
+
+    plain = postprocessor._postprocess_nodes(hits, QueryBundle("invented question"))
+    folded = postprocessor._postprocess_nodes(hits, EveryChildQuery("invented question"))
+
+    assert [scored.node.node_id for scored in folded] == ["section-7"]
+    assert folded[0].node.get_content() == FOLD_SECTION
+    assert folded[0].node.metadata[MATCH_SPANS_KEY] == [_located(FOLD_FACTS[2]), _located(FOLD_FACTS[0])]
+    assert "window_chars" not in folded[0].node.metadata
+    assert plain[0].node.metadata[MATCH_SPANS_KEY] == [_located(FOLD_FACTS[2])]
+
+
+def test_an_assessment_never_folds_a_child_already_emitted_as_itself() -> None:
+    """A section that fails to load for its first hit leaves that hit alone; a later emission folds what follows."""
+    loads: list[str] = []
+
+    def _get_node(node_id: str, raise_error: bool = False) -> TextNode | None:
+        """Fail the first load, as a transient docstore error does, then return the section.
+
+        Args:
+            node_id (str): The requested node id.
+            raise_error (bool): Accepted for signature parity, unused.
+
+        Returns:
+            TextNode | None: ``None`` on the first call, the section afterwards.
+        """
+        loads.append(node_id)
+        return None if len(loads) == 1 else _span_section(FOLD_SECTION)
+
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=types.SimpleNamespace(get_node=_get_node),
+        usable_tokens=4000,
+        per_hit_floor=256,
+        char_token_ratio=3.5,
+        budget_enforced=True,
+    )
+    hits = [_span_hit(FOLD_FACTS[0], node_id="child-early"), _span_hit(FOLD_FACTS[1], node_id="child-middle")]
+
+    folded = postprocessor._postprocess_nodes(hits, EveryChildQuery("invented question"))
+
+    assert [scored.node.node_id for scored in folded] == ["child-early", "section-7"]
+    assert folded[1].node.get_content() == FOLD_SECTION
+    assert folded[1].node.metadata[MATCH_SPANS_KEY] == [_located(FOLD_FACTS[1])]
+
+
+def test_an_assessment_appends_nothing_for_a_child_without_text() -> None:
+    """A retrieved child with no text has nothing to keep, so no empty window joins the emission."""
+    hits = [_span_hit(FOLD_FACTS[0], node_id="child-early"), _span_hit("", node_id="child-empty")]
+
+    folded = _span_postprocessor(_span_section(FOLD_SECTION), usable_tokens=0)._postprocess_nodes(
+        hits, EveryChildQuery("invented question")
+    )
+
+    assert folded[0].node.get_content() == FOLD_FACTS[0]
+    assert folded[0].node.metadata[MATCH_SPANS_KEY] == [[0, len(FOLD_FACTS[0])]]
+
+
+def test_an_assessment_window_stamps_the_children_it_shows_and_appends_the_rest_whole() -> None:
+    """A child the window shows whole is stamped; one outside it and one it cuts into are appended, in rank order."""
+    postprocessor = _span_postprocessor(_span_section(FOLD_SECTION), usable_tokens=300, per_hit_floor=100)
+    first = FOLD_FACTS[1]
+    start, end = postprocessor._window_bounds(FOLD_SECTION, FOLD_SECTION.index(first), len(first), 1050)
+    inside = FOLD_SECTION[FOLD_SECTION.index(first) + len(first) + 1 :][:40]
+    partial = FOLD_SECTION[end - 20 : end + 30]
+    hits = [
+        _span_hit(first, node_id="child-first"),
+        _span_hit(FOLD_FACTS[2], node_id="child-outside"),
+        _span_hit(inside, node_id="child-inside"),
+        _span_hit(partial, node_id="child-partial"),
+    ]
+
+    folded = postprocessor._postprocess_nodes(hits, EveryChildQuery("invented question"))
+
+    window = FOLD_SECTION[start:end]
+    second = len(window) + len(WINDOW_JOIN)
+    third = second + len(FOLD_FACTS[2]) + len(WINDOW_JOIN)
+    assert [scored.node.node_id for scored in folded] == ["section-7"]
+    node = folded[0].node
+    assert node.get_content() == f"{window}{WINDOW_JOIN}{FOLD_FACTS[2]}{WINDOW_JOIN}{partial}"
+    assert node.metadata[MATCH_SPANS_KEY] == [
+        _located(first, origin=start),
+        [second, second + len(FOLD_FACTS[2])],
+        _located(inside, origin=start),
+        [third, third + len(partial)],
+    ]
+    assert node.metadata["window_chars"] == len(node.get_content())
+    assert node.metadata["parent_context_windowed"] is True
+
+
+def test_an_assessment_appends_a_first_child_its_window_cuts_into_without_a_partial_stamp() -> None:
+    """A window whose edges cut into its own child shows only part of it; the child is appended whole instead."""
+    child = "alpha beta gamma delta"
+    section = "Prefix-" + child + "-suffix and more invented closing text."
+    postprocessor = _span_postprocessor(
+        _span_section(section), usable_tokens=1, per_hit_floor=len(child) + 2, char_token_ratio=1.0
+    )
+
+    folded = postprocessor._postprocess_nodes([_span_hit(child)], EveryChildQuery("invented question"))[0].node
+
+    offset = len("beta gamma") + len(WINDOW_JOIN)
+    assert folded.get_content() == f"beta gamma{WINDOW_JOIN}{child}"
+    assert folded.metadata[MATCH_SPANS_KEY] == [[offset, offset + len(child)]]
+
+
+@pytest.mark.parametrize(
+    ("first", "overrides", "emitted_id"),
+    [
+        ("Kernsatz ohne Umbrüche", {"usable_tokens": 300, "per_hit_floor": 100}, "child-first"),
+        (FOLD_FACTS[0], {"usable_tokens": 0}, "child-first"),
+        (FOLD_SECTION[:2000], {"usable_tokens": 300, "per_hit_floor": 100}, "section-7"),
+    ],
+    ids=["unlocated-first-child", "budget-exhausted", "child-longer-than-the-window"],
+)
+def test_an_assessment_appends_every_sibling_of_a_first_child_emitted_as_itself(
+    first: str, overrides: dict[str, Any], emitted_id: str
+) -> None:
+    """When the section's one emission is its first child, or a cut of it, every later child follows it whole.
+
+    Args:
+        first (str): The top-ranked child's text.
+        overrides (dict[str, Any]): Postprocessor overrides that force the path.
+        emitted_id (str): The node id that path emits under.
+    """
+    hits = [_span_hit(first, node_id="child-first"), _span_hit(FOLD_FACTS[2], node_id="child-late")]
+    postprocessor = _span_postprocessor(_span_section(FOLD_SECTION), **overrides)
+
+    plain = postprocessor._postprocess_nodes(hits, QueryBundle("invented question"))
+    folded = postprocessor._postprocess_nodes(hits, EveryChildQuery("invented question"))
+
+    assert [scored.node.node_id for scored in folded] == [scored.node.node_id for scored in plain] == [emitted_id]
+    main = plain[0].node.get_content()
+    offset = len(main) + len(WINDOW_JOIN)
+    assert folded[0].node.get_content() == f"{main}{WINDOW_JOIN}{FOLD_FACTS[2]}"
+    assert folded[0].node.metadata[MATCH_SPANS_KEY] == [[0, len(main)], [offset, offset + len(FOLD_FACTS[2])]]
+
+
+#: Metadata keys an assessment's fold may change; every other key is the lookup's.
+FOLD_KEYS = frozenset({MATCH_SPANS_KEY, "window_chars"})
+
+
+def _fold_case(rng: random.Random) -> tuple[Any, list[NodeWithScore]]:
+    """Draw invented sections and a ranked hit list over them, some hits parentless, orphaned or unlocatable.
+
+    Every text is cut from labelled, numbered filler, so no two hits share an opening.
+
+    Args:
+        rng (random.Random): The seeded source.
+
+    Returns:
+        tuple[Any, list[NodeWithScore]]: The docstore and the hits, best first.
+    """
+    sections: dict[str, TextNode] = {}
+    for index in range(rng.randrange(1, 4)):
+        metadata: dict[str, Any] = {"filename": f"report-{index}.pdf", "page": index, "file_hash": f"{index:064d}"}
+        if rng.random() < 0.5:
+            metadata["reference_metadata"] = {"text_id": f"9{index}", "author": "Invented Author"}
+        text = _fold_filler(f"Section{index}", rng.choice([5, 40, 150, 400]))
+        sections[f"section-{index}"] = TextNode(text=text, id_=f"section-{index}", metadata=metadata)
+    hits: list[NodeWithScore] = []
+    for rank in range(rng.randrange(1, 9)):
+        draw = rng.random()
+        if draw < 0.2:
+            parent_id = "" if draw < 0.1 else "missing-section"
+            text = _fold_filler(f"Loose{rank}", rng.choice([2, 30]))
+        else:
+            parent_id = rng.choice(sorted(sections))
+            parent_text = sections[parent_id].text
+            start = rng.randrange(0, len(parent_text) - 20)
+            text = parent_text[start : start + rng.choice([20, 120, 600, 2500])]
+            if rng.random() < 0.15:
+                text = f"Unlocatable invented sentence {rank}."
+        metadata = {"hier.parent_id": parent_id, "docint_hier_type": "fine"} if parent_id else {}
+        # What a lookup's section copies from its first child: its entities and the rerank stamp.
+        metadata.update(
+            {"entities": [{"text": f"Invented Org {rank}", "type": "ORG"}], rag_module.RERANK_APPLIED_KEY: True}
+        )
+        hits.append(
+            NodeWithScore(node=TextNode(text=text, id_=f"hit-{rank}", metadata=metadata), score=1.0 - rank / 10)
+        )
+    return _oversize_docstore(**sections), hits
+
+
+def _emitted_groups(hits: list[NodeWithScore], docstore: Any) -> list[list[NodeWithScore]]:
+    """Return, per emitted node, the hits an assessment folds into it: its section's hits from the emitting one on.
+
+    Args:
+        hits (list[NodeWithScore]): The ranked hits.
+        docstore (Any): The docstore the sections load from.
+
+    Returns:
+        list[list[NodeWithScore]]: One group per emitted node; empty for a hit emitted as itself because it has
+        no parent or its parent is missing.
+    """
+    groups: list[list[NodeWithScore]] = []
+    seen: set[str] = set()
+    for rank, hit in enumerate(hits):
+        parent_id = hit.node.metadata.get("hier.parent_id", "")
+        if not parent_id or docstore.get_node(parent_id) is None:
+            groups.append([])
+        elif parent_id not in seen:
+            seen.add(parent_id)
+            groups.append([later for later in hits[rank:] if later.node.metadata.get("hier.parent_id") == parent_id])
+    return groups
+
+
+@pytest.mark.parametrize("social", [False, True], ids=["documents", "social-table-chain"])
+def test_an_assessment_emits_a_lookups_nodes_with_every_retrieved_child_folded_in(social: bool) -> None:
+    """Seeded fuzz: the flag keeps the lookup's ids, order, scores and metadata, and only adds to each text.
+
+    Every hit of a loaded section reaches that section's one emission: each child's span, in rank order,
+    points at its own text, or at the cut of it when the emission is that cut. Through the social-table
+    chain the diversity cap then keeps exactly the nodes it keeps for the lookup.
+
+    Args:
+        social (bool): Whether the social-table diversity postprocessor runs after parent context.
+    """
+    rng = random.Random(83)
+    budgets = [(0, 256, False), (4000, 256, True), (300, 100, True), (60, 10, True), (0, 256, True)]
+    appended = 0
+
+    for _ in range(600):
+        docstore, hits = _fold_case(rng)
+        usable, floor, enforced = rng.choice(budgets)
+        chain: list[Any] = [
+            rag_module.ParentContextPostprocessor(
+                docstore=docstore,
+                usable_tokens=usable,
+                per_hit_floor=floor,
+                char_token_ratio=3.5,
+                budget_enforced=enforced,
+            )
+        ]
+        if social:
+            chain.append(rag_module.SocialSourceDiversityPostprocessor(diversity_limit=2))
+        plain, folded = list(hits), list(hits)
+        for postprocessor in chain:
+            plain = postprocessor.postprocess_nodes(plain, query_bundle=QueryBundle("invented question"))
+            folded = postprocessor.postprocess_nodes(folded, query_bundle=EveryChildQuery("invented question"))
+
+        assert [(n.node.node_id, n.score) for n in folded] == [(n.node.node_id, n.score) for n in plain]
+        for before, after in zip(plain, folded, strict=True):
+            kept = {key: value for key, value in after.node.metadata.items() if key not in FOLD_KEYS}
+            assert kept == {key: value for key, value in before.node.metadata.items() if key not in FOLD_KEYS}
+            assert after.node.get_content().startswith(before.node.get_content())
+            assert after.node.get_metadata_str(mode=MetadataMode.LLM) == before.node.get_metadata_str(
+                mode=MetadataMode.LLM
+            )
+            appended += WINDOW_JOIN in after.node.get_content()[len(before.node.get_content()) :]
+        if social:
+            continue
+        for before, after, group in zip(plain, folded, _emitted_groups(hits, docstore), strict=True):
+            if not group:
+                assert after.node.get_content() == before.node.get_content()
+                assert after.node.metadata == before.node.metadata
+                continue
+            text, spans = after.node.get_content(), after.node.metadata[MATCH_SPANS_KEY]
+            assert len(spans) == len(group)
+            for (start, end), child in zip(spans, group, strict=True):
+                shown, own = text[start:end], child.node.get_content()
+                assert shown == own or (child is group[0] and bool(shown) and own.startswith(shown))
+    assert appended > 100
 
 
 def test_cached_summary_sources_gain_citation_numbers(

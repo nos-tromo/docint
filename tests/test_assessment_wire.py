@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import httpx
 import openai
 import pytest
-from assessment_fakes import scored_node
+from assessment_fakes import FixedRetriever, RecordingPostprocessor, scored_node
+from llama_index.core.llms import MockLLM
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.response_synthesizers import Refine
 from llama_index.core.schema import QueryBundle
 from openai.resources.chat.completions import Completions
 from openai.types.chat import ChatCompletion, ChatCompletionMessage
@@ -25,6 +28,7 @@ from docint.agents.assessment.classify import classify_turn
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
 from docint.core.rag import RAG
+from docint.core.retrieval.evidence import EveryChildQuery
 from docint.utils.env_cfg import OpenAIConfig
 
 
@@ -227,8 +231,26 @@ def test_only_an_unscoped_turn_gets_a_researcher_that_searches_the_turns_engine(
     assert researcher._search("method") == found
     engine.retrieve.assert_called_once()
     bundle = engine.retrieve.call_args.args[0]
-    assert isinstance(bundle, QueryBundle)
+    assert isinstance(bundle, EveryChildQuery)
     assert bundle.query_str == "method"
+
+
+def test_a_research_search_asks_a_real_engine_for_every_child() -> None:
+    """The flag reaches the turn engine's postprocessors on every research search, as it does on the seed."""
+    recorder = RecordingPostprocessor()
+    engine = RetrieverQueryEngine(
+        retriever=FixedRetriever([scored_node("m", "Method section.")]),
+        response_synthesizer=Refine(llm=MockLLM()),
+        node_postprocessors=[recorder],
+    )
+    researcher = _rag().assessment_runner(engine, scoped=False)._researcher
+    assert isinstance(researcher, ResearchLoop)
+
+    found = researcher._search("method")
+
+    assert [scored.node.node_id for scored in found] == ["m"]
+    assert [type(bundle) for bundle in recorder.bundles] == [EveryChildQuery]
+    assert [cast(QueryBundle, bundle).query_str for bundle in recorder.bundles] == ["method"]
 
 
 def test_the_research_step_cap_is_assessment_max_steps(monkeypatch: pytest.MonkeyPatch) -> None:

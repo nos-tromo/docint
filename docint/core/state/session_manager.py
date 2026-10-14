@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 from llama_index.core import Response
-from llama_index.core.schema import BaseNode, QueryBundle
+from llama_index.core.schema import BaseNode
 from llama_index.core.vector_stores.types import MetadataFilters
 from loguru import logger
 from sqlalchemy.orm import Session
@@ -25,6 +25,7 @@ from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentResu
 from docint.agents.assessment.split import LabelledAnswer, compose_labelled_answer
 from docint.agents.context import TurnContext as AgentTurnContext
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
+from docint.core.retrieval.evidence import EveryChildQuery
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
@@ -820,11 +821,14 @@ class SessionManager:
     ) -> Iterator[AgentProgress | str | dict[str, Any]]:
         """Answer one turn as an assessment.
 
-        The seed is exactly a lookup's evidence (the turn's own engine, filters,
-        rerank and parent context); the runner may research further, then
-        streams the two-part answer. The sentinel becomes a localized label in
-        the persisted text, so history, transcripts and report exports show the
-        boundary without knowing the protocol.
+        The seed is a lookup's evidence (the turn's own engine, filters, rerank
+        and parent context), except that each section keeps every child the
+        reranker returned under it (see
+        :class:`~docint.core.retrieval.evidence.EveryChildQuery`); the runner
+        may research further, then streams the two-part answer. The sentinel
+        becomes a localized label in the persisted text, so history,
+        transcripts and report exports show the boundary without knowing the
+        protocol.
 
         Args:
             user_msg (str): The user's message, verbatim.
@@ -852,7 +856,7 @@ class SessionManager:
         Raises:
             RuntimeError: If the runner ends without a result.
         """
-        seed = list(engine.retrieve(QueryBundle(expanded_query)))
+        seed = list(engine.retrieve(EveryChildQuery(expanded_query)))
         runner = self.rag.assessment_runner(engine, scoped=bool(scoped_node_ids))
         result: AssessmentResult | None = None
         for item in runner.run(question=user_msg, prior_turn=prior_turn, seed=seed):

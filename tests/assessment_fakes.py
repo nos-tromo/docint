@@ -9,8 +9,12 @@ from unittest.mock import MagicMock
 import httpx
 import openai
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole, ToolCallBlock
+from llama_index.core.bridge.pydantic import Field
 from llama_index.core.llms.llm import ToolSelection
-from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
+from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.schema import BaseNode, NodeWithScore, QueryBundle, TextNode
+from typing_extensions import override
 
 #: What the production LLM view lets through for these doubles.
 _VISIBLE = frozenset({"citation_index", "filename", "page"})
@@ -223,6 +227,57 @@ def tool_llm(script: Sequence[ToolSelection | str | Exception]) -> MagicMock:
     llm.chat_with_tools.side_effect = _chat_with_tools
     llm.get_tool_calls_from_response.side_effect = _tool_calls
     return llm
+
+
+class FixedRetriever(BaseRetriever):
+    """Return the same invented hits for any query, as a reranked retriever would hand them on."""
+
+    def __init__(self, hits: Sequence[NodeWithScore]) -> None:
+        """Hold the hits.
+
+        Args:
+            hits (Sequence[NodeWithScore]): What every retrieval returns, best first.
+        """
+        super().__init__()
+        self._hits = list(hits)
+
+    @override
+    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
+        """Return the hits.
+
+        Args:
+            query_bundle (QueryBundle): The query, unused.
+
+        Returns:
+            list[NodeWithScore]: The fixed hits.
+        """
+        return list(self._hits)
+
+
+class RecordingPostprocessor(BaseNodePostprocessor):
+    """Record the bundle each retrieval hands the postprocessor chain, and change nothing.
+
+    Attributes:
+        bundles (list[QueryBundle | None]): One bundle per pass, in order.
+    """
+
+    bundles: list[QueryBundle | None] = Field(default_factory=list)
+
+    @override
+    def _postprocess_nodes(
+        self, nodes: list[NodeWithScore], query_bundle: QueryBundle | None = None
+    ) -> list[NodeWithScore]:
+        """Record the bundle and pass the nodes through.
+
+        Args:
+            nodes (list[NodeWithScore]): The retrieved nodes.
+            query_bundle (QueryBundle | None): The bundle the engine passes on.
+
+        Returns:
+            list[NodeWithScore]: The nodes, unchanged.
+        """
+        self.bundles.append(query_bundle)
+        return nodes
 
 
 def search_call(query: str, call_id: str = "call_x") -> ToolSelection:

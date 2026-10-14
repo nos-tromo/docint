@@ -9,13 +9,20 @@ from unittest.mock import MagicMock
 
 import pytest
 from _pytest.logging import LogCaptureFixture
-from assessment_fakes import llm_view, scored_node, social_post, streaming_llm
+from assessment_fakes import (
+    FixedRetriever,
+    RecordingPostprocessor,
+    llm_view,
+    scored_node,
+    social_post,
+    streaming_llm,
+)
 from llama_index.core import PromptTemplate
 from llama_index.core.llms import MockLLM
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.response_synthesizers import Refine
 from llama_index.core.retrievers import BaseRetriever
-from llama_index.core.schema import BaseNode, NodeWithScore, QueryBundle
+from llama_index.core.schema import BaseNode, NodeWithScore, QueryBundle, TextNode
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from typing_extensions import override
@@ -25,6 +32,7 @@ from docint.agents.assessment.split import SENTINEL
 from docint.agents.history import build_prior_turn
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.rag import RAG, ParentContextPostprocessor
+from docint.core.retrieval.evidence import EveryChildQuery
 from docint.core.state.base import Base
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.turn import Turn
@@ -772,3 +780,149 @@ def test_a_legacy_agent_follow_up_never_sees_the_judgement_of_a_stored_assessmen
 
     assert FACT in answer
     assert JUDGEMENT not in answer
+
+
+def _real_engine(sm: SessionManager, hits: list[NodeWithScore], postprocessor: Any, *, streaming: bool) -> None:
+    """Route the turn to a real query engine over fixed hits, installed on the RAG double.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        hits (list[NodeWithScore]): What every retrieval returns, best first.
+        postprocessor (Any): The engine's one node postprocessor.
+        streaming (bool): Whether the engine's synthesizer streams, as a streaming turn's does.
+    """
+    rag = cast(Any, sm.rag)
+    rag._build_grounded_text_qa_template.side_effect = _echo_template
+    rag._build_grounded_refine_template.side_effect = _echo_template
+    engine = RetrieverQueryEngine(
+        retriever=FixedRetriever(hits),
+        response_synthesizer=Refine(llm=MockLLM(), text_qa_template=_echo_template(False), streaming=streaming),
+        node_postprocessors=[postprocessor],
+    )
+    rag.build_query_engine.return_value = engine
+    rag.query_engine = engine
+
+
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+def test_the_seed_asks_for_every_child_and_the_lookup_it_falls_back_to_does_not(
+    session_manager: SessionManager, entry: str
+) -> None:
+    """The flag rides on the seed's bundle through a real engine; the lookup that replaces an oversized turn is plain.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        entry (str): The session manager method under test.
+    """
+    recorder = RecordingPostprocessor()
+    _real_engine(session_manager, _seed(), recorder, streaming=entry == "stream_chat")
+    cast(Any, session_manager.rag).assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
+        answer_llm=cast(Any, streaming_llm(["unused"])),
+        llm_view=llm_view,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        reasoning=False,
+    )
+    # A question this long leaves the evidence no room, so the turn is answered as a lookup.
+    question = "Assess the survey. " + "invented filler " * 2500
+
+    if entry == "chat":
+        final = session_manager.chat(question, session_id="s1", answer_mode="assessment")
+    else:
+        final = list(session_manager.stream_chat(question, session_id="s1", answer_mode="assessment"))[-1]
+
+    assert isinstance(final, dict)
+    assert "answer_mode" not in final
+    assert [type(bundle) for bundle in recorder.bundles] == [EveryChildQuery, QueryBundle]
+    assert [cast(QueryBundle, bundle).query_str for bundle in recorder.bundles] == ["expanded question"] * 2
+
+
+def _filler(label: str, count: int) -> str:
+    """Return invented filler whose sentences are numbered, so a child cut from it is found where it was cut.
+
+    Args:
+        label (str): A word that sets this filler apart from any other.
+        count (int): How many sentences.
+
+    Returns:
+        str: The filler.
+    """
+    return "".join(f"{label} filler sentence {index:04d}. " for index in range(count))
+
+
+#: The facts of two retrieved children of one invented section, about ten thousand characters apart.
+EARLY_FACT = "The invented trial enrolled its first cohort within a single week."
+LATE_FACT = "The later cohort was unblinded before the primary endpoint was read."
+#: The section: the first child is (200, 1200), the second (10000, 11000), and the whole of it fits parent context.
+TRIAL_SECTION = (
+    (_filler("Lead", 20)[:300] + EARLY_FACT + _filler("Body", 400))[:10100] + LATE_FACT + _filler("Tail", 80)
+)[:12000]
+
+
+def test_every_child_of_a_section_reaches_a_crowded_8k_answer(session_manager: SessionManager) -> None:
+    """Codex's reproduction: five hits at 8k, two of them children of one section shown whole, both facts answered.
+
+    The section and three long passages crowd the answer, so the section is cut; with only its first child's
+    match stamped, the later fact would be cut away while the turn reported nothing.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    assert (TRIAL_SECTION.index(EARLY_FACT), TRIAL_SECTION.index(LATE_FACT)) == (300, 10100)
+    section = TextNode(id_="section-3", text=TRIAL_SECTION, metadata={"filename": "trial.pdf", "page": 3})
+
+    def _child(start: int, end: int, node_id: str, score: float) -> NodeWithScore:
+        """Build one retrieved child of the section.
+
+        Args:
+            start (int): Where it starts in the section.
+            end (int): Where it ends.
+            node_id (str): Its id.
+            score (float): Its rerank score.
+
+        Returns:
+            NodeWithScore: The hit.
+        """
+        metadata = {"hier.parent_id": "section-3", "docint_hier_type": "fine"}
+        return NodeWithScore(node=TextNode(id_=node_id, text=TRIAL_SECTION[start:end], metadata=metadata), score=score)
+
+    passages = [
+        NodeWithScore(
+            node=TextNode(
+                id_=f"notes-{number}",
+                text=_filler(f"Notes{number}", 160)[:4000],
+                metadata={"filename": f"notes-{number}.pdf", "page": number},
+            ),
+            score=0.7 - number / 100,
+        )
+        for number in range(1, 4)
+    ]
+    hits = [_child(200, 1200, "child-early", 0.9), passages[0], _child(10000, 11000, "child-late", 0.8), *passages[1:]]
+    # What an 8k window leaves parent context (``RAG._compute_parent_context_budget`` at five reranked hits).
+    postprocessor = ParentContextPostprocessor(
+        docstore=SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: section if node_id == "section-3" else None
+        ),
+        usable_tokens=6184,
+        per_hit_floor=1236,
+        char_token_ratio=3.5,
+        budget_enforced=True,
+    )
+    _real_engine(session_manager, hits, postprocessor, streaming=True)
+    answer_llm = streaming_llm(ANSWER)
+    cast(Any, session_manager.rag).assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
+        answer_llm=cast(Any, answer_llm),
+        llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        reasoning=False,
+    )
+
+    final = list(session_manager.stream_chat(QUESTION, session_id="s1", answer_mode="assessment"))[-1]
+
+    assert isinstance(final, dict)
+    assert [source["id"] for source in final["sources"]] == ["section-3", "notes-1", "notes-2", "notes-3"]
+    prompt = answer_llm.stream_chat.call_args.args[0][0].content
+    assert TRIAL_SECTION not in prompt
+    assert EARLY_FACT in prompt
+    assert LATE_FACT in prompt
+    assert final["agent"]["reason"] is None

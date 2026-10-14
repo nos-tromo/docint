@@ -427,9 +427,10 @@ Classification and research make a single attempt per call, whatever
 `OPENAI_MAX_RETRIES` says, so retries never stretch their 15-second and
 two-minute bounds; lookups and the answer keep the retries.
 
-**Evidence.** An assessment seeds its evidence with exactly the passages a
-lookup would have used — the turn's own engine, filters, rerank and
-parent-context chain — then lets the plain model search further through a
+**Evidence.** An assessment seeds its evidence with the passages a lookup
+would have used — the turn's own engine, filters, rerank and parent-context
+chain, each section keeping every child retrieved under it — then lets the
+plain model search further through a
 `search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
 prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
 `ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
