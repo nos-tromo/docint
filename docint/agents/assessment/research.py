@@ -5,7 +5,9 @@ decoding without ``--enable-auto-tool-choice``; a model that answers in prose
 anyway (Ollama treats ``required`` as ``auto``) ends research. The turn reports
 ``tools_unavailable`` when the endpoint rejects the first call, or when the
 first round returns no tool call. The time budget bounds every model call and
-every search; a search still running when it runs out is abandoned.
+every search; a search still running when it runs out is abandoned. Searches
+share ``SEARCH_SLOTS`` slots per process, and an abandoned one keeps its slot
+until it ends, so no outage can pile up more running searches than that.
 """
 
 from __future__ import annotations
@@ -41,6 +43,12 @@ RESEARCH_WALL_CLOCK_S = 120.0
 MAX_QUERY_CHARS = 300
 #: Name of the thread a search runs on, so an abandoned one can be found.
 SEARCH_THREAD_NAME = "assessment-research-search"
+#: Searches that may run at once in this process, abandoned ones included.
+SEARCH_SLOTS = 8
+#: Longest a search waits for a free slot; the wait comes out of the research budget.
+SEARCH_SLOT_WAIT_S = 5.0
+#: The process-wide slots every research search takes; a resource cap, not session state.
+SEARCH_SLOT_POOL = threading.BoundedSemaphore(SEARCH_SLOTS)
 
 DEFAULT_ASSESSMENT_RESEARCH_PROMPT = (
     "Gather the evidence a careful judgement of the material needs; do not answer yet.\n\n"
@@ -93,8 +101,27 @@ def _failure_reason(exc: Exception, *, first: bool) -> str:
     return "research_failed"
 
 
-def _bounded(search: SearchFn, query: str, timeout: float) -> concurrent.futures.Future[list[NodeWithScore]] | None:
-    """Run one search on its own thread and wait for it no longer than ``timeout``.
+class _NoSearchSlot(Exception):
+    """Every search slot stayed taken for as long as the search could wait."""
+
+
+def _bounded(
+    search: SearchFn,
+    query: str,
+    timeout: float,
+    *,
+    slots: threading.Semaphore,
+    clock: Callable[[], float],
+) -> concurrent.futures.Future[list[NodeWithScore]] | None:
+    """Run one search on its own thread, in a free search slot, and wait for it no longer than ``timeout``.
+
+    The search first waits for a slot, at most ``min(timeout, SEARCH_SLOT_WAIT_S)``,
+    and that wait comes out of ``timeout``. The worker gives the slot back when
+    retrieval actually ends, before it resolves the future, so an abandoned search
+    holds its slot until it finishes and the caller never races its own slot on its
+    next search; abandoned work is thus capped at the slot count. The remaining
+    deadline is deliberately not passed into retrieval: its clients are the shared
+    lookup clients, with timeouts of their own that free the slot when they fire.
 
     The search runs in a copy of the caller's context, since retrieval reads the
     request's collection and reasoning scope from context variables. Its outcome,
@@ -105,25 +132,49 @@ def _bounded(search: SearchFn, query: str, timeout: float) -> concurrent.futures
     Args:
         search (SearchFn): Runs one search through the turn's engine.
         query (str): What to search for.
-        timeout (float): Seconds to wait.
+        timeout (float): Seconds the slot wait and the search may take together.
+        slots (threading.Semaphore): The search slots to take one from.
+        clock (Callable[[], float]): Monotonic clock the slot wait is measured with.
 
     Returns:
         concurrent.futures.Future[list[NodeWithScore]] | None: The finished
-        search, holding its passages or its exception; ``None`` when it outlasts
-        the timeout, in which case it finishes in the background, unread.
+        search, holding its passages or its exception; ``None`` when the slot wait
+        left no time (the search never starts) or the search outlasts the timeout,
+        in which case it finishes in the background, unread, still in its slot.
+
+    Raises:
+        _NoSearchSlot: When no slot frees up in time; the search is never called
+            and no thread is started.
     """
+    began = clock()
+    if not slots.acquire(timeout=min(timeout, SEARCH_SLOT_WAIT_S)):
+        raise _NoSearchSlot
+    left = timeout - (clock() - began)
+    if left <= 0:
+        slots.release()
+        return None
     future: concurrent.futures.Future[list[NodeWithScore]] = concurrent.futures.Future()
     context = contextvars.copy_context()
 
     def _run() -> None:
-        """Run the search and hand its outcome to the future."""
+        """Run the search, give its slot back, then hand its outcome to the future."""
         try:
-            future.set_result(context.run(search, query))
+            try:
+                found = context.run(search, query)
+            finally:
+                slots.release()
         except BaseException as exc:
             future.set_exception(exc)
+        else:
+            future.set_result(found)
 
-    threading.Thread(target=_run, name=SEARCH_THREAD_NAME, daemon=True).start()
-    done, _ = concurrent.futures.wait([future], timeout=timeout)
+    thread = threading.Thread(target=_run, name=SEARCH_THREAD_NAME, daemon=True)
+    try:
+        thread.start()
+    except BaseException:
+        slots.release()
+        raise
+    done, _ = concurrent.futures.wait([future], timeout=left)
     return future if done else None
 
 
@@ -154,6 +205,7 @@ class ResearchLoop:
         prompt: str | None = None,
         wall_clock_s: float = RESEARCH_WALL_CLOCK_S,
         clock: Callable[[], float] = time.monotonic,
+        slots: threading.Semaphore = SEARCH_SLOT_POOL,
     ) -> None:
         """Bind the model, the search and the limits.
 
@@ -169,9 +221,12 @@ class ResearchLoop:
             wall_clock_s (float): Seconds research may take in total, its model
                 calls and its searches included.
             clock (Callable[[], float]): Monotonic clock, injectable for tests.
+            slots (threading.Semaphore): The search slots shared by every research
+                in the process (``SEARCH_SLOT_POOL``); injectable for tests.
         """
         self._llm = llm
         self._search = search
+        self._slots = slots
         self._max_steps = max_steps
         self._ratio = char_token_ratio
         self._token_limit = int(ctx_window * 0.95) - RESEARCH_REPLY_TOKENS - TOOL_SCHEMA_TOKENS
@@ -280,7 +335,12 @@ class ResearchLoop:
             if remaining <= 0:
                 reason = "time_budget"
                 break
-            finished = _bounded(self._search, query, remaining)
+            try:
+                finished = _bounded(self._search, query, remaining, slots=self._slots, clock=self._clock)
+            except _NoSearchSlot:
+                reason = "research_failed"
+                logger.warning("Assessment research stopped (research_failed): no search capacity")
+                break
             if finished is None:
                 reason = "time_budget"
                 logger.warning("Assessment research stopped (time_budget): a search outlasted the research budget")

@@ -17,14 +17,41 @@ from assessment_fakes import bad_request, llm_view, scored_node, search_call, to
 from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
 from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
+from typing_extensions import override
 
 from docint.agents.assessment.ledger import EvidenceLedger, Room
-from docint.agents.assessment.research import SEARCH_THREAD_NAME, ResearchLoop
+from docint.agents.assessment.research import (
+    SEARCH_SLOT_POOL,
+    SEARCH_SLOT_WAIT_S,
+    SEARCH_SLOTS,
+    SEARCH_THREAD_NAME,
+    ResearchLoop,
+    _bounded,
+)
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn
 from docint.agents.types import AgentProgress
 from docint.core.rag import ParentContextPostprocessor
 
 QUESTION = "zzsecretzz What could be improved in this study?"
+
+
+@pytest.fixture(autouse=True)
+def _search_capacity_is_whole_again() -> Iterator[None]:
+    """Fail any test that leaves one of the process-wide search slots taken.
+
+    Torn down after every fixture the test requested, so a held search is
+    released and joined before the slots are counted.
+
+    Yields:
+        None: The test runs.
+    """
+    yield
+    taken = 0
+    while taken < SEARCH_SLOTS and SEARCH_SLOT_POOL.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        SEARCH_SLOT_POOL.release()
+    assert taken == SEARCH_SLOTS
 
 
 def _ticking(*ticks: float) -> Callable[[], float]:
@@ -457,8 +484,9 @@ def test_the_wall_clock_bounds_research() -> None:
 
 def test_each_research_call_is_bounded_by_the_time_remaining() -> None:
     """One hung call cannot outlast the research budget; a floor of a second keeps the last call possible."""
-    # Start; then per round: the budget check, the call's own timeout, the time left for its search, the check after.
-    clock = _ticking(0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 119.5, 200.0)
+    # Start; then per round: the budget check, the call's own timeout, the time left for its search,
+    # the slot wait's start and end, the check after.
+    clock = _ticking(0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0, 119.5, 200.0)
     llm = tool_llm([search_call("method"), search_call("results")])
 
     _drain(
@@ -524,6 +552,330 @@ def test_a_search_that_outlasts_the_budget_ends_research_on_time(
     assert loguru_caplog.messages == [
         "Assessment research stopped (time_budget): a search outlasted the research budget"
     ]
+
+
+def _alive_searches() -> int:
+    """Count the search threads still running.
+
+    Returns:
+        int: Threads named ``SEARCH_THREAD_NAME`` that are alive.
+    """
+    return sum(thread.name == SEARCH_THREAD_NAME and thread.is_alive() for thread in threading.enumerate())
+
+
+def test_abandoned_searches_are_capped_at_the_slot_count(held_search: tuple[threading.Event, SearchFn]) -> None:
+    """Codex's reproduction: hung searches across turns pile up only until every slot is held, then research stops.
+
+    Args:
+        held_search (tuple[threading.Event, SearchFn]): The blocking search.
+    """
+    _, search = held_search
+    calls: list[str] = []
+
+    def _counted(query: str) -> list[NodeWithScore]:
+        """Count the search, then block like the held one.
+
+        Args:
+            query (str): The search query.
+
+        Returns:
+            list[NodeWithScore]: The late passage.
+        """
+        calls.append(query)
+        return search(query)
+
+    outcomes = [
+        _drain(
+            _loop(tool_llm([search_call(f"turn {turn}")]), _counted, wall_clock_s=0.2).run(
+                question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+            )
+        )[1].reason
+        for turn in range(SEARCH_SLOTS + 1)
+    ]
+
+    assert outcomes == ["time_budget"] * SEARCH_SLOTS + ["research_failed"]
+    assert len(calls) == SEARCH_SLOTS
+    assert _alive_searches() == SEARCH_SLOTS
+
+
+def _recorded(searched: list[str]) -> SearchFn:
+    """Build a search that records each query and finds nothing.
+
+    Args:
+        searched (list[str]): Where the queries go.
+
+    Returns:
+        SearchFn: The search.
+    """
+
+    def _run(query: str) -> list[NodeWithScore]:
+        """Record the query.
+
+        Args:
+            query (str): The search query.
+
+        Returns:
+            list[NodeWithScore]: Nothing.
+        """
+        searched.append(query)
+        return []
+
+    return _run
+
+
+class _Recording(threading.BoundedSemaphore):
+    """Search slots that record how long a search would wait and find them all taken."""
+
+    def __init__(self) -> None:
+        """Start with one slot and no waits recorded."""
+        super().__init__(1)
+        self.waits: list[float | None] = []
+
+    @override
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        """Record the wait and report no free slot.
+
+        Args:
+            blocking (bool): Whether the caller would block.
+            timeout (float | None): How long it would wait.
+
+        Returns:
+            bool: Always ``False``.
+        """
+        self.waits.append(timeout)
+        return False
+
+
+@pytest.mark.parametrize(("budget", "wait"), [(120.0, SEARCH_SLOT_WAIT_S), (2.0, 2.0)])
+def test_no_free_slot_stops_research_without_starting_the_search(
+    budget: float, wait: float, monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A search waits for a slot no longer than the budget allows, and never runs or starts a thread without one.
+
+    Args:
+        budget (float): The research budget in seconds.
+        wait (float): The longest the search may wait for a slot.
+        monkeypatch (pytest.MonkeyPatch): Records thread starts.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    slots = _Recording()
+    searched: list[str] = []
+    started: list[str] = []
+    real_start = threading.Thread.start
+
+    def _start(thread: threading.Thread) -> None:
+        """Record a thread start, then start it.
+
+        Args:
+            thread (threading.Thread): The thread.
+        """
+        started.append(thread.name)
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", _start)
+
+    _, outcome = _drain(
+        _loop(
+            tool_llm([search_call("zzsecretzz method")]),
+            _recorded(searched),
+            wall_clock_s=budget,
+            clock=lambda: 0.0,
+            slots=slots,
+        ).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+
+    assert (outcome.reason, outcome.actions) == ("research_failed", [])
+    assert slots.waits == [wait]
+    assert (searched, started) == ([], [])
+    assert loguru_caplog.messages == ["Assessment research stopped (research_failed): no search capacity"]
+
+
+def test_a_timed_out_search_keeps_its_slot_until_it_ends(held_search: tuple[threading.Event, SearchFn]) -> None:
+    """Abandoned work stays counted: the slot frees only when retrieval actually finishes.
+
+    Args:
+        held_search (tuple[threading.Event, SearchFn]): The blocking search.
+    """
+    release, search = held_search
+    slots = threading.BoundedSemaphore(1)
+
+    _, outcome = _drain(
+        _loop(tool_llm([search_call("method")]), search, wall_clock_s=0.2, slots=slots).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert outcome.reason == "time_budget"
+    assert slots.acquire(blocking=False) is False
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == SEARCH_THREAD_NAME:
+            thread.join(timeout=5)
+    assert slots.acquire(blocking=False) is True
+    slots.release()
+
+
+def test_a_search_thread_that_cannot_start_gives_its_slot_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A thread the process cannot start must not take a slot with it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Makes thread starts fail.
+    """
+    slots = threading.BoundedSemaphore(1)
+
+    def _start(thread: threading.Thread) -> None:
+        """Fail as a process out of threads does.
+
+        Args:
+            thread (threading.Thread): The thread, unused.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", _start)
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        _drain(
+            _loop(tool_llm([search_call("method")]), _search({}), slots=slots).run(
+                question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+            )
+        )
+
+    assert slots.acquire(blocking=False) is True
+    slots.release()
+
+
+class _Abort(BaseException):
+    """Ends a search the way an interrupt would, past ``except Exception``."""
+
+
+def test_a_search_ending_in_a_base_exception_gives_its_slot_back() -> None:
+    """The slot is held while retrieval runs and returned however it ends."""
+    slots = threading.BoundedSemaphore(1)
+    held_while_running: list[bool] = []
+
+    def _search(query: str) -> list[NodeWithScore]:
+        """Check the search holds its slot, then end abruptly.
+
+        Args:
+            query (str): The search query, unused.
+
+        Raises:
+            _Abort: Always.
+        """
+        free = slots.acquire(blocking=False)
+        if free:
+            slots.release()
+        held_while_running.append(not free)
+        raise _Abort
+
+    finished = _bounded(_search, "method", 5.0, slots=slots, clock=time.monotonic)
+
+    assert finished is not None
+    assert isinstance(finished.exception(), _Abort)
+    assert held_while_running == [True]
+    assert slots.acquire(blocking=False) is True
+    slots.release()
+
+
+class _SlowRelease(threading.BoundedSemaphore):
+    """Search slots whose release takes a moment, so its order against the result shows."""
+
+    @override
+    def release(self, n: int = 1) -> None:
+        """Pause, then give the slot back.
+
+        Args:
+            n (int): How many slots to give back.
+        """
+        time.sleep(0.3)
+        super().release(n)
+
+
+def test_a_search_gives_its_slot_back_before_its_result_is_read() -> None:
+    """The caller never finds its own finished search still holding the slot its next search needs."""
+    slots = _SlowRelease(1)
+
+    finished = _bounded(_search({}), "method", 5.0, slots=slots, clock=time.monotonic)
+
+    assert finished is not None
+    assert slots.acquire(blocking=False) is True
+    threading.BoundedSemaphore.release(slots)
+
+
+class _SlowSlots(threading.BoundedSemaphore):
+    """Search slots that take ``delay`` seconds of an injected clock to hand out."""
+
+    def __init__(self, now: list[float], delay: float) -> None:
+        """Hold the clock and the delay.
+
+        Args:
+            now (list[float]): The injected clock's reading, advanced in place.
+            delay (float): Seconds a slot takes to come free.
+        """
+        super().__init__(1)
+        self._now = now
+        self._delay = delay
+
+    @override
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        """Advance the clock by the delay, then take a slot.
+
+        Args:
+            blocking (bool): Whether the caller blocks.
+            timeout (float | None): How long it would wait.
+
+        Returns:
+            bool: Whether a slot was taken.
+        """
+        self._now[0] += self._delay
+        return super().acquire(blocking, timeout)
+
+
+def test_the_slot_wait_comes_out_of_the_research_budget(held_search: tuple[threading.Event, SearchFn]) -> None:
+    """A slot that takes nearly the whole budget to free leaves the search only what remains.
+
+    Args:
+        held_search (tuple[threading.Event, SearchFn]): The blocking search.
+    """
+    _, search = held_search
+    now = [0.0]
+    started = time.monotonic()
+
+    _, outcome = _drain(
+        _loop(
+            tool_llm([search_call("method")]),
+            search,
+            wall_clock_s=100.0,
+            clock=lambda: now[0],
+            slots=_SlowSlots(now, 99.9),
+        ).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+
+    assert outcome.reason == "time_budget"
+    assert time.monotonic() - started < 3.0
+
+
+def test_a_slot_that_frees_only_after_the_budget_never_starts_the_search() -> None:
+    """Once the wait for a slot has used the whole budget, the slot goes back unused."""
+    now = [0.0]
+    slots = _SlowSlots(now, 150.0)
+    searched: list[str] = []
+
+    _, outcome = _drain(
+        _loop(
+            tool_llm([search_call("method")]),
+            _recorded(searched),
+            wall_clock_s=100.0,
+            clock=lambda: now[0],
+            slots=slots,
+        ).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+
+    assert (outcome.reason, searched) == ("time_budget", [])
+    assert threading.BoundedSemaphore.acquire(slots, blocking=False) is True
 
 
 _SCOPE: ContextVar[str | None] = ContextVar("invented_collection_scope", default=None)
