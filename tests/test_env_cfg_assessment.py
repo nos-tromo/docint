@@ -103,5 +103,7 @@ def test_small_window_warns_once_and_names_the_knob(
     assessment_available(4096)
 
     warnings = [message for message in loguru_caplog.messages if "Assessment turns are off" in message]
-    assert len(warnings) == 1
-    assert "OPENAI_CTX_WINDOW" in warnings[0]
+    assert warnings == [
+        "Assessment turns are off: the chat context window is 4096 tokens, below the 8192 they need. "
+        "Raise OPENAI_CTX_WINDOW (and the context window the chat endpoint serves) to enable them."
+    ]

@@ -20,7 +20,7 @@ def _warn_small_window(ctx_window: int) -> None:
     """
     logger.warning(
         "Assessment turns are off: the chat context window is {} tokens, below the {} they need. "
-        "Raise OPENAI_CTX_WINDOW (and the model's num_ctx on Ollama) to enable them.",
+        "Raise OPENAI_CTX_WINDOW (and the context window the chat endpoint serves) to enable them.",
         ctx_window,
         MIN_CTX_WINDOW,
     )

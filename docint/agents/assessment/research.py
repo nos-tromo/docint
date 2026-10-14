@@ -1,13 +1,13 @@
 """The research step: the plain model searches the collection until it has enough.
 
-Calls tools with ``tool_choice="required"``, which vLLM serves through guided
-decoding without ``--enable-auto-tool-choice``; a model that answers in prose
-anyway (Ollama treats ``required`` as ``auto``) ends research. The turn reports
-``tools_unavailable`` when the endpoint rejects the first call, or when the
-first round returns no tool call. The time budget bounds every model call and
-every search; a search still running when it runs out is abandoned. Searches
-share ``SEARCH_SLOTS`` slots per process, and an abandoned one keeps its slot
-until it ends, so no outage can pile up more running searches than that.
+Calls tools with ``tool_choice="required"``; a model that answers in prose
+anyway (an endpoint that serves ``required`` as ``auto``) ends research. The
+turn reports ``tools_unavailable`` when the endpoint rejects the first call, or
+when the first round returns no tool call. The time budget bounds every model
+call and every search; a search still running when it runs out is abandoned.
+Searches share ``SEARCH_SLOTS`` slots per process, and an abandoned one keeps
+its slot until it ends, so no outage can pile up more running searches than
+that.
 """
 
 from __future__ import annotations
