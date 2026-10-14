@@ -16,7 +16,7 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole, ToolCallB
 from llama_index.core.tools import FunctionTool
 from loguru import logger
 
-from docint.agents.assessment.ledger import EvidenceLedger, digest
+from docint.agents.assessment.ledger import EvidenceLedger, digest, is_context_overflow
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn, prior_turn_block
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.utils.embed_chunking import estimate_tokens
@@ -32,7 +32,6 @@ STEP_TOKENS = 700
 MESSAGE_OVERHEAD_TOKENS = 40
 RESEARCH_WALL_CLOCK_S = 120.0
 MAX_QUERY_CHARS = 300
-_CONTEXT_ERROR_MARKERS = ("maximum context length", "context length", "context_length_exceeded", "input length exceeds")
 
 DEFAULT_ASSESSMENT_RESEARCH_PROMPT = (
     "Gather the evidence a careful judgement of the material needs; do not answer yet.\n\n"
@@ -78,8 +77,7 @@ def _failure_reason(exc: Exception, *, first: bool) -> str:
     Returns:
         str: ``context_budget``, ``tools_unavailable`` or ``research_failed``.
     """
-    message = str(exc).lower()
-    if any(marker in message for marker in _CONTEXT_ERROR_MARKERS):
+    if is_context_overflow(exc):
         return "context_budget"
     if first and isinstance(exc, openai.BadRequestError):
         return "tools_unavailable"

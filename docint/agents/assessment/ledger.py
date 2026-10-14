@@ -26,6 +26,29 @@ PRIOR_TURN_TOKENS = 400
 QUESTION_TOKENS = 150
 SLACK_TOKENS = 64
 SAFETY_MARGIN = 0.95
+#: How OpenAI-compatible servers word a prompt longer than the model's context.
+CONTEXT_ERROR_MARKERS = (
+    "context length",
+    "maximum model length",
+    "context size",
+    "context window",
+    "too long",
+    "context_length_exceeded",
+    "input length exceeds",
+)
+
+
+def is_context_overflow(exc: BaseException) -> bool:
+    """Return whether a failed model call says the prompt did not fit the context.
+
+    Args:
+        exc (BaseException): The failure.
+
+    Returns:
+        bool: ``True`` when its message carries an overflow marker, in any case.
+    """
+    message = str(exc).lower()
+    return any(marker in message for marker in CONTEXT_ERROR_MARKERS)
 
 
 @dataclass(frozen=True)

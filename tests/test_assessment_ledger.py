@@ -6,11 +6,13 @@ import pytest
 from assessment_fakes import llm_view, scored_node
 
 from docint.agents.assessment.ledger import (
+    CONTEXT_ERROR_MARKERS,
     DIGEST_CHARS,
     DIGEST_LABEL_CHARS,
     EvidenceLedger,
     answer_budget,
     digest,
+    is_context_overflow,
     render_context,
 )
 from docint.agents.assessment.split import SENTINEL, compose_labelled_answer
@@ -158,6 +160,34 @@ def test_answer_budget_matches_the_planned_table(
     budget = answer_budget(ctx_window=window, template="x" * 2500, reasoning=reasoning, char_token_ratio=3.5)
 
     assert (budget.evidence_tokens, budget.output_tokens, budget.max_entries) == (evidence, output, entries)
+
+
+def test_the_overflow_markers_are_the_ruled_set() -> None:
+    """The phrasings OpenAI, vLLM and llama.cpp use for a prompt longer than the model's context."""
+    assert CONTEXT_ERROR_MARKERS == (
+        "context length",
+        "maximum model length",
+        "context size",
+        "context window",
+        "too long",
+        "context_length_exceeded",
+        "input length exceeds",
+    )
+
+
+@pytest.mark.parametrize("marker", CONTEXT_ERROR_MARKERS)
+def test_every_overflow_marker_matches_in_any_case(marker: str) -> None:
+    """Servers capitalize these phrases however they like.
+
+    Args:
+        marker (str): One overflow marker.
+    """
+    assert is_context_overflow(RuntimeError(f"Upstream error: {marker.upper()}."))
+
+
+def test_an_unrelated_failure_is_not_an_overflow() -> None:
+    """A transport fault must never be retried as if the prompt were too long."""
+    assert not is_context_overflow(RuntimeError("Connection reset by peer"))
 
 
 def test_shared_budget_helpers_keep_the_validator_semantics() -> None:

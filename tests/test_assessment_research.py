@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import httpx
 import openai
+import pytest
 from _pytest.logging import LogCaptureFixture
 from assessment_fakes import scored_node, search_call, tool_llm
 from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
@@ -257,13 +258,50 @@ def test_a_rejected_first_tool_call_reports_tools_unavailable(loguru_caplog: Log
     assert "zzsecretzz" not in loguru_caplog.text
 
 
-def test_a_context_error_reports_context_budget() -> None:
-    """A context-length 400 is a budget stop, not missing tool support."""
-    llm = tool_llm([_bad_request("This model's maximum context length is 8192 tokens; input tokens exceeded")])
+@pytest.mark.parametrize(
+    ("error", "first_call", "later_call"),
+    [
+        (
+            _bad_request("This model's maximum context length is 8192 tokens; your request has 9001 input tokens."),
+            "context_budget",
+            "context_budget",
+        ),
+        (
+            _bad_request("The decoder prompt (length 9001) is longer than the maximum model length of 8192"),
+            "context_budget",
+            "context_budget",
+        ),
+        (_bad_request("request exceeds the available context size"), "context_budget", "context_budget"),
+        (_bad_request("Input is too long"), "context_budget", "context_budget"),
+        (
+            _bad_request("auto tool choice requires --enable-auto-tool-choice"),
+            "tools_unavailable",
+            "research_failed",
+        ),
+        (RuntimeError("boom"), "research_failed", "research_failed"),
+    ],
+)
+def test_a_failed_call_is_named_by_its_message_and_its_round(
+    error: Exception, first_call: str, later_call: str
+) -> None:
+    """A context-length error is a budget stop on any round; a rejected first call means no tool support.
 
-    _, outcome = _drain(_loop(llm, _search({})).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)))
+    Args:
+        error (Exception): What the endpoint raises.
+        first_call (str): The reason when the first call fails.
+        later_call (str): The reason when a call after a search fails.
+    """
+    first = tool_llm([error])
+    _, outcome = _drain(_loop(first, _search({})).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)))
+    assert outcome.reason == first_call
 
-    assert outcome.reason == "context_budget"
+    later = tool_llm([search_call("method"), error])
+    _, outcome = _drain(
+        _loop(later, _search({"method": [scored_node("m", "M.")]})).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+    assert outcome.reason == later_call
 
 
 def test_a_later_failure_reports_research_failed() -> None:
