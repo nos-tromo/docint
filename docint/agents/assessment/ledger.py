@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
@@ -57,7 +57,8 @@ class AnswerBudget:
 
     Attributes:
         evidence_tokens (int): Room for the rendered ledger.
-        output_tokens (int): ``max_tokens`` for the streamed answer.
+        output_tokens (int): Reply room kept free inside the window; no longer
+            sent as ``max_tokens``, so the answer call is uncapped like a lookup's.
         max_entries (int): Ledger cap that keeps every entry legible.
     """
 
@@ -193,12 +194,44 @@ def digest(number: int, scored: NodeWithScore) -> str:
     return neutralize_sentinel(" ".join(line.split()))
 
 
+def effective_ratio(
+    texts: Sequence[str],
+    *,
+    char_token_ratio: float,
+    count_tokens: Callable[[str], int] | None,
+    sample_chars: int = 12_000,
+) -> float:
+    """Return the characters per token to pack with: measured when possible, never above the configured ratio.
+
+    Args:
+        texts (Sequence[str]): The parts to be rendered.
+        char_token_ratio (float): The configured characters per token.
+        count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
+        sample_chars (int): The most characters measured, taken evenly across ``texts``.
+
+    Returns:
+        float: The denser of the measured and the configured ratio; the configured
+        one without a tokenizer, without text, or when the tokenizer fails.
+    """
+    if count_tokens is None or not any(texts):
+        return char_token_ratio
+    sample = "\n\n".join(text[: sample_chars // max(1, len(texts))] for text in texts)
+    try:
+        tokens = count_tokens(sample)
+    except Exception:
+        return char_token_ratio
+    if tokens <= 0:
+        return char_token_ratio
+    return min(char_token_ratio, len(sample) / tokens)
+
+
 def render_context(
     nodes: list[NodeWithScore],
     *,
     llm_view: Callable[[BaseNode], BaseNode],
     budget_tokens: int,
     char_token_ratio: float,
+    count_tokens: Callable[[str], int] | None = None,
 ) -> tuple[str, int]:
     """Render numbered nodes like the grounded prompt's context, shortened to fit.
 
@@ -211,6 +244,8 @@ def render_context(
             must not see.
         budget_tokens (int): Tokens the rendered evidence may use.
         char_token_ratio (float): Characters per token for the budget.
+        count_tokens (Callable[[str], int] | None): A tokenizer; when given, the
+            evidence is packed at its measured density (see :func:`effective_ratio`).
 
     Returns:
         tuple[str, int]: The context block and how many entries were shortened.
@@ -221,8 +256,9 @@ def render_context(
         view = llm_view(scored.node)
         headers.append(neutralize_sentinel(view.get_metadata_str(mode=MetadataMode.LLM)))
         bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
+    ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
     reserved = sum(len(header) + 4 for header in headers) + MARKER_RESERVE_CHARS * len(headers)
-    char_budget = max(0, int(budget_tokens * char_token_ratio) - reserved)
+    char_budget = max(0, int(budget_tokens * ratio) - reserved)
     allowances = allocate_shortest_first([len(body) for body in bodies], char_budget)
     rendered: list[str] = []
     shortened = 0

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import pytest
@@ -10,7 +10,7 @@ from assessment_fakes import llm_view, scored_node, streaming_llm
 from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger
-from docint.agents.assessment.runner import AssessmentResult, AssessmentRunner, ResearchOutcome
+from docint.agents.assessment.runner import AssessmentResult, AssessmentRunner, ResearchOutcome, prior_turn_block
 from docint.agents.assessment.split import SENTINEL, assessment_label
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.utils.embed_chunking import estimate_tokens
@@ -30,7 +30,11 @@ def _english(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _runner(
-    tokens: list[str] | None = None, *, reasoning: bool = False, researcher: Any = None
+    tokens: list[str] | None = None,
+    *,
+    reasoning: bool = False,
+    researcher: Any = None,
+    count_tokens: Callable[[str], int] | None = None,
 ) -> tuple[AssessmentRunner, Any]:
     """Build a runner over a streaming double.
 
@@ -38,6 +42,7 @@ def _runner(
         tokens (list[str] | None): The answer tokens; ``ANSWER`` by default.
         reasoning (bool): Whether the answer model counts as a reasoning model.
         researcher (Any): An optional research step.
+        count_tokens (Callable[[str], int] | None): An optional tokenizer.
 
     Returns:
         tuple[AssessmentRunner, Any]: The runner and its model double.
@@ -50,8 +55,24 @@ def _runner(
         char_token_ratio=3.5,
         reasoning=reasoning,
         researcher=researcher,
+        count_tokens=count_tokens,
     )
     return runner, llm
+
+
+def _long_seed(count: int) -> list[NodeWithScore]:
+    """Return ``count`` passages of about 2,000 characters each, too long to show whole.
+
+    Args:
+        count (int): How many passages.
+
+    Returns:
+        list[NodeWithScore]: The seed evidence.
+    """
+    return [
+        scored_node(f"n{number}", f"Passage {number}. " + "The result holds. " * 111, page=number)
+        for number in range(1, count + 1)
+    ]
 
 
 def _seed() -> list[NodeWithScore]:
@@ -85,8 +106,8 @@ def test_a_seeded_turn_streams_progress_then_a_labelled_answer() -> None:
     assert result.actions == [{"action": "seed", "detail": "", "found": 2}]
 
 
-def test_the_answer_call_carries_question_evidence_prior_turn_and_reserve() -> None:
-    """One user message holds everything; the reserve rides as ``max_tokens``."""
+def test_the_answer_call_carries_question_evidence_and_prior_turn_but_no_max_tokens() -> None:
+    """One user message holds everything; the reply reserve stays inside the budget, never sent as a cap."""
     runner, llm = _runner()
     prior = PriorTurn(user_text="Summarise it.", assistant_text="It has one experiment [1].")
 
@@ -98,16 +119,21 @@ def test_the_answer_call_carries_question_evidence_prior_turn_and_reserve() -> N
     assert "citation_index: 1" in prompt
     assert "citation_index: 2" in prompt
     assert "It has one experiment [1]." in prompt
-    assert call.kwargs["max_tokens"] == 1024
+    assert "max_tokens" not in call.kwargs
 
 
-def test_a_reasoning_model_gets_the_larger_reserve() -> None:
-    """A thinking model spends reply tokens on reasoning first."""
-    runner, llm = _runner(reasoning=True)
+def test_a_reasoning_model_keeps_a_larger_reserve_free_without_sending_it() -> None:
+    """A thinking model spends reply tokens on reasoning first, so its evidence is packed tighter."""
+    runner, llm = _runner()
+    thinking, thinking_llm = _runner(reasoning=True)
 
-    list(runner.run(question=QUESTION, prior_turn=None, seed=_seed()))
+    list(runner.run(question=QUESTION, prior_turn=None, seed=_long_seed(10)))
+    list(thinking.run(question=QUESTION, prior_turn=None, seed=_long_seed(10)))
 
-    assert llm.stream_chat.call_args.kwargs["max_tokens"] == 3072
+    plain_prompt = llm.stream_chat.call_args.args[0][0].content
+    thinking_prompt = thinking_llm.stream_chat.call_args.args[0][0].content
+    assert len(thinking_prompt) < len(plain_prompt)
+    assert "max_tokens" not in thinking_llm.stream_chat.call_args.kwargs
 
 
 def test_no_evidence_skips_the_answer_call() -> None:
@@ -262,3 +288,54 @@ def test_an_empty_ledger_always_reports_no_evidence() -> None:
     assert isinstance(result, AssessmentResult)
     assert result.reason == "no_evidence"
     llm.stream_chat.assert_not_called()
+
+
+def _prompt(runner: AssessmentRunner, llm: Any, seed: list[NodeWithScore], prior: PriorTurn | None = None) -> str:
+    """Run a turn and return the prompt the answer call received.
+
+    Args:
+        runner (AssessmentRunner): The runner.
+        llm (Any): Its model double.
+        seed (list[NodeWithScore]): The seed evidence.
+        prior (PriorTurn | None): The previous exchange, if any.
+
+    Returns:
+        str: The answer prompt.
+    """
+    list(runner.run(question=QUESTION, prior_turn=prior, seed=seed))
+    return str(llm.stream_chat.call_args.args[0][0].content)
+
+
+def test_a_dense_tokenizer_packs_less_evidence_than_the_configured_ratio() -> None:
+    """Text that tokenizes at two characters a token must not be packed at three and a half."""
+    plain = _prompt(*_runner(), _long_seed(10))
+    dense = _prompt(*_runner(count_tokens=lambda text: len(text) // 2), _long_seed(10))
+
+    assert len(dense) < len(plain)
+
+
+def test_a_tokenizer_that_fails_falls_back_to_the_configured_ratio() -> None:
+    """A broken tokenizer leaves the turn exactly as it is without one."""
+
+    def _broken(text: str) -> int:
+        raise RuntimeError("tokenizer unavailable")
+
+    plain = _prompt(*_runner(), _long_seed(10))
+    fallback = _prompt(*_runner(count_tokens=_broken), _long_seed(10))
+
+    assert fallback == plain
+
+
+def test_the_prior_turn_and_question_are_measured_with_the_tokenizer() -> None:
+    """Their overhead is counted, not estimated, when a tokenizer is available."""
+    measured: list[str] = []
+
+    def _count(text: str) -> int:
+        measured.append(text)
+        return max(1, len(text) // 4)
+
+    prior = PriorTurn(user_text="Summarise it.", assistant_text="It has one experiment [1].")
+
+    _prompt(*_runner(count_tokens=_count), _seed(), prior)
+
+    assert prior_turn_block(prior) + QUESTION in measured

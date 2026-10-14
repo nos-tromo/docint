@@ -6,6 +6,7 @@ LLM-view renderer and the optional research step all arrive as arguments.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -132,6 +133,7 @@ class AssessmentRunner:
         reasoning: bool,
         researcher: Researcher | None = None,
         answer_prompt: str | None = None,
+        count_tokens: Callable[[str], int] | None = None,
     ) -> None:
         """Bind the turn's models and limits.
 
@@ -147,6 +149,8 @@ class AssessmentRunner:
                 scoped turn, whose evidence is fixed.
             answer_prompt (str | None): Template override; the localized
                 ``assessment_answer`` prompt by default.
+            count_tokens (Callable[[str], int] | None): A tokenizer, when one is
+                loaded; budgets then follow the measured text instead of the ratio.
         """
         self._answer_llm = answer_llm
         self._llm_view = llm_view
@@ -154,9 +158,25 @@ class AssessmentRunner:
         self._ratio = char_token_ratio
         self._reasoning = reasoning
         self._researcher = researcher
+        self._count_tokens = count_tokens
         self._answer_prompt = answer_prompt or load_localized_prompt(
             "assessment_answer", default=DEFAULT_ASSESSMENT_ANSWER_PROMPT
         )
+
+    def _overhead_tokens(self, text: str) -> int:
+        """Measure the prior turn and the question, counted when a tokenizer is loaded.
+
+        Args:
+            text (str): The prior-turn block followed by the question.
+
+        Returns:
+            int: Their tokens; the ratio estimate without a tokenizer, or when it fails.
+        """
+        if self._count_tokens is not None:
+            # A failed count leaves the estimate, as packing does.
+            with contextlib.suppress(Exception):
+                return self._count_tokens(text)
+        return estimate_tokens(text, self._ratio)
 
     def run(
         self, *, question: str, prior_turn: PriorTurn | None, seed: Sequence[NodeWithScore]
@@ -202,22 +222,21 @@ class AssessmentRunner:
         nodes = ledger.numbered()
         block = prior_turn_block(prior_turn)
         # The prior turn and question can outgrow their reserve; the evidence gives way.
-        overhead = estimate_tokens(block + question.strip(), self._ratio)
+        overhead = self._overhead_tokens(block + question.strip())
         extra = max(0, overhead - PRIOR_TURN_TOKENS - QUESTION_TOKENS)
         context, shortened = render_context(
             nodes,
             llm_view=self._llm_view,
             budget_tokens=max(0, budget.evidence_tokens - extra),
             char_token_ratio=self._ratio,
+            count_tokens=self._count_tokens,
         )
         prompt = self._answer_prompt.format(prior_turn=block, context_str=context, question=question.strip())
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
         splitter = SentinelStreamSplitter()
         raw: list[str] = []
         messages = [ChatMessage(role=MessageRole.USER, content=prompt)]
-        for token in stream_chat_response_to_tokens(
-            self._answer_llm.stream_chat(messages, max_tokens=budget.output_tokens)
-        ):
+        for token in stream_chat_response_to_tokens(self._answer_llm.stream_chat(messages)):
             raw.append(token)
             visible = splitter.feed(token)
             if visible:

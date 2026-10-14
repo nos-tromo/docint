@@ -200,3 +200,17 @@ def test_the_research_step_cap_is_assessment_max_steps(monkeypatch: pytest.Monke
 
     assert isinstance(researcher, ResearchLoop)
     assert researcher._max_steps == 4
+
+
+def test_the_runner_counts_with_the_embedding_tokenizer_when_one_is_loaded() -> None:
+    """Measured density needs a tokenizer; without one the runner keeps the configured ratio."""
+    rag = _rag()
+    rag._embed_token_counter = lambda text: list(range(len(text) // 2))
+
+    with_tokenizer = rag.assessment_runner(MagicMock(), scoped=True)
+    rag._embed_token_counter = None
+    without = rag.assessment_runner(MagicMock(), scoped=True)
+
+    assert with_tokenizer._count_tokens is not None
+    assert with_tokenizer._count_tokens("abcdefgh") == 4
+    assert without._count_tokens is None

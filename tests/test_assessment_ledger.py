@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from assessment_fakes import llm_view, scored_node
 
@@ -12,6 +14,7 @@ from docint.agents.assessment.ledger import (
     EvidenceLedger,
     answer_budget,
     digest,
+    effective_ratio,
     is_context_overflow,
     render_context,
 )
@@ -188,6 +191,85 @@ def test_every_overflow_marker_matches_in_any_case(marker: str) -> None:
 def test_an_unrelated_failure_is_not_an_overflow() -> None:
     """A transport fault must never be retried as if the prompt were too long."""
     assert not is_context_overflow(RuntimeError("Connection reset by peer"))
+
+
+def _two_chars_a_token(text: str) -> int:
+    """Count tokens like a tokenizer meeting dense text.
+
+    Args:
+        text (str): The text to count.
+
+    Returns:
+        int: One token per two characters.
+    """
+    return len(text) // 2
+
+
+def _raises(text: str) -> int:
+    """Stand in for a tokenizer that fails.
+
+    Args:
+        text (str): The text to count, unused.
+
+    Raises:
+        RuntimeError: Always.
+    """
+    raise RuntimeError("tokenizer unavailable")
+
+
+@pytest.mark.parametrize(
+    ("texts", "count_tokens", "expected"),
+    [
+        (["dense passage " * 50], None, 3.5),
+        ([], _two_chars_a_token, 3.5),
+        (["", ""], _two_chars_a_token, 3.5),
+        (["dense passage " * 50], _two_chars_a_token, 2.0),
+        (["sparse passage " * 50], lambda text: max(1, len(text) // 6), 3.5),
+        (["dense passage " * 50], _raises, 3.5),
+        (["dense passage " * 50], lambda text: 0, 3.5),
+    ],
+    ids=["no-counter", "no-texts", "empty-texts", "dense", "sparse-is-capped", "counter-raises", "counter-zero"],
+)
+def test_effective_ratio_never_exceeds_the_configured_one(texts: list[str], count_tokens: Any, expected: float) -> None:
+    """Measured density only ever tightens the budget, and a broken counter changes nothing.
+
+    Args:
+        texts (list[str]): The rendered parts.
+        count_tokens (Any): The tokenizer double, or ``None``.
+        expected (float): The ratio to pack with.
+    """
+    assert effective_ratio(texts, char_token_ratio=3.5, count_tokens=count_tokens) == pytest.approx(expected, abs=0.01)
+
+
+def test_effective_ratio_samples_every_entry_evenly() -> None:
+    """A bounded sample takes the same prefix from every entry, so one long passage cannot dominate."""
+    seen: list[str] = []
+
+    def _record(text: str) -> int:
+        seen.append(text)
+        return max(1, len(text) // 2)
+
+    effective_ratio(["a" * 100, "b" * 10, "c" * 100], char_token_ratio=3.5, count_tokens=_record, sample_chars=60)
+
+    assert seen == ["a" * 20 + "\n\n" + "b" * 10 + "\n\n" + "c" * 20]
+
+
+def test_render_context_packs_tighter_for_dense_text() -> None:
+    """With a tokenizer, packing follows the evidence's measured density instead of the configured ratio."""
+    ledger = EvidenceLedger(cap=10)
+    ledger.add([scored_node(f"n{i}", "word " * 1000, filename=f"doc{i}.pdf") for i in range(10)])
+
+    plain, _ = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=4000, char_token_ratio=3.5)
+    dense, _ = render_context(
+        ledger.numbered(),
+        llm_view=llm_view,
+        budget_tokens=4000,
+        char_token_ratio=3.5,
+        count_tokens=_two_chars_a_token,
+    )
+
+    assert len(dense) < len(plain)
+    assert _two_chars_a_token(dense) <= 4000
 
 
 def test_shared_budget_helpers_keep_the_validator_semantics() -> None:

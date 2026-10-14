@@ -8134,6 +8134,7 @@ class RAG:
         research_llm = self.text_model
         answer_llm = self.post_retrieval_text_model
         ratio = float(self.embed_char_token_ratio or 3.5)
+        counter = self._embed_token_counter
         researcher = (
             None
             if scoped
@@ -8152,6 +8153,7 @@ class RAG:
             char_token_ratio=ratio,
             reasoning=answer_llm is not research_llm,
             researcher=researcher,
+            count_tokens=(lambda text: len(counter(text))) if counter is not None else None,
         )
 
     def stream_stateless_assessment(
