@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, cast
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from docint.agents.types import PriorTurn
+    from docint.agents.types import AnswerMode, PriorTurn
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -127,6 +127,7 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from docint.agents.assessment.runner import AssessmentRunner
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
     ResolutionSummary,
@@ -7992,6 +7993,7 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+        answer_mode: AnswerMode = "lookup",
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -8022,6 +8024,7 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
+            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
 
         Returns:
             dict[str, Any]: The chat response data, including ``turn_idx``.
@@ -8039,6 +8042,7 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
+            answer_mode=answer_mode,
         )
 
     def stream_chat(
@@ -8056,6 +8060,7 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+        answer_mode: AnswerMode = "lookup",
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -8086,6 +8091,7 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
+            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -8103,6 +8109,30 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
+            answer_mode=answer_mode,
+        )
+
+    def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:
+        """Build the runner for one assessment turn over this turn's engine.
+
+        Args:
+            engine (Any): The turn's query engine; research searches through its
+                ``retrieve``, so filters, rerank and parent context apply as on a
+                lookup without building a second engine.
+            scoped (bool): Whether the turn answers from a pinned scope, which
+                forbids searching beyond it.
+
+        Returns:
+            AssessmentRunner: A runner bound to this request's models and limits.
+        """
+        _ = engine, scoped  # Research, which searches through the engine, is wired in separately.
+        answer_llm = self.post_retrieval_text_model
+        return AssessmentRunner(
+            answer_llm=answer_llm,
+            llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
+            ctx_window=int(self.openai_ctx_window),
+            char_token_ratio=float(self.embed_char_token_ratio or 3.5),
+            reasoning=answer_llm is not self.text_model,
         )
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:

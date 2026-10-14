@@ -16,19 +16,22 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 from llama_index.core import Response
-from llama_index.core.schema import BaseNode
+from llama_index.core.schema import BaseNode, QueryBundle
 from llama_index.core.vector_stores.types import MetadataFilters
 from loguru import logger
 from sqlalchemy.orm import Session
 
+from docint.agents.assessment.runner import AssessmentResult
+from docint.agents.assessment.split import LabelledAnswer, compose_labelled_answer
 from docint.agents.context import TurnContext as AgentTurnContext
-from docint.agents.types import PriorTurn
+from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
 from docint.core.state.turn import Turn
 from docint.core.summary.units import source_file_hash
+from docint.utils.llm_sanitize import strip_reasoning
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -102,6 +105,13 @@ def _log_turn_summary(
         scoped = response.get("scoped_chunk_count")
         if scoped is not None:
             fields.insert(4, f"scoped_chunks={scoped}")
+        agent = response.get("agent")
+        if response.get("answer_mode") == "assessment" and isinstance(agent, dict):
+            # Counts and protocol tokens only: agent.actions carry user-derived queries.
+            fields.insert(-1, "answer=assessment")
+            fields.insert(-1, f"steps={agent.get('steps')}")
+            fields.insert(-1, f"outcome={agent.get('answer')}")
+            fields.insert(-1, f"reason={agent.get('reason') or 'none'}")
         logger.info("Turn complete | {}", " ".join(fields))
     except Exception:
         # A turn has already been answered and persisted by this point.
@@ -367,6 +377,7 @@ class SessionManager:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+        answer_mode: AnswerMode = "lookup",
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -409,6 +420,10 @@ class SessionManager:
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn: ``all``, ``documents`` or ``visual``. A scope outranks
                 it. See :mod:`docint.core.retrieval.visual`.
+            answer_mode (AnswerMode): How to answer: ``lookup`` (default) runs
+                the grounded pipeline unchanged; ``assessment`` researches and
+                writes a labelled two-part answer (see
+                :meth:`stream_assessment`).
 
         Returns:
             dict[str, Any]: The response data, including ``turn_idx`` — the
@@ -488,6 +503,30 @@ class SessionManager:
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
+        if answer_mode == "assessment":
+            final: dict[str, Any] = {}
+            for item in self.stream_assessment(
+                user_msg,
+                engine=engine,
+                expanded_query=expanded_query,
+                retrieval_query=retrieval_query,
+                prior_turn=prior_turn,
+                scoped_node_ids=scoped_node_ids,
+                graph_debug=graph_debug,
+                coverage_unit=coverage_unit,
+                metadata_filters_active=metadata_filters_active,
+                metadata_filter_rules=metadata_filter_rules,
+                retrieval_target=retrieval_target,
+                session_id=session_id,
+                owner=owner,
+                replace_turn_idx=replace_turn_idx,
+                turn_started_at=turn_started_at,
+                persist=True,
+            ):
+                if isinstance(item, dict):
+                    final = item
+            return final
+
         self._bind_prior_turn_context(engine, prior_turn)
         resp = engine.query(expanded_query)
         response = self.rag._normalize_response_data(
@@ -536,7 +575,8 @@ class SessionManager:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
-    ) -> Iterator[str | dict[str, Any]]:
+        answer_mode: AnswerMode = "lookup",
+    ) -> Iterator[AgentProgress | str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
         Args:
@@ -569,9 +609,12 @@ class SessionManager:
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn: ``all``, ``documents`` or ``visual``. A scope outranks
                 it. See :mod:`docint.core.retrieval.visual`.
+            answer_mode (AnswerMode): See :meth:`chat`.
 
         Yields:
-            str | dict: Chunks of text, followed by a dict with metadata.
+            AgentProgress | str | dict[str, Any]: Chunks of text, followed by a
+            dict with metadata. An assessment turn also yields
+            :class:`AgentProgress` steps ahead of its text.
 
         Raises:
             ValueError: If the user message is empty.
@@ -630,6 +673,27 @@ class SessionManager:
             expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
+
+        if answer_mode == "assessment":
+            yield from self.stream_assessment(
+                user_msg,
+                engine=streaming_engine,
+                expanded_query=expanded_query,
+                retrieval_query=retrieval_query,
+                prior_turn=prior_turn,
+                scoped_node_ids=scoped_node_ids,
+                graph_debug=graph_debug,
+                coverage_unit=coverage_unit,
+                metadata_filters_active=metadata_filters_active,
+                metadata_filter_rules=metadata_filter_rules,
+                retrieval_target=retrieval_target,
+                session_id=session_id,
+                owner=owner,
+                replace_turn_idx=replace_turn_idx,
+                turn_started_at=turn_started_at,
+                persist=True,
+            )
+            return
 
         self._bind_prior_turn_context(streaming_engine, prior_turn)
         response = streaming_engine.query(expanded_query)
@@ -694,6 +758,143 @@ class SessionManager:
             final["scoped_chunk_count"] = len(list(scoped_node_ids))
         # Logged before the yield: a client that disconnects mid-stream must
         # not be able to erase the record of a turn the backend fully paid for.
+        _log_turn_summary(
+            collection=self.rag.qdrant_collection,
+            session_id=session_id,
+            turn_idx=turn_idx,
+            response=final,
+            elapsed_s=time.monotonic() - turn_started_at,
+        )
+        yield final
+
+    def stream_assessment(
+        self,
+        user_msg: str,
+        *,
+        engine: Any,
+        expanded_query: str,
+        retrieval_query: str,
+        prior_turn: PriorTurn | None,
+        scoped_node_ids: Sequence[str] | None,
+        graph_debug: dict[str, Any],
+        coverage_unit: str,
+        metadata_filters_active: bool,
+        metadata_filter_rules: Sequence[Any] | None,
+        retrieval_target: RetrievalTarget,
+        session_id: str | None,
+        owner: str | None,
+        replace_turn_idx: int | None,
+        turn_started_at: float,
+        persist: bool,
+    ) -> Iterator[AgentProgress | str | dict[str, Any]]:
+        """Answer one turn as an assessment.
+
+        The seed is exactly a lookup's evidence (the turn's own engine, filters,
+        rerank and parent context); the runner may research further, then
+        streams the two-part answer. The sentinel becomes a localized label in
+        the persisted text, so history, transcripts and report exports show the
+        boundary without knowing the protocol.
+
+        Args:
+            user_msg (str): The user's message, verbatim.
+            engine (Any): The turn's query engine; its ``retrieve`` seeds and
+                searches.
+            expanded_query (str): The rewritten, graph-expanded query to seed with.
+            retrieval_query (str): The rewritten query, recorded on the turn.
+            prior_turn (PriorTurn | None): The previous exchange, in full.
+            scoped_node_ids (Sequence[str] | None): A pinned scope; forbids research.
+            graph_debug (dict[str, Any]): The expansion's debug payload.
+            coverage_unit (str): The collection's coverage unit.
+            metadata_filters_active (bool): Whether request filters are active.
+            metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
+            retrieval_target (RetrievalTarget): The turn's target.
+            session_id (str | None): The conversation; ``None`` when stateless.
+            owner (str | None): The owning principal.
+            replace_turn_idx (int | None): Turn to overwrite instead of appending.
+            turn_started_at (float): ``time.monotonic()`` at turn start.
+            persist (bool): Whether to write the turn (``False`` when stateless).
+
+        Yields:
+            AgentProgress | str | dict[str, Any]: Research steps, answer text,
+            then the final payload (``turn_idx`` included, ``None`` if not persisted).
+
+        Raises:
+            RuntimeError: If the runner ends without a result.
+        """
+        seed = list(engine.retrieve(QueryBundle(expanded_query)))
+        runner = self.rag.assessment_runner(engine, scoped=bool(scoped_node_ids))
+        result: AssessmentResult | None = None
+        for item in runner.run(question=user_msg, prior_turn=prior_turn, seed=seed):
+            if isinstance(item, AssessmentResult):
+                result = item
+            else:
+                yield item
+        if result is None:
+            raise RuntimeError("Assessment runner ended without a result.")
+
+        visible, _ = strip_reasoning(result.raw_text)
+        labelled = (
+            compose_labelled_answer(visible)
+            if visible.strip()
+            else LabelledAnswer(text="", evidence_chars=None, outcome="empty")
+        )
+        # A reply of nothing but the sentinel is no answer; the normalizer would show the token as text.
+        reply = "" if labelled.outcome == "empty" and visible.strip() else result.raw_text
+        final_response = Response(response=reply, source_nodes=result.nodes)
+        normalized = self.rag._normalize_response_data(
+            user_msg,
+            final_response,
+            metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
+            retrieval_query=retrieval_query,
+            coverage_unit=coverage_unit,
+            retrieval_mode="scoped" if scoped_node_ids else "agent",
+        )
+        if labelled.outcome != "empty":
+            normalized["response"] = labelled.text
+        trail: dict[str, Any] = {
+            "steps": result.steps,
+            "actions": result.actions,
+            "reason": result.reason,
+            "answer": labelled.outcome,
+            "shortened": result.shortened,
+            "evidence_chars": labelled.evidence_chars,
+        }
+        normalized["graph_debug"] = graph_debug
+        normalized["retrieval_target"] = retrieval_target
+
+        turn_idx: int | None = None
+        if persist and session_id is not None:
+            turn_idx = self._persist_turn(
+                session_id,
+                user_msg,
+                final_response,
+                normalized,
+                owner=owner,
+                replace_idx=replace_turn_idx,
+                agent_trail=trail,
+            )
+            if replace_turn_idx is None:
+                self._maybe_update_summary(session_id)
+
+        final: dict[str, Any] = {
+            "response": normalized.get("response"),
+            "sources": normalized.get("sources", []),
+            "session_id": session_id,
+            "reasoning": normalized.get("reasoning"),
+            "graph_debug": graph_debug,
+            "retrieval_query": normalized.get("retrieval_query"),
+            "coverage_unit": normalized.get("coverage_unit"),
+            "retrieval_mode": normalized.get("retrieval_mode"),
+            "rerank": normalized.get("rerank"),
+            "retrieval_target": retrieval_target,
+            "visual": normalized.get("visual"),
+            "answer_mode": "assessment",
+            "agent": trail,
+            "turn_idx": turn_idx,
+        }
+        if scoped_node_ids:
+            final["scoped_chunk_count"] = len(list(scoped_node_ids))
         _log_turn_summary(
             collection=self.rag.qdrant_collection,
             session_id=session_id,
