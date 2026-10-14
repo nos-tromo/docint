@@ -8430,6 +8430,8 @@ class RAG:
             engine=engine,
             expanded_query=expanded_query,
             retrieval_query=expanded_query,
+            # No history to resolve, and the expanded query carries graph terms.
+            resolved_question=None,
             prior_turn=None,
             scoped_node_ids=scoped_node_ids,
             graph_debug=graph_debug,

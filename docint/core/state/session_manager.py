@@ -520,6 +520,7 @@ class SessionManager:
                     engine=engine,
                     expanded_query=expanded_query,
                     retrieval_query=retrieval_query,
+                    resolved_question=retrieval_query,
                     prior_turn=prior_turn,
                     scoped_node_ids=scoped_node_ids,
                     graph_debug=graph_debug,
@@ -698,6 +699,7 @@ class SessionManager:
                 engine=streaming_engine,
                 expanded_query=expanded_query,
                 retrieval_query=retrieval_query,
+                resolved_question=retrieval_query,
                 prior_turn=prior_turn,
                 scoped_node_ids=scoped_node_ids,
                 graph_debug=graph_debug,
@@ -806,6 +808,7 @@ class SessionManager:
         engine: Any,
         expanded_query: str,
         retrieval_query: str,
+        resolved_question: str | None,
         prior_turn: PriorTurn | None,
         scoped_node_ids: Sequence[str] | None,
         graph_debug: dict[str, Any],
@@ -836,6 +839,9 @@ class SessionManager:
                 searches.
             expanded_query (str): The rewritten, graph-expanded query to seed with.
             retrieval_query (str): The rewritten query, recorded on the turn.
+            resolved_question (str | None): The history-resolved rewrite a lookup
+                answers from, which research and the answer read on a labelled
+                line beside the message; ``None`` without history (stateless).
             prior_turn (PriorTurn | None): The previous exchange, in full.
             scoped_node_ids (Sequence[str] | None): A pinned scope; forbids research.
             graph_debug (dict[str, Any]): The expansion's debug payload.
@@ -859,7 +865,9 @@ class SessionManager:
         seed = list(engine.retrieve(EveryChildQuery(expanded_query)))
         runner = self.rag.assessment_runner(engine, scoped=bool(scoped_node_ids))
         result: AssessmentResult | None = None
-        for item in runner.run(question=user_msg, prior_turn=prior_turn, seed=seed):
+        for item in runner.run(
+            question=user_msg, prior_turn=prior_turn, seed=seed, resolved_question=resolved_question
+        ):
             if isinstance(item, AssessmentResult):
                 result = item
             else:

@@ -14,8 +14,10 @@ from assessment_fakes import (
     RecordingPostprocessor,
     llm_view,
     scored_node,
+    search_call,
     social_post,
     streaming_llm,
+    tool_llm,
 )
 from llama_index.core import PromptTemplate
 from llama_index.core.llms import MockLLM
@@ -27,7 +29,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from typing_extensions import override
 
-from docint.agents.assessment.runner import AssessmentRunner
+from docint.agents.assessment.research import ResearchLoop
+from docint.agents.assessment.runner import RESOLVED_QUESTION_LABEL, AssessmentRunner
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.history import build_prior_turn
 from docint.agents.types import AgentProgress, PriorTurn
@@ -320,6 +323,7 @@ def test_a_stateless_assessment_persists_nothing(session_manager: SessionManager
             engine=engine,
             expanded_query=QUESTION,
             retrieval_query=QUESTION,
+            resolved_question=None,
             prior_turn=None,
             scoped_node_ids=None,
             graph_debug={},
@@ -353,6 +357,8 @@ def test_a_stateless_assessment_runs_without_a_session() -> None:
     kwargs = manager.stream_assessment.call_args.kwargs
     assert items[-1] == {"answer_mode": "assessment"}
     assert (kwargs["persist"], kwargs["session_id"], kwargs["prior_turn"]) == (False, None, None)
+    # No history to resolve, and its retrieval query carries graph terms.
+    assert kwargs["resolved_question"] is None
     assert kwargs["engine"] is rag.build_query_engine.return_value
     assert kwargs["expanded_query"] == "expanded"
     assert rag.build_query_engine.call_args.kwargs["streaming"] is True
@@ -926,3 +932,99 @@ def test_every_child_of_a_section_reaches_a_crowded_8k_answer(session_manager: S
     assert EARLY_FACT in prompt
     assert LATE_FACT in prompt
     assert final["agent"]["reason"] is None
+
+
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+def test_a_session_turn_hands_the_runner_the_rewrite_a_lookup_answers_from(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """The resolved question is the turn's own retrieval query, the one a lookup would have answered from.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        entry (str): The session manager method under test.
+    """
+    _arm(session_manager, nodes=_seed())
+    handed: list[Any] = []
+    real = SessionManager.stream_assessment
+
+    def _spy(self: SessionManager, *args: Any, **kwargs: Any) -> Any:
+        """Record the resolved question, then run the real assessment.
+
+        Args:
+            self (SessionManager): The session manager.
+            *args (Any): Positional arguments, passed on.
+            **kwargs (Any): Keyword arguments, passed on.
+
+        Returns:
+            Any: The real assessment stream.
+        """
+        handed.append((kwargs["resolved_question"], kwargs["retrieval_query"]))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(SessionManager, "stream_assessment", _spy)
+
+    if entry == "chat":
+        session_manager.chat(QUESTION, session_id="s1", answer_mode="assessment")
+    else:
+        list(session_manager.stream_chat(QUESTION, session_id="s1", answer_mode="assessment"))
+
+    assert handed == [("rewritten question", "rewritten question")]
+
+
+#: An invented constraint the user set two turns before the follow-up; only the search rewrite recovered it.
+BUDGET_REWRITE = "Should we proceed with the invented pilot deployment within the €10,000 budget?"
+
+
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+def test_a_constraint_resolved_from_earlier_turns_reaches_research_and_the_answer(
+    session_manager: SessionManager, entry: str
+) -> None:
+    """Codex's reproduction: a budget set two turns back is not in the prior turn, only in the rewrite, and both see it.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        entry (str): The session manager method under test.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.rewrite_retrieval_query.return_value = BUDGET_REWRITE
+    engine = _arm(session_manager, nodes=_seed())
+    research_llm = tool_llm([search_call("invented pilot cost")])
+    answer_llm = streaming_llm(ANSWER)
+    rag.assessment_runner.side_effect = lambda turn_engine, scoped: AssessmentRunner(
+        answer_llm=cast(Any, answer_llm),
+        llm_view=llm_view,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        reasoning=False,
+        researcher=ResearchLoop(
+            llm=cast(Any, research_llm),
+            search=lambda query: list(engine.retrieve(EveryChildQuery(query))),
+            max_steps=6,
+            ctx_window=8192,
+            char_token_ratio=3.5,
+        ),
+    )
+    prior = PriorTurn(user_text="Which vendor did the pilot pick?", assistant_text="It picked the harbour vendor [1].")
+    kwargs: dict[str, Any] = {
+        "session_id": "s1",
+        "prior_turn": prior,
+        "skip_query_rewrite": False,
+        "answer_mode": "assessment",
+    }
+
+    if entry == "chat":
+        final = session_manager.chat("Should we proceed?", **kwargs)
+    else:
+        final = list(session_manager.stream_chat("Should we proceed?", **kwargs))[-1]
+
+    assert isinstance(final, dict)
+    assert final["retrieval_query"] == BUDGET_REWRITE
+    assert "€10,000" not in f"{prior.user_text} {prior.assistant_text}"
+    research_prompt = str(research_llm.chat_with_tools.call_args_list[0].kwargs["chat_history"][0].content)
+    answer_prompt = str(answer_llm.stream_chat.call_args.args[0][0].content)
+    for prompt in (research_prompt, answer_prompt):
+        assert "Should we proceed?" in prompt
+        assert "€10,000" in prompt
+        assert f"{RESOLVED_QUESTION_LABEL}: {BUDGET_REWRITE}" in prompt

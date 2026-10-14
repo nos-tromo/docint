@@ -263,7 +263,9 @@ class ResearchLoop:
         whatever then ended it; a refusal that a later search follows is not reported.
 
         Args:
-            question (str): The user's message, verbatim.
+            question (str): The question as the prompts show it: the user's message and,
+                when the conversation resolved more, the labelled rewrite (see
+                :func:`~docint.agents.assessment.runner.question_block`).
             prior_turn (PriorTurn | None): The previous exchange, if any.
             ledger (EvidenceLedger): The evidence so far; extended in place.
 

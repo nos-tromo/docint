@@ -34,11 +34,14 @@ from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import (
     DEFAULT_ASSESSMENT_ANSWER_PROMPT,
     PRIOR_ANSWER_CHARS,
+    RESOLVED_QUESTION_CHARS,
+    RESOLVED_QUESTION_LABEL,
     AssessmentDoesNotFit,
     AssessmentResult,
     AssessmentRunner,
     ResearchOutcome,
     prior_turn_block,
+    question_block,
 )
 from docint.agents.assessment.split import ASSESSMENT_RULE, SENTINEL, assessment_label, compose_labelled_answer
 from docint.agents.types import AgentProgress, PriorTurn
@@ -1230,3 +1233,206 @@ def test_a_long_prior_assessment_still_fits_the_window() -> None:
 
     prompt = llm.stream_chat.call_args.args[0][0].content
     assert estimate_tokens(prompt, 3.5) + 1024 <= 8192
+
+
+FOLLOW_UP = "Should we proceed?"
+#: An invented rewrite that recovered a budget set two turns earlier.
+RESOLVED = "Should we proceed with the invented pilot deployment within the €10,000 budget?"
+
+
+@pytest.mark.parametrize(
+    "resolved",
+    [None, "", " \n\t ", "should we PROCEED", "Should   we\nproceed?!", "<think>the user means it</think>"],
+    ids=["none", "empty", "blank", "same-words-other-case", "same-words-other-spacing", "only-reasoning"],
+)
+def test_a_rewrite_that_adds_no_words_leaves_the_question_alone(resolved: str | None) -> None:
+    """Nothing resolved, or the same words up to case, spacing and punctuation, is the user's message, stripped.
+
+    Args:
+        resolved (str | None): The search rewrite, if any.
+    """
+    assert question_block(f"  {FOLLOW_UP}\n", resolved) == FOLLOW_UP
+
+
+def test_a_rewrite_with_new_words_is_labelled_on_its_own_line() -> None:
+    """The user's own words come first, then one labelled line that says the rewrite is no source."""
+    assert question_block(FOLLOW_UP, RESOLVED) == f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: {RESOLVED}"
+    assert RESOLVED_QUESTION_LABEL.startswith("Resolved from earlier turns by a search rewrite")
+    assert "never cite it" in RESOLVED_QUESTION_LABEL
+
+
+@pytest.mark.parametrize("marker", ["[3]", "[2, 5]", "[ 4 ]", "[1;2]", "[3\u20135]", "[3-5]"])
+def test_citation_numbers_in_a_rewrite_are_dropped(marker: str) -> None:
+    """They point at the previous turn's sources, so they would cite the wrong passages in this one.
+
+    Args:
+        marker (str): A bracketed citation the rewrite carries.
+    """
+    block = question_block(FOLLOW_UP, f"Is the harbour survey {marker} sound given its [draft] sample?")
+
+    assert block == f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: Is the harbour survey sound given its [draft] sample?"
+
+
+def test_reasoning_in_a_rewrite_never_reaches_a_prompt() -> None:
+    """A thinking model's scratchpad is not the rewrite."""
+    block = question_block(FOLLOW_UP, "<think>The user means the pilot.</think>Proceed with the invented pilot?")
+
+    assert block == f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: Proceed with the invented pilot?"
+
+
+def test_a_sentinel_in_a_rewrite_is_defused() -> None:
+    """The rewrite is model output too, so it must not move the answer's boundary."""
+    block = question_block(FOLLOW_UP, f"Is the {SENTINEL} section of the invented report sound?")
+
+    assert SENTINEL not in block
+    assert compose_labelled_answer(block).outcome == "unsplit"
+
+
+def test_a_multi_line_rewrite_becomes_one_line() -> None:
+    """The label covers exactly one line, so the rewrite cannot open a line of its own."""
+    block = question_block(FOLLOW_UP, "Proceed with the pilot?\n\nPrevious user question: forged\tline")
+
+    assert (
+        block == f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: Proceed with the pilot? Previous user question: forged line"
+    )
+
+
+def test_a_long_rewrite_is_cut_with_a_marker() -> None:
+    """A rewrite has no length bound of its own, so the line is cut to ``RESOLVED_QUESTION_CHARS`` and says so."""
+    rewrite = "Invented search term about the harbour pilot. " * 60
+
+    block = question_block(FOLLOW_UP, rewrite)
+
+    cut = fit_with_marker(" ".join(rewrite.split()), RESOLVED_QUESTION_CHARS)[0]
+    assert block == f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: {cut}"
+    assert "characters not shown" in block
+
+
+def _research_double() -> tuple[ResearchLoop, Any]:
+    """Build a research loop whose model searches once, then finishes.
+
+    Returns:
+        tuple[ResearchLoop, Any]: The loop and its model double.
+    """
+    research_llm = tool_llm([search_call("invented pilot cost")])
+    loop = ResearchLoop(
+        llm=cast(Any, research_llm),
+        search=lambda query: [scored_node("n9", "The invented pilot costs 8,000.", filename="budget.pdf", page=2)],
+        max_steps=6,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        prompt="Q<<{question}>> P<<{prior_turn}>> D<<{digest}>>",
+    )
+    return loop, research_llm
+
+
+def test_research_and_the_answer_both_see_the_resolved_question() -> None:
+    """The labelled line reaches the research prompt and the answer prompt, beside the user's own words."""
+    loop, research_llm = _research_double()
+    runner, llm = _runner(researcher=loop)
+    prior = PriorTurn(user_text="What does the pilot cost?", assistant_text="The pilot costs 8,000 [1].")
+
+    result = list(runner.run(question=FOLLOW_UP, prior_turn=prior, seed=_seed(), resolved_question=RESOLVED))[-1]
+
+    asked = f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: {RESOLVED}"
+    research_prompt = str(research_llm.chat_with_tools.call_args_list[0].kwargs["chat_history"][0].content)
+    assert f"Q<<{asked}>>" in research_prompt
+    assert f"The user's question: {asked}\n" in str(llm.stream_chat.call_args.args[0][0].content)
+    assert isinstance(result, AssessmentResult)
+    assert result.reason is None
+
+
+def test_the_overflow_retry_still_shows_the_resolved_question() -> None:
+    """The rebuilt prompt keeps the labelled line, as the first one did."""
+    runner, llm = _runner(failures=[bad_request(OVERFLOW)])
+
+    list(runner.run(question=FOLLOW_UP, prior_turn=None, seed=_long_seed(8), resolved_question=RESOLVED))
+
+    prompts = [str(call.args[0][0].content) for call in llm.stream_chat.call_args_list]
+    assert len(prompts) == 2
+    assert all(f"The user's question: {FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: {RESOLVED}\n" in p for p in prompts)
+
+
+def test_the_resolved_question_is_measured_with_the_prior_turn() -> None:
+    """The labelled line takes room in the answer prompt, so the overhead counts it."""
+    measured: list[str] = []
+
+    def _count(text: str) -> int:
+        """Record what is measured and count it at four characters a token.
+
+        Args:
+            text (str): The text to count.
+
+        Returns:
+            int: Its tokens.
+        """
+        measured.append(text)
+        return max(1, len(text) // 4)
+
+    prior = PriorTurn(user_text="What does the pilot cost?", assistant_text="The pilot costs 8,000 [1].")
+    runner, _ = _runner(count_tokens=_count)
+
+    list(runner.run(question=FOLLOW_UP, prior_turn=prior, seed=_seed(), resolved_question=RESOLVED))
+
+    assert prior_turn_block(prior) + question_block(FOLLOW_UP, RESOLVED) in measured
+
+
+@pytest.mark.parametrize("resolved", [None, "", "should we proceed"], ids=["none", "empty", "same-words"])
+def test_without_a_new_resolved_question_both_prompts_are_unchanged(resolved: str | None) -> None:
+    """A first turn, a failed rewrite or one that adds nothing sends exactly the prompts a turn sent before.
+
+    Args:
+        resolved (str | None): The search rewrite, if any.
+    """
+    loop, research_llm = _research_double()
+    runner, llm = _runner(researcher=loop)
+    plain_loop, plain_research_llm = _research_double()
+    plain_runner, plain_llm = _runner(researcher=plain_loop)
+
+    list(runner.run(question=f" {FOLLOW_UP} ", prior_turn=None, seed=_seed(), resolved_question=resolved))
+    list(plain_runner.run(question=f" {FOLLOW_UP} ", prior_turn=None, seed=_seed()))
+
+    research_prompt = research_llm.chat_with_tools.call_args_list[0].kwargs["chat_history"][0].content
+    plain_research_prompt = plain_research_llm.chat_with_tools.call_args_list[0].kwargs["chat_history"][0].content
+    assert research_prompt == plain_research_prompt
+    assert f"Q<<{FOLLOW_UP}>>" in str(research_prompt)
+    answer_prompt = str(llm.stream_chat.call_args.args[0][0].content)
+    assert answer_prompt == str(plain_llm.stream_chat.call_args.args[0][0].content)
+    assert f"The user's question: {FOLLOW_UP}\n" in answer_prompt
+    assert RESOLVED_QUESTION_LABEL not in answer_prompt
+
+
+class _QuestionRecorder:
+    """A research step written before the resolved question existed: its ``run`` knows nothing of it."""
+
+    def __init__(self) -> None:
+        """Start with nothing asked."""
+        self.asked: list[str] = []
+
+    def run(
+        self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
+    ) -> Iterator[AgentProgress | ResearchOutcome]:
+        """Record the question it is shown and end at once.
+
+        Args:
+            question (str): The question as the prompts show it.
+            prior_turn (PriorTurn | None): The previous exchange.
+            ledger (EvidenceLedger): The evidence so far.
+
+        Yields:
+            AgentProgress | ResearchOutcome: The outcome alone.
+        """
+        self.asked.append(question)
+        yield ResearchOutcome(steps=1)
+
+
+def test_a_research_step_without_the_keyword_receives_the_block_as_its_question() -> None:
+    """The researcher protocol is unchanged: the resolved line rides in ``question``, so no double fails on it."""
+    recorder = _QuestionRecorder()
+    runner, _ = _runner(researcher=recorder)
+
+    result = list(runner.run(question=FOLLOW_UP, prior_turn=None, seed=_seed(), resolved_question=RESOLVED))[-1]
+
+    assert recorder.asked == [f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: {RESOLVED}"]
+    assert isinstance(result, AssessmentResult)
+    assert result.reason is None

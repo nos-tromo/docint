@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -28,9 +29,10 @@ from docint.agents.assessment.ledger import (
     is_context_overflow,
     render_context,
 )
-from docint.agents.assessment.split import ASSESSMENT_RULE, SentinelStreamSplitter
+from docint.agents.assessment.split import ASSESSMENT_RULE, SentinelStreamSplitter, neutralize_sentinel
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.utils.embed_chunking import estimate_tokens
+from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.prompt_loader import load_localized_prompt
 from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
 
@@ -60,6 +62,16 @@ An earlier assessment's two parts share it.
 #: How the prior-turn block labels the two parts of an earlier assessment.
 PRIOR_SOURCED_LABEL = "Previous assistant answer, source-backed part (its [n] refer to the previous turn's sources)"
 PRIOR_ASSESSMENT_LABEL = "Previous assistant answer, the model's own assessment"
+
+#: Longest history-resolved rewrite, in characters, that research and the answer step are shown.
+RESOLVED_QUESTION_CHARS = 1000
+#: How the question block labels that rewrite.
+RESOLVED_QUESTION_LABEL = (
+    "Resolved from earlier turns by a search rewrite (may repeat earlier answers, the model's own assessments "
+    "included; not a source, never cite it)"
+)
+#: A bracketed citation number, list or range (hyphen or en dash), as an earlier answer cites its sources.
+_CITATION_NUMBERS_RE = re.compile(r"\[\s*\d+(?:\s*[,;\u2013-]\s*\d+)*\s*\]")
 
 
 class AssessmentDoesNotFit(ValueError):
@@ -106,7 +118,7 @@ class Researcher(Protocol):
         """Search until the evidence suffices.
 
         Args:
-            question (str): The user's message, verbatim.
+            question (str): The question as the prompts show it (see :func:`question_block`).
             prior_turn (PriorTurn | None): The previous exchange, if any.
             ledger (EvidenceLedger): The evidence so far; extended in place.
 
@@ -180,6 +192,37 @@ def prior_turn_block(prior_turn: PriorTurn | None) -> str:
     return f"Previous user question: {prior_turn.user_text}\n{_prior_answer(prior_turn)}"
 
 
+def question_block(question: str, resolved: str | None) -> str:
+    """Render the question as research and the answer step are shown it.
+
+    The search rewrite a lookup answers from can carry what the conversation
+    settled before the last exchange, such as a constraint set two turns
+    earlier. It is model output, so it is shown sanitized: reasoning blocks and
+    bracketed citation numbers, which point at an earlier turn's sources, are
+    dropped, its whitespace collapses onto one line, sentinels are defused, and
+    it is cut to ``RESOLVED_QUESTION_CHARS`` with a marker.
+
+    Args:
+        question (str): The user's message, verbatim.
+        resolved (str | None): The history-resolved search rewrite, if any.
+
+    Returns:
+        str: The stripped question, then one line labelled ``RESOLVED_QUESTION_LABEL``
+        carrying the sanitized rewrite; the question alone when there is no rewrite,
+        nothing of it is left, or it holds the same words up to case, spacing and
+        punctuation.
+    """
+    asked = question.strip()
+    if resolved is None:
+        return asked
+    visible, _ = strip_reasoning(resolved)
+    plain = " ".join(_CITATION_NUMBERS_RE.sub("", visible).split())
+    sanitized, _ = fit_with_marker(neutralize_sentinel(plain), RESOLVED_QUESTION_CHARS)
+    if not sanitized or re.findall(r"\w+", sanitized.casefold()) == re.findall(r"\w+", asked.casefold()):
+        return asked
+    return f"{asked}\n{RESOLVED_QUESTION_LABEL}: {sanitized}"
+
+
 class AssessmentRunner:
     """Seed the evidence, let research extend it, then stream the answer."""
 
@@ -227,7 +270,7 @@ class AssessmentRunner:
         """Measure the prior turn and the question, counted when a tokenizer is loaded.
 
         Args:
-            text (str): The prior-turn block followed by the question.
+            text (str): The prior-turn block followed by the question block (see :func:`question_block`).
 
         Returns:
             int: Their tokens; the ratio estimate without a tokenizer, or when it fails.
@@ -293,7 +336,7 @@ class AssessmentRunner:
         Args:
             nodes (list[NodeWithScore]): The numbered evidence.
             block (str): The rendered prior turn.
-            question (str): The user's message, stripped.
+            question (str): The question as the prompts show it (see :func:`question_block`).
             budget_tokens (int): Tokens the rendered evidence may use.
             compact (bool): Whether headers are compacted, as on the overflow retry.
 
@@ -318,7 +361,12 @@ class AssessmentRunner:
         return itertools.chain([] if first is None else [first], tokens), rendered.shortened, rendered.legible
 
     def run(
-        self, *, question: str, prior_turn: PriorTurn | None, seed: Sequence[NodeWithScore]
+        self,
+        *,
+        question: str,
+        prior_turn: PriorTurn | None,
+        seed: Sequence[NodeWithScore],
+        resolved_question: str | None = None,
     ) -> Iterator[AgentProgress | str | AssessmentResult]:
         """Run the turn.
 
@@ -333,6 +381,9 @@ class AssessmentRunner:
             seed (Sequence[NodeWithScore]): The lookup's passages for the
                 question, each section keeping every child retrieved under it,
                 or a scoped turn's pinned chunks.
+            resolved_question (str | None): The search rewrite a lookup answers
+                from, which research and the answer read beside the message
+                (see :func:`question_block`); ``None`` when there is none.
 
         Yields:
             AgentProgress | str | AssessmentResult: Progress steps, answer text
@@ -351,8 +402,9 @@ class AssessmentRunner:
             char_token_ratio=self._ratio,
         )
         block = prior_turn_block(prior_turn)
+        asked = question_block(question, resolved_question)
         # The prior turn and question can outgrow their reserve; the evidence gives way.
-        overhead = self._overhead_tokens(block + question.strip())
+        overhead = self._overhead_tokens(block + asked)
         extra = max(0, overhead - PRIOR_TURN_TOKENS - QUESTION_TOKENS)
         evidence_budget = max(0, budget.evidence_tokens - extra)
         # Pinned or seeded evidence is never dropped; packing shortens it instead.
@@ -372,7 +424,7 @@ class AssessmentRunner:
             reason = "context_budget"
         elif self._researcher is not None and not ledger.full:
             try:
-                for item in self._researcher.run(question=question, prior_turn=prior_turn, ledger=ledger):
+                for item in self._researcher.run(question=asked, prior_turn=prior_turn, ledger=ledger):
                     if isinstance(item, ResearchOutcome):
                         steps, reason = item.steps, item.reason
                         actions.extend(item.actions)
@@ -389,7 +441,7 @@ class AssessmentRunner:
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
         try:
             tokens, shortened, legible = self._open_answer(
-                nodes, block=block, question=question.strip(), budget_tokens=evidence_budget
+                nodes, block=block, question=asked, budget_tokens=evidence_budget
             )
         except Exception as exc:
             if not is_context_overflow(exc):
@@ -406,7 +458,7 @@ class AssessmentRunner:
                 raise ValueError("The assessment prompt exceeds the model's context window.") from exc
             try:
                 tokens, shortened, legible = self._open_answer(
-                    nodes, block=block, question=question.strip(), budget_tokens=retry_budget, compact=True
+                    nodes, block=block, question=asked, budget_tokens=retry_budget, compact=True
                 )
             except Exception as retry_exc:
                 if is_context_overflow(retry_exc):
