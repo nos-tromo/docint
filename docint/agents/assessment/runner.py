@@ -166,7 +166,8 @@ class AssessmentRunner:
             reasoning=self._reasoning,
             char_token_ratio=self._ratio,
         )
-        ledger = EvidenceLedger(cap=budget.max_entries)
+        # Pinned or seeded evidence is never dropped; packing shortens it instead.
+        ledger = EvidenceLedger(cap=max(budget.max_entries, len(seed)))
         seeded = ledger.add(seed)
         actions: list[dict[str, Any]] = [{"action": "seed", "detail": "", "found": len(seeded)}]
         yield AgentProgress(step=0, action="seed", detail="", found=len(seeded))

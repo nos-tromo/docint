@@ -165,3 +165,19 @@ def test_the_runner_never_yields_an_empty_string() -> None:
     items = list(runner.run(question=QUESTION, prior_turn=None, seed=_seed()))
 
     assert "" not in [item for item in items if isinstance(item, str)]
+
+
+def test_a_seed_larger_than_the_cap_is_kept_whole_and_shortened() -> None:
+    """Seeded evidence past the ledger cap is kept whole; packing shortens it instead."""
+    seed = [
+        scored_node(f"n{number}", f"Passage {number}. " + "The result holds. " * 111, page=number)
+        for number in range(1, 31)
+    ]
+    runner, _ = _runner()
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=seed))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert len(result.nodes) == 30
+    assert result.shortened > 0
+    assert sorted(node.node.metadata["citation_index"] for node in result.nodes) == list(range(1, 31))
