@@ -159,8 +159,9 @@ def digest(number: int, scored: NodeWithScore) -> str:
     page = meta.get("page") if meta.get("page") is not None else meta.get("page_number")
     where = f"{name}, p. {page}" if name and page is not None else name
     text = " ".join(scored.node.get_content(metadata_mode=MetadataMode.NONE).split())
-    snippet = neutralize_sentinel(text[:DIGEST_CHARS])
-    return f"[{number}] ({where}) {snippet}" if where else f"[{number}] {snippet}"
+    snippet = text[:DIGEST_CHARS]
+    line = f"[{number}] ({where}) {snippet}" if where else f"[{number}] {snippet}"
+    return neutralize_sentinel(line)
 
 
 def render_context(
@@ -189,7 +190,7 @@ def render_context(
     bodies: list[str] = []
     for scored in nodes:
         view = llm_view(scored.node)
-        headers.append(view.get_metadata_str(mode=MetadataMode.LLM))
+        headers.append(neutralize_sentinel(view.get_metadata_str(mode=MetadataMode.LLM)))
         bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
     header_chars = sum(len(header) + 2 for header in headers)
     char_budget = max(0, int(budget_tokens * char_token_ratio) - header_chars)
@@ -200,4 +201,5 @@ def render_context(
         fitted, cut = fit_with_marker(body, allowance)
         shortened += int(cut)
         rendered.append(f"{header}\n\n{fitted}" if header else fitted)
-    return "\n\n".join(rendered), shortened
+    # The join can complete a sentinel that neither part holds alone.
+    return neutralize_sentinel("\n\n".join(rendered)), shortened
