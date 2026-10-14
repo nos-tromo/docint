@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatTurn, type ChatTurnData } from './ChatTurn'
-import type { ChatFinalEvent } from '@/api/types'
+import type { AgentTrail, ChatFinalEvent } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
 
 beforeEach(() => {
@@ -250,5 +251,116 @@ describe('ChatTurn', () => {
     expect(container.querySelector('img')).toBeNull()
     expect(container.querySelector('b')).toBeNull()
     expect(container).toHaveTextContent('<b>bold</b> after')
+  })
+
+  const TRAIL: AgentTrail = {
+    steps: 1,
+    actions: [
+      { action: 'seed', detail: '', found: 2 },
+      { action: 'search', detail: 'evaluation datasets', found: 1 }
+    ],
+    reason: null,
+    answer: 'split',
+    shortened: 0,
+    evidence_chars: 9
+  }
+
+  function assessmentMeta(trail: AgentTrail = TRAIL): ChatFinalEvent {
+    return { session_id: 's', sources: [], answer_mode: 'assessment', agent: trail } as ChatFinalEvent
+  }
+
+  it('shows the live research trail while an assessment turn runs', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 0, action: 'seed', detail: '', found: 2 },
+        { step: 1, action: 'search', detail: 'evaluation datasets', found: 1 }
+      ]
+    })
+    const trail = screen.getByTestId('agent-trail-live')
+    expect(trail).toHaveTextContent('Initial search: 2 passages')
+    expect(trail).toHaveTextContent('evaluation datasets')
+  })
+
+  it('marks a finished assessment and lists its searches behind a disclosure', async () => {
+    renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta() })
+
+    expect(screen.getByTestId('assessment-notice')).toHaveTextContent(/model's own assessment/i)
+    expect(screen.queryByTestId('agent-trail-live')).not.toBeInTheDocument()
+    const toggle = screen.getByRole('button', { name: /show the searches/i })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(toggle)
+    expect(screen.getByRole('button', { name: /hide the searches/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText(/evaluation datasets/)).toBeInTheDocument()
+  })
+
+  it('shows an amber notice for a degraded research step', () => {
+    renderTurn({
+      user: 'q',
+      assistant: 'Fact [1].',
+      done: true,
+      meta: assessmentMeta({ ...TRAIL, reason: 'tools_unavailable' })
+    })
+    expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(/could not run its own searches/i)
+  })
+
+  it('says when the model did not separate its judgement', () => {
+    renderTurn({
+      user: 'q',
+      assistant: 'View.',
+      done: true,
+      meta: assessmentMeta({ ...TRAIL, answer: 'unsplit', evidence_chars: 0 })
+    })
+    expect(screen.getByTestId('assessment-answer-degraded')).toHaveTextContent(/did not separate/i)
+  })
+
+  it('renders no assessment notice on a lookup turn', () => {
+    renderTurn({
+      user: 'q',
+      assistant: 'Alice.',
+      done: true,
+      meta: { session_id: 's', sources: [] } as unknown as ChatFinalEvent
+    })
+    expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
+  })
+
+  it('names the answer step in the live trail', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [{ step: 2, action: 'answer', detail: '', found: 0 }]
+    })
+    expect(screen.getByTestId('agent-trail-live')).toHaveTextContent('Writing the assessment…')
+  })
+
+  it('says how many passages were shortened to fit the context', () => {
+    renderTurn({
+      user: 'q',
+      assistant: 'Fact [1].',
+      done: true,
+      meta: assessmentMeta({ ...TRAIL, shortened: 3 })
+    })
+    expect(screen.getByTestId('assessment-notice')).toHaveTextContent(/3 passages were shortened/i)
+  })
+
+  it('does not mention shortening when nothing was shortened', () => {
+    renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta() })
+    expect(screen.getByTestId('assessment-notice')).not.toHaveTextContent(/shortened/i)
+  })
+
+  it('offers no search disclosure when the assessment ran none of its own', () => {
+    renderTurn({
+      user: 'q',
+      assistant: 'Fact [1].',
+      done: true,
+      meta: assessmentMeta({ ...TRAIL, actions: [{ action: 'seed', detail: '', found: 2 }] })
+    })
+    expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
   })
 })

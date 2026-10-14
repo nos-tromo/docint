@@ -186,6 +186,33 @@ export const de: Strings = {
   'chat.validation_not_validated_title': 'Antwort nicht validiert',
   'chat.validation_default_detail':
     'Die Validierung wurde für diese Antwort übersprungen oder war nicht verfügbar.',
+  'chat.validation_passed_assessment_title':
+    'Antwortvalidierung für den quellengestützten Teil bestanden',
+  'chat.validation_mismatch_assessment_title':
+    'Antwortvalidierung hat den quellengestützten Teil beanstandet',
+  'chat.validation_skipped_assessment_title':
+    'Nicht validiert – die Antwort hat keinen getrennten quellengestützten Teil',
+  'chat.assessment_notice':
+    'Diese Antwort enthält eine eigene Einschätzung des Modells, im Text markiert. Sie kann auf Allgemeinwissen beruhen und wird nicht gegen die Quellen geprüft.',
+  'chat.assessment_shortened':
+    '{count} Passagen wurden gekürzt, damit sie in den Kontext des Modells passen.',
+  'chat.assessment_trail_show': 'Suchen hinter dieser Einschätzung anzeigen',
+  'chat.assessment_trail_hide': 'Suchen hinter dieser Einschätzung ausblenden',
+  'chat.assessment_trail_seed': 'Erste Suche: {count} Passagen',
+  'chat.assessment_trail_search': 'Gesucht nach „{query}“: {count} neue Passagen',
+  'chat.assessment_trail_answer': 'Einschätzung wird geschrieben …',
+  'chat.assessment_reason.tools_unavailable':
+    'Das Modell konnte keine eigenen Suchen ausführen (das Chat-Modell hat Tool-Aufrufe abgelehnt); diese Einschätzung beruht nur auf den Passagen der ersten Suche.',
+  'chat.assessment_reason.research_failed':
+    'Die Recherche brach unterwegs ab; diese Einschätzung beruht auf den bis dahin gefundenen Passagen.',
+  'chat.assessment_reason.context_budget':
+    'Die Recherche endete vorzeitig, weil das Kontextfenster des Modells voll war.',
+  'chat.assessment_reason.time_budget':
+    'Die Recherche endete vorzeitig, weil die Zeit abgelaufen war.',
+  'chat.assessment_reason.no_evidence': 'Es wurden keine Passagen gefunden, die sich bewerten ließen.',
+  'chat.assessment_answer.unsplit':
+    'Das Modell hat nicht getrennt, was die Quellen sagen und was es selbst urteilt; die ganze Antwort ist daher als seine Einschätzung markiert und wurde nicht validiert.',
+  'chat.assessment_answer.empty': 'Das Modell hat keine Einschätzung geliefert.',
 
   // chat search panel + session scope
   'search.title': 'Suche',

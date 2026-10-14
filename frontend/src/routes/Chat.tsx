@@ -5,7 +5,7 @@ import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
 import { clearScope, setScope } from '@/api/scope'
-import type { ChatFinalEvent } from '@/api/types'
+import type { AgentStep, ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
 import { useStickToBottom } from '@/hooks/useStickToBottom'
@@ -35,6 +35,7 @@ type Action =
   | { type: 'start'; user: string; scopeRequested?: number; unsavedId?: string }
   | { type: 'token'; token: string }
   | { type: 'retry'; query: string }
+  | { type: 'agent'; step: AgentStep }
   | { type: 'finalize'; meta: ChatFinalEvent }
   | { type: 'fail'; error?: string }
 
@@ -78,6 +79,14 @@ function reducer(s: State, a: Action): State {
       const last = s.turns[s.turns.length - 1]
       if (!last) return s
       const updated = { ...last, assistant: '', retryQuery: a.query }
+      return { ...s, turns: [...s.turns.slice(0, -1), updated] }
+    }
+    // A research step of an assessment turn. The turn stays open: only the
+    // final envelope finishes it.
+    case 'agent': {
+      const last = s.turns[s.turns.length - 1]
+      if (!last) return s
+      const updated = { ...last, agentSteps: [...(last.agentSteps ?? []), a.step] }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
     case 'finalize': {
@@ -227,7 +236,9 @@ export function Chat() {
                 validation_mismatch: m.validation_mismatch,
                 validation_reason: m.validation_reason,
                 retried: m.retried,
-                retry_query: m.retry_query
+                retry_query: m.retry_query,
+                answer_mode: m.answer_mode,
+                agent: m.agent
               } as ChatFinalEvent)
             : null
         })
@@ -303,6 +314,18 @@ export function Chat() {
         if (typeof data.retry === 'object' && data.retry !== null) {
           const retryQuery = (data.retry as Record<string, unknown>).query
           if (typeof retryQuery === 'string') dispatch({ type: 'retry', query: retryQuery })
+          continue
+        }
+        // Must be caught before the finalize fallthrough below: an unhandled
+        // step frame would finish the turn and re-enable Send mid-research.
+        // The final envelope also carries `agent` (the trail), with a session id.
+        if (
+          typeof data.agent === 'object' &&
+          data.agent !== null &&
+          !('session_id' in data) &&
+          !('response' in data)
+        ) {
+          dispatch({ type: 'agent', step: data.agent as AgentStep })
           continue
         }
         if (typeof data.error === 'string') {

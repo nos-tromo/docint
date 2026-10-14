@@ -410,6 +410,36 @@ describe('Chat session-history validation restoration', () => {
     })
     expect(screen.queryByText(/response validation passed/i)).toBeNull()
   })
+
+  it('restores the assessment notice from session history', async () => {
+    mockHistoryFetch([
+      { role: 'user', content: 'What could be improved?' },
+      {
+        role: 'assistant',
+        content: 'Fact [1].',
+        sources: [],
+        validation_checked: true,
+        validation_mismatch: false,
+        validation_reason: null,
+        answer_mode: 'assessment',
+        agent: {
+          steps: 0,
+          actions: [{ action: 'seed', detail: '', found: 2 }],
+          reason: null,
+          answer: 'split',
+          shortened: 0,
+          evidence_chars: 9
+        }
+      }
+    ])
+
+    renderChatWithSession('sess-restored')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/validation passed for the source-backed part/i)).toBeInTheDocument()
+  })
 })
 
 describe('Chat drafts', () => {
@@ -858,6 +888,9 @@ describe('Chat session switching', () => {
     expect(chatReducer(empty, { type: 'token', token: 'x' })).toEqual(empty)
     expect(chatReducer(empty, { type: 'retry', query: 'q' })).toEqual(empty)
     expect(
+      chatReducer(empty, { type: 'agent', step: { step: 1, action: 'search', detail: 'q', found: 1 } })
+    ).toEqual(empty)
+    expect(
       chatReducer(empty, { type: 'finalize', meta: { session_id: 's' } as ChatFinalEvent })
     ).toEqual({ turns: [], inflight: false })
     expect(chatReducer(empty, { type: 'fail', error: 'boom' })).toEqual({
@@ -939,6 +972,80 @@ describe('Chat session switching', () => {
     await waitFor(() => {
       expect(screen.getByText(/Evidence insufficient/)).toBeInTheDocument()
     })
+  })
+
+  it('folds research steps into the open turn without finishing it', () => {
+    const open = { turns: [{ user: 'q', assistant: '', done: false, meta: null }], inflight: true }
+    const step = { step: 1, action: 'search' as const, detail: 'evaluation datasets', found: 1 }
+
+    const next = chatReducer(open, { type: 'agent', step })
+
+    expect(next.inflight).toBe(true)
+    expect(next.turns[0].done).toBe(false)
+    expect(next.turns[0].agentSteps).toEqual([step])
+  })
+
+  it('streams an assessment turn through its research steps to the final notice', async () => {
+    const trail =
+      '{"steps":1,"actions":[{"action":"seed","detail":"","found":2},' +
+      '{"action":"search","detail":"evaluation datasets","found":1}],' +
+      '"reason":null,"answer":"split","shortened":0,"evidence_chars":9}'
+    const frames =
+      'data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n' +
+      'data: {"agent":{"step":1,"action":"search","detail":"evaluation datasets","found":1}}\n\n' +
+      'data: {"token":"Fact [1]."}\n\n' +
+      `data: {"response":"Fact [1].","sources":[],"session_id":"sess-1","answer_mode":"assessment","agent":${trail}}\n\n`
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'What could be improved?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/Fact \[1\]\./)).toBeInTheDocument()
+    expect(useUiStore.getState().currentSessionId).toBe('sess-1')
+  })
+
+  it('keeps the turn open while research steps stream, until the final envelope', async () => {
+    // A step frame taken for the final envelope would finish the turn and
+    // re-enable Send mid-research, yet leave the same end state behind.
+    const enc = new TextEncoder()
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stream = controller
+      }
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, body }))
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'What could be improved?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    stream.enqueue(enc.encode('data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n'))
+
+    expect(await screen.findByTestId('agent-trail-live')).toHaveTextContent('Initial search: 2 passages')
+    expect(screen.getByRole('button', { name: /send/i })).toHaveAttribute('aria-busy', 'true')
+
+    stream.enqueue(
+      enc.encode(
+        'data: {"response":"Fact [1].","sources":[],"session_id":"sess-1","answer_mode":"assessment",' +
+          '"agent":{"steps":0,"actions":[{"action":"seed","detail":"","found":2}],"reason":null,' +
+          '"answer":"split","shortened":0,"evidence_chars":9}}\n\n'
+      )
+    )
+    stream.close()
+
+    expect(await screen.findByTestId('assessment-notice')).toBeInTheDocument()
+    expect(screen.queryByTestId('agent-trail-live')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
   })
 
   it('sends the retrieval target with the question it applies to', async () => {

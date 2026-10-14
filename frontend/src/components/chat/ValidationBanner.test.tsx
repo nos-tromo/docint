@@ -61,6 +61,29 @@ describe('ValidationBanner', () => {
       screen.getByText(/skipped or unavailable/i)
     ).toBeInTheDocument()
   })
+
+  it('names the source-backed part when it validated an assessment', () => {
+    render(
+      <ValidationBanner
+        v={{ validation_checked: true, validation_mismatch: false, validation_reason: null, answer_mode: 'assessment' }}
+      />
+    )
+    expect(screen.getByText(/validation passed for the source-backed part/i)).toBeInTheDocument()
+  })
+
+  it('says an unseparated assessment was not validated', () => {
+    render(<ValidationBanner v={{ validation_checked: false, validation_reason: 'x', answer_mode: 'assessment' }} />)
+    expect(screen.getByText(/no separate source-backed part/i)).toBeInTheDocument()
+  })
+
+  it('names the source-backed part when the validator flagged an assessment', () => {
+    render(
+      <ValidationBanner
+        v={{ validation_checked: true, validation_mismatch: true, validation_reason: null, answer_mode: 'assessment' }}
+      />
+    )
+    expect(screen.getByText(/validation flagged the source-backed part/i)).toBeInTheDocument()
+  })
 })
 
 describe('ValidationBanner markers are drawn, never typed', () => {

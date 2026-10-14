@@ -178,6 +178,29 @@ export const en = {
   'chat.validation_unavailable_title': 'Response validation unavailable',
   'chat.validation_not_validated_title': 'Response not validated',
   'chat.validation_default_detail': 'Validation was skipped or unavailable for this response.',
+  'chat.validation_passed_assessment_title': 'Response validation passed for the source-backed part',
+  'chat.validation_mismatch_assessment_title': 'Response validation flagged the source-backed part',
+  'chat.validation_skipped_assessment_title':
+    'Not validated — the answer has no separate source-backed part',
+  'chat.assessment_notice':
+    "This answer includes the model's own assessment, marked in the text. It may draw on general knowledge and is not checked against the sources.",
+  'chat.assessment_shortened': '{count} passages were shortened to fit the model’s context.',
+  'chat.assessment_trail_show': 'Show the searches behind this assessment',
+  'chat.assessment_trail_hide': 'Hide the searches behind this assessment',
+  'chat.assessment_trail_seed': 'Initial search: {count} passages',
+  'chat.assessment_trail_search': 'Searched “{query}”: {count} new passages',
+  'chat.assessment_trail_answer': 'Writing the assessment…',
+  'chat.assessment_reason.tools_unavailable':
+    'The model could not run its own searches (the chat model rejected tool calls), so this assessment rests on the first search’s passages only.',
+  'chat.assessment_reason.research_failed':
+    'The research step failed part-way, so this assessment rests on the passages found before it stopped.',
+  'chat.assessment_reason.context_budget':
+    'The research stopped early because the model’s context window was full.',
+  'chat.assessment_reason.time_budget': 'The research stopped early because it ran out of time.',
+  'chat.assessment_reason.no_evidence': 'No passages were found to assess.',
+  'chat.assessment_answer.unsplit':
+    'The model did not separate what the sources say from its own judgement, so the whole answer is marked as its assessment and was not validated.',
+  'chat.assessment_answer.empty': 'The model returned no assessment.',
 
   // chat search panel + session scope
   'search.title': 'Search',

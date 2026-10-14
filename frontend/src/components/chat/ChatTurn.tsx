@@ -1,5 +1,6 @@
-import { WarningIcon } from '@infra/ui'
-import type { ChatFinalEvent, Source } from '@/api/types'
+import { useId, useState } from 'react'
+import { DisclosureButton, InfoIcon, SearchIcon, WarningIcon } from '@infra/ui'
+import type { AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
 import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
@@ -30,6 +31,8 @@ export interface ChatTurnData {
    * remove another.
    */
   unsavedId?: string
+  /** Research steps streamed while an assessment turn works; `meta.agent` replaces them once done. */
+  agentSteps?: AgentStep[]
 }
 
 /**
@@ -114,6 +117,74 @@ function dedupeSources(sources: Source[]): Source[] {
   return out
 }
 
+type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found'>
+
+function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
+  if (step.action === 'seed') return t('chat.assessment_trail_seed', { count: step.found })
+  if (step.action === 'answer') return t('chat.assessment_trail_answer')
+  return t('chat.assessment_trail_search', { query: step.detail, count: step.found })
+}
+
+/** The research steps of an assessment turn while it runs. */
+function AgentTrailLive({ steps }: { steps: AgentStep[] }) {
+  const t = useT()
+  return (
+    <ul
+      className="mt-3 space-y-1 text-xs text-muted-foreground"
+      data-testid="agent-trail-live"
+      aria-live="polite"
+    >
+      {steps.map((step) => (
+        <li key={`${step.step}-${step.action}`} className="flex items-center gap-2">
+          <SearchIcon className="h-3.5 w-3.5 shrink-0" />
+          <span>{stepLabel(step, t)}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** Says the answer carries the model's own judgement; the searches sit behind a disclosure. */
+function AssessmentNotice({ trail }: { trail: AgentTrail }) {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  const listId = useId()
+  const searches = trail.actions.filter((action) => action.action === 'search')
+  return (
+    <div
+      className="mt-3 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground"
+      data-testid="assessment-notice"
+      role="note"
+    >
+      <div className="flex items-center gap-2">
+        <InfoIcon className="h-3.5 w-3.5 shrink-0" />
+        <span className="flex-1">
+          {t('chat.assessment_notice')}
+          {trail.shortened > 0 && ` ${t('chat.assessment_shortened', { count: trail.shortened })}`}
+        </span>
+        {searches.length > 0 && (
+          <DisclosureButton
+            expanded={open}
+            controls={listId}
+            label={open ? t('chat.assessment_trail_hide') : t('chat.assessment_trail_show')}
+            onClick={() => setOpen((value) => !value)}
+            className="h-6 w-6"
+          />
+        )}
+      </div>
+      {open && (
+        <ul id={listId} className="mt-2 list-disc space-y-1 pl-5">
+          {searches.map((action, index) => (
+            // A finished trail is read-only and never reordered; a repeated query rules out `detail` alone.
+            // eslint-disable-next-line @eslint-react/no-array-index-key
+            <li key={`${index}-${action.detail}`}>{stepLabel(action, t)}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 export function ChatTurn({
   turn,
   sessionId,
@@ -139,6 +210,7 @@ export function ChatTurn({
         })
       : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
+  const trail = turn.done && turn.meta?.answer_mode === 'assessment' ? (turn.meta.agent ?? null) : null
   return (
     <article className="space-y-3">
       <div className="rounded-md bg-muted px-4 py-2 self-end max-w-2xl ml-auto">
@@ -155,10 +227,34 @@ export function ChatTurn({
         ) : (
           <div className="text-muted-foreground">{turn.done ? t('chat.no_answer') : '…'}</div>
         )}
+        {!turn.done && turn.agentSteps && turn.agentSteps.length > 0 && (
+          <AgentTrailLive steps={turn.agentSteps} />
+        )}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">{t('chat.error_title')}</div>
             <div className="mt-1 whitespace-pre-wrap">{turn.error}</div>
+          </div>
+        )}
+        {trail && <AssessmentNotice trail={trail} />}
+        {trail?.reason && (
+          <div
+            className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
+            data-testid="assessment-research-degraded"
+            role="alert"
+          >
+            <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
+            {t(`chat.assessment_reason.${trail.reason}`)}
+          </div>
+        )}
+        {trail && trail.answer !== 'split' && (
+          <div
+            className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
+            data-testid="assessment-answer-degraded"
+            role="alert"
+          >
+            <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
+            {t(`chat.assessment_answer.${trail.answer}`)}
           </div>
         )}
         {retryQuery(turn) && (

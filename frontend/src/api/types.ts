@@ -56,6 +56,40 @@ export interface ValidationFields {
   validation_reason?: string | null
 }
 
+/** How a chat turn was answered. */
+export type AnswerMode = 'lookup' | 'assessment'
+
+/** What one step of an assessment turn did. */
+export type AgentAction = 'seed' | 'search' | 'answer'
+
+/** One step of an assessment turn, streamed as an `{agent}` frame. */
+export interface AgentStep {
+  step: number
+  action: AgentAction
+  /** The model-written search query; empty for `seed` and `answer`. */
+  detail: string
+  found: number
+}
+
+/** Why research stopped short. Protocol tokens, never prose. */
+export type AgentReason =
+  | 'tools_unavailable'
+  | 'research_failed'
+  | 'context_budget'
+  | 'time_budget'
+  | 'no_evidence'
+
+/** What an assessment turn did, as the final envelope and session history report it. */
+export interface AgentTrail {
+  steps: number
+  actions: { action: AgentAction; detail: string; found: number }[]
+  reason: AgentReason | null
+  /** `split`: separated cleanly; `unsplit`: the whole answer is labelled; `empty`: no answer text. */
+  answer: 'split' | 'unsplit' | 'empty'
+  shortened: number
+  evidence_chars: number | null
+}
+
 export interface ChatFinalEvent extends ValidationFields {
   status?: 'answer' | 'clarification'
   answer?: string
@@ -95,6 +129,10 @@ export interface ChatFinalEvent extends ValidationFields {
    * not be fetched — a degraded visual turn. Absent on any other target.
    */
   visual?: { images_attached: number } | null
+  /** `'assessment'` when the turn added a labelled model judgement; absent on a lookup. */
+  answer_mode?: AnswerMode
+  /** What the assessment did; absent on a lookup. */
+  agent?: AgentTrail | null
 }
 
 /** A rule targets either one `field` or several `fields`; with several, it
@@ -246,6 +284,10 @@ export interface SessionMessage extends Partial<ValidationFields> {
   retried?: boolean
   /** The reformulated retrieval query that retry used. */
   retry_query?: string
+  /** `'assessment'` on an assessment turn. */
+  answer_mode?: AnswerMode
+  /** The assessment's trail. */
+  agent?: AgentTrail | null
 }
 
 export interface DocumentRecord {

@@ -1,8 +1,10 @@
 import type { ComponentType } from 'react'
 import { CheckIcon, InfoIcon, WarningIcon, type IconProps } from '@infra/ui'
-import type { ValidationFields } from '@/api/types'
+import type { ChatFinalEvent, ValidationFields } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
+
+type BannerFields = ValidationFields & Pick<ChatFinalEvent, 'answer_mode'>
 
 interface BannerSpec {
   tone: string
@@ -14,16 +16,19 @@ interface BannerSpec {
   detail?: string
 }
 
-function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpec {
+function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
   // Mirrors Streamlit's response_validation_summary: always show *some*
   // signal under each chat turn so the validation status never silently
   // disappears.
   const reason = v.validation_reason ?? undefined
+  const assessment = v.answer_mode === 'assessment'
   if (v.validation_checked === true && v.validation_mismatch === true) {
     return {
       tone: 'border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] text-[var(--status-amber-strong)]',
       Icon: WarningIcon,
-      title: t('chat.validation_mismatch_title'),
+      title: assessment
+        ? t('chat.validation_mismatch_assessment_title')
+        : t('chat.validation_mismatch_title'),
       detail: reason ?? t('chat.validation_mismatch_default_detail')
     }
   }
@@ -31,7 +36,9 @@ function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpe
     return {
       tone: 'border-[var(--status-emerald-border)] bg-[var(--status-emerald-surface)] text-[var(--status-emerald-strong)]',
       Icon: CheckIcon,
-      title: t('chat.validation_passed_title'),
+      title: assessment
+        ? t('chat.validation_passed_assessment_title')
+        : t('chat.validation_passed_title'),
       detail: reason ?? undefined
     }
   }
@@ -45,14 +52,16 @@ function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpe
     tone: 'border-border bg-muted text-muted-foreground',
     Icon: InfoIcon,
     title:
-      v.validation_checked === false
-        ? t('chat.validation_unavailable_title')
-        : t('chat.validation_not_validated_title'),
+      assessment && v.validation_checked === false
+        ? t('chat.validation_skipped_assessment_title')
+        : v.validation_checked === false
+          ? t('chat.validation_unavailable_title')
+          : t('chat.validation_not_validated_title'),
     detail: t('chat.validation_default_detail')
   }
 }
 
-export function ValidationBanner({ v }: { v: ValidationFields }) {
+export function ValidationBanner({ v }: { v: BannerFields }) {
   const t = useT()
   const spec = resolveSpec(v, t)
   return (
