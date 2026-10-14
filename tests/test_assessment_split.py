@@ -183,3 +183,13 @@ def test_splitter_holds_back_only_a_possible_sentinel_prefix() -> None:
 
     assert splitter.feed("Fact [[ASSESS") == "Fact "
     assert splitter.flush() == "[[ASSESS"
+
+
+def test_splitter_keeps_its_indices_aligned_past_a_dotted_capital_i() -> None:
+    """A dotted capital I lower-cases to two characters; the cut must still land on the sentinel."""
+    text = "Istanbul İ fact [1].\n[[ASSESSMENT]]\nView."
+    splitter = SentinelStreamSplitter()
+
+    out = splitter.feed(text) + splitter.flush()
+
+    assert out == text.replace(SENTINEL, assessment_label(with_rule=True))

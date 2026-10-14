@@ -10,6 +10,7 @@ history and report exports — without any of them knowing the protocol.
 from __future__ import annotations
 
 import re
+import string
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -23,6 +24,8 @@ _SENTINEL_RE = re.compile(r"(?:#{1,6}\s*)?(?:\*\*|__)?\[{1,2}\s*assessment\s*\]{
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
+# str.lower() can change length (U+0130), which would misalign buffer indices.
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 
 AnswerOutcome = Literal["split", "unsplit", "empty"]
 
@@ -175,7 +178,7 @@ class SentinelStreamSplitter:
         self._buffer += token
         out: list[str] = []
         while self._buffer:
-            lower = self._buffer.lower()
+            lower = self._buffer.translate(_ASCII_LOWER)
             if self._in_think:
                 end = lower.find(_THINK_CLOSE)
                 if end < 0:
