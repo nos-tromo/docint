@@ -120,9 +120,9 @@ say, cited as usual, and continues under a **Model assessment** label with the
 model's own judgement, which may draw on general knowledge and is not checked
 against the sources. A note under the answer says so and, behind a disclosure
 caret, lists the searches; the validation banner speaks of the source-backed
-part only. A turn whose research failed, stopped early, left passages out for
-lack of room or found nothing, or whose model did not separate the two parts,
-says so in an amber notice.
+part only. A turn whose research failed, stopped early or found nothing, whose
+evidence was partly left out for lack of room, or whose model did not separate
+the two parts, says so in an amber notice.
 
 A **Search in** picker under the query field chooses what the keywords
 match: Text (the chunk body, the default), Author, Network or UUID. The

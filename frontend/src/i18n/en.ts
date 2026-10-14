@@ -198,7 +198,7 @@ export const en = {
   'chat.assessment_reason.research_failed':
     'The research step failed part-way, so this assessment rests on the passages found before it stopped.',
   'chat.assessment_reason.context_budget':
-    'The model’s context window was full, so research stopped early or some of its passages were left out.',
+    'The model’s context window was full, so research stopped early or part of the evidence was left out.',
   'chat.assessment_reason.time_budget': 'The research stopped early because it ran out of time.',
   'chat.assessment_reason.no_evidence': 'No passages were found to assess.',
   'chat.assessment_answer.unsplit':

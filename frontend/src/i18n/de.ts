@@ -210,7 +210,7 @@ export const de: Strings = {
   'chat.assessment_reason.research_failed':
     'Die Recherche brach unterwegs ab; diese Einschätzung beruht auf den bis dahin gefundenen Passagen.',
   'chat.assessment_reason.context_budget':
-    'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder einige ihrer Passagen wurden ausgelassen.',
+    'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder ein Teil der Belege wurde ausgelassen.',
   'chat.assessment_reason.time_budget':
     'Die Recherche endete vorzeitig, weil die Zeit abgelaufen war.',
   'chat.assessment_reason.no_evidence': 'Es wurden keine Passagen gefunden, die sich bewerten ließen.',

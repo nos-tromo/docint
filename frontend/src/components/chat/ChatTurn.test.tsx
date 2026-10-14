@@ -339,13 +339,13 @@ describe('ChatTurn', () => {
   })
 
   it.each([
-    ['en', 'The model’s context window was full, so research stopped early or some of its passages were left out.'],
+    ['en', 'The model’s context window was full, so research stopped early or part of the evidence was left out.'],
     [
       'de',
-      'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder einige ihrer Passagen wurden ausgelassen.'
+      'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder ein Teil der Belege wurde ausgelassen.'
     ]
-  ] as const)('says in the %s notice that a full context window can also leave passages out', (lang, copy) => {
-    // The token covers research the room stopped and passages the answer had no room for.
+  ] as const)('says in the %s notice that a full context window can also leave evidence out', (lang, copy) => {
+    // The token covers research the room stopped and evidence left out whole or cut below its minimum.
     renderTurn(
       {
         user: 'q',

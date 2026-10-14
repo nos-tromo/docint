@@ -472,9 +472,11 @@ ledger, numbered 1..N in the order it was found; an entry is shortened to fit
 the context rather than dropped, because replay numbers citations by position.
 If the final estimate still does not fit, the latest research additions are
 left out, never the seed, so the numbering stays contiguous, and the turn
-reports `context_budget`. If the prompt
+reports `context_budget`; it does the same when what remains, a dense seed
+included, can only be sent cut below its legible minimum. If the prompt
 still overflows the model's context, it is rebuilt once with less evidence and
-compacted metadata headers, each passage's citation line kept whole; a second
+compacted metadata headers, each passage's citation line kept whole (a rebuild
+that cuts passages below their minimum is reported the same way); a second
 overflow, or compact headers that alone fill the room, ends the turn with
 `context_overflow` on `/stream_query` (`/query` answers HTTP 500, as for a lookup).
 
@@ -489,9 +491,10 @@ reformulation could improve.
 **Degraded turns** say why. `agent.reason` is `tools_unavailable` (the endpoint
 rejected tool calls or answered without one; the answer rests on the seed
 passages), `research_failed`, `context_budget` (the context window ended
-research before its step cap, left it no room to run, or left out passages it
-found; a refusal that did not end research is not reported, and an earlier
-reason is kept), `time_budget` or `no_evidence`;
+research early or never let it start, the last search lost a passage to the
+room, passages were left out at a fit, or the evidence was sent below its
+legible minimum; a refusal that a later search follows is not reported, and an
+earlier reason is kept), `time_budget` or `no_evidence`;
 `agent.answer` is `unsplit` or `empty`. These are protocol tokens; the SPA maps
 each to catalog copy.
 
