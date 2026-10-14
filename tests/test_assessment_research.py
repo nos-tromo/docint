@@ -540,8 +540,9 @@ def test_a_search_that_outlasts_the_budget_ends_research_on_time(
     ledger.add([scored_node("seed", "The seed passage.")])
     started = time.monotonic()
 
+    # A fixed clock: only the real wait for the search spends the budget, however the host stalls.
     progress, outcome = _drain(
-        _loop(tool_llm([search_call("zzsecretzz method")]), search, wall_clock_s=0.3).run(
+        _loop(tool_llm([search_call("zzsecretzz method")]), search, wall_clock_s=0.3, clock=lambda: 0.0).run(
             question=QUESTION, prior_turn=None, ledger=ledger
         )
     )
@@ -584,9 +585,10 @@ def test_abandoned_searches_are_capped_at_the_slot_count(held_search: tuple[thre
         calls.append(query)
         return search(query)
 
+    # A fixed clock: only the real waits, for a slot and for the search, spend the budget.
     outcomes = [
         _drain(
-            _loop(tool_llm([search_call(f"turn {turn}")]), _counted, wall_clock_s=0.2).run(
+            _loop(tool_llm([search_call(f"turn {turn}")]), _counted, wall_clock_s=0.2, clock=lambda: 0.0).run(
                 question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
             )
         )[1].reason
@@ -699,8 +701,9 @@ def test_a_timed_out_search_keeps_its_slot_until_it_ends(held_search: tuple[thre
     release, search = held_search
     slots = threading.BoundedSemaphore(1)
 
+    # A fixed clock: only the real wait for the search spends the budget, however the host stalls.
     _, outcome = _drain(
-        _loop(tool_llm([search_call("method")]), search, wall_clock_s=0.2, slots=slots).run(
+        _loop(tool_llm([search_call("method")]), search, wall_clock_s=0.2, clock=lambda: 0.0, slots=slots).run(
             question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
         )
     )
