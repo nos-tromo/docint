@@ -253,6 +253,14 @@ def test_effective_ratio_samples_every_entry_evenly() -> None:
     seen: list[str] = []
 
     def _record(text: str) -> int:
+        """Record the sample and count it densely.
+
+        Args:
+            text (str): The sample.
+
+        Returns:
+            int: One token per two characters.
+        """
         seen.append(text)
         return max(1, len(text) // 2)
 

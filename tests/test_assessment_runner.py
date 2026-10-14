@@ -335,6 +335,14 @@ def test_a_tokenizer_that_fails_falls_back_to_the_configured_ratio() -> None:
     """A broken tokenizer leaves the turn exactly as it is without one."""
 
     def _broken(text: str) -> int:
+        """Stand in for a tokenizer that fails.
+
+        Args:
+            text (str): The text to count, unused.
+
+        Raises:
+            RuntimeError: Always.
+        """
         raise RuntimeError("tokenizer unavailable")
 
     plain = _prompt(*_runner(), _long_seed(10))
@@ -348,6 +356,14 @@ def test_the_prior_turn_and_question_are_measured_with_the_tokenizer() -> None:
     measured: list[str] = []
 
     def _count(text: str) -> int:
+        """Record what is measured and count it at four characters a token.
+
+        Args:
+            text (str): The text to count.
+
+        Returns:
+            int: Its tokens.
+        """
         measured.append(text)
         return max(1, len(text) // 4)
 
@@ -411,6 +427,18 @@ def test_an_answer_that_fails_after_its_first_token_is_never_retried() -> None:
     llm = streaming_llm([])
 
     def _stream(messages: list[ChatMessage], **kwargs: Any) -> Iterator[ChatResponse]:
+        """Stream one token, then fail as an overflowing endpoint would.
+
+        Args:
+            messages (list[ChatMessage]): The prompt, unused.
+            **kwargs (Any): Call options, unused.
+
+        Yields:
+            ChatResponse: The first token.
+
+        Raises:
+            openai.BadRequestError: After the first token.
+        """
         yield ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content="Fact"), delta="Fact")
         raise bad_request(OVERFLOW)
 

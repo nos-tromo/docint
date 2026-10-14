@@ -267,7 +267,7 @@ def _allowances(
 
     Returns:
         tuple[int, list[int]]: The text budget, zero or less when the headers use
-        it all, and each text's allowance, shortest first.
+        it all, and each text's allowance in input order, shared shortest-first.
     """
     ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
     reserved = sum(len(header) + 4 for header in headers) + MARKER_RESERVE_CHARS * len(headers)

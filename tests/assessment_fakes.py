@@ -107,6 +107,18 @@ def streaming_llm(tokens: Sequence[str], *, failures: Sequence[Exception] = ()) 
     pending = list(failures)
 
     def _stream(messages: Sequence[ChatMessage], **kwargs: Any) -> Iterator[ChatResponse]:
+        """Raise the next scripted failure on the first pull, or stream the answer.
+
+        Args:
+            messages (Sequence[ChatMessage]): The prompt, unused.
+            **kwargs (Any): Call options, unused.
+
+        Yields:
+            ChatResponse: One response per token, the text so far included.
+
+        Raises:
+            Exception: The next scripted failure, while any remain.
+        """
         if pending:
             raise pending.pop(0)
         text = ""

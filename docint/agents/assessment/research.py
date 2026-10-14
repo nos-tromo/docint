@@ -201,7 +201,7 @@ class ResearchLoop:
                 break
             if not calls:
                 if steps == 0:
-                    # Prose before any search: the endpoint served ``required`` as ``auto``.
+                    # Prose in the first round: the endpoint served ``required`` as ``auto``.
                     reason = "tools_unavailable"
                     logger.warning(
                         "Assessment research stopped (tools_unavailable): the model replied without a tool call"
