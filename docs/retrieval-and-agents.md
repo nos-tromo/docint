@@ -433,8 +433,9 @@ prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
 on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
 Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
-never widened: a
-scoped assessment answers from its chunks with no research.
+never widened: a scoped assessment answers from its chunks with no research.
+A scope too large to show legibly in one answer is answered as a lookup
+instead.
 
 **Answer.** One streamed call on the answer model (the reasoning toggle
 applies) writes two parts separated by a `[[ASSESSMENT]]` line
@@ -446,6 +447,8 @@ persisted text, so the boundary survives into history, transcripts and report
 exports without any of them knowing the protocol. Sources are the evidence
 ledger, numbered 1..N in the order it was found; an entry is shortened to fit
 the context, never dropped, because replay numbers citations by position.
+If the prompt still overflows the model's context, it is rebuilt once with
+less evidence; a second overflow ends the turn with `context_overflow`.
 
 **Validation.** Only the source-backed part is validated, against the sources it
 cites (at most six; the first six when it cites none), with a note
