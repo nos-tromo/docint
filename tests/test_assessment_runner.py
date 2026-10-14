@@ -602,6 +602,87 @@ def test_a_fact_deep_in_a_promoted_section_survives_a_full_ledger() -> None:
     assert DEEP_FACT in llm.stream_chat.call_args.args[0][0].content
 
 
+def _unique_filler(label: str, count: int) -> str:
+    """Return invented filler whose sentences are numbered, so no stretch of it repeats.
+
+    Args:
+        label (str): A word that sets this filler apart from any other.
+        count (int): How many sentences.
+
+    Returns:
+        str: The filler.
+    """
+    return "".join(f"{label} filler sentence {index:04d}. " for index in range(count))
+
+
+#: The decisive fact of an invented section, 50 characters into its second retrieved child.
+TOUCH_FACT = "The second cohort was dropped after a protocol breach in week three."
+#: An invented section whose two retrieved children touch at 2,100: (100, 2100) and (2100, 4100).
+TOUCHING_SECTION = (_unique_filler("Lead", 100)[:2150] + TOUCH_FACT + _unique_filler("Tail", 100))[:4200]
+
+
+def _child_of_touching_section(start: int, end: int, node_id: str) -> NodeWithScore:
+    """Build one retrieved child of :data:`TOUCHING_SECTION`.
+
+    Args:
+        start (int): Where the child starts in the section.
+        end (int): Where it ends.
+        node_id (str): The child's id.
+
+    Returns:
+        NodeWithScore: The hit, pointing at its section.
+    """
+    metadata = {"hier.parent_id": "section-9", "docint_hier_type": "fine"}
+    return NodeWithScore(node=TextNode(id_=node_id, text=TOUCHING_SECTION[start:end], metadata=metadata), score=0.8)
+
+
+def test_a_match_touching_the_seeded_one_keeps_its_own_region_in_a_crowded_8k_answer() -> None:
+    """Codex's reproduction: research reads a fact at 2,150 in the child touching the seeded one; the answer keeps it.
+
+    Ten passages crowd an 8k answer, so the section is cut; merged with the seeded match, the second
+    match would keep only the opening of the first, and nothing would say so.
+    """
+    assert TOUCHING_SECTION.index(TOUCH_FACT) == 2150
+    section = TextNode(id_="section-9", text=TOUCHING_SECTION, metadata={"filename": "trial.pdf", "page": 4})
+    postprocessor = ParentContextPostprocessor(
+        docstore=SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: section if node_id == "section-9" else None
+        ),
+        usable_tokens=4000,
+        per_hit_floor=256,
+        char_token_ratio=3.5,
+        budget_enforced=True,
+    )
+    seeded = postprocessor._postprocess_nodes([_child_of_touching_section(100, 2100, "child-1")])
+    found = postprocessor._postprocess_nodes([_child_of_touching_section(2100, 4100, "child-2")])
+    assert [scored.node.metadata[MATCH_SPANS_KEY] for scored in (*seeded, *found)] == [[[100, 2100]], [[2100, 4100]]]
+    fillers = [
+        scored_node(f"n{number}", _unique_filler(f"Passage{number}", 160)[:4000], filename="notes.pdf", page=number)
+        for number in range(1, 10)
+    ]
+    research_llm = tool_llm([search_call("protocol breach")])
+    researcher = ResearchLoop(
+        llm=cast(Any, research_llm),
+        search=lambda query: found,
+        max_steps=6,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        prompt="{question}{prior_turn}{digest}",
+    )
+    runner, llm = _runner(researcher=researcher, view=ParentContextPostprocessor._emit_with_llm_exclusion)
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=[*seeded, *fillers]))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert len(result.nodes) == 10
+    digest_reply = research_llm.chat_with_tools.call_args_list[1].kwargs["chat_history"][2]
+    assert TOUCH_FACT in str(digest_reply.content)
+    prompt = llm.stream_chat.call_args.args[0][0].content
+    assert TOUCHING_SECTION not in prompt
+    assert TOUCH_FACT in prompt
+    assert result.reason is None
+
+
 class _AddsOneBatch:
     """Research that adds one batch of passages in a single search."""
 

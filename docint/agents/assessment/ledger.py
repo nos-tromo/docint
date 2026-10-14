@@ -14,10 +14,11 @@ from docint.utils.text_budget import (
     MARKER_RESERVE_CHARS,
     MATCH_SPANS_KEY,
     REGION_CHARS,
+    WINDOW_JOIN,
     allocate_with_floors,
+    distinct_spans,
     excerpt,
     fit_with_marker,
-    merge_spans,
     place,
 )
 
@@ -27,8 +28,6 @@ MIN_ENTRY_TOKENS = 240
 DIGEST_CHARS = 400
 #: Longest file name a digest label carries.
 DIGEST_LABEL_CHARS = 120
-#: Seam between two windows of one passage; no brackets, so it never reads as a citation.
-WINDOW_JOIN = "\n\n…\n\n"
 #: What a passage pays for each window past its first when it is cut: the join and that window's marker.
 SEAM_CHARS = len(WINDOW_JOIN) + MARKER_RESERVE_CHARS
 #: Fewest characters a shortened passage may keep and still be read.
@@ -146,14 +145,31 @@ def _shifted(spans: Iterable[tuple[int, int]], by: int) -> list[tuple[int, int]]
     return [(start + by, end + by) for start, end in spans]
 
 
+def _inside_one(span: tuple[int, int], spans: Sequence[tuple[int, int]]) -> bool:
+    """Return whether a match lies wholly inside a single one of other matches.
+
+    Args:
+        span (tuple[int, int]): The match.
+        spans (Sequence[tuple[int, int]]): The matches that may hold it.
+
+    Returns:
+        bool: ``True`` when one of ``spans`` holds all of it; lying across two that touch does not count.
+    """
+    start, end = span
+    return any(lo <= start and end <= hi for lo, hi in spans)
+
+
 def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScore | None:
     """Fold another emission of a held passage into its entry, with its match.
 
     The node supplying the text is the one the entry is copied from: the held
     node when the arriving window extends it or adds only a match, the arriving
     one when it already holds the held text. Each side's match spans are moved
-    to where its text sits in the result. Anything but a ``TextNode`` keeps the
-    held entry as is.
+    to where its text sits in the result. Matches count one by one, as packing
+    counts them: an arriving match is news unless a single held match holds it,
+    and a held match a single arriving one holds is dropped when the arriving
+    window replaces the entry, so a re-cut of the same child never raises its
+    floor. Anything but a ``TextNode`` keeps the held entry as is.
 
     Args:
         held (NodeWithScore): The ledger's entry.
@@ -168,17 +184,17 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     new_text = arriving.node.get_content(metadata_mode=MetadataMode.NONE)
     held_spans, new_spans = _anchors(held.node), _anchors(arriving.node)
     if new_text in held_text:
-        covered = merge_spans(held_spans, len(held_text))
-        fresh = [
-            (start, end)
-            for start, end in _shifted(new_spans, held_text.find(new_text))
-            if not any(lo <= start and end <= hi for lo, hi in covered)
-        ]
+        held_matches = distinct_spans(held_spans, len(held_text))
+        arriving_matches = distinct_spans(_shifted(new_spans, held_text.find(new_text)), len(held_text))
+        fresh = [span for span in arriving_matches if not _inside_one(span, held_matches)]
         if not fresh:
             return None
         base, text, spans = held.node, held_text, held_spans + fresh
     elif held_text in new_text:
-        base, text, spans = arriving.node, new_text, new_spans + _shifted(held_spans, new_text.find(held_text))
+        arriving_matches = distinct_spans(new_spans, len(new_text))
+        held_matches = distinct_spans(_shifted(held_spans, new_text.find(held_text)), len(new_text))
+        kept = [span for span in held_matches if not _inside_one(span, arriving_matches)]
+        base, text, spans = arriving.node, new_text, new_spans + kept
     else:
         shift = len(held_text) + len(WINDOW_JOIN)
         base, text, spans = held.node, f"{held_text}{WINDOW_JOIN}{new_text}", held_spans + _shifted(new_spans, shift)
@@ -351,8 +367,9 @@ class EvidenceLedger:
 def digest(number: int, scored: NodeWithScore) -> str:
     """Render one bounded line the research model reads instead of the passage.
 
-    A passage that says where its retrieved match sits is read from a view of
-    ``DIGEST_CHARS`` placed on that match, led by ``…`` when the view skips the
+    A passage that says where its retrieved matches sit is read from a view of
+    ``DIGEST_CHARS`` placed on the first one it names that lies in its text,
+    which is its top-ranked child, led by ``…`` when the view skips the
     passage's opening; any other passage is read from its start.
 
     Args:
@@ -369,7 +386,8 @@ def digest(number: int, scored: NodeWithScore) -> str:
     page = meta.get("page") if meta.get("page") is not None else meta.get("page_number")
     where = f"{name}, p. {page}" if name and page is not None else name
     raw = scored.node.get_content(metadata_mode=MetadataMode.NONE)
-    spans = merge_spans(_anchors(scored.node), len(raw))
+    # Stored order, not text order: the first stamp is the top-ranked child.
+    spans = [clipped for anchor in _anchors(scored.node) for clipped in distinct_spans([anchor], len(raw))]
     if spans:
         start, end = place(*spans[0], DIGEST_CHARS, len(raw))
         snippet = " ".join(raw[start:end].split())
@@ -433,20 +451,21 @@ def _windows(body: str, anchors: Sequence[tuple[int, int]]) -> list[tuple[str, l
     """Split a passage at its window joins, each window with the matches inside it, as :func:`excerpt` sees them.
 
     A match crossing a ``WINDOW_JOIN`` that the source text itself holds is clipped
-    into the windows on both sides, so it counts in both.
+    into the windows on both sides, so it counts in both. Matches that touch,
+    overlap or nest each count on their own; only an exact repeat counts once.
 
     Args:
         body (str): The passage text.
         anchors (Sequence[tuple[int, int]]): Where its retrieved matches sit in ``body``.
 
     Returns:
-        list[tuple[str, list[tuple[int, int]]]]: Each window and its matches, moved
-        into the window, clipped to it and merged.
+        list[tuple[str, list[tuple[int, int]]]]: Each window and its distinct
+        matches, moved into the window and clipped to it (see :func:`distinct_spans`).
     """
     windows: list[tuple[str, list[tuple[int, int]]]] = []
     offset = 0
     for window in body.split(WINDOW_JOIN):
-        windows.append((window, merge_spans(_shifted(anchors, -offset), len(window))))
+        windows.append((window, distinct_spans(_shifted(anchors, -offset), len(window))))
         offset += len(window) + len(WINDOW_JOIN)
     return windows
 
@@ -456,7 +475,7 @@ def _window_floor(window: str, spans: Sequence[tuple[int, int]]) -> int:
 
     Args:
         window (str): The window's text.
-        spans (Sequence[tuple[int, int]]): Its merged matches.
+        spans (Sequence[tuple[int, int]]): Its distinct matches.
 
     Returns:
         int: A region and its marker per match, or the whole window when that is less.

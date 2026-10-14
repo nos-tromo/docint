@@ -4,6 +4,8 @@ from collections.abc import Sequence
 
 #: Node metadata naming where a passage's retrieved match sits: ``[start, end]`` spans in its own text.
 MATCH_SPANS_KEY = "docint_match_spans"
+#: Seam between two windows of one passage; no brackets, so it never reads as a citation.
+WINDOW_JOIN = "\n\n…\n\n"
 #: Worst-case length of the cut marker, reserved for every entry.
 MARKER_RESERVE_CHARS = 50
 #: Fewest characters a region kept around a match may show; a passage cut to 300 characters still keeps one.
@@ -113,6 +115,22 @@ def merge_spans(spans: Sequence[Sequence[int]], length: int) -> list[tuple[int, 
     return merged
 
 
+def distinct_spans(spans: Sequence[Sequence[int]], length: int) -> list[tuple[int, int]]:
+    """Clip spans to a text and drop the empty ones and exact repeats, keeping each match apart.
+
+    Unlike :func:`merge_spans`, spans that touch, overlap or nest stay separate, so each
+    one is still counted as its own match.
+
+    Args:
+        spans (Sequence[Sequence[int]]): ``(start, end)`` offsets, in any order.
+        length (int): Length of the text they point into.
+
+    Returns:
+        list[tuple[int, int]]: The distinct non-empty spans inside ``[0, length]``, sorted by start, then end.
+    """
+    return sorted({(max(0, start), min(length, end)) for start, end in spans if min(length, end) > max(0, start)})
+
+
 def place(start: int, end: int, size: int, length: int) -> tuple[int, int]:
     """Place a region of ``size`` characters on a span of a text.
 
@@ -138,12 +156,13 @@ def excerpt(text: str, anchors: Sequence[Sequence[int]], allowance: int) -> tupl
     """Trim a text to its allowance, keeping the text around each anchor.
 
     A text with no anchor past the prefix it may show is cut exactly as
-    :func:`fit_with_marker` cuts it. Otherwise each anchor gets a region of an
-    equal share of the allowance, less one marker each; while those shares
-    would fall below ``MIN_REGION_CHARS``, the anchors latest in the text are
-    dropped. Every gap between what is shown carries its own marker, and the
-    result stays within the allowance plus one ``MARKER_RESERVE_CHARS``, as a
-    prefix cut does.
+    :func:`fit_with_marker` cuts it. Otherwise each distinct anchor gets a
+    region of an equal share of the allowance, less one marker each, even where
+    anchors touch, overlap or nest (see :func:`distinct_spans`); only the
+    regions are merged. While those shares would fall below
+    ``MIN_REGION_CHARS``, the anchors latest in the text are dropped. Every gap
+    between what is shown carries its own marker, and the result stays within
+    the allowance plus one ``MARKER_RESERVE_CHARS``, as a prefix cut does.
 
     Args:
         text (str): The full text.
@@ -153,7 +172,7 @@ def excerpt(text: str, anchors: Sequence[Sequence[int]], allowance: int) -> tupl
     Returns:
         tuple[str, bool]: The rendered text and whether it was trimmed.
     """
-    spans = merge_spans(anchors, len(text))
+    spans = distinct_spans(anchors, len(text))
     while spans and allowance < len(spans) * REGION_CHARS:
         spans.pop()
     if len(text) <= allowance or all(end <= allowance for _, end in spans):

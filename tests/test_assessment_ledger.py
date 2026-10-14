@@ -39,8 +39,8 @@ from docint.utils.text_budget import (
     MATCH_SPANS_KEY,
     MIN_REGION_CHARS,
     allocate_shortest_first,
+    distinct_spans,
     fit_with_marker,
-    merge_spans,
 )
 
 
@@ -772,6 +772,50 @@ def test_a_contained_window_whose_match_is_covered_adds_nothing() -> None:
     assert ledger.entries()[0] is first
 
 
+def test_a_match_across_two_touching_held_matches_is_news() -> None:
+    """Held matches count one by one, so a match straddling the point where two of them touch is not covered."""
+    whole = "The study opens with a pilot, then compares two invented cohorts."
+    held = scored_node("section-1", whole, filename="paper.pdf", page=2, **{MATCH_SPANS_KEY: [[0, 15], [15, 34]]})
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+    arriving = _anchored("opens with a pilot", "opens with")
+
+    changed = ledger.add([arriving])
+
+    assert changed == [(1, arriving)]
+    assert _matches(ledger.entries()[0]) == ["The study opens", " with a pilot, then", "opens with"]
+
+
+@pytest.mark.parametrize(
+    ("arriving_matches", "matches"),
+    [
+        (["opens with a pilot"], ["opens with a pilot"]),
+        (["opens wi", "th a pilot"], ["opens wi", "th a pilot", "with a"]),
+    ],
+    ids=["inside-one-arriving-match", "across-two-touching-arriving-matches"],
+)
+def test_a_fuller_window_keeps_a_held_match_only_when_no_single_match_of_its_own_holds_it(
+    arriving_matches: list[str], matches: list[str]
+) -> None:
+    """A re-cut of a child the arriving section already stamps whole adds no floor; one across two of its matches does.
+
+    Args:
+        arriving_matches (list[str]): The arriving section's matched texts.
+        matches (list[str]): The matched texts the merged entry must carry, in span order.
+    """
+    whole = "The study opens with a pilot, then compares."
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([_anchored("opens with a pilot", "with a")])
+    spans = [[whole.index(text), whole.index(text) + len(text)] for text in arriving_matches]
+    arriving = scored_node("section-1", whole, filename="paper.pdf", page=2, **{MATCH_SPANS_KEY: spans})
+
+    changed = ledger.add([arriving])
+
+    assert changed == [(1, arriving)]
+    assert _text(ledger.entries()[0]) == whole
+    assert _matches(ledger.entries()[0]) == matches
+
+
 #: An invented section whose decisive sentence sits deep inside it.
 DEEP_FACT = "The pilot excluded every respondent recruited after March."
 DEEP_SECTION = ("Background filler sentence. " * 190)[:5214] + DEEP_FACT + " Closing filler sentence." * 40
@@ -834,6 +878,27 @@ def test_digest_of_a_match_near_the_start_reads_from_the_start() -> None:
 
     assert line.startswith("[1] (paper.pdf, p. 2) Background filler sentence.")
     assert "…" not in line
+
+
+@pytest.mark.parametrize(
+    "lead",
+    [[], [[-50, -10]], [[len(DEEP_SECTION) + 5, len(DEEP_SECTION) + 90]]],
+    ids=["first-stamped", "before-the-text-skipped", "past-the-text-skipped"],
+)
+def test_digest_reads_around_the_first_stamped_match_not_the_earliest_in_the_text(lead: list[list[int]]) -> None:
+    """The top-ranked child is stamped first, so research reads it even where a lower-ranked one sits earlier.
+
+    Args:
+        lead (list[list[int]]): Spans stamped ahead of the first real one, empty once clipped to the text.
+    """
+    fact_at = DEEP_SECTION.index(DEEP_FACT)
+    early = DEEP_SECTION.index("Background", 600)
+    spans = [*lead, [fact_at, fact_at + len(DEEP_FACT)], [early, early + 40]]
+
+    line = digest(2, scored_node("section-1", DEEP_SECTION, filename="paper.pdf", page=2, **{MATCH_SPANS_KEY: spans}))
+
+    assert line.startswith("[2] (paper.pdf, p. 2) … ")
+    assert DEEP_FACT in line
 
 
 def _sized(count: int, body: int, *, label: int = 0, start: int = 1) -> list[NodeWithScore]:
@@ -1082,8 +1147,10 @@ CODEX_ENTRY = _matched_windows(7)
         ("x" * 1000, [(800, 850)], 300),
         ("x" * 120, [(10, 20)], 120),
         ("x" * 1000, [(100, 120), (800, 820)], 500),
-        ("x" * 1000, [(100, 160), (150, 220)], 300),
-        ("x" * 1000, [(100, 150), (150, 220)], 300),
+        ("x" * 1000, [(100, 160), (150, 220)], 500),
+        ("x" * 1000, [(100, 150), (150, 220)], 500),
+        ("x" * 1000, [(100, 400), (150, 220)], 500),
+        ("x" * 1000, [(100, 150), (100, 150)], 300),
         ("x" * 700, [(10, 20), (300, 310), (600, 610)], 700),
         ("x" * 1000, [(-40, -10), (1005, 1050)], 300),
         (_join("a" * 1000, "b" * 1000), [(800, 820), (SECOND + 300, SECOND + 320)], 555),
@@ -1105,6 +1172,8 @@ CODEX_ENTRY = _matched_windows(7)
         "two-matches",
         "overlapping-matches",
         "touching-matches",
+        "nested-matches",
+        "a-repeated-match",
         "three-matches-in-a-shorter-text",
         "matches-outside-the-text",
         "two-windows-a-match-each",
@@ -1124,6 +1193,8 @@ def test_text_floor_reserves_a_region_for_every_match_and_a_seam_for_every_windo
     body: str, anchors: list[tuple[int, int]], floor: int
 ) -> None:
     """Each window needs ``min(len, 250 * matches)``, each seam 55, and the passage never less than today's minimum.
+
+    Matches that touch, overlap or nest count one by one; only an exact repeat counts once.
 
     Args:
         body (str): The passage text.
@@ -1395,13 +1466,13 @@ def _held_prefixes(scored: NodeWithScore) -> list[str]:
         scored (NodeWithScore): The passage.
 
     Returns:
-        list[str]: The first ``MIN_REGION_CHARS`` characters, or fewer, of each merged match in each window.
+        list[str]: The first ``MIN_REGION_CHARS`` characters, or fewer, of each distinct match in each window.
     """
     spans = [(start, end) for start, end in scored.node.metadata.get(MATCH_SPANS_KEY, [])]
     prefixes: list[str] = []
     offset = 0
     for window in _text(scored).split(WINDOW_JOIN):
-        local = merge_spans([(start - offset, end - offset) for start, end in spans], len(window))
+        local = distinct_spans([(start - offset, end - offset) for start, end in spans], len(window))
         prefixes += [window[start : start + min(MIN_REGION_CHARS, end - start)] for start, end in local]
         offset += len(window) + len(WINDOW_JOIN)
     return prefixes

@@ -10,8 +10,10 @@ import pytest
 from docint.utils.text_budget import (
     MARKER_RESERVE_CHARS,
     MIN_REGION_CHARS,
+    REGION_CHARS,
     allocate_shortest_first,
     allocate_with_floors,
+    distinct_spans,
     excerpt,
     fit_with_marker,
     place,
@@ -212,6 +214,142 @@ def test_excerpt_never_renders_past_its_allowance_and_one_marker(
         _walk(text, rendered)
     else:
         assert rendered == text
+
+
+@pytest.mark.parametrize(
+    ("spans", "expected"),
+    [
+        ([(100, 150), (150, 220)], [(100, 150), (150, 220)]),
+        ([(100, 160), (150, 220)], [(100, 160), (150, 220)]),
+        ([(100, 400), (150, 220)], [(100, 400), (150, 220)]),
+        ([(150, 220), (100, 150)], [(100, 150), (150, 220)]),
+        ([(100, 150), (100, 150)], [(100, 150)]),
+        ([(990, 1200), (990, 1500)], [(990, 1000)]),
+        ([(-40, -10), (1005, 1050), (90, 30), (500, 500)], []),
+        ([(-40, 20)], [(0, 20)]),
+    ],
+    ids=[
+        "touching",
+        "overlapping",
+        "nested",
+        "unsorted",
+        "repeated",
+        "repeated-once-clipped",
+        "empty-or-outside",
+        "clipped",
+    ],
+)
+def test_distinct_spans_never_merges_matches(spans: list[tuple[int, int]], expected: list[tuple[int, int]]) -> None:
+    """Spans are clipped, emptied ones and exact repeats dropped and the rest sorted, but none is merged into another.
+
+    Args:
+        spans (list[tuple[int, int]]): The match spans, in a text of 1,000 characters.
+        expected (list[tuple[int, int]]): What is kept.
+    """
+    assert distinct_spans(spans, 1000) == expected
+
+
+#: Invented text in which every stretch of eight characters or more occurs once.
+UNIQUE = "".join(f"t{index:05d} " for index in range(1200))
+
+
+def _kept(text: str, rendered: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return the spans whose opening, up to ``MIN_REGION_CHARS``, a rendering does not show.
+
+    Args:
+        text (str): The full text.
+        rendered (str): Its rendering.
+        spans (list[tuple[int, int]]): The distinct match spans.
+
+    Returns:
+        list[tuple[int, int]]: The spans that lost part of their opening; empty when every one kept it.
+    """
+    shown = _walk(text, rendered)
+    return [
+        (start, end)
+        for start, end in spans
+        if not any(lo <= start and start + min(MIN_REGION_CHARS, end - start) <= hi for lo, hi in shown)
+    ]
+
+
+@pytest.mark.parametrize(
+    "spans",
+    [
+        [(1000, 2000), (2000, 3000)],
+        [(1000, 2500), (2000, 3000)],
+        [(1000, 3000), (2000, 2600)],
+        [(1000, 2000), (1000, 2000)],
+        [(1000, 1100), (1100, 1150), (1150, 3000)],
+    ],
+    ids=["touching", "overlapping", "nested", "repeated", "three-touching"],
+)
+def test_excerpt_at_its_floor_keeps_the_opening_of_every_match(spans: list[tuple[int, int]]) -> None:
+    """Matches that touch, overlap or nest each keep their own region; a repeated one needs only one.
+
+    Args:
+        spans (list[tuple[int, int]]): The match spans.
+    """
+    distinct = distinct_spans(spans, len(UNIQUE))
+    allowance = len(distinct) * REGION_CHARS
+
+    rendered, cut = excerpt(UNIQUE, spans, allowance)
+
+    assert cut is True
+    assert len(rendered) <= allowance + MARKER_RESERVE_CHARS
+    assert _kept(UNIQUE, rendered, distinct) == []
+
+
+def _related(rng: random.Random, spans: list[tuple[int, int]], length: int) -> tuple[int, int]:
+    """Draw a span that touches, overlaps, nests in or repeats an earlier one, or a fresh one.
+
+    Args:
+        rng (random.Random): The seeded source.
+        spans (list[tuple[int, int]]): The spans drawn so far.
+        length (int): The text's length.
+
+    Returns:
+        tuple[int, int]: The new span; it may reach past the text, as a stale stamp can.
+    """
+    size = rng.choice([1, 40, 200, 600, 2500])
+    if not spans or rng.random() < 0.3:
+        start = rng.randrange(0, length)
+        return start, start + size
+    start, end = rng.choice(spans)
+    shape = rng.choice(["touch", "overlap", "nest", "repeat"])
+    if shape == "touch":
+        return end, end + size
+    if shape == "overlap":
+        shift = rng.randrange(1, max(2, end - start))
+        return start + shift, end + shift
+    if shape == "nest":
+        inner = rng.randrange(start, end)
+        return inner, rng.randrange(inner + 1, end + 1)
+    return start, end
+
+
+def test_excerpt_at_or_above_its_floor_keeps_every_distinct_match() -> None:
+    """Seeded fuzz: from an allowance of one region per distinct match, each keeps its opening, within the bound."""
+    rng = random.Random(61)
+    cut_count = 0
+
+    for _ in range(4000):
+        length = rng.choice([300, 1000, 4000, len(UNIQUE)])
+        text = UNIQUE[:length]
+        spans: list[tuple[int, int]] = []
+        for _ in range(rng.randrange(1, 7)):
+            spans.append(_related(rng, spans, length))
+        distinct = distinct_spans(spans, length)
+        allowance = len(distinct) * REGION_CHARS + rng.choice([0, 0, 1, 37, 400])
+
+        rendered, cut = excerpt(text, spans, allowance)
+
+        if not cut:
+            assert rendered == text
+            continue
+        cut_count += 1
+        assert len(rendered) <= allowance + MARKER_RESERVE_CHARS
+        assert _kept(text, rendered, distinct) == []
+    assert cut_count > 2000
 
 
 def test_a_long_match_keeps_only_its_first_region_when_it_has_to_be_cut() -> None:
