@@ -8223,7 +8223,7 @@ class RAG:
         )
         # The runner refuses before its first yield, so nothing has streamed yet.
         try:
-            first = next(stream)
+            first = next(stream, None)
         except AssessmentDoesNotFit as exc:
             logger.warning(
                 "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
@@ -8239,6 +8239,8 @@ class RAG:
             )
             yield str(data.get("response") or "")
             yield data
+            return
+        if first is None:
             return
         yield first
         yield from stream

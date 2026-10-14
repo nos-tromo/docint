@@ -430,6 +430,30 @@ def test_a_stateless_assessment_starts_its_clock_before_the_engine_is_built(monk
     assert manager.stream_assessment.call_args.kwargs["turn_started_at"] == 100.0
 
 
+def test_an_empty_assessment_stream_ends_a_streaming_turn_quietly(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pulling the first item of nothing must end the turn, not raise from inside the generator.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _arm(session_manager, nodes=_seed())
+    monkeypatch.setattr(SessionManager, "stream_assessment", lambda _self, *_args, **_kwargs: iter([]))
+
+    assert list(session_manager.stream_chat(QUESTION, session_id="s1", answer_mode="assessment")) == []
+
+
+def test_an_empty_stateless_assessment_stream_ends_quietly() -> None:
+    """The stateless entry point ends the same way when the stream yields nothing."""
+    rag = MagicMock()
+    rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
+    rag.ensure_session_manager.return_value.stream_assessment.return_value = iter([])
+
+    assert list(RAG.stream_stateless_assessment(rag, QUESTION, expanded_query="expanded", graph_debug={})) == []
+
+
 #: Fifty pinned posts: too many to show legibly in one 8k answer.
 PINNED = [f"post-{number}" for number in range(1, 51)]
 LOOKUP_ANSWER = "The festival moved to Sunday [1]."

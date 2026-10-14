@@ -491,7 +491,9 @@ class _FinishAtOnce:
 
 @pytest.mark.parametrize(("window", "reasoning"), [(8192, False), (8192, True), (32768, False)])
 def test_an_unscoped_seed_always_fits(window: int, reasoning: bool) -> None:
-    """A lookup's top-n never exceeds the ledger cap, and a full cap stays legible even with long social rows.
+    """At the default ``RETRIEVE_TOP_K`` a lookup's top-n never exceeds the ledger cap.
+
+    A full cap stays legible even with long social rows, so an unscoped seed always fits.
 
     Args:
         window (int): The context window in tokens.

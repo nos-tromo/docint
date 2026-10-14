@@ -2,8 +2,9 @@
 
 Calls tools with ``tool_choice="required"``, which vLLM serves through guided
 decoding without ``--enable-auto-tool-choice``; a model that answers in prose
-anyway (Ollama treats ``required`` as ``auto``) ends research, reported as
-``tools_unavailable`` when it never searched at all.
+anyway (Ollama treats ``required`` as ``auto``) ends research. The turn reports
+``tools_unavailable`` when the endpoint rejects the first call, or when the
+first round returns no tool call.
 """
 
 from __future__ import annotations

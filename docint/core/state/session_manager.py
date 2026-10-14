@@ -705,7 +705,7 @@ class SessionManager:
             )
             # The runner refuses before its first yield, so nothing has streamed yet.
             try:
-                first = next(stream)
+                first = next(stream, None)
             except AssessmentDoesNotFit as exc:
                 logger.warning(
                     "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
@@ -713,6 +713,8 @@ class SessionManager:
                 )
                 prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
             else:
+                if first is None:
+                    return
                 yield first
                 yield from stream
                 return
