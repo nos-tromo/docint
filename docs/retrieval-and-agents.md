@@ -429,10 +429,12 @@ two-minute bounds; lookups and the answer keep the retries.
 
 **Evidence.** An assessment seeds its evidence with the passages a lookup
 would have used — the turn's own engine, filters, rerank and parent-context
-chain, each section keeping every child retrieved under it — then lets the
-plain model search further through a
+chain — then lets the plain model search further through a
 `search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
-prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
+prompt `assessment_research.txt`, `tool_choice="required"`). The seed and every
+search keep every child the reranker returned: each section carries every child
+retrieved under it, appended after a `…` line when its window does not show it.
+Lookups are unchanged. Research stops at
 `ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
 on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
@@ -447,7 +449,8 @@ headers included; a result that would crowd the others is refused, and the
 ledger counts as full once not even a bare 300-character passage would fit.
 Every match an entry holds keeps room in the answer: each costs 250 characters
 (200 of text and a cut marker) in its window, each further window 55, and an
-extension whose matches would no longer fit is refused.
+extension whose matches would no longer fit is refused. Matches that touch or
+overlap are counted apart, each keeping its own region.
 A new window of a section the ledger already holds is not dropped. Text the entry
 lacks extends it after a `…` line, a window that repeats it adds at most its
 match, and the entry keeps its number. When the answer has to shorten such an entry, the cut is
@@ -509,7 +512,9 @@ from stored history, get it too. The prior turn is read by
 asked after one sees both parts of it, each labelled: the source-backed part,
 whose `[n]` refer to the previous turn's sources, and the model's own
 assessment. They share the 4,000-character prior-answer budget shortest-first,
-so a long source-backed part cannot push the judgement out.
+so a long source-backed part cannot push the judgement out. Research and the
+answer also see the rewrite a lookup answers from, on a labelled line beside
+the user's own words. It is a reading aid, never a source.
 
 ## Citation numbering
 
