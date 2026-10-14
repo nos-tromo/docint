@@ -435,9 +435,10 @@ prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
 `ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
 on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
-A new window of a section the ledger already holds does count as new: it extends
-that entry after a `…` line, and the entry keeps its number. When the answer has
-to shorten such an entry, each window is cut on its own, so every window keeps text.
+A new window of a section the ledger already holds is not dropped. Text the entry
+lacks extends it after a `…` line, a window that repeats it adds nothing, and the
+entry keeps its number. When the answer has to shorten such an entry, the cut is
+shared across its windows rather than taken from the end.
 Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
 never widened: a scoped assessment answers from its chunks with no research.
 Evidence too large to show legibly in one answer — typically a large pinned
