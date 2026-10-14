@@ -531,3 +531,149 @@ def test_shared_budget_helpers_keep_the_validator_semantics() -> None:
     assert allocate_shortest_first([10, 100, 1000], 300) == [10, 100, 190]
     assert fit_with_marker("abcdef", 3) == ("abc[... 3 of 6 characters not shown ...]", True)
     assert fit_with_marker("abc", 3) == ("abc", False)
+
+
+#: Two windows of one invented section, each about a thousand characters.
+FIRST_WINDOW = "Alpha: " + "The first survey wave lost two respondents. " * 23
+LAST_WINDOW = "Omega: " + "The final wave was rerun with a larger sample. " * 21
+
+
+def _render_passage(body: str, allowance: int) -> tuple[str, int]:
+    """Render one passage whose text may show exactly ``allowance`` characters before its cut marker.
+
+    Args:
+        body (str): The passage text.
+        allowance (int): Characters its text may show.
+
+    Returns:
+        tuple[str, int]: The rendered text without its header, and how many entries were shortened.
+    """
+    nodes = _numbered([scored_node("sec", body, filename="paper.pdf", page=2)])
+    header = llm_view(nodes[0].node).get_metadata_str(mode=MetadataMode.LLM)
+    budget = len(header) + 4 + MARKER_RESERVE_CHARS + allowance
+    context, shortened = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    return context.removeprefix(f"{header}\n\n"), shortened
+
+
+def test_a_shortened_merged_passage_keeps_text_from_every_window() -> None:
+    """Cut from the tail, the newest window would be the first to go, so each window is cut on its own."""
+    body = f"{FIRST_WINDOW}{WINDOW_JOIN}{LAST_WINDOW}"
+
+    rendered, shortened = _render_passage(body, 1000)
+
+    assert FIRST_WINDOW[:300] in rendered
+    assert LAST_WINDOW[:300] in rendered
+    assert rendered.count("characters not shown") == 2
+    assert WINDOW_JOIN in rendered
+    assert shortened == 1
+    assert len(rendered) <= 1000 + MARKER_RESERVE_CHARS
+
+
+def test_a_short_window_stays_whole_and_hands_its_unused_share_to_the_long_one() -> None:
+    """The windows share what is left shortest first, as whole passages do."""
+    short = "Beta: only a short note."
+    long = "Gamma: " + "A long window of invented text. " * 60
+
+    rendered, shortened = _render_passage(f"{short}{WINDOW_JOIN}{long}", 1000)
+
+    share = 1000 - len(WINDOW_JOIN) - MARKER_RESERVE_CHARS - len(short)
+    assert rendered == f"{short}{WINDOW_JOIN}{fit_with_marker(long, share)[0]}"
+    assert shortened == 1
+
+
+def test_a_long_passage_without_the_join_renders_exactly_as_before() -> None:
+    """Only a passage that holds several windows is cut window by window."""
+    body = "The harbour survey repeated its findings. " * 80
+
+    rendered, shortened = _render_passage(body, 1000)
+
+    assert rendered == fit_with_marker(body, 1000)[0]
+    assert shortened == 1
+
+
+@pytest.mark.parametrize("slack", [0, 1, 54, 500])
+def test_a_merged_passage_that_fits_is_rendered_untouched(slack: int) -> None:
+    """Fitting is judged on the whole passage: its windows would be cut on their own shares, so the guard matters.
+
+    Args:
+        slack (int): Characters of allowance beyond the passage's length.
+    """
+    body = f"{FIRST_WINDOW[:500]}{WINDOW_JOIN}{LAST_WINDOW[:500]}"
+
+    rendered, shortened = _render_passage(body, len(body) + slack)
+
+    assert rendered == body
+    assert shortened == 0
+
+
+def test_a_merged_passage_one_character_over_its_allowance_is_cut_window_by_window() -> None:
+    """The first character that does not fit starts the window logic; both windows keep text and a marker."""
+    body = f"{FIRST_WINDOW[:500]}{WINDOW_JOIN}{LAST_WINDOW[:500]}"
+
+    rendered, shortened = _render_passage(body, len(body) - 1)
+
+    assert FIRST_WINDOW[:200] in rendered
+    assert LAST_WINDOW[:200] in rendered
+    assert rendered.count("characters not shown") == 2
+    assert shortened == 1
+
+
+@pytest.mark.parametrize("allowance", [0, 20, 56])
+def test_an_allowance_too_small_for_a_character_per_window_cuts_the_whole_passage(allowance: int) -> None:
+    """The joins and the second marker take 55 characters; with a character per window unaffordable, the cut is today's.
+
+    Args:
+        allowance (int): Characters the passage may show.
+    """
+    body = f"{FIRST_WINDOW}{WINDOW_JOIN}{LAST_WINDOW}"
+
+    rendered, shortened = _render_passage(body, allowance)
+
+    assert rendered == fit_with_marker(body, allowance)[0]
+    assert shortened == 1
+
+
+def test_a_character_per_window_is_enough_to_cut_window_by_window() -> None:
+    """One character more than the fallback's last allowance gives each window one."""
+    body = f"{FIRST_WINDOW}{WINDOW_JOIN}{LAST_WINDOW}"
+
+    rendered, _ = _render_passage(body, 57)
+
+    assert rendered == f"{fit_with_marker(FIRST_WINDOW, 1)[0]}{WINDOW_JOIN}{fit_with_marker(LAST_WINDOW, 1)[0]}"
+
+
+@pytest.mark.parametrize("windows", [2, 3, 5])
+@pytest.mark.parametrize("allowance", [60, 200, 600, 1500, 4000])
+def test_a_merged_passage_never_renders_past_its_allowance_and_one_marker(windows: int, allowance: int) -> None:
+    """The bound is the one a whole-passage cut keeps, however many windows share the allowance.
+
+    Args:
+        windows (int): How many windows the passage joins.
+        allowance (int): Characters the passage may show.
+    """
+    parts = [f"W{index}: " + f"invented sentence {index}. " * (10 * (index + 1)) for index in range(windows)]
+    body = WINDOW_JOIN.join(parts)
+
+    rendered, shortened = _render_passage(body, allowance)
+
+    assert len(rendered) <= allowance + MARKER_RESERVE_CHARS
+    assert shortened == int(len(body) > allowance)
+    reserve = (windows - 1) * (len(WINDOW_JOIN) + MARKER_RESERVE_CHARS)
+    if len(body) > allowance and allowance - reserve >= windows:
+        assert rendered.count(WINDOW_JOIN) == windows - 1
+
+
+def test_several_merged_passages_pack_within_the_evidence_budget_with_text_from_every_window() -> None:
+    """The context bound is unchanged: each entry pays for its joins and markers out of its own allowance."""
+    ledger = EvidenceLedger(cap=10)
+    for entry in range(5):
+        for window in range(3):
+            text = f"E{entry}W{window}: " + "Invented window text. " * 28
+            ledger.add([scored_node(f"sec-{entry}", text, filename=f"doc{entry}.pdf")])
+    assert len(ledger) == 5
+
+    context, shortened = render_context(ledger.numbered(), llm_view=llm_view, budget_tokens=3000, char_token_ratio=1.0)
+
+    assert len(context) <= 3000
+    assert shortened == 5
+    assert all(f"E{entry}W{window}:" in context for entry in range(5) for window in range(3))

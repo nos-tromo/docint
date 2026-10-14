@@ -353,6 +353,35 @@ def evidence_fits(
     )
 
 
+def _fit_windows(body: str, allowance: int) -> tuple[str, bool]:
+    """Fit one passage to its allowance, window by window when it joins several.
+
+    Cut from the tail, a passage extended by :meth:`EvidenceLedger.add` would lose
+    its newest window first, so each window is shortened on its own. The joins and
+    one cut marker per window beyond the first come out of the allowance (the
+    caller's reserve covers the first marker); the rest is shared shortest-first.
+    The result stays within the allowance plus one marker reserve, as a
+    whole-passage cut does.
+
+    Args:
+        body (str): The passage text.
+        allowance (int): Characters it may show before its cut marker.
+
+    Returns:
+        tuple[str, bool]: The rendered text and whether it was shortened. A passage
+        that fits, joins no windows, or leaves less than a character per window is
+        cut as :func:`fit_with_marker` cuts it.
+    """
+    windows = body.split(WINDOW_JOIN)
+    seams = len(windows) - 1
+    remainder = allowance - seams * (len(WINDOW_JOIN) + MARKER_RESERVE_CHARS)
+    if len(body) <= allowance or seams == 0 or remainder < len(windows):
+        return fit_with_marker(body, allowance)
+    shares = allocate_shortest_first([len(window) for window in windows], remainder)
+    fitted = [fit_with_marker(window, share) for window, share in zip(windows, shares, strict=True)]
+    return WINDOW_JOIN.join(text for text, _ in fitted), any(cut for _, cut in fitted)
+
+
 def render_context(
     nodes: list[NodeWithScore],
     *,
@@ -364,7 +393,8 @@ def render_context(
     """Render numbered nodes like the grounded prompt's context, shortened to fit.
 
     Headers are always kept; the text budget is shared shortest-first and every
-    cut is marked, so the model can tell a short excerpt from a short source.
+    cut is marked, so the model can tell a short excerpt from a short source. A
+    passage that joins several windows is cut window by window, so each keeps text.
 
     Args:
         nodes (list[NodeWithScore]): The numbered ledger.
@@ -385,7 +415,7 @@ def render_context(
     rendered: list[str] = []
     shortened = 0
     for header, body, allowance in zip(headers, bodies, allowances, strict=True):
-        fitted, cut = fit_with_marker(body, allowance)
+        fitted, cut = _fit_windows(body, allowance)
         shortened += int(cut)
         rendered.append(f"{header}\n\n{fitted}" if header else fitted)
     # The join can complete a sentinel that neither part holds alone.
