@@ -429,8 +429,8 @@ lookup would have used — the turn's own engine, filters, rerank and
 parent-context chain — then lets the plain model search further through a
 `search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
 prompt `assessment_research.txt`, `tool_choice="required"`). Research stops at
-`ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute wall clock, on a
-repeated query, when the evidence ledger is full, when the model replies
+`ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
+on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
 Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
 never widened: a

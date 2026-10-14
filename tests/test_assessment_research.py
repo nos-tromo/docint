@@ -304,7 +304,7 @@ def test_a_later_failure_reports_research_failed() -> None:
 
 def test_the_wall_clock_bounds_research() -> None:
     """A slow endpoint cannot hold the turn open indefinitely."""
-    ticks = iter([0.0, 0.0, 200.0])
+    ticks = iter([0.0, 0.0, 0.0, 200.0])
     llm = tool_llm([search_call("method"), search_call("results")])
 
     _, outcome = _drain(
@@ -314,6 +314,21 @@ def test_the_wall_clock_bounds_research() -> None:
     )
 
     assert outcome.reason == "time_budget"
+
+
+def test_each_research_call_is_bounded_by_the_time_remaining() -> None:
+    """One hung call cannot outlast the research budget; a floor of a second keeps the last call possible."""
+    # Start, then per round: the budget check and the call's own timeout.
+    ticks = iter([0.0, 0.0, 0.0, 100.0, 119.5, 200.0])
+    llm = tool_llm([search_call("method"), search_call("results")])
+
+    _drain(
+        _loop(llm, _search({"method": [scored_node("m", "M.")]}), clock=lambda: next(ticks), wall_clock_s=120.0).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert [call.kwargs["timeout"] for call in llm.chat_with_tools.call_args_list] == [120.0, 1.0]
 
 
 def test_a_window_too_small_for_one_step_never_calls_the_model() -> None:

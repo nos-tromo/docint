@@ -154,6 +154,8 @@ def test_a_research_step_sends_required_single_non_strict_tool_calls(monkeypatch
     assert body["tool_choice"] == "required"
     assert body["parallel_tool_calls"] is False
     assert body["max_tokens"] == 512
+    # The SDK's per-request timeout: the research budget still left, two minutes at most.
+    assert 0 < body["timeout"] <= 120.0
     assert body["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
     assert {tool["function"]["name"] for tool in body["tools"]} == {"search", "finish"}
     assert all(tool["function"]["strict"] is False for tool in body["tools"])

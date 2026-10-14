@@ -190,6 +190,8 @@ class ResearchLoop:
                     strict=False,
                     allow_parallel_tool_calls=False,
                     max_tokens=RESEARCH_REPLY_TOKENS,
+                    # One hung call must not outlast the research budget.
+                    timeout=max(1.0, self._wall_clock_s - (self._clock() - started)),
                 )
                 calls = self._llm.get_tool_calls_from_response(response, error_on_no_tool_call=False)
             except Exception as exc:
