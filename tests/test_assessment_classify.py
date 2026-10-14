@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from _pytest.logging import LogCaptureFixture
 
-from docint.agents.assessment.classify import classify_turn
+from docint.agents.assessment.classify import DEFAULT_ASSESSMENT_CLASSIFY_PROMPT, classify_turn
 from docint.agents.types import PriorTurn
 
 QUESTION = "zzsecretzz What could be improved in this study?"
@@ -90,3 +90,42 @@ def test_the_prompt_carries_the_question_and_the_prior_exchange(monkeypatch: pyt
     assert QUESTION in prompt
     assert "It reports one experiment [1]." in prompt
     assert '{"mode": "assessment"}' in prompt
+
+
+def _assert_leans_to_lookup(prompt: str, tie_break: str) -> None:
+    """Check that lookup is listed first, wins a tie, and leads the format line.
+
+    Args:
+        prompt (str): The rendered classifier prompt.
+        tie_break (str): The locale's "when unsure" sentence.
+    """
+    assert prompt.index('- "lookup"') < prompt.index('- "assessment"')
+    assert tie_break in prompt.split('- "assessment"', 1)[1]
+    last_line = prompt.strip().splitlines()[-1]
+    assert last_line.index('{"mode": "lookup"}') < last_line.index('{"mode": "assessment"}')
+
+
+@pytest.mark.parametrize(
+    ("code", "tie_break"), [("en", "When unsure, answer lookup."), ("de", "Im Zweifel antworte mit lookup.")]
+)
+def test_the_prompt_leans_to_lookup(monkeypatch: pytest.MonkeyPatch, code: str, tie_break: str) -> None:
+    """A model that echoes the format line, or cannot decide, picks the cheap mode.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+        tie_break (str): The locale's "when unsure" sentence.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", code)
+    llm = _llm('{"mode": "lookup"}')
+
+    classify_turn(cast(Any, llm), question=QUESTION, prior_turn=None)
+
+    _assert_leans_to_lookup(llm.complete.call_args.args[0], tie_break)
+
+
+def test_the_bundled_fallback_prompt_leans_to_lookup() -> None:
+    """The default used when the prompt file is missing keeps the same order."""
+    prompt = DEFAULT_ASSESSMENT_CLASSIFY_PROMPT.format(question=QUESTION, prior_turn="(none)")
+
+    _assert_leans_to_lookup(prompt, "When unsure, answer lookup.")

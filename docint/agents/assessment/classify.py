@@ -25,11 +25,12 @@ CLASSIFY_TIMEOUT_S = 15.0
 
 DEFAULT_ASSESSMENT_CLASSIFY_PROMPT = (
     "Decide whether the user's latest message asks for a judgement or for information.\n\n"
-    '- "assessment": an evaluation, critique, opinion or recommendation about the material.\n'
-    '- "lookup": information the material itself states, even on an evaluative topic.\n\n'
+    '- "lookup": information the material itself states, even on an evaluative topic.\n'
+    '- "assessment": an evaluation, critique, opinion or recommendation about the material.\n\n'
+    "When unsure, answer lookup.\n\n"
     "Previous exchange:\n{prior_turn}\n\n"
     "Latest user message:\n{question}\n\n"
-    'Return JSON only: {{"mode": "assessment"}} or {{"mode": "lookup"}}\n'
+    'Return JSON only: {{"mode": "lookup"}} or {{"mode": "assessment"}}\n'
 )
 
 
