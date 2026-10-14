@@ -108,6 +108,14 @@ def test_blank_text_is_empty() -> None:
     assert labelled.evidence_chars is None
 
 
+def test_a_sentinel_only_answer_is_empty() -> None:
+    """A bare sentinel carries no text on either side, so there is nothing to label."""
+    labelled = compose_labelled_answer(SENTINEL)
+
+    assert labelled.outcome == "empty"
+    assert (labelled.text, labelled.evidence_chars) == ("", None)
+
+
 def test_the_label_follows_the_response_language(monkeypatch: pytest.MonkeyPatch) -> None:
     """The label is localized like the rest of the answer.
 
@@ -187,7 +195,7 @@ def test_splitter_holds_back_only_a_possible_sentinel_prefix() -> None:
 
 def test_splitter_keeps_its_indices_aligned_past_a_dotted_capital_i() -> None:
     """A dotted capital I lower-cases to two characters; the cut must still land on the sentinel."""
-    text = "Istanbul İ fact [1].\n[[ASSESSMENT]]\nView."
+    text = "Istanbul \u0130 fact [1].\n[[ASSESSMENT]]\nView."
     splitter = SentinelStreamSplitter()
 
     out = splitter.feed(text) + splitter.flush()

@@ -94,6 +94,8 @@ def compose_labelled_answer(text: str) -> LabelledAnswer:
         return LabelledAnswer(text=f"{assessment_label(with_rule=False)}{body}", evidence_chars=0, outcome="unsplit")
     evidence = body[: match.start()].strip()
     assessment = _SENTINEL_RE.sub("", body[match.end() :]).strip()
+    if not evidence and not assessment:
+        return LabelledAnswer(text="", evidence_chars=None, outcome="empty")
     if not assessment:
         return LabelledAnswer(text=evidence, evidence_chars=None, outcome="split")
     if not evidence:
