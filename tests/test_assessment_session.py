@@ -22,6 +22,7 @@ from typing_extensions import override
 
 from docint.agents.assessment.runner import AssessmentRunner
 from docint.agents.assessment.split import SENTINEL
+from docint.agents.history import build_prior_turn
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.rag import RAG, ParentContextPostprocessor
 from docint.core.state.base import Base
@@ -652,3 +653,122 @@ def test_a_query_fallback_never_binds_a_prior_turn_onto_the_shared_engine(sessio
     assert rag.query_engine is shared
     assert PRIOR_QUESTION not in second["response"]
     assert PRIOR_QUESTION not in first["response"]
+
+
+#: What an assessment turn said, as one answer: the sourced part, the label, then the judgement.
+FACT = "The second wave lost respondents [2]."
+JUDGEMENT = "The attrition probably biases the findings."
+ASSESSMENT_ANSWER = f"{FACT}\n\n---\n\n**Model assessment**\n\n{JUDGEMENT}"
+
+
+def _bound_block(sm: SessionManager, prior: PriorTurn | None) -> str | None:
+    """Bind a prior turn onto an engine double and read back what the generation template carries.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        prior (PriorTurn | None): The prior turn to bind.
+
+    Returns:
+        str | None: The bound prior-turn block, or ``None`` when nothing was bound.
+    """
+    rag = cast(Any, sm.rag)
+    rag._build_grounded_text_qa_template.side_effect = _echo_template
+    rag._build_grounded_refine_template.side_effect = _echo_template
+    engine = MagicMock()
+
+    sm._bind_prior_turn_context(engine, prior)
+
+    if not engine.update_prompts.called:
+        return None
+    template = engine.update_prompts.call_args.args[0]["response_synthesizer:text_qa_template"]
+    return template.format(context_str="", query_str="")
+
+
+def test_a_lookup_binds_only_the_source_backed_part_of_an_assessment(session_manager: SessionManager) -> None:
+    """The model's judgement must never reach a grounded prompt as if a source had said it.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    prior = PriorTurn(user_text=PRIOR_QUESTION, assistant_text=ASSESSMENT_ANSWER, evidence_chars=len(FACT))
+
+    block = _bound_block(session_manager, prior)
+
+    assert block is not None
+    assert PRIOR_QUESTION in block
+    assert FACT in block
+    assert JUDGEMENT not in block
+    assert "Model assessment" not in block
+
+
+def test_a_lookup_binds_nothing_when_no_part_of_the_assessment_was_source_backed(
+    session_manager: SessionManager,
+) -> None:
+    """An unsplit assessment is judgement throughout, so there is no prior turn to show a lookup.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    prior = PriorTurn(user_text=PRIOR_QUESTION, assistant_text=f"**Model assessment**\n\n{JUDGEMENT}", evidence_chars=0)
+
+    assert _bound_block(session_manager, prior) is None
+
+
+def test_a_lookup_answer_is_bound_whole(session_manager: SessionManager) -> None:
+    """A lookup is source-backed throughout, so the boundary leaves it as it was.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    block = _bound_block(session_manager, PriorTurn(user_text=PRIOR_QUESTION, assistant_text=FACT))
+
+    assert (
+        block == f"PRIOR<<Previous user question: {PRIOR_QUESTION}\nPrevious assistant answer: {FACT}>> CTX<<>> Q<<>>"
+    )
+
+
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+def test_a_legacy_agent_follow_up_never_sees_the_judgement_of_a_stored_assessment(
+    session_manager: SessionManager, entry: str
+) -> None:
+    """``/agent/*`` builds its prior turn from stored history, whose assessment turns carry ``agent.evidence_chars``.
+
+    The lookup that follows is answered by the real synthesizer; the echo template shows
+    which prior turn reached it.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        entry (str): The session manager method under test.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag._build_grounded_text_qa_template.side_effect = _echo_template
+    rag._build_grounded_refine_template.side_effect = _echo_template
+    engine = RetrieverQueryEngine(
+        retriever=_SeedRetriever(),
+        response_synthesizer=Refine(
+            llm=MockLLM(), text_qa_template=_echo_template(False), streaming=entry == "stream_chat"
+        ),
+    )
+    rag.query_engine = engine
+    rag.build_query_engine.return_value = engine
+    history = [
+        {"role": "user", "content": PRIOR_QUESTION},
+        {
+            "role": "assistant",
+            "content": ASSESSMENT_ANSWER,
+            "agent": {"answer": "split", "evidence_chars": len(FACT)},
+        },
+    ]
+    prior = build_prior_turn(history)
+
+    if entry == "chat":
+        answer = session_manager.chat("Where was the survey run?", session_id="s1", prior_turn=prior)["response"]
+    else:
+        answer = "".join(
+            item
+            for item in session_manager.stream_chat("Where was the survey run?", session_id="s1", prior_turn=prior)
+            if isinstance(item, str)
+        )
+
+    assert FACT in answer
+    assert JUDGEMENT not in answer

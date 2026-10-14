@@ -300,9 +300,13 @@ class SessionManager:
 
         Uses :meth:`llama_index.core.PromptTemplate.partial_format` to
         override the default sentinel set in
-        :meth:`docint.core.rag.RAG._build_grounded_text_qa_template`. No-op
-        when ``prior_turn`` is ``None`` (the default sentinel renders fine
-        as-is). Failures (e.g., the engine does not expose
+        :meth:`docint.core.rag.RAG._build_grounded_text_qa_template`.
+
+        Only the source-backed part of the exchange is bound
+        (:meth:`PriorTurn.evidence_only`): every lookup path binds here, and a
+        grounded prompt must never carry an assessment's judgement as if a
+        source had said it. No-op when nothing remains to bind (the default
+        sentinel renders fine as-is). Failures (e.g., the engine does not expose
         ``update_prompts``) are logged and swallowed because the prior-turn
         block is a soft enhancement; the engine remains usable with the
         default binding.
@@ -311,6 +315,9 @@ class SessionManager:
             engine: The active query engine (typically a ``RetrieverQueryEngine``).
             prior_turn: The immediately preceding user/assistant exchange, if any.
         """
+        if prior_turn is None:
+            return
+        prior_turn = prior_turn.evidence_only()
         if prior_turn is None:
             return
         update_prompts = getattr(engine, "update_prompts", None)

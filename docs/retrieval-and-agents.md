@@ -469,7 +469,9 @@ each to catalog copy.
 
 **Follow-ups.** A lookup asked after an assessment receives only the
 source-backed part of that answer as its prior turn, so the model's judgement is
-never restated as sourced fact. The prior turn is read by
+never restated as sourced fact. The cut is made where the prior turn is bound to
+the generation prompt, so the legacy `/agent/*` endpoints, which build theirs
+from stored history, get it too. The prior turn is read by
 `SessionManager.get_prior_turn`, without rehydrating any citation.
 
 ## Citation numbering
