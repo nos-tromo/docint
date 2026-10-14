@@ -1,0 +1,203 @@
+"""The numbered evidence an assessment turn gathers, and the room it may use."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+
+from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
+
+from docint.agents.assessment.split import neutralize_sentinel
+from docint.utils.embed_chunking import estimate_tokens
+from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
+
+MAX_LEDGER_ENTRIES = 24
+#: Smallest share of the answer budget worth giving one entry (~200 text + header).
+MIN_ENTRY_TOKENS = 240
+DIGEST_CHARS = 400
+ANSWER_OUTPUT_TOKENS = 1024
+#: A thinking model spends its reply budget on reasoning before the answer.
+ANSWER_OUTPUT_TOKENS_REASONING = 3072
+PRIOR_TURN_TOKENS = 400
+QUESTION_TOKENS = 150
+SLACK_TOKENS = 64
+SAFETY_MARGIN = 0.95
+
+
+@dataclass(frozen=True)
+class AnswerBudget:
+    """How much the answer step may spend.
+
+    Attributes:
+        evidence_tokens (int): Room for the rendered ledger.
+        output_tokens (int): ``max_tokens`` for the streamed answer.
+        max_entries (int): Ledger cap that keeps every entry legible.
+    """
+
+    evidence_tokens: int
+    output_tokens: int
+    max_entries: int
+
+
+def answer_budget(*, ctx_window: int, template: str, reasoning: bool, char_token_ratio: float) -> AnswerBudget:
+    """Size the answer step from the context window.
+
+    Args:
+        ctx_window (int): The chat model's context window in tokens.
+        template (str): The answer prompt template, measured for its overhead.
+        reasoning (bool): Whether the answer model thinks before answering.
+        char_token_ratio (float): Characters per token for estimation.
+
+    Returns:
+        AnswerBudget: Evidence room, output reserve and ledger cap.
+    """
+    output = ANSWER_OUTPUT_TOKENS_REASONING if reasoning else ANSWER_OUTPUT_TOKENS
+    evidence = max(
+        0,
+        int(ctx_window * SAFETY_MARGIN)
+        - estimate_tokens(template, char_token_ratio)
+        - PRIOR_TURN_TOKENS
+        - QUESTION_TOKENS
+        - SLACK_TOKENS
+        - output,
+    )
+    return AnswerBudget(
+        evidence_tokens=evidence,
+        output_tokens=output,
+        max_entries=max(1, min(MAX_LEDGER_ENTRIES, evidence // MIN_ENTRY_TOKENS)),
+    )
+
+
+class EvidenceLedger:
+    """Append-only evidence, numbered in the order it was found."""
+
+    def __init__(self, *, cap: int) -> None:
+        """Start empty.
+
+        Args:
+            cap (int): The most entries the ledger admits.
+        """
+        self._cap = max(1, cap)
+        self._entries: list[NodeWithScore] = []
+        self._ids: set[str] = set()
+
+    def __len__(self) -> int:
+        """Return how many entries the ledger holds.
+
+        Returns:
+            int: The entry count.
+        """
+        return len(self._entries)
+
+    @property
+    def full(self) -> bool:
+        """Whether the ledger admits no more entries.
+
+        Returns:
+            bool: ``True`` at the cap.
+        """
+        return len(self._entries) >= self._cap
+
+    def add(self, nodes: Iterable[NodeWithScore]) -> list[tuple[int, NodeWithScore]]:
+        """Admit passages not seen before, up to the cap.
+
+        Args:
+            nodes (Iterable[NodeWithScore]): Passages in ranked order.
+
+        Returns:
+            list[tuple[int, NodeWithScore]]: The newly admitted passages with
+            their ledger numbers.
+        """
+        added: list[tuple[int, NodeWithScore]] = []
+        for scored in nodes:
+            if self.full:
+                break
+            node_id = scored.node.node_id
+            if node_id in self._ids:
+                continue
+            self._ids.add(node_id)
+            self._entries.append(scored)
+            added.append((len(self._entries), scored))
+        return added
+
+    def entries(self) -> list[NodeWithScore]:
+        """Return the entries in ledger order, unnumbered.
+
+        Returns:
+            list[NodeWithScore]: The admitted passages.
+        """
+        return list(self._entries)
+
+    def numbered(self) -> list[NodeWithScore]:
+        """Return clones stamped with their ledger number, in ledger order.
+
+        Returns:
+            list[NodeWithScore]: Clones carrying ``citation_index``; the cached
+            originals are never written to.
+        """
+        numbered: list[NodeWithScore] = []
+        for number, scored in enumerate(self._entries, start=1):
+            clone = scored.node.model_copy(deep=True)
+            clone.metadata["citation_index"] = number
+            clone.excluded_llm_metadata_keys = [k for k in clone.excluded_llm_metadata_keys if k != "citation_index"]
+            numbered.append(NodeWithScore(node=clone, score=scored.score))
+        return numbered
+
+
+def digest(number: int, scored: NodeWithScore) -> str:
+    """Render one bounded line the research model reads instead of the passage.
+
+    Args:
+        number (int): The passage's ledger number.
+        scored (NodeWithScore): The passage.
+
+    Returns:
+        str: ``[n] (file, p. x) text…`` on a single line.
+    """
+    meta = scored.node.metadata or {}
+    name = str(meta.get("filename") or meta.get("file_name") or "")
+    page = meta.get("page") if meta.get("page") is not None else meta.get("page_number")
+    where = f"{name}, p. {page}" if name and page is not None else name
+    text = " ".join(scored.node.get_content(metadata_mode=MetadataMode.NONE).split())
+    snippet = neutralize_sentinel(text[:DIGEST_CHARS])
+    return f"[{number}] ({where}) {snippet}" if where else f"[{number}] {snippet}"
+
+
+def render_context(
+    nodes: list[NodeWithScore],
+    *,
+    llm_view: Callable[[BaseNode], BaseNode],
+    budget_tokens: int,
+    char_token_ratio: float,
+) -> tuple[str, int]:
+    """Render numbered nodes like the grounded prompt's context, shortened to fit.
+
+    Headers are always kept; the text budget is shared shortest-first and every
+    cut is marked, so the model can tell a short excerpt from a short source.
+
+    Args:
+        nodes (list[NodeWithScore]): The numbered ledger.
+        llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt
+            must not see.
+        budget_tokens (int): Tokens the rendered evidence may use.
+        char_token_ratio (float): Characters per token for the budget.
+
+    Returns:
+        tuple[str, int]: The context block and how many entries were shortened.
+    """
+    headers: list[str] = []
+    bodies: list[str] = []
+    for scored in nodes:
+        view = llm_view(scored.node)
+        headers.append(view.get_metadata_str(mode=MetadataMode.LLM))
+        bodies.append(neutralize_sentinel(view.get_content(metadata_mode=MetadataMode.NONE)))
+    header_chars = sum(len(header) + 2 for header in headers)
+    char_budget = max(0, int(budget_tokens * char_token_ratio) - header_chars)
+    allowances = allocate_shortest_first([len(body) for body in bodies], char_budget)
+    rendered: list[str] = []
+    shortened = 0
+    for header, body, allowance in zip(headers, bodies, allowances, strict=True):
+        fitted, cut = fit_with_marker(body, allowance)
+        shortened += int(cut)
+        rendered.append(f"{header}\n\n{fitted}" if header else fitted)
+    return "\n\n".join(rendered), shortened
