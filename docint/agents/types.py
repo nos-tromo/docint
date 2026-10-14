@@ -1,7 +1,10 @@
 """Shared types for agent orchestration."""
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+AnswerMode = Literal["lookup", "assessment"]
+"""How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
 
 @dataclass

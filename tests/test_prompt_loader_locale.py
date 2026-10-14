@@ -212,3 +212,33 @@ def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
     for locale in ("en", "de"):
         text = Path(f"docint/utils/prompts/{locale}/{name}.txt").read_text(encoding="utf-8")
         assert "Markdown" in text, f"{locale}/{name}.txt no longer asks for Markdown"
+
+
+@pytest.mark.parametrize("name", ["assessment_classify"])
+def test_assessment_prompts_match_across_locales(name: str) -> None:
+    """German and English assessment prompts take the same placeholders and format cleanly.
+
+    Args:
+        name (str): The prompt basename.
+    """
+    import re
+
+    from docint.utils.env_cfg import load_path_env
+
+    root = load_path_env().prompts
+    texts = {code: (root / code / f"{name}.txt").read_text(encoding="utf-8") for code in ("en", "de")}
+
+    def placeholders(text: str) -> set[str]:
+        """Collect the ``{name}`` placeholders of a template.
+
+        Args:
+            text (str): The template text.
+
+        Returns:
+            set[str]: The placeholder names.
+        """
+        return set(re.findall(r"\{(\w+)\}", text))
+
+    assert placeholders(texts["de"]) == placeholders(texts["en"])
+    for text in texts.values():
+        text.format(**dict.fromkeys(placeholders(text), "X"))

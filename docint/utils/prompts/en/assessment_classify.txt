@@ -1,0 +1,12 @@
+Decide whether the user's latest message asks for a judgement or for information.
+
+- "assessment": the user wants an evaluation, critique, opinion or recommendation about the material — for example what could be improved, what its strengths or weaknesses are, whether something is convincing, plausible, correct or well done, which option is better, or what is missing.
+- "lookup": the user wants information the material itself states — facts, summaries, explanations, lists, quotes, where something is mentioned — even when the topic is evaluative, such as "what does the paper say about its limitations?".
+
+Previous exchange:
+{prior_turn}
+
+Latest user message:
+{question}
+
+Return JSON only: {{"mode": "assessment"}} or {{"mode": "lookup"}}
