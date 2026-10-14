@@ -214,7 +214,9 @@ def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
         assert "Markdown" in text, f"{locale}/{name}.txt no longer asks for Markdown"
 
 
-@pytest.mark.parametrize("name", ["assessment_classify", "assessment_answer", "response_validator_assessment"])
+@pytest.mark.parametrize(
+    "name", ["assessment_classify", "assessment_answer", "assessment_research", "response_validator_assessment"]
+)
 def test_assessment_prompts_match_across_locales(name: str) -> None:
     """German and English assessment prompts take the same placeholders and format cleanly.
 

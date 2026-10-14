@@ -49,6 +49,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SparseClientConfig,
     SummaryConfig,
+    load_assessment_env,
     load_embed_client_env,
     load_embedding_env,
     load_graphrag_env,
@@ -127,6 +128,7 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import AssessmentRunner
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -8115,6 +8117,10 @@ class RAG:
     def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:
         """Build the runner for one assessment turn over this turn's engine.
 
+        Research runs on the plain (non-reasoning) chat model, which picks the
+        queries; the answer is written by whichever model the request's
+        reasoning toggle selects.
+
         Args:
             engine (Any): The turn's query engine; research searches through its
                 ``retrieve``, so filters, rerank and parent context apply as on a
@@ -8125,14 +8131,27 @@ class RAG:
         Returns:
             AssessmentRunner: A runner bound to this request's models and limits.
         """
-        _ = engine, scoped  # Research, which searches through the engine, is wired in separately.
+        research_llm = self.text_model
         answer_llm = self.post_retrieval_text_model
+        ratio = float(self.embed_char_token_ratio or 3.5)
+        researcher = (
+            None
+            if scoped
+            else ResearchLoop(
+                llm=research_llm,
+                search=lambda query: list(engine.retrieve(QueryBundle(query))),
+                max_steps=load_assessment_env().max_steps,
+                ctx_window=int(self.openai_ctx_window),
+                char_token_ratio=ratio,
+            )
+        )
         return AssessmentRunner(
             answer_llm=answer_llm,
             llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
             ctx_window=int(self.openai_ctx_window),
-            char_token_ratio=float(self.embed_char_token_ratio or 3.5),
-            reasoning=answer_llm is not self.text_model,
+            char_token_ratio=ratio,
+            reasoning=answer_llm is not research_llm,
+            researcher=researcher,
         )
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:

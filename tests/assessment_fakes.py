@@ -6,7 +6,8 @@ from collections.abc import Iterator, Sequence
 from typing import Any
 from unittest.mock import MagicMock
 
-from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
+from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole, ToolCallBlock
+from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
 
 #: What the production LLM view lets through for these doubles.
@@ -60,3 +61,81 @@ def streaming_llm(tokens: Sequence[str]) -> MagicMock:
 
     llm.stream_chat.side_effect = _stream
     return llm
+
+
+def tool_llm(script: Sequence[ToolSelection | str | Exception]) -> MagicMock:
+    """Build a function-calling model double that replays one scripted reply per call.
+
+    Args:
+        script (Sequence[ToolSelection | str | Exception]): Per call: a tool
+            call to return, plain text to answer with, or an error to raise.
+            After the script runs out, the model calls ``finish``.
+
+    Returns:
+        MagicMock: The model double; ``chat_with_tools.call_args_list`` records every call.
+    """
+    replies = list(script)
+    llm = MagicMock()
+
+    def _chat_with_tools(tools: Sequence[Any], **kwargs: Any) -> ChatResponse:
+        """Replay the next scripted reply as a chat response, or raise it.
+
+        Args:
+            tools (Sequence[Any]): The tools offered, unused.
+            **kwargs (Any): The call's other arguments, unused.
+
+        Returns:
+            ChatResponse: A tool call, or plain text.
+
+        Raises:
+            Exception: The scripted error, when that is the next reply.
+        """
+        reply: ToolSelection | str | Exception = (
+            replies.pop(0) if replies else ToolSelection(tool_id="", tool_name="finish", tool_kwargs={})
+        )
+        if isinstance(reply, Exception):
+            raise reply
+        if isinstance(reply, ToolSelection):
+            block = ToolCallBlock(
+                tool_call_id=reply.tool_id or None, tool_name=reply.tool_name, tool_kwargs=reply.tool_kwargs
+            )
+            return ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, blocks=[block]))
+        return ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=reply))
+
+    def _tool_calls(response: ChatResponse, error_on_no_tool_call: bool = True, **kwargs: Any) -> list[ToolSelection]:
+        """Read the tool calls out of a response, as the real model does.
+
+        Args:
+            response (ChatResponse): The response to read.
+            error_on_no_tool_call (bool): Accepted for signature parity, unused.
+            **kwargs (Any): Other arguments, unused.
+
+        Returns:
+            list[ToolSelection]: The calls; empty for a plain-text response.
+        """
+        return [
+            ToolSelection(
+                tool_id=block.tool_call_id or "",
+                tool_name=block.tool_name,
+                tool_kwargs=block.tool_kwargs if isinstance(block.tool_kwargs, dict) else {},
+            )
+            for block in response.message.blocks
+            if isinstance(block, ToolCallBlock)
+        ]
+
+    llm.chat_with_tools.side_effect = _chat_with_tools
+    llm.get_tool_calls_from_response.side_effect = _tool_calls
+    return llm
+
+
+def search_call(query: str, call_id: str = "call_x") -> ToolSelection:
+    """Build a scripted ``search`` tool call.
+
+    Args:
+        query (str): The search query.
+        call_id (str): The tool-call id the model returns.
+
+    Returns:
+        ToolSelection: The scripted call.
+    """
+    return ToolSelection(tool_id=call_id, tool_name="search", tool_kwargs={"query": query})
