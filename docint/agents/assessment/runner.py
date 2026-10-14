@@ -7,6 +7,7 @@ LLM-view renderer and the optional research step all arrive as arguments.
 from __future__ import annotations
 
 import contextlib
+import itertools
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -17,10 +18,12 @@ from llama_index.core.schema import BaseNode, NodeWithScore
 from loguru import logger
 
 from docint.agents.assessment.ledger import (
+    OVERFLOW_RETRY_SHARE,
     PRIOR_TURN_TOKENS,
     QUESTION_TOKENS,
     EvidenceLedger,
     answer_budget,
+    is_context_overflow,
     render_context,
 )
 from docint.agents.assessment.split import SentinelStreamSplitter
@@ -178,6 +181,38 @@ class AssessmentRunner:
                 return self._count_tokens(text)
         return estimate_tokens(text, self._ratio)
 
+    def _open_answer(
+        self, nodes: list[NodeWithScore], *, block: str, question: str, budget_tokens: int
+    ) -> tuple[Iterator[str], int]:
+        """Render the evidence into the answer prompt, send it and pull the first token.
+
+        The endpoint's HTTP error, a context overflow included, surfaces on that
+        first pull, before any answer text exists.
+
+        Args:
+            nodes (list[NodeWithScore]): The numbered evidence.
+            block (str): The rendered prior turn.
+            question (str): The user's message, stripped.
+            budget_tokens (int): Tokens the rendered evidence may use.
+
+        Returns:
+            tuple[Iterator[str], int]: The answer tokens, the first one included,
+            and how many entries were shortened.
+        """
+        context, shortened = render_context(
+            nodes,
+            llm_view=self._llm_view,
+            budget_tokens=budget_tokens,
+            char_token_ratio=self._ratio,
+            count_tokens=self._count_tokens,
+        )
+        prompt = self._answer_prompt.format(prior_turn=block, context_str=context, question=question)
+        tokens = stream_chat_response_to_tokens(
+            self._answer_llm.stream_chat([ChatMessage(role=MessageRole.USER, content=prompt)])
+        )
+        first = next(tokens, None)
+        return itertools.chain([] if first is None else [first], tokens), shortened
+
     def run(
         self, *, question: str, prior_turn: PriorTurn | None, seed: Sequence[NodeWithScore]
     ) -> Iterator[AgentProgress | str | AssessmentResult]:
@@ -224,19 +259,34 @@ class AssessmentRunner:
         # The prior turn and question can outgrow their reserve; the evidence gives way.
         overhead = self._overhead_tokens(block + question.strip())
         extra = max(0, overhead - PRIOR_TURN_TOKENS - QUESTION_TOKENS)
-        context, shortened = render_context(
-            nodes,
-            llm_view=self._llm_view,
-            budget_tokens=max(0, budget.evidence_tokens - extra),
-            char_token_ratio=self._ratio,
-            count_tokens=self._count_tokens,
-        )
-        prompt = self._answer_prompt.format(prior_turn=block, context_str=context, question=question.strip())
+        evidence_budget = max(0, budget.evidence_tokens - extra)
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
+        try:
+            tokens, shortened = self._open_answer(
+                nodes, block=block, question=question.strip(), budget_tokens=evidence_budget
+            )
+        except Exception as exc:
+            if not is_context_overflow(exc):
+                raise
+            # Only before the first token: nothing has been shown that a retry would contradict.
+            logger.warning(
+                "Assessment answer overflowed the context window ({}); retrying with less evidence",
+                type(exc).__name__,
+            )
+            try:
+                tokens, shortened = self._open_answer(
+                    nodes,
+                    block=block,
+                    question=question.strip(),
+                    budget_tokens=int(evidence_budget * OVERFLOW_RETRY_SHARE),
+                )
+            except Exception as retry_exc:
+                if is_context_overflow(retry_exc):
+                    raise ValueError("The assessment prompt exceeds the model's context window.") from retry_exc
+                raise
         splitter = SentinelStreamSplitter()
         raw: list[str] = []
-        messages = [ChatMessage(role=MessageRole.USER, content=prompt)]
-        for token in stream_chat_response_to_tokens(self._answer_llm.stream_chat(messages)):
+        for token in tokens:
             raw.append(token)
             visible = splitter.feed(token)
             if visible:

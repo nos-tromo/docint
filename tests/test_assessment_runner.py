@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from typing import Any, cast
 
+import openai
 import pytest
-from assessment_fakes import llm_view, scored_node, streaming_llm
+from assessment_fakes import bad_request, llm_view, scored_node, streaming_llm
+from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger
@@ -35,6 +37,7 @@ def _runner(
     reasoning: bool = False,
     researcher: Any = None,
     count_tokens: Callable[[str], int] | None = None,
+    failures: list[Exception] | None = None,
 ) -> tuple[AssessmentRunner, Any]:
     """Build a runner over a streaming double.
 
@@ -43,11 +46,12 @@ def _runner(
         reasoning (bool): Whether the answer model counts as a reasoning model.
         researcher (Any): An optional research step.
         count_tokens (Callable[[str], int] | None): An optional tokenizer.
+        failures (list[Exception] | None): Errors the first answer calls raise.
 
     Returns:
         tuple[AssessmentRunner, Any]: The runner and its model double.
     """
-    llm = streaming_llm(tokens or ANSWER)
+    llm = streaming_llm(tokens or ANSWER, failures=failures or [])
     runner = AssessmentRunner(
         answer_llm=cast(Any, llm),
         llm_view=llm_view,
@@ -339,3 +343,73 @@ def test_the_prior_turn_and_question_are_measured_with_the_tokenizer() -> None:
     _prompt(*_runner(count_tokens=_count), _seed(), prior)
 
     assert prior_turn_block(prior) + QUESTION in measured
+
+
+OVERFLOW = "This model's maximum context length is 8192 tokens; your request has 9001 input tokens."
+
+
+def test_an_overflowing_answer_prompt_is_rebuilt_once_with_less_evidence() -> None:
+    """A context error before the first token rebuilds the prompt smaller; the turn then completes."""
+    runner, llm = _runner(failures=[bad_request(OVERFLOW)])
+
+    items = list(runner.run(question=QUESTION, prior_turn=None, seed=_long_seed(8)))
+
+    first, second = (call.args[0][0].content for call in llm.stream_chat.call_args_list)
+    result = items[-1]
+    assert len(second) < len(first)
+    assert [item.action for item in items if isinstance(item, AgentProgress)] == ["seed", "answer"]
+    assert isinstance(result, AssessmentResult)
+    assert result.raw_text == "".join(ANSWER)
+    # The first prompt held every passage whole, so the count can only be the retry's.
+    assert "characters not shown" not in first
+    assert result.shortened == 8
+
+
+def test_a_second_overflow_ends_the_turn_as_a_context_window_error() -> None:
+    """The API reports a ValueError naming the context window as ``context_overflow``."""
+    runner, llm = _runner(failures=[bad_request(OVERFLOW), bad_request(OVERFLOW)])
+
+    with pytest.raises(ValueError, match="context window"):
+        list(runner.run(question=QUESTION, prior_turn=None, seed=_long_seed(8)))
+
+    assert llm.stream_chat.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "error", [bad_request("The model 'test-model' does not exist."), RuntimeError("upstream unavailable")]
+)
+def test_a_failure_that_is_not_an_overflow_is_not_retried(error: Exception) -> None:
+    """Only a prompt that was too long is worth sending again shorter.
+
+    Args:
+        error (Exception): What the answer call raises.
+    """
+    runner, llm = _runner(failures=[error])
+
+    with pytest.raises(type(error)) as raised:
+        list(runner.run(question=QUESTION, prior_turn=None, seed=_seed()))
+
+    assert raised.value is error
+    assert llm.stream_chat.call_count == 1
+
+
+def test_an_answer_that_fails_after_its_first_token_is_never_retried() -> None:
+    """Text already streamed cannot be taken back, so a later error propagates unchanged."""
+    llm = streaming_llm([])
+
+    def _stream(messages: list[ChatMessage], **kwargs: Any) -> Iterator[ChatResponse]:
+        yield ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content="Fact"), delta="Fact")
+        raise bad_request(OVERFLOW)
+
+    llm.stream_chat.side_effect = _stream
+    runner = AssessmentRunner(
+        answer_llm=cast(Any, llm), llm_view=llm_view, ctx_window=8192, char_token_ratio=3.5, reasoning=False
+    )
+    streamed: list[Any] = []
+
+    with pytest.raises(openai.BadRequestError):
+        for item in runner.run(question=QUESTION, prior_turn=None, seed=_seed()):
+            streamed.append(item)
+
+    assert "Fact" in streamed
+    assert llm.stream_chat.call_count == 1

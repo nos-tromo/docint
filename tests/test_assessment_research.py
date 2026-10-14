@@ -5,11 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, cast
 
-import httpx
-import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
-from assessment_fakes import scored_node, search_call, tool_llm
+from assessment_fakes import bad_request, scored_node, search_call, tool_llm
 from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
 from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import NodeWithScore
@@ -20,19 +18,6 @@ from docint.agents.assessment.runner import ResearchOutcome
 from docint.agents.types import AgentProgress
 
 QUESTION = "zzsecretzz What could be improved in this study?"
-
-
-def _bad_request(message: str) -> openai.BadRequestError:
-    """Build the error an OpenAI-compatible endpoint raises on HTTP 400.
-
-    Args:
-        message (str): The error message.
-
-    Returns:
-        openai.BadRequestError: The error.
-    """
-    request = httpx.Request("POST", "http://inference.invalid/v1/chat/completions")
-    return openai.BadRequestError(message, response=httpx.Response(400, request=request), body=None)
 
 
 def _search(results: dict[str, list[NodeWithScore]]) -> Any:
@@ -250,7 +235,7 @@ def test_a_rejected_first_tool_call_reports_tools_unavailable(loguru_caplog: Log
     Args:
         loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
     """
-    llm = tool_llm([_bad_request(f"model does not support tools: {QUESTION}")])
+    llm = tool_llm([bad_request(f"model does not support tools: {QUESTION}")])
 
     _, outcome = _drain(_loop(llm, _search({})).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)))
 
@@ -262,19 +247,19 @@ def test_a_rejected_first_tool_call_reports_tools_unavailable(loguru_caplog: Log
     ("error", "first_call", "later_call"),
     [
         (
-            _bad_request("This model's maximum context length is 8192 tokens; your request has 9001 input tokens."),
+            bad_request("This model's maximum context length is 8192 tokens; your request has 9001 input tokens."),
             "context_budget",
             "context_budget",
         ),
         (
-            _bad_request("The decoder prompt (length 9001) is longer than the maximum model length of 8192"),
+            bad_request("The decoder prompt (length 9001) is longer than the maximum model length of 8192"),
             "context_budget",
             "context_budget",
         ),
-        (_bad_request("request exceeds the available context size"), "context_budget", "context_budget"),
-        (_bad_request("Input is too long"), "context_budget", "context_budget"),
+        (bad_request("request exceeds the available context size"), "context_budget", "context_budget"),
+        (bad_request("Input is too long"), "context_budget", "context_budget"),
         (
-            _bad_request("auto tool choice requires --enable-auto-tool-choice"),
+            bad_request("auto tool choice requires --enable-auto-tool-choice"),
             "tools_unavailable",
             "research_failed",
         ),

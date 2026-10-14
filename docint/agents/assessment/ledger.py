@@ -26,6 +26,8 @@ PRIOR_TURN_TOKENS = 400
 QUESTION_TOKENS = 150
 SLACK_TOKENS = 64
 SAFETY_MARGIN = 0.95
+#: Share of the evidence budget an overflowing answer prompt is rebuilt with, once.
+OVERFLOW_RETRY_SHARE = 0.6
 #: How OpenAI-compatible servers word a prompt longer than the model's context.
 CONTEXT_ERROR_MARKERS = (
     "context length",

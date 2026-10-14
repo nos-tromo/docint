@@ -6,6 +6,8 @@ from collections.abc import Iterator, Sequence
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
+import openai
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole, ToolCallBlock
 from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
@@ -42,18 +44,36 @@ def llm_view(node: BaseNode) -> BaseNode:
     return clone
 
 
-def streaming_llm(tokens: Sequence[str]) -> MagicMock:
+def bad_request(message: str) -> openai.BadRequestError:
+    """Build the error an OpenAI-compatible endpoint raises on HTTP 400.
+
+    Args:
+        message (str): The error message.
+
+    Returns:
+        openai.BadRequestError: The error.
+    """
+    request = httpx.Request("POST", "http://inference.invalid/v1/chat/completions")
+    return openai.BadRequestError(message, response=httpx.Response(400, request=request), body=None)
+
+
+def streaming_llm(tokens: Sequence[str], *, failures: Sequence[Exception] = ()) -> MagicMock:
     """Build a chat model whose ``stream_chat`` streams ``tokens``, recording each call.
 
     Args:
         tokens (Sequence[str]): The answer, token by token.
+        failures (Sequence[Exception]): Errors the first calls raise, one per call,
+            on their first pull — where an endpoint's HTTP error surfaces.
 
     Returns:
         MagicMock: The model double; ``stream_chat.call_args`` holds the messages and kwargs.
     """
     llm = MagicMock()
+    pending = list(failures)
 
     def _stream(messages: Sequence[ChatMessage], **kwargs: Any) -> Iterator[ChatResponse]:
+        if pending:
+            raise pending.pop(0)
         text = ""
         for token in tokens:
             text += token
