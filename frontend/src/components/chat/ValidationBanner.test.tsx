@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { ValidationBanner } from './ValidationBanner'
-import type { ValidationFields } from '@/api/types'
+import type { AgentTrail, ValidationFields } from '@/api/types'
+
+function trail(overrides: Partial<AgentTrail>): AgentTrail {
+  return { steps: 1, actions: [], reason: null, answer: 'split', shortened: 0, evidence_chars: 9, ...overrides }
+}
 
 describe('ValidationBanner', () => {
   it('renders the validated state when the answer is grounded', () => {
@@ -72,8 +76,80 @@ describe('ValidationBanner', () => {
   })
 
   it('says an unseparated assessment was not validated', () => {
-    render(<ValidationBanner v={{ validation_checked: false, validation_reason: 'x', answer_mode: 'assessment' }} />)
+    render(
+      <ValidationBanner
+        v={{
+          validation_checked: false,
+          validation_reason: 'x',
+          answer_mode: 'assessment',
+          agent: trail({ answer: 'unsplit', evidence_chars: 0 })
+        }}
+      />
+    )
     expect(screen.getByText(/no separate source-backed part/i)).toBeInTheDocument()
+  })
+
+  it('says a split assessment with no source-backed text was not validated', () => {
+    render(
+      <ValidationBanner
+        v={{
+          validation_checked: false,
+          answer_mode: 'assessment',
+          agent: trail({ answer: 'split', evidence_chars: 0 })
+        }}
+      />
+    )
+    expect(screen.getByText(/no separate source-backed part/i)).toBeInTheDocument()
+  })
+
+  it('says an empty assessment was not validated', () => {
+    render(
+      <ValidationBanner
+        v={{
+          validation_checked: false,
+          answer_mode: 'assessment',
+          agent: trail({ answer: 'empty', evidence_chars: null })
+        }}
+      />
+    )
+    expect(screen.getByText(/no separate source-backed part/i)).toBeInTheDocument()
+  })
+
+  it('blames the validator, not the answer, when a split assessment went unchecked', () => {
+    // The source-backed part exists; validation was disabled or failed.
+    render(
+      <ValidationBanner
+        v={{
+          validation_checked: false,
+          answer_mode: 'assessment',
+          agent: trail({ answer: 'split', evidence_chars: 9 })
+        }}
+      />
+    )
+    expect(screen.getByText(/response validation unavailable/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no separate source-backed part/i)).not.toBeInTheDocument()
+  })
+
+  it('treats a split assessment whose whole answer is source-backed as a validator outage', () => {
+    render(
+      <ValidationBanner
+        v={{
+          validation_checked: false,
+          answer_mode: 'assessment',
+          agent: trail({ answer: 'split', evidence_chars: null })
+        }}
+      />
+    )
+    expect(screen.getByText(/response validation unavailable/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no separate source-backed part/i)).not.toBeInTheDocument()
+  })
+
+  it('falls back to the generic unavailable title when an assessment carries no trail', () => {
+    render(
+      <ValidationBanner v={{ validation_checked: false, answer_mode: 'assessment', agent: null }} />
+    )
+    expect(screen.getByText(/response validation unavailable/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no separate source-backed part/i)).not.toBeInTheDocument()
   })
 
   it('names the source-backed part when the validator flagged an assessment', () => {

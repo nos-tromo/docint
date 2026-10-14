@@ -4,7 +4,7 @@ import type { ChatFinalEvent, ValidationFields } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 
-type BannerFields = ValidationFields & Pick<ChatFinalEvent, 'answer_mode'>
+type BannerFields = ValidationFields & Pick<ChatFinalEvent, 'answer_mode' | 'agent'>
 
 interface BannerSpec {
   tone: string
@@ -22,6 +22,8 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
   // disappears.
   const reason = v.validation_reason ?? undefined
   const assessment = v.answer_mode === 'assessment'
+  // The backend skips validation exactly when the answer is not `split` or its evidence part is empty.
+  const noSourcePart = !!v.agent && (v.agent.answer !== 'split' || v.agent.evidence_chars === 0)
   if (v.validation_checked === true && v.validation_mismatch === true) {
     return {
       tone: 'border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] text-[var(--status-amber-strong)]',
@@ -52,7 +54,7 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
     tone: 'border-border bg-muted text-muted-foreground',
     Icon: InfoIcon,
     title:
-      assessment && v.validation_checked === false
+      assessment && v.validation_checked === false && noSourcePart
         ? t('chat.validation_skipped_assessment_title')
         : v.validation_checked === false
           ? t('chat.validation_unavailable_title')
