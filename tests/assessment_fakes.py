@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
+import threading
+import time
 from collections.abc import Iterator, Sequence
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -291,3 +296,81 @@ def search_call(query: str, call_id: str = "call_x") -> ToolSelection:
         ToolSelection: The scripted call.
     """
     return ToolSelection(tool_id=call_id, tool_name="search", tool_kwargs={"query": query})
+
+
+class _LoopbackServer(ThreadingHTTPServer):
+    """A loopback HTTP server that queues many connections and never waits on its handler threads."""
+
+    request_queue_size = 64
+    daemon_threads = True
+
+
+#: How many pieces :func:`fragmented_endpoint` sends a reply in, and the pause before each.
+REPLY_FRAGMENTS = 12
+REPLY_FRAGMENT_GAP_S = 0.25
+
+
+@contextlib.contextmanager
+def fragmented_endpoint(body: dict[str, Any]) -> Iterator[str]:
+    """Serve one canned chat completion over loopback, a fragment at a time, and yield its ``/v1`` base URL.
+
+    Status and headers go out at once; the body follows in ``REPLY_FRAGMENTS``
+    pieces ``REPLY_FRAGMENT_GAP_S`` apart. No read waits long enough for a
+    per-operation timeout of a second to fire, yet the reply takes about three.
+
+    Args:
+        body (dict[str, Any]): The completion every request is answered with.
+
+    Yields:
+        str: The base URL, ending in ``/v1``.
+    """
+    raw = json.dumps(body).encode()
+    size = -(-len(raw) // REPLY_FRAGMENTS)
+
+    class _Fragmented(BaseHTTPRequestHandler):
+        """Answers every request with the canned completion, a fragment at a time."""
+
+        def do_POST(self) -> None:
+            """Read the request, then send the reply slowly; a client that has gone is ignored."""
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                for start in range(0, len(raw), size):
+                    time.sleep(REPLY_FRAGMENT_GAP_S)
+                    self.wfile.write(raw[start : start + size])
+                    self.wfile.flush()
+            except OSError:
+                return
+
+        @override
+        def log_message(self, format: str, *args: Any) -> None:
+            """Keep the test output quiet.
+
+            Args:
+                format (str): The message template, unused.
+                *args (Any): Its values, unused.
+            """
+
+    server = _LoopbackServer(("127.0.0.1", 0), _Fragmented)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def join_threads(name: str) -> None:
+    """Wait up to ten seconds for every thread with ``name`` to end, so an abandoned call gives its slot back.
+
+    Args:
+        name (str): The thread name the work runs under.
+    """
+    for thread in threading.enumerate():
+        if thread.name == name:
+            thread.join(timeout=10)

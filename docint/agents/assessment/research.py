@@ -4,16 +4,17 @@ Calls tools with ``tool_choice="required"``; a model that answers in prose
 anyway (an endpoint that serves ``required`` as ``auto``) ends research. The
 turn reports ``tools_unavailable`` when the endpoint rejects the first call, or
 when the first round returns no tool call. The time budget bounds every model
-call and every search; a search still running when it runs out is abandoned.
-Searches share ``SEARCH_SLOTS`` slots per process, and an abandoned one keeps
-its slot until it ends, so no outage can pile up more running searches than
-that.
+call and every search, and model calls run like searches: each on its own
+thread, abandoned when the budget runs out, and a reply that lands after it is
+not acted on. Searches share ``SEARCH_SLOTS`` slots per process and model calls
+``MODEL_SLOTS``; an abandoned call keeps its slot until it ends, so no outage
+can pile up more running calls than that.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-import contextvars
+import functools
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -24,6 +25,7 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole, ToolCallB
 from llama_index.core.tools import FunctionTool
 from loguru import logger
 
+from docint.agents.assessment.bounded import NoSlot, run_bounded
 from docint.agents.assessment.ledger import EvidenceLedger, digest, is_context_overflow
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn, prior_turn_block
 from docint.agents.types import AgentProgress, PriorTurn
@@ -49,6 +51,14 @@ SEARCH_SLOTS = 8
 SEARCH_SLOT_WAIT_S = 5.0
 #: The process-wide slots every research search takes; a resource cap, not session state.
 SEARCH_SLOT_POOL = threading.BoundedSemaphore(SEARCH_SLOTS)
+#: Name of the thread a model call runs on, so an abandoned one can be found.
+MODEL_THREAD_NAME = "assessment-research-model"
+#: Research model calls that may run at once in this process, abandoned ones included.
+MODEL_SLOTS = 8
+#: Longest a model call waits for a free slot; the wait comes out of the research budget.
+MODEL_SLOT_WAIT_S = 5.0
+#: The process-wide slots every research model call takes; a resource cap, not session state.
+MODEL_SLOT_POOL = threading.BoundedSemaphore(MODEL_SLOTS)
 
 DEFAULT_ASSESSMENT_RESEARCH_PROMPT = (
     "Gather the evidence a careful judgement of the material needs; do not answer yet.\n\n"
@@ -101,10 +111,6 @@ def _failure_reason(exc: Exception, *, first: bool) -> str:
     return "research_failed"
 
 
-class _NoSearchSlot(Exception):
-    """Every search slot stayed taken for as long as the search could wait."""
-
-
 def _bounded(
     search: SearchFn,
     query: str,
@@ -113,21 +119,10 @@ def _bounded(
     slots: threading.Semaphore,
     clock: Callable[[], float],
 ) -> concurrent.futures.Future[list[NodeWithScore]] | None:
-    """Run one search on its own thread, in a free search slot, and wait for it no longer than ``timeout``.
+    """Run one search as :func:`~docint.agents.assessment.bounded.run_bounded` runs work, on a search slot.
 
-    The search first waits for a slot, at most ``min(timeout, SEARCH_SLOT_WAIT_S)``,
-    and that wait comes out of ``timeout``. The worker gives the slot back when
-    retrieval actually ends, before it resolves the future, so an abandoned search
-    holds its slot until it finishes and the caller never races its own slot on its
-    next search; abandoned work is thus capped at the slot count. The remaining
-    deadline is deliberately not passed into retrieval: its clients are the shared
+    The remaining deadline is not passed into retrieval: its clients are the shared
     lookup clients, with timeouts of their own that free the slot when they fire.
-
-    The search runs in a copy of the caller's context, since retrieval reads the
-    request's collection and reasoning scope from context variables. Its outcome,
-    result or exception, lands on a future that is only waited on, never asked
-    for a result with a timeout: a search's own ``TimeoutError`` must not read as
-    the budget running out.
 
     Args:
         search (SearchFn): Runs one search through the turn's engine.
@@ -137,47 +132,17 @@ def _bounded(
         clock (Callable[[], float]): Monotonic clock the slot wait is measured with.
 
     Returns:
-        concurrent.futures.Future[list[NodeWithScore]] | None: The finished
-        search, holding its passages or its exception; ``None`` when the slot wait
-        left no time (the search never starts) or the search outlasts the timeout,
-        in which case it finishes in the background, unread, still in its slot.
+        concurrent.futures.Future[list[NodeWithScore]] | None: The finished search,
+        holding its passages or its exception; ``None`` when it never started or
+        outlasted the timeout, in which case it finishes unread, still in its slot.
 
     Raises:
-        _NoSearchSlot: When no slot frees up in time; the search is never called
-            and no thread is started.
-        Exception: Whatever stops the search from starting, its thread included,
-            once its slot has been given back.
+        NoSlot: When no search slot frees up in time; the search is never called.
+        Exception: Whatever stops the search from starting, once its slot is back.
     """
-    began = clock()
-    if not slots.acquire(timeout=min(timeout, SEARCH_SLOT_WAIT_S)):
-        raise _NoSearchSlot
-    try:
-        left = timeout - (clock() - began)
-        if left <= 0:
-            slots.release()
-            return None
-        future: concurrent.futures.Future[list[NodeWithScore]] = concurrent.futures.Future()
-        context = contextvars.copy_context()
-
-        def _run() -> None:
-            """Run the search, give its slot back, then hand its outcome to the future."""
-            try:
-                try:
-                    found = context.run(search, query)
-                finally:
-                    slots.release()
-            except BaseException as exc:
-                future.set_exception(exc)
-            else:
-                future.set_result(found)
-
-        threading.Thread(target=_run, name=SEARCH_THREAD_NAME, daemon=True).start()
-    except BaseException:
-        # Until its thread runs, the slot is this call's to give back.
-        slots.release()
-        raise
-    done, _ = concurrent.futures.wait([future], timeout=left)
-    return future if done else None
+    return run_bounded(
+        lambda: search(query), timeout, slots=slots, clock=clock, name=SEARCH_THREAD_NAME, slot_wait=SEARCH_SLOT_WAIT_S
+    )
 
 
 def _tool_reply(call_id: str, text: str) -> ChatMessage:
@@ -208,12 +173,14 @@ class ResearchLoop:
         wall_clock_s: float = RESEARCH_WALL_CLOCK_S,
         clock: Callable[[], float] = time.monotonic,
         slots: threading.Semaphore = SEARCH_SLOT_POOL,
+        model_slots: threading.Semaphore = MODEL_SLOT_POOL,
     ) -> None:
         """Bind the model, the search and the limits.
 
         Args:
-            llm (FunctionCallingLLM): The plain (non-reasoning) chat model; one
-                that makes a single attempt per call, so ``wall_clock_s`` is absolute.
+            llm (FunctionCallingLLM): The plain (non-reasoning) chat model. Each call
+                is abandoned at the deadline; one making a single attempt per call
+                ends an abandoned call, and frees its slot, at its own timeout.
             search (SearchFn): Runs one search through the turn's engine.
             max_steps (int): The most model rounds research may take.
             ctx_window (int): The chat model's context window in tokens.
@@ -225,10 +192,13 @@ class ResearchLoop:
             clock (Callable[[], float]): Monotonic clock, injectable for tests.
             slots (threading.Semaphore): The search slots shared by every research
                 in the process (``SEARCH_SLOT_POOL``); injectable for tests.
+            model_slots (threading.Semaphore): The model-call slots shared by every
+                research in the process (``MODEL_SLOT_POOL``); injectable for tests.
         """
         self._llm = llm
         self._search = search
         self._slots = slots
+        self._model_slots = model_slots
         self._max_steps = max_steps
         self._ratio = char_token_ratio
         self._token_limit = int(ctx_window * 0.95) - RESEARCH_REPLY_TOKENS - TOOL_SCHEMA_TOKENS
@@ -290,24 +260,54 @@ class ResearchLoop:
             if self._transcript_tokens(transcript) + STEP_TOKENS > self._token_limit:
                 reason = "context_budget"
                 break
+            remaining = self._wall_clock_s - (self._clock() - started)
             try:
-                response = self._llm.chat_with_tools(
-                    self._tools,
-                    user_msg=None,
-                    chat_history=list(transcript),
-                    tool_choice="required",
-                    strict=False,
-                    allow_parallel_tool_calls=False,
-                    max_tokens=RESEARCH_REPLY_TOKENS,
-                    # One hung call must not outlast the research budget.
-                    timeout=max(1.0, self._wall_clock_s - (self._clock() - started)),
+                pending = run_bounded(
+                    functools.partial(
+                        self._llm.chat_with_tools,
+                        self._tools,
+                        user_msg=None,
+                        chat_history=list(transcript),
+                        tool_choice="required",
+                        strict=False,
+                        allow_parallel_tool_calls=False,
+                        max_tokens=RESEARCH_REPLY_TOKENS,
+                        # The SDK's own bound, which ends an abandoned call and frees its slot.
+                        timeout=max(1.0, remaining),
+                    ),
+                    remaining,
+                    slots=self._model_slots,
+                    clock=self._clock,
+                    name=MODEL_THREAD_NAME,
+                    slot_wait=MODEL_SLOT_WAIT_S,
                 )
-                calls = self._llm.get_tool_calls_from_response(response, error_on_no_tool_call=False)
+            except NoSlot:
+                reason = "research_failed"
+                logger.warning("Assessment research stopped (research_failed): no model capacity")
+                break
             except Exception as exc:
-                # The call's timeout is the time left, so failing once it is spent is the budget running out.
+                reason = "research_failed"
+                logger.warning("Assessment research model call could not start: {}", type(exc).__name__)
+                break
+            if pending is None:
+                # The slot wait spent the budget, or the call outlasted it.
+                reason = "time_budget"
+                logger.warning(
+                    "Assessment research stopped (time_budget): no model reply arrived within the research budget"
+                )
+                break
+            try:
+                calls = self._llm.get_tool_calls_from_response(pending.result(), error_on_no_tool_call=False)
+            except Exception as exc:
+                # A call that fails once the budget is spent, however it failed, ran out of time.
                 spent = self._clock() - started > self._wall_clock_s
                 reason = "time_budget" if spent else _failure_reason(exc, first=steps == 0)
                 logger.warning("Assessment research stopped ({}): {}", reason, type(exc).__name__)
+                break
+            # A reply that lands after the budget is not acted on.
+            if self._clock() - started > self._wall_clock_s:
+                reason = "time_budget"
+                logger.warning("Assessment research stopped (time_budget): the model replied after the research budget")
                 break
             if not calls:
                 if steps == 0:
@@ -343,7 +343,7 @@ class ResearchLoop:
                 break
             try:
                 finished = _bounded(self._search, query, remaining, slots=self._slots, clock=self._clock)
-            except _NoSearchSlot:
+            except NoSlot:
                 reason = "research_failed"
                 logger.warning("Assessment research stopped (research_failed): no search capacity")
                 break

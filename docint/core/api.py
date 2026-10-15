@@ -964,7 +964,8 @@ def _classify_turn(question: str, prior_turn: PriorTurn | None, retrieval_target
     and below the minimum context window there is no room for a judgement.
     Fail-soft: a misconfigured assessment setting or an unavailable model
     answers the turn as a lookup, so lookup chat never breaks on this feature.
-    The call makes a single attempt, so the classifier's time bound is absolute.
+    The classifier abandons its call at its deadline however the reply arrives;
+    the model makes a single attempt, so an abandoned call ends at its own timeout.
 
     Args:
         question (str): The user's message, verbatim.

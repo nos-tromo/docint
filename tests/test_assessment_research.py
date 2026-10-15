@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextvars
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any, cast
@@ -14,14 +14,26 @@ import httpx
 import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
-from assessment_fakes import bad_request, llm_view, scored_node, search_call, tool_llm
-from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
+from assessment_fakes import (
+    bad_request,
+    fragmented_endpoint,
+    join_threads,
+    llm_view,
+    scored_node,
+    search_call,
+    tool_llm,
+)
+from llama_index.core.base.llms.types import ChatResponse, MessageRole, ToolCallBlock
 from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 from typing_extensions import override
 
 from docint.agents.assessment.ledger import EvidenceLedger, Room
 from docint.agents.assessment.research import (
+    MODEL_SLOT_POOL,
+    MODEL_SLOT_WAIT_S,
+    MODEL_SLOTS,
+    MODEL_THREAD_NAME,
     SEARCH_SLOT_POOL,
     SEARCH_SLOT_WAIT_S,
     SEARCH_SLOTS,
@@ -32,6 +44,7 @@ from docint.agents.assessment.research import (
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn
 from docint.agents.types import AgentProgress
 from docint.core.rag import ParentContextPostprocessor
+from docint.utils.openai_cfg import LocalOpenAI
 
 QUESTION = "zzsecretzz What could be improved in this study?"
 
@@ -53,6 +66,25 @@ def _search_capacity_is_whole_again() -> Iterator[None]:
     for _ in range(taken):
         SEARCH_SLOT_POOL.release()
     assert taken == SEARCH_SLOTS
+
+
+@pytest.fixture(autouse=True)
+def _model_capacity_is_whole_again() -> Iterator[None]:
+    """Fail any test that leaves one of the process-wide model-call slots taken.
+
+    Torn down after every fixture the test requested, so a held call is
+    released and joined before the slots are counted.
+
+    Yields:
+        None: The test runs.
+    """
+    yield
+    taken = 0
+    while taken < MODEL_SLOTS and MODEL_SLOT_POOL.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        MODEL_SLOT_POOL.release()
+    assert taken == MODEL_SLOTS
 
 
 def _ticking(*ticks: float) -> Callable[[], float]:
@@ -473,6 +505,7 @@ def test_the_wall_clock_bounds_research() -> None:
         searched.append(query)
         return [scored_node("m", "M.")]
 
+    # Start, the budget check and the time left for the call; from the call's slot wait on, 200 s have passed.
     _, outcome = _drain(
         _loop(llm, _search_recorded, clock=_ticking(0.0, 0.0, 0.0, 200.0), wall_clock_s=120.0).run(
             question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
@@ -485,9 +518,9 @@ def test_the_wall_clock_bounds_research() -> None:
 
 def test_each_research_call_is_bounded_by_the_time_remaining() -> None:
     """One hung call cannot outlast the research budget; a floor of a second keeps the last call possible."""
-    # Start; then per round: the budget check, the call's own timeout, the time left for its search,
-    # the slot wait's start and end, the check after.
-    clock = _ticking(0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0, 119.5, 200.0)
+    # Start; then per round: the budget check, the time left for the call, its slot wait's start and end,
+    # the check on its reply, the time left for its search, that slot wait's start and end, the check after.
+    clock = _ticking(0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 119.5, 119.5, 119.5, 200.0)
     llm = tool_llm([search_call("method"), search_call("results")])
 
     _drain(
@@ -667,12 +700,13 @@ def test_no_free_slot_stops_research_without_starting_the_search(
     real_start = threading.Thread.start
 
     def _start(thread: threading.Thread) -> None:
-        """Record a thread start, then start it.
+        """Record a search thread's start, then start any thread.
 
         Args:
             thread (threading.Thread): The thread.
         """
-        started.append(thread.name)
+        if thread.name == SEARCH_THREAD_NAME:
+            started.append(thread.name)
         real_start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", _start)
@@ -733,17 +767,18 @@ def test_a_search_thread_that_cannot_start_ends_research_and_keeps_what_it_found
     real_start = threading.Thread.start
 
     def _start(thread: threading.Thread) -> None:
-        """Start the first thread; fail the next as a process out of threads does.
+        """Start the first search thread; fail the next as a process out of threads does.
 
         Args:
             thread (threading.Thread): The thread.
 
         Raises:
-            RuntimeError: From the second start on.
+            RuntimeError: From the second search thread on.
         """
-        started.append(thread.name)
-        if len(started) > 1:
-            raise RuntimeError("can't start new thread")
+        if thread.name == SEARCH_THREAD_NAME:
+            started.append(thread.name)
+            if len(started) > 1:
+                raise RuntimeError("can't start new thread")
         real_start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", _start)
@@ -1011,6 +1046,7 @@ def test_a_model_call_that_times_out_with_the_budget_spent_reports_time_budget()
     """The call's timeout is the time left, so its timeout error once the clock is spent is the budget running out."""
     timeout = openai.APITimeoutError(request=httpx.Request("POST", "http://inference.invalid/v1/chat/completions"))
 
+    # Start, the budget check and the time left for the call; from the call's slot wait on, 200 s have passed.
     _, outcome = _drain(
         _loop(tool_llm([timeout]), _search({}), clock=_ticking(0.0, 0.0, 0.0, 200.0), wall_clock_s=120.0).run(
             question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
@@ -1216,8 +1252,9 @@ def test_a_refusal_followed_by_a_search_that_adds_goes_unreported() -> None:
 def test_a_reason_research_already_gave_outranks_a_last_refusal() -> None:
     """The first cause is kept: a last search that lost a passage and ran out of time reports the time."""
     ledger = _closing_ledger()
-    # Start; the budget check, the call's timeout, the time left, the slot wait's start and end; then the check after.
-    clock = _ticking(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 200.0)
+    # Start; the budget check, the time left for the call, its slot wait's start and end, the check on its reply,
+    # the time left for the search, that slot wait's start and end; then the check after.
+    clock = _ticking(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 200.0)
 
     _, outcome = _drain(
         _loop(tool_llm([search_call("method")]), _search({"method": _wide(3)}), clock=clock).run(
@@ -1227,3 +1264,274 @@ def test_a_reason_research_already_gave_outranks_a_last_refusal() -> None:
 
     assert ledger.refusals == 1
     assert outcome.reason == "time_budget"
+
+
+#: A research reply in which the model calls ``finish``, as an OpenAI-compatible endpoint sends it.
+FINISH_REPLY: dict[str, Any] = {
+    "id": "invented-completion",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "invented-model",
+    "choices": [
+        {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "finish", "arguments": "{}"}}],
+            },
+        }
+    ],
+}
+
+
+def test_a_reply_that_arrives_in_fragments_past_the_budget_ends_research_on_time(
+    loguru_caplog: LogCaptureFixture,
+) -> None:
+    """Codex's reproduction: each fragment of a ``finish`` lands within the client's timeout, the reply past the budget.
+
+    The SDK's timeout bounds each read, not the call, so only the research deadline can stop it; the
+    call is abandoned in its slot, and joined here once it ends.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    with fragmented_endpoint(FINISH_REPLY) as base:
+        llm = LocalOpenAI(api_base=base, api_key="test", model="invented-model", max_retries=0)
+        started = time.monotonic()
+        _, outcome = _drain(
+            _loop(llm, _search({}), wall_clock_s=1.0).run(
+                question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+            )
+        )
+        elapsed = time.monotonic() - started
+        join_threads(MODEL_THREAD_NAME)
+
+    assert elapsed < 2.0
+    assert (outcome.reason, outcome.steps) == ("time_budget", 0)
+    assert loguru_caplog.messages == [
+        "Assessment research stopped (time_budget): no model reply arrived within the research budget"
+    ]
+
+
+@pytest.fixture
+def held_model() -> Iterator[tuple[threading.Event, Any]]:
+    """A model whose call blocks until released, then calls ``finish``; teardown releases it and joins its thread.
+
+    Yields:
+        tuple[threading.Event, Any]: The release and the model double.
+    """
+    release = threading.Event()
+    llm = tool_llm([])
+    reply = llm.chat_with_tools.side_effect
+
+    def _held(tools: Sequence[Any], **kwargs: Any) -> ChatResponse:
+        """Wait for the release, then reply as the double does.
+
+        Args:
+            tools (Sequence[Any]): The tools offered.
+            **kwargs (Any): The call's other arguments.
+
+        Returns:
+            ChatResponse: A ``finish`` call.
+        """
+        release.wait(timeout=10)
+        return reply(tools, **kwargs)
+
+    llm.chat_with_tools.side_effect = _held
+    yield release, llm
+    release.set()
+    join_threads(MODEL_THREAD_NAME)
+
+
+def test_a_model_call_that_outlasts_the_budget_keeps_its_slot_until_it_ends(
+    held_model: tuple[threading.Event, Any], loguru_caplog: LogCaptureFixture
+) -> None:
+    """Research ends at its budget, but the abandoned call stays counted until it really finishes.
+
+    Args:
+        held_model (tuple[threading.Event, Any]): The blocking model.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    release, llm = held_model
+    slots = threading.BoundedSemaphore(1)
+    started = time.monotonic()
+
+    # A fixed clock: only the real wait for the reply spends the budget, however the host stalls.
+    _, outcome = _drain(
+        _loop(llm, _search({}), wall_clock_s=0.2, clock=lambda: 0.0, model_slots=slots).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert time.monotonic() - started < 3.0
+    assert (outcome.reason, outcome.steps, outcome.actions) == ("time_budget", 0, [])
+    assert loguru_caplog.messages == [
+        "Assessment research stopped (time_budget): no model reply arrived within the research budget"
+    ]
+    assert slots.acquire(blocking=False) is False
+    release.set()
+    join_threads(MODEL_THREAD_NAME)
+    assert slots.acquire(blocking=False) is True
+    slots.release()
+
+
+@pytest.mark.parametrize(("budget", "wait"), [(120.0, MODEL_SLOT_WAIT_S), (2.0, 2.0)])
+def test_no_free_model_slot_stops_research_without_calling_the_model(
+    budget: float, wait: float, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A model call waits for a slot no longer than the budget allows, and never runs without one.
+
+    Args:
+        budget (float): The research budget in seconds.
+        wait (float): The longest the call may wait for a slot.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    slots = _Recording()
+    llm = tool_llm([search_call("method")])
+    searched: list[str] = []
+
+    _, outcome = _drain(
+        _loop(llm, _recorded(searched), wall_clock_s=budget, clock=lambda: 0.0, model_slots=slots).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert (outcome.reason, outcome.steps, outcome.actions) == ("research_failed", 0, [])
+    assert slots.waits == [wait]
+    assert searched == []
+    llm.chat_with_tools.assert_not_called()
+    assert loguru_caplog.messages == ["Assessment research stopped (research_failed): no model capacity"]
+
+
+def test_a_model_thread_that_cannot_start_ends_research_and_gives_its_slot_back(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A process out of threads fails research there, with the model never called and its slot free again.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Makes the model thread's start fail.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    slots = threading.BoundedSemaphore(1)
+    llm = tool_llm([search_call("method")])
+    real_start = threading.Thread.start
+
+    def _start(thread: threading.Thread) -> None:
+        """Fail a model thread's start as a process out of threads does; start any other thread.
+
+        Args:
+            thread (threading.Thread): The thread.
+
+        Raises:
+            RuntimeError: For a model thread.
+        """
+        if thread.name == MODEL_THREAD_NAME:
+            raise RuntimeError("can't start new thread")
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", _start)
+
+    _, outcome = _drain(
+        _loop(llm, _search({}), model_slots=slots).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+
+    assert (outcome.reason, outcome.steps) == ("research_failed", 0)
+    llm.chat_with_tools.assert_not_called()
+    assert loguru_caplog.messages == ["Assessment research model call could not start: RuntimeError"]
+    assert slots.acquire(blocking=False) is True
+    slots.release()
+
+
+def _replying_late(reply: ToolSelection | str, now: list[float]) -> Any:
+    """Build a model double whose one reply lands at 200 s on the injected clock.
+
+    Args:
+        reply (ToolSelection | str): The reply: a tool call, or prose.
+        now (list[float]): The injected clock's reading, advanced in place.
+
+    Returns:
+        Any: The model double.
+    """
+    llm = tool_llm([reply])
+    scripted = llm.chat_with_tools.side_effect
+
+    def _late(tools: Sequence[Any], **kwargs: Any) -> ChatResponse:
+        """Let 200 s pass on the injected clock, then reply as scripted.
+
+        Args:
+            tools (Sequence[Any]): The tools offered.
+            **kwargs (Any): The call's other arguments.
+
+        Returns:
+            ChatResponse: The scripted reply.
+        """
+        now[0] = 200.0
+        return scripted(tools, **kwargs)
+
+    llm.chat_with_tools.side_effect = _late
+    return llm
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        ToolSelection(tool_id="call_1", tool_name="finish", tool_kwargs={}),
+        "Here is my assessment already.",
+        search_call("method"),
+    ],
+    ids=["finish", "prose", "search"],
+)
+def test_a_reply_that_lands_after_the_budget_is_not_acted_on(
+    reply: ToolSelection | str, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A late ``finish`` is no clean end, late prose is no missing tool support, and a late search never runs.
+
+    Args:
+        reply (ToolSelection | str): What the model replies, at 200 s of a 120 s budget.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    now = [0.0]
+    searched: list[str] = []
+
+    progress, outcome = _drain(
+        _loop(_replying_late(reply, now), _recorded(searched), wall_clock_s=120.0, clock=lambda: now[0]).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert (outcome.reason, outcome.steps, outcome.actions) == ("time_budget", 0, [])
+    assert (progress, searched) == ([], [])
+    assert loguru_caplog.messages == [
+        "Assessment research stopped (time_budget): the model replied after the research budget"
+    ]
+
+
+def test_a_model_call_runs_on_its_own_thread_in_the_callers_context() -> None:
+    """The call is abandoned at the deadline, so it runs on its own thread, still seeing the request's scope."""
+    seen: list[tuple[str, str | None]] = []
+    llm = tool_llm([])
+    reply = llm.chat_with_tools.side_effect
+
+    def _record(tools: Sequence[Any], **kwargs: Any) -> ChatResponse:
+        """Record the thread and the scope the call runs under, then reply as the double does.
+
+        Args:
+            tools (Sequence[Any]): The tools offered.
+            **kwargs (Any): The call's other arguments.
+
+        Returns:
+            ChatResponse: A ``finish`` call.
+        """
+        seen.append((threading.current_thread().name, _SCOPE.get()))
+        return reply(tools, **kwargs)
+
+    llm.chat_with_tools.side_effect = _record
+    token = _SCOPE.set("invented-collection")
+    try:
+        _drain(_loop(llm, _search({})).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)))
+    finally:
+        _SCOPE.reset(token)
+
+    assert seen == [(MODEL_THREAD_NAME, "invented-collection")]

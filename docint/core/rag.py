@@ -3653,7 +3653,9 @@ class RAG:
         The SDK retries a failed call and llama-index retries it again, so with
         ``OPENAI_MAX_RETRIES`` set one call can outlast its own ``timeout`` several
         times over. The turn classifier and the research step use this instance
-        instead: a failure ends the call and each degrades on its own. Lookups and
+        instead: a failure ends the call and each degrades on its own. Both abandon
+        a call at their deadline, but an abandoned call holds its slot until it
+        ends, so a single attempt still bounds how long it holds it. Lookups and
         the answer keep ``OPENAI_MAX_RETRIES``.
 
         Returns:
@@ -8339,8 +8341,9 @@ class RAG:
         """Build the runner for one assessment turn over this turn's engine.
 
         Research runs on the plain (non-reasoning) chat model, which picks the
-        queries, with retries off so its time budget holds; the answer is
-        written by whichever model the request's reasoning toggle selects.
+        queries, with retries off so a call research abandons at its time budget
+        frees its slot at its own timeout; the answer is written by whichever
+        model the request's reasoning toggle selects.
 
         Args:
             engine (Any): The turn's query engine; research searches through its
