@@ -63,7 +63,8 @@ export interface ChatFinalEvent extends ValidationFields {
   response?: string
   message?: string
   sources: Source[]
-  session_id: string
+  /** `null` for a stateless turn: it is saved in no session. */
+  session_id: string | null
   intent?: string
   confidence?: number
   tool_used?: string

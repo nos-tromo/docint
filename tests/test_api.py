@@ -2099,7 +2099,9 @@ def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["answer"] == "answer"
-    assert body["session_id"] == "stateless"
+    # No session exists, so none is named: a placeholder id was adopted and
+    # resumed by clients as if it were a real conversation.
+    assert body["session_id"] is None
     assert len(rag.chats) == before_chats
     assert rag.stateless_queries[-1].startswith("What?")
     assert body["graph_debug"]["applied"] is True
@@ -2202,7 +2204,7 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
         text = "".join([chunk.decode() for chunk in resp.iter_raw()])
 
     assert '"token"' in text
-    assert '"session_id": "stateless"' in text
+    assert '"session_id": null' in text
     assert '"graph_debug"' in text
     # The async query path was exercised and carried the filter kwargs.
     assert len(rag.stateless_query_filters) == before + 1

@@ -23,6 +23,13 @@ export interface ChatTurnData {
    * reloaded session it arrives on `meta` instead.
    */
   retryQuery?: string
+  /**
+   * Set on a turn sent in stateless mode. It is saved in no session, so it
+   * names itself for the report instead of borrowing a session's id — every
+   * stateless answer once shared one placeholder key, and adding one could
+   * remove another.
+   */
+  unsavedId?: string
 }
 
 /**
@@ -120,10 +127,11 @@ export function ChatTurn({
 }) {
   const t = useT()
   const sources = dedupeSources(turn.meta?.sources ?? [])
+  const reportSessionId = turn.unsavedId ? `stateless-${turn.unsavedId}` : sessionId
   const reportItem =
-    turn.done && turn.assistant && sessionId && turnIdx != null
+    turn.done && turn.assistant && reportSessionId && turnIdx != null
       ? chatAnswerSnapshot({
-          sessionId,
+          sessionId: reportSessionId,
           turnIdx,
           userText: turn.user,
           modelResponse: turn.assistant,
