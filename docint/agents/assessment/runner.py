@@ -209,18 +209,30 @@ def question_block(question: str, resolved: str | None) -> str:
     Returns:
         str: The stripped question, then one line labelled ``RESOLVED_QUESTION_LABEL``
         carrying the sanitized rewrite; the question alone when there is no rewrite,
-        nothing of it is left, or it holds the same words up to case, spacing and
-        punctuation.
+        nothing of it is left, or it holds the question's words up to case, spacing,
+        punctuation and citation numbers, compared before the cut.
     """
     asked = question.strip()
     if resolved is None:
         return asked
     visible, _ = strip_reasoning(resolved)
-    plain = " ".join(_CITATION_NUMBERS_RE.sub("", visible).split())
-    sanitized, _ = fit_with_marker(neutralize_sentinel(plain), RESOLVED_QUESTION_CHARS)
-    if not sanitized or re.findall(r"\w+", sanitized.casefold()) == re.findall(r"\w+", asked.casefold()):
+    plain = neutralize_sentinel(" ".join(_CITATION_NUMBERS_RE.sub("", visible).split()))
+    if not plain or _words(plain) == _words(_CITATION_NUMBERS_RE.sub("", asked)):
         return asked
+    sanitized, _ = fit_with_marker(plain, RESOLVED_QUESTION_CHARS)
     return f"{asked}\n{RESOLVED_QUESTION_LABEL}: {sanitized}"
+
+
+def _words(text: str) -> list[str]:
+    """Return *text*'s words, case-folded, for comparing a rewrite with the question.
+
+    Args:
+        text (str): A question or its rewrite.
+
+    Returns:
+        list[str]: The runs of word characters in *text*, in order.
+    """
+    return re.findall(r"\w+", text.casefold())
 
 
 class AssessmentRunner:

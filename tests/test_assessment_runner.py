@@ -1308,6 +1308,23 @@ def test_a_long_rewrite_is_cut_with_a_marker() -> None:
     assert "characters not shown" in block
 
 
+#: An invented message longer than the resolved line's cap.
+LONG_QUESTION = ("Assess the invented harbour survey's sampling plan, its staffing and its timeline. " * 20).strip()
+
+
+@pytest.mark.parametrize(
+    "question", [LONG_QUESTION, "Is the claim in [3] sound?"], ids=["longer-than-the-cap", "citation-numbers"]
+)
+def test_a_rewrite_that_repeats_the_question_adds_no_line(question: str) -> None:
+    """A first turn's rewrite is the message itself, so it adds no line, however long or cited the message is.
+
+    Args:
+        question (str): The user's message, which the rewrite repeats.
+    """
+    assert len(LONG_QUESTION) > RESOLVED_QUESTION_CHARS
+    assert question_block(question, question) == question
+
+
 def _research_double() -> tuple[ResearchLoop, Any]:
     """Build a research loop whose model searches once, then finishes.
 
