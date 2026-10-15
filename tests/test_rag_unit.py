@@ -3864,6 +3864,51 @@ def test_an_assessment_window_stamps_the_children_it_shows_and_appends_the_rest_
     assert node.metadata["parent_context_windowed"] is True
 
 
+def test_an_assessment_stamps_a_child_at_either_edge_of_a_whole_section_in_place() -> None:
+    """A child that opens or closes the section lies inside it, so it is stamped there and never appended again."""
+    section = FOLD_SECTION.strip()
+    head, tail = section[:60], section[-60:]
+    hits = [
+        _span_hit(FOLD_FACTS[1], node_id="child-middle"),
+        _span_hit(tail, node_id="child-tail"),
+        _span_hit(head, node_id="child-head"),
+    ]
+
+    folded = _span_postprocessor(_span_section(section))._postprocess_nodes(hits, EveryChildQuery("invented question"))
+
+    node = folded[0].node
+    assert node.get_content() == section
+    assert node.metadata[MATCH_SPANS_KEY] == [
+        _located(FOLD_FACTS[1]),
+        [len(section) - len(tail), len(section)],
+        [0, len(head)],
+    ]
+
+
+def test_an_assessment_stamps_a_child_at_either_edge_of_its_window_in_place() -> None:
+    """A child whose span ends where the window ends, or starts where it starts, is shown whole and only stamped."""
+    postprocessor = _span_postprocessor(_span_section(FOLD_SECTION), usable_tokens=300, per_hit_floor=100)
+    first = FOLD_FACTS[1]
+    start, end = postprocessor._window_bounds(FOLD_SECTION, FOLD_SECTION.index(first), len(first), 1050)
+    head, tail = FOLD_SECTION[start : start + 40], FOLD_SECTION[end - 40 : end]
+    hits = [
+        _span_hit(first, node_id="child-first"),
+        _span_hit(tail, node_id="child-tail"),
+        _span_hit(head, node_id="child-head"),
+    ]
+
+    folded = postprocessor._postprocess_nodes(hits, EveryChildQuery("invented question"))
+
+    node = folded[0].node
+    window = FOLD_SECTION[start:end]
+    assert node.get_content() == window
+    assert node.metadata[MATCH_SPANS_KEY] == [
+        _located(first, origin=start),
+        [len(window) - len(tail), len(window)],
+        [0, len(head)],
+    ]
+
+
 def test_an_assessment_appends_a_first_child_its_window_cuts_into_without_a_partial_stamp() -> None:
     """A window whose edges cut into its own child shows only part of it; the child is appended whole instead."""
     child = "alpha beta gamma delta"
