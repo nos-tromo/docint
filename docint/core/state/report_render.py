@@ -641,7 +641,9 @@ def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     lines = [
         f"### {ui_string('report_label_question')}: {snap.get('user_text', '').strip()}",
         "",
-        f"**{ui_string('report_label_answer')}:** {snap.get('model_response', '').strip()}",
+        f"**{ui_string('report_label_answer')}:**",
+        "",
+        snap.get("model_response", "").strip(),
     ]
     sources = snap.get("sources") or []
     if sources:
@@ -975,6 +977,13 @@ table.finding table.media-grid td.m-fig { padding-right: 4mm; }
 .prose li { margin: 1pt 0; }
 .prose strong { font-weight: 600; }
 .prose h1, .prose h2, .prose h3, .prose h4 { font-size: 11pt; font-weight: 600; margin: 7pt 0 3pt; }
+/* Fixed layout: an auto-layout table sizes every column from every cell's text. */
+.prose table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 3pt 0 6pt; font-size: 9pt; }
+.prose th, .prose td {
+  border: 1px solid #e6e6e6; padding: 2pt 5pt; text-align: left; vertical-align: top; overflow-wrap: break-word;
+}
+.prose th { background: #f7f7f7; font-weight: 600; }
+.prose tr { break-inside: avoid; }
 .note { font-style: italic; color: #444; margin-top: 5pt; }
 .label { font-weight: 600; color: #333; }
 .badge {
@@ -1037,8 +1046,10 @@ _MD_RENDERER: Any = None
 def _render_markdown_html(text: str) -> str:
     """Render LLM-authored Markdown (summaries, chat answers) to safe HTML.
 
-    Raw HTML in the source is escaped (``html=False``), so investigator-facing
-    text can never inject markup into the report. Evidence chunk text is *not*
+    CommonMark plus the two GFM extensions the SPA renders (tables,
+    strikethrough), so an export shows what the chat showed. Raw HTML in the
+    source is escaped (``html=False``), so investigator-facing text can never
+    inject markup into the report. Evidence chunk text is *not*
     routed here — it stays verbatim via :func:`_esc`. The renderer is built once
     and cached; the import is lazy so importing this module stays cheap.
 
@@ -1055,7 +1066,7 @@ def _render_markdown_html(text: str) -> str:
     if _MD_RENDERER is None:
         from markdown_it import MarkdownIt
 
-        _MD_RENDERER = MarkdownIt("commonmark", {"html": False})
+        _MD_RENDERER = MarkdownIt("commonmark", {"html": False}).enable(["table", "strikethrough"])
     return str(_MD_RENDERER.render(text))
 
 

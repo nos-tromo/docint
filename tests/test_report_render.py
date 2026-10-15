@@ -568,6 +568,27 @@ def test_html_renders_markdown_in_chat_answer(monkeypatch: pytest.MonkeyPatch) -
     assert "**strongly**" not in htm
 
 
+def test_html_renders_gfm_table_and_strikethrough_in_chat_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GFM extensions the SPA renders render in the export too, not as raw pipes."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    answer = "| Name | Role |\n| --- | --- |\n| Alice Weber | Chair [1] |\n\n~~draft~~ final"
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": answer, "sources": []})
+    htm = R.render_html(report)
+    assert "<th>Name</th>" in htm
+    assert "<td>Chair [1]</td>" in htm
+    assert "| --- |" not in htm
+    assert "<s>draft</s>" in htm
+
+
+def test_markdown_chat_answer_starts_its_own_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A structured answer is not glued onto its label, where a leading heading or list would break."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    answer = "### Board\n\n- Alice Weber chairs it [1]"
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": answer, "sources": []})
+    md = R.render_markdown(report)
+    assert "**Answer:**\n\n### Board\n\n- Alice Weber chairs it [1]" in md
+
+
 def test_html_summary_renders_as_prose_not_evidence_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
     """A summary flows as prose, not inside the grey `.chunk` evidence box."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
@@ -1194,6 +1215,19 @@ def test_pdf_wraps_an_unbroken_token_inside_the_page(monkeypatch: pytest.MonkeyP
     report = _long_finding(
         "x" * 400, reference_metadata={"network": "examplenet", "url": "https://example.invalid/" + "y" * 300}
     )
+
+    assert text_beyond_the_page(html_cls(string=R.render_html(report)).render()) == []
+
+
+def test_pdf_keeps_a_wide_answer_table_inside_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model-written table with many columns and an unbroken token wraps inside the page."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    header = "| " + " | ".join(f"Column {i}" for i in range(6)) + " |"
+    rule = "|" + " --- |" * 6
+    row = "| " + " | ".join(["https://example.invalid/" + "y" * 120, *(f"value {i}" for i in range(5))]) + " |"
+    answer = "\n".join([header, rule, row, row])
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": answer, "sources": []})
 
     assert text_beyond_the_page(html_cls(string=R.render_html(report)).render()) == []
 
