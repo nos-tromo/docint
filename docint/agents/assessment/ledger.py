@@ -181,22 +181,19 @@ def _has_match(body: str, spans: Sequence[tuple[int, int]]) -> bool:
     return any(_match_ranges(body, span) for span in spans)
 
 
-def _covered(span: tuple[int, int], spans: Sequence[tuple[int, int]], text: str) -> bool:
+def _covered(needed: Sequence[tuple[int, int]], others: Sequence[Sequence[tuple[int, int]]]) -> bool:
     """Return whether a single one of other matches keeps everything packing keeps of a match.
 
     Args:
-        span (tuple[int, int]): The match, in ``text``.
-        spans (Sequence[tuple[int, int]]): The matches that may keep it, in ``text``.
-        text (str): The passage they point into.
+        needed (Sequence[tuple[int, int]]): What packing keeps of the match (see :func:`_match_ranges`).
+        others (Sequence[Sequence[tuple[int, int]]]): What it keeps of each match that may keep it, in the same text.
 
     Returns:
-        bool: ``True`` when one of ``spans`` has kept ranges containing each of
-        ``span``'s, or ``span`` keeps nothing; two that touch never count together.
+        bool: ``True`` when one of ``others`` contains each of ``needed``, or
+        ``needed`` is empty; two matches that touch never count together.
     """
-    needed = _match_ranges(text, span)
     return not needed or any(
-        all(any(lo <= start and end <= hi for lo, hi in _match_ranges(text, other)) for start, end in needed)
-        for other in spans
+        all(any(lo <= start and end <= hi for lo, hi in kept) for start, end in needed) for kept in others
     )
 
 
@@ -233,14 +230,16 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     if new_text in held_text:
         held_matches = distinct_spans(held_spans, len(held_text))
         arriving_matches = distinct_spans(_shifted(new_spans, held_text.find(new_text)), len(held_text))
-        fresh = [span for span in arriving_matches if not _covered(span, held_matches, held_text)]
+        held_kept = [_match_ranges(held_text, span) for span in held_matches]
+        fresh = [span for span in arriving_matches if not _covered(_match_ranges(held_text, span), held_kept)]
         if not fresh:
             return None
         base, text, spans = held.node, held_text, held_spans + fresh
     elif held_text in new_text:
         arriving_matches = distinct_spans(new_spans, len(new_text))
         held_matches = distinct_spans(_shifted(held_spans, new_text.find(held_text)), len(new_text))
-        kept = [span for span in held_matches if not _covered(span, arriving_matches, new_text)]
+        arriving_kept = [_match_ranges(new_text, span) for span in arriving_matches]
+        kept = [span for span in held_matches if not _covered(_match_ranges(new_text, span), arriving_kept)]
         base, text, spans = arriving.node, new_text, new_spans + kept
     else:
         shift = len(held_text) + len(WINDOW_JOIN)
