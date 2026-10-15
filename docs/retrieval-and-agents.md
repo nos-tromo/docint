@@ -424,8 +424,10 @@ which is the behaviour without this feature. No classifier call is made when
 tokens (`agents/assessment/gate.py` logs one warning naming
 `OPENAI_CTX_WINDOW`), on the `visual` target, or on a corrective retry.
 Classification and research make a single attempt per call, whatever
-`OPENAI_MAX_RETRIES` says, so retries never stretch their 15-second and
-two-minute bounds; lookups and the answer keep the retries.
+`OPENAI_MAX_RETRIES` says, and their 15-second and two-minute deadlines hold
+however a reply arrives: one that trickles in, each piece within the client's
+timeout, is abandoned at the deadline all the same. Lookups and the answer keep
+the retries.
 
 **Evidence.** An assessment seeds its evidence with the passages a lookup
 would have used — the turn's own engine, filters, rerank and parent-context
@@ -441,12 +443,17 @@ does not show it whole. Lookups are unchanged. Research stops at
 `ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
 on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
-The research budget covers the searches as well as the model calls: a search
-still running when it runs out is abandoned and the turn reports `time_budget`.
-Research searches share a per-process bound of eight: a timed-out search holds
-its slot until it ends, and when no slot frees within five seconds (or the time
-left, if less) research stops with `research_failed`; a slot that frees only as
-the time runs out ends research with `time_budget`, the search never started.
+The research budget covers the model calls as well as the searches, and model
+calls run like searches: each on its own thread, abandoned when the budget runs
+out, and the turn reports `time_budget`; a reply that lands after the budget,
+even a `finish`, is not acted on. Research searches and research model calls
+each share a per-process bound of eight: an abandoned call holds its slot until
+it ends, and when no slot frees within five seconds (or the time left, if less)
+research stops with `research_failed`; a slot that frees only as the time runs
+out ends research with `time_budget`, the call never started. The classifier
+has eight slots of its own, so research never uses up what every turn needs:
+with more than eight classifications in flight in one process, a further turn
+waits up to a second for a slot and is answered as a lookup.
 Research admits a passage only while every passage stays legible in the answer,
 headers included; a result that would crowd the others is refused, and the
 ledger counts as full once not even a bare 300-character passage would fit.
@@ -455,14 +462,18 @@ Every match an entry holds keeps room in the answer: each costs 250 characters
 extension whose matches would no longer fit is refused. Matches that touch or
 overlap are counted apart, each keeping its own region.
 A new window of a section the ledger already holds is not dropped. Text the entry
-lacks extends it after a `…` line, a window that repeats it adds at most its
-match, and the entry keeps its number. When the answer has to shorten such an entry, the cut is
+lacks extends it after a `…` line, a window that repeats it adds only a match
+whose kept text the entry lacks, and the entry keeps its number; a window with a
+located match never merges with one without, so whichever comes second adds
+nothing. When the answer has to shorten such an entry, the cut is
 shared across its windows rather than taken from the end. Shortening keeps the
 text around each passage's retrieved match, so a section promoted from a matched
-chunk is cut around that chunk rather than to its opening; the research model's
-digest of a passage shows the same place. A match longer than 200 characters,
-typically a whole retrieved child chunk, keeps only its first 200 when it has to
-be cut.
+chunk is cut around that chunk rather than to its opening. A match longer than
+200 characters, typically a whole retrieved child chunk, keeps only its first
+200 when it has to be cut. The research model's digest of a passage shows only
+text the answer is sure to keep: the first 200 characters of each match,
+top-ranked first, up to 400 in all, or the passage's opening when it has no
+match.
 Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
 never widened: a scoped assessment answers from its chunks with no research.
 Evidence too large to show legibly in one answer — typically a large pinned
