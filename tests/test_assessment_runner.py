@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any, cast
@@ -684,6 +685,119 @@ def test_a_match_touching_the_seeded_one_keeps_its_own_region_in_a_crowded_8k_an
     assert TOUCHING_SECTION not in prompt
     assert TOUCH_FACT in prompt
     assert result.reason is None
+
+
+#: A methodological caveat of 70 characters, 300 characters into the first match of :data:`CAVEAT_SECTION`.
+CAVEAT = "Caveat: the invented pilot left out every night-shift worker it found."
+#: Where :data:`CAVEAT_SECTION`'s five matches sit: one of 600 characters, then four of 260 after 450-character gaps.
+CAVEAT_MATCHES = [(200, 800), (1250, 1510), (1960, 2220), (2670, 2930), (3380, 3640)]
+#: An invented section of 4,040 characters: a lead, the five matches with their gaps, and a tail.
+CAVEAT_SECTION = (
+    _unique_filler("Lead", 20)[:200]
+    + _unique_filler("Match", 20)[:300]
+    + CAVEAT
+    + _unique_filler("Rest", 20)[:230]
+    + "".join(
+        _unique_filler(f"Gap{index}", 30)[:450] + _unique_filler(f"Hit{index}", 20)[:260] for index in range(2, 6)
+    )
+    + _unique_filler("Tail", 30)[:400]
+)
+
+
+def _caveat_section(*matches: int) -> NodeWithScore:
+    """Return :data:`CAVEAT_SECTION` stamped with some of its matches, in the order given.
+
+    Args:
+        *matches (int): Which matches it carries, numbered from 1.
+
+    Returns:
+        NodeWithScore: The section, as parent context emits it whole.
+    """
+    spans = [list(CAVEAT_MATCHES[number - 1]) for number in matches]
+    return scored_node("section-s", CAVEAT_SECTION, filename="study.pdf", page=5, **{MATCH_SPANS_KEY: spans})
+
+
+def _two_match_source(number: int) -> NodeWithScore:
+    """Return an invented source of 2,600 characters stamped with two matches.
+
+    Args:
+        number (int): The source's number, which also sets its text apart.
+
+    Returns:
+        NodeWithScore: The source.
+    """
+    text = _unique_filler(f"Source{number}", 100)[:2600]
+    spans = [[400, 520], [1600, 1720]]
+    return scored_node(
+        f"source-{number}", text, filename=f"source-{number}.pdf", page=number, **{MATCH_SPANS_KEY: spans}
+    )
+
+
+def _digest_lines(research_llm: Any) -> list[str]:
+    """Return every digest line research read: the seed's in its prompt, then each search's in its tool reply.
+
+    Args:
+        research_llm (Any): The research model double.
+
+    Returns:
+        list[str]: The digest lines, in the order research read them.
+    """
+    history = research_llm.chat_with_tools.call_args_list[-1].kwargs["chat_history"]
+    return [
+        line
+        for message in history
+        if message.role in (MessageRole.USER, MessageRole.TOOL)
+        for line in str(message.content).splitlines()
+        if re.match(r"\[\d+\] ", line)
+    ]
+
+
+def test_what_research_reads_of_a_crowded_section_reaches_an_8k_reasoning_answer() -> None:
+    """Codex's reproduction: research read a caveat in a section's first match that the answer prompt left out.
+
+    At 8K with reasoning on, twelve sources share the answer, and the section's five matches each keep
+    under 300 characters, less than the 400-character view research had read around the first. Every
+    piece of every digest research reads must reach the prompt, unless the turn reports ``context_budget``.
+    """
+    assert (len(CAVEAT_SECTION), CAVEAT_SECTION.index(CAVEAT), len(CAVEAT)) == (4040, 500, 70)
+    results = {
+        "method": [_caveat_section(1, 5), *(_two_match_source(number) for number in range(4, 8))],
+        "sampling": [_two_match_source(number) for number in range(8, 12)],
+    }
+    research_llm = tool_llm([search_call("method"), search_call("sampling")])
+    researcher = ResearchLoop(
+        llm=cast(Any, research_llm),
+        search=lambda query: results[query],
+        max_steps=6,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        prompt="{question}\n{prior_turn}\n{digest}",
+    )
+    llm = streaming_llm(ANSWER)
+    runner = AssessmentRunner(
+        answer_llm=cast(Any, llm),
+        llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
+        ctx_window=8192,
+        char_token_ratio=3.5,
+        reasoning=True,
+        researcher=researcher,
+        answer_prompt=DEFAULT_ASSESSMENT_ANSWER_PROMPT,
+    )
+    seed = [_caveat_section(1, 2, 3, 4), *(_two_match_source(number) for number in range(1, 4))]
+
+    result = list(runner.run(question=QUESTION, prior_turn=None, seed=seed))[-1]
+
+    assert isinstance(result, AssessmentResult)
+    assert len(result.nodes) == 12
+    prompt = " ".join(llm.stream_chat.call_args.args[0][0].content.split())
+    assert " ".join(CAVEAT_SECTION.split()) not in prompt
+    lines = _digest_lines(research_llm)
+    assert len(lines) == 13
+    pieces = [
+        piece for line in lines for piece in re.sub(r"^\[\d+\] \([^()]*\) ", "", line).removeprefix("… ").split(" … ")
+    ]
+    if result.reason != "context_budget":
+        assert [piece for piece in pieces if piece not in prompt] == []
 
 
 class _AddsOneBatch:

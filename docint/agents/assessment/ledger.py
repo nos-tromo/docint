@@ -13,13 +13,13 @@ from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.text_budget import (
     MARKER_RESERVE_CHARS,
     MATCH_SPANS_KEY,
+    MIN_REGION_CHARS,
     REGION_CHARS,
     WINDOW_JOIN,
     allocate_with_floors,
     distinct_spans,
     excerpt,
     fit_with_marker,
-    place,
 )
 
 MAX_LEDGER_ENTRIES = 24
@@ -145,18 +145,59 @@ def _shifted(spans: Iterable[tuple[int, int]], by: int) -> list[tuple[int, int]]
     return [(start + by, end + by) for start, end in spans]
 
 
-def _inside_one(span: tuple[int, int], spans: Sequence[tuple[int, int]]) -> bool:
-    """Return whether a match lies wholly inside a single one of other matches.
+def _match_ranges(body: str, span: tuple[int, int]) -> list[tuple[int, int]]:
+    """Return what every packing at or above the floor keeps of one match: its opening in each window.
 
     Args:
-        span (tuple[int, int]): The match.
-        spans (Sequence[tuple[int, int]]): The matches that may hold it.
+        body (str): The passage text.
+        span (tuple[int, int]): The match, in ``body``.
 
     Returns:
-        bool: ``True`` when one of ``spans`` holds all of it; lying across two that touch does not count.
+        list[tuple[int, int]]: For each window of ``body`` the match has a part in,
+        that part's first ``MIN_REGION_CHARS``, in body coordinates; none when it has
+        no part in any window.
     """
     start, end = span
-    return any(lo <= start and end <= hi for lo, hi in spans)
+    ranges: list[tuple[int, int]] = []
+    offset = 0
+    for window in body.split(WINDOW_JOIN):
+        lo, hi = max(start, offset), min(end, offset + len(window))
+        if hi > lo:
+            ranges.append((lo, lo + min(MIN_REGION_CHARS, hi - lo)))
+        offset += len(window) + len(WINDOW_JOIN)
+    return ranges
+
+
+def _has_match(body: str, spans: Sequence[tuple[int, int]]) -> bool:
+    """Return whether a passage holds a match with a part in some window of its text.
+
+    Args:
+        body (str): The passage text.
+        spans (Sequence[tuple[int, int]]): Its match spans.
+
+    Returns:
+        bool: ``True`` when packing keeps a region for at least one of them.
+    """
+    return any(_match_ranges(body, span) for span in spans)
+
+
+def _covered(span: tuple[int, int], spans: Sequence[tuple[int, int]], text: str) -> bool:
+    """Return whether a single one of other matches keeps everything packing keeps of a match.
+
+    Args:
+        span (tuple[int, int]): The match, in ``text``.
+        spans (Sequence[tuple[int, int]]): The matches that may keep it, in ``text``.
+        text (str): The passage they point into.
+
+    Returns:
+        bool: ``True`` when one of ``spans`` has kept ranges containing each of
+        ``span``'s, or ``span`` keeps nothing; two that touch never count together.
+    """
+    needed = _match_ranges(text, span)
+    return not needed or any(
+        all(any(lo <= start and end <= hi for lo, hi in _match_ranges(text, other)) for start, end in needed)
+        for other in spans
+    )
 
 
 def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScore | None:
@@ -166,10 +207,13 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     node when the arriving window extends it or adds only a match, the arriving
     one when it already holds the held text. Each side's match spans are moved
     to where its text sits in the result. Matches count one by one, as packing
-    counts them: an arriving match is news unless a single held match holds it,
-    and a held match a single arriving one holds is dropped when the arriving
-    window replaces the entry, so a re-cut of the same child never raises its
-    floor. Anything but a ``TextNode`` keeps the held entry as is.
+    counts them, by what packing keeps of each (see :func:`kept_ranges`): an
+    arriving match is news unless a single held match keeps all of it, and a held
+    match a single arriving one keeps is dropped when the arriving window
+    replaces the entry. A re-cut of a child that the child's own opening holds
+    therefore adds no floor, while one that starts inside a long child keeps its
+    own. A stamped and an unstamped emission keep different text, so they never
+    merge. Anything but a ``TextNode`` keeps the held entry as is.
 
     Args:
         held (NodeWithScore): The ledger's entry.
@@ -177,23 +221,26 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
 
     Returns:
         NodeWithScore | None: A new entry with both excerpts, every match and the
-        higher score, or ``None`` when the entry already shows the arriving text
-        and every match it carries. Neither input is written to.
+        higher score; ``None`` when the entry already keeps the arriving text and
+        every match it carries, or when exactly one side holds a match in its
+        text. Neither input is written to.
     """
     held_text = held.node.get_content(metadata_mode=MetadataMode.NONE)
     new_text = arriving.node.get_content(metadata_mode=MetadataMode.NONE)
     held_spans, new_spans = _anchors(held.node), _anchors(arriving.node)
+    if _has_match(held_text, held_spans) != _has_match(new_text, new_spans):
+        return None
     if new_text in held_text:
         held_matches = distinct_spans(held_spans, len(held_text))
         arriving_matches = distinct_spans(_shifted(new_spans, held_text.find(new_text)), len(held_text))
-        fresh = [span for span in arriving_matches if not _inside_one(span, held_matches)]
+        fresh = [span for span in arriving_matches if not _covered(span, held_matches, held_text)]
         if not fresh:
             return None
         base, text, spans = held.node, held_text, held_spans + fresh
     elif held_text in new_text:
         arriving_matches = distinct_spans(new_spans, len(new_text))
         held_matches = distinct_spans(_shifted(held_spans, new_text.find(held_text)), len(new_text))
-        kept = [span for span in held_matches if not _inside_one(span, arriving_matches)]
+        kept = [span for span in held_matches if not _covered(span, arriving_matches, new_text)]
         base, text, spans = arriving.node, new_text, new_spans + kept
     else:
         shift = len(held_text) + len(WINDOW_JOIN)
@@ -310,7 +357,9 @@ class EvidenceLedger:
         Parent-context windows of one section share the section's node id, so a
         later window of a held id is new evidence: it extends that entry, which
         keeps its number. So is a window the entry already shows when it carries
-        a match the entry lacks. A full ledger admits no new entry but still
+        a match whose kept text the entry lacks (see :func:`kept_ranges`). A
+        stamped and an unstamped emission of one id never merge: whichever comes
+        second is nothing new. A full ledger admits no new entry but still
         extends one. Once :meth:`restrict` is installed, a passage or extension
         that would leave the evidence illegible is refused and the rest of the
         batch is still considered; :attr:`refusals` counts what the room turns away.
@@ -364,20 +413,57 @@ class EvidenceLedger:
         return [_stamp(scored, number) for number, scored in enumerate(self._entries, start=1)]
 
 
+def kept_ranges(body: str, anchors: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return the ranges of a passage that every packing at or above its :func:`text_floor` keeps.
+
+    A passage with a match in some window keeps, for each match in stored (rank)
+    order, its first ``MIN_REGION_CHARS`` in each window it has a part in; an exact
+    repeat counts once. There is no whole-text rule: a short window merged into an
+    entry is floored per match, not shown whole. A passage with no such match keeps
+    its whole text when that is no longer than its floor; otherwise its first
+    window's share at its floor, which is its first ``MIN_TEXT_CHARS`` when it has
+    one window.
+
+    Args:
+        body (str): The passage text, as packing cuts it.
+        anchors (Sequence[tuple[int, int]]): Where its retrieved matches sit in ``body``, in stored order.
+
+    Returns:
+        list[tuple[int, int]]: The kept ranges in ``body``, matches in stored order;
+        empty only when the floor leaves a passage without matches nothing of its
+        first window.
+    """
+    ranges: list[tuple[int, int]] = []
+    for anchor in anchors:
+        ranges += [kept for kept in _match_ranges(body, anchor) if kept not in ranges]
+    if ranges:
+        return ranges
+    floor = text_floor(body, anchors)
+    if len(body) <= floor:
+        return [(0, len(body))]
+    windows = body.split(WINDOW_JOIN)
+    if len(windows) == 1:
+        return [(0, floor)]
+    lengths = [len(window) for window in windows]
+    share = allocate_with_floors(lengths, [0] * len(windows), floor - (len(windows) - 1) * SEAM_CHARS)[0]
+    return [(0, share)] if share else []
+
+
 def digest(number: int, scored: NodeWithScore) -> str:
     """Render one bounded line the research model reads instead of the passage.
 
-    A passage that says where its retrieved matches sit is read from a view of
-    ``DIGEST_CHARS`` placed on the first one it names that lies in its text,
-    which is its top-ranked child, led by ``…`` when the view skips the
-    passage's opening; any other passage is read from its start.
+    The line shows only what every legible packing of the passage keeps (see
+    :func:`kept_ranges`): each retrieved match's opening, top-ranked first, or the
+    opening of a passage without one. Pieces are joined by ``…``, take at most
+    ``DIGEST_CHARS`` of the passage together, and the line is led by ``…`` when
+    the first piece does not start the passage.
 
     Args:
         number (int): The passage's ledger number.
         scored (NodeWithScore): The passage.
 
     Returns:
-        str: ``[n] (file, p. x) text…`` on a single line.
+        str: ``[n] (file, p. x) text … text`` on a single line.
     """
     meta = scored.node.metadata or {}
     name = " ".join(str(meta.get("filename") or meta.get("file_name") or "").split())
@@ -386,14 +472,20 @@ def digest(number: int, scored: NodeWithScore) -> str:
     page = meta.get("page") if meta.get("page") is not None else meta.get("page_number")
     where = f"{name}, p. {page}" if name and page is not None else name
     raw = scored.node.get_content(metadata_mode=MetadataMode.NONE)
-    # Stored order, not text order: the first stamp is the top-ranked child.
-    spans = [clipped for anchor in _anchors(scored.node) for clipped in distinct_spans([anchor], len(raw))]
-    if spans:
-        start, end = place(*spans[0], DIGEST_CHARS, len(raw))
-        snippet = " ".join(raw[start:end].split())
-        snippet = f"… {snippet}" if start > 0 else snippet
-    else:
-        snippet = " ".join(raw.split())[:DIGEST_CHARS]
+    pieces: list[str] = []
+    first: int | None = None
+    left = DIGEST_CHARS
+    for start, end in kept_ranges(raw, _anchors(scored.node)):
+        if left <= 0:
+            break
+        taken = raw[start : min(end, start + left)]
+        left -= len(taken)
+        piece = " ".join(taken.split())
+        if piece:
+            first = start if first is None else first
+            pieces.append(piece)
+    snippet = " … ".join(pieces)
+    snippet = f"… {snippet}" if first else snippet
     line = f"[{number}] ({where}) {snippet}" if where else f"[{number}] {snippet}"
     return neutralize_sentinel(" ".join(line.split()))
 

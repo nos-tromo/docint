@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
 import random
+import re
 from typing import Any
 
 import pytest
@@ -27,6 +29,7 @@ from docint.agents.assessment.ledger import (
     evidence_fits,
     fit_ledger,
     is_context_overflow,
+    kept_ranges,
     render_context,
     text_floor,
 )
@@ -816,6 +819,72 @@ def test_a_fuller_window_keeps_a_held_match_only_when_no_single_match_of_its_own
     assert _matches(ledger.entries()[0]) == matches
 
 
+#: An invented section whose numbered sentences never repeat, so a window of it is found in one place only.
+RECUT_SECTION = "".join(f"Invented sentence {index:03d} of the section. " for index in range(60))[:1500]
+#: A retrieved child of 400 characters, longer than the 200 a match keeps when cut.
+RECUT_CHILD = (300, 700)
+
+
+@pytest.mark.parametrize(
+    ("held_match", "merged", "floor"),
+    [((350, 650), [[300, 700], [350, 650]], 500), ((300, 600), [[300, 700]], 300)],
+    ids=["a-recut-from-inside-the-child", "a-cut-from-the-childs-start"],
+)
+def test_a_held_recut_of_a_long_child_survives_a_fuller_window_only_when_the_child_would_not_keep_it(
+    held_match: tuple[int, int], merged: list[list[int]], floor: int
+) -> None:
+    """The arriving child keeps its first 200 characters; a held cut those do not hold keeps its own match and floor.
+
+    Args:
+        held_match (tuple[int, int]): Where the held window's match sits in the section.
+        merged (list[list[int]]): The matches the merged entry must carry.
+        floor (int): The merged entry's floor.
+    """
+    start, end = held_match
+    held = scored_node(
+        "section-1",
+        RECUT_SECTION[200:1000],
+        filename="paper.pdf",
+        page=2,
+        **{MATCH_SPANS_KEY: [[start - 200, end - 200]]},
+    )
+    arriving = scored_node(
+        "section-1", RECUT_SECTION, filename="paper.pdf", page=2, **{MATCH_SPANS_KEY: [list(RECUT_CHILD)]}
+    )
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+
+    changed = ledger.add([arriving])
+
+    assert changed == [(1, arriving)]
+    entry = ledger.entries()[0]
+    assert _text(entry) == RECUT_SECTION
+    assert entry.node.metadata[MATCH_SPANS_KEY] == merged
+    assert text_floor(RECUT_SECTION, [(lo, hi) for lo, hi in merged]) == floor
+
+
+@pytest.mark.parametrize("stamped_first", [False, True], ids=["unstamped-first", "stamped-first"])
+def test_a_stamped_and_an_unstamped_emission_of_one_id_never_merge(stamped_first: bool) -> None:
+    """One keeps its opening, the other its match, so neither may replace or extend the other.
+
+    A section's whole text arrives unstamped when its child cannot be located in it, and a window
+    of it arrives stamped from another search; whichever comes second is nothing new.
+
+    Args:
+        stamped_first (bool): Whether the ledger holds the stamped window when the whole section arrives.
+    """
+    unstamped = scored_node("section-1", RECUT_SECTION, filename="paper.pdf", page=2)
+    stamped = scored_node(
+        "section-1", RECUT_SECTION[200:1000], filename="paper.pdf", page=2, **{MATCH_SPANS_KEY: [[100, 300]]}
+    )
+    held, arriving = (stamped, unstamped) if stamped_first else (unstamped, stamped)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+
+    assert ledger.add([arriving]) == []
+    assert ledger.entries()[0] is held
+
+
 #: An invented section whose decisive sentence sits deep inside it.
 DEEP_FACT = "The pilot excluded every respondent recruited after March."
 DEEP_SECTION = ("Background filler sentence. " * 190)[:5214] + DEEP_FACT + " Closing filler sentence." * 40
@@ -863,7 +932,7 @@ def test_each_window_of_a_shortened_merged_passage_keeps_its_own_match() -> None
     assert WINDOW_JOIN in context
 
 
-def test_digest_reads_around_the_match() -> None:
+def test_digest_reads_the_match() -> None:
     """The research model's digest of a promoted section shows the retrieved sentence, and says it skipped ahead."""
     line = digest(3, _anchored(DEEP_SECTION, DEEP_FACT))
 
@@ -885,7 +954,7 @@ def test_digest_of_a_match_near_the_start_reads_from_the_start() -> None:
     [[], [[-50, -10]], [[len(DEEP_SECTION) + 5, len(DEEP_SECTION) + 90]]],
     ids=["first-stamped", "before-the-text-skipped", "past-the-text-skipped"],
 )
-def test_digest_reads_around_the_first_stamped_match_not_the_earliest_in_the_text(lead: list[list[int]]) -> None:
+def test_digest_reads_the_first_stamped_match_not_the_earliest_in_the_text(lead: list[list[int]]) -> None:
     """The top-ranked child is stamped first, so research reads it even where a lower-ranked one sits earlier.
 
     Args:
@@ -1218,6 +1287,68 @@ def test_a_seed_passage_keeps_todays_floor(length: int, span: tuple[float, float
     assert text_floor("s" * length, anchors) == min(length, MIN_TEXT_CHARS)
 
 
+@pytest.mark.parametrize(
+    ("body", "anchors", "ranges"),
+    [
+        ("x" * 1000, [(100, 700)], [(100, 300)]),
+        ("x" * 1000, [(100, 150)], [(100, 150)]),
+        ("x" * 120, [(10, 20)], [(10, 20)]),
+        ("x" * 1000, [(800, 850), (100, 150)], [(800, 850), (100, 150)]),
+        ("x" * 1000, [(100, 150), (150, 220)], [(100, 150), (150, 220)]),
+        ("x" * 1000, [(100, 400), (150, 220)], [(100, 300), (150, 220)]),
+        ("x" * 1000, [(100, 150), (100, 150)], [(100, 150)]),
+        ("x" * 1000, [(100, 400), (100, 500)], [(100, 300)]),
+        ("x" * 1000, [(950, 1100)], [(950, 1000)]),
+        ("x" * 1000, [(-40, -10), (1005, 1050)], [(0, 300)]),
+        (_join("a" * 1000, "b" * 1000), [(990, SECOND + 10)], [(990, 1000), (SECOND, SECOND + 10)]),
+        (_join("a" * 1000, "b" * 1000), [(500, SECOND + 600)], [(500, 700), (SECOND, SECOND + 200)]),
+        (_join("a" * 1000, "b" * 1000), [(990, SECOND - 2)], [(990, 1000)]),
+        (_join("a" * 1000, "b" * 1000), [(1000, SECOND)], [(0, 122)]),
+        ("x" * 1000, [], [(0, 300)]),
+        ("x" * 120, [], [(0, 120)]),
+        (_join("a" * 1000, "b" * 1000), [], [(0, 122)]),
+        (_join("a" * 100, "b" * 1000), [], [(0, 100)]),
+        (_join("a" * 100, "b" * 100), [], [(0, 205)]),
+        (_join(*["w" * 100] * 7), [], [(0, 1)]),
+        (_join("", "b" * 1000), [], []),
+    ],
+    ids=[
+        "a-long-match-keeps-its-first-200",
+        "a-short-match-keeps-itself",
+        "a-short-matched-passage-keeps-only-its-match",
+        "matches-in-stored-order",
+        "touching-matches",
+        "nested-matches",
+        "an-exactly-repeated-match",
+        "matches-repeated-once-cut",
+        "a-match-partly-outside-the-text",
+        "matches-outside-the-text-read-as-unstamped",
+        "a-match-across-a-join-the-text-holds",
+        "a-long-match-across-a-join",
+        "a-match-ending-inside-the-join",
+        "a-match-on-the-join-alone-reads-as-unstamped",
+        "unstamped-one-window",
+        "unstamped-under-its-floor",
+        "unstamped-two-windows",
+        "unstamped-short-first-window",
+        "unstamped-two-windows-under-their-floor",
+        "unstamped-seven-windows",
+        "unstamped-empty-first-window",
+    ],
+)
+def test_kept_ranges_are_what_every_packing_at_the_floor_keeps(
+    body: str, anchors: list[tuple[int, int]], ranges: list[tuple[int, int]]
+) -> None:
+    """Each match keeps its first 200 characters per window, in stored order; without one, the opening its floor buys.
+
+    Args:
+        body (str): The passage text.
+        anchors (list[tuple[int, int]]): Its match spans, in stored order.
+        ranges (list[tuple[int, int]]): What every packing at or above its floor keeps.
+    """
+    assert kept_ranges(body, anchors) == ranges
+
+
 def _header_chars(nodes: list[NodeWithScore]) -> int:
     """Return what the numbered passages' headers, joins and cut markers reserve.
 
@@ -1540,3 +1671,180 @@ def test_admission_never_holds_a_match_the_answer_would_lose() -> None:
 
     assert refused > 50
     assert extended > 100
+
+
+#: What leads a digest line before its text: the number, the file label, and the space after them.
+_DIGEST_LEAD = re.compile(r"^\[\d+\](?: \([^()]*\))?(?: |$)")
+
+
+def _digest_pieces(line: str) -> list[str]:
+    """Return the text a digest line shows, piece by piece, without its number, file label or leading skip marker.
+
+    Args:
+        line (str): One digest line.
+
+    Returns:
+        list[str]: The pieces between the ``…`` that join them.
+    """
+    shown = _DIGEST_LEAD.sub("", line, count=1).removeprefix("… ")
+    return [piece for piece in shown.split(" … ") if piece]
+
+
+def _collapsed(text: str) -> str:
+    """Collapse every run of whitespace to one space, as a digest line does.
+
+    Args:
+        text (str): The text.
+
+    Returns:
+        str: The collapsed text.
+    """
+    return " ".join(text.split())
+
+
+def _section_units(rng: random.Random, words: itertools.count[int], *, joins: bool) -> list[str]:
+    """Build an invented section as words no other text holds, with a window join now and then.
+
+    Args:
+        rng (random.Random): The seeded source.
+        words (itertools.count[int]): Numbers each word is made unique by.
+        joins (bool): Whether the section's own text holds window joins.
+
+    Returns:
+        list[str]: The section's units, its text when joined by spaces.
+    """
+    units: list[str] = []
+    for _ in range(rng.choice([30, 90, 250, 500])):
+        units.append(WINDOW_JOIN if joins and units and rng.random() < 0.04 else f"q{next(words):06d}")
+    return units
+
+
+def _stamped_window(rng: random.Random, node_id: str, units: list[str]) -> NodeWithScore:
+    """Build one window of a section, as parent context emits it, stamped with up to four matches.
+
+    The window opens on a word and its first match starts inside one, as a located child always
+    does; the others start anywhere, joins included. Matches are drawn short and long, and now and
+    then nested in, touching or repeating another.
+
+    Args:
+        rng (random.Random): The seeded source.
+        node_id (str): The section's node id, shared by every window of it.
+        units (list[str]): The section's units.
+
+    Returns:
+        NodeWithScore: The window, its matches in random stored order.
+    """
+    lo = 0 if rng.random() < 0.25 else rng.choice([index for index, unit in enumerate(units) if unit != WINDOW_JOIN])
+    hi = len(units) if rng.random() < 0.25 else rng.randrange(lo + 1, len(units) + 1)
+    window = units[lo:hi]
+    text = " ".join(window)
+    offsets = list(itertools.accumulate((len(unit) + 1 for unit in window), initial=0))
+    inside = [offsets[index] + rng.randrange(len(unit)) for index, unit in enumerate(window) if unit != WINDOW_JOIN]
+    spans: list[list[int]] = []
+    for number in range(rng.randrange(1, 4)):
+        start = rng.choice(inside) if number == 0 else rng.randrange(len(text))
+        spans.append([start, min(len(text), start + rng.choice([1, 25, 120, 199, 200, 201, 260, 600]))])
+    if rng.random() < 0.4:
+        start, end = rng.choice(spans)
+        nested_start = rng.randrange(start, end)
+        spans.append(
+            rng.choice(
+                [[nested_start, rng.randrange(nested_start, end) + 1], [end, min(len(text), end + 210)], [start, end]]
+            )
+        )
+    rng.shuffle(spans)
+    return scored_node(node_id, text, filename=f"{node_id}.pdf", page=1, **{MATCH_SPANS_KEY: spans})
+
+
+def _arrival(rng: random.Random, sections: dict[str, list[str]], plain: dict[str, NodeWithScore]) -> NodeWithScore:
+    """Draw one retrieved passage: mostly a stamped window, now and then an unstamped passage or a mixed emission.
+
+    An unstamped id only ever arrives with the same text; a stamped and an unstamped emission share an
+    id only as a section's whole text arriving unstamped, or a window of an unstamped passage arriving stamped.
+
+    Args:
+        rng (random.Random): The seeded source.
+        sections (dict[str, list[str]]): The stamped sections' units, by node id.
+        plain (dict[str, NodeWithScore]): The unstamped passages, by node id.
+
+    Returns:
+        NodeWithScore: The passage.
+    """
+    roll = rng.random()
+    if plain and roll < 0.2:
+        return plain[rng.choice(sorted(plain))]
+    if plain and roll < 0.25:
+        node_id = rng.choice(sorted(plain))
+        return _stamped_window(rng, node_id, _text(plain[node_id]).split(" "))
+    node_id = rng.choice(sorted(sections))
+    if roll < 0.3:
+        return scored_node(node_id, " ".join(sections[node_id]), filename=f"{node_id}.pdf", page=1)
+    return _stamped_window(rng, node_id, sections[node_id])
+
+
+def _budgets(rng: random.Random, nodes: list[NodeWithScore]) -> list[int]:
+    """Pick evidence budgets from just below the legible minimum to past what shows everything.
+
+    Args:
+        rng (random.Random): The seeded source.
+        nodes (list[NodeWithScore]): The numbered evidence.
+
+    Returns:
+        list[int]: Budgets in characters (one per token): the minimum, a few above it, one below.
+    """
+    floor = sum(
+        text_floor(_text(scored), [(lo, hi) for lo, hi in scored.node.metadata.get(MATCH_SPANS_KEY, [])])
+        for scored in nodes
+    )
+    need = _header_chars(nodes) + floor
+    spare = sum(len(_text(scored)) for scored in nodes) - floor
+    return [need - 1, need, need + rng.randrange(1, 300), need + rng.randrange(1, max(2, spare + 100))]
+
+
+def test_research_reads_only_what_every_legible_answer_shows() -> None:
+    """Seeded fuzz: every digest research reads, of the seed and of each search, is in every legible render.
+
+    Stamped windows merge through all three branches (contained, containing, joined); unstamped
+    passages merge only with their identical text. Texts are made of words no other text holds, so a
+    piece found in the context is the piece research read.
+    """
+    rng = random.Random(67)
+    checked = cut = pieces = 0
+
+    for _ in range(3000):
+        words = itertools.count()
+        sections = {
+            f"s{index}": _section_units(rng, words, joins=rng.random() < 0.3) for index in range(rng.randrange(1, 4))
+        }
+        plain = {
+            f"p{index}": scored_node(
+                f"p{index}",
+                " ".join(_section_units(rng, words, joins=rng.random() < 0.3)),
+                filename=f"p{index}.pdf",
+                page=1,
+            )
+            for index in range(rng.randrange(0, 3))
+        }
+        ledger = EvidenceLedger(cap=50)
+        ledger.add([_arrival(rng, sections, plain) for _ in range(rng.randrange(1, 5))])
+        lines = [digest(number, scored) for number, scored in enumerate(ledger.entries(), start=1)]
+        for _ in range(rng.randrange(1, 4)):
+            added = ledger.add([_arrival(rng, sections, plain) for _ in range(rng.randrange(1, 4))])
+            lines += [digest(number, scored) for number, scored in added]
+        nodes = ledger.numbered()
+        for budget in _budgets(rng, nodes):
+            context, shortened, legible = render_context(
+                nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0
+            )
+            if not legible:
+                continue
+            shown = _collapsed(context)
+            read = [piece for line in lines for piece in _digest_pieces(line)]
+            assert [piece for piece in read if piece not in shown] == []
+            checked += 1
+            cut += shortened > 0
+            pieces += len(read)
+
+    assert checked > 8000
+    assert cut > 6000
+    assert pieces > 80_000
