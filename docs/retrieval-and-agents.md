@@ -432,9 +432,12 @@ would have used — the turn's own engine, filters, rerank and parent-context
 chain — then lets the plain model search further through a
 `search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
 prompt `assessment_research.txt`, `tool_choice="required"`). The seed and every
-search keep every child the reranker returned: each section carries every child
-retrieved under it, appended after a `…` line when its window does not show it.
-Lookups are unchanged. Research stops at
+search keep every child the reranker returned. A section still yields one
+passage: the whole section, a window of it, a cut of its first child when that
+child outgrows the window, or the first child itself once the parent-context
+budget is spent or the child cannot be located. That passage carries every child
+retrieved under the section, each appended after a `…` line when the passage
+does not show it whole. Lookups are unchanged. Research stops at
 `ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
 on a repeated query, when the evidence ledger is full, when the model replies
 without calling a tool, or after two searches in a row that add nothing new.
@@ -513,8 +516,10 @@ asked after one sees both parts of it, each labelled: the source-backed part,
 whose `[n]` refer to the previous turn's sources, and the model's own
 assessment. They share the 4,000-character prior-answer budget shortest-first,
 so a long source-backed part cannot push the judgement out. Research and the
-answer also see the rewrite a lookup answers from, on a labelled line beside
-the user's own words. It is a reading aid, never a source.
+answer also see the rewrite a lookup answers from, on a labelled line under the
+user's own words, with reasoning and citation numbers dropped and cut at 1,000
+characters. The line is left out when the rewrite adds no words, and on
+stateless turns, which have no history. It is a reading aid, never a source.
 
 ## Citation numbering
 
