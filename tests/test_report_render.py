@@ -568,6 +568,88 @@ def test_html_renders_markdown_in_chat_answer(monkeypatch: pytest.MonkeyPatch) -
     assert "**strongly**" not in htm
 
 
+def test_html_renders_gfm_table_and_strikethrough_in_chat_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GFM extensions the SPA renders render in the export too, not as raw pipes."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    answer = "| Name | Role |\n| --- | --- |\n| Alice Weber | Chair [1] |\n\n~~draft~~ final"
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": answer, "sources": []})
+    htm = R.render_html(report)
+    assert "<th>Name</th>" in htm
+    assert "<td>Chair [1]</td>" in htm
+    assert "| --- |" not in htm
+    assert "<s>draft</s>" in htm
+
+
+def test_markdown_chat_answer_starts_its_own_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A structured answer is not glued onto its label, where a leading heading or list would break."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    answer = "### Board\n\n- Alice Weber chairs it [1]"
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": answer, "sources": []})
+    md = R.render_markdown(report)
+    assert "**Answer:**\n\n### Board\n\n- Alice Weber chairs it [1]" in md
+
+
+def _markdown_table(columns: int, rows: int) -> str:
+    """A GFM table ``columns`` wide whose body rows each spell out a single cell."""
+    return "\n".join(["|" + "a|" * columns, "|" + "-|" * columns, *(["|x|"] * rows)])
+
+
+def _chat_report(*answers: str) -> dict[str, Any]:
+    """A report of one chat answer per argument."""
+    return {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "items": [
+            {"id": i, "artifact_type": "chat_answer", "note": None, "snapshot": {"user_text": "q", "model_response": a}}
+            for i, a in enumerate(answers, start=1)
+        ],
+    }
+
+
+def test_html_renders_a_sparse_table_that_would_explode_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2 KB of pipes autocompletes into 65,792 cells; the export keeps it as text instead."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_chat_report(_markdown_table(256, 256)))
+    assert "<table>" not in htm
+    assert "|a|a|a|" in htm
+
+
+def test_html_renders_tables_up_to_the_column_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A table exactly as wide as the cap renders; one column more stays text."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    assert "<table>" in R.render_html(_chat_report(_markdown_table(R._TABLE_MAX_COLUMNS, 1)))
+    assert "<table>" not in R.render_html(_chat_report(_markdown_table(R._TABLE_MAX_COLUMNS + 1, 1)))
+
+
+def test_html_table_budget_spans_the_whole_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cell budget is the report's, not each answer's: the second table no longer fits."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    monkeypatch.setattr(R, "_TABLE_CELL_BUDGET", 6)
+    htm = R.render_html(_chat_report(_markdown_table(2, 1), _markdown_table(2, 1)))
+    assert htm.count("<table>") == 1
+
+
+@pytest.mark.parametrize(
+    "oversized", [_markdown_table(256, 256), _markdown_table(2, 4)], ids=["too-wide", "too-many-cells"]
+)
+def test_html_refused_table_ends_tables_for_the_report(monkeypatch: pytest.MonkeyPatch, oversized: str) -> None:
+    """After one table is refused, later ones stay text too, so the check cannot be made to repeat."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    monkeypatch.setattr(R, "_TABLE_CELL_BUDGET", 6)
+    htm = R.render_html(_chat_report(oversized, _markdown_table(2, 1)))
+    assert "<table>" not in htm
+
+
+def test_html_renders_a_table_written_directly_under_a_sentence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A table may interrupt a paragraph, as the SPA renders it; the budgeted rule keeps that."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(
+        _chat_report("The roles compare as follows:\n| Name | Role |\n| --- | --- |\n| Alice | Chair |")
+    )
+    assert "<td>Chair</td>" in htm
+
+
 def test_html_summary_renders_as_prose_not_evidence_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
     """A summary flows as prose, not inside the grey `.chunk` evidence box."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
@@ -1194,6 +1276,19 @@ def test_pdf_wraps_an_unbroken_token_inside_the_page(monkeypatch: pytest.MonkeyP
     report = _long_finding(
         "x" * 400, reference_metadata={"network": "examplenet", "url": "https://example.invalid/" + "y" * 300}
     )
+
+    assert text_beyond_the_page(html_cls(string=R.render_html(report)).render()) == []
+
+
+def test_pdf_keeps_a_wide_answer_table_inside_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model-written table with many columns and an unbroken token wraps inside the page."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    header = "| " + " | ".join(f"Column {i}" for i in range(6)) + " |"
+    rule = "|" + " --- |" * 6
+    row = "| " + " | ".join(["https://example.invalid/" + "y" * 120, *(f"value {i}" for i in range(5))]) + " |"
+    answer = "\n".join([header, rule, row, row])
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": answer, "sources": []})
 
     assert text_beyond_the_page(html_cls(string=R.render_html(report)).render()) == []
 

@@ -150,6 +150,14 @@ In the Markdown, HTML and PDF exports:
   to another zone. A value that is not an ISO timestamp prints verbatim.
 - A summary is not titled with its collection's name when the subheader already
   names it.
+- **Chat answers and summaries keep their Markdown.** HTML and PDF render it as
+  the chat does (CommonMark plus GFM tables and strikethrough; raw HTML is
+  escaped), and the Markdown export starts the answer on its own line below its
+  label. The Report tab previews both as plain text. A report renders at most
+  10,000 table cells in all and no table wider than 32 columns: a table past
+  either limit prints as its text, and so does every table after it — GFM fills
+  each short row out to the header's width, so a few KB of pipes would
+  otherwise lay out as tens of thousands of cells.
 
 A finding judged from an image **opens with the picture**, printed at up to
 62 × 90 mm and captioned with its kind (image or video frame). Beside it sit the

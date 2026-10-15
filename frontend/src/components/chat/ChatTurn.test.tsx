@@ -199,4 +199,41 @@ describe('ChatTurn', () => {
 
     expect(screen.queryByTestId('retry-notice')).not.toBeInTheDocument()
   })
+
+  it('renders a Markdown answer as structure, its citation markers as text', () => {
+    const answer = [
+      '### Board members',
+      '',
+      '- **Alice Weber** chairs the board [1]',
+      '- Bob Stein keeps the minutes [2][3]',
+      '',
+      '| Name | Role |',
+      '| --- | --- |',
+      '| Alice Weber | Chair |'
+    ].join('\n')
+
+    const { container } = renderTurn({ user: 'who sits on the board?', assistant: answer, done: true, meta: null })
+
+    expect(screen.getByRole('heading', { level: 3, name: 'Board members' })).toBeInTheDocument()
+    expect(container.querySelectorAll('li')).toHaveLength(2)
+    expect(screen.getByText('Alice Weber', { selector: 'strong' })).toBeInTheDocument()
+    expect(container.querySelector('li')).toHaveTextContent('Alice Weber chairs the board [1]')
+    expect(screen.getByText(/keeps the minutes \[2\]\[3\]/)).toBeInTheDocument()
+    // A wide table scrolls inside its own box instead of stretching the panel.
+    expect(screen.getByTestId('markdown-table')).toContainElement(screen.getByRole('table'))
+    expect(screen.getByRole('cell', { name: 'Chair' })).toBeInTheDocument()
+  })
+
+  it('never renders raw HTML from an answer as markup', () => {
+    const { container } = renderTurn({
+      user: 'q',
+      assistant: 'Before <img src="x" onerror="alert(1)"> <b>bold</b> after',
+      done: true,
+      meta: null
+    })
+
+    expect(container.querySelector('img')).toBeNull()
+    expect(container.querySelector('b')).toBeNull()
+    expect(container).toHaveTextContent('<b>bold</b> after')
+  })
 })

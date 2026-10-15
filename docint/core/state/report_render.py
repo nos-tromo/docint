@@ -22,11 +22,14 @@ import unicodedata
 import zipfile
 from collections import OrderedDict
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from docint.core.state.pdf_progress import ProgressCallback, progress_scope
 from docint.utils.env_cfg import language_endonym
 from docint.utils.ui_strings import ui_string
+
+if TYPE_CHECKING:
+    from markdown_it.rules_block import StateBlock
 
 # Artifact types (English protocol values, mirrored in the frontend).
 ARTIFACT_CHAT = "chat_answer"
@@ -641,7 +644,9 @@ def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     lines = [
         f"### {ui_string('report_label_question')}: {snap.get('user_text', '').strip()}",
         "",
-        f"**{ui_string('report_label_answer')}:** {snap.get('model_response', '').strip()}",
+        f"**{ui_string('report_label_answer')}:**",
+        "",
+        snap.get("model_response", "").strip(),
     ]
     sources = snap.get("sources") or []
     if sources:
@@ -975,6 +980,13 @@ table.finding table.media-grid td.m-fig { padding-right: 4mm; }
 .prose li { margin: 1pt 0; }
 .prose strong { font-weight: 600; }
 .prose h1, .prose h2, .prose h3, .prose h4 { font-size: 11pt; font-weight: 600; margin: 7pt 0 3pt; }
+/* Fixed layout: an auto-layout table sizes every column from every cell's text. */
+.prose table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 3pt 0 6pt; font-size: 9pt; }
+.prose th, .prose td {
+  border: 1px solid #e6e6e6; padding: 2pt 5pt; text-align: left; vertical-align: top; overflow-wrap: break-word;
+}
+.prose th { background: #f7f7f7; font-weight: 600; }
+.prose tr { break-inside: avoid; }
 .note { font-style: italic; color: #444; margin-top: 5pt; }
 .label { font-weight: 600; color: #333; }
 .badge {
@@ -1033,17 +1045,77 @@ def _esc(value: Any) -> str:
 
 _MD_RENDERER: Any = None
 
+#: Table cells one report renders from LLM-written Markdown, across all its items.
+_TABLE_CELL_BUDGET = 10_000
+#: The widest Markdown table a report renders as a table.
+_TABLE_MAX_COLUMNS = 32
+_TABLE_CELLS_LEFT = "table_cells_left"
 
-def _render_markdown_html(text: str) -> str:
+
+def _table_budget() -> dict[str, Any]:
+    """A fresh Markdown render environment holding one report's table-cell budget."""
+    return {_TABLE_CELLS_LEFT: _TABLE_CELL_BUDGET}
+
+
+def _budgeted_table(state: StateBlock, start_line: int, end_line: int, silent: bool) -> bool:
+    """GFM's table rule, refusing a table the report's cell budget cannot pay for.
+
+    A GFM table fills every short row out to its header's width, so a few KB of
+    pipes expand into tens of thousands of cells: a 2 KB answer became 65,792
+    cells and a 12 s, 793 MB PDF render. The cost is bounded before anything is
+    built — the delimiter row gives the width, the lines up to the next blank
+    one bound the rows — and counting stops once the budget is exceeded. A
+    refused table stays text, and so does every later table in the report: the
+    budget drops to zero, so crafted input cannot make the check itself repeat.
+
+    Args:
+        state (StateBlock): The block parser's state; ``state.env`` holds the budget.
+        start_line (int): The candidate header row.
+        end_line (int): The end of the block being parsed.
+        silent (bool): Whether this only probes for a table's start.
+
+    Returns:
+        bool: Whether a table starts here and fits the budget.
+    """
+    from markdown_it.rules_block import table
+
+    left = state.env.get(_TABLE_CELLS_LEFT, 0)
+    if left <= 0 or not table(state, start_line, end_line, True):
+        return False
+    row = start_line + 1
+    delimiter_row = state.src[state.bMarks[row] + state.tShift[row] : state.eMarks[row]]
+    columns = sum(1 for cell in delimiter_row.split("|") if cell.strip())
+    if columns > _TABLE_MAX_COLUMNS:
+        state.env[_TABLE_CELLS_LEFT] = 0
+        return False
+    cells, line = columns, start_line + 2
+    while cells <= left and line < end_line and not state.isEmpty(line) and state.sCount[line] >= state.blkIndent:
+        cells += columns
+        line += 1
+    if cells > left:
+        state.env[_TABLE_CELLS_LEFT] = 0
+        return False
+    if silent:
+        return True
+    state.env[_TABLE_CELLS_LEFT] = left - cells
+    return table(state, start_line, end_line, False)
+
+
+def _render_markdown_html(text: str, env: dict[str, Any] | None = None) -> str:
     """Render LLM-authored Markdown (summaries, chat answers) to safe HTML.
 
-    Raw HTML in the source is escaped (``html=False``), so investigator-facing
-    text can never inject markup into the report. Evidence chunk text is *not*
+    CommonMark plus the two GFM extensions the SPA renders (tables,
+    strikethrough), so an export shows what the chat showed. Raw HTML in the
+    source is escaped (``html=False``), so investigator-facing text can never
+    inject markup into the report. Evidence chunk text is *not*
     routed here — it stays verbatim via :func:`_esc`. The renderer is built once
     and cached; the import is lazy so importing this module stays cheap.
 
     Args:
         text (str): The Markdown source.
+        env (dict[str, Any] | None): The report's render environment, which
+            carries its table-cell budget (:func:`_budgeted_table`) across items;
+            ``None`` gives this text a budget of its own.
 
     Returns:
         str: Rendered HTML, or ``""`` for empty input.
@@ -1055,8 +1127,10 @@ def _render_markdown_html(text: str) -> str:
     if _MD_RENDERER is None:
         from markdown_it import MarkdownIt
 
-        _MD_RENDERER = MarkdownIt("commonmark", {"html": False})
-    return str(_MD_RENDERER.render(text))
+        renderer = MarkdownIt("commonmark", {"html": False}).enable(["table", "strikethrough"])
+        renderer.block.ruler.at("table", _budgeted_table, {"alt": ["paragraph", "reference"]})
+        _MD_RENDERER = renderer
+    return str(_MD_RENDERER.render(text, _table_budget() if env is None else env))
 
 
 def _html_note(note: str | None) -> str:
@@ -1311,11 +1385,11 @@ def _html_finding_table(snap: dict[str, Any], note: str | None, *, band_html: st
     )
 
 
-def _html_chat(snap: dict[str, Any], note: str | None) -> str:
+def _html_chat(snap: dict[str, Any], note: str | None, md_env: dict[str, Any]) -> str:
     parts = [
         f'<div class="item-title">{ui_string("report_label_question")}: {_esc(snap.get("user_text"))}</div>',
         f'<div class="label">{ui_string("report_label_answer")}:</div>',
-        f'<div class="prose">{_render_markdown_html(snap.get("model_response") or "")}</div>',
+        f'<div class="prose">{_render_markdown_html(snap.get("model_response") or "", md_env)}</div>',
     ]
     sources = snap.get("sources") or []
     if sources:
@@ -1369,11 +1443,11 @@ def _html_hate(snap: dict[str, Any], note: str | None, number: int) -> str:
     return _html_finding_table(snap, note, band_html=_html_band(number, tags_html), detail_rows=detail_rows)
 
 
-def _html_summary(snap: dict[str, Any], note: str | None, collection: str) -> str:
+def _html_summary(snap: dict[str, Any], note: str | None, collection: str, md_env: dict[str, Any]) -> str:
     title = _summary_title(snap, collection)
     parts = [
         f'<div class="item-title">{_esc(title)}</div>' if title else "",
-        f'<div class="prose">{_render_markdown_html(snap.get("text") or "")}</div>',
+        f'<div class="prose">{_render_markdown_html(snap.get("text") or "", md_env)}</div>',
         _html_note(note),
     ]
     return "".join(parts)
@@ -1408,15 +1482,17 @@ def _html_collection_overview(overview: dict[str, Any]) -> str:
     )
 
 
-def _html_item(artifact_type: str, snap: dict[str, Any], note: str | None, number: int, collection: str) -> str:
+def _html_item(
+    artifact_type: str, snap: dict[str, Any], note: str | None, number: int, collection: str, md_env: dict[str, Any]
+) -> str:
     """HTML for one item of a section, ``number`` being its 1-based place there."""
     if artifact_type == ARTIFACT_CHAT:
-        return _html_chat(snap, note)
+        return _html_chat(snap, note, md_env)
     if artifact_type == ARTIFACT_ENTITY:
         return _html_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
         return _html_hate(snap, note, number)
-    return _html_summary(snap, note, collection)
+    return _html_summary(snap, note, collection, md_env)
 
 
 def _html_toc(sections: list[Section], overview_present: bool) -> str:
@@ -1492,12 +1568,15 @@ def render_html(report: dict[str, Any]) -> str:
         if report.get("show_toc"):
             body_parts.append(_html_toc(sections, overview is not None))
         collection = str(report.get("collection_name") or "").strip()
+        md_env = _table_budget()
         for artifact_type, heading_key, items in sections:
             anchor = SECTION_ANCHOR.get(artifact_type, "")
             body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
             item_class = "item" if artifact_type in _NUMBERED_SECTIONS else "item item-prose"
             for number, item in enumerate(items, start=1):
-                rendered = _html_item(artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection)
+                rendered = _html_item(
+                    artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection, md_env
+                )
                 body_parts.append(f'<div class="{item_class}">{rendered}</div>')
         if overview is not None:
             # Its own page after the findings; alone, it stays under the title.

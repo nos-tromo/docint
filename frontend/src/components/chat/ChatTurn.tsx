@@ -1,13 +1,11 @@
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { WarningIcon, useTheme } from '@infra/ui'
-import { cn } from '@/lib/cn'
+import { WarningIcon } from '@infra/ui'
 import type { ChatFinalEvent, Source } from '@/api/types'
 import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
 import { GraphDebugPanel } from './GraphDebugPanel'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { MarkdownProse } from '@/components/common/MarkdownProse'
 import { chatAnswerSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -121,10 +119,6 @@ export function ChatTurn({
   reportDedupeKeys?: Set<string>
 }) {
   const t = useT()
-  // The typography plugin's `prose-invert` hardcodes light-on-dark prose
-  // colors; only apply it when the resolved theme is actually dark, or
-  // markdown answers render illegibly on the light-theme `bg-muted` panel.
-  const { resolved } = useTheme()
   const sources = dedupeSources(turn.meta?.sources ?? [])
   const reportItem =
     turn.done && turn.assistant && sessionId && turnIdx != null
@@ -149,14 +143,7 @@ export function ChatTurn({
           {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
         </div>
         {turn.assistant ? (
-          <div
-            className={cn(
-              'prose prose-sm max-w-none prose-p:my-2 prose-pre:bg-muted prose-code:before:content-none prose-code:after:content-none',
-              resolved === 'dark' && 'prose-invert'
-            )}
-          >
-            <Markdown remarkPlugins={[remarkGfm]}>{turn.assistant}</Markdown>
-          </div>
+          <MarkdownProse text={turn.assistant} />
         ) : (
           <div className="text-muted-foreground">{turn.done ? t('chat.no_answer') : '…'}</div>
         )}

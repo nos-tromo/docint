@@ -445,8 +445,10 @@ export function Chat() {
             item) lets them shrink below their content, so the list scrolls
             internally instead of the section outgrowing its row — which made
             the whole page scroll and pushed the composer flush against the
-            viewport bottom, past the p-8 padding box. */}
-        <section className="flex flex-col h-full min-h-0">
+            viewport bottom, past the p-8 padding box. min-w-0 does the same
+            for width: a wide answer table scrolls in its own box instead of
+            widening the column past the viewport. */}
+        <section className="flex flex-col h-full min-h-0 min-w-0">
           <ScopeBanner
             count={scopedChunkIds.length}
             missing={scope.missing}

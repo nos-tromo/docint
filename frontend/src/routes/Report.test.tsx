@@ -686,6 +686,28 @@ describe('Report view — frozen thumbnails', () => {
     expect(screen.getByText('[2] photo.jpg')).toBeInTheDocument()
   })
 
+  it('previews a Markdown answer as plain text', async () => {
+    const detail = {
+      ...reportDetail,
+      items: [
+        {
+          id: 14,
+          artifact_type: 'chat_answer',
+          dedupe_key: 'chat:s1:0',
+          position: 0,
+          note: null,
+          snapshot: { user_text: 'q', model_response: '### Board\n\n- **Alice Weber** chairs it [1]', sources: [] },
+          created_at: null
+        }
+      ]
+    }
+    mockFetch(detail)
+    renderReport()
+
+    expect(await screen.findByText('Board Alice Weber chairs it [1]')).toBeInTheDocument()
+    expect(screen.queryByText(/\*\*|###/)).not.toBeInTheDocument()
+  })
+
   it('never renders a non-image data URI from a snapshot', async () => {
     const detail = {
       ...reportDetail,

@@ -204,3 +204,11 @@ def test_summary_fold_prompt_placeholders() -> None:
     for locale in ("en", "de"):
         text = Path(f"docint/utils/prompts/{locale}/summary_fold.txt").read_text(encoding="utf-8")
         assert "{summaries_block}" in text, f"missing {{summaries_block}} in {locale}/summary_fold.txt"
+
+
+@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine"])
+def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
+    """Both locales ask the chat model for Markdown, which the SPA and the report exports render."""
+    for locale in ("en", "de"):
+        text = Path(f"docint/utils/prompts/{locale}/{name}.txt").read_text(encoding="utf-8")
+        assert "Markdown" in text, f"{locale}/{name}.txt no longer asks for Markdown"
