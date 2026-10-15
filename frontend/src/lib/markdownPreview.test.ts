@@ -27,4 +27,20 @@ describe('markdownPreview', () => {
   it('drops code fences and thematic breaks', () => {
     expect(markdownPreview(['```', 'code', '```', '---', 'after'].join('\n'))).toBe('code\nafter')
   })
+
+  it('flattens a pathological line without backtracking', () => {
+    // Overlapping whitespace quantifiers once took 19 s on the first of these
+    // lines; the second fits inside the source cap, so the cap alone cannot pass
+    // it; the third is quadratic for the link rewrite, so only the cap can.
+    const lines = [
+      ' '.repeat(3200) + '-' + ' '.repeat(3200) + 'x',
+      ' '.repeat(990) + '-' + ' '.repeat(990) + 'x',
+      '['.repeat(60_000)
+    ]
+    for (const line of lines) {
+      const start = performance.now()
+      markdownPreview(line)
+      expect(performance.now() - start).toBeLessThan(250)
+    }
+  })
 })
