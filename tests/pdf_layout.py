@@ -96,6 +96,25 @@ def text_beyond_the_page(document: Any) -> list[str]:
     ]
 
 
+def words_drawn(document: Any) -> list[list[str]]:
+    """Return the words laid out above each page's foot, page by page.
+
+    Text WeasyPrint dropped, or pushed past the foot of a page, is missing.
+
+    Args:
+        document (Any): A rendered ``weasyprint.Document``.
+
+    Returns:
+        list[list[str]]: Each page's words, in layout order.
+    """
+    pages: list[list[str]] = []
+    for page in document.pages:
+        foot = page._page_box.content_box_y() + page._page_box.height
+        boxes = [box for box in _of_kind(page._page_box, "TextBox") if box.position_y + box.height <= foot + 0.5]
+        pages.append([word for box in boxes for word in box.text.split()])
+    return pages
+
+
 def text_beyond_its_cell(document: Any, cell_class: str) -> list[str]:
     """Return text in table cells of ``cell_class`` that runs past its cell's right edge.
 

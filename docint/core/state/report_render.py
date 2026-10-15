@@ -30,7 +30,12 @@ from docint.utils.env_cfg import language_endonym
 from docint.utils.ui_strings import ui_string
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from markdown_it.renderer import RendererHTML
     from markdown_it.rules_block import StateBlock
+    from markdown_it.token import Token
+    from markdown_it.utils import EnvType, OptionsDict
 
 # Artifact types (English protocol values, mirrored in the frontend).
 ARTIFACT_CHAT = "chat_answer"
@@ -988,6 +993,10 @@ table.finding table.media-grid td.m-fig { padding-right: 4mm; }
 }
 .prose th { background: #f7f7f7; font-weight: 600; }
 .prose tr { break-inside: avoid; }
+/* WeasyPrint drops a repeating header that does not fit a page; a tall one
+   (`_render_thead_open`) prints once instead, as rows that may split. */
+.prose thead.tall { display: table-row-group; }
+.prose thead.tall tr { break-inside: auto; }
 .note { font-style: italic; color: #444; margin-top: 5pt; }
 .label { font-weight: 600; color: #333; }
 .badge {
@@ -1111,6 +1120,54 @@ def _budgeted_table(state: StateBlock, start_line: int, end_line: int, silent: b
     return table(state, start_line, end_line, False)
 
 
+#: A Markdown table's 9pt text: narrow character cells across the text width, and the line pitch.
+_TABLE_LINE = (78, 13.5)
+#: The tallest table header still repeated on every page (:func:`_render_thead_open`).
+_HEAD_REPEAT_MAX_PT = 180.0
+
+
+def _head_height_pt(labels: list[str]) -> float:
+    """Estimate, pessimistically, how tall a header of ``labels`` sets in equal fixed-layout columns."""
+    cells, line_pt = _TABLE_LINE
+    per_column = max(1, cells // len(labels) - 2)  # two cells go to the padding
+    return max(_text_height_pt(label, per_column, line_pt) for label in labels)
+
+
+def _render_thead_open(
+    renderer: RendererHTML, tokens: Sequence[Token], idx: int, options: OptionsDict, env: EnvType
+) -> str:
+    """Open a table header, marked ``tall`` when it might not fit a page.
+
+    WeasyPrint repeats a header on every page its table reaches and drops one
+    that does not fit a page, labels and all; in a narrow column a few hundred
+    characters are enough. A tall header therefore prints once, as ordinary
+    rows that may split (the ``.prose thead.tall`` rule), while a short one
+    keeps repeating. The bar is a quarter page because word wrap in a narrow
+    column can double the estimate. Keeping a tall header with its first row
+    through ``break-after: avoid`` instead crashes WeasyPrint when that row is
+    taller than a page.
+
+    Args:
+        renderer (RendererHTML): The renderer the rule is bound to.
+        tokens (Sequence[Token]): The block tokens being rendered.
+        idx (int): The position of the ``thead_open`` token.
+        options (OptionsDict): The parser options.
+        env (EnvType): The render environment.
+
+    Returns:
+        str: The header's opening tag.
+    """
+    labels: list[str] = []
+    for token in tokens[idx + 1 :]:
+        if token.type == "thead_close":
+            break
+        if token.type == "inline":
+            labels.append(token.content)
+    if labels and _head_height_pt(labels) > _HEAD_REPEAT_MAX_PT:
+        tokens[idx].attrSet("class", "tall")
+    return renderer.renderToken(tokens, idx, options, env)
+
+
 def _render_markdown_html(text: str, budget: _TableBudget | None = None) -> str:
     """Render LLM-authored Markdown (summaries, chat answers) to safe HTML.
 
@@ -1144,6 +1201,7 @@ def _render_markdown_html(text: str, budget: _TableBudget | None = None) -> str:
 
         renderer = MarkdownIt("commonmark", {"html": False}).enable(["table", "strikethrough"])
         renderer.block.ruler.at("table", _budgeted_table, {"alt": ["paragraph", "reference"]})
+        renderer.add_render_rule("thead_open", _render_thead_open)
         _MD_RENDERER = renderer
     return str(_MD_RENDERER.render(text, {_TABLE_BUDGET: _table_budget() if budget is None else budget}))
 
