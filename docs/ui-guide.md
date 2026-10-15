@@ -79,8 +79,9 @@ hate-speech-only, custom field/operator/value rules) via
 mismatches, and an optional `GraphDebugPanel`. Cancellation uses an
 `AbortController`.
 
-The answer is Markdown: `grounded_qa.txt` asks the model for lists, bold, tables
-and topic headings where structure helps, and for plain paragraphs otherwise.
+The answer is Markdown: `grounded_qa.txt`, and `assessment_answer.txt` on an
+assessment turn, ask the model for lists, bold, tables and topic headings where
+structure helps, and for plain paragraphs otherwise.
 `components/common/MarkdownProse.tsx` renders it, shared with the Analysis
 summary. A table scrolls inside its own box, citation markers such as `[3]` stay
 plain text, and raw HTML in an answer is shown as text, never parsed.

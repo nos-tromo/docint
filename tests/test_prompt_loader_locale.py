@@ -206,7 +206,7 @@ def test_summary_fold_prompt_placeholders() -> None:
         assert "{summaries_block}" in text, f"missing {{summaries_block}} in {locale}/summary_fold.txt"
 
 
-@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine"])
+@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine", "assessment_answer"])
 def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
     """Both locales ask the chat model for Markdown, which the SPA and the report exports render."""
     for locale in ("en", "de"):
