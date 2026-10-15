@@ -43,6 +43,7 @@ import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel, hateConfidenceLabel } from '@/lib/hateCategoryLabel'
 import { hasImageParts, type ImageParts } from '@/lib/reportSnapshots'
+import { markdownPreview } from '@/lib/markdownPreview'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
@@ -229,13 +230,13 @@ function itemBody(item: ReportItem): string {
   const s = item.snapshot
   switch (item.artifact_type) {
     case 'chat_answer':
-      return truncate(str(s, 'model_response'))
+      return truncate(markdownPreview(str(s, 'model_response')))
     case 'entity_finding':
       return truncate(str(s, 'chunk_text'))
     case 'hate_speech_finding':
       return truncate(str(s, 'reason') || str(s, 'chunk_text'))
     default:
-      return truncate(str(s, 'text'))
+      return truncate(markdownPreview(str(s, 'text')))
   }
 }
 

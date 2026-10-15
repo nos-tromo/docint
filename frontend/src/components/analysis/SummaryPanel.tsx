@@ -1,8 +1,6 @@
 import { useEffect, useReducer, useRef } from 'react'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { Button, DownloadButton, RefreshButton, useTheme } from '@infra/ui'
-import { cn } from '@/lib/cn'
+import { Button, DownloadButton, RefreshButton } from '@infra/ui'
+import { MarkdownProse } from '@/components/common/MarkdownProse'
 import { cachedSummary, summarize } from '@/api/analysis'
 import { streamSseGet } from '@/api/sse'
 import { INGEST_JOB_EVENTS_PATH } from '@/api/jobs'
@@ -123,8 +121,6 @@ function inFlightJobId(e: ApiError): string | null {
 
 export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<string> }) {
   const t = useT()
-  // See ChatTurn.tsx: `prose-invert` only belongs on a dark background.
-  const { resolved } = useTheme()
   const collection = useUiStore((s) => s.selectedCollection)
   const [state, dispatch] = useReducer(reducer, initialState)
   // Tracks the in-flight build's SSE subscription so it can be torn down on
@@ -361,14 +357,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
       {state.error && <div className="text-red-400 text-sm">{state.error}</div>}
       {state.text && (
         <div className="rounded-md border border-border bg-muted p-4 text-sm">
-          <div
-            className={cn(
-              'prose prose-sm max-w-none prose-p:my-2 prose-pre:bg-muted prose-code:before:content-none prose-code:after:content-none',
-              resolved === 'dark' && 'prose-invert'
-            )}
-          >
-            <Markdown remarkPlugins={[remarkGfm]}>{state.text}</Markdown>
-          </div>
+          <MarkdownProse text={state.text} />
         </div>
       )}
       {state.meta && <ValidationBanner v={state.meta} />}
