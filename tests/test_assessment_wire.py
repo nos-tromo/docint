@@ -364,7 +364,7 @@ def test_the_plain_model_retries_a_stalled_endpoint(monkeypatch: pytest.MonkeyPa
 
 
 def test_the_turn_classifier_makes_one_attempt_at_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Its 15-second bound holds for the whole call, not for each retry of it.
+    """One attempt per call, so a classification abandoned at its deadline frees its slot at its own timeout.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -378,7 +378,7 @@ def test_the_turn_classifier_makes_one_attempt_at_a_stalled_endpoint(monkeypatch
 
 
 def test_research_makes_one_attempt_per_call_at_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The two-minute research budget is absolute only when no call retries inside it.
+    """One attempt per call, so a research call abandoned at the budget frees its slot at its own timeout.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
