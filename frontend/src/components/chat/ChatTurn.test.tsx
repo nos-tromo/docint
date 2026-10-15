@@ -10,12 +10,12 @@ beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
 })
 
-function renderTurn(turn: ChatTurnData) {
+function renderTurn(turn: ChatTurnData, props: Omit<Parameters<typeof ChatTurn>[0], 'turn'> = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <ChatTurn turn={turn} />
+        <ChatTurn turn={turn} {...props} />
       </MemoryRouter>
     </QueryClientProvider>
   )
@@ -190,6 +190,21 @@ describe('ChatTurn', () => {
     renderTurn({ user: 'what did the UN say?', assistant: 'Three resolutions.', done: true, meta })
 
     expect(screen.getByTestId('retry-notice')).toHaveTextContent(/Security Council resolutions/)
+  })
+
+  it('gives a stateless answer its own report identity, never a shared placeholder', () => {
+    // A stateless turn is saved in no session. Keyed by the placeholder id the
+    // server used to hand back, every such answer shared `chat:stateless:<n>`:
+    // a fresh one read as already in the report, and the toggle then removed a
+    // different answer.
+    const meta = { session_id: null, sources: [] } as unknown as ChatFinalEvent
+
+    renderTurn(
+      { user: 'who?', assistant: 'Alice.', done: true, meta, unsavedId: 'k1' },
+      { turnIdx: 0, reportDedupeKeys: new Set(['chat:stateless:0']) }
+    )
+
+    expect(screen.getByRole('button', { name: 'Add to report' })).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('shows no retry notice on an ordinary answer', () => {

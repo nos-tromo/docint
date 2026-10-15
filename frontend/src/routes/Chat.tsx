@@ -32,7 +32,7 @@ interface State {
 type Action =
   | { type: 'reset' }
   | { type: 'set_turns'; turns: ChatTurnData[] }
-  | { type: 'start'; user: string; scopeRequested?: number }
+  | { type: 'start'; user: string; scopeRequested?: number; unsavedId?: string }
   | { type: 'token'; token: string }
   | { type: 'retry'; query: string }
   | { type: 'finalize'; meta: ChatFinalEvent }
@@ -56,7 +56,8 @@ function reducer(s: State, a: Action): State {
             done: false,
             meta: null,
             error: null,
-            scopeRequested: a.scopeRequested
+            scopeRequested: a.scopeRequested,
+            unsavedId: a.unsavedId
           }
         ]
       }
@@ -243,7 +244,15 @@ export function Chat() {
     // turn, so the guardrail below compares what was asked for against what
     // the server says it did.
     const pinned = scopedChunkIds
-    dispatch({ type: 'start', user: message, scopeRequested: pinned.length || undefined })
+    dispatch({
+      type: 'start',
+      user: message,
+      scopeRequested: pinned.length || undefined,
+      // Not crypto.randomUUID: it is absent outside a secure context (a
+      // plain-HTTP dev host), and one turn in flight at a time keeps a
+      // millisecond timestamp unique.
+      unsavedId: filters.retrievalMode === 'stateless' ? Date.now().toString(36) : undefined
+    })
     clearDraft(key)
 
     const ac = new AbortController()
