@@ -970,6 +970,22 @@ def test_digest_reads_the_first_stamped_match_not_the_earliest_in_the_text(lead:
     assert DEEP_FACT in line
 
 
+def test_digest_reads_each_match_in_turn_up_to_its_budget() -> None:
+    """Matches are read in rank order until ``DIGEST_CHARS`` of the passage are taken, so a third long one is cut."""
+    first, second, third = "A" * 150, "B" * 300, "C" * 300
+    filler = "Background filler sentence. " * 11
+    body = f"{filler}{first}{filler}{second}{filler}{third}{filler}"
+    spans = [[body.index(match), body.index(match) + len(match)] for match in (first, second, third)]
+
+    line = digest(4, scored_node("section-1", body, filename="paper.pdf", page=2, **{MATCH_SPANS_KEY: spans}))
+
+    assert _digest_pieces(line) == [
+        first,
+        second[:MIN_REGION_CHARS],
+        third[: DIGEST_CHARS - len(first) - MIN_REGION_CHARS],
+    ]
+
+
 def _sized(count: int, body: int, *, label: int = 0, start: int = 1) -> list[NodeWithScore]:
     """Build invented passages of a given text length whose visible header grows with ``label``.
 
