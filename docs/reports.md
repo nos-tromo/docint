@@ -157,7 +157,9 @@ In the Markdown, HTML and PDF exports:
   10,000 table cells in all and no table wider than 32 columns: a table past
   either limit prints as its text, and so does every table after it — GFM fills
   each short row out to the header's width, so a few KB of pipes would
-  otherwise lay out as tens of thousands of cells.
+  otherwise lay out as tens of thousands of cells. In the PDF a table's header
+  repeats on every page the table reaches, unless it is too tall to: then it
+  prints once, as an ordinary row.
 
 A finding judged from an image **opens with the picture**, printed at up to
 62 × 90 mm and captioned with its kind (image or video frame). Beside it sit the

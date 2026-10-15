@@ -5,6 +5,7 @@ import io
 import json
 import re
 import zipfile
+from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
@@ -19,7 +20,9 @@ from pdf_layout import (
     text_beyond_its_cell,
     text_beyond_the_page,
     weasyprint_html,
+    words_drawn,
 )
+from typing_extensions import override
 
 from docint.core.state import report_render as R
 from docint.utils.ui_strings import ui_string
@@ -648,6 +651,73 @@ def test_html_renders_a_table_written_directly_under_a_sentence(monkeypatch: pyt
         _chat_report("The roles compare as follows:\n| Name | Role |\n| --- | --- |\n| Alice | Chair |")
     )
     assert "<td>Chair</td>" in htm
+
+
+def test_html_keeps_each_answer_s_link_references_to_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two answers defining one reference label each link to their own target, never the first answer's."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(
+        _chat_report(
+            "See the [minutes].\n\n[minutes]: https://example.invalid/minutes-a",
+            "See the [minutes].\n\n[minutes]: https://example.invalid/minutes-b",
+        )
+    )
+    assert re.findall(r'href="(https://[^"]+)"', htm) == [
+        "https://example.invalid/minutes-a",
+        "https://example.invalid/minutes-b",
+    ]
+
+
+def _tall_header_table() -> tuple[str, list[str]]:
+    """A six-column answer table whose first header cell holds 200 labels, and those labels."""
+    labels = [f"label{i:03d}" for i in range(200)]
+    header = f"| {' '.join(labels)} | B | C | D | E | F |"
+    return "\n".join([header, "|---" * 6 + "|", "| 1 | 2 | 3 | 4 | 5 | 6 |"]), labels
+
+
+def test_html_prints_a_header_too_tall_to_repeat_as_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A header that might not fit a page is marked to print once; a short one still repeats."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    tall, _ = _tall_header_table()
+    short = R.render_html(_chat_report("| Name | Role |\n| --- | --- |\n| Alice | Chair |"))
+    assert '<thead class="tall">' in R.render_html(_chat_report(tall))
+    assert "<th>Name</th>" in short
+    assert 'class="tall"' not in short
+
+
+class _CountingTokens(Sequence[Any]):
+    """A token list counting every token read out of it; a slice counts each token it copies."""
+
+    def __init__(self, tokens: list[Any]) -> None:
+        self._tokens = tokens
+        self.reads = 0
+
+    @override
+    def __len__(self) -> int:
+        return len(self._tokens)
+
+    @override
+    def __getitem__(self, key: Any) -> Any:
+        found = self._tokens[key]
+        self.reads += len(found) if isinstance(key, slice) else 1
+        return found
+
+
+def test_html_reads_only_a_table_s_own_header_tokens() -> None:
+    """Sizing a header reads that header's tokens, never the rest of the document.
+
+    Copying the rest per table made thousands of one-cell tables amid prose export in quadratic time.
+    """
+    R._render_markdown_html("warm the renderer")
+    renderer = R._MD_RENDERER
+    prose = "A sentence.\n\n" * 2_000
+    tokens = renderer.parse(prose + "| a |\n| --- |\n| x |\n\n" + prose, {R._TABLE_BUDGET: R._table_budget()})
+    idx = next(i for i, token in enumerate(tokens) if token.type == "thead_open")
+    counted = _CountingTokens(tokens)
+
+    R._render_thead_open(renderer.renderer, counted, idx, renderer.options, {})
+
+    assert counted.reads < 20
 
 
 def test_html_summary_renders_as_prose_not_evidence_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1291,6 +1361,34 @@ def test_pdf_keeps_a_wide_answer_table_inside_the_page(monkeypatch: pytest.Monke
     report = _single_item_report("chat_answer", {"user_text": "q", "model_response": answer, "sources": []})
 
     assert text_beyond_the_page(html_cls(string=R.render_html(report)).render()) == []
+
+
+def test_pdf_prints_every_label_of_a_header_taller_than_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WeasyPrint drops a repeating header that does not fit a page; a tall one prints as rows, every label kept.
+
+    The rows split, so the header starts under its answer instead of leaving that page blank.
+    """
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    table, labels = _tall_header_table()
+    pages = words_drawn(html_cls(string=R.render_html(_chat_report(table))).render())
+    drawn = {word for words in pages for word in words}
+
+    assert [label for label in labels if label not in drawn] == []
+    assert labels[0] in pages[0]
+
+
+def test_pdf_repeats_a_short_header_on_every_page_its_table_reaches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a tall header gives up repeating: a short one heads every page of a long table."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    rows = [f"| r{i} | {'cell ' * 8}|" for i in range(150)]
+    answer = "\n".join(["| Colhead | Other |", "| --- | --- |", *rows])
+    pages = words_drawn(html_cls(string=R.render_html(_chat_report(answer))).render())
+    table_pages = [words for words in pages if any(re.fullmatch(r"r\d+", word) for word in words)]
+
+    assert len(table_pages) > 1
+    assert all("Colhead" in words for words in table_pages)
 
 
 def test_pdf_keeps_a_long_label_inside_the_key_column(monkeypatch: pytest.MonkeyPatch) -> None:
