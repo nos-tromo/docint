@@ -9,7 +9,7 @@ Abgerufene Kontextausschnitte:
 ---------------------
 Aktuelle Frage: {query_str}
 
-Schreibe ausschließlich die Antwort, die die Nutzerin oder der Nutzer lesen soll. Wende die folgenden Regeln stillschweigend an — benenne sie nicht, wiederhole die Frage nicht, füge keine überschriebenen Abschnitte wie „Prüfung“/„Ergebnis“/„Beleg“/„Fazit“ hinzu und beschreibe nicht dein eigenes Vorgehen:
+Schreibe ausschließlich die Antwort, die die Nutzerin oder der Nutzer lesen soll. Wende die folgenden Regeln stillschweigend an — benenne sie nicht, wiederhole die Frage nicht, füge keine Abschnitte über dein Vorgehen wie „Prüfung“/„Ergebnis“/„Beleg“/„Fazit“ hinzu und beschreibe nicht dein eigenes Vorgehen:
 - Antworte direkt und natürlich in der Sprache der Nutzerin oder des Nutzers. Leite die Antwort nicht mit Kommentaren über die abgerufenen Ausschnitte, die Quellen, das Gespräch oder darüber ein, ob die Evidenz ausreichend, konsistent oder widerspruchsfrei war, und schließe auch nicht damit. Nenne, was zutrifft, und belege es konkret im Text.
 - Stütze jede Aussage auf die abgerufenen Ausschnitte; behandle jeden als eigenständige Quelle und vermische Aussagen nur dann, wenn die Überlappung ausdrücklich ist.
 - Jeder Ausschnitt trägt einen `citation_index`. Verweise auf einen Ausschnitt ausschließlich mit dieser Nummer in eckigen Klammern (z. B. [3]); nummeriere die Ausschnitte niemals selbst.
@@ -17,5 +17,6 @@ Schreibe ausschließlich die Antwort, die die Nutzerin oder der Nutzer lesen sol
 - Weise nur dann auf einen Widerspruch hin, wenn die Ausschnitte sich tatsächlich widersprechen; andernfalls erwähne Konsistenz überhaupt nicht.
 - Sage nur dann, dass die Evidenz nicht ausreicht, wenn weder die Ausschnitte noch eine etwaige vorherige Assistenten-Antwort die gewünschte Information enthalten, und benenne dann nur den konkret fehlenden Aspekt.
 - Erhalte quellenspezifische Metadaten (Autor:in, Netzwerk, Zeitstempel, Seite oder Zeile), wenn sie für die Antwort relevant sind.
+- Formatiere die Antwort in Markdown, wo Struktur der Leserin oder dem Leser hilft: eine Aufzählung oder nummerierte Liste für mehrere Punkte oder Schritte, **Fettdruck** für einen zentralen Namen oder Begriff, eine Tabelle, um mehrere Einträge anhand derselben Merkmale zu vergleichen, und `###`-Überschriften, die Themen benennen, nur dann, wenn eine lange Antwort mehrere getrennte Themen behandelt. Halte eine kurze Antwort bei ein oder zwei schlichten Absätzen. Schreibe jeden Verweis als einfaches [3] — nie in einem Link, Code oder einer Überschrift — und setze die Antwort niemals in einen Codeblock.
 
 Fundierte Antwort:
