@@ -1251,7 +1251,10 @@ class QueryOut(BaseModel):
 
     answer: str
     sources: list[dict[str, Any]] = []
-    session_id: str
+    #: ``None`` for a stateless turn sent without one: no session exists to
+    #: name. A placeholder id here was adopted by clients as a conversation,
+    #: and the next session-mode turn then created a row under it.
+    session_id: str | None = None
     graph_debug: dict[str, Any] | None = None
     retrieval_query: str | None = None
     coverage_unit: str | None = None
@@ -2411,7 +2414,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 )
                 if graph_debug is not None:
                     data["graph_debug"] = graph_debug
-                session_id = payload.session_id or "stateless"
+                session_id = payload.session_id
             else:
                 session_id = rag.start_session(
                     payload.session_id,
@@ -2612,7 +2615,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 final_payload = {
                     "response": answer_text,
                     "sources": stateless_data.get("sources") or [],
-                    "session_id": payload.session_id or "stateless",
+                    "session_id": payload.session_id,
                     "reasoning": stateless_data.get("reasoning"),
                     "graph_debug": stateless_data.get("graph_debug"),
                     "retrieval_target": stateless_data.get("retrieval_target") or payload.retrieval_target,

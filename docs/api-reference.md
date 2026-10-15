@@ -230,7 +230,8 @@ Request (`QueryIn`):
   explicit boolean every turn.
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
-  `RAG.run_query()` directly.
+  `RAG.run_query()` directly and persists nothing, so its `session_id` is
+  `null` unless the request carried one.
 - `retrieval_target` — which evidence may answer the turn: `all` (default,
   documents and imagery fused), `documents` (no image lane), or `visual` (the
   `{collection}_images` companion alone, the one path that sends the stored
