@@ -21,6 +21,7 @@ import re
 import unicodedata
 import zipfile
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -1049,12 +1050,19 @@ _MD_RENDERER: Any = None
 _TABLE_CELL_BUDGET = 10_000
 #: The widest Markdown table a report renders as a table.
 _TABLE_MAX_COLUMNS = 32
-_TABLE_CELLS_LEFT = "table_cells_left"
+_TABLE_BUDGET = "table_budget"
 
 
-def _table_budget() -> dict[str, Any]:
-    """A fresh Markdown render environment holding one report's table-cell budget."""
-    return {_TABLE_CELLS_LEFT: _TABLE_CELL_BUDGET}
+@dataclass
+class _TableBudget:
+    """The table cells a report may still render from LLM-written Markdown (:func:`_budgeted_table`)."""
+
+    cells_left: int
+
+
+def _table_budget() -> _TableBudget:
+    """A fresh table-cell budget for one report, shared by every text it renders."""
+    return _TableBudget(_TABLE_CELL_BUDGET)
 
 
 def _budgeted_table(state: StateBlock, start_line: int, end_line: int, silent: bool) -> bool:
@@ -1069,7 +1077,8 @@ def _budgeted_table(state: StateBlock, start_line: int, end_line: int, silent: b
     budget drops to zero, so crafted input cannot make the check itself repeat.
 
     Args:
-        state (StateBlock): The block parser's state; ``state.env`` holds the budget.
+        state (StateBlock): The block parser's state; ``state.env`` carries the
+            report's :class:`_TableBudget`.
         start_line (int): The candidate header row.
         end_line (int): The end of the block being parsed.
         silent (bool): Whether this only probes for a table's start.
@@ -1079,29 +1088,30 @@ def _budgeted_table(state: StateBlock, start_line: int, end_line: int, silent: b
     """
     from markdown_it.rules_block import table
 
-    left = state.env.get(_TABLE_CELLS_LEFT, 0)
-    if left <= 0 or not table(state, start_line, end_line, True):
+    budget = state.env.get(_TABLE_BUDGET)
+    if budget is None or budget.cells_left <= 0 or not table(state, start_line, end_line, True):
         return False
+    left = budget.cells_left
     row = start_line + 1
     delimiter_row = state.src[state.bMarks[row] + state.tShift[row] : state.eMarks[row]]
     columns = sum(1 for cell in delimiter_row.split("|") if cell.strip())
     if columns > _TABLE_MAX_COLUMNS:
-        state.env[_TABLE_CELLS_LEFT] = 0
+        budget.cells_left = 0
         return False
     cells, line = columns, start_line + 2
     while cells <= left and line < end_line and not state.isEmpty(line) and state.sCount[line] >= state.blkIndent:
         cells += columns
         line += 1
     if cells > left:
-        state.env[_TABLE_CELLS_LEFT] = 0
+        budget.cells_left = 0
         return False
     if silent:
         return True
-    state.env[_TABLE_CELLS_LEFT] = left - cells
+    budget.cells_left = left - cells
     return table(state, start_line, end_line, False)
 
 
-def _render_markdown_html(text: str, env: dict[str, Any] | None = None) -> str:
+def _render_markdown_html(text: str, budget: _TableBudget | None = None) -> str:
     """Render LLM-authored Markdown (summaries, chat answers) to safe HTML.
 
     CommonMark plus the two GFM extensions the SPA renders (tables,
@@ -1111,11 +1121,16 @@ def _render_markdown_html(text: str, env: dict[str, Any] | None = None) -> str:
     routed here — it stays verbatim via :func:`_esc`. The renderer is built once
     and cached; the import is lazy so importing this module stays cheap.
 
+    Each text parses in an environment of its own: markdown-it keeps link
+    reference definitions there, the first definition of a label winning, so a
+    shared one let an earlier item's ``[label]: url`` retarget a later item's
+    links. Only the table-cell budget spans the report.
+
     Args:
         text (str): The Markdown source.
-        env (dict[str, Any] | None): The report's render environment, which
-            carries its table-cell budget (:func:`_budgeted_table`) across items;
-            ``None`` gives this text a budget of its own.
+        budget (_TableBudget | None): The report's table-cell budget
+            (:func:`_budgeted_table`), shared across its items; ``None`` gives
+            this text a budget of its own.
 
     Returns:
         str: Rendered HTML, or ``""`` for empty input.
@@ -1130,7 +1145,7 @@ def _render_markdown_html(text: str, env: dict[str, Any] | None = None) -> str:
         renderer = MarkdownIt("commonmark", {"html": False}).enable(["table", "strikethrough"])
         renderer.block.ruler.at("table", _budgeted_table, {"alt": ["paragraph", "reference"]})
         _MD_RENDERER = renderer
-    return str(_MD_RENDERER.render(text, _table_budget() if env is None else env))
+    return str(_MD_RENDERER.render(text, {_TABLE_BUDGET: _table_budget() if budget is None else budget}))
 
 
 def _html_note(note: str | None) -> str:
@@ -1385,11 +1400,11 @@ def _html_finding_table(snap: dict[str, Any], note: str | None, *, band_html: st
     )
 
 
-def _html_chat(snap: dict[str, Any], note: str | None, md_env: dict[str, Any]) -> str:
+def _html_chat(snap: dict[str, Any], note: str | None, table_budget: _TableBudget) -> str:
     parts = [
         f'<div class="item-title">{ui_string("report_label_question")}: {_esc(snap.get("user_text"))}</div>',
         f'<div class="label">{ui_string("report_label_answer")}:</div>',
-        f'<div class="prose">{_render_markdown_html(snap.get("model_response") or "", md_env)}</div>',
+        f'<div class="prose">{_render_markdown_html(snap.get("model_response") or "", table_budget)}</div>',
     ]
     sources = snap.get("sources") or []
     if sources:
@@ -1443,11 +1458,11 @@ def _html_hate(snap: dict[str, Any], note: str | None, number: int) -> str:
     return _html_finding_table(snap, note, band_html=_html_band(number, tags_html), detail_rows=detail_rows)
 
 
-def _html_summary(snap: dict[str, Any], note: str | None, collection: str, md_env: dict[str, Any]) -> str:
+def _html_summary(snap: dict[str, Any], note: str | None, collection: str, table_budget: _TableBudget) -> str:
     title = _summary_title(snap, collection)
     parts = [
         f'<div class="item-title">{_esc(title)}</div>' if title else "",
-        f'<div class="prose">{_render_markdown_html(snap.get("text") or "", md_env)}</div>',
+        f'<div class="prose">{_render_markdown_html(snap.get("text") or "", table_budget)}</div>',
         _html_note(note),
     ]
     return "".join(parts)
@@ -1483,16 +1498,16 @@ def _html_collection_overview(overview: dict[str, Any]) -> str:
 
 
 def _html_item(
-    artifact_type: str, snap: dict[str, Any], note: str | None, number: int, collection: str, md_env: dict[str, Any]
+    artifact_type: str, snap: dict[str, Any], note: str | None, number: int, collection: str, table_budget: _TableBudget
 ) -> str:
     """HTML for one item of a section, ``number`` being its 1-based place there."""
     if artifact_type == ARTIFACT_CHAT:
-        return _html_chat(snap, note, md_env)
+        return _html_chat(snap, note, table_budget)
     if artifact_type == ARTIFACT_ENTITY:
         return _html_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
         return _html_hate(snap, note, number)
-    return _html_summary(snap, note, collection, md_env)
+    return _html_summary(snap, note, collection, table_budget)
 
 
 def _html_toc(sections: list[Section], overview_present: bool) -> str:
@@ -1568,14 +1583,14 @@ def render_html(report: dict[str, Any]) -> str:
         if report.get("show_toc"):
             body_parts.append(_html_toc(sections, overview is not None))
         collection = str(report.get("collection_name") or "").strip()
-        md_env = _table_budget()
+        table_budget = _table_budget()
         for artifact_type, heading_key, items in sections:
             anchor = SECTION_ANCHOR.get(artifact_type, "")
             body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
             item_class = "item" if artifact_type in _NUMBERED_SECTIONS else "item item-prose"
             for number, item in enumerate(items, start=1):
                 rendered = _html_item(
-                    artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection, md_env
+                    artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection, table_budget
                 )
                 body_parts.append(f'<div class="{item_class}">{rendered}</div>')
         if overview is not None:

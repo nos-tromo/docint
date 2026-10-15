@@ -650,6 +650,21 @@ def test_html_renders_a_table_written_directly_under_a_sentence(monkeypatch: pyt
     assert "<td>Chair</td>" in htm
 
 
+def test_html_keeps_each_answer_s_link_references_to_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two answers defining one reference label each link to their own target, never the first answer's."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(
+        _chat_report(
+            "See the [minutes].\n\n[minutes]: https://example.invalid/minutes-a",
+            "See the [minutes].\n\n[minutes]: https://example.invalid/minutes-b",
+        )
+    )
+    assert re.findall(r'href="(https://[^"]+)"', htm) == [
+        "https://example.invalid/minutes-a",
+        "https://example.invalid/minutes-b",
+    ]
+
+
 def test_html_summary_renders_as_prose_not_evidence_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
     """A summary flows as prose, not inside the grey `.chunk` evidence box."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
