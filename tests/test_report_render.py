@@ -5,6 +5,7 @@ import io
 import json
 import re
 import zipfile
+from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
@@ -21,6 +22,7 @@ from pdf_layout import (
     weasyprint_html,
     words_drawn,
 )
+from typing_extensions import override
 
 from docint.core.state import report_render as R
 from docint.utils.ui_strings import ui_string
@@ -681,6 +683,41 @@ def test_html_prints_a_header_too_tall_to_repeat_as_rows(monkeypatch: pytest.Mon
     assert '<thead class="tall">' in R.render_html(_chat_report(tall))
     assert "<th>Name</th>" in short
     assert 'class="tall"' not in short
+
+
+class _CountingTokens(Sequence[Any]):
+    """A token list counting every token read out of it; a slice counts each token it copies."""
+
+    def __init__(self, tokens: list[Any]) -> None:
+        self._tokens = tokens
+        self.reads = 0
+
+    @override
+    def __len__(self) -> int:
+        return len(self._tokens)
+
+    @override
+    def __getitem__(self, key: Any) -> Any:
+        found = self._tokens[key]
+        self.reads += len(found) if isinstance(key, slice) else 1
+        return found
+
+
+def test_html_reads_only_a_table_s_own_header_tokens() -> None:
+    """Sizing a header reads that header's tokens, never the rest of the document.
+
+    Copying the rest per table made thousands of one-cell tables amid prose export in quadratic time.
+    """
+    R._render_markdown_html("warm the renderer")
+    renderer = R._MD_RENDERER
+    prose = "A sentence.\n\n" * 2_000
+    tokens = renderer.parse(prose + "| a |\n| --- |\n| x |\n\n" + prose, {R._TABLE_BUDGET: R._table_budget()})
+    idx = next(i for i, token in enumerate(tokens) if token.type == "thead_open")
+    counted = _CountingTokens(tokens)
+
+    R._render_thead_open(renderer.renderer, counted, idx, renderer.options, {})
+
+    assert counted.reads < 20
 
 
 def test_html_summary_renders_as_prose_not_evidence_chunk(monkeypatch: pytest.MonkeyPatch) -> None:

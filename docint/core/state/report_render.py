@@ -1158,7 +1158,8 @@ def _render_thead_open(
         str: The header's opening tag.
     """
     labels: list[str] = []
-    for token in tokens[idx + 1 :]:
+    for i in range(idx + 1, len(tokens)):  # by index: a slice copies the rest of the document per table
+        token = tokens[i]
         if token.type == "thead_close":
             break
         if token.type == "inline":
