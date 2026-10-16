@@ -18,6 +18,7 @@ from llama_index.core.llms.llm import stream_chat_response_to_tokens
 from llama_index.core.schema import BaseNode, NodeWithScore
 from loguru import logger
 
+from docint.agents.assessment.keyword import NO_CHECKS, render_keyword_checks
 from docint.agents.assessment.ledger import (
     OVERFLOW_RETRY_SHARE,
     PRIOR_TURN_TOKENS,
@@ -51,12 +52,16 @@ DEFAULT_ASSESSMENT_ANSWER_PROMPT = (
     "You are assessing material from retrieved evidence.\n\n"
     "Conversation continuity:\n{prior_turn}\n\n"
     "Retrieved context snippets:\n---------------------\n{context_str}\n---------------------\n"
+    "Keyword checks, exact counts of indexed chunks containing all the words (not sources):\n{keyword_checks}\n\n"
     "The user's question: {question}\n\n"
     "Part 1: what the snippets say, every claim cited by its citation_index in square brackets.\n"
     "Then a line containing only [[ASSESSMENT]]\n"
-    "Part 2: your own assessment; flag general knowledge, cite snippets you react to.\n\n"
+    "Part 2: your own assessment; flag general knowledge, cite snippets you react to. "
+    "A check with 0 shows no passage contains those words, never that the idea is absent.\n\n"
     "Answer:\n"
 )
+#: Characters the keyword checks may take in the answer prompt; whole lines only.
+KEYWORD_CHECKS_CHARS = 800
 
 PRIOR_ANSWER_CHARS = 4000
 """Longest earlier assistant answer, in characters, that research and the answer step are shown.
@@ -341,7 +346,14 @@ class AssessmentRunner:
         )
 
     def _open_answer(
-        self, nodes: list[NodeWithScore], *, block: str, question: str, budget_tokens: int, compact: bool = False
+        self,
+        nodes: list[NodeWithScore],
+        *,
+        block: str,
+        question: str,
+        checks: str,
+        budget_tokens: int,
+        compact: bool = False,
     ) -> tuple[Iterator[str], int, bool]:
         """Render the evidence into the answer prompt, send it and pull the first token.
 
@@ -352,6 +364,8 @@ class AssessmentRunner:
             nodes (list[NodeWithScore]): The numbered evidence.
             block (str): The rendered prior turn.
             question (str): The question as the prompts show it (see :func:`question_block`).
+            checks (str): The research's keyword checks (see
+                :func:`~docint.agents.assessment.keyword.render_keyword_checks`).
             budget_tokens (int): Tokens the rendered evidence may use.
             compact (bool): Whether headers are compacted, as on the overflow retry.
 
@@ -368,7 +382,9 @@ class AssessmentRunner:
             count_tokens=self._count_tokens,
             compact=compact,
         )
-        prompt = self._answer_prompt.format(prior_turn=block, context_str=rendered.context, question=question)
+        prompt = self._answer_prompt.format(
+            prior_turn=block, context_str=rendered.context, question=question, keyword_checks=checks
+        )
         tokens = stream_chat_response_to_tokens(
             self._answer_llm.stream_chat([ChatMessage(role=MessageRole.USER, content=prompt)])
         )
@@ -451,12 +467,17 @@ class AssessmentRunner:
         if len(ledger) == 0:
             yield AssessmentResult(raw_text="", nodes=[], steps=steps, actions=actions, reason="no_evidence")
             return
+        checks = render_keyword_checks(actions, max_chars=KEYWORD_CHECKS_CHARS)
+        if checks != NO_CHECKS:
+            # Known only now, the checks spend what the prior turn and question left of their reserve first.
+            extra = max(0, self._overhead_tokens(block + asked + checks) - PRIOR_TURN_TOKENS - QUESTION_TOKENS)
+            evidence_budget = max(0, budget.evidence_tokens - extra)
         # Remeasured on everything found, which catches research denser than the seed.
         nodes = self._fit(ledger.numbered(), keep=seed_count, budget_tokens=evidence_budget)
         yield AgentProgress(step=steps + 1, action="answer", detail="", found=len(nodes))
         try:
             tokens, shortened, legible = self._open_answer(
-                nodes, block=block, question=asked, budget_tokens=evidence_budget
+                nodes, block=block, question=asked, checks=checks, budget_tokens=evidence_budget
             )
         except Exception as exc:
             if not is_context_overflow(exc):
@@ -473,7 +494,7 @@ class AssessmentRunner:
                 raise ValueError("The assessment prompt exceeds the model's context window.") from exc
             try:
                 tokens, shortened, legible = self._open_answer(
-                    nodes, block=block, question=asked, budget_tokens=retry_budget, compact=True
+                    nodes, block=block, question=asked, checks=checks, budget_tokens=retry_budget, compact=True
                 )
             except Exception as retry_exc:
                 if is_context_overflow(retry_exc):

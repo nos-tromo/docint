@@ -28,6 +28,8 @@ MAX_KEYWORD_CHARS = 100
 #: Characters before an anchored term that its region keeps, so a negation in front of it stays visible.
 TERM_CONTEXT_CHARS = 80
 
+#: What the answer prompt's checks block holds when research made no check with a known count.
+NO_CHECKS = "(none)"
 #: Why a keyword call cannot run: none of its words is long enough for the index.
 NO_USABLE_WORD = "no_usable_word"
 #: Why a keyword call cannot run: the field matches one exact value, and several words were given.
@@ -212,7 +214,7 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
 
     Returns:
         str: One ``- "words" (field): count`` line per check, with
-        ``, unchecked: N`` on a partial index; ``(none)`` when there is none.
+        ``, unchecked: N`` on a partial index; :data:`NO_CHECKS` when there is none.
     """
     lines: list[str] = []
     used = 0
@@ -229,4 +231,4 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
             break
         lines.append(line)
         used += cost
-    return "\n".join(lines) or "(none)"
+    return "\n".join(lines) or NO_CHECKS

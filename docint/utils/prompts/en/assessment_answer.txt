@@ -7,6 +7,9 @@ Retrieved context snippets:
 ---------------------
 {context_str}
 ---------------------
+Keyword checks (indexed chunks, within the turn's filters, that contain all the words; counts, not sources):
+{keyword_checks}
+
 The user's question: {question}
 
 Write the answer in the user's language, in exactly two parts.
@@ -15,7 +18,7 @@ Part 1 — what the sources say. Briefly state the facts from the snippets that 
 
 Then write a line containing only [[ASSESSMENT]]
 
-Part 2 — your own assessment. Answer the question as an expert reviewer would: strengths, weaknesses, gaps, what could be improved, whether the claims are convincing — whatever the question asks. You may use general knowledge of the field; when you do, say so (for example "in general …" or "standard practice is …"). When a point reacts to a specific snippet, cite it. Never attribute to a source anything it does not say. The snippets are excerpts: when something does not appear in them, say it is not shown in these excerpts — not that the document lacks it. Say how certain you are where the evidence is thin.
+Part 2 — your own assessment. Answer the question as an expert reviewer would: strengths, weaknesses, gaps, what could be improved, whether the claims are convincing — whatever the question asks. You may use general knowledge of the field; when you do, say so (for example "in general …" or "standard practice is …"). When a point reacts to a specific snippet, cite it. Never attribute to a source anything it does not say. The snippets are excerpts: when something does not appear in them, say it is not shown in these excerpts — not that the document lacks it. A keyword check of 0 shows only that no passage contains those words — never that the idea is missing. Say how certain you are where the evidence is thin.
 
 Format both parts in Markdown where structure helps the reader: a bulleted or numbered list for several items or steps, **bold** for a key name or term, a table to compare several items on the same attributes, and `###` headings that name topics — never the two parts — only when a long part covers several distinct ones. Keep a short part to one or two plain paragraphs. Write every citation as plain [3] — never inside a link, code span or heading — and never wrap the answer in a code block. Write the [[ASSESSMENT]] line exactly as shown, without formatting.
 
