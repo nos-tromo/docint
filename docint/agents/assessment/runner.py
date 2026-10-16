@@ -29,7 +29,12 @@ from docint.agents.assessment.ledger import (
     is_context_overflow,
     render_context,
 )
-from docint.agents.assessment.split import ASSESSMENT_RULE, SentinelStreamSplitter, neutralize_sentinel
+from docint.agents.assessment.split import (
+    ASSESSMENT_RULE,
+    CITATION_NUMBERS_RE,
+    SentinelStreamSplitter,
+    neutralize_sentinel,
+)
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.llm_sanitize import strip_reasoning
@@ -70,8 +75,6 @@ RESOLVED_QUESTION_LABEL = (
     "Resolved from earlier turns by a search rewrite (may repeat earlier answers, the model's own assessments "
     "included; not a source, never cite it)"
 )
-#: A bracketed citation number, list or range (hyphen or en dash), as an earlier answer cites its sources.
-_CITATION_NUMBERS_RE = re.compile(r"\[\s*\d+(?:\s*[,;\u2013-]\s*\d+)*\s*\]")
 
 
 class AssessmentDoesNotFit(ValueError):
@@ -216,8 +219,8 @@ def question_block(question: str, resolved: str | None) -> str:
     if resolved is None:
         return asked
     visible, _ = strip_reasoning(resolved)
-    plain = neutralize_sentinel(" ".join(_CITATION_NUMBERS_RE.sub("", visible).split()))
-    if not plain or _words(plain) == _words(_CITATION_NUMBERS_RE.sub("", asked)):
+    plain = neutralize_sentinel(" ".join(CITATION_NUMBERS_RE.sub("", visible).split()))
+    if not plain or _words(plain) == _words(CITATION_NUMBERS_RE.sub("", asked)):
         return asked
     sanitized, _ = fit_with_marker(plain, RESOLVED_QUESTION_CHARS)
     return f"{asked}\n{RESOLVED_QUESTION_LABEL}: {sanitized}"

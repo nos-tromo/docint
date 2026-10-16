@@ -24,6 +24,8 @@ ASSESSMENT_RULE = "\n\n---\n\n"
 # Tolerates what models do to a marker: case, single brackets, bold, heading marks.
 _SENTINEL_RE = re.compile(r"(?:#{1,6}\s*)?(?:\*\*|__)?\[{1,2}\s*assessment\s*\]{1,2}(?:\*\*|__)?", re.IGNORECASE)
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+#: A bracketed citation number, list or range (hyphen or en dash), as an earlier answer cites its sources.
+CITATION_NUMBERS_RE = re.compile(r"\[\s*\d+(?:\s*[,;\u2013-]\s*\d+)*\s*\]")
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 # str.lower() can change length (U+0130), which would misalign buffer indices.
