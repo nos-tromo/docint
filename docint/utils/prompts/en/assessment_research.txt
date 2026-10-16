@@ -9,8 +9,8 @@ Previous exchange:
 Passages already found, numbered:
 {digest}
 
-You have two tools:
+Your tools:
 - search(query): searches the collection and returns new numbered passages. Use short, specific queries naming the parts of the material the judgement depends on — for a study, typically its claims, method, data, evaluation, results and stated limitations; for other material, whatever its quality turns on. Do not repeat a query.
-- finish(): call it when the passages cover what the judgement needs, or when searching stops turning up anything new.
+{keyword_tool}- finish(): call it when the passages cover what the judgement needs, or when searching stops turning up anything new.
 
 Call exactly one tool per step.

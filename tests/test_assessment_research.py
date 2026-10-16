@@ -18,6 +18,8 @@ from assessment_fakes import (
     bad_request,
     fragmented_endpoint,
     join_threads,
+    keyword_call,
+    keyword_tool,
     llm_view,
     scored_node,
     search_call,
@@ -28,6 +30,7 @@ from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 from typing_extensions import override
 
+from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY, KeywordResult
 from docint.agents.assessment.ledger import EvidenceLedger, Room
 from docint.agents.assessment.research import (
     MODEL_SLOT_POOL,
@@ -45,6 +48,7 @@ from docint.agents.assessment.runner import ResearchOutcome, SearchFn
 from docint.agents.types import AgentProgress
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.openai_cfg import LocalOpenAI
+from docint.utils.text_budget import MATCH_SPANS_KEY
 
 QUESTION = "zzsecretzz What could be improved in this study?"
 
@@ -1535,3 +1539,355 @@ def test_a_model_call_runs_on_its_own_thread_in_the_callers_context() -> None:
         _SCOPE.reset(token)
 
     assert seen == [(MODEL_THREAD_NAME, "invented-collection")]
+
+
+def _hit(words: str, *nodes: NodeWithScore, matches: int | None = 1, unchecked: int = 0) -> KeywordResult:
+    """Build what a keyword check found.
+
+    Args:
+        words (str): The words matched.
+        *nodes (NodeWithScore): The passages retrieved.
+        matches (int | None): The count.
+        unchecked (int): Chunks the index does not cover.
+
+    Returns:
+        KeywordResult: The result.
+    """
+    return KeywordResult(nodes=list(nodes), matches=matches, unchecked=unchecked, keywords=tuple(words.split()))
+
+
+def _reply(llm: Any, call: int = 1, position: int = 2) -> str:
+    """Return a tool reply as a later model call was shown it.
+
+    Args:
+        llm (Any): The model double.
+        call (int): The model call whose history to read.
+        position (int): The message's place in that history.
+
+    Returns:
+        str: The reply text.
+    """
+    return str(llm.chat_with_tools.call_args_list[call].kwargs["chat_history"][position].content)
+
+
+TRIAL_TEXT = (
+    "The trial enrolled two hundred patients across four sites over two years. " * 3
+    + "There was keine Kontrollgruppe in the design."
+)
+
+
+def test_keyword_sits_between_search_and_finish_when_the_turn_offers_it() -> None:
+    """Offered, the check is a third tool; without it research keeps exactly its two."""
+    llm = tool_llm([])
+
+    _drain(
+        _loop(llm, _search({}), keyword=keyword_tool()).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert [tool.metadata.name for tool in llm.chat_with_tools.call_args.args[0]] == ["search", "keyword", "finish"]
+
+
+def test_the_keyword_schema_offers_exactly_the_ready_fields() -> None:
+    """The model can only ask for a field whose index is ready; text is the default."""
+    llm = tool_llm([])
+
+    _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(fields=("text", "author"))).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    parameters = llm.chat_with_tools.call_args.args[0][1].metadata.get_parameters_dict()
+    assert parameters["required"] == ["words"]
+    assert parameters["properties"]["field"]["enum"] == ["text", "author"]
+    assert parameters["properties"]["field"]["default"] == "text"
+
+
+def test_the_prompt_describes_keyword_only_when_it_is_offered() -> None:
+    """Some chat templates drop the tool schemas, so the prose must match what is offered."""
+    offered, plain = tool_llm([]), tool_llm([])
+    template = "{digest}|{keyword_tool}|"
+
+    _drain(
+        _loop(
+            offered,
+            _search({}),
+            prompt=template,
+            keyword=keyword_tool(fields=("text", "uuid")),
+            keyword_prompt="KW {fields}",
+        ).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+    _drain(
+        _loop(plain, _search({}), prompt=template).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+
+    assert offered.chat_with_tools.call_args.kwargs["chat_history"][0].content == "(none)|KW text, uuid\n|"
+    assert plain.chat_with_tools.call_args.kwargs["chat_history"][0].content == "(none)||"
+
+
+def test_a_keyword_check_reports_its_count_and_adds_its_passages() -> None:
+    """The count leads the reply, and the passages enter the ledger as a search's do."""
+    hit = scored_node("k", "Kontrollgruppe fehlt.", filename="trial.pdf")
+    llm = tool_llm([keyword_call("Kontrollgruppe")])
+    ledger = EvidenceLedger(cap=5)
+    tool = keyword_tool({("Kontrollgruppe", "text"): _hit("Kontrollgruppe", hit, matches=3)})
+
+    progress, outcome = _drain(
+        _loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=ledger)
+    )
+
+    assert [(step.action, step.detail, step.found, step.field, step.matches) for step in progress] == [
+        ("keyword", "Kontrollgruppe", 1, "text", 3)
+    ]
+    assert outcome.actions == [
+        {"action": "keyword", "detail": "Kontrollgruppe", "field": "text", "found": 1, "matches": 3}
+    ]
+    assert _reply(llm).splitlines() == [
+        "3 indexed chunks in the searched material contain all of these words.",
+        "[1] (trial.pdf) Kontrollgruppe fehlt.",
+    ]
+    assert len(ledger) == 1
+
+
+def test_a_zero_count_is_a_fact_and_never_an_idle_round() -> None:
+    """Absence checks are what the tool is for, so two in a row do not end research."""
+    llm = tool_llm([keyword_call("Kontrollgruppe"), keyword_call("Randomisierung"), search_call("method")])
+
+    progress, outcome = _drain(
+        _loop(llm, _search({"method": [scored_node("m", "M.")]}), keyword=keyword_tool()).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert [(step.action, step.matches) for step in progress] == [("keyword", 0), ("keyword", 0), ("search", None)]
+    assert outcome.reason is None
+
+
+def test_a_count_that_failed_reads_unknown_and_never_zero() -> None:
+    """A failed count must not pass for an exact absence; twice with nothing new is idle research."""
+    llm = tool_llm([keyword_call("Kontrollgruppe"), keyword_call("Randomisierung"), search_call("never")])
+    tool = keyword_tool(
+        {
+            ("Kontrollgruppe", "text"): _hit("Kontrollgruppe", matches=None),
+            ("Randomisierung", "text"): _hit("Randomisierung", matches=None),
+        }
+    )
+
+    progress, outcome = _drain(
+        _loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+
+    assert [step.matches for step in progress] == [None, None]
+    assert outcome.actions[0]["matches"] is None
+    assert _reply(llm).splitlines()[0] == "The number of matching chunks is unavailable."
+    assert outcome.steps == 2
+
+
+def test_a_partial_index_is_named_in_the_reply_and_the_record() -> None:
+    """On a partial index a count is only as good as what the index covers."""
+    llm = tool_llm([keyword_call("Kontrollgruppe")])
+    tool = keyword_tool({("Kontrollgruppe", "text"): _hit("Kontrollgruppe", matches=0, unchecked=12)})
+
+    _, outcome = _drain(
+        _loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+
+    assert outcome.actions[0]["unchecked"] == 12
+    assert "12 chunks are not in the keyword index yet, so they were not checked." in _reply(llm).splitlines()
+
+
+def test_a_repeated_check_ends_research_and_a_search_for_the_same_words_does_not() -> None:
+    """A check repeats by field and word set, in any order and case; a search is no check."""
+    ran: list[tuple[str, str]] = []
+    llm = tool_llm(
+        [
+            search_call("control group"),
+            keyword_call("control group"),
+            keyword_call("Group  CONTROL"),
+            search_call("never"),
+        ]
+    )
+
+    progress, outcome = _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(ran=ran)).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert [step.action for step in progress] == ["search", "keyword"]
+    assert ran == [("control group", "text")]
+    assert outcome.steps == 3
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "problems", "error"),
+    [
+        ({"words": "  "}, {}, "Error: call keyword with the words to match"),
+        ({"words": "x" * 101}, {}, "Error: keep the words within 100 characters"),
+        ({"words": "Krieger", "field": "network"}, {}, "Error: field must be one of: text, author, uuid."),
+        ({"words": "a b"}, {"a b": NO_USABLE_WORD}, "Error: give at least one word of two or more characters."),
+        ({"words": "id1 id2", "field": "uuid"}, {"id1 id2": ONE_VALUE_ONLY}, "Error: uuid matches one exact value"),
+    ],
+)
+def test_an_invalid_keyword_call_is_answered_and_research_continues(
+    kwargs: dict[str, Any], problems: dict[str, str], error: str
+) -> None:
+    """A check that cannot run costs a step and gets a reply saying why; it never runs.
+
+    Args:
+        kwargs (dict[str, Any]): The call's arguments.
+        problems (dict[str, str]): What the tool's check says about the words.
+        error (str): How the reply starts.
+    """
+    ran: list[tuple[str, str]] = []
+    llm = tool_llm([ToolSelection(tool_id="c1", tool_name="keyword", tool_kwargs=kwargs), search_call("method")])
+    tool = keyword_tool(fields=("text", "author", "uuid"), problems=problems, ran=ran)
+
+    progress, outcome = _drain(
+        _loop(llm, _search({"method": [scored_node("m", "M.")]}), keyword=tool).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert ran == []
+    assert [step.action for step in progress] == ["search"]
+    assert outcome.steps == 3
+    assert _reply(llm).startswith(error)
+
+
+def test_a_keyword_check_that_raises_ends_research_as_a_failed_search_does(loguru_caplog: LogCaptureFixture) -> None:
+    """A broken check stops research with what it found, and its words never reach the log.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+
+    def _broken(words: str, field: str) -> KeywordResult:
+        """Fail with the words in the message.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError(words)
+
+    llm = tool_llm([keyword_call("zzsecretzz")])
+
+    _, outcome = _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(run=_broken)).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert outcome.reason == "research_failed"
+    assert loguru_caplog.messages == ["Assessment research keyword check failed: RuntimeError"]
+    assert "zzsecretzz" not in loguru_caplog.text
+
+
+def test_no_free_slot_stops_a_keyword_check_before_it_runs(loguru_caplog: LogCaptureFixture) -> None:
+    """A check is a search: it waits for the same slots and never runs without one.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    ran: list[tuple[str, str]] = []
+    llm = tool_llm([keyword_call("Kontrollgruppe")])
+
+    _, outcome = _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(ran=ran), slots=_Recording()).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert (outcome.reason, ran) == ("research_failed", [])
+    assert loguru_caplog.messages == ["Assessment research stopped (research_failed): no search capacity"]
+
+
+def test_a_keyword_check_that_outlasts_the_budget_ends_research_on_time(loguru_caplog: LogCaptureFixture) -> None:
+    """The research budget bounds a check as it bounds a search.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    release = threading.Event()
+
+    def _slow(words: str, field: str) -> KeywordResult:
+        """Hold the slot until the test lets go.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            KeywordResult: A zero count, read by nobody.
+        """
+        release.wait(5)
+        return _hit(words, matches=0)
+
+    llm = tool_llm([keyword_call("Kontrollgruppe")])
+    try:
+        _, outcome = _drain(
+            _loop(llm, _search({}), keyword=keyword_tool(run=_slow), clock=lambda: 0.0, wall_clock_s=0.2).run(
+                question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+            )
+        )
+    finally:
+        release.set()
+        join_threads(SEARCH_THREAD_NAME)
+
+    assert outcome.reason == "time_budget"
+    assert loguru_caplog.messages == [
+        "Assessment research stopped (time_budget): no keyword check result arrived within the research budget"
+    ]
+
+
+def test_a_text_check_anchors_its_passages_on_the_words() -> None:
+    """Research and the ledger see the word in its context, not the chunk's first sentence."""
+    hit = scored_node("k", TRIAL_TEXT, filename="trial.pdf", **{MATCH_SPANS_KEY: [[0, len(TRIAL_TEXT)]]})
+    llm = tool_llm([keyword_call("Kontrollgruppe")])
+    ledger = EvidenceLedger(cap=5)
+
+    _drain(
+        _loop(llm, _search({}), keyword=keyword_tool({("Kontrollgruppe", "text"): _hit("Kontrollgruppe", hit)})).run(
+            question=QUESTION, prior_turn=None, ledger=ledger
+        )
+    )
+
+    assert "keine Kontrollgruppe" in _reply(llm)
+    assert ledger.entries()[0].node.metadata[MATCH_SPANS_KEY][0][0] > 0
+
+
+def test_a_metadata_check_leaves_its_passages_as_retrieved() -> None:
+    """An author match sits in the metadata, so the text holds nothing to anchor on."""
+    hit = scored_node("k", TRIAL_TEXT, filename="trial.pdf", **{MATCH_SPANS_KEY: [[0, len(TRIAL_TEXT)]]})
+    llm = tool_llm([keyword_call("Kontrollgruppe", field="author")])
+    ledger = EvidenceLedger(cap=5)
+    tool = keyword_tool({("Kontrollgruppe", "author"): _hit("Kontrollgruppe", hit)}, fields=("text", "author"))
+
+    _drain(_loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=ledger))
+
+    assert ledger.entries()[0].node.metadata[MATCH_SPANS_KEY] == [[0, len(TRIAL_TEXT)]]
+
+
+def test_offering_keyword_reserves_room_for_its_schema() -> None:
+    """A window that holds one plain round is too small once the keyword schema rides along."""
+    plain, offered = tool_llm([]), tool_llm([])
+
+    _, without = _drain(
+        _loop(plain, _search({}), ctx_window=1787).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+    )
+    _, with_keyword = _drain(
+        _loop(offered, _search({}), ctx_window=1787, keyword=keyword_tool()).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert without.reason is None
+    plain.chat_with_tools.assert_called_once()
+    assert with_keyword.reason == "context_budget"
+    offered.chat_with_tools.assert_not_called()

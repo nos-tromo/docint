@@ -21,6 +21,8 @@ from llama_index.core.schema import MetadataMode, NodeWithScore
 from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
+#: The field a keyword call matches when it names none: the passage text.
+DEFAULT_KEYWORD_FIELD = "text"
 #: Longest keyword input in characters. Longer input is refused, never cut: a cut last word would widen the match.
 MAX_KEYWORD_CHARS = 100
 #: Characters before an anchored term that its region keeps, so a negation in front of it stays visible.

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import httpx
 import openai
 import pytest
-from assessment_fakes import FixedRetriever, RecordingPostprocessor, scored_node
+from assessment_fakes import FixedRetriever, RecordingPostprocessor, keyword_tool, scored_node
 from llama_index.core.llms import MockLLM
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.response_synthesizers import Refine
@@ -169,6 +169,33 @@ def test_a_research_step_sends_required_single_non_strict_tool_calls(monkeypatch
     assert body["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
     assert {tool["function"]["name"] for tool in body["tools"]} == {"search", "finish"}
     assert all(tool["function"]["strict"] is False for tool in body["tools"])
+
+
+def test_the_keyword_tool_reaches_the_wire_with_its_ready_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The field enum and its default survive into the request, where guided decoding enforces them.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    sent = _serve(monkeypatch, [_completion("finish", "{}", "call_1")])
+    loop = ResearchLoop(
+        llm=_rag().text_model,
+        search=lambda _query: [],
+        max_steps=3,
+        ctx_window=32768,
+        char_token_ratio=3.5,
+        keyword=keyword_tool(fields=("text", "author")),
+    )
+
+    list(loop.run(question="What could be improved?", prior_turn=None, ledger=EvidenceLedger(cap=5)))
+
+    tools = {tool["function"]["name"]: tool["function"] for tool in sent[0]["tools"]}
+    assert list(tools) == ["search", "keyword", "finish"]
+    keyword = tools["keyword"]
+    assert keyword["strict"] is False
+    assert keyword["parameters"]["required"] == ["words"]
+    assert keyword["parameters"]["properties"]["field"]["enum"] == ["text", "author"]
+    assert keyword["parameters"]["properties"]["field"]["default"] == "text"
 
 
 def test_the_second_request_answers_the_first_call_by_its_id(monkeypatch: pytest.MonkeyPatch) -> None:
