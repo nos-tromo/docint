@@ -91,6 +91,8 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
             # that the answer on screen came from a second attempt.
             ("retried", "BOOLEAN"),
             ("retry_query", "TEXT"),
+            # Assessment provenance; NULL marks a lookup turn.
+            ("agent_trail", "TEXT"),
         ]
         with engine.begin() as conn:
             for name, sql_type in pending:

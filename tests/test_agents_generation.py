@@ -522,3 +522,29 @@ def test_validation_prompt_has_no_truncation_warning_when_everything_fits() -> N
 
     assert llm.last_prompt is not None
     assert "truncat" not in llm.last_prompt.lower()
+
+
+def test_validation_prompt_scopes_an_assessment_to_its_source_backed_part() -> None:
+    """An assessment turn's validator is told the model's judgement is out of scope."""
+    agent = ResultValidationResponseAgent(enabled=True, llm=None)
+    sources = [{"text": "One dataset is used.", "citation_index": 1}]
+
+    with_note = agent._build_prompt(query="q", answer="One dataset [1].", sources=sources, intent="assessment")
+    without = agent._build_prompt(query="q", answer="One dataset [1].", sources=sources)
+
+    assert "not under review" in with_note
+    assert "not under review" not in without
+
+
+def test_validation_assessment_note_is_localized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The note follows the response language like the rest of the validator prompt.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    agent = ResultValidationResponseAgent(enabled=True, llm=None)
+
+    prompt = agent._build_prompt(query="q", answer="a", sources=[{"text": "t"}], intent="assessment")
+
+    assert "nicht Gegenstand der Prüfung" in prompt

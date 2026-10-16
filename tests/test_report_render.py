@@ -24,6 +24,7 @@ from pdf_layout import (
 )
 from typing_extensions import override
 
+from docint.agents.assessment.split import compose_labelled_answer
 from docint.core.state import report_render as R
 from docint.utils.ui_strings import ui_string
 
@@ -1842,3 +1843,27 @@ def test_pdf_fetches_nothing_but_data_uris(tmp_path: Any) -> None:
 
     pdf = weasyprint_html()(string=document).write_pdf()
     assert pdf.count(b"/Subtype /Image") == 1
+
+
+def test_assessment_label_renders_as_a_rule_and_bold_heading(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The persisted label reads as a separator, never turns the evidence into a heading.
+
+    Without a blank line before ``---`` CommonMark makes the paragraph above a
+    setext ``<h2>``; the composed label guarantees that blank line.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    labelled = compose_labelled_answer(
+        "The study reports an F1 of 0.71 [1].\n[[ASSESSMENT]]\nThe evaluation set is small."
+    )
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": labelled.text, "sources": []})
+
+    htm = R.render_html(report)
+    md = R.render_markdown(report)
+
+    assert "<hr" in htm
+    assert "<strong>Model assessment</strong>" in htm
+    assert not re.search(r"<h2[^>]*>\s*The study reports", htm)
+    assert "**Model assessment**" in md

@@ -12,6 +12,7 @@ from docint.agents.types import ResponseAgent, RetrievalResult, Turn
 from docint.utils.env_cfg import load_response_validation_env
 from docint.utils.prompt_loader import load_localized_prompt
 from docint.utils.reference_metadata import format_reference_metadata_block
+from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
 
 if TYPE_CHECKING:
     from llama_index.core.llms import LLM
@@ -32,6 +33,13 @@ DEFAULT_TRUNCATION_NOTE = (
     "may still be grounded in the hidden text. Do not report a detail as "
     "ungrounded solely because it is missing from a truncated excerpt; judge "
     "only contradictions with the text you can actually see."
+)
+
+DEFAULT_ASSESSMENT_NOTE = (
+    "NOTE: This turn asked for an assessment. The answer below is only its source-backed part; "
+    "the model's own judgement follows separately and is not under review. Judge sources_relevant by "
+    "whether the sources bear on the subject of the question, and summary_grounded only by whether "
+    "each statement in the answer is supported by the sources."
 )
 
 DEFAULT_RESPONSE_VALIDATOR_PROMPT = (
@@ -91,6 +99,10 @@ class ResultValidationResponseAgent(ResponseAgent):
         self._truncation_note = load_localized_prompt(
             "response_validator_truncation",
             default=DEFAULT_TRUNCATION_NOTE,
+        ).strip()
+        self._assessment_note = load_localized_prompt(
+            "response_validator_assessment",
+            default=DEFAULT_ASSESSMENT_NOTE,
         ).strip()
 
     @override
@@ -240,6 +252,8 @@ class ResultValidationResponseAgent(ResponseAgent):
             intent=intent,
             tool_used=tool_used,
         )
+        if intent == "assessment":
+            retrieval_context = f"{retrieval_context}{self._assessment_note}\n\n"
         return self._prompt_template.format(
             retrieval_context=retrieval_context,
             answer=answer,
@@ -360,15 +374,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             list[int]: Characters granted to each source, positionally aligned
             with ``lengths``.
         """
-        allocation = [0] * len(lengths)
-        remaining_budget = budget
-        order = sorted(range(len(lengths)), key=lambda i: lengths[i])
-        for position, index in enumerate(order):
-            share = remaining_budget // (len(order) - position)
-            granted = min(lengths[index], share)
-            allocation[index] = granted
-            remaining_budget -= granted
-        return allocation
+        return allocate_shortest_first(lengths, budget)
 
     def _sources_to_text(self, sources: list[dict[str, Any]]) -> tuple[str, bool]:
         """Convert source dictionaries to text snippets for validation.
@@ -473,10 +479,7 @@ class ResultValidationResponseAgent(ResponseAgent):
         Returns:
             tuple[str, bool]: The rendered body and whether it was trimmed.
         """
-        if len(text) <= allowance:
-            return (text, False)
-        hidden = len(text) - allowance
-        return (f"{text[:allowance]}[... {hidden} of {len(text)} characters not shown ...]", True)
+        return fit_with_marker(text, allowance)
 
     def _parse_response(self, text: str) -> dict[str, Any]:
         """Parse JSON payload from the validator model response.

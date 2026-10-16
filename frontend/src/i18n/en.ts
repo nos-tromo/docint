@@ -147,6 +147,8 @@ export const en = {
     'Chat stream ended unexpectedly — the connection dropped or the backend went away mid-answer. Check the backend logs and try again.',
   'chat.error_backend_failed':
     'The answer could not be generated. Try again; the code shown and the backend logs identify the failure.',
+  'chat.assessment_interrupted':
+    'This answer did not finish. It may be incomplete, and it may contain the model’s own judgement without its label, not checked against the sources.',
   'chat.error_context_overflow':
     'The request is too large for the model – Try a shorter question or select fewer documents.',
   'chat.error_embedding_unavailable':
@@ -178,6 +180,32 @@ export const en = {
   'chat.validation_unavailable_title': 'Response validation unavailable',
   'chat.validation_not_validated_title': 'Response not validated',
   'chat.validation_default_detail': 'Validation was skipped or unavailable for this response.',
+  'chat.validation_passed_assessment_title': 'Response validation passed for the source-backed part',
+  'chat.validation_mismatch_assessment_title': 'Response validation flagged the source-backed part',
+  'chat.validation_skipped_assessment_title':
+    'Not validated — the answer has no separate source-backed part',
+  'chat.assessment_notice':
+    'This answer includes the model’s own assessment, marked in the text. It may draw on general knowledge and is not checked against the sources.',
+  'chat.assessment_shortened_one': '{count} passage was shortened to fit the model’s context.',
+  'chat.assessment_shortened_other': '{count} passages were shortened to fit the model’s context.',
+  'chat.assessment_trail_show': 'Show the searches behind this assessment',
+  'chat.assessment_trail_hide': 'Hide the searches behind this assessment',
+  'chat.assessment_trail_seed_one': 'Initial search: {count} passage',
+  'chat.assessment_trail_seed_other': 'Initial search: {count} passages',
+  'chat.assessment_trail_search_one': 'Searched “{query}”: {count} new passage',
+  'chat.assessment_trail_search_other': 'Searched “{query}”: {count} new passages',
+  'chat.assessment_trail_answer': 'Writing the assessment…',
+  'chat.assessment_reason.tools_unavailable':
+    'The model could not run its own searches, so this assessment rests on the first search’s passages only.',
+  'chat.assessment_reason.research_failed':
+    'The research step failed part-way, so this assessment rests on the passages found before it stopped.',
+  'chat.assessment_reason.context_budget':
+    'The model’s context window was full, so research stopped early or part of the evidence was left out.',
+  'chat.assessment_reason.time_budget': 'The research stopped early because it ran out of time.',
+  'chat.assessment_reason.no_evidence': 'No passages were found to assess.',
+  'chat.assessment_answer.unsplit':
+    'The model did not separate what the sources say from its own judgement, so the whole answer is marked as its assessment.',
+  'chat.assessment_answer.empty': 'The model returned no assessment.',
 
   // chat search panel + session scope
   'search.title': 'Search',

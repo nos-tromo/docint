@@ -153,6 +153,8 @@ export const de: Strings = {
     'Der Chat-Stream wurde unerwartet beendet — die Verbindung brach ab oder das Backend war mitten in der Antwort nicht mehr erreichbar. Prüfen Sie die Backend-Logs und versuchen Sie es erneut.',
   'chat.error_backend_failed':
     'Die Antwort konnte nicht erzeugt werden. Versuchen Sie es erneut; der angezeigte Code und die Backend-Logs benennen den Fehler.',
+  'chat.assessment_interrupted':
+    'Diese Antwort wurde nicht fertiggestellt. Sie kann unvollständig sein und eigene Einschätzungen des Modells ohne deren Kennzeichnung enthalten, die nicht gegen die Quellen geprüft sind.',
   'chat.error_context_overflow':
     'Die Anfrage ist zu groß für das Modell – Bitte stellen Sie eine kürzere Frage oder wählen Sie weniger Dokumente aus.',
   'chat.error_embedding_unavailable':
@@ -186,6 +188,37 @@ export const de: Strings = {
   'chat.validation_not_validated_title': 'Antwort nicht validiert',
   'chat.validation_default_detail':
     'Die Validierung wurde für diese Antwort übersprungen oder war nicht verfügbar.',
+  'chat.validation_passed_assessment_title':
+    'Antwortvalidierung für den quellengestützten Teil bestanden',
+  'chat.validation_mismatch_assessment_title':
+    'Antwortvalidierung hat den quellengestützten Teil beanstandet',
+  'chat.validation_skipped_assessment_title':
+    'Nicht validiert – die Antwort hat keinen getrennten quellengestützten Teil',
+  'chat.assessment_notice':
+    'Diese Antwort enthält eine eigene Einschätzung des Modells, im Text markiert. Sie kann auf Allgemeinwissen beruhen und wird nicht gegen die Quellen geprüft.',
+  'chat.assessment_shortened_one':
+    '{count} Passage wurde gekürzt, damit sie in den Kontext des Modells passt.',
+  'chat.assessment_shortened_other':
+    '{count} Passagen wurden gekürzt, damit sie in den Kontext des Modells passen.',
+  'chat.assessment_trail_show': 'Suchen hinter dieser Einschätzung anzeigen',
+  'chat.assessment_trail_hide': 'Suchen hinter dieser Einschätzung ausblenden',
+  'chat.assessment_trail_seed_one': 'Erste Suche: {count} Passage',
+  'chat.assessment_trail_seed_other': 'Erste Suche: {count} Passagen',
+  'chat.assessment_trail_search_one': 'Gesucht nach „{query}“: {count} neue Passage',
+  'chat.assessment_trail_search_other': 'Gesucht nach „{query}“: {count} neue Passagen',
+  'chat.assessment_trail_answer': 'Einschätzung wird geschrieben…',
+  'chat.assessment_reason.tools_unavailable':
+    'Das Modell konnte keine eigenen Suchen ausführen; diese Einschätzung beruht nur auf den Passagen der ersten Suche.',
+  'chat.assessment_reason.research_failed':
+    'Die Recherche brach unterwegs ab; diese Einschätzung beruht auf den bis dahin gefundenen Passagen.',
+  'chat.assessment_reason.context_budget':
+    'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder ein Teil der Belege wurde ausgelassen.',
+  'chat.assessment_reason.time_budget':
+    'Die Recherche endete vorzeitig, weil die Zeit abgelaufen war.',
+  'chat.assessment_reason.no_evidence': 'Es wurden keine Passagen gefunden, die sich bewerten ließen.',
+  'chat.assessment_answer.unsplit':
+    'Das Modell hat nicht getrennt, was die Quellen sagen und was es selbst urteilt; die ganze Antwort ist daher als seine Einschätzung markiert.',
+  'chat.assessment_answer.empty': 'Das Modell hat keine Einschätzung geliefert.',
 
   // chat search panel + session scope
   'search.title': 'Suche',
