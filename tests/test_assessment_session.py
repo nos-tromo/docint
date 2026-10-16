@@ -144,7 +144,7 @@ def _arm(
     rag = cast(Any, sm.rag)
     rag.build_query_engine.return_value = engine
     rag.query_engine = engine
-    rag.assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
+    rag.assessment_runner.side_effect = lambda engine, scoped, **_: AssessmentRunner(
         answer_llm=cast(Any, streaming_llm(tokens or ANSWER)),
         llm_view=view,
         ctx_window=8192,
@@ -240,6 +240,34 @@ def test_a_scoped_assessment_keeps_its_scope_and_never_researches(session_manage
     assert final["retrieval_mode"] == "scoped"
     assert final["scoped_chunk_count"] == 2
     assert cast(Any, session_manager.rag).assessment_runner.call_args.kwargs["scoped"] is True
+
+
+def test_the_runner_receives_the_turns_filters_and_target(session_manager: SessionManager) -> None:
+    """A keyword check must count the material the turn may answer from, so its filters reach the runner.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    _arm(session_manager, nodes=_seed())
+    rules = [{"field": "mimetype", "operator": "eq", "value": "text/plain"}]
+
+    list(
+        session_manager.stream_chat(
+            QUESTION,
+            session_id="s1",
+            metadata_filter_rules=rules,
+            metadata_filters_active=True,
+            retrieval_target="documents",
+            answer_mode="assessment",
+        )
+    )
+
+    kwargs = cast(Any, session_manager.rag).assessment_runner.call_args.kwargs
+    assert (kwargs["metadata_filter_rules"], kwargs["metadata_filters_active"], kwargs["retrieval_target"]) == (
+        rules,
+        True,
+        "documents",
+    )
 
 
 def test_a_lookup_turn_never_builds_a_runner(session_manager: SessionManager) -> None:
@@ -677,7 +705,7 @@ def test_a_query_fallback_never_binds_a_prior_turn_onto_the_shared_engine(sessio
         response_synthesizer=Refine(llm=MockLLM(), text_qa_template=_echo_template(False)),
     )
     rag.query_engine = shared
-    rag.assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
+    rag.assessment_runner.side_effect = lambda engine, scoped, **_: AssessmentRunner(
         answer_llm=cast(Any, streaming_llm(["unused"])),
         llm_view=llm_view,
         ctx_window=8192,
@@ -851,7 +879,7 @@ def test_the_seed_asks_for_every_child_and_the_lookup_it_falls_back_to_does_not(
     """
     recorder = RecordingPostprocessor()
     _real_engine(session_manager, _seed(), recorder, streaming=entry == "stream_chat")
-    cast(Any, session_manager.rag).assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
+    cast(Any, session_manager.rag).assessment_runner.side_effect = lambda engine, scoped, **_: AssessmentRunner(
         answer_llm=cast(Any, streaming_llm(["unused"])),
         llm_view=llm_view,
         ctx_window=8192,
@@ -945,7 +973,7 @@ def test_every_child_of_a_section_reaches_a_crowded_8k_answer(session_manager: S
     )
     _real_engine(session_manager, hits, postprocessor, streaming=True)
     answer_llm = streaming_llm(ANSWER)
-    cast(Any, session_manager.rag).assessment_runner.side_effect = lambda engine, scoped: AssessmentRunner(
+    cast(Any, session_manager.rag).assessment_runner.side_effect = lambda engine, scoped, **_: AssessmentRunner(
         answer_llm=cast(Any, answer_llm),
         llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
         ctx_window=8192,
@@ -1022,7 +1050,7 @@ def test_a_constraint_resolved_from_earlier_turns_reaches_research_and_the_answe
     engine = _arm(session_manager, nodes=_seed())
     research_llm = tool_llm([search_call("invented pilot cost")])
     answer_llm = streaming_llm(ANSWER)
-    rag.assessment_runner.side_effect = lambda turn_engine, scoped: AssessmentRunner(
+    rag.assessment_runner.side_effect = lambda turn_engine, scoped, **_: AssessmentRunner(
         answer_llm=cast(Any, answer_llm),
         llm_view=llm_view,
         ctx_window=8192,

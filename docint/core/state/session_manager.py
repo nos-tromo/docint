@@ -863,7 +863,13 @@ class SessionManager:
             RuntimeError: If the runner ends without a result.
         """
         seed = list(engine.retrieve(EveryChildQuery(expanded_query)))
-        runner = self.rag.assessment_runner(engine, scoped=bool(scoped_node_ids))
+        runner = self.rag.assessment_runner(
+            engine,
+            scoped=bool(scoped_node_ids),
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            retrieval_target=retrieval_target,
+        )
         result: AssessmentResult | None = None
         for item in runner.run(
             question=user_msg, prior_turn=prior_turn, seed=seed, resolved_question=resolved_question

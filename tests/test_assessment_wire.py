@@ -32,6 +32,16 @@ from docint.core.retrieval.evidence import EveryChildQuery
 from docint.utils.env_cfg import OpenAIConfig
 
 
+@pytest.fixture(autouse=True)
+def _no_keyword_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offer research no keyword tool, so building a runner never reads a Qdrant over the patched transport.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(RAG, "_assessment_keyword_tool", lambda self, **kwargs: None)
+
+
 def _rag(*, max_retries: int = 0) -> RAG:
     """Build a RAG whose text model targets a vLLM-style endpoint.
 
@@ -292,6 +302,42 @@ def test_the_research_step_cap_is_assessment_max_steps(monkeypatch: pytest.Monke
 
     assert isinstance(researcher, ResearchLoop)
     assert researcher._max_steps == 4
+
+
+def test_research_gets_a_keyword_tool_bound_to_the_turns_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tool counts what the turn may answer from; a scoped turn researches nothing and builds none.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    built: list[dict[str, Any]] = []
+    tool = keyword_tool()
+
+    def _tool(self: RAG, **kwargs: Any) -> Any:
+        """Record the request the tool is built for.
+
+        Args:
+            self (RAG): The engine.
+            **kwargs (Any): The turn's filters and target.
+
+        Returns:
+            Any: The tool.
+        """
+        built.append(kwargs)
+        return tool
+
+    monkeypatch.setattr(RAG, "_assessment_keyword_tool", _tool)
+    rules = [{"field": "mimetype", "operator": "eq", "value": "text/plain"}]
+
+    runner = _rag().assessment_runner(
+        MagicMock(), scoped=False, metadata_filter_rules=rules, metadata_filters_active=True, retrieval_target="all"
+    )
+    scoped = _rag().assessment_runner(MagicMock(), scoped=True, metadata_filter_rules=rules)
+
+    assert isinstance(runner._researcher, ResearchLoop)
+    assert runner._researcher._keyword is tool
+    assert built == [{"metadata_filter_rules": rules, "metadata_filters_active": True, "retrieval_target": "all"}]
+    assert scoped._researcher is None
 
 
 def test_the_runner_counts_with_the_embedding_tokenizer_when_one_is_loaded() -> None:
