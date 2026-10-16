@@ -139,15 +139,26 @@ const KEYWORD_FIELD_LABEL: Partial<Record<string, keyof Strings>> = {
   uuid: 'search.field.uuid'
 }
 
-type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches'>
+type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches' | 'unchecked'>
 
 function keywordLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
   const field = step.field ? KEYWORD_FIELD_LABEL[step.field] : undefined
+  const unchecked = step.unchecked ?? 0
   const vars = {
     query: step.detail,
     where: field ? t('chat.assessment_trail_keyword_field', { field: t(field) }) : '',
     matches: step.matches ?? 0,
-    count: step.found
+    count: step.found,
+    // A count over a partly indexed collection says what it left out.
+    unchecked:
+      unchecked > 0
+        ? t(
+            unchecked === 1
+              ? 'chat.assessment_trail_keyword_unchecked_one'
+              : 'chat.assessment_trail_keyword_unchecked_other',
+            { count: unchecked }
+          )
+        : ''
   }
   // A failed count is unknown, never a zero.
   if (typeof step.matches !== 'number') return t('chat.assessment_trail_keyword_unknown', vars)

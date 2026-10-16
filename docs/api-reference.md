@@ -291,10 +291,10 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
   `answer`, and `detail` is the model-written query of a search or the words of a
   keyword check. A keyword step adds `field` (`text`, `author`, `network` or
   `uuid`) and `matches`, the exact number of indexed chunks that contain the
-  words; `matches` is absent when the count failed, and no other step carries
-  either key. The final `agent.actions` records the same keys (`matches: null`
-  for a failed count), plus `unchecked` when the keyword index does not cover
-  every chunk.
+  words, plus `unchecked`, the chunks the keyword index does not cover yet, when
+  there are any; `matches` is absent when the count failed, and no other step
+  carries these keys. The final `agent.actions` records the same keys
+  (`matches: null` for a failed count).
 - `{"retry": {"query": "..."}}` — a corrective retry is replacing the answer
   streamed so far.
 - `{"error": "Internal server error", "code": "..."}` — the turn failed;

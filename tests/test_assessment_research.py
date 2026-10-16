@@ -1767,8 +1767,8 @@ def test_a_keyword_check_reports_its_count_and_adds_its_passages() -> None:
         _loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=ledger)
     )
 
-    assert [(step.action, step.detail, step.found, step.field, step.matches) for step in progress] == [
-        ("keyword", "Kontrollgruppe", 1, "text", 3)
+    assert [(step.action, step.detail, step.found, step.field, step.matches, step.unchecked) for step in progress] == [
+        ("keyword", "Kontrollgruppe", 1, "text", 3, None)
     ]
     assert outcome.actions == [
         {"action": "keyword", "detail": "Kontrollgruppe", "field": "text", "found": 1, "matches": 3}
@@ -1814,15 +1814,16 @@ def test_a_count_that_failed_reads_unknown_and_never_zero() -> None:
     assert outcome.steps == 2
 
 
-def test_a_partial_index_is_named_in_the_reply_and_the_record() -> None:
-    """On a partial index a count is only as good as what the index covers."""
+def test_a_partial_index_is_named_in_the_reply_the_record_and_the_trail() -> None:
+    """On a partial index a count is only as good as what the index covers, so every reader is told."""
     llm = tool_llm([keyword_call("Kontrollgruppe")])
     tool = keyword_tool({("Kontrollgruppe", "text"): _hit("Kontrollgruppe", matches=0, unchecked=12)})
 
-    _, outcome = _drain(
+    progress, outcome = _drain(
         _loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
     )
 
+    assert [step.unchecked for step in progress] == [12]
     assert outcome.actions[0]["unchecked"] == 12
     assert "12 chunks are not in the keyword index yet, so they were not checked." in _reply(llm).splitlines()
 

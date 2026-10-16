@@ -73,6 +73,8 @@ export interface AgentStep {
   field?: string
   /** Indexed chunks a keyword check matched; absent or null when its count failed. */
   matches?: number | null
+  /** Chunks a keyword check could not reach, outside the keyword index; absent when it covers them all. */
+  unchecked?: number
 }
 
 /** Why research stopped short. Protocol tokens, never prose. */
@@ -86,7 +88,7 @@ export type AgentReason =
 /** What an assessment turn did, as the final envelope and session history report it. */
 export interface AgentTrail {
   steps: number
-  actions: Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches'>[]
+  actions: Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches' | 'unchecked'>[]
   reason: AgentReason | null
   /** `split`: separated cleanly; `unsplit`: the whole answer is labelled; `empty`: no answer text. */
   answer: 'split' | 'unsplit' | 'empty'

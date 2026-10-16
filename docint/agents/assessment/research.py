@@ -615,7 +615,13 @@ class ResearchLoop:
                     action["unchecked"] = result.unchecked
                 actions.append(action)
                 yield AgentProgress(
-                    step=steps, action="keyword", detail=words, found=len(added), field=field, matches=result.matches
+                    step=steps,
+                    action="keyword",
+                    detail=words,
+                    found=len(added),
+                    field=field,
+                    matches=result.matches,
+                    unchecked=result.unchecked or None,
                 )
                 reply = keyword_reply(
                     matches=result.matches,

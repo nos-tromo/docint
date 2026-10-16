@@ -26,6 +26,8 @@ class AgentProgress:
         field (str | None): The field a keyword check matched; ``None`` otherwise.
         matches (int | None): Indexed chunks a keyword check matched; ``None``
             on any other step, or when the count failed.
+        unchecked (int | None): Chunks a keyword check could not reach because
+            the keyword index does not cover them; ``None`` when it covers all.
     """
 
     step: int
@@ -34,6 +36,7 @@ class AgentProgress:
     found: int
     field: str | None = None
     matches: int | None = None
+    unchecked: int | None = None
 
 
 @dataclass

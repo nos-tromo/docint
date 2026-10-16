@@ -5649,6 +5649,9 @@ def test_an_agent_frame_carries_only_the_fields_its_step_sets() -> None:
     unknown = api_module._sse_agent_frame(
         AgentProgress(step=3, action="keyword", detail="Krieger", found=1, field="author")
     )
+    partial = api_module._sse_agent_frame(
+        AgentProgress(step=4, action="keyword", detail="Studie", found=0, field="text", matches=0, unchecked=12)
+    )
 
     assert search == (
         'data: {"agent": {"step": 1, "action": "search", "detail": "evaluation datasets", "found": 1}}\n\n'
@@ -5657,6 +5660,7 @@ def test_an_agent_frame_carries_only_the_fields_its_step_sets() -> None:
         "agent": {"step": 2, "action": "keyword", "detail": "Kontrollgruppe", "found": 0, "field": "text", "matches": 0}
     }
     assert "matches" not in json.loads(unknown.removeprefix("data: "))["agent"]
+    assert json.loads(partial.removeprefix("data: "))["agent"]["unchecked"] == 12
 
 
 def test_stream_query_never_retries_an_assessment_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
