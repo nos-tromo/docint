@@ -218,6 +218,18 @@ describe('ChatTurn', () => {
     expect(screen.getByRole('button', { name: 'Add to report' })).toHaveAttribute('aria-pressed', 'false')
   })
 
+  it('offers no Add to report for a turn that failed', () => {
+    // A failed turn is never saved, so after a reload the next saved answer takes
+    // its place in the list and, with it, the report key this one would claim.
+    renderTurn(
+      { user: 'who?', assistant: 'Alice', done: true, meta: null, error: 'The stream ended.' },
+      'en',
+      { sessionId: 's', turnIdx: 0, reportDedupeKeys: new Set<string>() }
+    )
+
+    expect(screen.queryByRole('button', { name: 'Add to report' })).not.toBeInTheDocument()
+  })
+
   it('shows no retry notice on an ordinary answer', () => {
     const meta = { session_id: 's', sources: [] } as unknown as ChatFinalEvent
 

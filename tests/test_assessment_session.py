@@ -179,6 +179,36 @@ def test_an_assessment_turn_streams_progress_text_then_a_final_frame(session_man
     assert engine.retrieve.call_args.args[0].query_str == "expanded question"
 
 
+@pytest.mark.parametrize("stateless", [False, True])
+def test_an_assessment_names_itself_before_its_first_word(session_manager: SessionManager, stateless: bool) -> None:
+    """Research steps precede every answer token, so a client knows the mode before any text.
+
+    A turn cut off mid-answer never sends the final frame that names its mode;
+    the SPA marks such a turn from these steps alone.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        stateless (bool): Whether the turn runs without a session.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.ensure_session_manager.return_value = session_manager
+    _arm(session_manager, nodes=_seed(), tokens=["A second dataset", " would help."])
+
+    items = list(
+        RAG.stream_stateless_assessment(rag, QUESTION, expanded_query="expanded", graph_debug={})
+        if stateless
+        else session_manager.stream_chat(QUESTION, session_id="s1", answer_mode="assessment")
+    )
+
+    texts = [index for index, item in enumerate(items) if isinstance(item, str)]
+    answers = [index for index, item in enumerate(items) if isinstance(item, AgentProgress) and item.action == "answer"]
+    assert isinstance(items[0], AgentProgress)
+    assert items[0].action == "seed"
+    assert texts
+    assert answers
+    assert answers[0] < texts[0]
+
+
 def test_assessment_citations_persist_in_ledger_order(session_manager: SessionManager) -> None:
     """Replay numbers citations by position, so they must be stored in ledger order.
 

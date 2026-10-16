@@ -153,6 +153,8 @@ export const de: Strings = {
     'Der Chat-Stream wurde unerwartet beendet — die Verbindung brach ab oder das Backend war mitten in der Antwort nicht mehr erreichbar. Prüfen Sie die Backend-Logs und versuchen Sie es erneut.',
   'chat.error_backend_failed':
     'Die Antwort konnte nicht erzeugt werden. Versuchen Sie es erneut; der angezeigte Code und die Backend-Logs benennen den Fehler.',
+  'chat.assessment_interrupted':
+    'Diese Antwort wurde nicht fertiggestellt. Sie kann unvollständig sein und eigene Einschätzungen des Modells ohne deren Kennzeichnung enthalten, die nicht gegen die Quellen geprüft sind.',
   'chat.error_context_overflow':
     'Die Anfrage ist zu groß für das Modell – Bitte stellen Sie eine kürzere Frage oder wählen Sie weniger Dokumente aus.',
   'chat.error_embedding_unavailable':

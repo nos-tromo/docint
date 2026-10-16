@@ -123,7 +123,10 @@ against the sources. A note under the answer says so and, behind a disclosure
 caret, lists the searches; the validation banner speaks of the source-backed
 part only. A turn whose research failed, stopped early or found nothing, whose
 evidence was partly left out for lack of room, or whose model did not separate
-the two parts, says so in an amber notice.
+the two parts, says so in an amber notice. An assessment cut off before it
+finished, by an error or a dropped connection, opens with a note that it may
+be incomplete and may contain the model's own judgement without its label. A
+turn that failed cannot be added to a report.
 
 A **Search in** picker under the query field chooses what the keywords
 match: Text (the chunk body, the default), Author, Network or UUID. The

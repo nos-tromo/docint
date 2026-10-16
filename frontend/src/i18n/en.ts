@@ -147,6 +147,8 @@ export const en = {
     'Chat stream ended unexpectedly — the connection dropped or the backend went away mid-answer. Check the backend logs and try again.',
   'chat.error_backend_failed':
     'The answer could not be generated. Try again; the code shown and the backend logs identify the failure.',
+  'chat.assessment_interrupted':
+    'This answer did not finish. It may be incomplete, and it may contain the model’s own judgement without its label, not checked against the sources.',
   'chat.error_context_overflow':
     'The request is too large for the model – Try a shorter question or select fewer documents.',
   'chat.error_embedding_unavailable':

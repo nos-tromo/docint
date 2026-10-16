@@ -232,8 +232,9 @@ export function ChatTurn({
   const t = useT()
   const sources = dedupeSources(turn.meta?.sources ?? [])
   const reportSessionId = turn.unsavedId ? `stateless-${turn.unsavedId}` : sessionId
+  // A failed turn is never saved: after a reload the next saved answer takes its index, and so its report key.
   const reportItem =
-    turn.done && turn.assistant && reportSessionId && turnIdx != null
+    turn.done && !turn.error && turn.assistant && reportSessionId && turnIdx != null
       ? chatAnswerSnapshot({
           sessionId: reportSessionId,
           turnIdx,
