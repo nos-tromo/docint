@@ -346,3 +346,14 @@ def test_index_tokens_split_a_word_where_the_index_does() -> None:
     assert index_tokens("snake_case") == ["snake", "case"]
     assert index_tokens("Straße") == ["straße"]
     assert index_tokens("...") == []
+
+
+def test_index_tokens_keep_a_word_whole_where_the_index_does() -> None:
+    """A word splits only where the index splits it, and is lowercased after that.
+
+    Lowercased first, the dotted capital I turns into an ``i`` and a combining
+    dot, which split the word apart; and a vowel sign counts as a letter to the
+    index, though ``re`` does not count it as a word character.
+    """
+    assert index_tokens("İstanbul") == ["İstanbul".lower()]
+    assert index_tokens("भारत") == ["भारत"]
