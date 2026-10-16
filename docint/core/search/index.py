@@ -325,6 +325,9 @@ def search_index_status(
             ``with_search_text``, ``missing``, and ``complete`` (every point
             carries the field). ``complete`` is ``False`` when the counts are
             unavailable, so an unknown state never reads as a finished one.
+            ``lanes`` maps each collection counted in full to its own
+            ``total`` and ``with_search_text``; a lane whose counts failed is
+            absent, never zero.
     """
     indexed = False
     try:
@@ -346,13 +349,18 @@ def search_index_status(
         logger.debug("companion lookup failed for {}: {}", companion, exc)
 
     total = with_search_text = 0
+    by_lane: dict[str, dict[str, int]] = {}
     populated = models.Filter(must_not=[models.IsEmptyCondition(is_empty=models.PayloadField(key=SEARCH_TEXT_FIELD))])
     for lane in lanes:
         try:
-            total += int(client.count(collection_name=lane, exact=True).count)
-            with_search_text += int(client.count(collection_name=lane, count_filter=populated, exact=True).count)
+            lane_total = int(client.count(collection_name=lane, exact=True).count)
+            total += lane_total
+            lane_with = int(client.count(collection_name=lane, count_filter=populated, exact=True).count)
+            with_search_text += lane_with
         except Exception as exc:
             logger.debug("search_text coverage unavailable for {}: {}", lane, exc)
+            continue
+        by_lane[lane] = {"total": lane_total, "with_search_text": lane_with}
 
     missing = max(0, total - with_search_text)
     return {
@@ -361,4 +369,5 @@ def search_index_status(
         "with_search_text": with_search_text,
         "missing": missing,
         "complete": with_search_text > 0 and missing == 0,
+        "lanes": by_lane,
     }

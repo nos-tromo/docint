@@ -404,3 +404,35 @@ def test_status_counts_the_image_companion_too() -> None:
     assert status["with_search_text"] == 100
     assert status["missing"] == 22
     assert status["complete"] is False
+
+
+def test_status_breaks_coverage_down_by_lane() -> None:
+    """A caller that searches one lane alone can tell what that lane leaves unchecked."""
+    client = _CompanionClient(main=(100, 90), images=(22, 0))
+
+    status = search_index_status(client, "col")
+
+    assert status["lanes"] == {
+        "col": {"total": 100, "with_search_text": 90},
+        "col_images": {"total": 22, "with_search_text": 0},
+    }
+
+
+class _FailingCompanionClient(_CompanionClient):
+    """Companion client whose image lane cannot be counted."""
+
+    @override
+    def count(self, collection_name: str, **kwargs: Any) -> Any:
+        """Fail for the companion, count the main collection."""
+        if collection_name.endswith("_images"):
+            raise RuntimeError("count unavailable")
+        return super().count(collection_name, **kwargs)
+
+
+def test_status_leaves_a_lane_it_could_not_count_out_of_the_breakdown() -> None:
+    """An uncounted lane is unknown, never an empty one."""
+    client = _FailingCompanionClient(main=(100, 100), images=(22, 0))
+
+    status = search_index_status(client, "col")
+
+    assert status["lanes"] == {"col": {"total": 100, "with_search_text": 100}}
