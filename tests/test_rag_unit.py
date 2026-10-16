@@ -35,7 +35,7 @@ from loguru import logger as _loguru_logger
 from qdrant_client import models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
-from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD
+from docint.agents.assessment.keyword import LONG_WORD, NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, CollectionCleanupError, LazyRerankerPostprocessor
 from docint.core.retrieval.evidence import EveryChildQuery
@@ -8750,9 +8750,14 @@ def test_the_check_names_what_keeps_a_call_from_running(monkeypatch: pytest.Monk
     assert tool.check("Kontrollgruppe", "text") is None
 
 
-@pytest.mark.parametrize("words", ["2.5", "U.S.", "p<0.05", "5%", "e.g. Kontrollgruppe", "..."])
+@pytest.mark.parametrize(
+    "words", ["2.5", "U.S.", "p<0.05", "5%", "e.g. Kontrollgruppe", "...", "vitamin D", "Artikel 5"]
+)
 def test_the_check_refuses_words_the_index_cannot_match_as_given(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
-    """A word the index splits into pieces too short to match would count nothing, or too much.
+    """A word the index skips, alone or as a piece of a longer one, would count nothing, or too much.
+
+    ``vitamin D`` would count every chunk with ``vitamin`` in it: the index skips
+    a single letter, so the check would answer for a broader query than it names.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -8764,12 +8769,42 @@ def test_the_check_refuses_words_the_index_cannot_match_as_given(monkeypatch: py
     assert _keyword_tool_for(rag).check(words, "text") == UNINDEXABLE_WORD
 
 
-def test_the_check_lets_words_through_whose_pieces_the_index_keeps(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A hyphenated term is matched by its parts, each long enough to count; exact ids are never split."""
+def test_the_check_refuses_an_initial_on_a_name_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name is matched word by word as the text is, so an initial would be skipped there too."""
     _coverage(monkeypatch, {"test": (10, 10)})
-    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **UUID_READY}})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY}})
+
+    assert _keyword_tool_for(rag, social=True).check("J Smith", "author") == UNINDEXABLE_WORD
+
+
+@pytest.mark.parametrize("words", ["x" * 31, "Donaudampfschifffahrtsgesellschaftskapitän"])
+def test_the_check_refuses_words_longer_than_the_index_reads(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
+    """The index reads a word only up to its first 30 characters, so a longer one would match more than it names.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        words (str): The words of the check.
+    """
+    _coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _keyword_tool_for(rag).check(words, "text") == LONG_WORD
+
+
+def test_the_check_lets_words_through_whose_pieces_the_index_keeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hyphenated term is matched by its parts, each long enough to count; exact ids are never split.
+
+    A lone sign is no word at all, so it narrows nothing by being left out, and
+    a word of exactly the index's longest length is read whole.
+    """
+    _coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY, **UUID_READY}})
 
     tool = _keyword_tool_for(rag, social=True)
 
     assert tool.check("COVID-19", "text") is None
     assert tool.check("a1-b2", "uuid") is None
+    assert tool.check("Müller & Söhne", "text") is None
+    assert tool.check("x" * 30, "text") is None
+    assert tool.check("1234567890", "author") is None
+    assert tool.check("0123456789abcdef0123456789abcdef", "uuid") is None

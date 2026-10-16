@@ -509,11 +509,15 @@ is not ready, and on any fault. Deciding reads coverage and payload schemas
 only: it creates no index and does not profile the collection again. A check
 runs on the search slots under the research budget and fails as a search does; a
 count that failed is reported unavailable, never zero. Input over 100
-characters, no word of two or more characters, a word the index splits into
-pieces too short to match (`2.5`, `U.S.`, `p<0.05`; such a word would count
-nothing, or too much), or several values for `uuid` get an error reply. A
-repeated check (same field, same words as the index reads them, in any order)
-ends research like a repeated query, but a search for the same words is no
+characters, no word of two or more characters, or several values for `uuid`
+get an error reply. So does a text or name check holding anything the index
+would skip or cut, since the count would then answer for a broader query than
+the one it names: a single letter or digit (the `D` of `vitamin D` would count
+every `vitamin`), a word split on dots and signs into such pieces (`2.5`,
+`U.S.`, `p<0.05`), or a word longer than the 30 characters the index reads.
+Words are split as Qdrant splits them, on Unicode letters and digits, before
+lowercasing. A repeated check (same field, same words as the index reads them,
+in any order) ends research like a repeated query, but a search for the same words is no
 repeat. A check with a known count is a fact even when it adds no passage, so
 only one whose count failed and that added nothing counts toward the two idle
 rounds.

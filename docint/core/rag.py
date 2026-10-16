@@ -129,6 +129,7 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from docint.agents.assessment.keyword import (
+    LONG_WORD,
     NO_USABLE_WORD,
     ONE_VALUE_ONLY,
     UNINDEXABLE_WORD,
@@ -208,6 +209,7 @@ from docint.core.search.fulltext import (
     parse_keywords,
 )
 from docint.core.search.index import (
+    SEARCH_MAX_TOKEN_LEN,
     SEARCH_MIN_TOKEN_LEN,
     SEARCH_TEXT_FIELD,
     ensure_search_index,
@@ -8537,23 +8539,31 @@ class RAG:
         def _check(words: str, field: str) -> str | None:
             """Say why a check cannot run, without touching Qdrant.
 
+            Every typed word is read as the index reads it, before
+            :func:`parse_keywords` drops the short ones. The index skips a piece
+            under ``SEARCH_MIN_TOKEN_LEN`` characters and cuts one over
+            ``SEARCH_MAX_TOKEN_LEN``, so a check holding either would count a
+            broader query than the one it names: ``vitamin D`` would count
+            every ``vitamin``. Exact-value fields are matched whole and never split.
+
             Args:
                 words (str): The words.
                 field (str): The field.
 
             Returns:
                 str | None: ``NO_USABLE_WORD``, ``UNINDEXABLE_WORD``,
-                ``ONE_VALUE_ONLY`` or ``None``.
+                ``LONG_WORD``, ``ONE_VALUE_ONLY`` or ``None``.
             """
             keywords = parse_keywords(words)
             if not keywords:
                 return NO_USABLE_WORD
-            # The index splits ``2.5`` into pieces it cannot match: refuse rather than count nothing, or too much.
-            pieces = [index_tokens(keyword) for keyword in keywords]
-            if search_field_spec(field).text_keys and any(
-                not split or min(map(len, split)) < SEARCH_MIN_TOKEN_LEN for split in pieces
-            ):
-                return UNINDEXABLE_WORD
+            if search_field_spec(field).text_keys:
+                pieces = [piece for word in words.split() for piece in index_tokens(word)]
+                # A keyword with no letter or digit at all (``...``) would compile to a match on nothing.
+                if not all(map(index_tokens, keywords)) or any(len(piece) < SEARCH_MIN_TOKEN_LEN for piece in pieces):
+                    return UNINDEXABLE_WORD
+                if any(len(piece) > SEARCH_MAX_TOKEN_LEN for piece in pieces):
+                    return LONG_WORD
             return ONE_VALUE_ONLY if _filter(words, field, None) is None else None
 
         def _run(words: str, field: str) -> KeywordResult:

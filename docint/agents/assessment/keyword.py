@@ -34,8 +34,10 @@ NO_CHECKS = "(none)"
 NO_USABLE_WORD = "no_usable_word"
 #: Why a keyword call cannot run: the field matches one exact value, and several words were given.
 ONE_VALUE_ONLY = "one_value_only"
-#: Why a keyword call cannot run: the index splits a word into pieces too short to match, as with ``2.5``.
+#: Why a keyword call cannot run: the index skips a word or a piece of one, as ``D`` in ``vitamin D`` or ``2.5``.
 UNINDEXABLE_WORD = "unindexable_word"
+#: Why a keyword call cannot run: a word is longer than the index reads, which would match more than it names.
+LONG_WORD = "long_word"
 
 _EDGE_PUNCTUATION_RE = re.compile(r"^\W+|\W+$")
 
@@ -68,8 +70,8 @@ class KeywordTool:
         fields (tuple[str, ...]): The fields whose indexes are ready, ``text``
             first when it is.
         check (Callable[[str, str], str | None]): Why ``(words, field)`` cannot
-            run, :data:`NO_USABLE_WORD`, :data:`ONE_VALUE_ONLY` or
-            :data:`UNINDEXABLE_WORD`, or ``None``; it does no I/O.
+            run, :data:`NO_USABLE_WORD`, :data:`ONE_VALUE_ONLY`,
+            :data:`UNINDEXABLE_WORD` or :data:`LONG_WORD`, or ``None``; it does no I/O.
         run (Callable[[str, str], KeywordResult]): Counts and retrieves the
             matches of ``(words, field)``; research runs it on a search slot.
     """

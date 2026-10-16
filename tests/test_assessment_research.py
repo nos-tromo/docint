@@ -31,7 +31,13 @@ from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 from typing_extensions import override
 
-from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD, KeywordResult
+from docint.agents.assessment.keyword import (
+    LONG_WORD,
+    NO_USABLE_WORD,
+    ONE_VALUE_ONLY,
+    UNINDEXABLE_WORD,
+    KeywordResult,
+)
 from docint.agents.assessment.ledger import EvidenceLedger, Room
 from docint.agents.assessment.research import (
     MODEL_SLOT_POOL,
@@ -1803,7 +1809,12 @@ def test_a_repeated_check_ends_research_and_a_search_for_the_same_words_does_not
         ({"words": "Krieger", "field": "network"}, {}, "Error: field must be one of: text, author, uuid."),
         ({"words": "a b"}, {"a b": NO_USABLE_WORD}, "Error: give at least one word of two or more characters."),
         ({"words": "id1 id2", "field": "uuid"}, {"id1 id2": ONE_VALUE_ONLY}, "Error: uuid matches one exact value"),
-        ({"words": "2.5"}, {"2.5": UNINDEXABLE_WORD}, "Error: the index cannot match a word like 2.5"),
+        ({"words": "vitamin D"}, {"vitamin D": UNINDEXABLE_WORD}, "Error: the index cannot match a single letter"),
+        (
+            {"words": "x" * 31},
+            {"x" * 31: LONG_WORD},
+            "Error: the index reads a word only up to its first 30 characters",
+        ),
     ],
 )
 def test_an_invalid_keyword_call_is_answered_and_research_continues(

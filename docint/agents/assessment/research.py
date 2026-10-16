@@ -36,6 +36,7 @@ from loguru import logger
 from docint.agents.assessment.bounded import NoSlot, run_bounded
 from docint.agents.assessment.keyword import (
     DEFAULT_KEYWORD_FIELD,
+    LONG_WORD,
     MAX_KEYWORD_CHARS,
     NO_USABLE_WORD,
     ONE_VALUE_ONLY,
@@ -49,6 +50,7 @@ from docint.agents.assessment.ledger import EvidenceLedger, digest, is_context_o
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn, prior_turn_block
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.search.fulltext import index_tokens, parse_keywords
+from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
 
@@ -298,8 +300,16 @@ def _keyword_request(keyword: KeywordTool, kwargs: Mapping[str, Any]) -> tuple[s
         return (
             words,
             field,
-            "Error: the index cannot match a word like 2.5, U.S. or p<0.05 exactly, since it splits words on "
-            "dots and signs; check words of letters or digits instead.",
+            "Error: the index cannot match a single letter or digit, such as the D in vitamin D, nor a word it "
+            "splits on dots and signs, such as 2.5, U.S. or p<0.05; check the other words only, or use search.",
+        )
+    if problem == LONG_WORD:
+        return (
+            words,
+            field,
+            f"Error: the index reads a word only up to its first {SEARCH_MAX_TOKEN_LEN} characters, so a longer "
+            "one cannot be checked exactly; check a shorter beginning of it, which also matches the longer words "
+            "it begins.",
         )
     return words, field, None
 

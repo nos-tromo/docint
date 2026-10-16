@@ -255,6 +255,20 @@ def test_assessment_prompts_match_across_locales(name: str) -> None:
 
 
 @pytest.mark.parametrize("code", ["en", "de"])
+def test_the_keyword_prompt_names_the_longest_word_the_index_reads(code: str) -> None:
+    """Research is told the length past which a check is refused, in both locales.
+
+    Args:
+        code (str): The locale.
+    """
+    from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
+    from docint.utils.env_cfg import load_path_env
+
+    text = (load_path_env().prompts / code / "assessment_research_keyword.txt").read_text(encoding="utf-8")
+    assert str(SEARCH_MAX_TOKEN_LEN) in text
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
 def test_assessment_answer_prompt_carries_the_protocol_tokens(code: str) -> None:
     """Both locales name the sentinel and the citation key verbatim; they are protocol.
 
