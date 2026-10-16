@@ -12,7 +12,7 @@ from docint.agents.assessment.keyword import (
     render_keyword_checks,
 )
 from docint.agents.assessment.ledger import EvidenceLedger, digest
-from docint.utils.text_budget import MATCH_SPANS_KEY
+from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS
 
 LEAD = "The trial enrolled two hundred patients across four sites over two years. " * 3
 TERM_TEXT = f"{LEAD}There was keine Kontrollgruppe in the design, which the authors acknowledge."
@@ -58,6 +58,28 @@ def test_a_span_never_moves_before_its_own_start() -> None:
     scored = scored_node("s", text, **{MATCH_SPANS_KEY: [[0, len(text)]]})
 
     assert _spans(anchor_terms(scored, ["Kontrollgruppe"])) == [[0, len(text)]]
+
+
+#: A word past the left context but inside the opening packing keeps of its span.
+NEAR_TEXT = "Patients from two sites took part in it. " * 3 + "There was keine Kontrollgruppe here." + " More." * 40
+
+
+def test_a_term_inside_the_kept_opening_leaves_the_span_alone() -> None:
+    """The opening already shows the word, so moving the span would only charge the room twice."""
+    term = NEAR_TEXT.index("Kontrollgruppe")
+    assert TERM_CONTEXT_CHARS < term and term + len("Kontrollgruppe") <= MIN_REGION_CHARS
+    scored = scored_node("s", NEAR_TEXT, **{MATCH_SPANS_KEY: [[0, len(NEAR_TEXT)]]})
+
+    assert anchor_terms(scored, ["Kontrollgruppe"]) is scored
+
+
+def test_a_held_section_showing_the_term_gains_nothing_from_its_check() -> None:
+    """Re-found by a check, a section whose kept opening holds the word is no new evidence."""
+    held = scored_node("s", NEAR_TEXT, **{MATCH_SPANS_KEY: [[0, len(NEAR_TEXT)]]})
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+
+    assert ledger.add([anchor_terms(held, ["Kontrollgruppe"])]) == []
 
 
 def test_a_term_outside_the_span_does_not_move_it() -> None:
@@ -195,8 +217,15 @@ def test_the_checks_list_every_keyword_call_with_a_known_count() -> None:
 
     assert render_keyword_checks(actions, max_chars=1000).splitlines() == [
         '- "Kontrollgruppe" (text): 0',
-        '- "Krieger" (author): 5, unchecked: 12',
+        '- "Krieger" (author): 5; 12 chunks not checked',
     ]
+
+
+def test_a_single_unchecked_chunk_reads_in_the_singular() -> None:
+    """The answer model reads the line as prose, so it should read right."""
+    actions = [{"action": "keyword", "detail": "Krieger", "field": "text", "found": 0, "matches": 0, "unchecked": 1}]
+
+    assert render_keyword_checks(actions, max_chars=1000) == '- "Krieger" (text): 0; 1 chunk not checked'
 
 
 def test_no_checks_render_as_none() -> None:

@@ -19,7 +19,7 @@ from typing import Any
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
-from docint.utils.text_budget import MATCH_SPANS_KEY
+from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS
 
 #: The field a keyword call matches when it names none: the passage text.
 DEFAULT_KEYWORD_FIELD = "text"
@@ -34,6 +34,8 @@ NO_CHECKS = "(none)"
 NO_USABLE_WORD = "no_usable_word"
 #: Why a keyword call cannot run: the field matches one exact value, and several words were given.
 ONE_VALUE_ONLY = "one_value_only"
+#: Why a keyword call cannot run: the index splits a word into pieces too short to match, as with ``2.5``.
+UNINDEXABLE_WORD = "unindexable_word"
 
 _EDGE_PUNCTUATION_RE = re.compile(r"^\W+|\W+$")
 
@@ -66,8 +68,8 @@ class KeywordTool:
         fields (tuple[str, ...]): The fields whose indexes are ready, ``text``
             first when it is.
         check (Callable[[str, str], str | None]): Why ``(words, field)`` cannot
-            run, :data:`NO_USABLE_WORD` or :data:`ONE_VALUE_ONLY`, or ``None``;
-            it does no I/O.
+            run, :data:`NO_USABLE_WORD`, :data:`ONE_VALUE_ONLY` or
+            :data:`UNINDEXABLE_WORD`, or ``None``; it does no I/O.
         run (Callable[[str, str], KeywordResult]): Counts and retrieves the
             matches of ``(words, field)``; research runs it on a search slot.
     """
@@ -123,10 +125,13 @@ def anchor_terms(scored: NodeWithScore, keywords: Sequence[str]) -> NodeWithScor
     A match span marks a retrieved child chunk, and packing keeps a region from
     its start, which shows the chunk's opening rather than the word the chunk
     was found by. Each span whose text holds a keyword at the start of a word
-    starts again just before the first one, with some left context; its end
-    stays put, and a span never starts before it did, so it cannot cross into
-    the window before it. A passage without spans keeps its shape: stamping it
-    would change how it merges with the ledger's entries.
+    past that opening starts again just before the first one, with some left
+    context; its end stays put, and a span never starts before it did, so it
+    cannot cross into the window before it. A span whose opening already shows
+    the word stays as it is: moved, it would merge into a held entry as a fresh
+    match and charge the room again for text the entry already shows. A passage
+    without spans keeps its shape: stamping it would change how it merges with
+    the ledger's entries.
 
     Args:
         scored (NodeWithScore): A passage a keyword call retrieved.
@@ -150,7 +155,8 @@ def anchor_terms(scored: NodeWithScore, keywords: Sequence[str]) -> NodeWithScor
             continue
         start, end = item
         found = pattern.search(text, start, end)
-        new_start = start if found is None else _context_start(text, start, found.start())
+        shown = found is None or found.end() <= start + MIN_REGION_CHARS
+        new_start = start if shown else _context_start(text, start, found.start())
         changed = changed or new_start != start
         moved.append([new_start, end])
     if not changed:
@@ -214,7 +220,8 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
 
     Returns:
         str: One ``- "words" (field): count`` line per check, with
-        ``, unchecked: N`` on a partial index; :data:`NO_CHECKS` when there is none.
+        ``; N chunks not checked`` when the index does not cover every chunk;
+        :data:`NO_CHECKS` when there is none.
     """
     lines: list[str] = []
     used = 0
@@ -225,7 +232,7 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
         line = f'- "{_check_words(action.get("detail"))}" ({action.get("field") or "text"}): {matches}'
         unchecked = action.get("unchecked")
         if type(unchecked) is int and unchecked > 0:
-            line += f", unchecked: {unchecked}"
+            line += f"; {unchecked} chunk not checked" if unchecked == 1 else f"; {unchecked} chunks not checked"
         cost = len(line) + (1 if lines else 0)
         if used + cost > max_chars:
             break

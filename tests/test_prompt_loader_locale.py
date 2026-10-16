@@ -221,6 +221,7 @@ def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
         "assessment_answer",
         "assessment_research",
         "assessment_research_keyword",
+        "assessment_research_keyword_fields",
         "response_validator_assessment",
     ],
 )

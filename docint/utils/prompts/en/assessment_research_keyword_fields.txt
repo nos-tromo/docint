@@ -1,0 +1,1 @@
+It also takes field, one of {fields}: text is the passage text (the default), author who wrote a posting, network the platform, uuid one posting's id.

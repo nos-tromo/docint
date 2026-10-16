@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -30,7 +31,7 @@ from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 from typing_extensions import override
 
-from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY, KeywordResult
+from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD, KeywordResult
 from docint.agents.assessment.ledger import EvidenceLedger, Room
 from docint.agents.assessment.research import (
     MODEL_SLOT_POOL,
@@ -47,6 +48,7 @@ from docint.agents.assessment.research import (
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn
 from docint.agents.types import AgentProgress
 from docint.core.rag import ParentContextPostprocessor
+from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.openai_cfg import LocalOpenAI
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -1605,26 +1607,98 @@ def test_the_keyword_schema_offers_exactly_the_ready_fields() -> None:
     assert parameters["properties"]["field"]["default"] == "text"
 
 
-def test_the_prompt_describes_keyword_only_when_it_is_offered() -> None:
-    """Some chat templates drop the tool schemas, so the prose must match what is offered."""
-    offered, plain = tool_llm([]), tool_llm([])
-    template = "{digest}|{keyword_tool}|"
+def _first_prompt(fields: tuple[str, ...] | None) -> str:
+    """Return the research prompt for a turn offering ``fields``, or no keyword tool.
 
+    Args:
+        fields (tuple[str, ...] | None): The fields offered, or ``None`` for no tool.
+
+    Returns:
+        str: The first message research sends.
+    """
+    llm = tool_llm([])
+    keyword = None if fields is None else keyword_tool(fields=fields)
     _drain(
         _loop(
-            offered,
+            llm,
             _search({}),
-            prompt=template,
-            keyword=keyword_tool(fields=("text", "uuid")),
-            keyword_prompt="KW {fields}",
+            prompt="{digest}|{keyword_tool}|",
+            keyword=keyword,
+            keyword_prompt="KW",
+            keyword_fields_prompt="F {fields}",
         ).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
     )
+    return str(llm.chat_with_tools.call_args.kwargs["chat_history"][0].content)
+
+
+def test_the_prompt_describes_keyword_only_when_it_is_offered() -> None:
+    """Some chat templates drop the tool schemas, so the prose must match what is offered."""
+    assert _first_prompt(("text", "uuid")) == "(none)|KW F text, uuid\n|"
+    assert _first_prompt(None) == "(none)||"
+
+
+def test_a_text_only_keyword_tool_says_nothing_of_fields() -> None:
+    """Fields a collection does not hold would only invite wasted calls."""
+    llm = tool_llm([])
+
     _drain(
-        _loop(plain, _search({}), prompt=template).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5))
+        _loop(llm, _search({}), keyword=keyword_tool(fields=("text",))).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
     )
 
-    assert offered.chat_with_tools.call_args.kwargs["chat_history"][0].content == "(none)|KW text, uuid\n|"
-    assert plain.chat_with_tools.call_args.kwargs["chat_history"][0].content == "(none)||"
+    parameters = llm.chat_with_tools.call_args.args[0][1].metadata.get_parameters_dict()
+    assert list(parameters["properties"]) == ["words"]
+    assert _first_prompt(("text",)) == "(none)|KW\n|"
+
+
+def test_the_field_description_names_only_the_fields_offered() -> None:
+    """The schema describes what the model may choose, no more."""
+    llm = tool_llm([])
+
+    _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(fields=("text", "author"))).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    description = llm.chat_with_tools.call_args.args[0][1].metadata.get_parameters_dict()["properties"]["field"]
+    assert "author" in description["description"]
+    assert "uuid" not in description["description"]
+
+
+def test_the_schema_reserve_is_what_the_keyword_schema_costs() -> None:
+    """The research window gives up exactly the tokens the offered schema adds to every request."""
+    plain = _loop(tool_llm([]), _search({}))
+    offered = _loop(tool_llm([]), _search({}), keyword=keyword_tool(fields=("text", "author", "network", "uuid")))
+
+    schema = next(tool for tool in offered._tools if tool.metadata.name == "keyword").metadata.to_openai_tool(
+        skip_length_check=True
+    )
+    assert plain._token_limit - offered._token_limit == estimate_tokens(json.dumps(schema), 3.5)
+
+
+def test_a_check_repeats_by_the_words_the_index_matches() -> None:
+    """Case, punctuation and short words the index ignores make no new check; a word it reads apart does."""
+    ran: list[tuple[str, str]] = []
+    llm = tool_llm(
+        [
+            keyword_call("Straße"),
+            keyword_call("Strasse"),
+            keyword_call("Kontrollgruppe."),
+            keyword_call("a kontrollgruppe"),
+            search_call("never"),
+        ]
+    )
+
+    _, outcome = _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(ran=ran)).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert ran == [("Straße", "text"), ("Strasse", "text"), ("Kontrollgruppe.", "text")]
+    assert outcome.steps == 4
 
 
 def test_a_keyword_check_reports_its_count_and_adds_its_passages() -> None:
@@ -1729,6 +1803,7 @@ def test_a_repeated_check_ends_research_and_a_search_for_the_same_words_does_not
         ({"words": "Krieger", "field": "network"}, {}, "Error: field must be one of: text, author, uuid."),
         ({"words": "a b"}, {"a b": NO_USABLE_WORD}, "Error: give at least one word of two or more characters."),
         ({"words": "id1 id2", "field": "uuid"}, {"id1 id2": ONE_VALUE_ONLY}, "Error: uuid matches one exact value"),
+        ({"words": "2.5"}, {"2.5": UNINDEXABLE_WORD}, "Error: the index cannot match a word like 2.5"),
     ],
 )
 def test_an_invalid_keyword_call_is_answered_and_research_continues(

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import functools
+import json
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -38,6 +39,7 @@ from docint.agents.assessment.keyword import (
     MAX_KEYWORD_CHARS,
     NO_USABLE_WORD,
     ONE_VALUE_ONLY,
+    UNINDEXABLE_WORD,
     KeywordResult,
     KeywordTool,
     anchor_terms,
@@ -46,6 +48,7 @@ from docint.agents.assessment.keyword import (
 from docint.agents.assessment.ledger import EvidenceLedger, digest, is_context_overflow
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn, prior_turn_block
 from docint.agents.types import AgentProgress, PriorTurn
+from docint.core.search.fulltext import index_tokens, parse_keywords
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
 
@@ -57,8 +60,6 @@ T = TypeVar("T")
 
 RESEARCH_REPLY_TOKENS = 512
 TOOL_SCHEMA_TOKENS = 350
-#: What the keyword tool's schema adds to every research request when it is offered.
-KEYWORD_SCHEMA_TOKENS = 150
 #: One round: the call plus a tool reply of five ~400-character digests.
 STEP_TOKENS = 700
 MESSAGE_OVERHEAD_TOKENS = 40
@@ -90,9 +91,18 @@ DEFAULT_ASSESSMENT_RESEARCH_PROMPT = (
     "Call exactly one tool per step.\n"
 )
 DEFAULT_ASSESSMENT_RESEARCH_KEYWORD_PROMPT = (
-    "- keyword(words, field) counts the indexed chunks that contain every word, in any order, and returns "
-    "the most relevant new ones; a count of 0 is exact. field is one of {fields}."
+    "- keyword(words) counts the indexed chunks that contain every word, in any order, and returns "
+    "the most relevant new ones; a count of 0 is exact."
 )
+DEFAULT_ASSESSMENT_RESEARCH_KEYWORD_FIELDS_PROMPT = "It also takes field, one of {fields}; text is the default."
+
+#: What each field matches, for the schema of a tool that offers more than the text.
+_FIELD_NOTES = {
+    "text": "the passage text (the default)",
+    "author": "who wrote a posting",
+    "network": "the platform",
+    "uuid": "one posting's id",
+}
 
 
 SEARCH_DESCRIPTION = "Search the collection and return new numbered passages. Use a short, specific query."
@@ -143,25 +153,24 @@ def _keyword(words: str, field: str = DEFAULT_KEYWORD_FIELD) -> str:
 def _keyword_schema(fields: Sequence[str]) -> type[BaseModel]:
     """Build the ``keyword`` tool's arguments, its field limited to the ready ones.
 
+    A tool that offers only the text takes no field at all: naming fields the
+    collection does not hold would only invite calls that fail.
+
     Args:
-        fields (Sequence[str]): The fields whose indexes are ready.
+        fields (Sequence[str]): The fields whose indexes are ready, ``text`` first.
 
     Returns:
         type[BaseModel]: The argument model the tool schema is rendered from.
     """
+    words = (str, Field(description="The words every match must contain, in any order."))
+    if tuple(fields) == (DEFAULT_KEYWORD_FIELD,):
+        return create_model("keyword", words=words)
     choices: dict[str, Any] = {"enum": list(fields)}
+    notes = "; ".join(f"{name}: {_FIELD_NOTES[name]}" for name in fields if name in _FIELD_NOTES)
     return create_model(
         "keyword",
-        words=(str, Field(description="The words every match must contain, in any order.")),
-        field=(
-            str,
-            Field(
-                default=DEFAULT_KEYWORD_FIELD,
-                description="text: the passage text; author: who wrote a posting; network: the platform; "
-                "uuid: one posting's id.",
-                json_schema_extra=choices,
-            ),
-        ),
+        words=words,
+        field=(str, Field(default=DEFAULT_KEYWORD_FIELD, description=f"{notes}.", json_schema_extra=choices)),
     )
 
 
@@ -285,6 +294,13 @@ def _keyword_request(keyword: KeywordTool, kwargs: Mapping[str, Any]) -> tuple[s
         return words, field, "Error: give at least one word of two or more characters."
     if problem == ONE_VALUE_ONLY:
         return words, field, f"Error: {field} matches one exact value; give a single one."
+    if problem == UNINDEXABLE_WORD:
+        return (
+            words,
+            field,
+            "Error: the index cannot match a word like 2.5, U.S. or p<0.05 exactly, since it splits words on "
+            "dots and signs; check words of letters or digits instead.",
+        )
     return words, field, None
 
 
@@ -319,6 +335,7 @@ class ResearchLoop:
         model_slots: threading.Semaphore = MODEL_SLOT_POOL,
         keyword: KeywordTool | None = None,
         keyword_prompt: str | None = None,
+        keyword_fields_prompt: str | None = None,
     ) -> None:
         """Bind the model, the search and the limits.
 
@@ -344,6 +361,10 @@ class ResearchLoop:
             keyword_prompt (str | None): Template override for the prose that
                 describes ``keyword``; the localized ``assessment_research_keyword``
                 prompt by default.
+            keyword_fields_prompt (str | None): Template override for the prose
+                that names the fields, added only when more than the text is
+                offered; the localized ``assessment_research_keyword_fields``
+                prompt by default.
         """
         self._llm = llm
         self._search = search
@@ -352,8 +373,6 @@ class ResearchLoop:
         self._model_slots = model_slots
         self._max_steps = max_steps
         self._ratio = char_token_ratio
-        schema_tokens = TOOL_SCHEMA_TOKENS + (KEYWORD_SCHEMA_TOKENS if keyword is not None else 0)
-        self._token_limit = int(ctx_window * 0.95) - RESEARCH_REPLY_TOKENS - schema_tokens
         self._prompt = prompt or load_localized_prompt(
             "assessment_research", default=DEFAULT_ASSESSMENT_RESEARCH_PROMPT
         )
@@ -361,21 +380,30 @@ class ResearchLoop:
         self._wall_clock_s = wall_clock_s
         self._clock = clock
         self._tools = [FunctionTool.from_defaults(fn=_search, name="search", description=SEARCH_DESCRIPTION)]
+        schema_tokens = TOOL_SCHEMA_TOKENS
         if keyword is not None:
-            template = keyword_prompt or load_localized_prompt(
-                "assessment_research_keyword", default=DEFAULT_ASSESSMENT_RESEARCH_KEYWORD_PROMPT
-            )
             # Some chat templates drop the schemas, so the prose names the tool too.
-            self._keyword_line = template.format(fields=", ".join(keyword.fields)) + "\n"
-            self._tools.append(
-                FunctionTool.from_defaults(
-                    fn=_keyword,
-                    name="keyword",
-                    description=KEYWORD_DESCRIPTION,
-                    fn_schema=_keyword_schema(keyword.fields),
+            parts = [
+                keyword_prompt
+                or load_localized_prompt(
+                    "assessment_research_keyword", default=DEFAULT_ASSESSMENT_RESEARCH_KEYWORD_PROMPT
                 )
+            ]
+            if len(keyword.fields) > 1:
+                fields_template = keyword_fields_prompt or load_localized_prompt(
+                    "assessment_research_keyword_fields", default=DEFAULT_ASSESSMENT_RESEARCH_KEYWORD_FIELDS_PROMPT
+                )
+                parts.append(fields_template.format(fields=", ".join(keyword.fields)))
+            self._keyword_line = " ".join(parts) + "\n"
+            tool = FunctionTool.from_defaults(
+                fn=_keyword, name="keyword", description=KEYWORD_DESCRIPTION, fn_schema=_keyword_schema(keyword.fields)
             )
+            self._tools.append(tool)
+            # Measured, not guessed: the schema rides along on every research request.
+            schema = json.dumps(tool.metadata.to_openai_tool(skip_length_check=True))
+            schema_tokens += estimate_tokens(schema, char_token_ratio)
         self._tools.append(FunctionTool.from_defaults(fn=_finish, name="finish", description=FINISH_DESCRIPTION))
+        self._token_limit = int(ctx_window * 0.95) - RESEARCH_REPLY_TOKENS - schema_tokens
 
     def _transcript_tokens(self, transcript: list[ChatMessage]) -> int:
         """Estimate what the transcript costs to resend.
@@ -546,7 +574,8 @@ class ResearchLoop:
                 if error is not None:
                     transcript.append(_tool_reply(call_id, error))
                     continue
-                key = (field, frozenset(words.casefold().split()))
+                # The tokens the index matches by: case, order and punctuation it ignores make no new check.
+                key = (field, frozenset(token for word in parse_keywords(words) for token in index_tokens(word)))
                 if key in checked:
                     break
                 checked.add(key)
