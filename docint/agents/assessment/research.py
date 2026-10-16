@@ -44,12 +44,12 @@ from docint.agents.assessment.keyword import (
     KeywordResult,
     KeywordTool,
     anchor_terms,
+    check_key,
     keyword_reply,
 )
 from docint.agents.assessment.ledger import EvidenceLedger, digest, is_context_overflow
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn, prior_turn_block
 from docint.agents.types import AgentProgress, PriorTurn
-from docint.core.search.fulltext import index_tokens, parse_keywords
 from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
@@ -497,7 +497,7 @@ class ResearchLoop:
         transcript: list[ChatMessage] = [ChatMessage(role=MessageRole.USER, content=prompt)]
         actions: list[dict[str, Any]] = []
         seen: set[str] = set()
-        checked: set[tuple[str, frozenset[str]]] = set()
+        checked: set[tuple[str, frozenset[str], frozenset[Any]]] = set()
         started = self._clock()
         steps, idle = 0, 0
         refused_last = False
@@ -584,8 +584,7 @@ class ResearchLoop:
                 if error is not None:
                     transcript.append(_tool_reply(call_id, error))
                     continue
-                # The tokens the index matches by: case, order and punctuation it ignores make no new check.
-                key = (field, frozenset(token for word in parse_keywords(words) for token in index_tokens(word)))
+                key = check_key(words, field)
                 if key in checked:
                     break
                 checked.add(key)

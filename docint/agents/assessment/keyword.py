@@ -19,6 +19,8 @@ from typing import Any
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
+from docint.core.search.fields import search_field_spec
+from docint.core.search.fulltext import index_tokens, parse_keywords
 from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS
 
 #: The field a keyword call matches when it names none: the passage text.
@@ -79,6 +81,30 @@ class KeywordTool:
     fields: tuple[str, ...]
     check: Callable[[str, str], str | None]
     run: Callable[[str, str], KeywordResult]
+
+
+def check_key(words: str, field: str) -> tuple[str, frozenset[str], frozenset[Any]]:
+    """Return what a keyword check matches by, so the same check asked again is known.
+
+    Text keys match the tokens the index reads, so case, order and punctuation it
+    ignores make no new check. Value keys match exact values, in the forms the
+    field tries them in, so two ids that only tokenize alike, or one id in two
+    cases, are two checks, while a uuid pasted with or without its dashes is one.
+
+    Args:
+        words (str): The words of the check.
+        field (str): A field the check may use.
+
+    Returns:
+        tuple[str, frozenset[str], frozenset[Any]]: The field, the index tokens of
+        its text match, and the exact values of its value match.
+    """
+    spec = search_field_spec(field)
+    tokens: frozenset[str] = frozenset()
+    if spec.text_keys:
+        tokens = frozenset(token for word in parse_keywords(words) for token in index_tokens(word))
+    values: frozenset[Any] = frozenset(spec.value_forms(words)) if spec.value_keys else frozenset()
+    return field, tokens, values
 
 
 def _term_pattern(keywords: Sequence[str]) -> re.Pattern[str] | None:

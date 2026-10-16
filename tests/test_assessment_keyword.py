@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
 from assessment_fakes import scored_node
 from llama_index.core.schema import MetadataMode
 
 from docint.agents.assessment.keyword import (
     TERM_CONTEXT_CHARS,
     anchor_terms,
+    check_key,
     keyword_reply,
     render_keyword_checks,
 )
@@ -264,3 +266,31 @@ def test_the_checks_keep_whole_lines_within_their_room() -> None:
     assert len(block) <= 60
     assert all(line.startswith('- "word') for line in block.splitlines())
     assert block.splitlines()[0] == '- "word0" (text): 0'
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "same"),
+    [
+        (("Kontrollgruppe", "text"), ("kontrollgruppe.", "text"), True),
+        (("control group", "text"), ("Group CONTROL", "text"), True),
+        (("Straße", "text"), ("Strasse", "text"), False),
+        (("post_ab.cd", "uuid"), ("post.ab_cd", "uuid"), False),
+        (("POST_AB", "uuid"), ("post_ab", "uuid"), False),
+        (("0123456789abcdef0123456789abcdef", "uuid"), ("01234567-89ab-cdef-0123-456789abcdef", "uuid"), True),
+        (("Wolfgang Krieger", "author"), ("krieger WOLFGANG", "author"), True),
+        (("Krieger", "author"), ("krieger", "author"), False),
+        (("Krieger", "text"), ("Krieger", "author"), False),
+    ],
+)
+def test_a_check_is_keyed_by_what_it_matches(first: tuple[str, str], second: tuple[str, str], same: bool) -> None:
+    """Text matches the index's tokens, so case, order and punctuation make no new check; an id matches as written.
+
+    A uuid pasted with and without its dashes is tried in both forms either way,
+    so it is one check, while two ids that only tokenize alike are two.
+
+    Args:
+        first (tuple[str, str]): The words and field of one check.
+        second (tuple[str, str]): The words and field of another.
+        same (bool): Whether the two are one check.
+    """
+    assert (check_key(*first) == check_key(*second)) is same

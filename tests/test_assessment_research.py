@@ -1707,6 +1707,55 @@ def test_a_check_repeats_by_the_words_the_index_matches() -> None:
     assert outcome.steps == 4
 
 
+def test_exact_values_repeat_only_as_the_same_value() -> None:
+    """Two ids that only tokenize alike are two checks; one uuid pasted with or without dashes is one."""
+    ran: list[tuple[str, str]] = []
+    llm = tool_llm(
+        [
+            keyword_call("post_ab.cd", "uuid"),
+            keyword_call("post.ab_cd", "uuid"),
+            keyword_call("0123456789abcdef0123456789abcdef", "uuid"),
+            keyword_call("01234567-89ab-cdef-0123-456789abcdef", "uuid"),
+            search_call("never"),
+        ]
+    )
+
+    _, outcome = _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(fields=("text", "uuid"), ran=ran)).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert ran == [("post_ab.cd", "uuid"), ("post.ab_cd", "uuid"), ("0123456789abcdef0123456789abcdef", "uuid")]
+    assert outcome.steps == 4
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "runs"),
+    [("Wolfgang Krieger", "krieger WOLFGANG", 1), ("Krieger", "krieger", 2)],
+)
+def test_a_name_check_repeats_by_its_words_but_a_single_word_also_by_its_exact_id(
+    first: str, second: str, runs: int
+) -> None:
+    """Several words match names only; a single word is tried as an exact id too, where its case counts.
+
+    Args:
+        first (str): The first check's words.
+        second (str): The second check's words.
+        runs (int): How many of the two run.
+    """
+    ran: list[tuple[str, str]] = []
+    llm = tool_llm([keyword_call(first, "author"), keyword_call(second, "author"), search_call("never")])
+
+    _drain(
+        _loop(llm, _search({}), keyword=keyword_tool(fields=("text", "author"), ran=ran)).run(
+            question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)
+        )
+    )
+
+    assert ran == [(first, "author"), (second, "author")][:runs]
+
+
 def test_a_keyword_check_reports_its_count_and_adds_its_passages() -> None:
     """The count leads the reply, and the passages enter the ledger as a search's do."""
     hit = scored_node("k", "Kontrollgruppe fehlt.", filename="trial.pdf")

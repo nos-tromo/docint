@@ -517,8 +517,11 @@ every `vitamin`), a word split on dots and signs into such pieces (`2.5`,
 `U.S.`, `p<0.05`), or a word longer than the 30 characters the index reads.
 Words are split as Qdrant splits them, on Unicode letters and digits, before
 lowercasing. A repeated check (same field, same words as the index reads them,
-in any order) ends research like a repeated query, but a search for the same words is no
-repeat. A check with a known count is a fact even when it adds no passage, so
+in any order) ends research like a repeated query, but a search for the same
+words is no repeat. An exact value repeats only as the same value, in the forms
+its field tries: a uuid pasted with or without its dashes is one check, while
+two ids that only read alike to the index are two, and so is one id in two
+cases. A check with a known count is a fact even when it adds no passage, so
 only one whose count failed and that added nothing counts toward the two idle
 rounds.
 
