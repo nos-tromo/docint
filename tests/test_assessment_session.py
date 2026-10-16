@@ -268,6 +268,21 @@ def test_the_runner_receives_the_turns_filters_and_target(session_manager: Sessi
         True,
         "documents",
     )
+    assert kwargs["social"] is False
+
+
+def test_a_social_collection_tells_the_runner_so_from_its_coverage_unit(session_manager: SessionManager) -> None:
+    """The turn already profiled its collection; the keyword tool reuses that rather than scanning again.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    _arm(session_manager, nodes=_seed())
+    cast(Any, session_manager.rag)._infer_collection_profile.return_value = {"coverage_unit": "posts"}
+
+    list(session_manager.stream_chat(QUESTION, session_id="s1", answer_mode="assessment"))
+
+    assert cast(Any, session_manager.rag).assessment_runner.call_args.kwargs["social"] is True
 
 
 def test_a_lookup_turn_never_builds_a_runner(session_manager: SessionManager) -> None:

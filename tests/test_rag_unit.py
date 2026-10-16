@@ -35,7 +35,7 @@ from loguru import logger as _loguru_logger
 from qdrant_client import models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
-from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY
+from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, CollectionCleanupError, LazyRerankerPostprocessor
 from docint.core.retrieval.evidence import EveryChildQuery
@@ -8428,7 +8428,7 @@ def _coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int, int]]
         "indexed": True,
         "lanes": {name: {"total": total, "with_search_text": covered} for name, (total, covered) in lanes.items()},
     }
-    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection: status)
+    monkeypatch.setattr(rag_module, "search_index_status", lambda client, collection, **kwargs: status)
 
 
 def _keyword_rag(
@@ -8436,16 +8436,16 @@ def _keyword_rag(
     schemas: dict[str, dict[str, str]],
     counts: dict[str, int | Exception] | None = None,
     nodes: list[NodeWithScore] | None = None,
-    social: bool = False,
 ) -> tuple[RAG, _KeywordClient, list[dict[str, Any]], list[QueryBundle], list[dict[str, Any]]]:
     """Build a RAG whose keyword checks count on a double and retrieve canned passages.
+
+    Profiling the collection fails, so any test proves the keyword tool never scans it.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         schemas (dict[str, dict[str, str]]): Payload schemas per collection.
         counts (dict[str, int | Exception] | None): Counts per collection.
         nodes (list[NodeWithScore] | None): What a keyword retrieval returns.
-        social (bool): Whether the collection profiles as a social export.
 
     Returns:
         tuple: The RAG, its client, the retriever builds, the bundles retrieved and the chains built.
@@ -8496,13 +8496,23 @@ def _keyword_rag(
         chains.append(kwargs)
         return []
 
+    def _no_scan() -> dict[str, Any]:
+        """Fail: the turn already knows whether its collection is social.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("the keyword tool must not profile the collection")
+
     monkeypatch.setattr(rag, "_build_retriever", _build)
     monkeypatch.setattr(rag, "_text_postprocessors", _chain)
-    monkeypatch.setattr(rag, "_infer_collection_profile", lambda: {"is_social_table": social})
+    monkeypatch.setattr(rag, "_infer_collection_profile", _no_scan)
     return rag, client, built, bundles, chains
 
 
-def _keyword_tool_for(rag: RAG, target: str = "documents", rules: Any = None, active: bool = False) -> Any:
+def _keyword_tool_for(
+    rag: RAG, target: str = "documents", rules: Any = None, active: bool = False, social: bool = False
+) -> Any:
     """Build a turn's keyword tool.
 
     Args:
@@ -8510,24 +8520,36 @@ def _keyword_tool_for(rag: RAG, target: str = "documents", rules: Any = None, ac
         target (str): The retrieval target.
         rules (Any): The raw request filter rules.
         active (bool): Whether request filters are active.
+        social (bool): Whether the turn's collection is a social export.
 
     Returns:
         Any: The tool, or ``None``.
     """
     return rag._assessment_keyword_tool(
-        metadata_filter_rules=rules, metadata_filters_active=active, retrieval_target=cast(Any, target)
+        metadata_filter_rules=rules,
+        metadata_filters_active=active,
+        retrieval_target=cast(Any, target),
+        social=social,
     )
 
 
 def test_the_keyword_tool_offers_exactly_the_fields_whose_indexes_are_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     """A field is offered only when every key it searches carries its own index kind."""
     _coverage(monkeypatch, {"test": (10, 10)})
-    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY}}, social=True)
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY}})
 
-    tool = _keyword_tool_for(rag)
+    tool = _keyword_tool_for(rag, social=True)
 
     assert tool is not None
     assert tool.fields == ("text", "author")
+
+
+def test_the_keyword_tool_needs_the_text_index_whatever_else_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text is the field a check means by default, so without it the tool is not offered at all."""
+    _coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": AUTHOR_READY})
+
+    assert _keyword_tool_for(rag, social=True) is None
 
 
 def test_a_collection_without_postings_is_offered_the_text_field_alone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8677,6 +8699,28 @@ def test_a_companion_of_unknown_coverage_withholds_the_tool_from_an_all_turn(mon
     assert _keyword_tool_for(rag, target="documents") is not None
 
 
+def test_a_companion_lookup_that_fails_withholds_the_tool_from_an_all_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An outage must not read as "no companion": its imagery would then be neither counted nor unchecked."""
+    _coverage(monkeypatch, {"test": (10, 10)})
+    rag, client, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    def _down(collection_name: str) -> bool:
+        """Fail as an unreachable Qdrant does.
+
+        Args:
+            collection_name (str): The collection.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("qdrant unreachable")
+
+    client.collection_exists = _down  # type: ignore[method-assign]
+
+    assert _keyword_tool_for(rag, target="all") is None
+    assert _keyword_tool_for(rag, target="documents") is not None
+
+
 def test_keyword_retrieval_keeps_every_child_and_leaves_the_social_links_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """A check shows matches: every retrieved child stays, and no non-matching sibling joins them."""
     _coverage(monkeypatch, {"test": (10, 10)})
@@ -8697,10 +8741,35 @@ def test_keyword_retrieval_keeps_every_child_and_leaves_the_social_links_out(mon
 def test_the_check_names_what_keeps_a_call_from_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Too-short words and several ids are refused before any search runs."""
     _coverage(monkeypatch, {"test": (10, 10)})
-    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **UUID_READY}}, social=True)
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **UUID_READY}})
 
-    tool = _keyword_tool_for(rag)
+    tool = _keyword_tool_for(rag, social=True)
 
     assert tool.check("a b", "text") == NO_USABLE_WORD
     assert tool.check("id1 id2", "uuid") == ONE_VALUE_ONLY
     assert tool.check("Kontrollgruppe", "text") is None
+
+
+@pytest.mark.parametrize("words", ["2.5", "U.S.", "p<0.05", "5%", "e.g. Kontrollgruppe", "..."])
+def test_the_check_refuses_words_the_index_cannot_match_as_given(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
+    """A word the index splits into pieces too short to match would count nothing, or too much.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        words (str): The words of the check.
+    """
+    _coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _keyword_tool_for(rag).check(words, "text") == UNINDEXABLE_WORD
+
+
+def test_the_check_lets_words_through_whose_pieces_the_index_keeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hyphenated term is matched by its parts, each long enough to count; exact ids are never split."""
+    _coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **UUID_READY}})
+
+    tool = _keyword_tool_for(rag, social=True)
+
+    assert tool.check("COVID-19", "text") is None
+    assert tool.check("a1-b2", "uuid") is None

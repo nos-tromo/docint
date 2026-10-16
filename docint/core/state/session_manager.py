@@ -869,6 +869,7 @@ class SessionManager:
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
             retrieval_target=retrieval_target,
+            social=coverage_unit != "documents",
         )
         result: AssessmentResult | None = None
         for item in runner.run(

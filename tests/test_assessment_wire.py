@@ -330,13 +330,20 @@ def test_research_gets_a_keyword_tool_bound_to_the_turns_filters(monkeypatch: py
     rules = [{"field": "mimetype", "operator": "eq", "value": "text/plain"}]
 
     runner = _rag().assessment_runner(
-        MagicMock(), scoped=False, metadata_filter_rules=rules, metadata_filters_active=True, retrieval_target="all"
+        MagicMock(),
+        scoped=False,
+        metadata_filter_rules=rules,
+        metadata_filters_active=True,
+        retrieval_target="all",
+        social=True,
     )
     scoped = _rag().assessment_runner(MagicMock(), scoped=True, metadata_filter_rules=rules)
 
     assert isinstance(runner._researcher, ResearchLoop)
     assert runner._researcher._keyword is tool
-    assert built == [{"metadata_filter_rules": rules, "metadata_filters_active": True, "retrieval_target": "all"}]
+    assert built == [
+        {"metadata_filter_rules": rules, "metadata_filters_active": True, "retrieval_target": "all", "social": True}
+    ]
     assert scoped._researcher is None
 
 

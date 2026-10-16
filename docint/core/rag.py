@@ -128,7 +128,13 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from docint.agents.assessment.keyword import NO_USABLE_WORD, ONE_VALUE_ONLY, KeywordResult, KeywordTool
+from docint.agents.assessment.keyword import (
+    NO_USABLE_WORD,
+    ONE_VALUE_ONLY,
+    UNINDEXABLE_WORD,
+    KeywordResult,
+    KeywordTool,
+)
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
 from docint.core.collection_overview import summarize_document_types
@@ -196,11 +202,13 @@ from docint.core.search.fulltext import (
     build_any_keyword_filter,
     build_scan_filter,
     build_search_filter,
+    index_tokens,
     matches_any_phrase,
     not_coarse_condition,
     parse_keywords,
 )
 from docint.core.search.index import (
+    SEARCH_MIN_TOKEN_LEN,
     SEARCH_TEXT_FIELD,
     ensure_search_index,
     image_companion_name,
@@ -8372,6 +8380,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None = None,
         metadata_filters_active: bool = False,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+        social: bool = False,
     ) -> AssessmentRunner:
         """Build the runner for one assessment turn over this turn's engine.
 
@@ -8392,6 +8401,9 @@ class RAG:
             metadata_filters_active (bool): Whether the turn carries filters at all.
             retrieval_target (RetrievalTarget): Which evidence may answer; a
                 keyword check counts and searches the same.
+            social (bool): Whether the turn's collection profiles as a social
+                export, as its coverage unit says; a keyword check then may match
+                posting metadata too.
 
         Returns:
             AssessmentRunner: A runner bound to this request's models and limits.
@@ -8413,6 +8425,7 @@ class RAG:
                     metadata_filter_rules=metadata_filter_rules,
                     metadata_filters_active=metadata_filters_active,
                     retrieval_target=retrieval_target,
+                    social=social,
                 ),
             )
         )
@@ -8432,25 +8445,30 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None,
         metadata_filters_active: bool,
         retrieval_target: RetrievalTarget,
+        social: bool = False,
     ) -> KeywordTool | None:
         """Offer research an exact word match over this turn's collection, when its indexes allow one.
 
         Deciding only reads: the keyword index's coverage per lane and each
-        collection's payload schema, so no index is created for it. The tool is
-        withheld when the turn's filters cannot be compiled for Qdrant (a check
-        would count the wrong material), when an image companion in scope could
-        not be counted, when no field is ready, and on any fault; research then
-        keeps ``search`` and ``finish``. A field is ready when every key it
-        searches carries its own index kind, the text field also needing chunks
-        that carry its text; the metadata fields are offered on social
-        collections only, the one place they hold anything. The image lane joins
-        a field's check only when the companion carries the same indexes;
-        otherwise its chunks are reported unchecked, never counted as misses.
+        collection's payload schema. It creates no index, and it does not
+        profile the collection, whose social flag the turn already holds. The
+        tool is withheld when the turn's filters cannot be compiled for Qdrant
+        (a check would count the wrong material), when an image companion in
+        scope could not be looked up or counted, when the text field is not
+        ready, and on any fault; research then keeps ``search`` and ``finish``.
+        A field is ready when every key it searches carries its own index kind,
+        the text field also needing chunks that carry its text. Text is
+        required, being what a check matches by default; author, network and
+        uuid join it on social collections, the one place they hold anything.
+        The image lane joins a field's check only when the companion carries the
+        same indexes; otherwise its chunks are reported unchecked, never counted
+        as misses.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The turn's raw filter rules.
             metadata_filters_active (bool): Whether the turn carries filters at all.
             retrieval_target (RetrievalTarget): Which evidence may answer.
+            social (bool): Whether the collection profiles as a social export.
 
         Returns:
             KeywordTool | None: The tool, or ``None`` when it is withheld.
@@ -8462,22 +8480,25 @@ class RAG:
         companion = image_companion_name(collection)
         try:
             client = self.qdrant_client
-            lanes = search_index_status(client, collection).get("lanes") or {}
+            lanes = search_index_status(client, collection, by_lane=True).get("lanes") or {}
             main = lanes.get(collection)
             images = lanes.get(companion)
-            in_scope = retrieval_target != "documents" and (images is not None or self._collection_exists(companion))
+            # Asked directly, so an outage withholds the tool rather than reading as "no companion".
+            in_scope = retrieval_target != "documents" and (
+                images is not None or bool(client.collection_exists(collection_name=companion))
+            )
             if main is None or (in_scope and images is None):
                 return None
             main_schema = read_payload_schema(client, collection)
             image_schema: dict[str, Any] = read_payload_schema(client, companion) if in_scope else {}
-            profile = self._infer_collection_profile()
         except Exception as exc:
             logger.debug("Keyword tool withheld: {}", type(exc).__name__)
             return None
         image_total = int(images["total"]) if in_scope and images is not None else 0
         image_missing = image_total - int(images["with_search_text"]) if in_scope and images is not None else 0
         main_missing = int(main["total"]) - int(main["with_search_text"])
-        names = list(SEARCH_FIELDS) if profile.get("is_social_table") else [DEFAULT_SEARCH_FIELD]
+        profile = {"is_social_table": social}
+        names = list(SEARCH_FIELDS) if social else [DEFAULT_SEARCH_FIELD]
         joins: dict[str, bool] = {}
         unchecked: dict[str, int] = {}
         for name in names:
@@ -8490,7 +8511,7 @@ class RAG:
             left_out = image_total if reaches_images and not joins[name] else 0
             covered = image_missing if joins[name] else 0
             unchecked[name] = left_out + (main_missing + covered if name == DEFAULT_SEARCH_FIELD else 0)
-        if not joins:
+        if DEFAULT_SEARCH_FIELD not in joins:
             return None
 
         def _filter(words: str, field: str, base: qdrant_models.Filter | None) -> qdrant_models.Filter | None:
@@ -8521,10 +8542,18 @@ class RAG:
                 field (str): The field.
 
             Returns:
-                str | None: ``NO_USABLE_WORD``, ``ONE_VALUE_ONLY`` or ``None``.
+                str | None: ``NO_USABLE_WORD``, ``UNINDEXABLE_WORD``,
+                ``ONE_VALUE_ONLY`` or ``None``.
             """
-            if not parse_keywords(words):
+            keywords = parse_keywords(words)
+            if not keywords:
                 return NO_USABLE_WORD
+            # The index splits ``2.5`` into pieces it cannot match: refuse rather than count nothing, or too much.
+            pieces = [index_tokens(keyword) for keyword in keywords]
+            if search_field_spec(field).text_keys and any(
+                not split or min(map(len, split)) < SEARCH_MIN_TOKEN_LEN for split in pieces
+            ):
+                return UNINDEXABLE_WORD
             return ONE_VALUE_ONLY if _filter(words, field, None) is None else None
 
         def _run(words: str, field: str) -> KeywordResult:
