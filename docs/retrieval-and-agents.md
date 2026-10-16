@@ -482,34 +482,41 @@ Evidence too large to show legibly in one answer — typically a large pinned
 scope — is answered as a lookup instead.
 
 **Keyword checks.** When the collection's keyword index is ready, research also
-gets `keyword(words, field)` (`agents/assessment/keyword.py`, described in prose
-by `assessment_research_keyword.txt`). Every word must occur in the same chunk,
-in any order, matched as the Search panel matches a word — case-insensitive, at
-the start of a word — but several words are not checked as a phrase. A check
+gets `keyword(words)` (`agents/assessment/keyword.py`, described in prose by
+`assessment_research_keyword.txt`). Every word must occur in the same chunk, in
+any order, matched as the Search panel matches a word — case-insensitive, at the
+start of a word — but several words are not checked as a phrase. A check
 reports the exact number of matching indexed chunks within the turn's filters
 (coarse parents excluded), then the most relevant new ones, retrieved through the
 turn's retriever narrowed to the matches: the same rerank, image floor and
 parent context as a search, without the social diversity cap and link-following,
 so every passage it adds is a match. A text hit's matches are moved to just
 before its first keyword, with up to 80 characters of left context, so the
-digest and the answer show the word rather than the chunk's opening. `field` is
-`text`, or on a social collection `author`, `network` or `uuid`, each offered
-only when every key it searches carries its own index kind; the tool schema
-limits the model to those. The image companion joins a check on the `all`
-target only for fields an image carries and only when it carries the same
-indexes; otherwise its chunks, like chunks the text index does not cover yet,
-are reported as unchecked, since a zero is only as good as what was checked.
-The tool is withheld, and research keeps `search` and `finish`, when the
-request's filters cannot be compiled for Qdrant, when an image companion in
-scope could not be counted, when no field is ready, and on any fault. Deciding
-reads coverage and payload schemas only, and creates no index. A check runs on
-the search slots under the research budget and fails as a search does; a count
-that failed is reported unavailable, never zero. Input over 100 characters, no
-word of two or more characters, or several values for `uuid` get an error reply.
-A repeated check (same field, same words in any order) ends research like a
-repeated query, but a search for the same words is no repeat. A check with a
-known count is a fact even when it adds no passage, so only one whose count
-failed and that added nothing counts toward the two idle rounds.
+digest and the answer show the word rather than the chunk's opening; a match
+whose kept opening already shows the word stays put, so a section research
+holds is not charged twice for it. The text field must be ready for the tool to
+be offered. On a social collection (as the turn's coverage unit says) a `field`
+argument adds `author`, `network` and `uuid`
+(`assessment_research_keyword_fields.txt`), each only when every key it searches
+carries its own index kind; the tool schema limits the model to those. The image
+companion joins a check on the `all` target only for fields an image carries and
+only when it carries the same indexes; otherwise its chunks, like chunks the
+text index does not cover yet, are reported as unchecked, since a zero is only
+as good as what was checked. The tool is withheld, and research keeps `search`
+and `finish`, when the request's filters cannot be compiled for Qdrant, when an
+image companion in scope could not be looked up or counted, when the text field
+is not ready, and on any fault. Deciding reads coverage and payload schemas
+only: it creates no index and does not profile the collection again. A check
+runs on the search slots under the research budget and fails as a search does; a
+count that failed is reported unavailable, never zero. Input over 100
+characters, no word of two or more characters, a word the index splits into
+pieces too short to match (`2.5`, `U.S.`, `p<0.05`; such a word would count
+nothing, or too much), or several values for `uuid` get an error reply. A
+repeated check (same field, same words as the index reads them, in any order)
+ends research like a repeated query, but a search for the same words is no
+repeat. A check with a known count is a fact even when it adds no passage, so
+only one whose count failed and that added nothing counts toward the two idle
+rounds.
 
 **Answer.** One streamed call on the answer model (the reasoning toggle
 applies) writes two parts separated by a `[[ASSESSMENT]]` line
@@ -531,7 +538,7 @@ that cuts passages below their minimum is reported the same way); a second
 overflow, or compact headers that alone fill the room, ends the turn with
 `context_overflow` on `/stream_query` (`/query` answers HTTP 500, as for a lookup).
 Research's keyword checks with a known count reach the prompt after the
-snippets, one line each (`- "words" (field): N`, with `, unchecked: M` on a
+snippets, one line each (`- "words" (field): N`, with `; M chunks not checked` on a
 partial index). They are counts, not sources: Part 1 stays snippet-only, and
 Part 2 may report a zero as no passage containing those words, never as proof
 the idea is missing. The block exists only once research ends, so it is
