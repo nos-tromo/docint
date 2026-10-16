@@ -319,6 +319,43 @@ describe('ChatTurn', () => {
     expect(screen.getByText(/evaluation datasets/)).toBeInTheDocument()
   })
 
+  it('labels a keyword check by its count and the field it matched', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 1, action: 'keyword', detail: 'Kontrollgruppe', found: 0, field: 'text', matches: 0 },
+        { step: 2, action: 'keyword', detail: 'Krieger', found: 2, field: 'author', matches: 1 },
+        { step: 3, action: 'keyword', detail: 'Nachtschicht', found: 1, field: 'text' }
+      ]
+    })
+    const trail = screen.getByTestId('agent-trail-live')
+    expect(trail).toHaveTextContent('Keyword check “Kontrollgruppe”: 0 matches, 0 new')
+    expect(trail).toHaveTextContent('Keyword check “Krieger” in Author: 1 match, 2 new')
+    expect(trail).toHaveTextContent('Keyword check “Nachtschicht”: count unavailable, 1 new')
+  })
+
+  it('lists keyword checks behind the disclosure, even when research only checked words', async () => {
+    renderTurn({
+      user: 'q',
+      assistant: 'Fact [1].',
+      done: true,
+      meta: assessmentMeta({
+        ...TRAIL,
+        actions: [
+          { action: 'seed', detail: '', found: 2 },
+          { action: 'keyword', detail: 'Kontrollgruppe', found: 0, field: 'text', matches: 0 },
+          { action: 'keyword', detail: 'Nachtschicht', found: 1, field: 'text', matches: null }
+        ]
+      })
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show the searches/i }))
+    expect(screen.getByText('Keyword check “Kontrollgruppe”: 0 matches, 0 new')).toBeInTheDocument()
+    expect(screen.getByText('Keyword check “Nachtschicht”: count unavailable, 1 new')).toBeInTheDocument()
+  })
+
   it('shows an amber notice for a degraded research step', () => {
     renderTurn({
       user: 'q',

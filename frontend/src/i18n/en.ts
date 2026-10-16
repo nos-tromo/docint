@@ -194,6 +194,10 @@ export const en = {
   'chat.assessment_trail_seed_other': 'Initial search: {count} passages',
   'chat.assessment_trail_search_one': 'Searched “{query}”: {count} new passage',
   'chat.assessment_trail_search_other': 'Searched “{query}”: {count} new passages',
+  'chat.assessment_trail_keyword_one': 'Keyword check “{query}”{where}: 1 match, {count} new',
+  'chat.assessment_trail_keyword_other': 'Keyword check “{query}”{where}: {matches} matches, {count} new',
+  'chat.assessment_trail_keyword_unknown': 'Keyword check “{query}”{where}: count unavailable, {count} new',
+  'chat.assessment_trail_keyword_field': ' in {field}',
   'chat.assessment_trail_answer': 'Writing the assessment…',
   'chat.assessment_reason.tools_unavailable':
     'The model could not run its own searches, so this assessment rests on the first search’s passages only.',

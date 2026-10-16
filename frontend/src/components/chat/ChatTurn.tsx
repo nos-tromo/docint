@@ -132,7 +132,27 @@ const ANSWER_COPY: Partial<Record<AgentTrail['answer'], keyof Strings>> = {
   empty: 'chat.assessment_answer.empty'
 }
 
-type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found'>
+/** The Search panel's labels for the fields a keyword check can match besides the text. */
+const KEYWORD_FIELD_LABEL: Partial<Record<string, keyof Strings>> = {
+  author: 'search.field.author',
+  network: 'search.field.network',
+  uuid: 'search.field.uuid'
+}
+
+type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches'>
+
+function keywordLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
+  const field = step.field ? KEYWORD_FIELD_LABEL[step.field] : undefined
+  const vars = {
+    query: step.detail,
+    where: field ? t('chat.assessment_trail_keyword_field', { field: t(field) }) : '',
+    matches: step.matches ?? 0,
+    count: step.found
+  }
+  // A failed count is unknown, never a zero.
+  if (typeof step.matches !== 'number') return t('chat.assessment_trail_keyword_unknown', vars)
+  return t(step.matches === 1 ? 'chat.assessment_trail_keyword_one' : 'chat.assessment_trail_keyword_other', vars)
+}
 
 function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
   const single = step.found === 1
@@ -140,6 +160,7 @@ function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
     return t(single ? 'chat.assessment_trail_seed_one' : 'chat.assessment_trail_seed_other', { count: step.found })
   }
   if (step.action === 'answer') return t('chat.assessment_trail_answer')
+  if (step.action === 'keyword') return keywordLabel(step, t)
   return t(single ? 'chat.assessment_trail_search_one' : 'chat.assessment_trail_search_other', {
     query: step.detail,
     count: step.found
@@ -176,7 +197,9 @@ function AssessmentNotice({ trail }: { trail: AgentTrail }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const listId = useId()
-  const searches = Array.isArray(trail.actions) ? trail.actions.filter((action) => action.action === 'search') : []
+  const searches = Array.isArray(trail.actions)
+    ? trail.actions.filter((action) => action.action === 'search' || action.action === 'keyword')
+    : []
   const shortened =
     trail.shortened > 0
       ? t(trail.shortened === 1 ? 'chat.assessment_shortened_one' : 'chat.assessment_shortened_other', {

@@ -60,15 +60,19 @@ export interface ValidationFields {
 export type AnswerMode = 'lookup' | 'assessment'
 
 /** What one step of an assessment turn did. */
-export type AgentAction = 'seed' | 'search' | 'answer'
+export type AgentAction = 'seed' | 'search' | 'keyword' | 'answer'
 
 /** One step of an assessment turn, streamed as an `{agent}` frame. */
 export interface AgentStep {
   step: number
   action: AgentAction
-  /** The model-written search query; empty for `seed` and `answer`. */
+  /** The model-written search query or keyword words; empty for `seed` and `answer`. */
   detail: string
   found: number
+  /** The field a keyword check matched (`text`, `author`, `network`, `uuid`). */
+  field?: string
+  /** Indexed chunks a keyword check matched; absent or null when its count failed. */
+  matches?: number | null
 }
 
 /** Why research stopped short. Protocol tokens, never prose. */
@@ -82,7 +86,7 @@ export type AgentReason =
 /** What an assessment turn did, as the final envelope and session history report it. */
 export interface AgentTrail {
   steps: number
-  actions: { action: AgentAction; detail: string; found: number }[]
+  actions: Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches'>[]
   reason: AgentReason | null
   /** `split`: separated cleanly; `unsplit`: the whole answer is labelled; `empty`: no answer text. */
   answer: 'split' | 'unsplit' | 'empty'
