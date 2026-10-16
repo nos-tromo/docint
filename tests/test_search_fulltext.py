@@ -10,6 +10,7 @@ from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.fulltext import (
     build_scan_filter,
     build_search_filter,
+    index_tokens,
     matches_any_phrase,
     matches_phrase,
     not_coarse_condition,
@@ -335,3 +336,13 @@ def test_build_scan_filter_keeps_the_callers_metadata_filter() -> None:
     f = build_scan_filter(base)
     assert cast(list[Any], f.must)[0] == cast(list[Any], base.must)[0]
     assert not_coarse_condition() in cast(list[Any], f.must)
+
+
+def test_index_tokens_split_a_word_where_the_index_does() -> None:
+    """The index splits on everything but letters and digits, so a number or abbreviation falls apart."""
+    assert index_tokens("COVID-19") == ["covid", "19"]
+    assert index_tokens("2.5") == ["2", "5"]
+    assert index_tokens("U.S.") == ["u", "s"]
+    assert index_tokens("snake_case") == ["snake", "case"]
+    assert index_tokens("Straße") == ["straße"]
+    assert index_tokens("...") == []

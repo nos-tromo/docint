@@ -304,6 +304,8 @@ def _write_with_retry(
 def search_index_status(
     client: Any,
     collection: str,
+    *,
+    by_lane: bool = False,
 ) -> dict[str, Any]:
     """Report how much of a collection is ready for full-text search.
 
@@ -319,15 +321,17 @@ def search_index_status(
     Args:
         client (Any): Qdrant client exposing ``get_collection`` and ``count``.
         collection (str): Physical collection name.
+        by_lane (bool): Whether to add the per-lane breakdown; off by default,
+            since ``/search`` hands the status to clients as it is.
 
     Returns:
         dict[str, Any]: ``indexed`` (the payload index exists), ``total``,
             ``with_search_text``, ``missing``, and ``complete`` (every point
             carries the field). ``complete`` is ``False`` when the counts are
             unavailable, so an unknown state never reads as a finished one.
-            ``lanes`` maps each collection counted in full to its own
-            ``total`` and ``with_search_text``; a lane whose counts failed is
-            absent, never zero.
+            With ``by_lane``, ``lanes`` maps each collection counted in full to
+            its own ``total`` and ``with_search_text``; a lane whose counts
+            failed is absent, never zero.
     """
     indexed = False
     try:
@@ -349,7 +353,7 @@ def search_index_status(
         logger.debug("companion lookup failed for {}: {}", companion, exc)
 
     total = with_search_text = 0
-    by_lane: dict[str, dict[str, int]] = {}
+    lane_counts: dict[str, dict[str, int]] = {}
     populated = models.Filter(must_not=[models.IsEmptyCondition(is_empty=models.PayloadField(key=SEARCH_TEXT_FIELD))])
     for lane in lanes:
         try:
@@ -360,14 +364,16 @@ def search_index_status(
         except Exception as exc:
             logger.debug("search_text coverage unavailable for {}: {}", lane, exc)
             continue
-        by_lane[lane] = {"total": lane_total, "with_search_text": lane_with}
+        lane_counts[lane] = {"total": lane_total, "with_search_text": lane_with}
 
     missing = max(0, total - with_search_text)
-    return {
+    status: dict[str, Any] = {
         "indexed": indexed,
         "total": total,
         "with_search_text": with_search_text,
         "missing": missing,
         "complete": with_search_text > 0 and missing == 0,
-        "lanes": by_lane,
     }
+    if by_lane:
+        status["lanes"] = lane_counts
+    return status

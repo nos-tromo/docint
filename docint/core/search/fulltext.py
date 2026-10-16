@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -15,6 +16,9 @@ _HIER_TYPE_FIELD = "docint_hier_type"
 
 #: Hierarchy value for an oversize parent chunk kept for context expansion.
 _HIER_COARSE = "coarse"
+
+#: A run of letters or digits: the index splits words on everything else, the underscore included.
+_INDEX_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 class KeywordTooShortError(ValueError):
@@ -48,6 +52,23 @@ def parse_keywords(raw: str) -> list[str]:
         seen.add(folded)
         keywords.append(keyword)
     return keywords
+
+
+def index_tokens(word: str) -> list[str]:
+    """Split a keyword into the tokens the full-text index matches it by.
+
+    The index's tokenizer splits on every character that is not a letter or a
+    digit and lowercases what is left, so ``2.5`` reaches it as ``2`` and ``5``,
+    both under its minimum token length; a caller that promises an exact match
+    can refuse such a word instead of letting it match nothing, or too much.
+
+    Args:
+        word (str): One keyword.
+
+    Returns:
+        list[str]: Its lowercased letter-and-digit runs, in order.
+    """
+    return _INDEX_TOKEN_RE.findall(word.lower())
 
 
 def matches_phrase(text: str, keywords: list[str]) -> bool:
