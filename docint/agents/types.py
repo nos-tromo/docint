@@ -6,7 +6,7 @@ from typing import Any, Literal, Protocol
 AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
-AgentAction = Literal["seed", "search", "answer"]
+AgentAction = Literal["seed", "search", "keyword", "answer"]
 """What one step of an assessment turn did."""
 
 
@@ -20,15 +20,20 @@ class AgentProgress:
     Attributes:
         step (int): ``0`` for the first search, then one per research round.
         action (AgentAction): What the step did.
-        detail (str): The model-written search query; empty otherwise. Shown to
-            the user, never logged.
+        detail (str): The model-written search query or keyword words; empty
+            otherwise. Shown to the user, never logged.
         found (int): Passages the step added to the evidence.
+        field (str | None): The field a keyword check matched; ``None`` otherwise.
+        matches (int | None): Indexed chunks a keyword check matched; ``None``
+            on any other step, or when the count failed.
     """
 
     step: int
     action: AgentAction
     detail: str
     found: int
+    field: str | None = None
+    matches: int | None = None
 
 
 @dataclass
