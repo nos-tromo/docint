@@ -18,10 +18,11 @@ from typing import Any
 
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
+from docint.agents.assessment.ledger import kept_ranges
 from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
 from docint.core.search.fields import search_field_spec
 from docint.core.search.fulltext import index_tokens, parse_keywords
-from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS
+from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS, WINDOW_JOIN
 
 #: The field a keyword call matches when it names none: the passage text.
 DEFAULT_KEYWORD_FIELD = "text"
@@ -158,8 +159,8 @@ def anchor_terms(scored: NodeWithScore, keywords: Sequence[str]) -> NodeWithScor
     cannot cross into the window before it. A span whose opening already shows
     the word stays as it is: moved, it would merge into a held entry as a fresh
     match and charge the room again for text the entry already shows. A passage
-    without spans keeps its shape: stamping it would change how it merges with
-    the ledger's entries.
+    without spans is one match over its whole text, which packing shows from
+    its opening (see :func:`_anchor_unstamped`).
 
     Args:
         scored (NodeWithScore): A passage a keyword call retrieved.
@@ -169,11 +170,13 @@ def anchor_terms(scored: NodeWithScore, keywords: Sequence[str]) -> NodeWithScor
         NodeWithScore: A copy with the moved spans, or ``scored`` itself when no
         span moves; the input is never written to.
     """
-    raw = (scored.node.metadata or {}).get(MATCH_SPANS_KEY)
     pattern = _term_pattern(keywords)
-    if not isinstance(raw, list) or pattern is None:
+    if pattern is None:
         return scored
     text = scored.node.get_content(metadata_mode=MetadataMode.NONE)
+    raw = (scored.node.metadata or {}).get(MATCH_SPANS_KEY)
+    if not isinstance(raw, list):
+        return _anchor_unstamped(scored, text, pattern)
     moved: list[Any] = []
     changed = False
     for item in raw:
@@ -191,6 +194,36 @@ def anchor_terms(scored: NodeWithScore, keywords: Sequence[str]) -> NodeWithScor
         return scored
     node = scored.node.model_copy(deep=True)
     node.metadata[MATCH_SPANS_KEY] = moved
+    return NodeWithScore(node=node, score=scored.score)
+
+
+def _anchor_unstamped(scored: NodeWithScore, text: str, pattern: re.Pattern[str]) -> NodeWithScore:
+    """Give a hit without spans a match where its word lies past the opening packing keeps of it.
+
+    Packing shows an unstamped passage from its opening, so a word past that
+    opening could be cut away while its count still reaches the answer. Such a
+    hit gains one match, from just before the word to the end of the window
+    holding it, so no region is charged in another window. The ledger merges it
+    into the same text held unstamped, whose opening then counts as matches of
+    its own.
+
+    Args:
+        scored (NodeWithScore): A passage without match spans.
+        text (str): Its text.
+        pattern (re.Pattern[str]): The keywords' word-prefix rule (see :func:`_term_pattern`).
+
+    Returns:
+        NodeWithScore: A stamped copy, or ``scored`` itself when the text holds
+        no keyword or its opening already shows the first one.
+    """
+    found = pattern.search(text)
+    if found is None or any(lo <= found.start() and found.end() <= hi for lo, hi in kept_ranges(text, [])):
+        return scored
+    join = text.rfind(WINDOW_JOIN, 0, found.start())
+    start = 0 if join < 0 else join + len(WINDOW_JOIN)
+    end = text.find(WINDOW_JOIN, found.end())
+    node = scored.node.model_copy(deep=True)
+    node.metadata[MATCH_SPANS_KEY] = [[_context_start(text, start, found.start()), len(text) if end < 0 else end]]
     return NodeWithScore(node=node, score=scored.score)
 
 

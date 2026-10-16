@@ -14,7 +14,7 @@ from docint.agents.assessment.keyword import (
     render_keyword_checks,
 )
 from docint.agents.assessment.ledger import EvidenceLedger, digest
-from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS
+from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS, WINDOW_JOIN
 
 LEAD = "The trial enrolled two hundred patients across four sites over two years. " * 3
 TERM_TEXT = f"{LEAD}There was keine Kontrollgruppe in the design, which the authors acknowledge."
@@ -93,10 +93,56 @@ def test_a_term_outside_the_span_does_not_move_it() -> None:
 
 
 def test_a_passage_without_spans_is_returned_as_is() -> None:
-    """An unstamped passage keeps its shape: stamping it would change how it merges."""
+    """An unstamped passage short enough to be shown whole already shows its term, so it keeps its shape."""
     scored = scored_node("s", TERM_TEXT)
 
     assert anchor_terms(scored, ["Kontrollgruppe"]) is scored
+
+
+#: An invented unstamped chunk, as a collection without parent sections stores it, its telling sentence deep inside.
+UNSTAMPED_FACT = "No randomization was used."
+UNSTAMPED_TEXT = (
+    "The cohort was followed for twelve months at three clinics. " * 12
+    + UNSTAMPED_FACT
+    + " The authors call it a limitation."
+)
+
+
+def test_an_unstamped_hit_is_anchored_on_its_term_past_the_opening() -> None:
+    """Packing shows an unstamped passage from its opening, so a term past it gets a match of its own."""
+    scored = scored_node("u", UNSTAMPED_TEXT, filename="trial.pdf")
+
+    anchored = anchor_terms(scored, ["randomization"])
+
+    term = UNSTAMPED_TEXT.index("randomization")
+    [[start, end]] = _spans(anchored)
+    assert term - TERM_CONTEXT_CHARS <= start < term
+    assert end == len(UNSTAMPED_TEXT)
+    assert MATCH_SPANS_KEY not in scored.node.metadata
+
+
+@pytest.mark.parametrize(("lead", "stamped"), [(291, False), (292, True)], ids=["ends-at-300", "ends-at-301"])
+def test_an_unstamped_hit_is_anchored_only_past_the_opening_packing_keeps(lead: int, stamped: bool) -> None:
+    """Packing keeps an unstamped passage's first 300 characters, so a term ending inside them needs no match.
+
+    Args:
+        lead (int): Characters before the space that precedes the term.
+        stamped (bool): Whether the hit gains a match.
+    """
+    scored = scored_node("u", "w" * lead + " Zielwert" + " filler" * 60)
+
+    assert (anchor_terms(scored, ["Zielwert"]) is not scored) is stamped
+
+
+def test_an_unstamped_hit_is_anchored_inside_the_window_holding_its_term() -> None:
+    """A match reaching back across a window join would be charged a region in the window before it."""
+    first = "Opening filler words. " * 40
+    text = f"{first}{WINDOW_JOIN}Short lead. Zielwert appears here.{' Trailing filler.' * 20}"
+
+    [[start, end]] = _spans(anchor_terms(scored_node("u", text), ["Zielwert"]))
+
+    assert len(first) + len(WINDOW_JOIN) <= start < text.index("Zielwert")
+    assert end == len(text)
 
 
 def test_the_input_passage_is_never_written_to() -> None:

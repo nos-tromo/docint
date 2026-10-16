@@ -1998,6 +1998,22 @@ def test_a_text_check_anchors_its_passages_on_the_words() -> None:
     assert ledger.entries()[0].node.metadata[MATCH_SPANS_KEY][0][0] > 0
 
 
+def test_a_check_that_finds_an_unstamped_seed_chunk_again_shows_its_words() -> None:
+    """A seed chunk without parent context gains the words past its opening as a match, and research reads them."""
+    text = "The cohort was followed for twelve months at three clinics. " * 12 + "No randomization was used."
+    seed = scored_node("u", text, filename="trial.pdf", page=3)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([seed])
+    llm = tool_llm([keyword_call("randomization")])
+    tool = keyword_tool({("randomization", "text"): _hit("randomization", seed)})
+
+    progress, _ = _drain(_loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=ledger))
+
+    assert [step.found for step in progress] == [1]
+    assert "No randomization was used." in _reply(llm)
+    assert len(ledger.entries()[0].node.metadata[MATCH_SPANS_KEY]) == 3
+
+
 def test_a_metadata_check_leaves_its_passages_as_retrieved() -> None:
     """An author match sits in the metadata, so the text holds nothing to anchor on."""
     hit = scored_node("k", TRIAL_TEXT, filename="trial.pdf", **{MATCH_SPANS_KEY: [[0, len(TRIAL_TEXT)]]})

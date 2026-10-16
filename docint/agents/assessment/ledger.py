@@ -197,6 +197,38 @@ def _covered(needed: Sequence[tuple[int, int]], others: Sequence[Sequence[tuple[
     )
 
 
+def _head_spans(text: str) -> list[tuple[int, int]]:
+    """Return matches whose kept text is all that packing keeps of a passage without any.
+
+    An unstamped passage keeps its opening (see :func:`kept_ranges`), which can
+    run past ``MIN_REGION_CHARS`` and, in a short passage, across a window join,
+    while a match keeps only its first ``MIN_REGION_CHARS`` in each window. So
+    each window's share of the opening becomes a match to the window's end, and
+    a share longer than one match keeps gets a second, whose kept text ends
+    where the share does. Merged with a stamped emission of the same text, the
+    passage then still keeps everything research read of it.
+
+    Args:
+        text (str): The passage text.
+
+    Returns:
+        list[tuple[int, int]]: The matches; none when packing keeps nothing of the passage.
+    """
+    spans: list[tuple[int, int]] = []
+    kept = kept_ranges(text, [])
+    offset = 0
+    for window in text.split(WINDOW_JOIN):
+        end = offset + len(window)
+        for lo, hi in kept:
+            first, last = max(lo, offset), min(hi, end)
+            if last > first:
+                spans.append((first, end))
+                if last - first > MIN_REGION_CHARS:
+                    spans.append((last - MIN_REGION_CHARS, end))
+        offset = end + len(WINDOW_JOIN)
+    return spans
+
+
 def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScore | None:
     """Fold another emission of a held passage into its entry, with its match.
 
@@ -209,8 +241,12 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     match a single arriving one keeps is dropped when the arriving window
     replaces the entry. A re-cut of a child that the child's own opening holds
     therefore adds no floor, while one that starts inside a long child keeps its
-    own. A stamped and an unstamped emission keep different text, so they never
-    merge. Anything but a ``TextNode`` keeps the held entry as is.
+    own. A stamped and an unstamped emission of different texts never merge: one
+    keeps its opening, the other its match. Of one text they do, as when a
+    keyword check anchors a passage held unstamped: the unstamped side counts
+    its opening as matches (see :func:`_head_spans`), so the merged entry keeps
+    all that research read of either. Anything but a ``TextNode`` keeps the held
+    entry as is.
 
     Args:
         held (NodeWithScore): The ledger's entry.
@@ -219,14 +255,21 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     Returns:
         NodeWithScore | None: A new entry with both excerpts, every match and the
         higher score; ``None`` when the entry already keeps the arriving text and
-        every match it carries, or when exactly one side holds a match in its
-        text. Neither input is written to.
+        every match it carries, or when exactly one of two different texts holds
+        a match. Neither input is written to.
     """
     held_text = held.node.get_content(metadata_mode=MetadataMode.NONE)
     new_text = arriving.node.get_content(metadata_mode=MetadataMode.NONE)
     held_spans, new_spans = _anchors(held.node), _anchors(arriving.node)
-    if _has_match(held_text, held_spans) != _has_match(new_text, new_spans):
-        return None
+    held_match = _has_match(held_text, held_spans)
+    if held_match != _has_match(new_text, new_spans):
+        if new_text != held_text:
+            return None
+        # One text with and without a match: the unmatched side keeps its opening as matches.
+        if held_match:
+            new_spans = _head_spans(new_text)
+        else:
+            held_spans = _head_spans(held_text)
     if new_text in held_text:
         held_matches = distinct_spans(held_spans, len(held_text))
         arriving_matches = distinct_spans(_shifted(new_spans, held_text.find(new_text)), len(held_text))
@@ -357,8 +400,9 @@ class EvidenceLedger:
         later window of a held id is new evidence: it extends that entry, which
         keeps its number. So is a window the entry already shows when it carries
         a match whose kept text the entry lacks (see :func:`kept_ranges`). A
-        stamped and an unstamped emission of one id never merge: whichever comes
-        second is nothing new. A full ledger admits no new entry but still
+        stamped and an unstamped emission of one id merge only when their text is
+        the same (see :func:`_merge_windows`); otherwise whichever comes second is
+        nothing new. A full ledger admits no new entry but still
         extends one. Once :meth:`restrict` is installed, a passage or extension
         that would leave the evidence illegible is refused and the rest of the
         batch is still considered; :attr:`refusals` counts what the room turns away.

@@ -466,8 +466,9 @@ overlap are counted apart, each keeping its own region.
 A new window of a section the ledger already holds is not dropped. Text the entry
 lacks extends it after a `…` line, a window that repeats it adds only a match
 whose kept text the entry lacks, and the entry keeps its number; a window with a
-located match never merges with one without, so whichever comes second adds
-nothing. When the answer has to shorten such an entry, the cut is
+located match merges with one without only when both carry the same text, the
+one without keeping its opening as matches of its own, and otherwise whichever
+comes second adds nothing. When the answer has to shorten such an entry, the cut is
 shared across its windows rather than taken from the end. Shortening keeps the
 text around each passage's retrieved match, so a section promoted from a matched
 chunk is cut around that chunk rather than to its opening. A match longer than
@@ -494,7 +495,11 @@ so every passage it adds is a match. A text hit's matches are moved to just
 before its first keyword, with up to 80 characters of left context, so the
 digest and the answer show the word rather than the chunk's opening; a match
 whose kept opening already shows the word stays put, so a section research
-holds is not charged twice for it. The text field must be ready for the tool to
+holds is not charged twice for it. A hit without matches, as a chunk without
+parent context arrives, gains one from just before its first keyword to the end
+of its window when its opening does not show the word. Held unstamped from an
+earlier search, that chunk keeps its opening and gains the word, and its floor
+rises from 300 to 750 characters. The text field must be ready for the tool to
 be offered. On a social collection (as the turn's coverage unit says) a `field`
 argument adds `author`, `network` and `uuid`
 (`assessment_research_keyword_fields.txt`), each only when every key it searches

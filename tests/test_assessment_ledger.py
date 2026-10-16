@@ -11,6 +11,8 @@ import pytest
 from assessment_fakes import llm_view, scored_node, social_post
 from llama_index.core.schema import Document, MetadataMode, NodeWithScore
 
+import docint.agents.assessment.ledger as ledger_module
+from docint.agents.assessment.keyword import anchor_terms
 from docint.agents.assessment.ledger import (
     COMPACT_HEADER_CHARS,
     CONTEXT_ERROR_MARKERS,
@@ -22,6 +24,7 @@ from docint.agents.assessment.ledger import (
     EvidenceLedger,
     Room,
     _allowances,
+    _head_spans,
     _parts,
     answer_budget,
     digest,
@@ -885,6 +888,92 @@ def test_a_stamped_and_an_unstamped_emission_of_one_id_never_merge(stamped_first
     assert ledger.entries()[0] is held
 
 
+#: An invented chunk as a collection without parent sections stores it, its telling sentence past its opening.
+PLAIN_FACT = "No randomization was used."
+PLAIN_TEXT = (
+    "The cohort was followed for twelve months at three clinics. " * 12
+    + PLAIN_FACT
+    + " The authors call it a limitation."
+)
+
+
+def _kept_at_floor(entry: NodeWithScore) -> str:
+    """Render one passage at exactly its floor, as the tightest legible packing shows it.
+
+    Args:
+        entry (NodeWithScore): The passage, alone in its ledger.
+
+    Returns:
+        str: The rendered context, its whitespace collapsed as a digest's is.
+    """
+    spans = [(lo, hi) for lo, hi in entry.node.metadata.get(MATCH_SPANS_KEY, [])]
+    return _collapsed(_render_numbered([entry], text_floor(_text(entry), spans)))
+
+
+def test_an_anchored_hit_of_a_chunk_held_unstamped_keeps_both_at_its_floor() -> None:
+    """A seeded chunk a keyword check finds again keeps what research read of it and gains the term's sentence.
+
+    Unstamped, the chunk was shown from its opening; one text with and without a match merges, the
+    opening counting as matches of its own, so every legible packing shows both.
+    """
+    held = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+    anchored = anchor_terms(held, ["randomization"])
+
+    assert ledger.add([anchored]) == [(1, anchored)]
+
+    shown = _kept_at_floor(ledger.entries()[0])
+    assert PLAIN_FACT in shown
+    assert all(piece in shown for piece in _digest_pieces(digest(1, held)))
+
+
+def test_an_unstamped_arrival_of_a_chunk_held_anchored_adds_its_opening() -> None:
+    """Found unstamped after a check anchored it, the chunk gains the opening its digest then showed research."""
+    plain = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([anchor_terms(plain, ["randomization"])])
+
+    assert ledger.add([plain]) == [(1, plain)]
+
+    shown = _kept_at_floor(ledger.entries()[0])
+    assert PLAIN_FACT in shown
+    assert all(piece in shown for piece in _digest_pieces(digest(1, plain)))
+
+
+def test_a_stamped_arrival_inside_the_opening_held_unstamped_adds_nothing() -> None:
+    """A match the unstamped entry already shows is no news, and turning it away is no refusal."""
+    held = scored_node("u", PLAIN_TEXT)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+
+    assert ledger.add([scored_node("u", PLAIN_TEXT, **{MATCH_SPANS_KEY: [[0, len(PLAIN_TEXT)]]})]) == []
+    assert ledger.refusals == 0
+    assert ledger.entries()[0] is held
+
+
+@pytest.mark.parametrize(("slack", "admitted"), [(-1, False), (0, True)], ids=["one-short", "exactly-enough"])
+def test_an_anchor_into_a_chunk_held_unstamped_needs_room_for_its_opening_and_its_term(
+    slack: int, admitted: bool
+) -> None:
+    """Merged, the chunk's floor rises from 300 to 750: its opening as two matches, the term as a third.
+
+    Args:
+        slack (int): Characters beyond the merged floor the budget allows.
+        admitted (bool): Whether the anchor is taken.
+    """
+    held = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+    budget = _header_chars(ledger.numbered()) + 750 + slack
+    ledger.restrict(Room(ledger.numbered(), llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0))
+
+    changed = ledger.add([anchor_terms(held, ["randomization"])])
+
+    assert bool(changed) is admitted
+    assert ledger.refusals == (0 if admitted else 1)
+
+
 #: An invented section whose decisive sentence sits deep inside it.
 DEEP_FACT = "The pilot excluded every respondent recruited after March."
 DEEP_SECTION = ("Background filler sentence. " * 190)[:5214] + DEEP_FACT + " Closing filler sentence." * 40
@@ -1365,6 +1454,47 @@ def test_kept_ranges_are_what_every_packing_at_the_floor_keeps(
     assert kept_ranges(body, anchors) == ranges
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "x" * 1000,
+        "x" * 250,
+        "x" * 120,
+        _join("a" * 1000, "b" * 1000),
+        _join("a" * 100, "b" * 1000),
+        _join("a" * 100, "b" * 100),
+        _join(*["w" * 100] * 7),
+        _join("", "b" * 1000),
+    ],
+    ids=[
+        "one-long-window",
+        "under-the-floor",
+        "under-one-region",
+        "two-windows",
+        "short-first-window",
+        "two-windows-under-their-floor",
+        "seven-windows",
+        "empty-first-window",
+    ],
+)
+def test_an_opening_as_matches_keeps_all_an_unstamped_passage_keeps(body: str) -> None:
+    """A merge that counts an unstamped passage's opening as matches never drops text research read of it.
+
+    Args:
+        body (str): The passage text.
+    """
+    kept: set[int] = set()
+    for lo, hi in kept_ranges(body, _head_spans(body)):
+        kept.update(range(lo, hi))
+    offset = 0
+    for window in body.split(WINDOW_JOIN):
+        end = offset + len(window)
+        for lo, hi in kept_ranges(body, []):
+            # The join between two kept windows is the packer's own, not the passage's text.
+            assert set(range(max(lo, offset), min(hi, end))) <= kept
+        offset = end + len(WINDOW_JOIN)
+
+
 def _header_chars(nodes: list[NodeWithScore]) -> int:
     """Return what the numbered passages' headers, joins and cut markers reserve.
 
@@ -1817,13 +1947,34 @@ def _budgets(rng: random.Random, nodes: list[NodeWithScore]) -> list[int]:
     return [need - 1, need, need + rng.randrange(1, 300), need + rng.randrange(1, max(2, spare + 100))]
 
 
-def test_research_reads_only_what_every_legible_answer_shows() -> None:
+def test_research_reads_only_what_every_legible_answer_shows(monkeypatch: pytest.MonkeyPatch) -> None:
     """Seeded fuzz: every digest research reads, of the seed and of each search, is in every legible render.
 
     Stamped windows merge through all three branches (contained, containing, joined); unstamped
-    passages merge only with their identical text. Texts are made of words no other text holds, so a
-    piece found in the context is the piece research read.
+    passages merge only with their identical text, and so does one text emitted with and without a
+    match, its unstamped side counting its opening as matches. Texts are made of words no other text
+    holds, so a piece found in the context is the piece research read.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Counts how often one text arrives with and without a match.
     """
+    head_spans = ledger_module._head_spans
+    heads = 0
+
+    def _counted(text: str) -> list[tuple[int, int]]:
+        """Count one merge of a text emitted with and without a match.
+
+        Args:
+            text (str): The unstamped side's text.
+
+        Returns:
+            list[tuple[int, int]]: Its opening as matches.
+        """
+        nonlocal heads
+        heads += 1
+        return head_spans(text)
+
+    monkeypatch.setattr(ledger_module, "_head_spans", _counted)
     rng = random.Random(67)
     checked = cut = pieces = 0
 
@@ -1864,3 +2015,4 @@ def test_research_reads_only_what_every_legible_answer_shows() -> None:
     assert checked > 8000
     assert cut > 6000
     assert pieces > 80_000
+    assert heads > 200
