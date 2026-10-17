@@ -2262,17 +2262,26 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
         Returns:
             set[str]: Ids of the candidates whose description score reaches
             ``rescore_min_score``. Empty with no candidate, no re-score or no
-            query, and when the re-score raises.
+            query, and when the re-score raises. A completed call logs its
+            counts and duration at DEBUG, never the query or the description.
         """
         query = str(getattr(query_bundle, "query_str", "") or "").strip()
         if not candidates or self.rescore is None or not query:
             return set()
+        started_at = time.monotonic()
         try:
             scores = self.rescore(query, candidates)
-            return {node_id for node_id, score in scores.items() if float(score) >= self.rescore_min_score}
+            rescued = {node_id for node_id, score in scores.items() if float(score) >= self.rescore_min_score}
         except Exception as exc:  # fail-soft: a failed second look drops the images as before
             logger.warning("Image re-score failed ({}); dropping the sub-floor images.", type(exc).__name__)
             return set()
+        logger.debug(
+            "Image re-score | candidates={} rescued={} elapsed_ms={}",
+            len(candidates),
+            len(rescued),
+            round((time.monotonic() - started_at) * 1000),
+        )
+        return rescued
 
     def _slots(self) -> int | None:
         """Return how many nodes the cut keeps.

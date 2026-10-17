@@ -7,12 +7,15 @@ chunk for a slot. Fusing the lane into the retriever puts image captions in
 front of the reranker and the generator like any other evidence.
 """
 
+import re
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
+from loguru import logger
 
 from docint.core.rag import (
     IMAGE_LANE_METADATA_KEY,
@@ -687,6 +690,63 @@ def test_a_failed_rescore_drops_the_image_as_before(raises: bool) -> None:
 
     assert _ids(out) == ["t1"]
     assert len(rescore.calls) == 1
+
+
+@pytest.fixture
+def debug_lines() -> Iterator[list[str]]:
+    """Collect every loguru message at DEBUG and above for the test.
+
+    Yields:
+        list[str]: The messages, in emission order.
+    """
+    lines: list[str] = []
+    sink_id = logger.add(lambda message: lines.append(message.record["message"]), level="DEBUG")
+    try:
+        yield lines
+    finally:
+        logger.remove(sink_id)
+
+
+@pytest.mark.parametrize(
+    ("scores", "rescued"),
+    [({"i1": 0.5, "i2": 0.001}, 1), ({}, 0)],
+    ids=["one-kept", "none-kept"],
+)
+def test_the_rescore_logs_counts_and_time_only(debug_lines: list[str], scores: dict[str, float], rescued: int) -> None:
+    """One DEBUG line says how many images got a second look, how many stayed and how long it took.
+
+    It is what an operator reads to tune ``IMAGE_RESCORE_MIN_SCORE`` and to see
+    what the description call costs. The query is text a user typed, so it
+    stays out of the log: counts and a duration, nothing else.
+
+    Args:
+        debug_lines (list[str]): Every message logged during the test.
+        scores (dict[str, float]): The description score per candidate.
+        rescued (int): How many candidates those scores keep.
+    """
+    nodes = [_text_node("t1", "Handbook section 1.", 0.3), _image_node("i1", 0.0044), _image_node("i2", 0.004)]
+
+    ImageRelevanceFloorPostprocessor(min_score=0.05, top_n=5, rescore=_Rescore(scores))._postprocess_nodes(
+        nodes, WEATHER
+    )
+
+    lines = [line for line in debug_lines if line.startswith("Image re-score")]
+    assert len(lines) == 1
+    assert re.fullmatch(rf"Image re-score \| candidates=2 rescued={rescued} elapsed_ms=\d+", lines[0])
+    assert not [line for line in debug_lines if WEATHER.query_str in line]
+
+
+def test_without_a_candidate_the_rescore_logs_nothing(debug_lines: list[str]) -> None:
+    """No second look, no line: a turn whose images all clear the floor makes no re-score call.
+
+    Args:
+        debug_lines (list[str]): Every message logged during the test.
+    """
+    nodes = [_text_node("t1", "Handbook section 1.", 0.3), _image_node("i1", 0.42)]
+
+    ImageRelevanceFloorPostprocessor(min_score=0.05, top_n=5, rescore=_Rescore({}))._postprocess_nodes(nodes, WEATHER)
+
+    assert not [line for line in debug_lines if line.startswith("Image re-score")]
 
 
 @pytest.mark.parametrize("shape", ["stamped", "unscored"])

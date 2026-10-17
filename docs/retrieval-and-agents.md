@@ -295,12 +295,13 @@ the chat client's timeout and retries. It also asks for no reasoning whatever
 `OPENAI_ENABLE_THINKING` says (no `reasoning_effort`, and on
 `INFERENCE_PROVIDER=vllm` `chat_template_kwargs.enable_thinking` sent as
 `false`), because a model that thought first could spend the whole deadline.
-Like the rest of the lane it fails soft:
-no description, a failed rerank (counted as described under
-[Reranking](#reranking)) or any other error drops the sub-floor images exactly
-as the floor alone would, and never fails the turn. Successful descriptions are
-cached per query, language and model, so an identical query costs only the
-second rerank.
+Like the rest of the lane it fails soft: no description, a failed rerank
+(counted as described under [Reranking](#reranking)) or any other error drops
+the sub-floor images exactly as the floor alone would, and never fails the
+turn. Successful descriptions are cached per query, language and model, so an
+identical query costs only the second rerank. At `LOG_LEVEL=DEBUG` each
+re-score that completes logs one counts-only line, `Image re-score |
+candidates=… rescued=… elapsed_ms=…`, never the query or the description.
 
 Measured with a local reranker (eight descriptions against nine captions), the
 true matches that cleared `0.02` scored 0.039–0.86 against their description,
