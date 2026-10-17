@@ -6,9 +6,10 @@ turn reports ``tools_unavailable`` when the endpoint rejects the first call, or
 when the first round returns no tool call. The time budget bounds every model
 call and every search, and model calls run like searches: each on its own
 thread, abandoned when the budget runs out, and a reply that lands after it is
-not acted on. Searches share ``SEARCH_SLOTS`` slots per process and model calls
-``MODEL_SLOTS``; an abandoned call keeps its slot until it ends, so no outage
-can pile up more running calls than that.
+not acted on. Searches and model calls take their slots from the process-wide
+pools in :mod:`~docint.agents.assessment.bounded` (``SEARCH_SLOTS`` and
+``MODEL_SLOTS`` of them), which agent turns share; an abandoned call keeps its
+slot until it ends, so no outage can pile up more running calls than that.
 """
 
 from __future__ import annotations

@@ -6,8 +6,9 @@ the process-wide search slots so it runs at once, then finished in call order on
 which numbers what they admit in call order. Every call gets a reply: calls past the round's limit
 are skipped, a call without room for a full reply never runs, and a call that cannot start, fails
 or outlives the time left gets an error reply. Work abandoned at the deadline keeps its search slot
-until it ends. A call whose I/O failed or found no search slot is counted, since the evidence it
-would have found is missing; one that ran out of time is not, the turn's time limit says so.
+until it ends. A call that could not be prepared, whose I/O failed, could not start or found no
+search slot, or whose answer raised, is counted as failed: the evidence it would have found is
+missing. One that ran out of time is not; the turn's time limit says so.
 
 Room. A round first reserves the least reply every call needs (:meth:`RoundCalls.least`), which
 the loop has already checked fits; a call then runs only while a full reply, ``result_chars`` at
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import math
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any, NamedTuple, cast
@@ -29,10 +31,9 @@ from typing import Any, NamedTuple, cast
 from loguru import logger
 
 from docint.agents.assessment.bounded import SEARCH_SLOT_WAIT_S, NoSlot, start_bounded
-from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, message_tokens
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import NAME_CHARS, PreparedCall, ToolContext, ToolRegistry, ToolReply, error_reply
-from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.text_budget import MARKER_RESERVE_CHARS, fit_with_marker
 
 #: Name of the thread a tool call's I/O runs on, so an abandoned one can be found.
@@ -70,27 +71,12 @@ class RoundReplies(NamedTuple):
 
     Attributes:
         replies (list[ToolReply]): One per call, in call order, each within ``result_chars``.
-        failed (int): Calls whose I/O failed or could not start, or that found no search slot.
+        failed (int): Calls that could not be prepared, whose I/O failed, could not start or
+            found no search slot, or whose answer raised.
     """
 
     replies: list[ToolReply]
     failed: int
-
-
-def message_tokens(text: str, char_token_ratio: float) -> int:
-    """Estimate what one message of a turn's transcript costs: its text and its envelope.
-
-    Args:
-        text (str): The message's text.
-        char_token_ratio (float): Characters per token.
-
-    Returns:
-        int: Estimated tokens.
-
-    Raises:
-        ValueError: If ``char_token_ratio`` is not positive.
-    """
-    return estimate_tokens(text, char_token_ratio) + MESSAGE_OVERHEAD_TOKENS
 
 
 class RoundCalls:
@@ -103,7 +89,7 @@ class RoundCalls:
         result_chars: int,
         max_calls_per_round: int,
         char_token_ratio: float,
-        search_slots: Any,
+        search_slots: threading.Semaphore,
     ) -> None:
         """Bind the tools, the reply size and the per-round limit.
 
@@ -112,11 +98,13 @@ class RoundCalls:
             result_chars (int): Longest one reply, in characters.
             max_calls_per_round (int): Calls one round may run; the rest are skipped.
             char_token_ratio (float): Characters per token, the ratio the budget was measured with.
-            search_slots (Any): The slots tool I/O runs in, a semaphore shared by the process.
+            search_slots (threading.Semaphore): The slots tool I/O runs in, shared by the process.
 
         Raises:
             ValueError: If ``char_token_ratio`` is not positive.
         """
+        if char_token_ratio <= 0:
+            raise ValueError("char_token_ratio must be positive")
         self._registry = registry
         self._result_chars = result_chars
         self._max_calls = max_calls_per_round
@@ -256,7 +244,8 @@ class RoundCalls:
 
         Returns:
             tuple[list[ToolReply], int]: One reply per call, in call order, and how many calls
-            failed: their I/O raised or could not start, or no search slot came free for it.
+            failed: their I/O raised or could not start, no search slot came free for it, or
+            their answer raised.
         """
         replies: list[ToolReply | None] = [None] * len(prepared)
         started: dict[int, concurrent.futures.Future[Any]] = {}

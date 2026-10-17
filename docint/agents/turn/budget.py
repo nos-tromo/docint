@@ -25,6 +25,22 @@ HISTORY_ALLOWANCE_TOKENS = 1300
 HISTORY_ALLOWANCE_TOKENS_REASONING = 750
 
 
+def message_tokens(text: str, char_token_ratio: float) -> int:
+    """Estimate what one message of a turn's prompt costs: its text and its envelope.
+
+    Args:
+        text (str): The message's text.
+        char_token_ratio (float): Characters per token.
+
+    Returns:
+        int: Estimated tokens.
+
+    Raises:
+        ValueError: If ``char_token_ratio`` is not positive.
+    """
+    return estimate_tokens(text, char_token_ratio) + MESSAGE_OVERHEAD_TOKENS
+
+
 def history_allowance_tokens(reasoning: bool) -> int:
     """Return how many tokens of earlier conversation a turn may send as messages.
 

@@ -51,6 +51,7 @@ from docint.agents.turn.calls import (
     NO_TIME_REPLY,
     SEARCH_THREAD_NAME,
     SKIPPED_REPLY,
+    RoundCalls,
 )
 from docint.agents.turn.history import ConversationTurn, ConversationWindow
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
@@ -1992,6 +1993,29 @@ def _counted_view() -> tuple[list[str], Callable[[Any], Any]]:
         return llm_view(node)
 
     return seen, _view
+
+
+def test_a_ratio_other_than_the_budgets_is_refused() -> None:
+    """The transcript is priced at the ratio the budget's room was measured at, or the room means nothing."""
+    with pytest.raises(ValueError, match="char_token_ratio"):
+        _loop(streaming_tool_llm([]), _documents(QuerySearch({})), char_token_ratio=2.5)
+
+
+@pytest.mark.parametrize("ratio", [0.0, -1.0])
+def test_round_calls_refuse_a_ratio_that_is_not_positive(ratio: float) -> None:
+    """Replies are priced in characters per token, which must be positive.
+
+    Args:
+        ratio (float): The ratio offered.
+    """
+    with pytest.raises(ValueError, match="char_token_ratio"):
+        RoundCalls(
+            registry=_documents(QuerySearch({})),
+            result_chars=3000,
+            max_calls_per_round=4,
+            char_token_ratio=ratio,
+            search_slots=threading.BoundedSemaphore(1),
+        )
 
 
 def test_the_tools_render_through_the_llm_view_the_loop_was_given() -> None:

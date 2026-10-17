@@ -11,9 +11,10 @@ as a user message (joined to a user message it would follow: strict chat templat
 a row), the tools still declared but ``tool_choice="none"``. ``agent.reason`` names the
 first cause: the rounds spent (``round_budget``), the time spent (``time_budget``), no room left
 for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
-row that added no passage (``idle``). Limits are checked between rounds, and the time also bounds every call's I/O; a
-round is never cut off while it streams, so an answer already streaming is never abandoned. An
-answer the endpoint cut at its length limit is kept, as shown, and flagged ``context_budget``.
+row that added no passage (``idle``). Limits are checked between rounds, and the time also
+bounds every call's I/O; a round is never cut off while it streams, so an answer already streaming
+is never abandoned. An answer the endpoint cut at its length limit is kept, as shown, and flagged
+``context_budget``.
 
 Calls and room. Every call id gets a reply, answered by
 :class:`~docint.agents.turn.calls.RoundCalls`: concurrently on the search slots, numbered in call
@@ -51,6 +52,7 @@ exception types and reason tokens.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -64,8 +66,8 @@ from loguru import logger
 from docint.agents.assessment.bounded import MODEL_SLOT_POOL, MODEL_SLOT_WAIT_S, SEARCH_SLOT_POOL, NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger, is_context_overflow
 from docint.agents.assessment.split import SentinelStreamSplitter
-from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget
-from docint.agents.turn.calls import RoundCalls, message_tokens
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_tokens
+from docint.agents.turn.calls import RoundCalls
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
 from docint.agents.turn.tools import ToolContext, ToolRegistry
 from docint.agents.types import AgentAction, AgentProgress
@@ -189,16 +191,22 @@ class _Streamed:
     shown: bool = False
 
 
-def _refused(exc: BaseException) -> bool:
-    """Return whether the endpoint refused a request as sent.
+def _raise_if_refused(turn: _Turn, exc: Exception) -> None:
+    """Raise :class:`ToolsUnavailable` when the endpoint refused the turn's first call as sent.
+
+    Only before anything was shown: the caller then answers without tools.
 
     Args:
-        exc (BaseException): The failure.
+        turn (_Turn): The turn.
+        exc (Exception): How the model call failed.
 
-    Returns:
-        bool: ``True`` for an HTTP 400 or 422 answer.
+    Raises:
+        ToolsUnavailable: For an HTTP 400 or 422 answer, not an overflow, to the turn's first
+            model call with nothing shown yet; the refusal is its ``__cause__``.
     """
-    return isinstance(exc, openai.APIStatusError) and exc.status_code in _REFUSED_STATUSES
+    refused = isinstance(exc, openai.APIStatusError) and exc.status_code in _REFUSED_STATUSES
+    if refused and not turn.shown and turn.model_calls == 1:
+        raise ToolsUnavailable("The chat endpoint refused a request offering tools.") from exc
 
 
 def _echoed(arguments: str) -> str:
@@ -289,8 +297,8 @@ class AgentLoop:
         char_token_ratio: float,
         llm_view: Callable[[BaseNode], BaseNode],
         clock: Callable[[], float] = time.monotonic,
-        model_slots: Any = MODEL_SLOT_POOL,
-        search_slots: Any = SEARCH_SLOT_POOL,
+        model_slots: threading.Semaphore = MODEL_SLOT_POOL,
+        search_slots: threading.Semaphore = SEARCH_SLOT_POOL,
         reasoning_open: bool = False,
     ) -> None:
         """Bind the model, the tools and the limits.
@@ -309,16 +317,22 @@ class AgentLoop:
             char_token_ratio (float): Characters per token, the ratio the budget was measured with.
             llm_view (Callable[[BaseNode], BaseNode]): Hides the metadata the model must not see.
             clock (Callable[[], float]): Monotonic clock, injectable for tests.
-            model_slots (Any): The model-call slots, a semaphore shared by the process
+            model_slots (threading.Semaphore): The model-call slots shared by the process
                 (``MODEL_SLOT_POOL``); injectable for tests.
-            search_slots (Any): The slots tool I/O runs in, a semaphore shared by the process
+            search_slots (threading.Semaphore): The slots tool I/O runs in, shared by the process
                 (``SEARCH_SLOT_POOL``); injectable for tests.
             reasoning_open (bool): Whether thinking was asked for, so a reply may open in reasoning
                 the chat template began; pass it only when the request enables thinking.
 
         Raises:
-            ValueError: If ``char_token_ratio`` is not positive.
+            ValueError: If ``char_token_ratio`` is not positive, or is not the ratio the budget
+                was measured with: the transcript is priced against the budget's room.
         """
+        if char_token_ratio != budget.char_token_ratio:
+            raise ValueError(
+                f"char_token_ratio {char_token_ratio} is not the budget's {budget.char_token_ratio}; "
+                "the turn's room was measured with the budget's."
+            )
         self._llm = llm
         self._registry = registry
         self._budget = budget
@@ -367,8 +381,8 @@ class AgentLoop:
             swapped in for the sentinel, then exactly one result.
 
         Raises:
-            NoSlot: When the first round finds no model slot, before anything is yielded, or the
-                answer round of a started turn finds none.
+            NoSlot: When a round finds no model slot before anything is yielded (the first round,
+                or a later one of a turn that has shown nothing), or the answer round finds none.
             ToolsUnavailable: Before anything is yielded, when the first call is refused as sent.
             ValueError: Naming the context window, when the answer does not fit even after the
                 tool replies were cut.
@@ -583,8 +597,7 @@ class AgentLoop:
             self._overflowed(turn, exc)
             return None
         if not turn.shown:
-            if turn.model_calls == 1 and _refused(exc):
-                raise ToolsUnavailable("The chat endpoint refused a request offering tools.") from exc
+            _raise_if_refused(turn, exc)
             raise exc
         logger.warning("An agent round failed ({}); the model answers from what it found", type(exc).__name__)
         turn.stop("research_failed")
@@ -625,8 +638,7 @@ class AgentLoop:
             if is_context_overflow(exc):
                 self._overflowed(turn, exc)
                 continue
-            if not turn.shown and turn.model_calls == 1 and _refused(exc):
-                raise ToolsUnavailable("The chat endpoint refused a request offering tools.") from exc
+            _raise_if_refused(turn, exc)
             raise exc
         done = streamed.done
         if done.reasoning:
