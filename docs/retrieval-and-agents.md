@@ -493,7 +493,11 @@ turn's retriever narrowed to the matches: the same rerank, image floor and
 parent context as a search, without the social diversity cap and link-following,
 so every passage it adds is a match. A text hit's matches are moved to just
 before its first keyword, with up to 80 characters of left context, so the
-digest and the answer show the word rather than the chunk's opening; a match
+digest and the answer show the word rather than the chunk's opening. The
+keyword is found as the count reads it: its pieces in order, each at the start
+of a word, whatever separates them, so `placebo-controlled` finds
+`placebo controlled` and a dash of another kind, while the `19` of `COVID-19`
+never anchors on its own. A match
 whose kept opening already shows the word stays put, so a section research
 holds is not charged twice for it. A hit without matches, as a chunk without
 parent context arrives, gains one from just before its first keyword to the end

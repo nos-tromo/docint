@@ -10,6 +10,7 @@ from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.fulltext import (
     build_scan_filter,
     build_search_filter,
+    index_pieces,
     index_tokens,
     matches_any_phrase,
     matches_phrase,
@@ -357,3 +358,10 @@ def test_index_tokens_keep_a_word_whole_where_the_index_does() -> None:
     """
     assert index_tokens("İstanbul") == ["İstanbul".lower()]
     assert index_tokens("भारत") == ["भारत"]
+
+
+def test_index_pieces_split_as_the_index_does_and_keep_their_case() -> None:
+    """The pieces are the index's tokens before lowercasing, as a case-insensitive search needs them."""
+    assert index_pieces("Placebo-Controlled") == ["Placebo", "Controlled"]
+    assert index_pieces("İstanbul") == ["İstanbul"]
+    assert index_tokens("Placebo-Controlled") == [piece.lower() for piece in index_pieces("Placebo-Controlled")]

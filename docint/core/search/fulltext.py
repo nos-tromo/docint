@@ -17,8 +17,11 @@ _HIER_TYPE_FIELD = "docint_hier_type"
 #: Hierarchy value for an oversize parent chunk kept for context expansion.
 _HIER_COARSE = "coarse"
 
-#: A run of what the index counts as letters or digits (Unicode alphabetic, vowel signs included, or numeric).
-_INDEX_TOKEN_RE = regex.compile(r"[\p{Alphabetic}\p{N}]+")
+#: What the index counts as part of a word, as a class body: Unicode alphabetic (vowel signs included) or numeric.
+INDEX_WORD_CLASS = r"\p{Alphabetic}\p{N}"
+
+#: A run of what the index counts as letters or digits.
+_INDEX_TOKEN_RE = regex.compile(rf"[{INDEX_WORD_CLASS}]+")
 
 
 class KeywordTooShortError(ValueError):
@@ -54,6 +57,22 @@ def parse_keywords(raw: str) -> list[str]:
     return keywords
 
 
+def index_pieces(word: str) -> list[str]:
+    """Split a keyword where the full-text index splits it, keeping each piece as written.
+
+    These are :func:`index_tokens` before lowercasing, which a case-insensitive
+    search of the original text needs: a lowercased ``İ`` no longer matches the
+    letter it came from.
+
+    Args:
+        word (str): One keyword.
+
+    Returns:
+        list[str]: Its letter-and-digit runs, in order.
+    """
+    return _INDEX_TOKEN_RE.findall(word)
+
+
 def index_tokens(word: str) -> list[str]:
     """Split a keyword into the tokens the full-text index matches it by.
 
@@ -70,7 +89,7 @@ def index_tokens(word: str) -> list[str]:
     Returns:
         list[str]: Its lowercased letter-and-digit runs, in order.
     """
-    return [piece.lower() for piece in _INDEX_TOKEN_RE.findall(word)]
+    return [piece.lower() for piece in index_pieces(word)]
 
 
 def matches_phrase(text: str, keywords: list[str]) -> bool:

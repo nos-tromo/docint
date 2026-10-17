@@ -16,12 +16,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import regex
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import kept_ranges
 from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
 from docint.core.search.fields import search_field_spec
-from docint.core.search.fulltext import index_tokens, parse_keywords
+from docint.core.search.fulltext import INDEX_WORD_CLASS, index_pieces, index_tokens, parse_keywords
 from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS, WINDOW_JOIN
 
 #: The field a keyword call matches when it names none: the passage text.
@@ -42,7 +43,10 @@ UNINDEXABLE_WORD = "unindexable_word"
 #: Why a keyword call cannot run: a word is longer than the index reads, which would match more than it names.
 LONG_WORD = "long_word"
 
-_EDGE_PUNCTUATION_RE = re.compile(r"^\W+|\W+$")
+#: A word starts where the index starts one: no letter or digit right before it.
+_WORD_START = rf"(?<![{INDEX_WORD_CLASS}])"
+#: Between two pieces of one keyword: the rest of the first word, then anything the index splits on.
+_PIECE_GAP = rf"[{INDEX_WORD_CLASS}]*[^{INDEX_WORD_CLASS}]+"
 
 
 @dataclass(frozen=True)
@@ -108,22 +112,30 @@ def check_key(words: str, field: str) -> tuple[str, frozenset[str], frozenset[An
     return field, tokens, values
 
 
-def _term_pattern(keywords: Sequence[str]) -> re.Pattern[str] | None:
+def _term_pattern(keywords: Sequence[str]) -> regex.Pattern[str] | None:
     """Compile the index's word-prefix rule for a set of keywords.
+
+    Each keyword matches as the index reads it: its pieces (see
+    :func:`~docint.core.search.fulltext.index_pieces`) in order, each at the
+    start of a word, whatever separates them in the text, so
+    ``placebo-controlled`` finds ``placebo controlled`` and a dash of any kind,
+    as the count does. A keyword's pieces stand together: anchored on any one of
+    them, the ``19`` of ``COVID-19`` would match an unrelated ``1990`` first.
 
     Args:
         keywords (Sequence[str]): The words of the match.
 
     Returns:
-        re.Pattern[str] | None: A case-insensitive pattern matching any keyword
-        at the start of a word, the longest first; ``None`` when no keyword
-        holds a word character.
+        regex.Pattern[str] | None: A case-insensitive pattern matching any
+        keyword, the longest first; ``None`` when no keyword holds a letter or digit.
     """
-    terms = {_EDGE_PUNCTUATION_RE.sub("", word) for word in keywords}
-    ordered = sorted((term for term in terms if term), key=len, reverse=True)
-    if not ordered:
+    alternatives = {
+        _PIECE_GAP.join(regex.escape(piece) for piece in pieces) for pieces in map(index_pieces, keywords) if pieces
+    }
+    if not alternatives:
         return None
-    return re.compile(r"(?<!\w)(?:" + "|".join(re.escape(term) for term in ordered) + ")", re.IGNORECASE)
+    ordered = sorted(alternatives, key=len, reverse=True)
+    return regex.compile(_WORD_START + "(?:" + "|".join(ordered) + ")", regex.IGNORECASE)
 
 
 def _context_start(text: str, start: int, found: int) -> int:
@@ -197,7 +209,7 @@ def anchor_terms(scored: NodeWithScore, keywords: Sequence[str]) -> NodeWithScor
     return NodeWithScore(node=node, score=scored.score)
 
 
-def _anchor_unstamped(scored: NodeWithScore, text: str, pattern: re.Pattern[str]) -> NodeWithScore:
+def _anchor_unstamped(scored: NodeWithScore, text: str, pattern: regex.Pattern[str]) -> NodeWithScore:
     """Give a hit without spans a match where its word lies past the opening packing keeps of it.
 
     Packing shows an unstamped passage from its opening, so a word past that
@@ -210,7 +222,7 @@ def _anchor_unstamped(scored: NodeWithScore, text: str, pattern: re.Pattern[str]
     Args:
         scored (NodeWithScore): A passage without match spans.
         text (str): Its text.
-        pattern (re.Pattern[str]): The keywords' word-prefix rule (see :func:`_term_pattern`).
+        pattern (regex.Pattern[str]): The keywords' word-prefix rule (see :func:`_term_pattern`).
 
     Returns:
         NodeWithScore: A stamped copy, or ``scored`` itself when the text holds
@@ -221,7 +233,8 @@ def _anchor_unstamped(scored: NodeWithScore, text: str, pattern: re.Pattern[str]
         return scored
     join = text.rfind(WINDOW_JOIN, 0, found.start())
     start = 0 if join < 0 else join + len(WINDOW_JOIN)
-    end = text.find(WINDOW_JOIN, found.end())
+    # From the term's start: a keyword's pieces may straddle a join, and the span must not.
+    end = text.find(WINDOW_JOIN, found.start())
     node = scored.node.model_copy(deep=True)
     node.metadata[MATCH_SPANS_KEY] = [[_context_start(text, start, found.start()), len(text) if end < 0 else end]]
     return NodeWithScore(node=node, score=scored.score)

@@ -185,6 +185,58 @@ def test_punctuation_around_a_keyword_does_not_hide_the_term() -> None:
     assert start > 0
 
 
+@pytest.mark.parametrize(
+    "gap",
+    [" ", "-", chr(0x2011), f" {chr(0x2013)} "],
+    ids=["space", "hyphen", "non-breaking-hyphen", "spaced-en-dash"],
+)
+def test_a_hyphenated_check_anchors_on_its_words_however_the_text_joins_them(gap: str) -> None:
+    """The index reads placebo-controlled as two words, and so does the anchor, whatever stands between them.
+
+    Args:
+        gap (str): What separates the two words in the passage.
+    """
+    text = f"{LEAD}The trial had no placebo{gap}controlled arm at any site."
+    scored = scored_node("s", text, **{MATCH_SPANS_KEY: [[0, len(text)]]})
+
+    start, end = _spans(anchor_terms(scored, ["placebo-controlled"]))[0]
+
+    assert text.index("placebo") - TERM_CONTEXT_CHARS <= start < text.index("placebo")
+    assert end == len(text)
+
+
+def test_a_short_piece_of_a_hyphenated_check_never_anchors_alone() -> None:
+    """Its words stand together, or the 19 of COVID-19 would anchor on an earlier, unrelated 1990."""
+    text = f"{LEAD}The clinic opened in 1990 and grew. {'Filler about staffing. ' * 6}Then COVID-19 closed it."
+    scored = scored_node("s", text, **{MATCH_SPANS_KEY: [[0, len(text)]]})
+
+    start, _ = _spans(anchor_terms(scored, ["COVID-19"]))[0]
+
+    assert "COVID-19" in text[start : start + MIN_REGION_CHARS]
+    assert "1990" not in text[start : start + MIN_REGION_CHARS]
+
+
+def test_a_word_after_an_underscore_starts_where_the_index_starts_one() -> None:
+    """The index splits on underscores, so a word after one is a word start for the anchor as well."""
+    text = f"{LEAD}The export was named site_report_final by the board."
+    scored = scored_node("s", text, **{MATCH_SPANS_KEY: [[0, len(text)]]})
+
+    start, _ = _spans(anchor_terms(scored, ["report"]))[0]
+
+    assert start > 0
+    assert "site_report" in text[start : start + MIN_REGION_CHARS]
+
+
+def test_an_unstamped_hit_is_anchored_on_a_hyphenated_check_its_text_spaces() -> None:
+    """A chunk without parent context gains its match where the index found the words, not where they are typed."""
+    text = "The cohort was followed for twelve months at three clinics. " * 12 + "There was no placebo controlled arm."
+
+    [[start, end]] = _spans(anchor_terms(scored_node("u", text), ["placebo-controlled"]))
+
+    assert text.index("placebo") - TERM_CONTEXT_CHARS <= start < text.index("placebo")
+    assert end == len(text)
+
+
 def test_each_span_anchors_on_its_own_occurrence() -> None:
     """Every retrieved child of a section is moved within itself, in stored order."""
     first = f"{LEAD}Kontrollgruppe one."

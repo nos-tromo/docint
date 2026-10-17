@@ -1998,6 +1998,20 @@ def test_a_text_check_anchors_its_passages_on_the_words() -> None:
     assert ledger.entries()[0].node.metadata[MATCH_SPANS_KEY][0][0] > 0
 
 
+def test_a_hyphenated_check_shows_research_the_words_however_the_text_joins_them() -> None:
+    """The count reads placebo-controlled as two words; the digest shows them where the text spaces them."""
+    text = "The trial enrolled two hundred patients across four sites over two years. " * 3 + (
+        "There was no placebo controlled arm in the design."
+    )
+    hit = scored_node("k", text, filename="trial.pdf", **{MATCH_SPANS_KEY: [[0, len(text)]]})
+    llm = tool_llm([keyword_call("placebo-controlled")])
+    tool = keyword_tool({("placebo-controlled", "text"): _hit("placebo-controlled", hit)})
+
+    _drain(_loop(llm, _search({}), keyword=tool).run(question=QUESTION, prior_turn=None, ledger=EvidenceLedger(cap=5)))
+
+    assert "no placebo controlled arm" in _reply(llm)
+
+
 def test_a_check_that_finds_an_unstamped_seed_chunk_again_shows_its_words() -> None:
     """A seed chunk without parent context gains the words past its opening as a match, and research reads them."""
     text = "The cohort was followed for twelve months at three clinics. " * 12 + "No randomization was used."
