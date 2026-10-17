@@ -39,6 +39,8 @@ DETAIL_CHARS = 200
 MAX_QUERY_CHARS = 300
 #: Longest tool name an error reply repeats back.
 NAME_CHARS = 64
+#: Longest header a reply shows whole; a longer one keeps its citation line and ``COMPACT_HEADER_CHARS`` of the rest.
+HEADER_CHARS = 500
 #: What a search reply says when it found nothing the turn had not shown.
 NO_NEW_PASSAGES = "No new passages."
 #: How a reply joins its passages, and its passages to the notes after them; ``render_context`` reserves it.
@@ -198,13 +200,43 @@ def _refs(numbers: Iterable[int]) -> str:
     return ", ".join(f"[{number}]" for number in sorted(numbers))
 
 
+def _numbered(entry: NodeWithScore, number: int) -> NodeWithScore:
+    """Stamp an entry with its number, its citation line first, so every passage a reply shows opens with it.
+
+    Args:
+        entry (NodeWithScore): The ledger entry; never written to.
+        number (int): Its ledger number.
+
+    Returns:
+        NodeWithScore: A stamped clone (see :func:`~docint.agents.assessment.ledger.stamp`).
+    """
+    stamped = stamp(entry, number)
+    metadata = {"citation_index": number, **stamped.node.metadata}
+    return NodeWithScore(node=stamped.node.model_copy(update={"metadata": metadata}), score=stamped.score)
+
+
+def _compact(stamped: NodeWithScore, ctx: ToolContext) -> bool:
+    """Return whether a passage's header is too long to show whole.
+
+    Args:
+        stamped (NodeWithScore): The numbered passage.
+        ctx (ToolContext): The turn's LLM view.
+
+    Returns:
+        bool: ``True`` when its header runs past ``HEADER_CHARS``.
+    """
+    headers, _, _ = passage_parts([stamped], ctx.llm_view)
+    return len(headers[0]) > HEADER_CHARS
+
+
 @dataclass(frozen=True)
 class _Planned:
     """A passage a reply may show, priced as the reply renders it.
 
     Attributes:
         number (int): Its ledger number.
-        passage (NodeWithScore): The ledger entry, stamped with that number.
+        passage (NodeWithScore): The ledger entry, numbered (see :func:`_numbered`).
+        compact (bool): Whether its header is compacted (see :func:`_compact`).
         reserve (int): What its header, joins and cut marker take.
         floor (int): The least text it shows: its legible floor, or ``passage_chars`` if less.
         need (int): The most text it shows: all of it, or ``passage_chars`` if less.
@@ -212,13 +244,14 @@ class _Planned:
 
     number: int
     passage: NodeWithScore
+    compact: bool
     reserve: int
     floor: int
     need: int
 
 
 def _plan(entry: NodeWithScore, number: int, ctx: ToolContext) -> _Planned:
-    """Price one entry under its number, with the compact header a reply gives it.
+    """Price one entry under its number, with the header a reply gives it.
 
     Args:
         entry (NodeWithScore): The ledger entry, or the entry a new passage would become.
@@ -226,14 +259,20 @@ def _plan(entry: NodeWithScore, number: int, ctx: ToolContext) -> _Planned:
         ctx (ToolContext): The turn's budget and LLM view.
 
     Returns:
-        _Planned: The stamped entry and its costs.
+        _Planned: The numbered entry and its costs.
     """
-    stamped = stamp(entry, number)
-    headers, bodies, anchors = passage_parts([stamped], ctx.llm_view, compact=True)
+    numbered = _numbered(entry, number)
+    compact = _compact(numbered, ctx)
+    headers, bodies, anchors = passage_parts([numbered], ctx.llm_view, compact=compact)
     reserve, floor = passage_costs(headers[0], bodies[0], anchors[0])
     cap = ctx.budget.passage_chars
     return _Planned(
-        number=number, passage=stamped, reserve=reserve, floor=min(floor, cap), need=min(len(bodies[0]), cap)
+        number=number,
+        passage=numbered,
+        compact=compact,
+        reserve=reserve,
+        floor=min(floor, cap),
+        need=min(len(bodies[0]), cap),
     )
 
 
@@ -265,7 +304,7 @@ def _render(planned: Sequence[_Planned], room: int, ctx: ToolContext) -> str:
         ctx (ToolContext): The turn's LLM view.
 
     Returns:
-        str: The passages, each a compact header and its text, joined by blank lines.
+        str: The passages, each its header and its text, joined by blank lines.
     """
     ordered = sorted(planned, key=lambda passage: passage.number)
     text_room = room - sum(passage.reserve for passage in ordered)
@@ -279,7 +318,7 @@ def _render(planned: Sequence[_Planned], room: int, ctx: ToolContext) -> str:
             budget_tokens=passage.reserve + share,
             # The budget is in characters: a reply is sized in characters.
             char_token_ratio=1.0,
-            compact=True,
+            compact=passage.compact,
         ).context
         for passage, share in zip(ordered, shares, strict=True)
     )
@@ -494,7 +533,7 @@ class ReadTool:
             ctx (ToolContext): The turn's evidence, budget and LLM view.
 
         Returns:
-            ToolReply: The passage with its compact header, its text cut around its matches
+            ToolReply: The passage with its header, its text cut around its matches
             only past ``result_chars``; an error reply when ``n`` is no passage's number.
         """
         raw = arguments.get("n")
@@ -513,13 +552,14 @@ class ReadTool:
             else:
                 known = f"the passages run from [1] to [{held}]"
             return error_reply(self.name, f"there is no passage [{number}]; {known}.", detail=detail)
+        numbered = _numbered(ctx.ledger.entries()[number - 1], number)
         rendered = render_context(
-            [stamp(ctx.ledger.entries()[number - 1], number)],
+            [numbered],
             llm_view=ctx.llm_view,
             budget_tokens=ctx.budget.result_chars,
             # The budget is in characters, as a search reply's is.
             char_token_ratio=1.0,
-            compact=True,
+            compact=_compact(numbered, ctx),
         )
         return PassageReply(text=rendered.context, found=0, action=self.name, detail=detail, numbers=(number,))
 

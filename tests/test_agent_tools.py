@@ -10,7 +10,7 @@ import sys
 from typing import Any
 
 import pytest
-from assessment_fakes import llm_view, scored_node
+from assessment_fakes import llm_view, scored_node, social_post
 from llama_index.core.schema import NodeWithScore
 from loguru import logger
 
@@ -29,6 +29,7 @@ from docint.agents.assessment.ledger import (
 from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import (
+    HEADER_CHARS,
     NO_NEW_PASSAGES,
     ReadTool,
     SearchTool,
@@ -37,6 +38,7 @@ from docint.agents.turn.tools import (
     _fits,
     _plan,
 )
+from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
 PROGRAMME = (
@@ -587,6 +589,46 @@ def test_a_long_header_is_compacted_so_it_costs_a_reply_little() -> None:
         len(header) <= len("citation_index: 1\n") + COMPACT_HEADER_CHARS + MARKER_RESERVE_CHARS for header in headers
     )
     assert len(reply.text) <= ctx.budget.result_chars
+
+
+def test_a_post_header_reaches_the_model_whole_with_its_number_first() -> None:
+    """Who posted a passage, and when, is evidence too: a header of ordinary length is never cut."""
+    ctx = ToolContext(
+        ledger=EvidenceLedger(cap=MAX_LEDGER_ENTRIES),
+        budget=_budget(),
+        llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
+    )
+    registry = _registry(_Search([social_post(3)]))
+
+    found = registry.call(_call("search", query="Harbour festival"), ctx)
+    read = registry.call(_call("read", n=1), ctx)
+
+    for reply in (found, read):
+        header = reply.text.partition("\n\n")[0]
+        assert header.startswith("citation_index: 1\nfilename: example_profile/dossier.json\n")
+        assert "'author': 'Harbour Events'" in header
+        assert "'text_id': '9876543213'" in header
+        assert not MARKER.search(header)
+
+
+@pytest.mark.parametrize(("extra", "whole"), [(0, True), (1, False)], ids=["at-the-limit", "past-the-limit"])
+def test_a_header_is_compacted_only_past_header_chars(extra: int, whole: bool) -> None:
+    """A header of HEADER_CHARS shows whole; one character more and it keeps its citation line and a cut rest.
+
+    Args:
+        extra (int): Characters past the limit the header runs.
+        whole (bool): Whether the reply shows it whole.
+    """
+    ctx = _context()
+    name = "h" * (HEADER_CHARS - len("citation_index: 1\nfilename: ") + extra)
+    reply = _registry(_Search([scored_node("named", PROGRAMME, filename=name)])).call(
+        _call("search", query="Hafenfest"), ctx
+    )
+
+    header = reply.text.partition("\n\n")[0]
+    assert header.startswith("citation_index: 1\nfilename: hhh")
+    assert (header == f"citation_index: 1\nfilename: {name}") is whole
+    assert (MARKER.search(header) is None) is whole
 
 
 def test_a_passage_fits_exactly_when_the_room_covers_its_reserve_and_floor() -> None:
