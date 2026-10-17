@@ -246,6 +246,11 @@ export interface SessionMessage extends Partial<ValidationFields> {
   retried?: boolean
   /** The reformulated retrieval query that retry used. */
   retry_query?: string
+  /**
+   * The evidence the turn answered under. Absent — not `all` — for a scoped
+   * turn and for one recorded before the target was stored.
+   */
+  retrieval_target?: RetrievalTarget
 }
 
 export interface DocumentRecord {

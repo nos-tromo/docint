@@ -127,6 +127,7 @@ export function Chat() {
   const activeReportId = useReportStore((s) => s.activeReportId)
   const reportDedupeKeys = useReportDedupeKeys(activeReportId)
   const filters = useChatFiltersStore()
+  const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
   const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false })
@@ -199,7 +200,9 @@ export function Chat() {
     abortRef.current?.abort()
     abortRef.current = null
     dispatch({ type: 'reset' })
-  }, [sessionIdParam, currentSessionId])
+    // "Answer from" belongs to one chat: the next one starts from everything.
+    setRetrievalTarget('all')
+  }, [sessionIdParam, currentSessionId, setRetrievalTarget])
 
   const onNewChat = () => {
     setCurrentSessionId(null)
@@ -227,7 +230,8 @@ export function Chat() {
                 validation_mismatch: m.validation_mismatch,
                 validation_reason: m.validation_reason,
                 retried: m.retried,
-                retry_query: m.retry_query
+                retry_query: m.retry_query,
+                retrieval_target: m.retrieval_target
               } as ChatFinalEvent)
             : null
         })
