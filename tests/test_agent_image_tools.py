@@ -711,7 +711,7 @@ def test_keyframes_needs_a_clip(file: object) -> None:
         file (object): The ``file`` the model sent; ``None`` leaves it out.
     """
     lister = _Lister({})
-    arguments = {} if file is None else {"file": file}
+    arguments: dict[str, object] = {} if file is None else {"file": file}
 
     reply = _registry(list_keyframes=lister).call(tool_call("keyframes", **arguments), _context())
 
