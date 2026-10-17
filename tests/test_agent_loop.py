@@ -1420,6 +1420,32 @@ def test_a_round_that_breaks_off_with_its_text_showing_is_withdrawn_and_answered
     assert result.actions == [{"action": "note", "detail": note.detail, "found": 0}]
 
 
+@pytest.mark.parametrize("path", ["first-round-withdrawn", "no-tool-round-allowed"])
+def test_the_final_note_joins_a_user_message_it_would_follow(path: str) -> None:
+    """Strict chat templates refuse two user messages in a row, so the final note joins the user's message.
+
+    Args:
+        path (str): How the answer round comes to follow the user's message directly: the first
+            round broke off and was withdrawn, or no tool round was allowed.
+    """
+    if path == "first-round-withdrawn":
+        broken = [*text_chunks(ANSWER, 20)[:7], RuntimeError("invented outage")]
+        llm = streaming_tool_llm([broken, _answer(SHORT_ANSWER)])
+        loop = _loop(llm, _documents(QuerySearch({})))
+    else:
+        llm = streaming_tool_llm([_answer(SHORT_ANSWER)])
+        loop = _loop(llm, _documents(QuerySearch({})), max_rounds=0)
+
+    _drain(_turn(loop))
+
+    sent = _sent(llm, llm.stream_chat.call_count - 1)
+    roles = [message.role for message in sent]
+    assert roles == [MessageRole.SYSTEM, MessageRole.USER]
+    wire = to_openai_message_dicts(sent)
+    assert isinstance(wire, list)
+    assert wire[-1] == {"role": "user", "content": f"{QUESTION}\n\n{FINAL_NOTE}"}
+
+
 def test_an_answer_round_that_breaks_off_raises_after_its_text() -> None:
     """An answer the endpoint stops sending partway is not passed off as whole: the turn raises."""
     broken = [*text_chunks(ANSWER, 20)[:7], RuntimeError("invented outage")]

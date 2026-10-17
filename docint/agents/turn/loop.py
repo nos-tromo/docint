@@ -7,7 +7,8 @@ provisional (see :func:`~docint.agents.turn.stream.stream_round`); text written 
 becomes a ``note`` step, which tells the client to withdraw whatever of it was streamed.
 
 Limits make the model answer in one more round, its last: the same transcript plus the final note
-as a user message, the tools still declared but ``tool_choice="none"``. ``agent.reason`` names the
+as a user message (joined to a user message it would follow: strict chat templates refuse two in
+a row), the tools still declared but ``tool_choice="none"``. ``agent.reason`` names the
 first cause: the rounds spent (``round_budget``), the time spent (``time_budget``), no room left
 for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
 row that added no passage (``idle``). Limits are checked between rounds, and the time also bounds every call's I/O; a
@@ -218,6 +219,32 @@ def _echoed(arguments: str) -> str:
     except (ValueError, RecursionError):
         return "{}"
     return arguments if isinstance(value, dict) else "{}"
+
+
+def _with_note(messages: Sequence[ChatMessage], note: str) -> list[ChatMessage]:
+    """Add the final note to the messages as a user message, never as a second one in a row.
+
+    Strict chat templates refuse two user messages in a row, so a note that would follow one
+    joins it: at the end of its last text block, or as a text block of its own after its others
+    (a picture, say). The messages given are never changed.
+
+    Args:
+        messages (Sequence[ChatMessage]): The prompt so far, ending in a user or a tool message.
+        note (str): The final note.
+
+    Returns:
+        list[ChatMessage]: The prompt with the note added.
+    """
+    last = messages[-1]
+    if last.role != MessageRole.USER:
+        return [*messages, ChatMessage(role=MessageRole.USER, content=note)]
+    blocks = list(last.blocks)
+    if blocks and isinstance(blocks[-1], TextBlock):
+        blocks[-1] = TextBlock(text=f"{blocks[-1].text}\n\n{note}")
+    else:
+        blocks.append(TextBlock(text=note))
+    joined = ChatMessage(role=MessageRole.USER, blocks=blocks, additional_kwargs=dict(last.additional_kwargs))
+    return [*messages[:-1], joined]
 
 
 def _shortened(transcript: Sequence[ChatMessage]) -> list[ChatMessage] | None:
@@ -583,10 +610,8 @@ class AgentLoop:
             time_left = max(0.0, self._time_left(turn))
             # A started turn owes its answer: it waits the time left, and at least the usual wait.
             wait = max(MODEL_SLOT_WAIT_S, time_left) if turn.shown else min(MODEL_SLOT_WAIT_S, time_left)
-            note = ChatMessage(role=MessageRole.USER, content=self._final_note)
-            streamed = yield from self._stream(
-                turn, [*turn.base, *turn.transcript, note], tool_choice="none", wait=wait
-            )
+            messages = _with_note([*turn.base, *turn.transcript], self._final_note)
+            streamed = yield from self._stream(turn, messages, tool_choice="none", wait=wait)
             if streamed is None:
                 # No answer can be written: a started turn fails as any failed answer round does.
                 if turn.shown:
