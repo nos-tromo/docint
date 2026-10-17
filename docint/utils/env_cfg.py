@@ -804,7 +804,7 @@ class ImageIngestionConfig:
     retrieve_top_k: int
     rerank_min_score: float = 0.05
     # A sub-floor image that would land inside the cut gets a second look,
-    # reranked against a caption-style description of the question.
+    # reranked against a list of the visible cues the question needs.
     rescore_enabled: bool = True
     rescore_min_score: float = 0.02
     rescore_timeout: float = 10.0
@@ -867,7 +867,7 @@ def load_image_ingestion_config(
             queries (unrelated images sit in the same 0.20-0.30 band as relevant ones), so the
             floor is applied to the reranker's score instead. Default is 0.05.
         default_rescore_enabled (bool): Whether a sub-floor image that would land inside the
-            top-n cut is re-scored against a caption-style description of the question, at the
+            top-n cut is re-scored against a list of the visible cues the question needs, at the
             cost of one chat call per such turn. Default True.
         default_rescore_min_score (float): Description score that keeps such an image.
             Default is 0.02.

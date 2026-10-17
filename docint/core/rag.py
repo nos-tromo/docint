@@ -2165,7 +2165,7 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     spot: a cross-encoder asks whether a passage answers it, so the right
     picture's caption scores in the band of an unrelated one. A sub-floor image
     that would land inside the cut therefore gets a second look (``rescore``),
-    reranked against a caption-style description of the query, and stays if
+    reranked against a list of the visible cues the query needs, and stays if
     that score clears ``rescore_min_score``. A miss, or a failed re-score,
     drops it exactly as before.
 
@@ -4224,7 +4224,7 @@ class RAG:
         return float(self._image_config_value("rescore_min_score", DEFAULT_IMAGE_RESCORE_MIN_SCORE))
 
     def _rescore_images_by_description(self, query: str, candidates: list[NodeWithScore]) -> dict[str, float]:
-        """Score image captions against a caption-style description of ``query``.
+        """Score image captions against a list of the visible cues ``query`` needs.
 
         The second look :class:`ImageRelevanceFloorPostprocessor` gives a
         sub-floor image inside the cut: asked as a question, the right

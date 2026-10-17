@@ -279,15 +279,16 @@ the answer shipping text alone. The response reports the turn as
 **A sub-floor image inside the cut gets one second look.** While the rerank is
 healthy, an image under the floor that would still land inside the top-n —
 counting every node kept, or already waiting for this look, ahead of it — is
-re-scored against a caption-style description of the query instead of the query
-itself. The chat model (`TEXT_MODEL`) writes the description: one line of
-concrete visual terms in `RESPONSE_LANGUAGE`, with people described by what is
-visible, never by name (`prompts/{en,de}/image_rescore_description.txt`). The
-candidates' captions are then reranked once against it, and an image reaching
-`IMAGE_RESCORE_MIN_SCORE` is kept at the position and with the score it already
-had. An image the cut would remove anyway is never a candidate, so a turn with
-none makes no extra call, and the `visual` target, which applies no floor, never
-re-scores.
+re-scored against a description of the query instead of the query itself. The
+chat model (`TEXT_MODEL`) writes the description in `RESPONSE_LANGUAGE`: one
+line listing the visible cues the question needs (and the kind of shot, indoors
+or outdoors, when it matters), each with its usual alternatives rather than a
+guessed answer, and with people described by what is visible, never by name
+(`prompts/{en,de}/image_rescore_description.txt`). The candidates' captions are
+then reranked once against it, and an image reaching `IMAGE_RESCORE_MIN_SCORE`
+is kept at the position and with the score it already had. An image the cut
+would remove anyway is never a candidate, so a turn with none makes no extra
+call, and the `visual` target, which applies no floor, never re-scores.
 
 The description is a chat call that runs before the answer's first token, so it
 has its own deadline, `IMAGE_RESCORE_TIMEOUT`, and a single attempt rather than
@@ -308,8 +309,11 @@ true matches that cleared `0.02` scored 0.039–0.86 against their description,
 the true matches that did not 0.0003–0.0119, and the strongest non-match 0.0072.
 The re-score rescues some question-phrased misses and admitted no measured
 non-match; a true match under the re-score floor still drops, as it would
-without the re-score. The figures come from one small run on that reranker;
-raise `IMAGE_RESCORE_MIN_SCORE` if unrelated images are rescued.
+without the re-score. In a live replay the model-written description rescued
+the right keyframe for person and weather questions (0.03–0.18) while
+unrelated captions stayed below 0.02. The figures come from small runs on a
+local reranker; raise `IMAGE_RESCORE_MIN_SCORE` if unrelated images are
+rescued.
 
 Full defaults and rationale:
 [configuration.md](configuration.md#image-ingestion--imageingestionconfig).
