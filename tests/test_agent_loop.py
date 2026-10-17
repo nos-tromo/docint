@@ -639,7 +639,8 @@ def test_every_call_gets_a_reply_even_on_timeout(held: threading.Event) -> None:
     assert shown_numbers(replies["call_b"]) == [1]
     assert replies["call_c"].startswith("Error: there is no tool named 'keyframes'")
     assert replies["call_d"].startswith("Error: the arguments for read must be a JSON object")
-    assert _steps(progress) == [("search", "Programm", 0), ("search", "Wetter", 1), ("read", "", 0)]
+    # Only the call its tool answered is a step; a time-out is no failed search, it ends in time_budget.
+    assert (_steps(progress), result.reason) == ([("search", "Wetter", 1)], None)
     held.set()
     join_threads(SEARCH_THREAD_NAME)
     assert [scored.node.node_id for scored in result.nodes] == ["weather"]
@@ -830,7 +831,7 @@ def test_extra_calls_in_a_round_are_skipped_with_a_reply() -> None:
     replies = _tool_replies(llm, 1)
     assert list(replies) == ["call_a", "call_b", "call_c"]
     assert replies["call_c"] == error_reply("search", SKIPPED_REPLY.format(limit=2)).text
-    assert _steps(progress) == [("search", "Programm", 1), ("search", "Wetter", 1), ("search", "Regatta", 0)]
+    assert _steps(progress) == [("search", "Programm", 1), ("search", "Wetter", 1)]
 
 
 # --- Model slots: the first round falls back, a later one still ends the turn ----------------
@@ -887,12 +888,28 @@ def test_a_later_round_without_a_model_slot_answers_from_what_was_found() -> Non
     assert (result.reason, result.steps, "".join(texts)) == ("research_failed", 1, ANSWER)
 
 
-def test_an_answer_round_waits_at_least_the_usual_slot_wait_once_the_time_is_up() -> None:
-    """With the time spent, the answer round still gets the usual wait for a model slot."""
+@pytest.mark.parametrize(
+    ("preface", "answer_wait"), [(PREFACE, MODEL_SLOT_WAIT_S), ("", 0.0)], ids=["started", "nothing-shown"]
+)
+def test_an_answer_round_waits_at_least_the_usual_slot_wait_once_the_time_is_up(
+    preface: str, answer_wait: float
+) -> None:
+    """With the time spent, a started turn's answer round still gets the usual wait for a model slot.
+
+    A turn that has shown nothing waits no longer than its time left, as its first round does:
+    without a slot it can still be answered another way.
+
+    Args:
+        preface (str): What the tool round writes before its call; its note is the one step shown.
+        answer_wait (float): The longest the answer round may wait for a slot.
+    """
     slots = _Granting()
     now = [0.0]
     llm = _advancing(
-        streaming_tool_llm([_calls(_search_call("call_a", "Programm")), _answer()]), now, after=0, to=500.0
+        streaming_tool_llm([_calls(_search_call("call_a", "Programm"), text=preface), _answer()]),
+        now,
+        after=0,
+        to=500.0,
     )
 
     _, _, result = _drain(
@@ -906,7 +923,7 @@ def test_an_answer_round_waits_at_least_the_usual_slot_wait_once_the_time_is_up(
         )
     )
 
-    assert slots.waits == [MODEL_SLOT_WAIT_S, MODEL_SLOT_WAIT_S]
+    assert slots.waits == [MODEL_SLOT_WAIT_S, answer_wait]
     assert result.reason == "time_budget"
 
 
@@ -1089,8 +1106,7 @@ def test_no_free_search_slot_answers_the_call_without_starting_it(
     assert slots.waits == [wait]
     assert (search.queries, started) == ([], [])
     assert _tool_replies(llm, 1) == {"call_a": error_reply("search", NO_CAPACITY_REPLY).text}
-    assert _steps(progress) == [("search", "zzsecretzz Programm", 0)]
-    assert result.reason is None
+    assert (_steps(progress), result.reason) == ([], "research_failed")
     assert loguru_caplog.messages == ["No search slot came free for 1 of an agent round's tool calls"]
 
 
@@ -1125,7 +1141,7 @@ def test_a_search_thread_that_cannot_start_is_answered_with_an_error(
     _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})), search_slots=slots)))
 
     assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY).text}
-    assert ("".join(texts), result.reason) == (ANSWER, None)
+    assert ("".join(texts), result.reason) == (ANSWER, "research_failed")
     assert loguru_caplog.messages == ["An agent's 'search' call could not start: RuntimeError"]
     assert slots.acquire(blocking=False) is True
     slots.release()
@@ -1188,7 +1204,7 @@ def test_a_search_raising_its_own_timeout_is_a_failed_call_not_a_spent_budget(
     _, _, result = _drain(_turn(_loop(llm, _documents(_search))))
 
     assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY).text}
-    assert result.reason is None
+    assert result.reason == "research_failed"
     assert loguru_caplog.messages == ["An agent's 'search' call failed: TimeoutError"]
 
 
@@ -1248,7 +1264,7 @@ def test_calls_from_a_reply_after_the_time_budget_are_answered_without_running()
     replies = _tool_replies(llm, 1)
     assert replies["call_a"] == error_reply("search", NO_TIME_REPLY).text
     assert replies["call_b"].startswith("Error: there is no passage [4]")
-    assert _steps(progress) == [("search", "Programm", 0), ("read", "4", 0)]
+    assert _steps(progress) == []
     assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
     assert (result.reason, "".join(texts)) == ("time_budget", ANSWER)
 
@@ -1408,7 +1424,7 @@ def test_a_call_without_room_for_its_reply_is_never_run() -> None:
     replies = _tool_replies(llm, 1)
     assert shown_numbers(replies["call_a"]) == [1]
     assert replies["call_b"] == error_reply("search", NO_ROOM_REPLY).text
-    assert _steps(progress) == [("search", "Programm", 1), ("search", "Wetter", 0)]
+    assert _steps(progress) == [("search", "Programm", 1)]
 
 
 def _budget_with_room(round_room: int) -> TurnBudget:
@@ -1536,6 +1552,153 @@ def test_a_reply_longer_than_one_reply_may_be_is_cut(loguru_caplog: LogCaptureFi
 
 
 # --- The trail and the transcript -------------------------------------------------------------
+
+
+def _failing_on(query: str, results: Mapping[str, list[NodeWithScore]]) -> SearchFn:
+    """Build a search that fails on one query and answers every other one.
+
+    Args:
+        query (str): The query whose search fails, as a storage outage would.
+        results (Mapping[str, list[NodeWithScore]]): Passages per other query.
+
+    Returns:
+        SearchFn: The search.
+    """
+    answering = QuerySearch(results)
+
+    def _search(asked: str) -> list[NodeWithScore]:
+        """Fail on the one query, else answer as the double does.
+
+        Args:
+            asked (str): What the tool searched for.
+
+        Returns:
+            list[NodeWithScore]: The passages for the query.
+
+        Raises:
+            RuntimeError: For the failing query.
+        """
+        if asked == query:
+            raise RuntimeError("invented storage outage")
+        return answering(asked)
+
+    return _search
+
+
+@pytest.mark.parametrize("kind", ["refused", "skipped", "failed", "argument-error"])
+def test_a_call_its_tool_did_not_answer_gets_its_reply_but_no_step(kind: str) -> None:
+    """A step means the tool answered: a call refused for room, skipped, failed or sent bad arguments shows none.
+
+    Args:
+        kind (str): Why the round's second call went unanswered.
+    """
+    second = _search_call("call_b", "" if kind == "argument-error" else "Wetter")
+    results = {"Programm": [programme_passage()], "Wetter": [weather_passage()]}
+    search = _failing_on("Wetter", results) if kind == "failed" else QuerySearch(results)
+    overrides: dict[str, Any] = {"refused": {"budget": TIGHT}, "skipped": {"max_calls_per_round": 1}}.get(kind, {})
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), second), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, _documents(search), **overrides)))
+
+    assert _tool_replies(llm, 1)["call_b"].startswith("Error: ")
+    assert _steps(progress) == [("search", "Programm", 1)]
+    assert result.actions == [{"action": "search", "detail": "Programm", "found": 1}]
+
+
+@pytest.mark.parametrize("cause", ["failed", "no-slot"])
+def test_a_call_that_failed_marks_the_turn_research_failed_and_it_still_answers(cause: str) -> None:
+    """Evidence may be missing when a search failed or found no slot; the turn says so, and the model answers by itself.
+
+    Args:
+        cause (str): Why the search returned nothing: it failed, or no search slot came free.
+    """
+    search = _failing_on("Programm", {}) if cause == "failed" else QuerySearch({"Programm": [programme_passage()]})
+    overrides: dict[str, Any] = {"search_slots": _Recording()} if cause == "no-slot" else {}
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), _answer()])
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(search), **overrides)))
+
+    assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "auto"
+    assert (result.reason, result.steps, "".join(texts)) == ("research_failed", 1, ANSWER)
+
+
+class _Brittle:
+    """A tool whose answer fails after its fetch returned, as a renderer that raises would."""
+
+    def __init__(self) -> None:
+        """Describe the tool."""
+        self.name = "brittle"
+        self.description = "Fail while answering."
+        self.parameters: dict[str, Any] = {"type": "object", "properties": {}}
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Fetch nothing, then fail to answer.
+
+        Args:
+            arguments (Mapping[str, Any]): Unused.
+            ctx (ToolContext): Unused.
+
+        Returns:
+            ToolReply | ToolWork: The work.
+        """
+
+        def _fail(fetched: Any, context: ToolContext) -> ToolReply:
+            """Fail as a broken renderer would.
+
+            Args:
+                fetched (Any): What the fetch returned.
+                context (ToolContext): Unused.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("invented rendering failure")
+
+        return ToolWork(detail="", fetch=list, answer=_fail)
+
+
+def test_a_call_whose_answer_fails_gets_its_reply_and_marks_research_failed(
+    loguru_caplog: LogCaptureFixture,
+) -> None:
+    """A tool that fails while answering, after its fetch returned, is a failed call like a failed search.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    llm = streaming_tool_llm([_calls(("call_a", "brittle", {})), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, ToolRegistry([_Brittle()]))))
+
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("brittle", FAILED_REPLY).text}
+    assert (progress, result.reason) == ([], "research_failed")
+    assert loguru_caplog.messages == ["An agent's 'brittle' call failed: RuntimeError"]
+
+
+def test_a_failed_calls_reason_is_kept_when_a_limit_ends_the_turn() -> None:
+    """The first cause stands: a limit reached after a failed call does not replace ``research_failed``."""
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), _answer()])
+
+    _, _, result = _drain(_turn(_loop(llm, _documents(_failing_on("Programm", {})), max_rounds=1)))
+
+    assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
+    assert result.reason == "research_failed"
+
+
+def test_a_memory_hit_and_a_read_still_get_their_step() -> None:
+    """A call answered from memory, and a read, are calls their tool answered: each is a step."""
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Programm")),
+            _calls(_search_call("call_b", "Programm"), ("call_c", "read", {"n": 1})),
+            _answer(),
+        ]
+    )
+
+    progress, _, result = _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
+
+    assert _steps(progress) == [("search", "Programm", 1), ("search", "Programm", 0), ("read", "1", 0)]
+    assert _tool_replies(llm, 2)["call_b"] == "Already called search with these arguments; see [1]."
+    assert result.reason is None
 
 
 def test_a_call_to_a_tool_the_turn_does_not_offer_gets_a_reply_but_no_step() -> None:

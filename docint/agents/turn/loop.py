@@ -17,6 +17,10 @@ Calls and room. Every call id gets a reply, answered by
 :class:`~docint.agents.turn.calls.RoundCalls`: concurrently on the search slots, numbered in call
 order, within the room and the time left. The turn's room for tool replies is the budget's
 ``round_room`` less the final note; a round's assistant message is counted before its calls.
+Only a call its tool answered is a step in the trail; an error reply, for arguments that will
+not do or for a call that did not run or failed, reaches the model alone. A call whose search
+failed or found no slot marks the turn ``research_failed`` without ending it: evidence may be
+missing.
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
 anything, a failure goes to the caller, who can still answer another way: no model slot within
@@ -99,9 +103,9 @@ class AgentResult:
             a tool reply showed, stamped with its ``citation_index``.
         steps (int): Rounds that called tools.
         actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
-            per call to an offered tool, in order.
-        reason (str | None): The first cause that made the model answer before it chose to, or
-            ``None``.
+            per call its tool answered, in order.
+        reason (str | None): The first cause that cut the turn short or left evidence out: a
+            limit, a failed round or a failed search; ``None`` when there was none.
         images_attached (int): Pictures sent to the model with the evidence.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.
@@ -131,7 +135,7 @@ class _Turn:
         idle (int): Rounds in a row that added no passage.
         model_calls (int): Model calls begun.
         shown (bool): Whether anything has been yielded.
-        reason (str | None): The first cause that made the model answer.
+        reason (str | None): The first cause that cut the turn short or left evidence out.
         shortened (bool): Whether the tool replies were cut after an overflow.
         actions (list[dict[str, Any]]): The trail so far.
         reasoning (list[str]): Each round's reasoning.
@@ -587,7 +591,7 @@ class AgentLoop:
 
         Args:
             turn (_Turn): The turn.
-            action (str): A note, or the name of an offered tool.
+            action (str): A note, or the name of the tool that answered the call.
             detail (str): The note's text, or the call's main argument.
             found (int): Passages the call admitted or extended.
             step (int | None): The round it belongs to; the last tool round by default.
@@ -608,7 +612,7 @@ class AgentLoop:
             done (RoundDone): The round, ended in calls.
 
         Yields:
-            AgentProgress: The round's note, if it wrote text, then one step per call to an offered tool.
+            AgentProgress: The round's note, if it wrote text, then one step per call its tool answered.
         """
         turn.steps += 1
         note = " ".join(done.text.split())[:NOTE_CHARS]
@@ -627,18 +631,21 @@ class AgentLoop:
         )
         asked = message_tokens(written, self._ratio)
         prepared = [self._registry.prepare(call, turn.ctx) for call in done.calls]
-        replies = self._calls.answer(
+        answered = self._calls.answer(
             prepared, turn.ctx, room=self._room - turn.spent - asked, time_left=lambda: self._time_left(turn)
         )
+        if answered.failed:
+            # Evidence a failed search would have found is missing; the turn goes on, and says so.
+            turn.stop("research_failed")
         turn.transcript.append(ChatMessage(role=MessageRole.ASSISTANT, blocks=blocks))
         turn.spent += asked
         found = 0
-        for call, reply in zip(done.calls, replies, strict=True):
+        for call, reply in zip(done.calls, answered.replies, strict=True):
             turn.transcript.append(
                 ChatMessage(role=MessageRole.TOOL, content=reply.text, additional_kwargs={"tool_call_id": call.id})
             )
             turn.spent += message_tokens(reply.text, self._ratio)
             found += reply.found
-            if reply.action in self._registry.names:
+            if not reply.error:
                 yield self._step(turn, reply.action, reply.detail, reply.found)
         turn.idle = 0 if found else turn.idle + 1

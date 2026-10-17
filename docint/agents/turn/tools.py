@@ -88,12 +88,15 @@ class ToolReply:
             tool, the name the model wrote, cut to ``NAME_CHARS``.
         detail (str): The call's main argument, cut to ``DETAIL_CHARS``, for the trail;
             empty when it has none to show. Shown to the user, never logged.
+        error (bool): Whether the reply says why the call was not answered, as every
+            :func:`error_reply` does; a turn's trail shows only calls their tool answered.
     """
 
     text: str
     found: int
     action: str
     detail: str
+    error: bool = False
 
 
 @dataclass(frozen=True)
@@ -208,9 +211,9 @@ def error_reply(action: str, message: str, *, detail: str = "") -> ToolReply:
         detail (str): The call's main argument, for the trail.
 
     Returns:
-        ToolReply: ``Error: <message>``; it admits nothing and is not remembered.
+        ToolReply: ``Error: <message>``, marked as an error; it admits nothing and is not remembered.
     """
-    return ToolReply(text=f"Error: {message}", found=0, action=action, detail=detail)
+    return ToolReply(text=f"Error: {message}", found=0, action=action, detail=detail, error=True)
 
 
 def trail_detail(value: Any) -> str:

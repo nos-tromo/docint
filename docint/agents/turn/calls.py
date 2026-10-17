@@ -6,7 +6,8 @@ the process-wide search slots so it runs at once, then finished in call order on
 which numbers what they admit in call order. Every call gets a reply: calls past the round's limit
 are skipped, a call without room for a full reply never runs, and a call that cannot start, fails
 or outlives the time left gets an error reply. Work abandoned at the deadline keeps its search slot
-until it ends.
+until it ends. A call whose I/O failed or found no search slot is counted, since the evidence it
+would have found is missing; one that ran out of time is not, the turn's time limit says so.
 
 Room. A round first reserves a short reply for every call; a call then runs only while a full
 reply, ``result_chars`` at the turn's ratio plus its envelope, still fits in place of its short
@@ -22,7 +23,7 @@ import concurrent.futures
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from loguru import logger
 
@@ -47,6 +48,18 @@ FAILED_REPLY = "the call failed; try other arguments, or answer from the passage
 NO_CAPACITY_REPLY = (
     "not run: no search capacity was free; call it again in your next round, or answer from the passages shown."
 )
+
+
+class RoundReplies(NamedTuple):
+    """The replies to one round's calls.
+
+    Attributes:
+        replies (list[ToolReply]): One per call, in call order, each within ``result_chars``.
+        failed (int): Calls whose I/O failed or could not start, or that found no search slot.
+    """
+
+    replies: list[ToolReply]
+    failed: int
 
 
 def message_tokens(text: str, char_token_ratio: float) -> int:
@@ -109,7 +122,7 @@ class RoundCalls:
 
     def answer(
         self, prepared: Sequence[PreparedCall], ctx: ToolContext, *, room: int, time_left: Callable[[], float]
-    ) -> list[ToolReply]:
+    ) -> RoundReplies:
         """Answer a round's calls, one reply per call in call order.
 
         Args:
@@ -120,10 +133,10 @@ class RoundCalls:
             time_left (Callable[[], float]): Reads the seconds the turn has left.
 
         Returns:
-            list[ToolReply]: The replies, each within ``result_chars``.
+            RoundReplies: The replies, each within ``result_chars``, and how many calls failed.
         """
-        replies = self._replies(prepared, self._admitted(prepared, room), ctx, time_left)
-        return [self._bounded(reply) for reply in replies]
+        replies, failed = self._replies(prepared, self._admitted(prepared, room), ctx, time_left)
+        return RoundReplies(replies=[self._bounded(reply) for reply in replies], failed=failed)
 
     def _admitted(self, prepared: Sequence[PreparedCall], room: int) -> list[bool | None]:
         """Decide which calls may run: within the round's limit, and while a full reply still fits.
@@ -162,7 +175,7 @@ class RoundCalls:
         admitted: Sequence[bool | None],
         ctx: ToolContext,
         time_left: Callable[[], float],
-    ) -> list[ToolReply]:
+    ) -> tuple[list[ToolReply], int]:
         """Run the admitted calls' I/O at once on the search slots, then finish every call in call order.
 
         Args:
@@ -172,11 +185,12 @@ class RoundCalls:
             time_left (Callable[[], float]): Reads the seconds the turn has left.
 
         Returns:
-            list[ToolReply]: One reply per call, in call order.
+            tuple[list[ToolReply], int]: One reply per call, in call order, and how many calls
+            failed: their I/O raised or could not start, or no search slot came free for it.
         """
         replies: list[ToolReply | None] = [None] * len(prepared)
         started: dict[int, concurrent.futures.Future[Any]] = {}
-        no_slot = 0
+        no_slot, failed = 0, 0
         for position, (ready, runs) in enumerate(zip(prepared, admitted, strict=True)):
             if runs is None:
                 replies[position] = error_reply(
@@ -201,6 +215,7 @@ class RoundCalls:
                     replies[position] = error_reply(ready.action, NO_CAPACITY_REPLY, detail=ready.detail)
                 except Exception as exc:
                     logger.warning("An agent's '{}' call could not start: {}", ready.action, type(exc).__name__)
+                    failed += 1
                     replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
         if no_slot:
             logger.warning("No search slot came free for {} of an agent round's tool calls", no_slot)
@@ -221,6 +236,7 @@ class RoundCalls:
                 failure = future.exception()
                 if failure is not None:
                     logger.warning("An agent's '{}' call failed: {}", ready.action, type(failure).__name__)
+                    failed += 1
                     replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
                     continue
                 fetched = future.result()
@@ -228,10 +244,11 @@ class RoundCalls:
                 replies[position] = self._registry.finish(ready, fetched, ctx)
             except Exception as exc:
                 logger.warning("An agent's '{}' call failed: {}", ready.action, type(exc).__name__)
+                failed += 1
                 replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
         if late:
             logger.warning("{} of an agent round's tool calls outlived the turn's time budget", late)
-        return [cast(ToolReply, reply) for reply in replies]
+        return [cast(ToolReply, reply) for reply in replies], no_slot + failed
 
     def _bounded(self, reply: ToolReply) -> ToolReply:
         """Return a reply within ``result_chars``, its text cut with a marker when longer.

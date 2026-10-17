@@ -35,7 +35,7 @@ from docint.agents.assessment.ledger import (
 )
 from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, ToolReply
+from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, ToolReply, error_reply
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -867,6 +867,34 @@ def test_an_error_reply_is_not_remembered() -> None:
     assert beyond.text == "Error: there is no passage [2]; the only passage is [1]."
     assert shown_numbers(later.text) == [1]
     assert repeated.text == "Already called read with these arguments; see [1]."
+
+
+def test_a_reply_says_whether_the_tool_answered_the_call() -> None:
+    """Error replies are marked, so a turn's trail can leave out a call its tool did not answer.
+
+    A search's passages, a read and an answer from memory are answers; an unoffered tool,
+    arguments that are no JSON object, a missing argument and a passage that is not held are not.
+    """
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage()]))
+
+    answers = [
+        registry.call(tool_call("search", query="Hafenfest"), ctx),
+        registry.call(tool_call("search", query="Hafenfest"), ctx),
+        registry.call(tool_call("read", n=1), ctx),
+    ]
+    errors = [
+        registry.call(ToolCall(id="call_0", name="keyframes", arguments="{}"), ctx),
+        registry.call(ToolCall(id="call_0", name="read", arguments="nicht json"), ctx),
+        registry.call(tool_call("search", query=""), ctx),
+        registry.call(tool_call("read", n=9), ctx),
+    ]
+
+    assert [type(reply) for reply in answers] == [PassageReply, ToolReply, PassageReply]
+    assert [reply.error for reply in answers] == [False, False, False]
+    assert [reply.error for reply in errors] == [True, True, True, True]
+    assert error_reply("search", "invented").error is True
+    assert ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="").error is False
 
 
 def test_read_of_a_number_beyond_the_evidence_names_the_range() -> None:
