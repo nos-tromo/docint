@@ -31,6 +31,7 @@ from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.split import neutralize_sentinel
 from docint.agents.turn.tools import (
+    DETAIL_CHARS,
     SearchFn,
     ToolContext,
     ToolReply,
@@ -140,7 +141,10 @@ def _text(value: Any) -> str:
 
 
 def _quoted(name: str) -> str:
-    """Name a clip in a reply: on one line, sentinels defused, in quotes, since a file name is data.
+    """Name a clip in a reply: on one line, cut to ``DETAIL_CHARS``, sentinels defused, in quotes.
+
+    A file name is data, whether the model sent it or a document carries it, so a reply
+    repeats it bounded and defused, as it does a query.
 
     Args:
         name (str): The clip's name.
@@ -148,7 +152,7 @@ def _quoted(name: str) -> str:
     Returns:
         str: The quoted name.
     """
-    return repr(neutralize_sentinel(" ".join(name.split())))
+    return repr(neutralize_sentinel(" ".join(name.split())[:DETAIL_CHARS]))
 
 
 def _held_clips(ctx: ToolContext) -> dict[str, tuple[str, int]]:

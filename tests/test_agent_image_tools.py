@@ -26,7 +26,7 @@ from typing_extensions import override
 import docint.core.rag as rag_module
 from docint.agents.turn.image_tools import KeyframesTool, SearchImagesTool
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import PassageReply, ReadTool, ToolContext, ToolRegistry
+from docint.agents.turn.tools import DETAIL_CHARS, PassageReply, ReadTool, ToolContext, ToolRegistry
 from docint.core.rag import RAG, ParentContextPostprocessor
 from docint.core.retrieval.visual import BLOB_PAYLOAD_KEYS
 from docint.core.retrieval_filters import build_qdrant_filter
@@ -917,6 +917,18 @@ def test_a_refused_clip_that_is_the_only_one_seen_says_to_search_for_another() -
 
     assert reply.text == (
         f"Error: no keyframes are stored for '{AUDIO}'; no other clip has been seen yet, so search for one first."
+    )
+
+
+def test_a_long_file_name_is_cut_where_a_reply_repeats_it() -> None:
+    """A run-on file name the model sent comes back cut to the trail's length, as a long query is."""
+    name = "hafen_" + "x" * 500 + ".mp4"
+
+    reply = _registry().call(tool_call("keyframes", file=name), _context())
+
+    assert reply.text == (
+        f"Error: no keyframes are stored for '{name[:DETAIL_CHARS]}'; "
+        "no clip has been seen yet, so search for one first."
     )
 
 
