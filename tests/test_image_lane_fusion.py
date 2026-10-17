@@ -163,6 +163,61 @@ def test_image_lane_receives_the_original_query() -> None:
     assert seen == ["Wo ist das Tor?"]
 
 
+def test_the_fused_order_alternates_lanes_by_their_own_rank() -> None:
+    """Each lane's best hit leads, so no modality is stranded behind the other.
+
+    Text hits used to come first and image hits last. A rerank that failed
+    kept that order and cut to its top-n, so an outage deleted the image lane.
+    The raw scores disagree on purpose: text similarity and CLIP cosine are
+    not on one scale, so only each lane's own rank may decide the order.
+    """
+    text_hits = [
+        _text_node(f"t{n}", f"Handbook section {n}.", score)
+        for n, score in enumerate((0.8, 0.7, 0.6, 0.5, 0.4, 0.3), start=1)
+    ]
+    image_hits = [_image_node("i1", 0.28), _image_node("i2", 0.27)]
+    fused = MultimodalRetriever(text_retriever=_TextRetriever(text_hits), image_lane=lambda query: image_hits)
+
+    out = fused.retrieve(QueryBundle(query_str="Where is the gate?"))
+
+    assert [n.node.node_id for n in out] == ["t1", "i1", "t2", "i2", "t3", "t4", "t5", "t6"]
+
+
+@pytest.mark.parametrize(
+    ("text_ids", "image_ids"),
+    [(["t1", "t2", "t3"], []), ([], ["i1", "i2", "i3"])],
+    ids=["text-only", "image-only"],
+)
+def test_a_single_lane_round_trips_unchanged(text_ids: list[str], image_ids: list[str]) -> None:
+    """With one lane empty there is nothing to interleave: it keeps its own order.
+
+    The scores are out of order on purpose, so a re-sort by score would show.
+    """
+    scores = (0.4, 0.9, 0.6)
+    text_hits = [_text_node(node_id, "Handbook section.", scores[n]) for n, node_id in enumerate(text_ids)]
+    image_hits = [_image_node(node_id, scores[n]) for n, node_id in enumerate(image_ids)]
+    fused = MultimodalRetriever(text_retriever=_TextRetriever(text_hits), image_lane=lambda query: image_hits)
+
+    out = fused.retrieve(QueryBundle(query_str="Where is the gate?"))
+
+    assert [n.node.node_id for n in out] == [*text_ids, *image_ids]
+
+
+def test_a_text_and_an_image_node_with_the_same_id_both_stay() -> None:
+    """The fusion keys by lane position, so equal node ids cannot merge two hits.
+
+    ``retrieve`` drops a repeated node id afterwards, which is why this reads
+    ``_retrieve``: the fusion itself must not be what loses a hit.
+    """
+    text_hit = _text_node("shared", "The gate is sealed.", 0.9)
+    image_hit = _image_node("shared", 0.28)
+    fused = MultimodalRetriever(text_retriever=_TextRetriever([text_hit]), image_lane=lambda query: [image_hit])
+
+    out = fused._retrieve(QueryBundle(query_str="Where is the gate?"))
+
+    assert out == [text_hit, image_hit]
+
+
 def test_floor_drops_images_the_reranker_scored_below_it() -> None:
     """A merely-nearest image does not become a citable source."""
     nodes = [_text_node("t1", "The gate is sealed.", 0.5), _image_node("point-77", 0.001)]

@@ -173,6 +173,7 @@ from docint.core.retrieval.visual import (
     ensure_visual_filter_indexes,
     image_token_reserve,
     rank_keyword_candidates,
+    reciprocal_rank_fusion,
     visual_min_match,
 )
 from docint.core.retrieval_filters import build_qdrant_filter, matches_metadata_filters, merge_qdrant_filters
@@ -2077,9 +2078,13 @@ class MultimodalRetriever(BaseRetriever):
             query_bundle (QueryBundle): The query being answered.
 
         Returns:
-            list[NodeWithScore]: Text hits followed by image-caption hits. The
-                order carries no ranking intent — the reranker downstream
-                scores both lanes on one scale.
+            list[NodeWithScore]: Text hits and image-caption hits fused by
+                reciprocal rank over each lane's own order, so every lane's
+                best hit leads. A healthy reranker re-scores the whole set and
+                ignores that order, but a degraded one keeps it and cuts to
+                its top-n: with the lanes stacked, that cut would delete a
+                whole modality, and a degraded rerank must never do that. A
+                single non-empty lane comes back unchanged.
         """
         nodes: list[NodeWithScore] = list(self.text_retriever.retrieve(query_bundle))
         try:
@@ -2099,12 +2104,17 @@ class MultimodalRetriever(BaseRetriever):
             for node in nodes
             if node.node.metadata.get("image_id")
         }
-        nodes.extend(
+        image_nodes = [
             node
             for node in image_nodes
             if str(node.node.metadata.get("image_id") or "").strip() not in already_retrieved
-        )
-        return nodes
+        ]
+
+        # Keyed by lane position, never node id: the two lanes' ids are not guaranteed distinct.
+        text_by_key = {f"t{rank}": node for rank, node in enumerate(nodes)}
+        image_by_key = {f"i{rank}": node for rank, node in enumerate(image_nodes)}
+        by_key = text_by_key | image_by_key
+        return [by_key[key] for key in reciprocal_rank_fusion(list(text_by_key), list(image_by_key))]
 
 
 class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
