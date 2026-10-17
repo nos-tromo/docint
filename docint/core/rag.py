@@ -511,10 +511,8 @@ def _quantization_matches(
 #   answer's evidence set, stamped by
 #   :class:`CitationNumberingPostprocessor` so the answer's "source 3"
 #   and the chat window's third card are the same chunk.
-# * Video keyframes: ``keyframe`` — the frame's number in its clip and
-#   when it appears (``#3 @ 01:12``), derived by
-#   :meth:`RAG._image_caption_node` from ``keyframe_index`` and
-#   ``keyframe_time_sec``, which stay hidden.
+# * Video keyframes: ``keyframe`` (``#3 @ 01:12``), derived by
+#   ``RAG._image_caption_node``; the raw index and time stay hidden.
 #
 # Explicitly excluded via absence: ``entities`` / ``relations`` (NER
 # output, can exceed 60 KB), per-column row dumps in ``tables.py``
