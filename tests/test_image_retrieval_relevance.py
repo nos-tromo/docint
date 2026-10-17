@@ -617,3 +617,40 @@ def test_the_rescore_never_marks_the_turn_unreranked(monkeypatch: pytest.MonkeyP
     assert scores == {}
     assert candidate.node.metadata == before
     assert candidate.score == 0.0044
+
+
+def test_the_floor_rescues_through_the_bound_rag_rescore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The floor and ``RAG._rescore_images_by_description`` agree on the call, end to end.
+
+    The floor's ``rescore`` is typed ``Any``, and its fail-soft ``except`` turns
+    a signature that drifted into a quiet drop: the images would just stop being
+    rescued while every test on either side still passed. So this runs the floor
+    with the real bound method and the real reranker, faking only the chat
+    description and the rerank endpoint.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setattr(image_description, "describe_for_image_match", lambda query: DESCRIPTION)
+    endpoint = _RerankEndpoint({KEYFRAME_CAPTION: 0.86, PIER_CAPTION: 0.0072})
+    rag = _endpoint_rag(monkeypatch, endpoint)
+    floor = ImageRelevanceFloorPostprocessor(
+        min_score=0.05, top_n=5, rescore=rag._rescore_images_by_description, rescore_min_score=0.02
+    )
+    text = NodeWithScore(
+        node=TextNode(id_="txt-0", text="Der Hafen liegt im Norden.", metadata={RERANK_APPLIED_KEY: True}),
+        score=0.31,
+    )
+    nodes = [
+        text,
+        _reranked_keyframe("kf-0", KEYFRAME_CAPTION, 0.0044),
+        _reranked_keyframe("kf-1", PIER_CAPTION, 0.0039),
+    ]
+
+    kept = floor._postprocess_nodes(nodes, QueryBundle(query_str=QUESTION))
+
+    assert [node.node.node_id for node in kept] == ["txt-0", "kf-0"]
+    assert kept[1].score == 0.0044
+    assert [(request["query"], request["documents"]) for request in endpoint.requests] == [
+        (DESCRIPTION, [KEYFRAME_CAPTION, PIER_CAPTION])
+    ]
