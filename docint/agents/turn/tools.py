@@ -27,13 +27,14 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from llama_index.core.schema import BaseNode, NodeWithScore
+from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
 from loguru import logger
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.passages import answer_passages, refs, render_entry
 from docint.agents.turn.stream import ToolCall
+from docint.utils.text_budget import MATCH_SPANS_KEY
 
 SearchFn = Callable[[str], list[NodeWithScore]]
 """Run one search through the turn's engine and return its ranked passages."""
@@ -94,9 +95,13 @@ class PassageReply(ToolReply):
 
     Attributes:
         numbers (tuple[int, ...]): The ledger numbers the reply showed or named, ascending.
+        depends_on (tuple[int, ...]): Entries the reply shows as they stand, as a read
+            does: the same call is answered from memory only while each is unchanged, and
+            answered anew once one of them has grown.
     """
 
     numbers: tuple[int, ...] = ()
+    depends_on: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,10 +111,13 @@ class _Answered:
     Attributes:
         numbers (tuple[int, ...]): The passages the answer showed or named.
         detail (str): The call's main argument, for the trail.
+        states (tuple[tuple[int, tuple[int, int]], ...]): Each entry the answer depends on,
+            with how far it had grown when answered (see :func:`_state`).
     """
 
     numbers: tuple[int, ...]
     detail: str
+    states: tuple[tuple[int, tuple[int, int]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -340,7 +348,9 @@ class ReadTool:
                 known = f"the passages run from [1] to [{held}]"
             return error_reply(self.name, f"there is no passage [{number}]; {known}.", detail=detail)
         text = render_entry(ctx.ledger.entries()[number - 1], number, ctx)
-        return PassageReply(text=text, found=0, action=self.name, detail=detail, numbers=(number,))
+        return PassageReply(
+            text=text, found=0, action=self.name, detail=detail, numbers=(number,), depends_on=(number,)
+        )
 
 
 def _arguments(raw: str) -> dict[str, Any] | None:
@@ -400,19 +410,38 @@ def _example(parameters: Mapping[str, Any]) -> str:
     return json.dumps(sample, ensure_ascii=False)
 
 
+def _state(ledger: EvidenceLedger, number: int) -> tuple[int, int]:
+    """Return how far a held entry has grown: its text's length and how many matches it holds.
+
+    The ledger only extends an entry, by a window that adds text or a match that adds a
+    span, so any change to what a read of it shows changes one of the two.
+
+    Args:
+        ledger (EvidenceLedger): The turn's evidence.
+        number (int): The entry's number.
+
+    Returns:
+        tuple[int, int]: The length of its text and the count of its match spans.
+    """
+    node = ledger.entries()[number - 1].node
+    spans = node.metadata.get(MATCH_SPANS_KEY)
+    return len(node.get_content(metadata_mode=MetadataMode.NONE)), len(spans) if isinstance(spans, list) else 0
+
+
 def _recall(key: tuple[str, str], ctx: ToolContext) -> ToolReply | None:
     """Answer a call from memory, when the same call was answered before in this turn.
 
     Args:
         key (tuple[str, str]): The tool's name and the call's normalized arguments.
-        ctx (ToolContext): The turn's memory.
+        ctx (ToolContext): The turn's evidence and memory.
 
     Returns:
         ToolReply | None: The numbers the earlier answer showed or named, admitting
-        nothing; ``None`` when nothing is remembered.
+        nothing; ``None`` when nothing is remembered, or when an entry the answer depends
+        on has grown since.
     """
     answered = ctx.answered.get(key)
-    if answered is None:
+    if answered is None or any(_state(ctx.ledger, number) != state for number, state in answered.states):
         return None
     name = key[0]
     logger.info("A repeated call to the '{}' tool was answered from memory", name)
@@ -573,7 +602,8 @@ class ToolRegistry:
             return remembered
         reply = prepared.work.answer(fetched, ctx)
         if isinstance(reply, PassageReply):
-            ctx.answered[prepared.key] = _Answered(numbers=reply.numbers, detail=reply.detail)
+            states = tuple((number, _state(ctx.ledger, number)) for number in reply.depends_on)
+            ctx.answered[prepared.key] = _Answered(numbers=reply.numbers, detail=reply.detail, states=states)
         return reply
 
     def call(self, call: ToolCall, ctx: ToolContext) -> ToolReply:

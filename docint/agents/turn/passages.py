@@ -2,9 +2,9 @@
 
 A reply never numbers a passage it does not show: a new passage enters the ledger only while
 every passage the reply shows still keeps at least its floor. Passages shown before are named
-by number. Sizes are in characters: the reply keeps within ``result_chars``, room for its notes
-reserved first, and the text of each passage within ``passage_chars``; a header shows whole up
-to ``HEADER_CHARS``.
+by number, with their own note when they grew past what the reply could show. Sizes are in
+characters: the reply keeps within ``result_chars``, room for its notes reserved first, and
+the text of each passage within ``passage_chars``; a header shows whole up to ``HEADER_CHARS``.
 
 Everything here reads or writes the turn's ledger, so it runs on the loop thread.
 """
@@ -254,12 +254,14 @@ def _left_out(count: int, *, full: bool) -> str:
     return f"{count} more matching {passages} did not fit in this reply; search with narrower words to see them."
 
 
-def _trailer(*, shown: bool, again: Sequence[int], left_out: int, full: bool) -> str:
+def _trailer(*, shown: bool, again: Sequence[int], grown: Sequence[int], left_out: int, full: bool) -> str:
     """Write the notes after a search reply's passages.
 
     Args:
         shown (bool): Whether the reply shows any passage.
-        again (Sequence[int]): Passages shown before that matched again, by number.
+        again (Sequence[int]): Passages shown before that matched again unchanged, by number.
+        grown (Sequence[int]): Passages shown before that the search extended with text the
+            reply had no room to show, by number.
         left_out (int): New passages the reply did not show.
         full (bool): Whether they were left out because the evidence was full.
 
@@ -271,6 +273,8 @@ def _trailer(*, shown: bool, again: Sequence[int], left_out: int, full: bool) ->
         lines.append(NO_NEW_PASSAGES)
     if again:
         lines.append(f"Also matched, shown before: {refs(again)}.")
+    if grown:
+        lines.append(f"Also matched, with new text not shown here: {refs(grown)}; read(n) shows it.")
     if left_out:
         lines.append(_left_out(left_out, full=full))
     return "\n".join(lines)
@@ -280,12 +284,14 @@ def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action:
     """Admit what a search found into the turn's evidence and render it as one reply.
 
     Passages are taken best first, the windows of one section as one passage. A passage
-    held before keeps its number: when the search extends it, its grown entry is shown if
-    it fits; otherwise it is named by number. A new passage is admitted, under the next
-    number, only while the reply can still show every passage at least at its floor; one
-    that does not fit, or finds the evidence full, stays unnumbered and the reply says how
-    many more matched. The reply keeps within ``result_chars``, room for its notes
-    reserved first, and each passage's text within ``passage_chars``.
+    held before keeps its number: found unchanged, it is named as shown before; extended
+    by the search, its grown entry is shown if it fits, and otherwise named as having new
+    text that ``read(n)`` shows. A new passage is admitted, under the next number, only
+    while the reply can still show every passage at least at its floor; one that does not
+    fit, or finds the evidence full, stays unnumbered and the reply says how many more
+    matched. The reply keeps within ``result_chars``, room for its notes reserved first
+    (every held passage counted in both notes naming them, an upper bound), and each
+    passage's text within ``passage_chars``.
 
     Args:
         found (Iterable[NodeWithScore]): The search's passages, best first.
@@ -299,21 +305,24 @@ def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action:
     sections = _sections(found)
     held = [number for windows in sections if (number := ledger.number_of(windows[0].node.node_id)) is not None]
     fresh = len(sections) - len(held)
-    notes = max(len(_trailer(shown=False, again=held, left_out=fresh, full=full)) for full in (False, True))
+    notes = max(len(_trailer(shown=False, again=held, grown=held, left_out=fresh, full=full)) for full in (False, True))
     room = ctx.budget.result_chars - notes - len(_JOIN)
     shown: list[_Planned] = []
     again: list[int] = []
+    grown: list[int] = []
     left_out, full, added = 0, False, 0
     for windows in sections:
         number = ledger.number_of(windows[0].node.node_id)
         if number is not None:
-            if ledger.add(windows):
-                added += 1
-                planned = _plan(ledger.entries()[number - 1], number, ctx)
-                if _fits([*shown, planned], room):
-                    shown.append(planned)
-                    continue
-            again.append(number)
+            if not ledger.add(windows):
+                again.append(number)
+                continue
+            added += 1
+            planned = _plan(ledger.entries()[number - 1], number, ctx)
+            if _fits([*shown, planned], room):
+                shown.append(planned)
+            else:
+                grown.append(number)
         elif ledger.full:
             left_out, full = left_out + 1, True
         else:
@@ -323,16 +332,17 @@ def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action:
                 shown.append(planned)
             else:
                 left_out += 1
-    trailer = _trailer(shown=bool(shown), again=again, left_out=left_out, full=full)
+    trailer = _trailer(shown=bool(shown), again=again, grown=grown, left_out=left_out, full=full)
     logger.debug(
-        "The '{}' tool showed {} passages, named {} shown before and left {} out",
+        "The '{}' tool showed {} passages, named {} shown before and {} grown, and left {} out",
         action,
         len(shown),
         len(again),
+        len(grown),
         left_out,
     )
     return RenderedPassages(
         text=_JOIN.join(part for part in (_render(shown, room, ctx), trailer) if part),
         found=added,
-        numbers=tuple(sorted({passage.number for passage in shown} | set(again))),
+        numbers=tuple(sorted({passage.number for passage in shown} | set(again) | set(grown))),
     )

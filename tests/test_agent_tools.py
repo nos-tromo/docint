@@ -30,7 +30,7 @@ from docint.agents.assessment.ledger import (
 from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry, ToolReply
+from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolContext, ToolRegistry, ToolReply
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -610,30 +610,56 @@ def test_every_passage_in_a_reply_stays_within_passage_chars(reasoning: bool, co
     assert len(reply.text) <= ctx.budget.result_chars
 
 
+def _addendum(number: int) -> NodeWithScore:
+    """Build a later window of an invented planning report, which extends the report's entry.
+
+    Args:
+        number (int): Which report; it shares the report's id, file and page.
+
+    Returns:
+        NodeWithScore: The window.
+    """
+    text = f"Nachtrag {number}: Der Lauf am Kai beginnt erst nach dem Konzert."
+    return scored_node(f"report-{number}", text, filename=f"planungsbericht_{number}.pdf", page=number)
+
+
 @pytest.mark.parametrize("reasoning", [False, True], ids=["plain", "reasoning"])
 @pytest.mark.parametrize(
-    ("held", "cap", "note"),
-    [(8, MAX_LEDGER_ENTRIES, "did not fit in this reply"), (0, 4, "the evidence holds all it can")],
-    ids=["named-again-and-no-room", "evidence-full"],
+    ("again", "grown", "cap", "notes"),
+    [
+        (8, 0, MAX_LEDGER_ENTRIES, ("Also matched, shown before: [1]", "did not fit in this reply")),
+        (
+            4,
+            4,
+            MAX_LEDGER_ENTRIES,
+            ("shown before: [1], [2], [3], [4].", "new text not shown here: [5], [6], [7], [8];", "did not fit"),
+        ),
+        (0, 0, 4, ("the evidence holds all it can",)),
+    ],
+    ids=["named-again", "named-again-and-grown", "evidence-full"],
 )
-def test_a_reply_with_notes_never_outgrows_result_chars(reasoning: bool, held: int, cap: int, note: str) -> None:
+def test_a_reply_with_notes_never_outgrows_result_chars(
+    reasoning: bool, again: int, grown: int, cap: int, notes: tuple[str, ...]
+) -> None:
     """Room for the notes after the passages is kept before any passage takes it, however the reply ends.
 
     Args:
         reasoning (bool): Whether the model thinks, which shortens replies.
-        held (int): How many found passages were shown before, and are named again.
+        again (int): How many found passages were shown before and are found unchanged.
+        grown (int): How many were shown before and are found grown, past the reply's room.
         cap (int): The most passages the turn's ledger admits.
-        note (str): Part of the note saying why passages were left out.
+        notes (tuple[str, ...]): Parts of the notes the reply must end with.
     """
     ctx = _context(reasoning=reasoning, cap=cap)
-    before = [_report(number) for number in range(1, held + 1)]
+    before = [_report(number) for number in range(1, again + grown + 1)]
     ctx.ledger.add(before)
-    found = [*before, *(_report(number) for number in range(held + 1, held + 11))]
+    fresh = [_report(number) for number in range(again + grown + 1, again + grown + 11)]
+    found = [*before[:again], *fresh, *(_addendum(number) for number in range(again + 1, again + grown + 1))]
 
     reply = _registry(_Search(found)).call(_call("search", query="Hafenverein"), ctx)
 
-    assert note in reply.text
-    assert ("Also matched, shown before:" in reply.text) is bool(held)
+    assert all(note in reply.text for note in notes)
+    assert not set(_shown(reply.text)) & set(range(1, again + grown + 1))
     assert len(reply.text) <= ctx.budget.result_chars
 
 
@@ -700,8 +726,8 @@ def test_a_passage_whose_matches_need_more_than_passage_chars_is_shown_within_it
     assert all(body.count(WINDOW_JOIN) == 2 for body in bodies_shown.values())
 
 
-def test_an_extension_without_room_is_named_by_its_number() -> None:
-    """A new window of a passage shown before joins its entry even when the reply has no room to show it."""
+def test_an_extension_without_room_is_named_as_grown() -> None:
+    """A new window of a passage shown before joins its entry without room to show it, and is named as grown."""
     ctx = _context(reasoning=True)
     opening, closing = OPENING * 8, CLOSING * 12
     ctx.ledger.add([_window(opening)])
@@ -710,10 +736,67 @@ def test_an_extension_without_room_is_named_by_its_number() -> None:
     reply = _registry(_Search([*reports, _window(closing)])).call(_call("search", query="Hafenverein"), ctx)
 
     assert _shown(reply.text) == [2, 3, 4, 5]
-    assert reply.text.endswith("\n\nAlso matched, shown before: [1].")
-    assert reply.found == 5
+    assert reply.text.endswith("\n\nAlso matched, with new text not shown here: [1]; read(n) shows it.")
+    assert "shown before" not in reply.text
+    assert isinstance(reply, PassageReply)
+    assert (reply.found, reply.numbers) == (5, (1, 2, 3, 4, 5))
     assert ctx.ledger.entries()[0].node.get_content() == f"{opening}{WINDOW_JOIN}{closing}"
     assert len(reply.text) <= ctx.budget.result_chars
+
+
+def test_a_repeated_read_shows_a_passage_again_once_it_grew() -> None:
+    """A read is answered from memory only while its passage is unchanged; once the passage grew, it is shown anew."""
+    ctx = _context()
+    registry = _registry(_Search([_window(OPENING)], [_window(CLOSING)]))
+    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
+
+    first = registry.call(_call("read", n=1), ctx)
+    unchanged = registry.call(_call("read", n=1), ctx)
+    registry.call(_call("search", query="Band am Kai"), ctx)
+    grown = registry.call(_call("read", n=1), ctx)
+    after = registry.call(_call("read", n=1), ctx)
+
+    assert OPENING in first.text
+    assert CLOSING not in first.text
+    assert unchanged.text == "Already called read with these arguments; see [1]."
+    assert _shown(grown.text) == [1]
+    assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in grown.text
+    assert after.text == "Already called read with these arguments; see [1]."
+
+
+def test_a_read_is_shown_anew_once_its_passage_gained_a_match() -> None:
+    """A search can add a match deep in a long passage without adding text; a read then keeps that part too."""
+    ctx = _context()
+    body = " ".join(f"Satz {line}: Der Hafenverein plant Stände und Musik am Kai." for line in range(1, 81))
+    start = len(body) - 400
+    held = scored_node("programme-9", body, filename="hafenfest_programm.pdf", page=3, **{MATCH_SPANS_KEY: [[60, 100]]})
+    window = scored_node(
+        "programme-9", body[start:], filename="hafenfest_programm.pdf", page=3, **{MATCH_SPANS_KEY: [[200, 240]]}
+    )
+    registry = _registry(_Search([held], [window]))
+    registry.call(_call("search", query="Hafenverein"), ctx)
+    before = registry.call(_call("read", n=1), ctx)
+    registry.call(_call("search", query="Musik am Kai"), ctx)
+
+    after = registry.call(_call("read", n=1), ctx)
+
+    late = body[start + 200 : start + 240]
+    assert late not in before.text
+    assert late in after.text
+    assert ctx.ledger.entries()[0].node.get_content() == body
+
+
+def test_a_read_finished_after_an_extending_search_in_its_round_shows_the_growth() -> None:
+    """Prepared together, the same read before and after a search that grows its passage is answered twice."""
+    ctx = _context()
+    registry = _registry(_Search([_window(OPENING)], [_window(CLOSING)]))
+    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
+    calls = [_call("read", n=1), _call("search", query="Band am Kai"), _call("read", n=1)]
+
+    before, _, after = _two_phase(registry, calls, ctx)
+
+    assert CLOSING not in before.text
+    assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in after.text
 
 
 def test_a_long_header_is_compacted_so_it_costs_a_reply_little() -> None:
