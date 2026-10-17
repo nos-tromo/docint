@@ -173,7 +173,7 @@ def _held_clips(ctx: ToolContext) -> dict[str, tuple[str, int]]:
     return clips
 
 
-def _clips_seen(ctx: ToolContext) -> str:
+def _clips_seen(ctx: ToolContext, *, refused: str = "") -> str:
     """Name the clips the turn's passages came from, for a reply that needs a clip.
 
     Each clip is named by its ``source_file``, in evidence order; clips that share a name
@@ -181,13 +181,19 @@ def _clips_seen(ctx: ToolContext) -> str:
 
     Args:
         ctx (ToolContext): The turn's evidence.
+        refused (str): The file name or id of a clip the reply refuses, which it never
+            offers back; empty when it refuses none.
 
     Returns:
         str: ``the clips seen so far are 'a.webm', 'b.mp4'``, or what to do when there are none.
     """
-    clips = [(_quoted(name), number) for name, number in _held_clips(ctx).values()]
+    held = _held_clips(ctx)
+    clips = [
+        (_quoted(name), number) for media_hash, (name, number) in held.items() if refused not in (media_hash, name)
+    ]
     if not clips:
-        return "no clip has been seen yet, so search for one first"
+        other = "other " if held else ""
+        return f"no {other}clip has been seen yet, so search for one first"
     names = Counter(name for name, _ in clips)
     return "the clips seen so far are " + ", ".join(
         f"{name} (passage [{number}])" if names[name] > 1 else name for name, number in clips
@@ -380,9 +386,8 @@ class KeyframesTool:
         """
         numbered = [(number, frame) for frame in fetched or () if (number := _frame_number(frame)) is not None]
         if not numbered:
-            return error_reply(
-                self.name, f"no keyframes are stored for {_quoted(clip.name)}; {_clips_seen(ctx)}.", detail=detail
-            )
+            seen = _clips_seen(ctx, refused=clip.key)
+            return error_reply(self.name, f"no keyframes are stored for {_quoted(clip.name)}; {seen}.", detail=detail)
         hashes = list(
             dict.fromkeys(
                 media_hash for _, frame in numbered if (media_hash := _text(frame.node.metadata.get("media_file_hash")))

@@ -45,6 +45,9 @@ CAPTIONS = (
 )
 #: The request filter of a turn that asks only about the clip from its thirtieth second on.
 FROM_THIRTY_SECONDS = [{"field": "keyframe_time_sec", "operator": "gte", "value": 30}]
+#: An audio clip: transcribed, so its segments carry its hash, and without frames.
+AUDIO = "hafen_interview.m4a"
+AUDIO_HASH = "e" * 64
 #: One file name two different clips carry, from two folders of one batch.
 SHARED = "hafen_rundgang.mov"
 FIRST_HASH = "a" * 64
@@ -850,7 +853,12 @@ def test_clips_seen_show_two_clips_of_one_name_apart() -> None:
 
 
 def test_an_unknown_clip_names_the_clips_seen() -> None:
-    """A clip with no stored frames is answered with the clips the turn's passages came from, each named once."""
+    """A clip with no stored frames is answered with the clips the turn's passages came from, each named once.
+
+    A transcribed audio file is a clip: ingest stamps its hash on its segments. A Nextext
+    transcript uploaded on its own names the file it was made from, but carries no media
+    hash, so it names no clip.
+    """
     ctx = _context()
     ctx.ledger.add(
         [
@@ -858,7 +866,8 @@ def test_an_unknown_clip_names_the_clips_seen() -> None:
             programme_passage(),
             _frame(2, clip=OTHER_CLIP, media_hash=OTHER_HASH),
             _segment(2),
-            _segment(3, clip="hafen_interview.m4a", media_hash=None),
+            _segment(3, clip=AUDIO, media_hash=AUDIO_HASH),
+            _segment(4, clip="kai_interview.mp3", media_hash=None),
         ]
     )
     lister = _Lister({})
@@ -867,10 +876,39 @@ def test_an_unknown_clip_names_the_clips_seen() -> None:
 
     assert reply.text == (
         "Error: no keyframes are stored for 'unbekannt.mp4'; "
-        "the clips seen so far are 'harbour_walk.webm', 'kai_rundgang.mp4'."
+        f"the clips seen so far are 'harbour_walk.webm', 'kai_rundgang.mp4', '{AUDIO}'."
     )
     assert (reply.found, reply.action, reply.detail) == (0, "keyframes", "unbekannt.mp4")
     assert lister.keys == ["unbekannt.mp4"]
+
+
+@pytest.mark.parametrize("file", [AUDIO, 2], ids=["by-name", "by-passage"])
+def test_the_clip_just_refused_is_not_among_the_clips_its_error_names(file: object) -> None:
+    """An audio clip has no frames; the reply refusing it names the other clips seen, never the refused one.
+
+    Args:
+        file (object): The clip asked for: by its file name, or by a passage of its transcript.
+    """
+    ctx = _context()
+    ctx.ledger.add([_segment(1), _segment(2, clip=AUDIO, media_hash=AUDIO_HASH)])
+
+    reply = _registry().call(tool_call("keyframes", file=file), ctx)
+
+    assert reply.text == (
+        f"Error: no keyframes are stored for '{AUDIO}'; the clips seen so far are 'harbour_walk.webm'."
+    )
+
+
+def test_a_refused_clip_that_is_the_only_one_seen_says_to_search_for_another() -> None:
+    """When the refused clip is the only clip seen, the reply says no other clip has been seen."""
+    ctx = _context()
+    ctx.ledger.add([_segment(1, clip=AUDIO, media_hash=AUDIO_HASH)])
+
+    reply = _registry().call(tool_call("keyframes", file=AUDIO), ctx)
+
+    assert reply.text == (
+        f"Error: no keyframes are stored for '{AUDIO}'; no other clip has been seen yet, so search for one first."
+    )
 
 
 def test_an_unknown_clip_before_any_clip_was_seen_says_to_search_first() -> None:
