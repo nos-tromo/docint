@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentResult
 from docint.agents.assessment.split import LabelledAnswer, compose_labelled_answer
 from docint.agents.context import TurnContext as AgentTurnContext
+from docint.agents.turn.history import ConversationTurn
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
 from docint.core.retrieval.evidence import EveryChildQuery
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
@@ -136,6 +137,20 @@ def _load_trail(raw: str | None) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return trail if isinstance(trail, dict) else None
+
+
+def _evidence_chars(raw: str | None) -> int | None:
+    """Read where a turn's source-backed part ends from its persisted trail.
+
+    Args:
+        raw (str | None): The stored trail JSON, or ``None`` on a lookup turn.
+
+    Returns:
+        int | None: The recorded boundary, or ``None`` when the trail has none.
+    """
+    trail = _load_trail(raw)
+    evidence_chars = trail.get("evidence_chars") if trail else None
+    return evidence_chars if isinstance(evidence_chars, int) else None
 
 
 class SessionCollectionMismatchError(Exception):
@@ -1560,13 +1575,49 @@ class SessionManager:
             turn = s.query(Turn).filter_by(conversation_id=session_id).order_by(Turn.idx.desc()).first()
             if turn is None or not (turn.model_response or "").strip():
                 return None
-            trail = _load_trail(turn.agent_trail)
-            evidence_chars = trail.get("evidence_chars") if trail else None
             return PriorTurn(
                 user_text=(turn.user_text or "").strip(),
                 assistant_text=turn.model_response.strip(),
-                evidence_chars=evidence_chars if isinstance(evidence_chars, int) else None,
+                evidence_chars=_evidence_chars(turn.agent_trail),
             )
+
+    def get_conversation(self, session_id: str, owner: str | None) -> tuple[list[ConversationTurn], str]:
+        """Read a session the caller owns as the agent loop's conversation.
+
+        Reads only the turns' text and trails and the rolling summary, never their
+        citations or stored reasoning. The window built from it keeps its own bounds,
+        so this returns everything stored: the summary grows by appending, so its end
+        is the newest part.
+
+        Args:
+            session_id (str): The ID of the session.
+            owner (str | None): The principal requesting it; ``None`` matches
+                legacy un-owned rows.
+
+        Returns:
+            tuple[list[ConversationTurn], str]: Every turn, oldest first, with where an
+            assessment's source-backed part ends, and the rolling summary; both empty
+            for a new, missing or foreign session.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return [], ""
+            rows = (
+                s.query(Turn.user_text, Turn.model_response, Turn.agent_trail)
+                .filter(Turn.conversation_id == session_id)
+                .order_by(Turn.idx)
+                .all()
+            )
+            turns = [
+                ConversationTurn(
+                    user_text=(user_text or "").strip(),
+                    assistant_text=(model_response or "").strip(),
+                    evidence_chars=_evidence_chars(agent_trail),
+                )
+                for user_text, model_response, agent_trail in rows
+            ]
+            return turns, (cast(str | None, conv.rolling_summary) or "").strip()
 
     def _pinned_collection_scope(self, conv: Conversation) -> AbstractContextManager[Any]:
         """Bind the collection a conversation was pinned to on creation.

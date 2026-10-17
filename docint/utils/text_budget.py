@@ -95,6 +95,53 @@ def fit_with_marker(text: str, allowance: int) -> tuple[str, bool]:
     return (f"{text[:allowance]}{_marker(len(text) - allowance, len(text))}", True)
 
 
+def _word_tail(text: str, allowance: int) -> str:
+    """Take the last characters of a text, leaving out a word they would open in the middle of.
+
+    Args:
+        text (str): The full text, longer than ``allowance``.
+        allowance (int): Characters it may show.
+
+    Returns:
+        str: At most ``allowance`` characters from the end, none of them leading whitespace.
+    """
+    if allowance <= 0:
+        return ""
+    start = len(text) - allowance
+    tail = text[start:]
+    if not text[start - 1].isspace() and not text[start].isspace():
+        _, *rest = tail.split(None, 1)
+        tail = rest[0] if rest else tail
+    return tail.lstrip()
+
+
+def fit_tail_with_marker(text: str, allowance: int) -> tuple[str, bool]:
+    """Trim a text to its allowance, keeping its end and marking how much was withheld.
+
+    For a text that grows by appending, the end is the newest part. Whole lines are
+    kept from the end while they fit; when not even the last one does, its end is
+    shown from the first full word in it. The marker leads, on a line of its own, and
+    like :func:`fit_with_marker`'s comes on top of the allowance.
+
+    Args:
+        text (str): The full text.
+        allowance (int): Characters it may show, the marker excluded.
+
+    Returns:
+        tuple[str, bool]: The rendered text and whether it was trimmed.
+    """
+    if len(text) <= allowance:
+        return (text, False)
+    kept = ""
+    for line in reversed(text.splitlines(keepends=True)):
+        if len(kept) + len(line) > allowance:
+            break
+        kept = line + kept
+    shown = kept.lstrip() or _word_tail(text, allowance)
+    marker = _marker(len(text) - len(shown), len(text))
+    return (f"{marker}\n{shown}" if shown else marker, True)
+
+
 def merge_spans(spans: Sequence[Sequence[int]], length: int) -> list[tuple[int, int]]:
     """Clip spans to a text, drop the empty ones, and merge those that overlap or touch.
 

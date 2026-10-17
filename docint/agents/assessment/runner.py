@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import itertools
-import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -29,10 +28,11 @@ from docint.agents.assessment.ledger import (
     is_context_overflow,
     render_context,
 )
-from docint.agents.assessment.split import ASSESSMENT_RULE, SentinelStreamSplitter, neutralize_sentinel
+from docint.agents.assessment.split import SentinelStreamSplitter
+from docint.agents.turn import history
+from docint.agents.turn.history import ANSWER_ASSESSMENT_LABEL, ANSWER_SOURCED_LABEL, labelled_lines, split_answer
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.utils.embed_chunking import estimate_tokens
-from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.prompt_loader import load_localized_prompt
 from docint.utils.text_budget import allocate_shortest_first, fit_with_marker
 
@@ -60,18 +60,13 @@ An earlier assessment's two parts share it.
 """
 
 #: How the prior-turn block labels the two parts of an earlier assessment.
-PRIOR_SOURCED_LABEL = "Previous assistant answer, source-backed part (its [n] refer to the previous turn's sources)"
-PRIOR_ASSESSMENT_LABEL = "Previous assistant answer, the model's own assessment"
+PRIOR_SOURCED_LABEL = f"{ANSWER_SOURCED_LABEL} (its [n] refer to the previous turn's sources)"
+PRIOR_ASSESSMENT_LABEL = ANSWER_ASSESSMENT_LABEL
 
-#: Longest history-resolved rewrite, in characters, that research and the answer step are shown.
-RESOLVED_QUESTION_CHARS = 1000
-#: How the question block labels that rewrite.
-RESOLVED_QUESTION_LABEL = (
-    "Resolved from earlier turns by a search rewrite (may repeat earlier answers, the model's own assessments "
-    "included; not a source, never cite it)"
-)
-#: A bracketed citation number, list or range (hyphen or en dash), as an earlier answer cites its sources.
-_CITATION_NUMBERS_RE = re.compile(r"\[\s*\d+(?:\s*[,;\u2013-]\s*\d+)*\s*\]")
+# Moved to turn/history.py; re-exported until this module is deleted.
+RESOLVED_QUESTION_CHARS = history.RESOLVED_QUESTION_CHARS
+RESOLVED_QUESTION_LABEL = history.RESOLVED_QUESTION_LABEL
+question_block = history.question_block
 
 
 class AssessmentDoesNotFit(ValueError):
@@ -166,14 +161,13 @@ def _prior_answer(prior_turn: PriorTurn) -> str:
     Returns:
         str: One labelled line per part shown.
     """
-    text, cut = prior_turn.assistant_text, prior_turn.evidence_chars
-    aligned = cut is not None and 0 <= cut <= len(text) and (cut == 0 or text.startswith(ASSESSMENT_RULE, cut))
-    parts = (text[:cut], text[cut:].removeprefix(ASSESSMENT_RULE)) if aligned else ("", "")
+    text = prior_turn.assistant_text
+    parts = split_answer(text, prior_turn.evidence_chars)
     if not any(parts):
         return f"Previous assistant answer: {fit_with_marker(text, PRIOR_ANSWER_CHARS)[0]}"
     shares = allocate_shortest_first([len(part) for part in parts], PRIOR_ANSWER_CHARS)
-    labelled = zip((PRIOR_SOURCED_LABEL, PRIOR_ASSESSMENT_LABEL), parts, shares, strict=True)
-    return "\n".join(f"{label}: {fit_with_marker(part, share)[0]}" for label, part, share in labelled if part)
+    shown = [fit_with_marker(part, share)[0] for part, share in zip(parts, shares, strict=True)]
+    return labelled_lines((PRIOR_SOURCED_LABEL, PRIOR_ASSESSMENT_LABEL), shown)
 
 
 def prior_turn_block(prior_turn: PriorTurn | None) -> str:
@@ -190,49 +184,6 @@ def prior_turn_block(prior_turn: PriorTurn | None) -> str:
     if prior_turn is None:
         return "(no prior turn)"
     return f"Previous user question: {prior_turn.user_text}\n{_prior_answer(prior_turn)}"
-
-
-def question_block(question: str, resolved: str | None) -> str:
-    """Render the question as research and the answer step are shown it.
-
-    The search rewrite a lookup answers from can carry what the conversation
-    settled before the last exchange, such as a constraint set two turns
-    earlier. It is model output, so it is shown sanitized: reasoning blocks and
-    bracketed citation numbers, which point at an earlier turn's sources, are
-    dropped, its whitespace collapses onto one line, sentinels are defused, and
-    it is cut to ``RESOLVED_QUESTION_CHARS`` with a marker.
-
-    Args:
-        question (str): The user's message, verbatim.
-        resolved (str | None): The history-resolved search rewrite, if any.
-
-    Returns:
-        str: The stripped question, then one line labelled ``RESOLVED_QUESTION_LABEL``
-        carrying the sanitized rewrite; the question alone when there is no rewrite,
-        nothing of it is left, or it holds the question's words up to case, spacing,
-        punctuation and citation numbers, compared before the cut.
-    """
-    asked = question.strip()
-    if resolved is None:
-        return asked
-    visible, _ = strip_reasoning(resolved)
-    plain = neutralize_sentinel(" ".join(_CITATION_NUMBERS_RE.sub("", visible).split()))
-    if not plain or _words(plain) == _words(_CITATION_NUMBERS_RE.sub("", asked)):
-        return asked
-    sanitized, _ = fit_with_marker(plain, RESOLVED_QUESTION_CHARS)
-    return f"{asked}\n{RESOLVED_QUESTION_LABEL}: {sanitized}"
-
-
-def _words(text: str) -> list[str]:
-    """Return *text*'s words, case-folded, for comparing a rewrite with the question.
-
-    Args:
-        text (str): A question or its rewrite.
-
-    Returns:
-        list[str]: The runs of word characters in *text*, in order.
-    """
-    return re.findall(r"\w+", text.casefold())
 
 
 class AssessmentRunner:
