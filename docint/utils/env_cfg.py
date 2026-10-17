@@ -4,6 +4,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Literal, cast
 
@@ -2331,6 +2332,145 @@ def load_assessment_env(default_enabled: bool = True, default_max_steps: int = 6
     return AssessmentConfig(
         enabled=str(os.getenv("ASSESSMENT_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
         max_steps=max(0, int(os.getenv("ASSESSMENT_MAX_STEPS") or default_max_steps)),
+    )
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """Dataclass for agent-turn configuration."""
+
+    enabled: bool
+    max_rounds: int
+    time_budget_s: float
+    max_calls_per_round: int
+
+
+@cache
+def _warn_agent_setting(message: str, *args: object) -> None:
+    """Warn once per process about one unusable agent setting.
+
+    The loader runs on every chat turn, so a typo in ``.env`` would otherwise
+    log on each of them.
+
+    Args:
+        message (str): Loguru ``{}`` template.
+        *args (object): Hashable template arguments.
+    """
+    logger.warning(message, *args)
+
+
+def _agent_flag(name: str, default: bool) -> bool:
+    """Read one boolean agent setting.
+
+    Args:
+        name (str): Environment variable to read.
+        default (bool): Value used when the variable is unset, blank or unrecognized.
+
+    Returns:
+        bool: The configured flag.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    spelling = raw.lower()
+    if spelling in {"1", "true", "yes", "on"}:
+        return True
+    if spelling in {"0", "false", "no", "off"}:
+        return False
+    _warn_agent_setting("Invalid {} {!r}; using {}.", name, raw, str(default).lower())
+    return default
+
+
+def _agent_int(name: str, default: int, *, minimum: int) -> int:
+    """Read one integer agent setting, raising a value below ``minimum`` to it.
+
+    Args:
+        name (str): Environment variable to read.
+        default (int): Value used when the variable is unset, blank or not an integer.
+        minimum (int): Lower bound of the result.
+
+    Returns:
+        int: The configured value, at least ``minimum``.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _warn_agent_setting("Invalid {} {!r}; using {}.", name, raw, default)
+        return default
+    if value < minimum:
+        _warn_agent_setting("{0} {1} is below {2}; using {2}.", name, value, minimum)
+        return minimum
+    return value
+
+
+def _agent_seconds(name: str, default: float) -> float:
+    """Read one agent duration in seconds.
+
+    Zero or less would never let a turn start, and an infinite value would
+    never end one, so neither is accepted.
+
+    Args:
+        name (str): Environment variable to read.
+        default (float): Value used when the variable is unset, blank or unusable.
+
+    Returns:
+        float: The configured duration, positive and finite.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value: float | None = float(raw)
+    except ValueError:
+        value = None
+    if value is None or not math.isfinite(value) or value <= 0:
+        _warn_agent_setting("Invalid {} {!r}; using {}.", name, raw, default)
+        return default
+    return value
+
+
+def load_agent_env(
+    default_enabled: bool = True,
+    default_max_rounds: int = 6,
+    default_time_budget_s: float = 120.0,
+    default_max_calls_per_round: int = 4,
+) -> AgentConfig:
+    """Load agent-turn configuration from environment variables.
+
+    A blank variable counts as unset, and so does one that cannot be used (not a
+    number, an unrecognized flag, a time budget that is not positive and finite),
+    after one warning per process: a typo must neither fail a turn nor repeat
+    itself in the log.
+
+    Args:
+        default_enabled (bool): Whether agent turns are enabled by default.
+        default_max_rounds (int): Tool-calling rounds a turn may run when neither
+            ``AGENT_MAX_ROUNDS`` nor ``ASSESSMENT_MAX_STEPS`` is set.
+        default_time_budget_s (float): Seconds a turn may spend before the model
+            is made to answer.
+        default_max_calls_per_round (int): Tool calls the model may make in one round.
+
+    Returns:
+        AgentConfig: Parsed agent settings.
+        - enabled (bool): Whether every chat turn runs as one tool-calling agent
+          loop. Off means a plain retrieve-then-answer lookup.
+        - max_rounds (int): Upper bound on tool-calling rounds per turn; ``0``
+          allows none. Unset, it follows ``ASSESSMENT_MAX_STEPS``, the older
+          assessment setting, so a deployment that tuned that keeps its budget.
+        - time_budget_s (float): Wall-clock seconds a turn may spend before the
+          model is made to answer.
+        - max_calls_per_round (int): Most tool calls the model may make in one
+          round; at least ``1``.
+    """
+    inherited_rounds = _agent_int("ASSESSMENT_MAX_STEPS", default_max_rounds, minimum=0)
+    return AgentConfig(
+        enabled=_agent_flag("AGENT_TURNS_ENABLED", default_enabled),
+        max_rounds=_agent_int("AGENT_MAX_ROUNDS", inherited_rounds, minimum=0),
+        time_budget_s=_agent_seconds("AGENT_TIME_BUDGET_S", default_time_budget_s),
+        max_calls_per_round=_agent_int("AGENT_MAX_CALLS_PER_ROUND", default_max_calls_per_round, minimum=1),
     )
 
 
