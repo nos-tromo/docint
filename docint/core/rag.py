@@ -1710,6 +1710,28 @@ def _stamp_rerank_outcome(
     return nodes
 
 
+def _rerank_degraded(nodes: list[NodeWithScore]) -> bool:
+    """Say whether the rerank that produced ``nodes`` left their scores incomparable.
+
+    A failed rerank is fail-soft: ``VLLMRerankPostprocessor`` hands the nodes
+    back in retrieval order with their *retrieval* scores intact, so the stamp
+    from :func:`_stamp_rerank_outcome` is the only thing that says they were
+    never re-scored. A wholly unscored set is the older shape of the same
+    fault, kept for a reranker that drops scores instead. Either way, nothing
+    in the set may be measured against a reranker threshold: an image still
+    carries its CLIP cosine, which is not on that scale.
+
+    Args:
+        nodes (list[NodeWithScore]): Nodes as the rerank step returned them.
+
+    Returns:
+        bool: ``True`` when any node is stamped as not reranked or none carries a score.
+    """
+    if all(node.score is None for node in nodes):
+        return True
+    return any(node.node.metadata.get(RERANK_APPLIED_KEY) is False for node in nodes)
+
+
 class VLLMRerankPostprocessor(BaseNodePostprocessor):
     """Call a vLLM-compatible rerank endpoint and map results back to nodes."""
 
@@ -1775,7 +1797,9 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
                 needed for reranking.
 
         Returns:
-            list[NodeWithScore]: Reranked nodes, or the original order if reranking fails.
+            list[NodeWithScore]: Reranked nodes, or the original order if reranking fails
+            or there is no query to rank against. Either way the nodes are stamped with the
+            outcome (see :func:`_stamp_rerank_outcome`); an empty query reads ``empty_query``.
 
         Raises:
             ValueError: If the vLLM rerank response is malformed or has no usable results.
@@ -1787,7 +1811,7 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
 
         query_text = str(getattr(query_bundle, "query_str", "") or "").strip()
         if not query_text:
-            return self._fallback_nodes(nodes)
+            return _stamp_rerank_outcome(self._fallback_nodes(nodes), applied=False, error="empty_query")
 
         documents = [self._node_text(node) for node in nodes]
         request_url = f"{self.api_base.rstrip('/')}/rerank"
@@ -2137,6 +2161,13 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     emptied them — the turn answered from one source while a dozen text
     chunks waited behind the cut.
 
+    When the rerank degraded (:func:`_rerank_degraded`) the floor stands down:
+    the scores left on the nodes are retrieval scores, and an image's CLIP
+    cosine is not on the reranker's scale, so measuring it against ``min_score``
+    would drop the image for the scale it was scored on. No image is dropped
+    then and the set is only cut, in the order it arrived -- the fused lane
+    order, which is what keeps an outage from deleting a whole modality.
+
     Attributes:
         min_score: The reranker score an image caption must reach.
         top_n: How many nodes survive, applied after the floor. ``None``
@@ -2166,16 +2197,14 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
                 postprocessor contract.
 
         Returns:
-            list[NodeWithScore]: The input minus sub-floor image nodes.
+            list[NodeWithScore]: The input minus sub-floor image nodes, cut to
+            ``top_n``. After a degraded rerank no image is gated: the input in
+            its given order, cut to ``top_n``.
         """
         if not any(node.node.metadata.get(IMAGE_LANE_METADATA_KEY) for node in nodes):
             return self._cut(nodes)
-        # ``VLLMRerankPostprocessor`` swallows its own transport errors and
-        # returns the nodes untouched, so a wholly unscored set means the
-        # rerank degraded -- not that nothing is relevant. Gating on that would
-        # blank the image lane for as long as the endpoint is down.
-        if all(node.score is None for node in nodes):
-            logger.warning("Rerank returned no scores; surfacing image sources ungated.")
+        if _rerank_degraded(nodes):
+            logger.warning("Rerank did not re-score the sources; surfacing image sources ungated.")
             return self._cut(nodes)
 
         kept: list[NodeWithScore] = []

@@ -7,6 +7,8 @@ chunk for a slot. Fusing the lane into the retriever puts image captions in
 front of the reranker and the generator like any other evidence.
 """
 
+import urllib.error
+import urllib.request
 from typing import Any
 
 import pytest
@@ -15,8 +17,12 @@ from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 from docint.core.rag import (
     IMAGE_LANE_METADATA_KEY,
     RAG,
+    RERANK_APPLIED_KEY,
+    RERANK_ERROR_KEY,
     ImageRelevanceFloorPostprocessor,
+    LazyRerankerPostprocessor,
     MultimodalRetriever,
+    VLLMRerankPostprocessor,
 )
 
 IMAGE_PAYLOAD: dict[str, Any] = {
@@ -246,18 +252,111 @@ def test_floor_never_touches_text_nodes() -> None:
 
 
 def test_floor_stands_down_when_the_rerank_degraded() -> None:
-    """An unscored set means the reranker failed, not that nothing is relevant.
+    """The legacy shape: a wholly unscored set means no rerank scored anything.
 
-    ``VLLMRerankPostprocessor`` swallows its transport errors and hands the
-    nodes back untouched, so a wholly unscored set is how a degraded rerank
-    announces itself. Applying the floor there would blank the image lane on
-    every query for as long as the rerank endpoint is down.
+    ``VLLMRerankPostprocessor`` now stamps its own failures, so this is the
+    guard for a reranker that drops scores instead. Applying the floor there
+    would blank the image lane on every query for as long as the rerank
+    endpoint is down.
     """
     nodes = [_text_node("t1", "The gate is sealed.", None), _image_node("point-77", None)]
 
     out = ImageRelevanceFloorPostprocessor(min_score=0.05)._postprocess_nodes(nodes, None)
 
     assert [n.node.node_id for n in out] == ["t1", "point-77"]
+
+
+def _unreranked(nodes: list[NodeWithScore]) -> list[NodeWithScore]:
+    """Stamp nodes the way a failed rerank leaves them.
+
+    Args:
+        nodes (list[NodeWithScore]): Nodes to mark; their scores are untouched.
+
+    Returns:
+        list[NodeWithScore]: The same nodes, carrying ``RERANK_APPLIED_KEY=False``.
+    """
+    for node in nodes:
+        node.node.metadata[RERANK_APPLIED_KEY] = False
+        node.node.metadata[RERANK_ERROR_KEY] = "rerank endpoint down"
+    return nodes
+
+
+@pytest.mark.parametrize("stamped", [(0, 1), (0,), (1,)], ids=["every-node", "text-node-only", "image-node-only"])
+def test_floor_stands_down_on_a_stamped_rerank_failure_even_with_retrieval_scores(stamped: tuple[int, ...]) -> None:
+    """A failed rerank keeps the retrieval scores; only the stamp says they are not comparable.
+
+    ``VLLMRerankPostprocessor`` falls back to the nodes it was handed, scores
+    intact, so the set is never wholly unscored. An image then carries its CLIP
+    cosine, and measuring that against a reranker threshold would drop the
+    image for the scale it was scored on. The floor sits above the CLIP band
+    here, which is the setting under which that comparison deletes the lane.
+    One stamped node is enough: the mark means the rerank did not run, wherever
+    it landed.
+    """
+    nodes = [_text_node("t1", "The gate is sealed.", 0.9), _image_node("point-77", 0.28)]
+    _unreranked([nodes[index] for index in stamped])
+
+    out = ImageRelevanceFloorPostprocessor(min_score=0.5)._postprocess_nodes(nodes, None)
+
+    assert [n.node.node_id for n in out] == ["t1", "point-77"]
+
+
+def test_a_rerank_outage_keeps_the_best_image_inside_the_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole chain, with the reranker really failing, still shows the best image.
+
+    Retrieval fuses the lanes by rank, the reranker fails the way a stopped
+    router does (scores kept, outcome stamped), and the floor must neither
+    gate the images on a score from another scale nor let its top-n cut take
+    text alone. The stamp must survive to the end, because it is what the
+    response lifts into ``rerank.applied``.
+    """
+
+    def _refuse(request: object, timeout: float) -> object:
+        raise urllib.error.URLError("rerank endpoint down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    text_hits = [
+        _text_node(f"t{n}", f"Handbook section {n}.", score)
+        for n, score in enumerate((0.8, 0.7, 0.6, 0.5, 0.4, 0.3), start=1)
+    ]
+    image_hits = [_image_node("i1", 0.28), _image_node("i2", 0.27)]
+    bundle = QueryBundle(query_str="Where is the gate?")
+    retrieved = MultimodalRetriever(
+        text_retriever=_TextRetriever(text_hits), image_lane=lambda query: image_hits
+    ).retrieve(bundle)
+    rag = RAG(qdrant_collection="testbatch")
+    rag.rerank_model_id = "stub-reranker"
+    rag._reranker = VLLMRerankPostprocessor(api_base="http://router:8000/v1", model="stub-reranker", top_n=5)
+
+    reranked = LazyRerankerPostprocessor(rag=rag, keep_all=True).postprocess_nodes(retrieved, bundle)
+    kept = ImageRelevanceFloorPostprocessor(min_score=0.5, top_n=5).postprocess_nodes(reranked, bundle)
+
+    assert len(kept) == 5
+    assert "i1" in [n.node.node_id for n in kept]
+    assert all(n.node.metadata[RERANK_APPLIED_KEY] is False for n in kept)
+
+
+@pytest.mark.parametrize(
+    "query_bundle",
+    [None, QueryBundle(query_str="   ")],
+    ids=["no-bundle", "blank-query"],
+)
+def test_an_empty_rerank_query_is_stamped_unapplied(query_bundle: QueryBundle | None) -> None:
+    """Nothing to rank against is a rerank that did not happen, and the turn must say so.
+
+    The nodes come back in retrieval order either way. Unstamped, a reranker
+    that sat in the loop and did nothing reads as one that was never there,
+    which is how the response reports a scoped turn.
+    """
+    reranker = VLLMRerankPostprocessor(api_base="http://router:8000/v1", model="stub-reranker", top_n=2)
+    nodes = [_text_node(f"t{n}", f"Handbook section {n}.", 0.9 - n / 10) for n in range(1, 4)]
+
+    out = reranker._postprocess_nodes(nodes, query_bundle)
+
+    assert [n.node.node_id for n in out] == ["t1", "t2"]
+    for node in out:
+        assert node.node.metadata[RERANK_APPLIED_KEY] is False
+        assert node.node.metadata[RERANK_ERROR_KEY] == "empty_query"
 
 
 @pytest.mark.parametrize("score", [None, 0.0])

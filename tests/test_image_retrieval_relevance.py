@@ -20,20 +20,23 @@ the reranker a second time, outside the query engine, and caught exceptions from
 that extra call. There is now a single rerank -- the one text sources already
 went through -- so an image-specific raise is no longer a distinct failure mode.
 The silent-degradation path (``VLLMRerankPostprocessor`` swallowing its own
-transport error and returning unscored nodes) is still covered below, because
-that is the one the live stack actually takes.
+transport error and returning the nodes with their retrieval scores, stamped as
+not reranked) is still covered below, because that is the one the live stack
+actually takes.
 """
 
 from __future__ import annotations
 
 import types
+import urllib.error
+import urllib.request
 from typing import Any, cast
 
 import pytest
 from _pytest.logging import LogCaptureFixture
 from llama_index.core.schema import NodeWithScore, QueryBundle
 
-from docint.core.rag import RAG, ImageRelevanceFloorPostprocessor
+from docint.core.rag import RAG, ImageRelevanceFloorPostprocessor, VLLMRerankPostprocessor
 from docint.utils.translate_client import TranslateResult
 
 
@@ -328,26 +331,24 @@ def test_captionless_images_are_dropped_rather_than_reranked_on_empty_text() -> 
     assert nodes == []
 
 
-def test_silent_rerank_fallback_does_not_blank_the_image_lane() -> None:
-    """``VLLMRerankPostprocessor`` swallows transport errors and returns nodes unscored.
+def test_silent_rerank_fallback_does_not_blank_the_image_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``VLLMRerankPostprocessor`` swallows transport errors and keeps the retrieval scores.
 
     That internal degradation must not be mistaken for "every image scored below
     the floor" — otherwise a rerank outage silently deletes all image sources.
+    The nodes come back scored (a CLIP cosine, on another scale than the floor)
+    and stamped as not reranked, so the floor is set above the CLIP band here:
+    that is the configuration in which comparing the two empties the lane.
     """
 
-    class FallbackReranker:
-        """Reranker stub reproducing ``_fallback_nodes``: original nodes, unscored."""
+    def _refuse(request: object, timeout: float) -> object:
+        raise urllib.error.URLError("rerank endpoint down")
 
-        def postprocess_nodes(self, nodes: list[NodeWithScore], query_bundle: Any = None) -> list[NodeWithScore]:
-            """Return the nodes exactly as handed in.
-
-            Args:
-                nodes: Caption nodes built from the CLIP matches.
-                query_bundle: Bundle carrying the rerank query string.
-            """
-            return [NodeWithScore(node=n.node, score=None) for n in nodes]
-
-    rag = _build_rag(image_service=StubImageService([TRANSFORMER]), reranker=FallbackReranker())
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    image_service = StubImageService([TRANSFORMER])
+    image_service.img_ingestion_config.rerank_min_score = 0.5
+    reranker = VLLMRerankPostprocessor(api_base="http://router:8000/v1", model="stub-reranker", top_n=5)
+    rag = _build_rag(image_service=image_service, reranker=reranker)
 
     sources = _lane_through_rerank(rag, "Zeig mir die Transformer-Architektur")
 
