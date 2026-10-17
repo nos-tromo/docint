@@ -769,6 +769,16 @@ def test_a_refused_first_call_is_tools_unavailable_even_when_it_must_answer() ->
     assert llm.stream_chat.call_args.kwargs["tool_choice"] == "none"
 
 
+def test_a_refusal_after_a_silent_first_round_is_raised_as_it_came() -> None:
+    """Only the first call can show the endpoint takes no tools: a later refusal, nothing shown yet, is raised as is."""
+    rejection = bad_request(TOOL_CHOICE_REJECTED)
+    llm = streaming_tool_llm([_calls(("call_a", "keyframes", {"file": "harbour_walk.webm"})), rejection])
+
+    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    assert (shown, raised) == ([], rejection)
+
+
 def test_two_idle_rounds_force_the_answer() -> None:
     """Two rounds in a row that add no passage make the model answer."""
     llm = streaming_tool_llm(
