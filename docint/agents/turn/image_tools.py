@@ -180,8 +180,9 @@ def _held_clips(ctx: ToolContext) -> dict[str, tuple[str, int]]:
 def _clips_seen(ctx: ToolContext, *, refused: str = "") -> str:
     """Name the clips the turn's passages came from, for a reply that needs a clip.
 
-    Each clip is named by its ``source_file``, in evidence order; clips that share a name
-    each carry the number of a passage from them, so the list never shows two as one.
+    Each clip is named by its ``source_file``, in evidence order; a clip whose name another
+    clip seen also carries, the refused one included, adds the number of a passage from it,
+    so a reply never shows two clips as one.
 
     Args:
         ctx (ToolContext): The turn's evidence.
@@ -198,7 +199,7 @@ def _clips_seen(ctx: ToolContext, *, refused: str = "") -> str:
     if not clips:
         other = "other " if held else ""
         return f"no {other}clip has been seen yet, so search for one first"
-    names = Counter(name for name, _ in clips)
+    names = Counter(_quoted(name) for name, _ in held.values())
     return "the clips seen so far are " + ", ".join(
         f"{name} (passage [{number}])" if names[name] > 1 else name for name, number in clips
     )

@@ -930,6 +930,18 @@ def test_the_clip_just_refused_is_not_among_the_clips_its_error_names(file: obje
     )
 
 
+def test_a_clip_sharing_the_refused_clips_name_is_named_with_a_passage() -> None:
+    """A refused audio clip and a video clip share a name; the video is offered by a passage, never by that name."""
+    ctx = _context()
+    ctx.ledger.add([_segment(1, clip=SHARED, media_hash=FIRST_HASH), _frame(0, clip=SHARED, media_hash=SECOND_HASH)])
+
+    reply = _registry().call(tool_call("keyframes", file=1), ctx)
+
+    assert reply.text == (
+        f"Error: no keyframes are stored for '{SHARED}'; the clips seen so far are '{SHARED}' (passage [2])."
+    )
+
+
 def test_a_refused_clip_that_is_the_only_one_seen_says_to_search_for_another() -> None:
     """When the refused clip is the only clip seen, the reply says no other clip has been seen."""
     ctx = _context()
