@@ -739,8 +739,12 @@ def test_keyframes_needs_a_clip(file: object) -> None:
 
 @pytest.mark.parametrize(
     ("count", "labels"),
-    [(8, [1, 2, 3, 4, 5, 6, 7, 8]), (20, [1, 4, 6, 9, 12, 15, 17, 20])],
-    ids=["eight-frames", "twenty-frames"],
+    [
+        (8, [1, 2, 3, 4, 5, 6, 7, 8]),
+        (9, [1, 2, 3, 4, 6, 7, 8, 9]),
+        (20, [1, 4, 6, 9, 12, 15, 17, 20]),
+    ],
+    ids=["eight-frames", "nine-frames", "twenty-frames"],
 )
 def test_keyframes_caps_long_clips_evenly(count: int, labels: list[int]) -> None:
     """At most eight frames are shown: a longer clip's evenly spaced, its first and last among them, the total noted.
@@ -757,11 +761,29 @@ def test_keyframes_caps_long_clips_evenly(count: int, labels: list[int]) -> None
     assert [int(label.split(" @ ")[0].removeprefix("#")) for label in _labels(reply.text)] == labels
     assert shown_numbers(reply.text) == list(range(1, 9))
     assert reply.text.endswith(
-        "\n\n20 frames in all; call keyframes(file, index) for one."
+        f"\n\n{count} frames in all; call keyframes(file, index) for one."
         if count > 8
         else f"Bild {count} am Hafen\n\nTags: hafen"
     )
     assert len(reply.text) <= ctx.budget.result_chars
+
+
+def test_an_uncaptioned_frame_is_listed_with_its_label_and_no_text() -> None:
+    """A frame the vision model said nothing about is still a frame of the clip: listed, labelled, its text empty."""
+    blank: dict[str, Any] = {**_frame_payload(0), "llm_description": "", "llm_tags": []}
+    companion = _Companion([_stored(blank), _stored(_frame_payload(1))])
+
+    reply = _registry(list_keyframes=_rag(companion)._agent_list_keyframes).call(
+        tool_call("keyframes", file=CLIP), _context()
+    )
+
+    first, second = re.split(r"\n\n(?=citation_index: )", reply.text)
+    header, _, body = first.partition("\n\n")
+    assert header.startswith("citation_index: 1\nkeyframe: #1 @ 00:00\n")
+    assert body == ""
+    assert second.startswith("citation_index: 2\nkeyframe: #2 @ 00:06\n")
+    assert CAPTIONS[1] in second
+    assert reply.found == 2
 
 
 @pytest.mark.parametrize("reasoning", [False, True], ids=["plain", "reasoning"])
