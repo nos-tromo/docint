@@ -23,18 +23,18 @@ anything, a failure goes to the caller, who can still answer another way: no mod
 ``MODEL_SLOT_WAIT_S`` raises :class:`~docint.agents.assessment.bounded.NoSlot`, the first call
 refused as sent (HTTP 400 or 422, not an overflow) raises :class:`ToolsUnavailable`, and anything
 else is raised as it came. Once the turn has shown a step or text, it ends with an
-:class:`AgentResult` unless the answer round itself fails:
+:class:`AgentResult` unless the answer round itself fails; a result always comes from an answer
+round that ran:
 
 * a round offered tools that finds no model slot within ``MODEL_SLOT_WAIT_S`` (never past the
-  time left), or whose call fails, makes the model answer (``research_failed``); text it showed
-  before breaking off is withdrawn by a note, as a round ending in calls withdraws its text;
-* the answer round waits for a model slot up to the time left, and at least ``MODEL_SLOT_WAIT_S``;
-  without one the turn ends with no answer text (``research_failed``);
+  time left), or whose model call fails, makes the model answer (``research_failed``); text it
+  showed before breaking off is withdrawn by a note, as a round ending in calls withdraws its text;
 * a round the endpoint finds too long is retried once as the answer, every tool reply cut to
   ``OVERFLOW_REPLY_SHARE`` (``context_budget``); with nothing to cut, or on a second overflow, it
   raises ``ValueError`` naming the context window;
-* any other failure of the answer round raises the error as it came: there is no answer to keep,
-  and a partial one must not pass as whole.
+* the answer round waits for a model slot up to the time left, and at least ``MODEL_SLOT_WAIT_S``;
+  without one it raises ``NoSlot``, and any other failure of it raises the error as it came: there
+  is no answer to keep, and an empty or partial one must not pass as whole.
 
 Nothing here logs a query, an answer, a tool argument or document text: only counts, tool names,
 exception types and reason tokens.
@@ -93,7 +93,8 @@ class AgentResult:
 
     Attributes:
         raw_text (str): The answer exactly as the model wrote it, sentinel included, reasoning
-            left out; empty when no answer could be written.
+            left out; empty only when the answer round wrote nothing. A result always comes from
+            an answer round that ran.
         nodes (list[NodeWithScore]): The turn's evidence numbered in ledger order: every passage
             a tool reply showed, stamped with its ``citation_index``.
         steps (int): Rounds that called tools.
@@ -331,7 +332,8 @@ class AgentLoop:
             swapped in for the sentinel, then exactly one result.
 
         Raises:
-            NoSlot: Before anything is yielded, when the first round finds no model slot.
+            NoSlot: When the first round finds no model slot, before anything is yielded, or the
+                answer round of a started turn finds none.
             ToolsUnavailable: Before anything is yielded, when the first call is refused as sent.
             ValueError: Naming the context window, when the answer does not fit even after the
                 tool replies were cut.
@@ -542,7 +544,7 @@ class AgentLoop:
             str | AgentResult: The answer text, then the result.
 
         Raises:
-            NoSlot: When no model slot comes free before anything was shown.
+            NoSlot: When no model slot comes free for the answer, whether or not anything was shown.
             ToolsUnavailable: When this is the turn's first call and it is refused as sent.
             ValueError: Naming the context window, on an overflow with nothing left to cut.
             Exception: The endpoint's error, when the answer fails.
@@ -557,12 +559,10 @@ class AgentLoop:
                 turn, [*turn.base, *turn.transcript, note], tool_choice="none", wait=wait
             )
             if streamed is None:
-                if not turn.shown:
-                    raise NoSlot
-                logger.warning("No model slot came free for an agent turn's answer; it ends without one")
-                turn.stop("research_failed")
-                yield self._result(turn, "")
-                return
+                # No answer can be written: a started turn fails as any failed answer round does.
+                if turn.shown:
+                    logger.warning("No model slot came free for an agent turn's answer")
+                raise NoSlot
             if streamed.done is not None:
                 break
             exc = cast(Exception, streamed.error)

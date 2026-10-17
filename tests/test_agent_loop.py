@@ -910,26 +910,24 @@ def test_an_answer_round_waits_at_least_the_usual_slot_wait_once_the_time_is_up(
     assert result.reason == "time_budget"
 
 
-def test_a_final_round_without_a_model_slot_ends_the_turn_without_an_answer() -> None:
-    """A started turn that cannot get a model slot for its answer still ends with a result, its steps kept."""
+def test_a_started_turn_without_a_model_slot_for_its_answer_raises() -> None:
+    """An answer round that gets no model slot fails the turn as any failed answer does: no result passes as one."""
     slots = _Granting(True, False, False)
     llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"))])
-
-    progress, texts, result = _drain(
-        _turn(
-            _loop(
-                llm,
-                _documents(QuerySearch({"Programm": [programme_passage()]})),
-                model_slots=slots,
-                clock=lambda: 0.0,
-            )
-        )
+    loop = _loop(
+        llm,
+        _documents(QuerySearch({"Programm": [programme_passage()]})),
+        model_slots=slots,
+        clock=lambda: 0.0,
     )
 
-    assert (texts, llm.stream_chat.call_count) == ([], 1)
-    assert _steps(progress) == [("search", "Programm", 1)]
-    assert (result.raw_text, result.reason, result.steps) == ("", "research_failed", 1)
-    assert result.actions == [{"action": "search", "detail": "Programm", "found": 1}]
+    shown, raised = _until_raised(_turn(loop))
+
+    assert (type(raised), llm.stream_chat.call_count) == (NoSlot, 1)
+    assert _steps(item for item in shown if isinstance(item, AgentProgress)) == [("search", "Programm", 1)]
+    assert not any(isinstance(item, (str, AgentResult)) for item in shown)
+    # The answer round still waits the time left, at least the usual wait, before it gives up.
+    assert slots.waits == [MODEL_SLOT_WAIT_S, MODEL_SLOT_WAIT_S, 120.0]
 
 
 def test_a_round_holds_its_model_slot_while_it_streams_and_gives_it_back() -> None:
