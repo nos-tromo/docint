@@ -1,4 +1,4 @@
-"""The tools an agent turn offers the model, and the registry that answers every call it makes.
+"""The registry that answers every tool call an agent turn makes, and its ``search`` and ``read`` tools.
 
 Every reply is text the model can read. A search shows the passages new to the turn under
 the numbers the answer cites them by, names the passages it showed before by number alone
@@ -7,15 +7,20 @@ for; those stay unnumbered, so every number the model can cite was shown to it. 
 shows one passage again, as much of it as one reply holds. A call the registry cannot run
 (a tool the turn does not offer, arguments that are not a JSON object) gets an error reply
 saying what to call instead, and a call made before is answered by number from memory,
-never run again; a read only while its passage is unchanged.
+never run again; a read only while its passage is unchanged. The image tools,
+``search_images`` and ``keyframes``, live in :mod:`docint.agents.turn.image_tools`.
 
 A call is answered in two steps, so a turn can run the I/O of several calls at once:
-:meth:`ToolRegistry.prepare` checks a call and answers it at once (an error, or a call made
-before) or returns the work it needs, and :meth:`ToolRegistry.finish` admits and renders.
-Only a prepared call's ``fetch``, its I/O, is meant to run off the loop thread: it reads
-neither the turn's context nor its ledger. Nothing else here is thread-safe, so ``prepare``
-and ``finish`` run on the loop thread, each in the order the model made the calls.
-:meth:`ToolRegistry.call` does the steps one after another.
+:meth:`ToolRegistry.prepare` checks a call and either answers it at once (an error, or a
+call made before whose answer no later growth can change, such as a search's) or returns
+the work it needs, and :meth:`ToolRegistry.finish` admits and renders. A read made before
+is decided at ``finish``, once the calls before it in its round have run, since one of them
+may grow its passage. A tool may read the turn's evidence while its call is prepared, as it
+stood when the round's calls were prepared: a passage number names an entry there, and one
+the same round admits is not there yet. Only a prepared call's ``fetch``, its I/O, is meant
+to run off the loop thread: it reads neither the turn's context nor its ledger. Nothing else
+here is thread-safe, so ``prepare`` and ``finish`` run on the loop thread, each in the order
+the model made the calls. :meth:`ToolRegistry.call` does the steps one after another.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from loguru import logger
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import TurnBudget
-from docint.agents.turn.passages import answer_passages, refs, render_entry
+from docint.agents.turn.passages import SEARCH_HINT, answer_passages, refs, render_entry
 from docint.agents.turn.stream import ToolCall
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -176,13 +181,16 @@ class Tool(Protocol):
     description: str
     parameters: dict[str, Any]
 
-    def prepare(self, arguments: Mapping[str, Any]) -> ToolReply | ToolWork:
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
         """Check a call's arguments and say what answering it takes.
 
-        Reads neither the turn's context nor its ledger, which it is not given.
+        Runs on the loop thread, in call order. It may read the turn's evidence as it stood
+        when the round's calls were prepared, such as the entry a passage number names;
+        it never writes the context, whose memory the registry keeps.
 
         Args:
             arguments (Mapping[str, Any]): The call's arguments, parsed from JSON.
+            ctx (ToolContext): The turn's context, to read only.
 
         Returns:
             ToolReply | ToolWork: An error reply when the arguments will not do, which is
@@ -205,7 +213,7 @@ def error_reply(action: str, message: str, *, detail: str = "") -> ToolReply:
     return ToolReply(text=f"Error: {message}", found=0, action=action, detail=detail)
 
 
-def _detail(value: Any) -> str:
+def trail_detail(value: Any) -> str:
     """Render a call's main argument as the trail shows it.
 
     Args:
@@ -220,7 +228,15 @@ def _detail(value: Any) -> str:
     return " ".join(text.split())[:DETAIL_CHARS]
 
 
-def passage_reply(found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str, detail: str) -> PassageReply:
+def passage_reply(
+    found: Iterable[NodeWithScore],
+    ctx: ToolContext,
+    *,
+    action: str,
+    detail: str,
+    hint: str = SEARCH_HINT,
+    note: str = "",
+) -> PassageReply:
     """Answer a call with what its search found (see :func:`~docint.agents.turn.passages.answer_passages`).
 
     Args:
@@ -228,14 +244,40 @@ def passage_reply(found: Iterable[NodeWithScore], ctx: ToolContext, *, action: s
         ctx (ToolContext): The turn's evidence, budget and LLM view.
         action (str): The calling tool's name, for the trail.
         detail (str): The call's main argument, for the trail.
+        hint (str): What the reply suggests for matching passages it had no room for.
+        note (str): A note of the calling tool's own, after the others; empty for none.
 
     Returns:
         PassageReply: The passages new to the turn under their numbers, the ones shown
         before named by number, and the notes; ``found`` counts what was admitted or extended.
     """
-    rendered = answer_passages(found, ctx, action=action)
+    rendered = answer_passages(found, ctx, action=action, hint=hint, note=note)
     return PassageReply(
         text=rendered.text, found=rendered.found, action=action, detail=detail, numbers=rendered.numbers
+    )
+
+
+def search_work(name: str, raw: Any, search: SearchFn, *, missing: str) -> ToolReply | ToolWork:
+    """Check a search's words: the search is the call's fetch, and :func:`passage_reply` its answer.
+
+    Args:
+        name (str): The calling tool's name.
+        raw (Any): The words as the model sent them.
+        search (SearchFn): Runs the search with the words, on one line and cut to ``MAX_QUERY_CHARS``.
+        missing (str): The error to answer with when there are no words to search for.
+
+    Returns:
+        ToolReply | ToolWork: An error reply when the words are missing, blank or not
+        text; otherwise the search to run and the answer to give with what it found.
+    """
+    query = " ".join(raw.split())[:MAX_QUERY_CHARS] if isinstance(raw, str) else ""
+    if not query:
+        return error_reply(name, missing, detail=trail_detail(raw))
+    detail = trail_detail(query)
+    return ToolWork(
+        detail=detail,
+        fetch=functools.partial(search, query),
+        answer=functools.partial(passage_reply, action=name, detail=detail),
     )
 
 
@@ -254,31 +296,26 @@ class SearchTool:
         self.parameters = copy.deepcopy(SEARCH_PARAMETERS)
         self._search = search
 
-    def prepare(self, arguments: Mapping[str, Any]) -> ToolReply | ToolWork:
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
         """Check the query; the search is the call's fetch, and :func:`passage_reply` its answer.
 
         Args:
             arguments (Mapping[str, Any]): ``query``, the words to look for.
+            ctx (ToolContext): Unused; a search needs nothing of the evidence to start.
 
         Returns:
             ToolReply | ToolWork: An error reply when the query is missing, blank or not
             text; otherwise the search to run and the answer to give with what it found.
         """
-        raw = arguments.get("query")
-        query = " ".join(raw.split())[:MAX_QUERY_CHARS] if isinstance(raw, str) else ""
-        if not query:
-            return error_reply(
-                self.name, "search needs a query: a few specific words to look for.", detail=_detail(raw)
-            )
-        detail = _detail(query)
-        return ToolWork(
-            detail=detail,
-            fetch=functools.partial(self._search, query),
-            answer=functools.partial(passage_reply, action=self.name, detail=detail),
+        return search_work(
+            self.name,
+            arguments.get("query"),
+            self._search,
+            missing="search needs a query: a few specific words to look for.",
         )
 
 
-def _passage_number(value: Any) -> int | None:
+def passage_number(value: Any) -> int | None:
     """Read a passage number as a model may write it.
 
     Args:
@@ -298,6 +335,22 @@ def _passage_number(value: Any) -> int | None:
     return value if 0 < value < _NUMBER_LIMIT else None
 
 
+def passage_range(held: int) -> str:
+    """Name the passage numbers the evidence holds, for a reply to a number it does not.
+
+    Args:
+        held (int): How many passages the evidence holds.
+
+    Returns:
+        str: ``the passages run from [1] to [n]``, or the wording for one passage or none.
+    """
+    if not held:
+        return "no passage has been shown yet"
+    if held == 1:
+        return "the only passage is [1]"
+    return f"the passages run from [1] to [{held}]"
+
+
 class ReadTool:
     """``read(n)``: show one passage of the turn's evidence again, as much of it as one reply holds."""
 
@@ -307,7 +360,7 @@ class ReadTool:
         self.description = READ_DESCRIPTION
         self.parameters = copy.deepcopy(READ_PARAMETERS)
 
-    def prepare(self, arguments: Mapping[str, Any]) -> ToolReply | ToolWork:
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
         """Check that ``n`` reads as a passage number; a read fetches nothing.
 
         Whether a passage of that number exists is decided at ``answer``, on the loop
@@ -315,14 +368,15 @@ class ReadTool:
 
         Args:
             arguments (Mapping[str, Any]): ``n``, the passage's number.
+            ctx (ToolContext): Unused; the number is looked up at ``answer``.
 
         Returns:
             ToolReply | ToolWork: An error reply when ``n`` is no number; otherwise the
             answer, with no fetch.
         """
         raw = arguments.get("n")
-        detail = _detail(raw)
-        number = _passage_number(raw)
+        detail = trail_detail(raw)
+        number = passage_number(raw)
         if number is None:
             return error_reply(
                 self.name, "read needs n, the number of a passage shown before, such as 3.", detail=detail
@@ -344,13 +398,7 @@ class ReadTool:
         """
         held = len(ctx.ledger)
         if not 1 <= number <= held:
-            if not held:
-                known = "no passage has been shown yet"
-            elif held == 1:
-                known = "the only passage is [1]"
-            else:
-                known = f"the passages run from [1] to [{held}]"
-            return error_reply(self.name, f"there is no passage [{number}]; {known}.", detail=detail)
+            return error_reply(self.name, f"there is no passage [{number}]; {passage_range(held)}.", detail=detail)
         text = render_entry(ctx.ledger.entries()[number - 1], number, ctx)
         return PassageReply(
             text=text, found=0, action=self.name, detail=detail, numbers=(number,), depends_on=(number,)
@@ -472,7 +520,9 @@ class PreparedCall:
         detail (str): The call's main argument, cut to ``DETAIL_CHARS``, for the trail;
             what a reply the loop writes itself, for a fetch that timed out, should show.
         reply (ToolReply | None): The answer when the call needs no work: an error, or the
-            memory of the same call earlier in the turn.
+            memory of the same call earlier in the turn when no growth of a passage can
+            change it, as for a search. A remembered read is decided at
+            :meth:`ToolRegistry.finish`, once the calls before it in its round have run.
         work (ToolWork | None): The work still to do; ``None`` exactly when ``reply`` is set.
         key (tuple[str, str] | None): The tool's name and the normalized arguments, under
             which the answer is remembered.
@@ -548,12 +598,14 @@ class ToolRegistry:
         call instead. A call made before in this turn, by tool and arguments compared on
         one line and case-folded, is answered by the numbers its answer showed or named,
         and needs no I/O; a read is left to :meth:`finish`, since an earlier call in its
-        round may still grow its passage. Otherwise the tool checks its arguments: an error
-        it finds is the answer, never remembered; else the prepared call carries its work.
+        round may still grow its passage. Otherwise the tool checks its arguments, reading
+        the evidence where it must: a passage number names an entry as the evidence stood
+        when the round's calls were prepared. An error it finds is the answer, never
+        remembered; else the prepared call carries its work.
 
         Args:
             call (ToolCall): The call as the model made it.
-            ctx (ToolContext): The turn's context; only its memory is read.
+            ctx (ToolContext): The turn's context; its memory and evidence are read, never written.
 
         Returns:
             PreparedCall: The answer, or the work to fetch and finish.
@@ -578,7 +630,7 @@ class ToolRegistry:
         remembered = _recall(key, ctx, final=False)
         if remembered is not None:
             return PreparedCall(action=tool.name, detail=remembered.detail, reply=remembered, key=key)
-        work = tool.prepare(arguments)
+        work = tool.prepare(arguments, ctx)
         if isinstance(work, ToolReply):
             return PreparedCall(action=tool.name, detail=work.detail, reply=work, key=key)
         return PreparedCall(action=tool.name, detail=work.detail, work=work, key=key)
@@ -587,11 +639,12 @@ class ToolRegistry:
         """Answer a prepared call, with what its fetch returned.
 
         Runs on the loop thread, in call order. A call answered when it was prepared keeps
-        that answer. Otherwise memory is checked again first: an identical call earlier in
-        the round, prepared beside this one, may have been answered since, and this call
-        is then answered from that memory, its own fetch discarded, never admitted again.
-        Otherwise the work's answer admits and renders, and a :class:`PassageReply` is
-        remembered.
+        that answer. Otherwise memory is checked first, now that the calls before this one
+        have finished: an identical call earlier in the round, prepared beside this one,
+        may have been answered since, and a read remembered from an earlier round is
+        decided here, while its passage is unchanged. Either way the call is answered from
+        memory, its own fetch discarded, never admitted again. Otherwise the work's answer
+        admits and renders, and a :class:`PassageReply` is remembered.
 
         Args:
             prepared (PreparedCall): The call, from :meth:`prepare`.

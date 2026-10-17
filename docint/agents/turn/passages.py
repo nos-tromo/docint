@@ -5,6 +5,8 @@ every passage the reply shows still keeps at least its floor. Passages shown bef
 by number, with their own note when they grew past what the reply could show. Sizes are in
 characters: the reply keeps within ``result_chars``, room for its notes reserved first, and
 the text of each passage within ``passage_chars``; a header shows whole up to ``HEADER_CHARS``.
+A calling tool may say what to do about the passages it had no room for, and add a note of
+its own; both are among the notes.
 
 Everything here reads or writes the turn's ledger, so it runs on the loop thread.
 """
@@ -28,6 +30,8 @@ if TYPE_CHECKING:
 HEADER_CHARS = 500
 #: What a search reply says when it found nothing the turn had not shown.
 NO_NEW_PASSAGES = "No new passages."
+#: What a search reply suggests for the matching passages it had no room for.
+SEARCH_HINT = "search with narrower words to see them"
 #: How a reply joins its passages, and its passages to the notes after them; ``render_context`` reserves it.
 _JOIN = "\n\n"
 
@@ -235,12 +239,13 @@ def _merged(windows: Sequence[NodeWithScore]) -> NodeWithScore:
     return scratch.entries()[0]
 
 
-def _left_out(count: int, *, full: bool) -> str:
+def _left_out(count: int, *, full: bool, hint: str) -> str:
     """Say how many new passages a reply did not show, and what to do about them.
 
     Args:
         count (int): How many it left out.
         full (bool): Whether the evidence was full, rather than the reply.
+        hint (str): What to do about passages the reply had no room for.
 
     Returns:
         str: One sentence.
@@ -251,10 +256,12 @@ def _left_out(count: int, *, full: bool) -> str:
             f"{count} more matching {passages} left out: the evidence holds all it can, "
             "so answer from the passages shown."
         )
-    return f"{count} more matching {passages} did not fit in this reply; search with narrower words to see them."
+    return f"{count} more matching {passages} did not fit in this reply; {hint}."
 
 
-def _trailer(*, shown: bool, again: Sequence[int], grown: Sequence[int], left_out: int, full: bool) -> str:
+def _trailer(
+    *, shown: bool, again: Sequence[int], grown: Sequence[int], left_out: int, full: bool, hint: str, note: str
+) -> str:
     """Write the notes after a search reply's passages.
 
     Args:
@@ -264,6 +271,8 @@ def _trailer(*, shown: bool, again: Sequence[int], grown: Sequence[int], left_ou
             reply had no room to show, by number.
         left_out (int): New passages the reply did not show.
         full (bool): Whether they were left out because the evidence was full.
+        hint (str): What to do about passages the reply had no room for.
+        note (str): The calling tool's own note, last; empty for none.
 
     Returns:
         str: The notes, one per line; empty when there is nothing to note.
@@ -276,11 +285,15 @@ def _trailer(*, shown: bool, again: Sequence[int], grown: Sequence[int], left_ou
     if grown:
         lines.append(f"Also matched, with new text not shown here: {refs(grown)}; read(n) shows it.")
     if left_out:
-        lines.append(_left_out(left_out, full=full))
+        lines.append(_left_out(left_out, full=full, hint=hint))
+    if note:
+        lines.append(note)
     return "\n".join(lines)
 
 
-def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str) -> RenderedPassages:
+def answer_passages(
+    found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str, hint: str = SEARCH_HINT, note: str = ""
+) -> RenderedPassages:
     """Admit what a search found into the turn's evidence and render it as one reply.
 
     Passages are taken best first, the windows of one section as one passage. A passage
@@ -297,6 +310,9 @@ def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action:
         found (Iterable[NodeWithScore]): The search's passages, best first.
         ctx (ToolContext): The turn's evidence, budget and LLM view.
         action (str): The calling tool's name, for the log line.
+        hint (str): What the reply suggests for matching passages it had no room for,
+            the end of its "did not fit in this reply" note.
+        note (str): A note of the calling tool's own, after the others; empty for none.
 
     Returns:
         RenderedPassages: The reply, what it admitted or extended, and the numbers it showed or named.
@@ -305,7 +321,10 @@ def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action:
     sections = _sections(found)
     held = [number for windows in sections if (number := ledger.number_of(windows[0].node.node_id)) is not None]
     fresh = len(sections) - len(held)
-    notes = max(len(_trailer(shown=False, again=held, grown=held, left_out=fresh, full=full)) for full in (False, True))
+    notes = max(
+        len(_trailer(shown=False, again=held, grown=held, left_out=fresh, full=full, hint=hint, note=note))
+        for full in (False, True)
+    )
     room = ctx.budget.result_chars - notes - len(_JOIN)
     shown: list[_Planned] = []
     again: list[int] = []
@@ -332,7 +351,7 @@ def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action:
                 shown.append(planned)
             else:
                 left_out += 1
-    trailer = _trailer(shown=bool(shown), again=again, grown=grown, left_out=left_out, full=full)
+    trailer = _trailer(shown=bool(shown), again=again, grown=grown, left_out=left_out, full=full, hint=hint, note=note)
     logger.debug(
         "The '{}' tool showed {} passages, named {} shown before and {} grown, and left {} out",
         action,

@@ -4762,6 +4762,34 @@ class RAG:
             limit=top_k,
         )
 
+    def _agent_search_images(self, description: str, *, qdrant_filter: Any | None = None) -> list[NodeWithScore]:
+        """Find the pictures that show a description, for an agent turn's ``search_images`` tool.
+
+        The visual target's chain up to its numbering: the two-lane visual retriever, then
+        the rerank against the description, as deep as a visual answer may look. No image
+        relevance floor: a description of what a picture shows scores the right image as
+        low on the cross-encoder as a question about the imagery does (see the visual
+        branch of :meth:`build_query_engine`). Both lanes and the rerank fail soft, so an
+        outage leaves fewer pictures, or the fused order, rather than failing the call.
+        Runs under the caller's collection scope (:meth:`collection_scope`).
+
+        Args:
+            description (str): What the picture should show.
+            qdrant_filter (Any | None): The request's compiled native filter, which the
+                image companion applies itself.
+
+        Returns:
+            list[NodeWithScore]: Caption nodes, best first; empty when nothing matched.
+        """
+        retriever = self._build_visual_retriever(
+            metadata_filter_rules=None,
+            metadata_filters_active=qdrant_filter is not None,
+            vector_store_kwargs={"qdrant_filters": qdrant_filter} if qdrant_filter is not None else None,
+        )
+        query = QueryBundle(query_str=description)
+        reranker = LazyRerankerPostprocessor(rag=self, top_n=max(self.rerank_top_n, self._visual_answer_max_images()))
+        return reranker.postprocess_nodes(retriever.retrieve(query), query_bundle=query)
+
     def _image_caption_node(self, payload: dict[str, Any], caption: str) -> NodeWithScore:
         """Wrap one image payload as a retrieval node.
 
@@ -4820,6 +4848,74 @@ class RAG:
         if not math.isfinite(seconds) or seconds < 0:
             return f"#{index + 1}"
         return f"#{index + 1} @ {format_short(seconds)}"
+
+    def _agent_list_keyframes(self, file_or_hash: str, *, qdrant_filter: Any | None = None) -> list[NodeWithScore]:
+        """List one clip's frames in time order, for an agent turn's ``keyframes`` tool.
+
+        A frame belongs to the clip when its ``source_file`` is the clip's file name or its
+        ``media_file_hash`` the clip's content hash; in the image companion only a clip's
+        frames carry either. A point counts as a frame by its ``keyframe_index``, the test
+        its label uses, which holds on the standalone and the social path alike (a social
+        frame's ``source_type`` is ``social_media``). Frames stored before keyframe indices
+        existed can be neither ordered nor labelled, so they are not listed here;
+        ``search_images`` still finds them. Thumbnails and the search text stay in the
+        store: pixels never ride a node. Runs under the caller's collection scope
+        (:meth:`collection_scope`).
+
+        Args:
+            file_or_hash (str): The clip's file name, or its content hash.
+            qdrant_filter (Any | None): The request's compiled native filter, ANDed with
+                the clip and frame conditions.
+
+        Returns:
+            list[NodeWithScore]: One caption node per frame, ordered by ``keyframe_index``;
+            empty when the collection has no image companion or the clip no frame.
+
+        Raises:
+            Exception: Whatever the store raises, so an outage fails the call rather than
+                reading as a clip without frames.
+        """
+        key = file_or_hash.strip()
+        companion = image_companion_name(self.qdrant_collection)
+        if not key or not self.qdrant_client.collection_exists(collection_name=companion):
+            return []
+        clip = qdrant_models.Filter(
+            should=[
+                qdrant_models.FieldCondition(key="source_file", match=qdrant_models.MatchValue(value=key)),
+                qdrant_models.FieldCondition(key="media_file_hash", match=qdrant_models.MatchValue(value=key)),
+            ]
+        )
+        frame = qdrant_models.Filter(
+            must_not=[qdrant_models.IsEmptyCondition(is_empty=qdrant_models.PayloadField(key="keyframe_index"))]
+        )
+        payloads = [
+            {**(point.payload or {}), "node_id": str(point.id)}
+            for page in iter_scroll(
+                self.qdrant_client,
+                collection_name=companion,
+                scroll_filter=merge_qdrant_filters(qdrant_filter, [frame, clip]),
+                with_payload=qdrant_models.PayloadSelectorExclude(exclude=list(BLOB_PAYLOAD_KEYS)),
+                with_vectors=False,
+                on_error="raise",
+            )
+            for point in page
+        ]
+        payloads.sort(key=RAG._keyframe_order)
+        return [self._image_caption_node(payload, RAG._image_caption_text(payload)) for payload in payloads]
+
+    @staticmethod
+    def _keyframe_order(payload: dict[str, Any]) -> tuple[float, str]:
+        """Order a clip's frames by their place in it, an unreadable index last.
+
+        Args:
+            payload (dict[str, Any]): A frame's payload, carrying its point id as ``node_id``.
+
+        Returns:
+            tuple[float, str]: Its ``keyframe_index``, then its point id for a stable tie.
+        """
+        index = payload.get("keyframe_index")
+        place = float(index) if isinstance(index, (int, float)) and not isinstance(index, bool) else math.inf
+        return place, str(payload.get("node_id") or "")
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.
