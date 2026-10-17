@@ -724,6 +724,7 @@ def test_a_passage_whose_matches_need_more_than_passage_chars_is_shown_within_it
     assert sorted(bodies_shown) == [1, 2]
     assert all(len(MARKER.sub("", body)) <= ctx.budget.passage_chars for body in bodies_shown.values())
     assert all(body.count(WINDOW_JOIN) == 2 for body in bodies_shown.values())
+    assert len(reply.text) <= ctx.budget.result_chars
 
 
 def test_an_extension_without_room_is_named_as_grown() -> None:

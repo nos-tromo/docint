@@ -1,12 +1,13 @@
 """The tools an agent turn offers the model, and the registry that answers every call it makes.
 
 Every reply is text the model can read. A search shows the passages new to the turn under
-the numbers the answer cites them by, names the passages it showed before by number alone,
-and says how many more matched than it had room for; those stay unnumbered, so every number
-the model can cite was shown to it. ``read(n)`` shows one passage in full. A call the
-registry cannot run (a tool the turn does not offer, arguments that are not a JSON object)
-gets an error reply saying what to call instead, and a call made before is answered by
-number from memory, never run again.
+the numbers the answer cites them by, names the passages it showed before by number alone
+(with a note of their own when they grew), and says how many more matched than it had room
+for; those stay unnumbered, so every number the model can cite was shown to it. ``read(n)``
+shows one passage again, as much of it as one reply holds. A call the registry cannot run
+(a tool the turn does not offer, arguments that are not a JSON object) gets an error reply
+saying what to call instead, and a call made before is answered by number from memory,
+never run again; a read only while its passage is unchanged.
 
 A call is answered in two steps, so a turn can run the I/O of several calls at once:
 :meth:`ToolRegistry.prepare` checks a call and answers it at once (an error, or a call made
@@ -60,7 +61,10 @@ SEARCH_PARAMETERS: dict[str, Any] = {
     "properties": {"query": {"type": "string", "description": "A few specific words to look for."}},
     "required": ["query"],
 }
-READ_DESCRIPTION = "Show the full text of passage [n], when a search showed only part of it."
+READ_DESCRIPTION = (
+    "Show the text of passage [n], one shown before, as much of it as one reply holds; "
+    "use it when a search showed only part of a passage."
+)
 READ_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {"n": {"type": "integer", "description": "The passage's number, as in [n]."}},
@@ -295,7 +299,7 @@ def _passage_number(value: Any) -> int | None:
 
 
 class ReadTool:
-    """``read(n)``: show one passage of the turn's evidence in full."""
+    """``read(n)``: show one passage of the turn's evidence again, as much of it as one reply holds."""
 
     def __init__(self) -> None:
         """Describe the tool."""
