@@ -7,10 +7,17 @@ import pkgutil
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
-from typing import Any
 
 import pytest
+from agent_fakes import (
+    PROGRAMME,
+    ScriptedSearch,
+    programme_passage,
+    shown_numbers,
+    tool_call,
+    tool_context,
+    two_phase_round,
+)
 from assessment_fakes import llm_view, scored_node, social_post
 from llama_index.core.schema import NodeWithScore
 from loguru import logger
@@ -22,21 +29,16 @@ from docint.agents.assessment.ledger import (
     MAX_LEDGER_ENTRIES,
     MIN_TEXT_CHARS,
     WINDOW_JOIN,
-    EvidenceLedger,
     passage_costs,
     passage_parts,
     stamp,
 )
-from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolContext, ToolRegistry, ToolReply
+from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, ToolReply
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
-PROGRAMME = (
-    "Das Hafenfest wurde wegen der Sturmwarnung auf Sonntag verschoben. Die Stände öffnen um zehn Uhr, Musik ab Mittag."
-)
 WEATHER = "Für Sonntag meldet der Wetterdienst bedeckten Himmel, Wind aus West und kühle Temperaturen am Hafen."
 CLIP = "Im Clip harbour_walk.webm gehen zwei Personen in Regenjacken am Hafen entlang; Person A trägt einen Schirm."
 OPENING = "Der Hafenverein lädt am Sonntag zum Hafenfest ein."
@@ -48,104 +50,16 @@ MARKER = re.compile(r"\[\.\.\. \d+ of \d+ characters not shown \.\.\.\]")
 NOTES = re.compile(r"\n\n(?:No new passages\.|Also matched, |\d+ more matching ).*\Z", re.DOTALL)
 
 
-def _budget(*, reasoning: bool = False) -> TurnBudget:
-    """Build one turn's budget at an 8k window; the tools read only its reply and passage sizes.
-
-    Args:
-        reasoning (bool): Whether the model thinks before it answers.
-
-    Returns:
-        TurnBudget: The budget.
-    """
-    return TurnBudget(
-        ctx_window=8192,
-        reasoning=reasoning,
-        char_token_ratio=3.5,
-        system_tokens=900,
-        tool_schema_tokens=630,
-        history_tokens=1300,
-        message_tokens=300,
-    )
-
-
-def _context(*, reasoning: bool = False, cap: int = MAX_LEDGER_ENTRIES) -> ToolContext:
-    """Build the context of one turn whose evidence is still empty.
-
-    Args:
-        reasoning (bool): Whether the model thinks before it answers, which shortens replies.
-        cap (int): The most passages the turn's ledger admits.
-
-    Returns:
-        ToolContext: The context.
-    """
-    return ToolContext(ledger=EvidenceLedger(cap=cap), budget=_budget(reasoning=reasoning), llm_view=llm_view)
-
-
-class _Search:
-    """A search double: each run answers with its next scripted result and records its query."""
-
-    def __init__(self, *results: list[NodeWithScore]) -> None:
-        """Hold the results, one per run.
-
-        Args:
-            *results (list[NodeWithScore]): What each run returns, in order.
-        """
-        self._results = list(results)
-        self.queries: list[str] = []
-
-    def __call__(self, query: str) -> list[NodeWithScore]:
-        """Run one search.
-
-        Args:
-            query (str): What the tool searched for.
-
-        Returns:
-            list[NodeWithScore]: The next scripted result.
-
-        Raises:
-            AssertionError: When the search runs more often than it has results.
-        """
-        self.queries.append(query)
-        if not self._results:
-            raise AssertionError("The search ran more often than its script has results.")
-        return self._results.pop(0)
-
-
-def _registry(search: _Search) -> ToolRegistry:
+def _registry(search: ScriptedSearch) -> ToolRegistry:
     """Build the registry of a documents turn: search and read.
 
     Args:
-        search (_Search): The search the search tool runs.
+        search (ScriptedSearch): The search the search tool runs.
 
     Returns:
         ToolRegistry: The registry.
     """
     return ToolRegistry([SearchTool(search), ReadTool()])
-
-
-def _call(name: str, **arguments: Any) -> ToolCall:
-    """Build one tool call as a model round sends it.
-
-    Args:
-        name (str): The tool's name.
-        **arguments (Any): The arguments, sent as JSON text.
-
-    Returns:
-        ToolCall: The call.
-    """
-    return ToolCall(id="call_0", name=name, arguments=json.dumps(arguments, ensure_ascii=False))
-
-
-def _shown(text: str) -> list[int]:
-    """Return the numbers a reply shows passages under, in reply order.
-
-    Args:
-        text (str): The reply.
-
-    Returns:
-        list[int]: Each shown passage's number.
-    """
-    return [int(number) for number in re.findall(r"^citation_index: (\d+)$", text, flags=re.MULTILINE)]
 
 
 def _bodies(text: str) -> dict[int, str]:
@@ -210,27 +124,18 @@ def _weather() -> NodeWithScore:
     return scored_node("weather", WEATHER, filename="wetterbericht_hafen.pdf", page=2)
 
 
-def _programme() -> NodeWithScore:
-    """Build the invented programme passage.
-
-    Returns:
-        NodeWithScore: The passage.
-    """
-    return scored_node("programme", PROGRAMME, filename="hafenfest_programm.pdf", page=1)
-
-
 def test_search_numbers_new_passages_and_refers_to_held_ones() -> None:
     """Passages new to the turn are shown under the next numbers; ones shown before are named by number alone."""
-    ctx = _context()
-    programme, clip = _programme(), scored_node("clip", CLIP, filename="harbour_walk.webm")
+    ctx = tool_context()
+    programme, clip = programme_passage(), scored_node("clip", CLIP, filename="harbour_walk.webm")
     ctx.ledger.add([programme, clip])
     report = _report(1, sentences=2)
-    search = _Search([_weather(), clip, programme, report])
+    search = ScriptedSearch([_weather(), clip, programme, report])
 
-    reply = _registry(search).call(_call("search", query="Hafenfest Wetter am Sonntag"), ctx)
+    reply = _registry(search).call(tool_call("search", query="Hafenfest Wetter am Sonntag"), ctx)
 
     assert search.queries == ["Hafenfest Wetter am Sonntag"]
-    assert _shown(reply.text) == [3, 4]
+    assert shown_numbers(reply.text) == [3, 4]
     assert WEATHER in reply.text
     assert report.node.get_content() in reply.text
     assert PROGRAMME not in reply.text
@@ -242,14 +147,14 @@ def test_search_numbers_new_passages_and_refers_to_held_ones() -> None:
 
 def test_a_result_never_numbers_what_it_did_not_show() -> None:
     """Passages a reply has no room to show stay unnumbered, so every number the model can cite was shown to it."""
-    ctx = _context(reasoning=True)
+    ctx = tool_context(reasoning=True)
     found = [_report(number) for number in range(1, 7)]
 
-    reply = _registry(_Search(found)).call(_call("search", query="Hafenverein Planung"), ctx)
+    reply = _registry(ScriptedSearch(found)).call(tool_call("search", query="Hafenverein Planung"), ctx)
 
     admitted = len(ctx.ledger)
     assert 0 < admitted < len(found)
-    assert _shown(reply.text) == list(range(1, admitted + 1))
+    assert shown_numbers(reply.text) == list(range(1, admitted + 1))
     assert all(ctx.ledger.number_of(scored.node.node_id) is None for scored in found[admitted:])
     assert reply.found == admitted
     assert reply.text.endswith(
@@ -263,13 +168,13 @@ def test_a_result_never_numbers_what_it_did_not_show() -> None:
 
 def test_an_extended_window_keeps_its_number() -> None:
     """A later window of a section shown before extends it under the same number, listed by number before a new one."""
-    ctx = _context()
-    registry = _registry(_Search([_window(OPENING)], [_weather(), _window(CLOSING)]))
-    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([_window(OPENING)], [_weather(), _window(CLOSING)]))
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
 
-    reply = registry.call(_call("search", query="Band am Kai"), ctx)
+    reply = registry.call(tool_call("search", query="Band am Kai"), ctx)
 
-    assert _shown(reply.text) == [1, 2]
+    assert shown_numbers(reply.text) == [1, 2]
     assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in reply.text
     assert WEATHER in reply.text
     assert (reply.found, len(ctx.ledger), ctx.ledger.number_of("programme-2")) == (2, 2, 1)
@@ -277,16 +182,16 @@ def test_an_extended_window_keeps_its_number() -> None:
 
 def test_read_returns_the_full_text_of_a_cut_passage() -> None:
     """A search shows a long passage cut to its share; read(n) shows all of it under the same number."""
-    ctx = _context()
+    ctx = tool_context()
     passage = _report(1, sentences=30)
     full_text = passage.node.get_content()
-    registry = _registry(_Search([passage]))
-    found = registry.call(_call("search", query="Hafenverein"), ctx)
+    registry = _registry(ScriptedSearch([passage]))
+    found = registry.call(tool_call("search", query="Hafenverein"), ctx)
     assert MARKER.search(found.text)
 
-    reply = registry.call(_call("read", n=1), ctx)
+    reply = registry.call(tool_call("read", n=1), ctx)
 
-    assert _shown(reply.text) == [1]
+    assert shown_numbers(reply.text) == [1]
     assert full_text in reply.text
     assert not MARKER.search(reply.text)
     assert (reply.found, reply.action, reply.detail) == (0, "read", "1")
@@ -296,14 +201,14 @@ def test_read_returns_the_full_text_of_a_cut_passage() -> None:
 
 def test_a_repeated_call_is_answered_not_rerun() -> None:
     """The same search again, spaced or cased otherwise, is answered from memory by every number it showed or named."""
-    ctx = _context()
+    ctx = tool_context()
     clip = scored_node("clip", CLIP, filename="harbour_walk.webm")
     ctx.ledger.add([clip])
-    search = _Search([_programme(), clip, _weather()])
+    search = ScriptedSearch([programme_passage(), clip, _weather()])
     registry = _registry(search)
-    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
 
-    again = registry.call(_call("search", query="  hafenfest   SONNTAG "), ctx)
+    again = registry.call(tool_call("search", query="  hafenfest   SONNTAG "), ctx)
 
     assert search.queries == ["Hafenfest Sonntag"]
     assert again.text == "Already called search with these arguments; see [1], [2], [3]."
@@ -318,13 +223,13 @@ def test_a_repeated_call_that_showed_nothing_says_so(full: bool) -> None:
     Args:
         full (bool): Whether the evidence is already full and the search finds new passages.
     """
-    ctx = _context(cap=1)
+    ctx = tool_context(cap=1)
     if full:
         ctx.ledger.add([scored_node("clip", CLIP, filename="harbour_walk.webm")])
-    registry = _registry(_Search([_programme(), _weather()] if full else []))
-    first = registry.call(_call("search", query="Feuerwerk am Kai"), ctx)
+    registry = _registry(ScriptedSearch([programme_passage(), _weather()] if full else []))
+    first = registry.call(tool_call("search", query="Feuerwerk am Kai"), ctx)
 
-    again = registry.call(_call("search", query="Feuerwerk am Kai"), ctx)
+    again = registry.call(tool_call("search", query="Feuerwerk am Kai"), ctx)
 
     assert first.text == (
         "2 more matching passages left out: the evidence holds all it can, so answer from the passages shown."
@@ -341,8 +246,8 @@ def test_an_unoffered_tool_gets_an_error_reply(name: str) -> None:
     Args:
         name (str): The tool the model called.
     """
-    ctx = _context()
-    search = _Search()
+    ctx = tool_context()
+    search = ScriptedSearch()
     call = ToolCall(id="call_0", name=name, arguments='{"description": "Zwei Personen in Regenjacken am Hafen"}')
 
     reply = _registry(search).call(call, ctx)
@@ -372,8 +277,8 @@ def test_malformed_arguments_get_an_error_reply(name: str, arguments: str, examp
         arguments (str): The raw arguments the model sent.
         example (str): The form the reply shows, from the tool's schema.
     """
-    ctx = _context()
-    search = _Search()
+    ctx = tool_context()
+    search = ScriptedSearch()
 
     reply = _registry(search).call(ToolCall(id="call_0", name=name, arguments=arguments), ctx)
 
@@ -406,8 +311,8 @@ def test_a_call_missing_its_argument_gets_the_tools_own_error(name: str, argumen
         arguments (str): The raw arguments the model sent.
         expected (str): The reply.
     """
-    ctx = _context()
-    search = _Search()
+    ctx = tool_context()
+    search = ScriptedSearch()
 
     reply = _registry(search).call(ToolCall(id="call_0", name=name, arguments=arguments), ctx)
 
@@ -415,39 +320,23 @@ def test_a_call_missing_its_argument_gets_the_tools_own_error(name: str, argumen
     assert search.queries == []
 
 
-def _two_phase(registry: ToolRegistry, calls: Sequence[ToolCall], ctx: ToolContext) -> list[ToolReply]:
-    """Answer calls as a turn with parallel calls does: all prepared in order, all fetched, then all finished in order.
-
-    Args:
-        registry (ToolRegistry): The turn's tools.
-        calls (Sequence[ToolCall]): One round's calls, in the order the model made them.
-        ctx (ToolContext): The turn's context.
-
-    Returns:
-        list[ToolReply]: One reply per call, in call order.
-    """
-    prepared = [registry.prepare(call, ctx) for call in calls]
-    fetched = [None if ready.fetch is None else ready.fetch() for ready in prepared]
-    return [registry.finish(ready, result, ctx) for ready, result in zip(prepared, fetched, strict=True)]
-
-
 def test_a_two_phase_run_answers_as_call_does() -> None:
     """Preparing a round's calls, fetching, then finishing them in call order answers as calling them one by one."""
     calls = [
-        _call("search", query="Hafenfest"),
-        _call("search", query="Wetter am Sonntag"),
-        _call("read", n=1),
-        _call("read", n=7),
-        _call("search", query="   "),
+        tool_call("search", query="Hafenfest"),
+        tool_call("search", query="Wetter am Sonntag"),
+        tool_call("read", n=1),
+        tool_call("read", n=7),
+        tool_call("search", query="   "),
         ToolCall(id="call_5", name="browse", arguments="{}"),
         ToolCall(id="call_6", name="read", arguments='{"n": 1'),
     ]
-    results = ([_programme(), _window(OPENING)], [_weather(), _programme()])
-    sequential_ctx, phased_ctx = _context(), _context()
-    one_by_one = _registry(_Search(*results))
+    results = ([programme_passage(), _window(OPENING)], [_weather(), programme_passage()])
+    sequential_ctx, phased_ctx = tool_context(), tool_context()
+    one_by_one = _registry(ScriptedSearch(*results))
 
     sequential = [one_by_one.call(call, sequential_ctx) for call in calls]
-    phased = _two_phase(_registry(_Search(*results)), calls, phased_ctx)
+    phased = two_phase_round(_registry(ScriptedSearch(*results)), calls, phased_ctx)
 
     assert phased == sequential
     for ctx in (phased_ctx, sequential_ctx):
@@ -456,14 +345,14 @@ def test_a_two_phase_run_answers_as_call_does() -> None:
 
 def test_two_identical_calls_prepared_together_are_admitted_once() -> None:
     """Both pass prepare and fetch; the second is answered from what the first's finish remembered."""
-    ctx = _context()
-    search = _Search([_programme(), _weather()], [_programme(), _weather()])
-    calls = [_call("search", query="Hafenfest Sonntag"), _call("search", query="hafenfest  SONNTAG")]
+    ctx = tool_context()
+    search = ScriptedSearch([programme_passage(), _weather()], [programme_passage(), _weather()])
+    calls = [tool_call("search", query="Hafenfest Sonntag"), tool_call("search", query="hafenfest  SONNTAG")]
 
-    first, second = _two_phase(_registry(search), calls, ctx)
+    first, second = two_phase_round(_registry(search), calls, ctx)
 
     assert search.queries == ["Hafenfest Sonntag", "hafenfest SONNTAG"]
-    assert (_shown(first.text), first.found) == ([1, 2], 2)
+    assert (shown_numbers(first.text), first.found) == ([1, 2], 2)
     assert (second.text, second.found) == ("Already called search with these arguments; see [1], [2].", 0)
     assert len(ctx.ledger) == 2
 
@@ -483,8 +372,8 @@ def test_a_call_answered_at_prepare_needs_no_io(call: ToolCall) -> None:
     Args:
         call (ToolCall): The call the model made.
     """
-    ctx = _context()
-    search = _Search()
+    ctx = tool_context()
+    search = ScriptedSearch()
     registry = _registry(search)
 
     prepared = registry.prepare(call, ctx)
@@ -496,12 +385,12 @@ def test_a_call_answered_at_prepare_needs_no_io(call: ToolCall) -> None:
 
 def test_a_prepare_that_hits_memory_needs_no_io() -> None:
     """A call answered before in the turn is answered when it is prepared, without fetching again."""
-    ctx = _context()
-    search = _Search([_programme()])
+    ctx = tool_context()
+    search = ScriptedSearch([programme_passage()])
     registry = _registry(search)
-    registry.call(_call("search", query="Hafenfest"), ctx)
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
 
-    prepared = registry.prepare(_call("search", query="HAFENFEST"), ctx)
+    prepared = registry.prepare(tool_call("search", query="HAFENFEST"), ctx)
 
     assert prepared.fetch is None
     assert registry.finish(prepared, None, ctx).text == "Already called search with these arguments; see [1]."
@@ -510,24 +399,24 @@ def test_a_prepare_that_hits_memory_needs_no_io() -> None:
 
 def test_read_has_no_io_step() -> None:
     """A read fetches nothing; its range check and render happen at finish, after the calls before it."""
-    ctx = _context()
-    registry = _registry(_Search([_programme()]))
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage()]))
 
-    prepared = registry.prepare(_call("read", n=1), ctx)
-    registry.call(_call("search", query="Hafenfest"), ctx)
+    prepared = registry.prepare(tool_call("read", n=1), ctx)
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
     reply = registry.finish(prepared, None, ctx)
 
     assert prepared.fetch is None
-    assert _shown(reply.text) == [1]
+    assert shown_numbers(reply.text) == [1]
     assert PROGRAMME in reply.text
 
 
 def test_a_prepared_call_carries_what_the_trail_shows() -> None:
     """The loop answers a call whose fetch timed out itself, so a prepared call names its action and argument."""
-    ctx = _context()
-    registry = _registry(_Search())
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch())
 
-    search = registry.prepare(_call("search", query="  Hafenfest   Sonntag "), ctx)
+    search = registry.prepare(tool_call("search", query="  Hafenfest   Sonntag "), ctx)
     unoffered = registry.prepare(ToolCall(id="call_1", name="browse", arguments="{}"), ctx)
 
     assert (search.action, search.detail, search.fetch is not None) == ("search", "Hafenfest Sonntag", True)
@@ -536,7 +425,7 @@ def test_a_prepared_call_carries_what_the_trail_shows() -> None:
 
 def test_a_failed_search_propagates_and_is_not_remembered() -> None:
     """A search that raises fails its call and leaves nothing remembered, so the same call runs again."""
-    ctx = _context()
+    ctx = tool_context()
     runs: list[str] = []
 
     def flaky(query: str) -> list[NodeWithScore]:
@@ -554,20 +443,20 @@ def test_a_failed_search_propagates_and_is_not_remembered() -> None:
         runs.append(query)
         if len(runs) == 1:
             raise TimeoutError("The invented search timed out.")
-        return [_programme()]
+        return [programme_passage()]
 
     registry = ToolRegistry([SearchTool(flaky), ReadTool()])
     with pytest.raises(TimeoutError):
-        registry.call(_call("search", query="Hafenfest"), ctx)
+        registry.call(tool_call("search", query="Hafenfest"), ctx)
 
-    reply = registry.call(_call("search", query="Hafenfest"), ctx)
+    reply = registry.call(tool_call("search", query="Hafenfest"), ctx)
 
-    assert (_shown(reply.text), runs) == ([1], ["Hafenfest", "Hafenfest"])
+    assert (shown_numbers(reply.text), runs) == ([1], ["Hafenfest", "Hafenfest"])
 
 
 def test_the_registry_offers_each_tool_as_a_function_schema() -> None:
     """Schemas go to the endpoint as function tools in the order given; changing a copy changes nothing."""
-    registry = _registry(_Search())
+    registry = _registry(ScriptedSearch())
 
     schemas = registry.schemas()
 
@@ -587,7 +476,7 @@ def test_the_registry_offers_each_tool_as_a_function_schema() -> None:
 def test_a_registry_refuses_two_tools_of_one_name() -> None:
     """A call names its tool, so two tools of one name could not both be answered."""
     with pytest.raises(ValueError, match="search"):
-        ToolRegistry([SearchTool(_Search()), SearchTool(_Search())])
+        ToolRegistry([SearchTool(ScriptedSearch()), SearchTool(ScriptedSearch())])
 
 
 @pytest.mark.parametrize("reasoning", [False, True], ids=["plain", "reasoning"])
@@ -599,10 +488,10 @@ def test_every_passage_in_a_reply_stays_within_passage_chars(reasoning: bool, co
         reasoning (bool): Whether the model thinks, which shortens replies and passages.
         count (int): How many long passages the search finds.
     """
-    ctx = _context(reasoning=reasoning)
+    ctx = tool_context(reasoning=reasoning)
     found = [_report(number, sentences=30) for number in range(1, count + 1)]
 
-    reply = _registry(_Search(found)).call(_call("search", query="Hafenverein"), ctx)
+    reply = _registry(ScriptedSearch(found)).call(tool_call("search", query="Hafenverein"), ctx)
 
     bodies = _bodies(reply.text)
     assert sorted(bodies) == list(range(1, count + 1))
@@ -650,26 +539,26 @@ def test_a_reply_with_notes_never_outgrows_result_chars(
         cap (int): The most passages the turn's ledger admits.
         notes (tuple[str, ...]): Parts of the notes the reply must end with.
     """
-    ctx = _context(reasoning=reasoning, cap=cap)
+    ctx = tool_context(reasoning=reasoning, cap=cap)
     before = [_report(number) for number in range(1, again + grown + 1)]
     ctx.ledger.add(before)
     fresh = [_report(number) for number in range(again + grown + 1, again + grown + 11)]
     found = [*before[:again], *fresh, *(_addendum(number) for number in range(again + 1, again + grown + 1))]
 
-    reply = _registry(_Search(found)).call(_call("search", query="Hafenverein"), ctx)
+    reply = _registry(ScriptedSearch(found)).call(tool_call("search", query="Hafenverein"), ctx)
 
     assert all(note in reply.text for note in notes)
-    assert not set(_shown(reply.text)) & set(range(1, again + grown + 1))
+    assert not set(shown_numbers(reply.text)) & set(range(1, again + grown + 1))
     assert len(reply.text) <= ctx.budget.result_chars
 
 
 def test_a_long_query_is_cut_for_the_search_and_the_trail() -> None:
     """A run-on query reaches the search on one line within its limit, and the trail shows less of it."""
-    ctx = _context()
-    search = _Search([])
+    ctx = tool_context()
+    search = ScriptedSearch([])
     query = "Hafenfest   " + " ".join(f"Stand{number}" for number in range(80))
 
-    reply = _registry(search).call(_call("search", query=query), ctx)
+    reply = _registry(search).call(tool_call("search", query=query), ctx)
 
     sent = " ".join(query.split())[:300]
     assert search.queries == [sent]
@@ -678,12 +567,12 @@ def test_a_long_query_is_cut_for_the_search_and_the_trail() -> None:
 
 def test_a_called_name_is_read_without_surrounding_spaces() -> None:
     """A name padded with spaces still reaches its tool."""
-    ctx = _context()
-    search = _Search([_programme()])
+    ctx = tool_context()
+    search = ScriptedSearch([programme_passage()])
 
     reply = _registry(search).call(ToolCall(id="call_0", name=" search ", arguments='{"query": "Hafenfest"}'), ctx)
 
-    assert (_shown(reply.text), reply.action) == ([1], "search")
+    assert (shown_numbers(reply.text), reply.action) == ([1], "search")
 
 
 def _matched(number: int) -> NodeWithScore:
@@ -713,12 +602,12 @@ def _matched(number: int) -> NodeWithScore:
 
 def test_a_passage_whose_matches_need_more_than_passage_chars_is_shown_within_it() -> None:
     """The cap wins over a passage's floor, so two such passages still share one reply; read(n) shows the rest."""
-    ctx = _context(reasoning=True)
+    ctx = tool_context(reasoning=True)
     found = [_matched(1), _matched(2)]
     headers, bodies, anchors = passage_parts([stamp(found[0], 1)], llm_view, compact=True)
     assert passage_costs(headers[0], bodies[0], anchors[0])[1] > ctx.budget.passage_chars
 
-    reply = _registry(_Search(found)).call(_call("search", query="Hafenverein Stände"), ctx)
+    reply = _registry(ScriptedSearch(found)).call(tool_call("search", query="Hafenverein Stände"), ctx)
 
     bodies_shown = _bodies(reply.text)
     assert sorted(bodies_shown) == [1, 2]
@@ -729,14 +618,14 @@ def test_a_passage_whose_matches_need_more_than_passage_chars_is_shown_within_it
 
 def test_an_extension_without_room_is_named_as_grown() -> None:
     """A new window of a passage shown before joins its entry without room to show it, and is named as grown."""
-    ctx = _context(reasoning=True)
+    ctx = tool_context(reasoning=True)
     opening, closing = OPENING * 8, CLOSING * 12
     ctx.ledger.add([_window(opening)])
     reports = [_report(number) for number in range(1, 5)]
 
-    reply = _registry(_Search([*reports, _window(closing)])).call(_call("search", query="Hafenverein"), ctx)
+    reply = _registry(ScriptedSearch([*reports, _window(closing)])).call(tool_call("search", query="Hafenverein"), ctx)
 
-    assert _shown(reply.text) == [2, 3, 4, 5]
+    assert shown_numbers(reply.text) == [2, 3, 4, 5]
     assert reply.text.endswith("\n\nAlso matched, with new text not shown here: [1]; read(n) shows it.")
     assert "shown before" not in reply.text
     assert isinstance(reply, PassageReply)
@@ -747,39 +636,39 @@ def test_an_extension_without_room_is_named_as_grown() -> None:
 
 def test_a_repeated_read_shows_a_passage_again_once_it_grew() -> None:
     """A read is answered from memory only while its passage is unchanged; once the passage grew, it is shown anew."""
-    ctx = _context()
-    registry = _registry(_Search([_window(OPENING)], [_window(CLOSING)]))
-    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([_window(OPENING)], [_window(CLOSING)]))
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
 
-    first = registry.call(_call("read", n=1), ctx)
-    unchanged = registry.call(_call("read", n=1), ctx)
-    registry.call(_call("search", query="Band am Kai"), ctx)
-    grown = registry.call(_call("read", n=1), ctx)
-    after = registry.call(_call("read", n=1), ctx)
+    first = registry.call(tool_call("read", n=1), ctx)
+    unchanged = registry.call(tool_call("read", n=1), ctx)
+    registry.call(tool_call("search", query="Band am Kai"), ctx)
+    grown = registry.call(tool_call("read", n=1), ctx)
+    after = registry.call(tool_call("read", n=1), ctx)
 
     assert OPENING in first.text
     assert CLOSING not in first.text
     assert unchanged.text == "Already called read with these arguments; see [1]."
-    assert _shown(grown.text) == [1]
+    assert shown_numbers(grown.text) == [1]
     assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in grown.text
     assert after.text == "Already called read with these arguments; see [1]."
 
 
 def test_a_read_is_shown_anew_once_its_passage_gained_a_match() -> None:
     """A search can add a match deep in a long passage without adding text; a read then keeps that part too."""
-    ctx = _context()
+    ctx = tool_context()
     body = " ".join(f"Satz {line}: Der Hafenverein plant Stände und Musik am Kai." for line in range(1, 81))
     start = len(body) - 400
     held = scored_node("programme-9", body, filename="hafenfest_programm.pdf", page=3, **{MATCH_SPANS_KEY: [[60, 100]]})
     window = scored_node(
         "programme-9", body[start:], filename="hafenfest_programm.pdf", page=3, **{MATCH_SPANS_KEY: [[200, 240]]}
     )
-    registry = _registry(_Search([held], [window]))
-    registry.call(_call("search", query="Hafenverein"), ctx)
-    before = registry.call(_call("read", n=1), ctx)
-    registry.call(_call("search", query="Musik am Kai"), ctx)
+    registry = _registry(ScriptedSearch([held], [window]))
+    registry.call(tool_call("search", query="Hafenverein"), ctx)
+    before = registry.call(tool_call("read", n=1), ctx)
+    registry.call(tool_call("search", query="Musik am Kai"), ctx)
 
-    after = registry.call(_call("read", n=1), ctx)
+    after = registry.call(tool_call("read", n=1), ctx)
 
     late = body[start + 200 : start + 240]
     assert late not in before.text
@@ -799,12 +688,12 @@ def test_a_remembered_read_waits_for_finish_when_its_round_may_grow_the_passage(
         Returns:
             ToolReply: The second round's read.
         """
-        ctx = _context()
-        registry = _registry(_Search([_window(OPENING)], [_window(CLOSING)]))
-        registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
-        registry.call(_call("read", n=1), ctx)
-        calls = [_call("search", query="Band am Kai"), _call("read", n=1)]
-        replies = _two_phase(registry, calls, ctx) if two_phase else [registry.call(call, ctx) for call in calls]
+        ctx = tool_context()
+        registry = _registry(ScriptedSearch([_window(OPENING)], [_window(CLOSING)]))
+        registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+        registry.call(tool_call("read", n=1), ctx)
+        calls = [tool_call("search", query="Band am Kai"), tool_call("read", n=1)]
+        replies = two_phase_round(registry, calls, ctx) if two_phase else [registry.call(call, ctx) for call in calls]
         return replies[1]
 
     sequential, phased = last_reply(two_phase=False), last_reply(two_phase=True)
@@ -815,12 +704,12 @@ def test_a_remembered_read_waits_for_finish_when_its_round_may_grow_the_passage(
 
 def test_an_unchanged_remembered_read_is_answered_from_memory_at_finish() -> None:
     """A remembered read needs no I/O; memory answers it at finish, while its passage is unchanged."""
-    ctx = _context()
-    registry = _registry(_Search([_window(OPENING)]))
-    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
-    registry.call(_call("read", n=1), ctx)
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([_window(OPENING)]))
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+    registry.call(tool_call("read", n=1), ctx)
 
-    prepared = registry.prepare(_call("read", n=1), ctx)
+    prepared = registry.prepare(tool_call("read", n=1), ctx)
 
     assert (prepared.reply, prepared.fetch) == (None, None)
     assert registry.finish(prepared, None, ctx).text == "Already called read with these arguments; see [1]."
@@ -828,12 +717,12 @@ def test_an_unchanged_remembered_read_is_answered_from_memory_at_finish() -> Non
 
 def test_a_read_finished_after_an_extending_search_in_its_round_shows_the_growth() -> None:
     """Prepared together, the same read before and after a search that grows its passage is answered twice."""
-    ctx = _context()
-    registry = _registry(_Search([_window(OPENING)], [_window(CLOSING)]))
-    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
-    calls = [_call("read", n=1), _call("search", query="Band am Kai"), _call("read", n=1)]
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([_window(OPENING)], [_window(CLOSING)]))
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+    calls = [tool_call("read", n=1), tool_call("search", query="Band am Kai"), tool_call("read", n=1)]
 
-    before, _, after = _two_phase(registry, calls, ctx)
+    before, _, after = two_phase_round(registry, calls, ctx)
 
     assert CLOSING not in before.text
     assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in after.text
@@ -841,16 +730,16 @@ def test_a_read_finished_after_an_extending_search_in_its_round_shows_the_growth
 
 def test_a_long_header_is_compacted_so_it_costs_a_reply_little() -> None:
     """A passage's header is cut to the compact form a reply prices it at, so long names still leave room."""
-    ctx = _context()
+    ctx = tool_context()
     found = [
         scored_node(f"long-{number}", _report(number).node.get_content(), filename=f"{number}_" + "hafen" * 200)
         for number in range(1, 6)
     ]
 
-    reply = _registry(_Search(found)).call(_call("search", query="Hafenverein"), ctx)
+    reply = _registry(ScriptedSearch(found)).call(tool_call("search", query="Hafenverein"), ctx)
 
     headers = [block.partition("\n\n")[0] for block in re.split(r"\n\n(?=citation_index: )", NOTES.sub("", reply.text))]
-    assert _shown(reply.text) == [1, 2, 3, 4]
+    assert shown_numbers(reply.text) == [1, 2, 3, 4]
     assert all(
         len(header) <= len("citation_index: 1\n") + COMPACT_HEADER_CHARS + MARKER_RESERVE_CHARS for header in headers
     )
@@ -859,15 +748,11 @@ def test_a_long_header_is_compacted_so_it_costs_a_reply_little() -> None:
 
 def test_a_post_header_reaches_the_model_whole_with_its_number_first() -> None:
     """Who posted a passage, and when, is evidence too: a header of ordinary length is never cut."""
-    ctx = ToolContext(
-        ledger=EvidenceLedger(cap=MAX_LEDGER_ENTRIES),
-        budget=_budget(),
-        llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
-    )
-    registry = _registry(_Search([social_post(3)]))
+    ctx = tool_context(view=ParentContextPostprocessor._emit_with_llm_exclusion)
+    registry = _registry(ScriptedSearch([social_post(3)]))
 
-    found = registry.call(_call("search", query="Harbour festival"), ctx)
-    read = registry.call(_call("read", n=1), ctx)
+    found = registry.call(tool_call("search", query="Harbour festival"), ctx)
+    read = registry.call(tool_call("read", n=1), ctx)
 
     for reply in (found, read):
         header = reply.text.partition("\n\n")[0]
@@ -885,10 +770,10 @@ def test_a_header_is_compacted_only_past_header_chars(extra: int, whole: bool) -
         extra (int): Characters past the limit the header runs.
         whole (bool): Whether the reply shows it whole.
     """
-    ctx = _context()
+    ctx = tool_context()
     name = "h" * (HEADER_CHARS - len("citation_index: 1\nfilename: ") + extra)
-    reply = _registry(_Search([scored_node("named", PROGRAMME, filename=name)])).call(
-        _call("search", query="Hafenfest"), ctx
+    reply = _registry(ScriptedSearch([scored_node("named", PROGRAMME, filename=name)])).call(
+        tool_call("search", query="Hafenfest"), ctx
     )
 
     header = reply.text.partition("\n\n")[0]
@@ -899,7 +784,7 @@ def test_a_header_is_compacted_only_past_header_chars(extra: int, whole: bool) -
 
 def test_a_passage_fits_exactly_when_the_room_covers_its_reserve_and_floor() -> None:
     """Admission at its boundary: text room must remain after the reserves and cover every floor."""
-    ctx = _context()
+    ctx = tool_context()
     passage = _plan(_report(1), 1, ctx)
     empty = _plan(scored_node("empty", "", filename="leer.pdf"), 2, ctx)
 
@@ -911,24 +796,26 @@ def test_a_passage_fits_exactly_when_the_room_covers_its_reserve_and_floor() -> 
 
 def test_windows_of_a_new_section_in_one_search_share_its_number() -> None:
     """Two windows of one section found together are one passage under one number."""
-    ctx = _context()
+    ctx = tool_context()
 
-    reply = _registry(_Search([_window(OPENING), _weather(), _window(CLOSING)])).call(
-        _call("search", query="Hafenfest Programm"), ctx
+    reply = _registry(ScriptedSearch([_window(OPENING), _weather(), _window(CLOSING)])).call(
+        tool_call("search", query="Hafenfest Programm"), ctx
     )
 
-    assert _shown(reply.text) == [1, 2]
+    assert shown_numbers(reply.text) == [1, 2]
     assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in reply.text
     assert (reply.found, len(ctx.ledger)) == (2, 2)
 
 
 def test_a_full_ledger_leaves_new_passages_out_and_says_so() -> None:
     """Once the evidence holds all it may, new passages stay unnumbered and the model is told to answer."""
-    ctx = _context(cap=1)
+    ctx = tool_context(cap=1)
 
-    reply = _registry(_Search([_programme(), _weather()])).call(_call("search", query="Hafenfest"), ctx)
+    reply = _registry(ScriptedSearch([programme_passage(), _weather()])).call(
+        tool_call("search", query="Hafenfest"), ctx
+    )
 
-    assert _shown(reply.text) == [1]
+    assert shown_numbers(reply.text) == [1]
     assert reply.text.endswith(
         "\n\n1 more matching passage left out: the evidence holds all it can, so answer from the passages shown."
     )
@@ -937,12 +824,12 @@ def test_a_full_ledger_leaves_new_passages_out_and_says_so() -> None:
 
 def test_a_search_that_finds_nothing_new_says_so() -> None:
     """Nothing found, or only passages shown before, is answered as no new passages."""
-    ctx = _context()
-    registry = _registry(_Search([], [_programme()], [_programme()]))
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([], [programme_passage()], [programme_passage()]))
 
-    nothing = registry.call(_call("search", query="Feuerwerk"), ctx)
-    registry.call(_call("search", query="Hafenfest"), ctx)
-    again = registry.call(_call("search", query="Stände Sonntag"), ctx)
+    nothing = registry.call(tool_call("search", query="Feuerwerk"), ctx)
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
+    again = registry.call(tool_call("search", query="Stände Sonntag"), ctx)
 
     assert (nothing.text, nothing.found) == (NO_NEW_PASSAGES, 0)
     assert (again.text, again.found) == (f"{NO_NEW_PASSAGES}\nAlso matched, shown before: [1].", 0)
@@ -955,40 +842,40 @@ def test_read_accepts_a_number_written_as_text(number: object) -> None:
     Args:
         number (object): The ``n`` the model sent.
     """
-    ctx = _context()
-    registry = _registry(_Search([_programme()]))
-    registry.call(_call("search", query="Hafenfest"), ctx)
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage()]))
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
 
-    reply = registry.call(_call("read", n=number), ctx)
+    reply = registry.call(tool_call("read", n=number), ctx)
 
-    assert _shown(reply.text) == [1]
+    assert shown_numbers(reply.text) == [1]
     assert PROGRAMME in reply.text
 
 
 def test_an_error_reply_is_not_remembered() -> None:
     """A read that failed runs again once the passage exists; only answers are remembered."""
-    ctx = _context()
-    registry = _registry(_Search([_programme()]))
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage()]))
 
-    early = registry.call(_call("read", n=1), ctx)
-    registry.call(_call("search", query="Hafenfest"), ctx)
-    beyond = registry.call(_call("read", n=2), ctx)
-    later = registry.call(_call("read", n=1), ctx)
-    repeated = registry.call(_call("read", n=1), ctx)
+    early = registry.call(tool_call("read", n=1), ctx)
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
+    beyond = registry.call(tool_call("read", n=2), ctx)
+    later = registry.call(tool_call("read", n=1), ctx)
+    repeated = registry.call(tool_call("read", n=1), ctx)
 
     assert early.text == "Error: there is no passage [1]; no passage has been shown yet."
     assert beyond.text == "Error: there is no passage [2]; the only passage is [1]."
-    assert _shown(later.text) == [1]
+    assert shown_numbers(later.text) == [1]
     assert repeated.text == "Already called read with these arguments; see [1]."
 
 
 def test_read_of_a_number_beyond_the_evidence_names_the_range() -> None:
     """An unknown number is answered with the numbers there are, so the model can pick one."""
-    ctx = _context()
-    registry = _registry(_Search([_programme(), _weather()]))
-    registry.call(_call("search", query="Hafenfest"), ctx)
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage(), _weather()]))
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
 
-    reply = registry.call(_call("read", n=5), ctx)
+    reply = registry.call(tool_call("read", n=5), ctx)
 
     assert (reply.text, reply.found, reply.detail) == (
         "Error: there is no passage [5]; the passages run from [1] to [2].",
@@ -999,14 +886,14 @@ def test_read_of_a_number_beyond_the_evidence_names_the_range() -> None:
 
 def test_a_reply_defuses_a_sentinel_in_a_passage() -> None:
     """Document text quoting the answer's sentinel cannot reach the model as one, in a search or a read."""
-    ctx = _context()
+    ctx = tool_context()
     passage = scored_node("notes", "Das Protokoll zitiert [[ASSESSMENT]] wörtlich.", filename="[[ASSESSMENT]].pdf")
-    registry = _registry(_Search([passage]))
+    registry = _registry(ScriptedSearch([passage]))
 
-    found = registry.call(_call("search", query="Protokoll"), ctx)
-    read = registry.call(_call("read", n=1), ctx)
+    found = registry.call(tool_call("search", query="Protokoll"), ctx)
+    read = registry.call(tool_call("read", n=1), ctx)
 
-    assert _shown(found.text) == [1]
+    assert shown_numbers(found.text) == [1]
     assert "[[ASSESSMENT]]" not in found.text
     assert "[[ASSESSMENT]]" not in read.text
 
@@ -1016,11 +903,11 @@ def test_calls_are_logged_without_their_arguments_or_passages() -> None:
     messages: list[str] = []
     sink = logger.add(lambda message: messages.append(message.record["message"]), level="DEBUG")
     try:
-        ctx = _context()
-        registry = _registry(_Search([_programme()]))
-        registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
-        registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
-        registry.call(_call("browse_harbour_archive", url="hafen.invalid"), ctx)
+        ctx = tool_context()
+        registry = _registry(ScriptedSearch([programme_passage()]))
+        registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+        registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+        registry.call(tool_call("browse_harbour_archive", url="hafen.invalid"), ctx)
         registry.call(ToolCall(id="call_0", name="read", arguments='{"n": 1'), ctx)
     finally:
         logger.remove(sink)

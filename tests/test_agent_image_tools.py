@@ -6,6 +6,7 @@ Every clip, caption, person and hash here is invented.
 from __future__ import annotations
 
 import functools
+import io
 import json
 import re
 import types
@@ -14,6 +15,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
+from agent_fakes import ScriptedSearch, programme_passage, shown_numbers, tool_call, tool_context, two_phase_round
 from assessment_fakes import scored_node
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
@@ -22,8 +24,6 @@ from qdrant_client import models
 from typing_extensions import override
 
 import docint.core.rag as rag_module
-from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger
-from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.image_tools import KeyframesTool, SearchImagesTool
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import PassageReply, ReadTool, ToolContext, ToolRegistry
@@ -47,26 +47,6 @@ CAPTIONS = (
 FROM_THIRTY_SECONDS = [{"field": "keyframe_time_sec", "operator": "gte", "value": 30}]
 
 
-def _budget(*, reasoning: bool = False) -> TurnBudget:
-    """Build one turn's budget at an 8k window; the tools read only its reply and passage sizes.
-
-    Args:
-        reasoning (bool): Whether the model thinks before it answers.
-
-    Returns:
-        TurnBudget: The budget.
-    """
-    return TurnBudget(
-        ctx_window=8192,
-        reasoning=reasoning,
-        char_token_ratio=3.5,
-        system_tokens=900,
-        tool_schema_tokens=630,
-        history_tokens=1300,
-        message_tokens=300,
-    )
-
-
 def _context(*, reasoning: bool = False) -> ToolContext:
     """Build the context of one turn whose evidence is still empty, seen through the production LLM view.
 
@@ -76,36 +56,7 @@ def _context(*, reasoning: bool = False) -> ToolContext:
     Returns:
         ToolContext: The context.
     """
-    return ToolContext(
-        ledger=EvidenceLedger(cap=MAX_LEDGER_ENTRIES),
-        budget=_budget(reasoning=reasoning),
-        llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
-    )
-
-
-def _call(name: str, **arguments: Any) -> ToolCall:
-    """Build one tool call as a model round sends it.
-
-    Args:
-        name (str): The tool's name.
-        **arguments (Any): The arguments, sent as JSON text.
-
-    Returns:
-        ToolCall: The call.
-    """
-    return ToolCall(id="call_0", name=name, arguments=json.dumps(arguments, ensure_ascii=False))
-
-
-def _shown(text: str) -> list[int]:
-    """Return the numbers a reply shows passages under, in reply order.
-
-    Args:
-        text (str): The reply.
-
-    Returns:
-        list[int]: Each shown passage's number.
-    """
-    return [int(number) for number in re.findall(r"^citation_index: (\d+)$", text, flags=re.MULTILINE)]
+    return tool_context(reasoning=reasoning, view=ParentContextPostprocessor._emit_with_llm_exclusion)
 
 
 def _labels(text: str) -> list[str]:
@@ -217,20 +168,6 @@ def _segment(number: int, *, clip: str = CLIP, media_hash: str | None = CLIP_HAS
     )
 
 
-def _programme() -> NodeWithScore:
-    """Build an invented passage of a document, which is from no clip.
-
-    Returns:
-        NodeWithScore: The passage.
-    """
-    return scored_node(
-        "programme",
-        "Das Hafenfest wurde wegen der Sturmwarnung auf Sonntag verschoben.",
-        filename="hafenfest_programm.pdf",
-        page=1,
-    )
-
-
 class _Lister:
     """A keyframe listing double: answers each clip key with its frames and records the keys asked for."""
 
@@ -256,41 +193,11 @@ class _Lister:
         return list(self._clips.get(key, []))
 
 
-class _SearchImages:
-    """An image search double: each run answers with its next scripted result and records its description."""
-
-    def __init__(self, *results: list[NodeWithScore]) -> None:
-        """Hold the results, one per run.
-
-        Args:
-            *results (list[NodeWithScore]): What each run returns, in order.
-        """
-        self._results = list(results)
-        self.descriptions: list[str] = []
-
-    def __call__(self, description: str) -> list[NodeWithScore]:
-        """Run one image search.
-
-        Args:
-            description (str): What the picture should show.
-
-        Returns:
-            list[NodeWithScore]: The next scripted result.
-
-        Raises:
-            AssertionError: When the search runs more often than it has results.
-        """
-        self.descriptions.append(description)
-        if not self._results:
-            raise AssertionError("The image search ran more often than its script has results.")
-        return self._results.pop(0)
-
-
-def _registry(*, search_images: _SearchImages | None = None, list_keyframes: Any = None) -> ToolRegistry:
+def _registry(*, search_images: ScriptedSearch | None = None, list_keyframes: Any = None) -> ToolRegistry:
     """Build the registry of a visual turn: search_images, keyframes and read.
 
     Args:
-        search_images (_SearchImages | None): The image search; one that never runs when not given.
+        search_images (ScriptedSearch | None): The image search; one that never runs when not given.
         list_keyframes (Any): The keyframe listing; one that holds no clip when not given.
 
     Returns:
@@ -298,7 +205,7 @@ def _registry(*, search_images: _SearchImages | None = None, list_keyframes: Any
     """
     return ToolRegistry(
         [
-            SearchImagesTool(search_images or _SearchImages()),
+            SearchImagesTool(search_images or ScriptedSearch()),
             KeyframesTool(list_keyframes or _Lister({})),
             ReadTool(),
         ]
@@ -483,33 +390,7 @@ class _RerankEndpoint:
         ranked = sorted(self._scores.items(), key=lambda item: item[1], reverse=True)[: sent["top_n"]]
         body = json.dumps({"results": [{"index": index, "relevance_score": score} for index, score in ranked]})
 
-        class _Response:
-            """The endpoint's answer, used as ``urlopen``'s context manager."""
-
-            def __enter__(self) -> _Response:
-                """Open the response.
-
-                Returns:
-                    _Response: Itself.
-                """
-                return self
-
-            def __exit__(self, *exc: object) -> None:
-                """Close the response.
-
-                Args:
-                    *exc (object): The exception, if any, unused.
-                """
-
-            def read(self) -> bytes:
-                """Return the body.
-
-                Returns:
-                    bytes: The results as JSON.
-                """
-                return body.encode("utf-8")
-
-        return _Response()
+        return io.BytesIO(body.encode("utf-8"))
 
 
 def _image_search_rag(monkeypatch: pytest.MonkeyPatch, retriever: _Retriever, built: dict[str, Any]) -> RAG:
@@ -627,14 +508,14 @@ def test_search_images_shows_new_pictures_and_names_ones_shown_before() -> None:
     ctx = _context()
     held, found = _frame(0), _frame(3, clip=OTHER_CLIP, media_hash=OTHER_HASH)
     ctx.ledger.add([held])
-    search = _SearchImages([found, held])
+    search = ScriptedSearch([found, held])
 
     reply = _registry(search_images=search).call(
-        _call("search_images", description="  Zwei Personen   in Regenjacken am Hafen "), ctx
+        tool_call("search_images", description="  Zwei Personen   in Regenjacken am Hafen "), ctx
     )
 
-    assert search.descriptions == [DESCRIPTION]
-    assert _shown(reply.text) == [2]
+    assert search.queries == [DESCRIPTION]
+    assert shown_numbers(reply.text) == [2]
     assert CAPTIONS[3] in reply.text
     assert _labels(reply.text) == ["#4 @ 00:18"]
     assert reply.text.endswith("\n\nAlso matched, shown before: [1].")
@@ -651,7 +532,7 @@ def test_search_images_needs_a_description(arguments: str) -> None:
     Args:
         arguments (str): The raw arguments the model sent.
     """
-    search = _SearchImages()
+    search = ScriptedSearch()
 
     reply = _registry(search_images=search).call(
         ToolCall(id="call_0", name="search_images", arguments=arguments), _context()
@@ -659,20 +540,20 @@ def test_search_images_needs_a_description(arguments: str) -> None:
 
     assert reply.text == "Error: search_images needs a description: what the picture should show."
     assert (reply.found, reply.action) == (0, "search_images")
-    assert search.descriptions == []
+    assert search.queries == []
 
 
 def test_a_repeated_image_search_is_answered_not_rerun() -> None:
     """The same description again is answered from memory by the numbers it showed."""
     ctx = _context()
-    search = _SearchImages([_frame(0), _frame(1)])
+    search = ScriptedSearch([_frame(0), _frame(1)])
     registry = _registry(search_images=search)
-    registry.call(_call("search_images", description=DESCRIPTION), ctx)
+    registry.call(tool_call("search_images", description=DESCRIPTION), ctx)
 
-    again = registry.call(_call("search_images", description=DESCRIPTION.upper()), ctx)
+    again = registry.call(tool_call("search_images", description=DESCRIPTION.upper()), ctx)
 
     assert again.text == "Already called search_images with these arguments; see [1], [2]."
-    assert search.descriptions == [DESCRIPTION]
+    assert search.queries == [DESCRIPTION]
 
 
 def test_keyframes_lists_frames_in_time_order() -> None:
@@ -684,9 +565,9 @@ def test_keyframes_lists_frames_in_time_order() -> None:
     )
     ctx = _context()
 
-    reply = _registry(list_keyframes=_rag(companion)._agent_list_keyframes).call(_call("keyframes", file=CLIP), ctx)
+    reply = _registry(list_keyframes=_rag(companion)._agent_list_keyframes).call(tool_call("keyframes", file=CLIP), ctx)
 
-    assert _shown(reply.text) == [1, 2, 3, 4, 5]
+    assert shown_numbers(reply.text) == [1, 2, 3, 4, 5]
     assert _labels(reply.text) == ["#1 @ 00:00", "#2 @ 00:06", "#3 @ 00:12", "#4 @ 00:18", "#5 @ 00:24"]
     shown_captions = re.findall("|".join(map(re.escape, CAPTIONS)), reply.text)
     assert [CAPTIONS.index(caption) for caption in shown_captions] == [0, 1, 2, 3, 4]
@@ -711,13 +592,13 @@ def test_keyframes_accepts_a_passage_number(file: object, media_hash: str | None
         key (str): What the clip's frames must be listed by.
     """
     ctx = _context()
-    ctx.ledger.add([_programme(), _segment(1, media_hash=media_hash)])
+    ctx.ledger.add([programme_passage(), _segment(1, media_hash=media_hash)])
     lister = _Lister({key: [_frame(0), _frame(1)]})
 
-    reply = _registry(list_keyframes=lister).call(_call("keyframes", file=file), ctx)
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", file=file), ctx)
 
     assert lister.keys == [key]
-    assert _shown(reply.text) == [3, 4]
+    assert shown_numbers(reply.text) == [3, 4]
     assert _labels(reply.text) == ["#1 @ 00:00", "#2 @ 00:06"]
     assert (reply.found, reply.detail) == (2, CLIP)
 
@@ -725,10 +606,10 @@ def test_keyframes_accepts_a_passage_number(file: object, media_hash: str | None
 def test_a_passage_from_no_clip_names_no_clip() -> None:
     """A document passage belongs to no clip; the reply says so and names the clips the turn has seen."""
     ctx = _context()
-    ctx.ledger.add([_programme(), _segment(1)])
+    ctx.ledger.add([programme_passage(), _segment(1)])
     lister = _Lister({})
 
-    reply = _registry(list_keyframes=lister).call(_call("keyframes", file=1), ctx)
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", file=1), ctx)
 
     assert reply.text == "Error: passage [1] is not from a clip; the clips seen so far are 'harbour_walk.webm'."
     assert (reply.found, reply.action, reply.detail) == (0, "keyframes", "1")
@@ -738,10 +619,10 @@ def test_a_passage_from_no_clip_names_no_clip() -> None:
 def test_an_unknown_passage_number_names_the_range() -> None:
     """A number no passage has is answered with the numbers there are, as read answers it."""
     ctx = _context()
-    ctx.ledger.add([_programme(), _segment(1)])
+    ctx.ledger.add([programme_passage(), _segment(1)])
     lister = _Lister({})
 
-    reply = _registry(list_keyframes=lister).call(_call("keyframes", file="[7]"), ctx)
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", file="[7]"), ctx)
 
     assert reply.text == "Error: there is no passage [7]; the passages run from [1] to [2]."
     assert (reply.found, reply.detail) == (0, "[7]")
@@ -752,19 +633,17 @@ def test_a_passage_number_resolves_against_the_evidence_as_the_round_was_prepare
     """Calls prepared together see the evidence as it stood before their round, not a number that round admits."""
     ctx = _context()
     registry = _registry(
-        search_images=_SearchImages([_frame(0)]),
+        search_images=ScriptedSearch([_frame(0)]),
         list_keyframes=_Lister({CLIP_HASH: [_frame(0), _frame(1)]}),
     )
-    calls = [_call("search_images", description=DESCRIPTION), _call("keyframes", file=1)]
+    calls = [tool_call("search_images", description=DESCRIPTION), tool_call("keyframes", file=1)]
 
-    prepared = [registry.prepare(call, ctx) for call in calls]
-    fetched = [None if ready.fetch is None else ready.fetch() for ready in prepared]
-    found, early = (registry.finish(ready, result, ctx) for ready, result in zip(prepared, fetched, strict=True))
-    later = registry.call(_call("keyframes", file=1), ctx)
+    found, early = two_phase_round(registry, calls, ctx)
+    later = registry.call(tool_call("keyframes", file=1), ctx)
 
-    assert _shown(found.text) == [1]
+    assert shown_numbers(found.text) == [1]
     assert early.text == "Error: there is no passage [1]; no passage has been shown yet."
-    assert _shown(later.text) == [2]
+    assert shown_numbers(later.text) == [2]
     assert later.text.endswith("\n\nAlso matched, shown before: [1].")
 
 
@@ -778,9 +657,9 @@ def test_keyframes_opens_one_frame_by_its_label_number(index: object) -> None:
     ctx = _context()
     lister = _Lister({CLIP: [_frame(position) for position in (0, 1, 3, 4)]})
 
-    reply = _registry(list_keyframes=lister).call(_call("keyframes", file=CLIP, index=index), ctx)
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", file=CLIP, index=index), ctx)
 
-    assert _shown(reply.text) == [1]
+    assert shown_numbers(reply.text) == [1]
     assert _labels(reply.text) == ["#4 @ 00:18"]
     assert CAPTIONS[3] in reply.text
     assert (reply.found, reply.detail, len(ctx.ledger)) == (1, f"{CLIP} #4", 1)
@@ -802,7 +681,7 @@ def test_a_frame_the_clip_lacks_is_answered_with_its_range(indexes: tuple[int, .
     ctx = _context()
 
     reply = _registry(list_keyframes=_Lister({CLIP: [_frame(position) for position in indexes]})).call(
-        _call("keyframes", file=CLIP, index=index), ctx
+        tool_call("keyframes", file=CLIP, index=index), ctx
     )
 
     assert reply.text == f"Error: 'harbour_walk.webm' has no frame #{index}; {known}."
@@ -818,7 +697,7 @@ def test_an_index_that_is_no_frame_number_gets_an_error_reply(index: object) -> 
     """
     lister = _Lister({CLIP: [_frame(0)]})
 
-    reply = _registry(list_keyframes=lister).call(_call("keyframes", file=CLIP, index=index), _context())
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", file=CLIP, index=index), _context())
 
     assert reply.text == "Error: index is the number of one frame, the n of its #n label, such as 3."
     assert lister.keys == []
@@ -834,7 +713,7 @@ def test_keyframes_needs_a_clip(file: object) -> None:
     lister = _Lister({})
     arguments = {} if file is None else {"file": file}
 
-    reply = _registry(list_keyframes=lister).call(_call("keyframes", **arguments), _context())
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", **arguments), _context())
 
     assert (
         reply.text == "Error: keyframes needs file: a clip's filename, or the number of a passage from it, such as 3."
@@ -857,10 +736,10 @@ def test_keyframes_caps_long_clips_evenly(count: int, labels: list[int]) -> None
     ctx = _context()
     frames = [_frame(index, caption=f"Bild {index + 1} am Hafen") for index in range(count)]
 
-    reply = _registry(list_keyframes=_Lister({CLIP: frames})).call(_call("keyframes", file=CLIP), ctx)
+    reply = _registry(list_keyframes=_Lister({CLIP: frames})).call(tool_call("keyframes", file=CLIP), ctx)
 
     assert [int(label.split(" @ ")[0].removeprefix("#")) for label in _labels(reply.text)] == labels
-    assert _shown(reply.text) == list(range(1, 9))
+    assert shown_numbers(reply.text) == list(range(1, 9))
     assert reply.text.endswith(
         "\n\n20 frames in all; call keyframes(file, index) for one."
         if count > 8
@@ -880,9 +759,9 @@ def test_a_keyframes_reply_with_its_notes_never_outgrows_result_chars(reasoning:
     long_caption = " ".join(f"Szene {line}: {CAPTIONS[line % len(CAPTIONS)]}." for line in range(14))
     frames = [_frame(index, caption=long_caption) for index in range(20)]
 
-    reply = _registry(list_keyframes=_Lister({CLIP: frames})).call(_call("keyframes", file=CLIP), ctx)
+    reply = _registry(list_keyframes=_Lister({CLIP: frames})).call(tool_call("keyframes", file=CLIP), ctx)
 
-    shown = _shown(reply.text)
+    shown = shown_numbers(reply.text)
     assert 0 < len(shown) < 8
     assert reply.text.endswith(
         f"\n\n{8 - len(shown)} more matching passage{'s' if 8 - len(shown) > 1 else ''} did not fit in this reply; "
@@ -898,7 +777,7 @@ def test_an_unknown_clip_names_the_clips_seen() -> None:
     ctx.ledger.add(
         [
             _segment(1),
-            _programme(),
+            programme_passage(),
             _frame(2, clip=OTHER_CLIP, media_hash=OTHER_HASH),
             _segment(2),
             _segment(3, clip="hafen_interview.m4a", media_hash=None),
@@ -906,7 +785,7 @@ def test_an_unknown_clip_names_the_clips_seen() -> None:
     )
     lister = _Lister({})
 
-    reply = _registry(list_keyframes=lister).call(_call("keyframes", file="unbekannt.mp4"), ctx)
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", file="unbekannt.mp4"), ctx)
 
     assert reply.text == (
         "Error: no keyframes are stored for 'unbekannt.mp4'; "
@@ -918,7 +797,7 @@ def test_an_unknown_clip_names_the_clips_seen() -> None:
 
 def test_an_unknown_clip_before_any_clip_was_seen_says_to_search_first() -> None:
     """With no clip in the evidence yet, the reply says to find one first."""
-    reply = _registry().call(_call("keyframes", file=CLIP), _context())
+    reply = _registry().call(tool_call("keyframes", file=CLIP), _context())
 
     assert reply.text == (
         "Error: no keyframes are stored for 'harbour_walk.webm'; no clip has been seen yet, so search for one first."
@@ -928,9 +807,9 @@ def test_an_unknown_clip_before_any_clip_was_seen_says_to_search_first() -> None
 def test_a_clip_name_from_a_passage_is_defused_in_an_error_reply() -> None:
     """A clip's name is document data; quoting the answer's sentinel in it cannot reach the model as one."""
     ctx = _context()
-    ctx.ledger.add([_segment(1, clip="[[ASSESSMENT]].webm"), _programme()])
+    ctx.ledger.add([_segment(1, clip="[[ASSESSMENT]].webm"), programme_passage()])
 
-    reply = _registry().call(_call("keyframes", file=2), ctx)
+    reply = _registry().call(tool_call("keyframes", file=2), ctx)
 
     assert reply.text.startswith("Error: passage [2] is not from a clip; the clips seen so far are ")
     assert "[[ASSESSMENT]]" not in reply.text
@@ -941,9 +820,9 @@ def test_a_repeated_keyframes_call_is_answered_not_rerun() -> None:
     ctx = _context()
     lister = _Lister({CLIP: [_frame(0), _frame(1)]})
     registry = _registry(list_keyframes=lister)
-    registry.call(_call("keyframes", file=CLIP), ctx)
+    registry.call(tool_call("keyframes", file=CLIP), ctx)
 
-    again = registry.call(_call("keyframes", file=f" {CLIP} "), ctx)
+    again = registry.call(tool_call("keyframes", file=f" {CLIP} "), ctx)
 
     assert again.text == "Already called keyframes with these arguments; see [1], [2]."
     assert lister.keys == [CLIP]
@@ -953,14 +832,14 @@ def test_frames_shown_before_are_named_by_number() -> None:
     """A frame a search showed keeps its number when its clip is listed; the clip's other frames are new."""
     ctx = _context()
     registry = _registry(
-        search_images=_SearchImages([_frame(1)]),
+        search_images=ScriptedSearch([_frame(1)]),
         list_keyframes=_Lister({CLIP: [_frame(0), _frame(1), _frame(2)]}),
     )
-    registry.call(_call("search_images", description=DESCRIPTION), ctx)
+    registry.call(tool_call("search_images", description=DESCRIPTION), ctx)
 
-    reply = registry.call(_call("keyframes", file=CLIP), ctx)
+    reply = registry.call(tool_call("keyframes", file=CLIP), ctx)
 
-    assert _shown(reply.text) == [2, 3]
+    assert shown_numbers(reply.text) == [2, 3]
     assert _labels(reply.text) == ["#1 @ 00:00", "#3 @ 00:12"]
     assert reply.text.endswith("\n\nAlso matched, shown before: [1].")
     assert isinstance(reply, PassageReply)
@@ -985,7 +864,7 @@ def test_a_social_frame_keeps_its_label_when_its_header_is_compacted() -> None:
     }
     frame = _builder()._image_caption_node(payload, RAG._image_caption_text(payload))
 
-    reply = _registry(list_keyframes=_Lister({CLIP: [frame]})).call(_call("keyframes", file=CLIP), _context())
+    reply = _registry(list_keyframes=_Lister({CLIP: [frame]})).call(tool_call("keyframes", file=CLIP), _context())
 
     header = reply.text.partition("\n\n")[0]
     assert "characters not shown" in header
@@ -1085,14 +964,14 @@ def test_image_calls_are_logged_without_their_arguments_or_captions() -> None:
         ctx = _context()
         ctx.ledger.add([_segment(1)])
         registry = _registry(
-            search_images=_SearchImages([_frame(0)]),
+            search_images=ScriptedSearch([_frame(0)]),
             list_keyframes=_Lister({CLIP: [_frame(index) for index in range(12)]}),
         )
-        registry.call(_call("search_images", description=DESCRIPTION), ctx)
-        registry.call(_call("search_images", description=DESCRIPTION), ctx)
-        registry.call(_call("keyframes", file=CLIP), ctx)
-        registry.call(_call("keyframes", file="unbekannt.mp4"), ctx)
-        registry.call(_call("keyframes", file=CLIP, index=40), ctx)
+        registry.call(tool_call("search_images", description=DESCRIPTION), ctx)
+        registry.call(tool_call("search_images", description=DESCRIPTION), ctx)
+        registry.call(tool_call("keyframes", file=CLIP), ctx)
+        registry.call(tool_call("keyframes", file="unbekannt.mp4"), ctx)
+        registry.call(tool_call("keyframes", file=CLIP, index=40), ctx)
     finally:
         logger.remove(sink)
 
