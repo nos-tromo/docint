@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
+from agent_fakes import PLANNED_SCHEMA_TOKENS
 
 from docint.agents.assessment import gate
 from docint.agents.assessment.gate import MIN_CTX_WINDOW, agent_available
@@ -21,7 +22,7 @@ def _budget(
     ctx_window: int = 8192,
     reasoning: bool = False,
     system: int = 900,
-    schema: int = 630,
+    schema: int = PLANNED_SCHEMA_TOKENS,
     history: int | None = None,
     message: int = 300,
 ) -> TurnBudget:
@@ -86,7 +87,7 @@ def _fresh_warnings() -> None:
 
 def test_the_budget_is_a_frozen_value_built_in_the_pinned_field_order() -> None:
     """The fields keep the order later tasks build a budget in, and none can change once a turn has started."""
-    budget = TurnBudget(8192, False, RATIO, 900, 630, 1300, 300)
+    budget = TurnBudget(8192, False, RATIO, 900, PLANNED_SCHEMA_TOKENS, 1300, 300)
 
     assert budget == _budget(history=1300)
     for name in (field.name for field in fields(TurnBudget)):
@@ -112,7 +113,7 @@ def test_the_room_is_what_the_reply_and_the_prompt_leave_of_the_window(reasoning
     """
     budget = _budget(reasoning=reasoning, history=1300)
 
-    assert budget.round_room == 7782 - reserve - (900 + 630 + 1300 + 300) - 2 * 40
+    assert budget.round_room == 7782 - reserve - (900 + PLANNED_SCHEMA_TOKENS + 1300 + 300) - 2 * 40
 
 
 def test_reasoning_at_8k_shrinks_history_before_refusing() -> None:

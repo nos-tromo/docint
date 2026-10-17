@@ -5,17 +5,25 @@ from __future__ import annotations
 import re
 
 import pytest
-from agent_fakes import ScriptedSearch, programme_passage, tool_call, tool_context, turn_budget
+from agent_fakes import ScriptedSearch, programme_passage, tool_call, tool_context
 from llama_index.core.schema import NodeWithScore
 
-from docint.agents.turn.budget import schema_tokens
-from docint.agents.turn.tools import SearchFn, ToolRegistry
+from docint.agents.assessment.gate import MIN_CTX_WINDOW
+from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, history_allowance_tokens, schema_tokens
+from docint.agents.turn.tools import SearchFn, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS
 
 CLIP = "harbour_walk.webm"
 #: Most words a description may take; every round of every turn is sent all of them.
 MAX_DESCRIPTION_WORDS = 60
+#: Characters per token the budget is measured with.
+RATIO = 3.5
+#: The system prompt a plain model is sized for, and a thinking model's, which German text may push up.
+PLAIN_SYSTEM_TOKENS = 900
+THINKING_SYSTEM_TOKENS = 1200
+MESSAGE_TOKENS = 300
+REMEDY = "shorten a tool description or raise the context window"
 
 
 def _no_frames(key: str) -> list[NodeWithScore]:
@@ -31,20 +39,20 @@ def _no_frames(key: str) -> list[NodeWithScore]:
 
 
 def _toolset(target: str, *, search: SearchFn | None = None, search_images: SearchFn | None = None) -> ToolRegistry:
-    """Build the tools of a turn whose searches find nothing unless given.
+    """Build the tools of a turn whose searches fail the test if they run, unless given.
 
     Args:
         target (str): The turn's retrieval target.
-        search (SearchFn | None): The text search; one that finds nothing when not given.
-        search_images (SearchFn | None): The image search; one that finds nothing when not given.
+        search (SearchFn | None): The text search; one that raises if it runs when not given.
+        search_images (SearchFn | None): The image search; one that raises if it runs when not given.
 
     Returns:
         ToolRegistry: The tools the target offers.
     """
     return toolset_for(
         target,
-        search=search or ScriptedSearch(),
-        search_images=search_images or ScriptedSearch(),
+        search=ScriptedSearch() if search is None else search,
+        search_images=ScriptedSearch() if search_images is None else search_images,
         list_keyframes=_no_frames,
     )
 
@@ -61,6 +69,21 @@ def _offered(registry: ToolRegistry) -> list[str]:
     return [schema["function"]["name"] for schema in registry.schemas()]
 
 
+def _is_refusal_naming_the_offered_tools(reply: ToolReply, registry: ToolRegistry) -> bool:
+    """Tell whether a reply is an error that names every tool the registry offers.
+
+    The registry's wording is pinned by its own tests; here only the facts matter.
+
+    Args:
+        reply (ToolReply): The reply to a call to a tool the registry does not offer.
+        registry (ToolRegistry): The registry that answered.
+
+    Returns:
+        bool: ``True`` when the reply opens with ``Error:`` and names each offered tool as a whole word.
+    """
+    return reply.text.startswith("Error:") and all(re.search(rf"\b{name}\b", reply.text) for name in registry.names)
+
+
 def test_documents_offers_no_image_tools() -> None:
     """A documents turn answers from text: search and read, and a call to an image tool is refused as unknown."""
     registry = _toolset("documents")
@@ -68,7 +91,7 @@ def test_documents_offers_no_image_tools() -> None:
     assert _offered(registry) == ["search", "read"]
     assert registry.names == {"search", "read"}
     refused = registry.call(tool_call("search_images", description="Regenjacken am Hafen"), tool_context())
-    assert refused.text == "Error: there is no tool named 'search_images'; the tools you can call are search, read."
+    assert _is_refusal_naming_the_offered_tools(refused, registry), refused.text
 
 
 def test_visual_offers_only_image_tools_and_read() -> None:
@@ -78,9 +101,7 @@ def test_visual_offers_only_image_tools_and_read() -> None:
     assert _offered(registry) == ["search_images", "keyframes", "read"]
     assert registry.names == {"search_images", "keyframes", "read"}
     refused = registry.call(tool_call("search", query="Hafenfest Sonntag"), tool_context())
-    assert refused.text == (
-        "Error: there is no tool named 'search'; the tools you can call are search_images, keyframes, read."
-    )
+    assert _is_refusal_naming_the_offered_tools(refused, registry), refused.text
 
 
 def test_all_offers_every_tool() -> None:
@@ -181,42 +202,81 @@ def test_a_description_stays_short() -> None:
     assert {name: count for name, count in words.items() if count > MAX_DESCRIPTION_WORDS} == {}
 
 
-def test_the_full_toolset_fits_the_schema_allowance_of_an_8k_turn() -> None:
-    """All four schemas together cost no more than the tokens the 8k turn budget is sized for."""
-    budget = turn_budget()
+def _budget_for(target: str, *, reasoning: bool, system: int) -> TurnBudget:
+    """Build the budget of a turn in the smallest window agent turns run in, with a target's real schemas measured.
 
-    assert schema_tokens(_toolset("all").schemas(), budget.char_token_ratio) <= budget.tool_schema_tokens
+    Args:
+        target (str): The turn's retrieval target; the schemas of the tools it offers are measured.
+        reasoning (bool): Whether the model thinks before it answers.
+        system (int): Tokens of the system prompt.
+
+    Returns:
+        TurnBudget: The budget, its history at the allowance for ``reasoning``.
+    """
+    return TurnBudget(
+        ctx_window=MIN_CTX_WINDOW,
+        reasoning=reasoning,
+        char_token_ratio=RATIO,
+        system_tokens=system,
+        tool_schema_tokens=schema_tokens(_toolset(target).schemas(), RATIO),
+        history_tokens=history_allowance_tokens(reasoning),
+        message_tokens=MESSAGE_TOKENS,
+    )
+
+
+@pytest.mark.parametrize("target", RETRIEVAL_TARGETS)
+def test_a_thinking_model_keeps_room_for_tool_results_in_the_smallest_window(target: str) -> None:
+    """The tools a target offers leave a thinking model, with a long system prompt, room to run a turn.
+
+    Args:
+        target (str): The retrieval target whose schemas are measured.
+    """
+    budget = _budget_for(target, reasoning=True, system=THINKING_SYSTEM_TOKENS)
+
+    assert budget.available, (
+        f"The {target} tools cost {budget.tool_schema_tokens} schema tokens and leave a thinking model "
+        f"{budget.round_room} tokens for tool results at {MIN_CTX_WINDOW}, under the {MIN_ROUND_ROOM} a turn needs; "
+        f"{REMEDY}."
+    )
+
+
+@pytest.mark.parametrize("target", RETRIEVAL_TARGETS)
+def test_a_plain_model_keeps_room_for_three_full_results_in_the_smallest_window(target: str) -> None:
+    """The tools a target offers leave a plain model room to read three full tool results before it answers.
+
+    Args:
+        target (str): The retrieval target whose schemas are measured.
+    """
+    budget = _budget_for(target, reasoning=False, system=PLAIN_SYSTEM_TOKENS)
+    three_results = 3 * budget.result_chars / budget.char_token_ratio
+
+    assert budget.round_room >= three_results, (
+        f"The {target} tools cost {budget.tool_schema_tokens} schema tokens and leave a plain model "
+        f"{budget.round_room} tokens for tool results at {MIN_CTX_WINDOW}, under the {three_results:.0f} that three "
+        f"full results take; {REMEDY}."
+    )
 
 
 @pytest.mark.parametrize(
-    ("tool", "phrases"),
+    ("tool", "anchors"),
     [
-        ("search", ("documents and transcripts", "what they say", "[n]", "shown before")),
-        (
-            "search_images",
-            (
-                "pictures and video frames",
-                "who appears",
-                "clothing",
-                "weather",
-                "places",
-                "what the picture would show",
-                "[n]",
-                "shown before",
-            ),
-        ),
-        ("keyframes", ("time order", "specific clip", "passage from one", "[n]")),
-        ("read", ("passage [n]", "a reply showed only in part")),
+        ("search", ("documents", "transcripts", "[n]")),
+        ("search_images", ("who appears", "clothing", "weather", "places", "[n]")),
+        ("keyframes", ("specific clip", "[n]")),
+        ("read", ("rest of a passage",)),
     ],
     ids=["search", "search_images", "keyframes", "read"],
 )
-def test_a_description_says_what_the_tool_is_for(tool: str, phrases: tuple[str, ...]) -> None:
-    """The model picks a tool by its description: the text search by what is said, the image tools by what is seen.
+def test_a_description_says_what_the_tool_is_for(tool: str, anchors: tuple[str, ...]) -> None:
+    """The model routes by what a description names: text by documents, pictures by what is seen, a clip, a passage.
+
+    Only those anchors are pinned, so a shortening that keeps the routing still passes. ``[n]`` is
+    pinned where a description promises numbered passages.
 
     Args:
         tool (str): The tool's name.
-        phrases (tuple[str, ...]): What its description must say, in any case.
+        anchors (tuple[str, ...]): What its description must name, in any case.
     """
     text = _descriptions()[tool].lower()
 
-    assert [phrase for phrase in phrases if phrase not in text] == []
+    assert [anchor for anchor in anchors if anchor not in text] == []
