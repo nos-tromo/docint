@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -410,6 +410,28 @@ describe('Chat session-history validation restoration', () => {
     })
     expect(screen.queryByText(/response validation passed/i)).toBeNull()
   })
+
+  it('reloaded turns keep their target chip', async () => {
+    // The final frame that carried the target is long gone on a reload; the
+    // history route is the only place it survives, so the mapping must copy it.
+    mockHistoryFetch([
+      { role: 'user', content: 'what is at the gate?' },
+      { role: 'assistant', content: 'A barrier.', sources: [], retrieval_target: 'visual' },
+      { role: 'user', content: 'who signed the notice?' },
+      { role: 'assistant', content: 'The clerk.', sources: [], retrieval_target: 'documents' },
+      { role: 'user', content: 'and the date?' },
+      { role: 'assistant', content: 'In March.', sources: [], retrieval_target: 'all' },
+      { role: 'user', content: 'anything else?' },
+      // Recorded before the target was stored, or answered from a selection.
+      { role: 'assistant', content: 'No.', sources: [] }
+    ])
+
+    renderChatWithSession('sess-targets')
+
+    expect(await screen.findByText('Answered from images only')).toBeInTheDocument()
+    expect(screen.getByText('Answered from documents only')).toBeInTheDocument()
+    expect(screen.getAllByTestId('retrieval-target-used')).toHaveLength(2)
+  })
 })
 
 describe('Chat drafts', () => {
@@ -495,6 +517,123 @@ describe('Chat retrieval controls', () => {
     expect(filters).toBeVisible()
     expect(mode).toBeVisible()
     expect(screen.queryByTestId('search-panel')?.contains(filters)).toBeFalsy()
+  })
+})
+
+describe('Chat retrieval target', () => {
+  const picker = () => screen.getByRole('button', { name: /answer from/i })
+
+  beforeEach(() => {
+    useChatFiltersStore.getState().reset()
+  })
+
+  /** Open a chat, narrow it to documents, and let one turn mint its session. */
+  async function answerOneTurnFromDocuments() {
+    const frames =
+      'data: {"token":"Answer"}\n\n' +
+      'data: {"response":"Answer","sources":[],"session_id":"sess-1","retrieval_target":"documents"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    renderChat()
+
+    await userEvent.click(picker())
+    expect(picker()).toHaveAccessibleName(/documents/i)
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Answer')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(useUiStore.getState().currentSessionId).toBe('sess-1')
+    })
+    // The target belongs to the chat, so it holds for as long as the chat does.
+    expect(picker()).toHaveAccessibleName(/documents/i)
+  }
+
+  it('a new chat starts at all', async () => {
+    // One click on the picker used to outlive the chat it was made in (and a
+    // reload besides), so a later chat answered from documents alone.
+    await answerOneTurnFromDocuments()
+
+    await userEvent.click(screen.getByRole('button', { name: /new chat/i }))
+
+    await waitFor(() => {
+      expect(picker()).toHaveAccessibleName(/everything/i)
+    })
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+  })
+
+  it('a collection switch starts the next chat at all', async () => {
+    // The sidebar drops the open chat through the store rather than through
+    // the New chat button, and takes the target with it.
+    await answerOneTurnFromDocuments()
+
+    act(() => {
+      useUiStore.getState().setSelectedCollection('other')
+    })
+
+    await waitFor(() => {
+      expect(picker()).toHaveAccessibleName(/everything/i)
+    })
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+  })
+
+  it('New chat resets the target in a chat that never minted a session', async () => {
+    // With no session there is none to clear, so nothing the effect on the
+    // effective session watches changes: the button resets the target itself.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }))
+
+    renderChat()
+
+    await userEvent.click(picker())
+    expect(picker()).toHaveAccessibleName(/documents/i)
+
+    await userEvent.click(screen.getByRole('button', { name: /new chat/i }))
+
+    await waitFor(() => {
+      expect(picker()).toHaveAccessibleName(/everything/i)
+    })
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+  })
+
+  it('New chat resets the target after a stateless turn, which mints no session either', async () => {
+    const frames =
+      'data: {"token":"Answer"}\n\n' +
+      'data: {"response":"Answer","sources":[],"session_id":null,"retrieval_target":"documents"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useChatFiltersStore.setState({ retrievalMode: 'stateless' })
+
+    renderChat()
+
+    await userEvent.click(picker())
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Answer')).toBeInTheDocument()
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+    expect(picker()).toHaveAccessibleName(/documents/i)
+
+    await userEvent.click(screen.getByRole('button', { name: /new chat/i }))
+
+    await waitFor(() => {
+      expect(picker()).toHaveAccessibleName(/everything/i)
+    })
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+  })
+
+  it('does not carry a leftover target into a chat opened fresh', () => {
+    useChatFiltersStore.setState({ retrievalTarget: 'visual' })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }))
+
+    renderChat()
+
+    expect(picker()).toHaveAccessibleName(/everything/i)
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
   })
 })
 
@@ -961,9 +1100,12 @@ describe('Chat session switching', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     useUiStore.setState({ selectedCollection: 'docs' })
-    useChatFiltersStore.getState().setRetrievalTarget('visual')
 
     renderChat()
+    // Picked inside the open chat: a chat opened fresh starts from everything.
+    act(() => {
+      useChatFiltersStore.getState().setRetrievalTarget('visual')
+    })
 
     await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
     await userEvent.click(screen.getByRole('button', { name: /send/i }))

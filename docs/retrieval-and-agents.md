@@ -182,14 +182,21 @@ onto the nodes. Gates:
   `OPENAI_*` setting when unset. See
   [configuration.md](configuration.md) for the full table.
 
-Reranking is **fail-soft**: a transport failure degrades to the
-original retrieval order rather than failing the query, and the outcome
-is stamped on each returned node (`docint_rerank_applied`,
-`docint_rerank_error`) so `/query` responses report whether the rerank
-actually ran. The reranker is wrapped in `LazyRerankerPostprocessor`,
-which defers client construction and its healthcheck to the first
-query — building a query engine for warmup or introspection does not
-pay that cost.
+Reranking is **fail-soft**: a transport failure degrades to the order
+the retriever returned rather than failing the query. With the image lane
+running that is the text and image hits fused by rank (see
+[Image retrieval lane](#image-retrieval-lane)), so the cut to the top-n
+keeps each lane's best hits. The outcome is stamped on each returned node
+(`docint_rerank_applied`, `docint_rerank_error`) so `/query` responses
+report whether the rerank actually ran; a query with no text to rank
+against is stamped the same way, with the error `empty_query`. Each failed
+call (unreachable endpoint, HTTP error, malformed payload) is also counted
+in `docint_rerank_failures_total`, exported on `GET /metrics`, and logged
+as a warning. The image re-score makes its own rerank call, which counts and
+logs the same way when it fails but leaves a turn's `rerank` field alone.
+The reranker is wrapped in `LazyRerankerPostprocessor`, which defers client
+construction and its healthcheck to the first query — building a query
+engine for warmup or introspection does not pay that cost.
 
 ## Parent-context expansion
 
@@ -238,13 +245,77 @@ Settings that shape the lane:
 - `IMAGE_RERANK_MIN_SCORE` (default `0.05`) — the reranker score an image
   caption must reach. The floor sits on the reranker, never on raw CLIP
   similarity, which is not comparable across queries: an unrelated query and a
-  matching one both land in the same narrow CLIP band. Raise it if unrelated
-  images still appear; lower it if relevant ones are missing. It applies to the
-  `all` target only — see the visual target below.
+  matching one both land in the same narrow CLIP band. A reranker asks whether
+  a caption *answers* the query, so a question about the imagery scores even a
+  relevant image far below a caption-shaped query: 0.0044–0.0065 measured,
+  against the floor's 0.05. That is why the floor alone drops such images, and
+  why they get the second look below. Raise the floor if unrelated images still
+  appear. It applies to the `all` target only — see the visual target below.
+- `IMAGE_RESCORE_ENABLED` (default `true`), `IMAGE_RESCORE_MIN_SCORE` (default
+  `0.02`) and `IMAGE_RESCORE_TIMEOUT` (default `10`, seconds) — the second look
+  for a sub-floor image, described below.
 
-If the rerank endpoint is down, images surface ungated rather than vanishing —
-a degraded ranking is more useful than a silently emptied lane. Full defaults
-and rationale:
+**The lanes reach the rerank fused.** Text and image hits are handed to the
+rerank as one list, fused by reciprocal rank over each lane's own order: each
+lane's best hit leads, and a tie goes to the text hit. Rank decides because the
+raw scores — text similarity and CLIP cosine — are not on one scale. A healthy
+reranker re-scores the whole list and ignores that order. It matters when the
+rerank fails: stacking one lane behind the other would let the cut to the top-n
+remove a whole modality.
+
+**If the rerank endpoint is down, the floor stands down.** A failed rerank hands
+the nodes back with their retrieval scores, and an image's CLIP cosine is not on
+the reranker's scale, so measuring it against `IMAGE_RERANK_MIN_SCORE` says
+nothing about relevance: CLIP cosines sit in a ~0.20–0.30 band whatever the
+query, so every one would clear the default floor, and a floor raised above the
+band would drop them all. The stamp on the nodes (`docint_rerank_applied=false`)
+tells the floor so, and so does a set with no scores at all. No image is gated
+or re-scored then; the set is only cut to the top-n, in its fused order. The cut
+is what matters here: with the text hits stacked ahead of the images it removes
+the images, and in the fused order it leaves each lane its best hits instead of
+the answer shipping text alone. The response reports the turn as
+`rerank.applied: false`.
+
+**A sub-floor image inside the cut gets one second look.** While the rerank is
+healthy, an image under the floor that would still land inside the top-n —
+counting every node kept, or already waiting for this look, ahead of it — is
+re-scored against a description of the query instead of the query itself. The
+chat model (`TEXT_MODEL`) writes the description in `RESPONSE_LANGUAGE`: one
+line listing the visible cues the question needs (and the kind of shot, indoors
+or outdoors, when it matters), each with its usual alternatives rather than a
+guessed answer, and with people described by what is visible, never by name
+(`prompts/{en,de}/image_rescore_description.txt`). The candidates' captions are
+then reranked once against it, and an image reaching `IMAGE_RESCORE_MIN_SCORE`
+is kept at the position and with the score it already had. An image the cut
+would remove anyway is never a candidate, so a turn with none makes no extra
+call, and the `visual` target, which applies no floor, never re-scores.
+
+The description is a chat call that runs before the answer's first token, so it
+has its own deadline, `IMAGE_RESCORE_TIMEOUT`, and a single attempt rather than
+the chat client's timeout and retries. It also asks for no reasoning whatever
+`OPENAI_ENABLE_THINKING` says (no `reasoning_effort`, and on
+`INFERENCE_PROVIDER=vllm` `chat_template_kwargs.enable_thinking` sent as
+`false`), because a model that thought first could spend the whole deadline.
+Like the rest of the lane it fails soft: no description, a failed rerank
+(counted as described under [Reranking](#reranking)) or any other error drops
+the sub-floor images exactly as the floor alone would, and never fails the
+turn. Successful descriptions are cached per query, language and model, so an
+identical query costs only the second rerank. At `LOG_LEVEL=DEBUG` each
+re-score that completes logs one counts-only line, `Image re-score |
+candidates=… rescued=… elapsed_ms=…`, never the query or the description.
+
+Measured with a local reranker (eight descriptions against nine captions), the
+true matches that cleared `0.02` scored 0.039–0.86 against their description,
+the true matches that did not 0.0003–0.0119, and the strongest non-match 0.0072.
+The re-score rescues some question-phrased misses and admitted no measured
+non-match; a true match under the re-score floor still drops, as it would
+without the re-score. In a live replay the model-written description rescued
+the right keyframe for person and weather questions (0.03–0.18) while
+unrelated captions stayed below 0.02. The figures come from small runs on a
+local reranker; raise `IMAGE_RESCORE_MIN_SCORE` if unrelated images are
+rescued.
+
+Full defaults and rationale:
 [configuration.md](configuration.md#image-ingestion--imageingestionconfig).
 
 ## Retrieval targets
@@ -264,6 +335,12 @@ the response and the final SSE frame. It is a separate field from
 
 A pinned scope outranks the target: hand-picked chunks are hand-picked
 whatever the target says.
+
+Each stored turn records the target it answered under, and the assistant entry
+in `GET /sessions/{id}/history` returns it, so a reloaded chat can still say what
+drew each answer. A scoped turn records none, for the reason above, and turns
+stored before the field existed have none either; the SPA shows nothing for
+either.
 
 **The visual target applies no relevance floor.** `IMAGE_RERANK_MIN_SCORE`
 protects a *text* answer from a merely-nearest image, and its threshold sits on

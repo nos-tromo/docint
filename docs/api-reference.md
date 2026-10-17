@@ -871,6 +871,12 @@ from `conversations` via `SessionManager.list_sessions()`.
 Returns `SessionHistoryOut` — `{"messages": [...]}` where each message
 comes from `Turn` / `Citation`.
 
+An assistant message carries `retrieval_target` (`all`, `documents` or
+`visual`) — the evidence the turn answered under, as `POST /query` reports it —
+whenever one was stored. The key is absent for a scoped turn, where the pinned
+scope outranks the target and no retrieval ran, and for turns stored before the
+field existed; absent never means `all`.
+
 ### `GET /sessions/{session_id}/sources.zip`
 
 Streams an `application/zip` bundle of every source file cited in the

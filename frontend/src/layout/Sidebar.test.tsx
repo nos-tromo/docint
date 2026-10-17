@@ -5,6 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Sidebar } from './Sidebar'
 import { useUiStore } from '@/stores/ui'
+import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 
@@ -72,6 +73,7 @@ beforeEach(() => {
   useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
   useIngestJobsStore.getState().clear()
   useChatUiStore.setState({ drafts: {} })
+  useChatFiltersStore.getState().reset()
 })
 
 afterEach(() => {
@@ -504,6 +506,24 @@ describe('Sidebar new chat', () => {
     await waitFor(() => {
       expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
     })
+  })
+
+  it('returns "Answer from" to everything where there is no session to drop', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: null })
+    useChatFiltersStore.setState({ retrievalTarget: 'documents' })
+
+    renderSidebarAt('/chat')
+
+    await userEvent.click(await screen.findByRole('button', { name: /new chat/i }))
+
+    // A blank or stateless chat holds no session id, so the Chat route's reset
+    // on a session going away never fires; the control resets the target itself.
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
   })
 
   it('draws the control rather than spelling it, so it renders the same everywhere', async () => {

@@ -226,11 +226,16 @@ def test_idempotent_column_migration_adds_missing_columns_on_legacy_db() -> None
         # Corrective-retry provenance rides the same idempotent migration.
         "retried",
         "retry_query",
+        # So does the evidence target a turn answered under.
+        "retrieval_target",
     } <= (post_columns)
 
     with engine.begin() as conn:
-        legacy = conn.execute(text("SELECT validation_checked FROM turns")).scalar()
-    assert legacy is None  # legacy row keeps NULL — not False
+        legacy_checked, legacy_target = conn.execute(
+            text("SELECT validation_checked, retrieval_target FROM turns")
+        ).one()
+    assert legacy_checked is None  # legacy row keeps NULL — not False
+    assert legacy_target is None  # and claims no target it never recorded
     engine.dispose()
 
 

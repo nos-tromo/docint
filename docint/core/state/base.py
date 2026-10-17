@@ -91,6 +91,8 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
             # that the answer on screen came from a second attempt.
             ("retried", "BOOLEAN"),
             ("retry_query", "TEXT"),
+            # The evidence target a turn answered under, so a reloaded session can say what drew its answers.
+            ("retrieval_target", "TEXT"),
         ]
         with engine.begin() as conn:
             for name, sql_type in pending:

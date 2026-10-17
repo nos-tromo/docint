@@ -17,7 +17,9 @@ from docint.agents import (
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
     Turn,
+    is_weak_answer,
 )
+from docint.agents.orchestrator import WEAK_ANSWER_MIN_CHARS
 from docint.agents.types import ResponseAgent, RetrievalAgent
 from docint.agents.types import Turn as TurnType
 
@@ -573,3 +575,61 @@ def test_orchestrator_forwards_history_into_retrieval_request(turn: Turn) -> Non
 
     assert retriever.called_with is not None
     assert retriever.called_with.history == history
+
+
+# ---------------------------------------------------------------------------
+# Predicate: is_weak_answer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(
+            "Aus den bereitgestellten Notizen geht nicht hervor, welches Schiff zuerst anlegte.",
+            id="de-geht-nicht-hervor",
+        ),
+        pytest.param(
+            "Zu der Frage nach dem Fahrplan finden sich in den Unterlagen keine Angaben dazu.",
+            id="de-keine-angaben",
+        ),
+        pytest.param(
+            "Welcher Kapitän das Boot am Morgen führte, ist dem Protokoll nicht zu entnehmen.",
+            id="de-nicht-zu-entnehmen",
+        ),
+        pytest.param(
+            "Die Zahl der Passagiere auf der Fähre wird im Bericht des Hafenamts nicht erwähnt.",
+            id="de-nicht-erwaehnt",
+        ),
+        pytest.param(
+            "The harbour survey is detailed, but the excerpt does not mention the channel depth.",
+            id="en-does-not-mention",
+        ),
+        pytest.param(
+            "The two reports describe the storm, yet the wind speed is not mentioned in either.",
+            id="en-not-mentioned",
+        ),
+        pytest.param(
+            "Although the logbook lists every departure, it does not say which crew was aboard.",
+            id="en-does-not-say",
+        ),
+        pytest.param(
+            "The excerpts cover the festival week, but there are no details about the catering budget.",
+            id="en-no-details",
+        ),
+        pytest.param(
+            "From the two invented accounts, the cause of the delay cannot be determined with certainty.",
+            id="en-cannot-be-determined",
+        ),
+    ],
+)
+def test_is_weak_answer_flags_refusal_phrasings(answer: str) -> None:
+    """A refusal naming a missing detail is weak, in German or English."""
+    assert len(answer.strip()) > WEAK_ANSWER_MIN_CHARS
+    assert is_weak_answer(answer) is True
+
+
+def test_is_weak_answer_keeps_a_substantive_answer() -> None:
+    """A grounded answer that matches no refusal phrase is not weak."""
+    answer = "Laut dem Bericht öffnete das Hafenbecken im Frühjahr und bediente zunächst zwei Fähren am Tag."
+    assert is_weak_answer(answer) is False

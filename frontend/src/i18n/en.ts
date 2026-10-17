@@ -127,6 +127,8 @@ export const en = {
   'chat.retrieval_target.all': 'Everything',
   'chat.retrieval_target.documents': 'Documents',
   'chat.retrieval_target.visual': 'Images',
+  'chat.retrieval_target_used.documents': 'Answered from documents only',
+  'chat.retrieval_target_used.visual': 'Answered from images only',
   'chat.visual_source_type': 'Kind of image',
   'chat.visual_source.any': 'Any',
   'chat.visual_source.video': 'Video keyframes',

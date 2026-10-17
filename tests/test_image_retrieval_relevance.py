@@ -20,20 +20,34 @@ the reranker a second time, outside the query engine, and caught exceptions from
 that extra call. There is now a single rerank -- the one text sources already
 went through -- so an image-specific raise is no longer a distinct failure mode.
 The silent-degradation path (``VLLMRerankPostprocessor`` swallowing its own
-transport error and returning unscored nodes) is still covered below, because
-that is the one the live stack actually takes.
+transport error and returning the nodes with their retrieval scores, stamped as
+not reranked) is still covered below, because that is the one the live stack
+actually takes.
 """
 
 from __future__ import annotations
 
+import json
 import types
+import urllib.error
+import urllib.request
 from typing import Any, cast
 
 import pytest
 from _pytest.logging import LogCaptureFixture
-from llama_index.core.schema import NodeWithScore, QueryBundle
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
+from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
+from typing_extensions import override
 
-from docint.core.rag import RAG, ImageRelevanceFloorPostprocessor
+import docint.utils.image_description as image_description
+from docint.core.rag import (
+    IMAGE_LANE_METADATA_KEY,
+    RAG,
+    RERANK_APPLIED_KEY,
+    RERANK_ERROR_KEY,
+    ImageRelevanceFloorPostprocessor,
+    VLLMRerankPostprocessor,
+)
 from docint.utils.translate_client import TranslateResult
 
 
@@ -328,26 +342,24 @@ def test_captionless_images_are_dropped_rather_than_reranked_on_empty_text() -> 
     assert nodes == []
 
 
-def test_silent_rerank_fallback_does_not_blank_the_image_lane() -> None:
-    """``VLLMRerankPostprocessor`` swallows transport errors and returns nodes unscored.
+def test_silent_rerank_fallback_does_not_blank_the_image_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``VLLMRerankPostprocessor`` swallows transport errors and keeps the retrieval scores.
 
     That internal degradation must not be mistaken for "every image scored below
     the floor" — otherwise a rerank outage silently deletes all image sources.
+    The nodes come back scored (a CLIP cosine, on another scale than the floor)
+    and stamped as not reranked, so the floor is set above the CLIP band here:
+    that is the configuration in which comparing the two empties the lane.
     """
 
-    class FallbackReranker:
-        """Reranker stub reproducing ``_fallback_nodes``: original nodes, unscored."""
+    def _refuse(request: object, timeout: float) -> object:
+        raise urllib.error.URLError("rerank endpoint down")
 
-        def postprocess_nodes(self, nodes: list[NodeWithScore], query_bundle: Any = None) -> list[NodeWithScore]:
-            """Return the nodes exactly as handed in.
-
-            Args:
-                nodes: Caption nodes built from the CLIP matches.
-                query_bundle: Bundle carrying the rerank query string.
-            """
-            return [NodeWithScore(node=n.node, score=None) for n in nodes]
-
-    rag = _build_rag(image_service=StubImageService([TRANSFORMER]), reranker=FallbackReranker())
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    image_service = StubImageService([TRANSFORMER])
+    image_service.img_ingestion_config.rerank_min_score = 0.5
+    reranker = VLLMRerankPostprocessor(api_base="http://router:8000/v1", model="stub-reranker", top_n=5)
+    rag = _build_rag(image_service=image_service, reranker=reranker)
 
     sources = _lane_through_rerank(rag, "Zeig mir die Transformer-Architektur")
 
@@ -401,3 +413,244 @@ def test_image_source_id_falls_back_to_the_image_hash() -> None:
     sources = _lane_through_rerank(rag, "Zeig mir die Transformer-Architektur")
 
     assert sources[0]["id"] == "105cc611aabb"
+
+
+QUESTION = "Wie ist das Wetter am Hafen?"
+KEYFRAME_CAPTION = "Zwei Personen in Regenjacken am Hafen, bedeckter Himmel."
+PIER_CAPTION = "Ein leerer Steg bei Sonnenschein, ein Rettungsring an einem Pfosten."
+DESCRIPTION = "Himmel über dem Hafen mit Wolken, Sonne oder Regen, Personen in Wetterkleidung"
+
+
+def _reranked_keyframe(node_id: str, caption: str, score: float) -> NodeWithScore:
+    """Build a keyframe caption node as the turn's healthy rerank left it.
+
+    Args:
+        node_id: The companion point id.
+        caption: The stored caption.
+        score: The rerank score the turn gave it.
+    """
+    metadata = {"file_name": "harbour_walk.webm", IMAGE_LANE_METADATA_KEY: True, RERANK_APPLIED_KEY: True}
+    return NodeWithScore(node=TextNode(id_=node_id, text=caption, metadata=metadata), score=score)
+
+
+class _Body:
+    """Response body a faked ``urlopen`` hands the reranker."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        """Store the JSON payload.
+
+        Args:
+            payload: What the endpoint answers.
+        """
+        self.payload = payload
+
+    def __enter__(self) -> _Body:
+        """Enter the response context."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Leave the response context.
+
+        Args:
+            *exc: Exception details, unused.
+        """
+
+    def read(self) -> bytes:
+        """Return the payload as the endpoint would send it."""
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class _RerankEndpoint:
+    """Rerank endpoint stand-in for ``urlopen``: scores by document text, every request recorded."""
+
+    def __init__(self, scores_by_document: dict[str, float]) -> None:
+        """Store the scores and prepare the request log.
+
+        Args:
+            scores_by_document: Relevance score per document text.
+        """
+        self.scores_by_document = scores_by_document
+        self.requests: list[dict[str, Any]] = []
+
+    def __call__(self, request: urllib.request.Request, timeout: float) -> _Body:
+        """Record the request and answer it the way the rerank endpoint does.
+
+        Args:
+            request: The rerank request.
+            timeout: The request timeout, unused.
+        """
+        body = json.loads(cast(bytes, request.data).decode("utf-8"))
+        self.requests.append(body)
+        results: list[dict[str, Any]] = [
+            {"index": index, "relevance_score": self.scores_by_document.get(document, 0.0)}
+            for index, document in enumerate(body["documents"])
+        ]
+        results.sort(key=lambda result: result["relevance_score"], reverse=True)
+        return _Body({"results": results[: body["top_n"]]})
+
+
+def _endpoint_rag(monkeypatch: pytest.MonkeyPatch, endpoint: _RerankEndpoint, *, top_n: int = 5) -> RAG:
+    """Build a RAG whose real reranker talks to ``endpoint``.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        endpoint: The faked rerank endpoint.
+        top_n: The reranker's own cut.
+    """
+    monkeypatch.setattr(urllib.request, "urlopen", endpoint)
+    reranker = VLLMRerankPostprocessor(api_base="http://router:8000/v1", model="stub-reranker", top_n=top_n)
+    return _build_rag(image_service=StubImageService(), reranker=reranker)
+
+
+def test_rescore_reranks_against_the_description_not_the_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second look scores a caption against what a matching picture would show.
+
+    Against the question itself the right keyframe scores in the band of an
+    unrelated caption; against a caption-style description of the question the
+    two separate. So the description, never the question, is the rerank query.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    asked: list[str] = []
+
+    def _describe(query: str) -> str:
+        """Record the query and describe it.
+
+        Args:
+            query: The query the images are scored for.
+        """
+        asked.append(query)
+        return DESCRIPTION
+
+    monkeypatch.setattr(image_description, "describe_for_image_match", _describe)
+    endpoint = _RerankEndpoint({KEYFRAME_CAPTION: 0.86})
+    rag = _endpoint_rag(monkeypatch, endpoint)
+
+    scores = rag._rescore_images_by_description(QUESTION, [_reranked_keyframe("kf-0", KEYFRAME_CAPTION, 0.0044)])
+
+    assert asked == [QUESTION]
+    assert [(request["query"], request["documents"]) for request in endpoint.requests] == [
+        (DESCRIPTION, [KEYFRAME_CAPTION])
+    ]
+    assert scores == {"kf-0": pytest.approx(0.86)}
+
+
+def test_the_rescore_scores_every_candidate_whatever_the_rerank_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reranker's own top-n must not cut the candidates: an unscored one could never be rescued.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setattr(image_description, "describe_for_image_match", lambda query: DESCRIPTION)
+    endpoint = _RerankEndpoint({KEYFRAME_CAPTION: 0.86, PIER_CAPTION: 0.39})
+    rag = _endpoint_rag(monkeypatch, endpoint, top_n=1)
+    candidates = [
+        _reranked_keyframe("kf-0", KEYFRAME_CAPTION, 0.0044),
+        _reranked_keyframe("kf-1", PIER_CAPTION, 0.0039),
+    ]
+
+    scores = rag._rescore_images_by_description(QUESTION, candidates)
+
+    assert endpoint.requests[0]["top_n"] == 2
+    assert scores == {"kf-0": pytest.approx(0.86), "kf-1": pytest.approx(0.39)}
+
+
+def test_no_description_rescues_nothing_and_skips_the_rerank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a description there is nothing to rerank against, so no rerank call is made.
+
+    The suite-wide stub in ``conftest.py`` answers no description.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    endpoint = _RerankEndpoint({KEYFRAME_CAPTION: 0.86})
+    rag = _endpoint_rag(monkeypatch, endpoint)
+
+    scores = rag._rescore_images_by_description(QUESTION, [_reranked_keyframe("kf-0", KEYFRAME_CAPTION, 0.0044)])
+
+    assert scores == {}
+    assert endpoint.requests == []
+
+
+class _UnappliedReranker(BaseNodePostprocessor):
+    """Reranker stand-in that scores every node yet stamps it as not reranked."""
+
+    top_n: int = 5
+
+    @override
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Score each node 0.9 and stamp it as a failed rerank.
+
+        Args:
+            nodes: The nodes to rerank.
+            query_bundle: The rerank query, unused.
+        """
+        scored = [NodeWithScore(node=node.node, score=0.9) for node in nodes]
+        for node in scored:
+            node.node.metadata[RERANK_APPLIED_KEY] = False
+            node.node.metadata[RERANK_ERROR_KEY] = "rerank endpoint down"
+        return scored
+
+
+def test_the_rescore_never_marks_the_turn_unreranked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second look reranks clones, so its outcome never reaches the turn's sources.
+
+    The turn reports its rerank from the stamps on its sources: a stamp from
+    the re-score landing there would report a healthy turn as unreranked. And a
+    clone stamped as not reranked rescues nothing, whatever score it carries.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setattr(image_description, "describe_for_image_match", lambda query: DESCRIPTION)
+    rag = _build_rag(image_service=StubImageService(), reranker=_UnappliedReranker())
+    candidate = _reranked_keyframe("kf-0", KEYFRAME_CAPTION, 0.0044)
+    before = dict(candidate.node.metadata)
+
+    scores = rag._rescore_images_by_description(QUESTION, [candidate])
+
+    assert scores == {}
+    assert candidate.node.metadata == before
+    assert candidate.score == 0.0044
+
+
+def test_the_floor_rescues_through_the_bound_rag_rescore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The floor and ``RAG._rescore_images_by_description`` agree on the call, end to end.
+
+    The floor's ``rescore`` is typed ``Any``, and its fail-soft ``except`` turns
+    a signature that drifted into a quiet drop: the images would just stop being
+    rescued while every test on either side still passed. So this runs the floor
+    with the real bound method and the real reranker, faking only the chat
+    description and the rerank endpoint.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setattr(image_description, "describe_for_image_match", lambda query: DESCRIPTION)
+    endpoint = _RerankEndpoint({KEYFRAME_CAPTION: 0.86, PIER_CAPTION: 0.0072})
+    rag = _endpoint_rag(monkeypatch, endpoint)
+    floor = ImageRelevanceFloorPostprocessor(
+        min_score=0.05, top_n=5, rescore=rag._rescore_images_by_description, rescore_min_score=0.02
+    )
+    text = NodeWithScore(
+        node=TextNode(id_="txt-0", text="Der Hafen liegt im Norden.", metadata={RERANK_APPLIED_KEY: True}),
+        score=0.31,
+    )
+    nodes = [
+        text,
+        _reranked_keyframe("kf-0", KEYFRAME_CAPTION, 0.0044),
+        _reranked_keyframe("kf-1", PIER_CAPTION, 0.0039),
+    ]
+
+    kept = floor._postprocess_nodes(nodes, QueryBundle(query_str=QUESTION))
+
+    assert [node.node.node_id for node in kept] == ["txt-0", "kf-0"]
+    assert kept[1].score == 0.0044
+    assert [(request["query"], request["documents"]) for request in endpoint.requests] == [
+        (DESCRIPTION, [KEYFRAME_CAPTION, PIER_CAPTION])
+    ]

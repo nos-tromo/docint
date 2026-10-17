@@ -5,6 +5,7 @@ import {
   summaryToMarkdown
 } from './exports'
 import type { ChatFinalEvent, SummaryResponse } from '@/api/types'
+import { catalogs, format, type Strings } from '@/i18n'
 
 describe('chatTranscriptToText', () => {
   it('renders role headers, validation, and source blocks', () => {
@@ -95,6 +96,51 @@ describe('chatTranscriptToText', () => {
     expect(text).not.toContain('Parent Text:')
     expect(text).not.toContain('Anchor Text:')
     expect(text).toContain('Author: alice')
+  })
+
+  it('the transcript names a non-default target', () => {
+    // The download is what leaves the app, so a text-only answer has to say so
+    // there as well: a reader of the file cannot see the picker that set it.
+    const turn = (n: number, extra: Record<string, unknown>) => ({
+      user: `q${n}`,
+      assistant: `a${n}`,
+      done: true,
+      meta: { session_id: 's', sources: [], ...extra } as unknown as ChatFinalEvent
+    })
+
+    const text = chatTranscriptToText([
+      turn(1, { retrieval_target: 'documents' }),
+      turn(2, { retrieval_target: 'visual' }),
+      turn(3, { retrieval_target: 'all' }),
+      turn(4, {}),
+      turn(5, { retrieval_mode: 'scoped', retrieval_target: 'documents' }),
+      { user: 'q6', assistant: 'a6', done: true, meta: null }
+    ])
+
+    // One line, directly after the answer it qualifies.
+    expect(text).toContain('ASSISTANT: a1\nAnswered from documents only\n\n')
+    expect(text).toContain('ASSISTANT: a2\nAnswered from images only\n\n')
+    // The default, an unrecorded target and a scoped turn say nothing.
+    expect(text.match(/Answered from/g)).toHaveLength(2)
+    expect(text).toContain('ASSISTANT: a3\n\n')
+    expect(text).toContain('ASSISTANT: a4\n\n')
+    expect(text).toContain('ASSISTANT: a5\n\n')
+  })
+
+  it('writes the target in the language of the export', () => {
+    const de = (key: keyof Strings, vars?: Record<string, string | number>) =>
+      format(catalogs.de[key], vars)
+    const turn = (target: string) => ({
+      user: 'q',
+      assistant: 'a',
+      done: true,
+      meta: { session_id: 's', sources: [], retrieval_target: target } as unknown as ChatFinalEvent
+    })
+
+    const text = chatTranscriptToText([turn('documents'), turn('visual')], de)
+
+    expect(text).toContain('ASSISTENT: a\nNur aus Dokumenten beantwortet\n')
+    expect(text).toContain('ASSISTENT: a\nNur aus Bildern beantwortet\n')
   })
 
   it('renders posting reference fields in the source metadata block', () => {

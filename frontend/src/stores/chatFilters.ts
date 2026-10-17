@@ -158,10 +158,10 @@ export const useChatFiltersStore = create<ChatFiltersState>()(
       name: 'docint-chat-filters',
       // The retrieval mode and a built-up filter set are part of "where I
       // was" — losing them on reload is the same complaint as losing the
-      // open chat. Actions are excluded automatically by partialize.
+      // open chat. Actions are excluded automatically by partialize. The
+      // retrieval target is left out on purpose: it belongs to one chat.
       partialize: (s) => ({
         retrievalMode: s.retrievalMode,
-        retrievalTarget: s.retrievalTarget,
         visualSourceType: s.visualSourceType,
         visualClipFile: s.visualClipFile,
         visualTimeFrom: s.visualTimeFrom,
@@ -174,21 +174,20 @@ export const useChatFiltersStore = create<ChatFiltersState>()(
         hateSpeechOnly: s.hateSpeechOnly,
         customRules: s.customRules
       }),
-      version: 2,
-      // A v1 state predates the retrieval target entirely; its absence must
-      // read as the default rather than as `undefined`, which the API would
-      // reject.
-      migrate: (persisted, version) =>
-        version < 2
-          ? {
-              ...(persisted as object),
-              retrievalTarget: initial.retrievalTarget,
-              visualSourceType: initial.visualSourceType,
-              visualClipFile: initial.visualClipFile,
-              visualTimeFrom: initial.visualTimeFrom,
-              visualTimeTo: initial.visualTimeTo
-            }
-          : persisted
+      version: 3,
+      // v1 predates the visual presets, which read as their defaults. Anything
+      // older than v3 may carry a stale target; it must not rehydrate.
+      migrate: (persisted, version) => {
+        const state: Record<string, unknown> = { ...(persisted as object) }
+        if (version < 2) {
+          state.visualSourceType = initial.visualSourceType
+          state.visualClipFile = initial.visualClipFile
+          state.visualTimeFrom = initial.visualTimeFrom
+          state.visualTimeTo = initial.visualTimeTo
+        }
+        if (version < 3) delete state.retrievalTarget
+        return state
+      }
     }
   )
 )

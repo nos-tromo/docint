@@ -506,6 +506,7 @@ class OpenAIPipeline:
         timeout = _openai_config.timeout
         self.temperature = _openai_config.temperature
         self.top_p = _openai_config.top_p
+        self.openai_config = _openai_config
         self.reasoning_effort = get_openai_reasoning_effort(_openai_config)
 
         self.client = OpenAI(
@@ -548,13 +549,33 @@ class OpenAIPipeline:
             logger.info("Loaded prompt from '{}'", prompt_path)
             return f.read()
 
-    def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+    def call_chat(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        *,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        reasoning: bool | None = None,
+    ) -> str:
         """Call OpenAI Chat completion.
 
         Args:
             prompt (str): The user prompt.
             system_prompt (str | None): Optional system prompt.
             model (str | None): Optional model override; defaults to the configured chat model.
+            timeout (float | None): Deadline in seconds for this call only; ``None``
+                keeps the client's own. Never passed on as ``None``, which would
+                lift the deadline altogether.
+            max_retries (int | None): Retry budget for this call only; ``None``
+                keeps the client's own.
+            reasoning (bool | None): Whether this call requests the provider's
+                reasoning/thinking mode; ``None`` keeps the ``OPENAI_ENABLE_THINKING``
+                default. ``False`` leaves ``reasoning_effort`` off and, on vLLM,
+                sends ``chat_template_kwargs.enable_thinking=false`` the way
+                :meth:`RAG._create_text_model` does, so a call with a short deadline
+                cannot spend it thinking on a stack whose template defaults thinking on.
 
         Returns:
             str: The response text.
@@ -569,10 +590,25 @@ class OpenAIPipeline:
             messages.append({"role": "user", "content": prompt})
 
             request_kwargs: dict[str, Any] = {}
-            if self.reasoning_effort is not None:
-                request_kwargs["reasoning_effort"] = self.reasoning_effort
+            reasoning_effort = (
+                self.reasoning_effort
+                if reasoning is None
+                else get_openai_reasoning_effort(self.openai_config, enabled=reasoning)
+            )
+            if reasoning_effort is not None:
+                request_kwargs["reasoning_effort"] = reasoning_effort
+            if reasoning is not None and self.openai_config.inference_provider == "vllm":
+                # vLLM-only, as in RAG._create_text_model: OpenAI proper rejects unknown body fields.
+                request_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": reasoning}}
 
-            response = self.client.chat.completions.create(
+            options: dict[str, Any] = {}
+            if timeout is not None:
+                options["timeout"] = timeout
+            if max_retries is not None:
+                options["max_retries"] = max_retries
+            client = self.client.with_options(**options) if options else self.client
+
+            response = client.chat.completions.create(
                 model=model or self.text_model_id,
                 messages=messages,
                 seed=self.seed,
