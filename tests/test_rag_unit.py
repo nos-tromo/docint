@@ -205,6 +205,20 @@ def test_normalize_response_data_handles_harmony_analysis_channel(
     assert normalized["reasoning"] == "hidden scratch"
 
 
+def test_normalize_response_data_returns_the_retrieval_mode() -> None:
+    """``SessionManager._persist_turn`` tells a scoped turn by this payload's ``retrieval_mode``.
+
+    It stores no retrieval target for a scoped turn, since the scope outranks
+    the target. A payload that dropped the key would read as unscoped and
+    record a target nothing applied.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    normalized = rag._normalize_response_data("query", DummyResponse("Answer", []), retrieval_mode="scoped")
+
+    assert normalized["retrieval_mode"] == "scoped"
+
+
 def test_create_text_model_disables_reasoning_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
