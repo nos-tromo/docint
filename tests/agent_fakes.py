@@ -20,8 +20,11 @@ from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import ToolContext, ToolRegistry, ToolReply
 
-ScriptedRound = Sequence[dict[str, Any]] | Exception
-"""One scripted model call: the raw chunks it streams, or the error its first pull raises."""
+ScriptedRound = Sequence[dict[str, Any] | Exception] | Exception
+"""One scripted model call: the raw chunks it streams, or the error its first pull raises.
+
+An error among the chunks is raised where it stands, as a stream that breaks off mid-reply.
+"""
 
 PROGRAMME = (
     "Das Hafenfest wurde wegen der Sturmwarnung auf Sonntag verschoben. Die Stände öffnen um zehn Uhr, Musik ab Mittag."
@@ -133,7 +136,7 @@ def streaming_tool_llm(script: Sequence[ScriptedRound]) -> MagicMock:
 
         Raises:
             AssertionError: When the model is called more often than the script has rounds.
-            Exception: The scripted error, when that is the round.
+            Exception: The scripted error, when that is the round or the round reaches it.
         """
         if not rounds:
             raise AssertionError("The model was called more often than its script has rounds.")
@@ -142,6 +145,8 @@ def streaming_tool_llm(script: Sequence[ScriptedRound]) -> MagicMock:
             raise current
         content = ""
         for raw in current:
+            if isinstance(raw, Exception):
+                raise raw
             delta: dict[str, Any] = raw["choices"][0]["delta"] if raw["choices"] else {}
             piece = delta.get("content") or ""
             content += piece

@@ -933,6 +933,7 @@ def test_the_turn_package_imports_nothing_from_rag_or_state() -> None:
 
     assert {
         "docint.agents.turn.image_tools",
+        "docint.agents.turn.loop",
         "docint.agents.turn.passages",
         "docint.agents.turn.tools",
         "docint.agents.turn.toolsets",
