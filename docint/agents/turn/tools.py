@@ -432,20 +432,27 @@ def _state(ledger: EvidenceLedger, number: int) -> tuple[int, int]:
     return len(node.get_content(metadata_mode=MetadataMode.NONE)), len(spans) if isinstance(spans, list) else 0
 
 
-def _recall(key: tuple[str, str], ctx: ToolContext) -> ToolReply | None:
+def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> ToolReply | None:
     """Answer a call from memory, when the same call was answered before in this turn.
+
+    An answer kept by entry state, a read's, is recalled only once every earlier call in
+    the round has finished, as at :meth:`ToolRegistry.finish`: until then one of them may
+    still grow the entry. An answer without states, a search's, is recalled at any time.
 
     Args:
         key (tuple[str, str]): The tool's name and the call's normalized arguments.
         ctx (ToolContext): The turn's evidence and memory.
+        final (bool): Whether every earlier call in the round has finished.
 
     Returns:
         ToolReply | None: The numbers the earlier answer showed or named, admitting
-        nothing; ``None`` when nothing is remembered, or when an entry the answer depends
-        on has grown since.
+        nothing; ``None`` when nothing is remembered, when the answer's states cannot be
+        trusted yet, or when an entry the answer depends on has grown since.
     """
     answered = ctx.answered.get(key)
-    if answered is None or any(_state(ctx.ledger, number) != state for number, state in answered.states):
+    if answered is None or (answered.states and not final):
+        return None
+    if any(_state(ctx.ledger, number) != state for number, state in answered.states):
         return None
     name = key[0]
     logger.info("A repeated call to the '{}' tool was answered from memory", name)
@@ -540,8 +547,9 @@ class ToolRegistry:
         arguments that are not a JSON object, is answered with an error saying what to
         call instead. A call made before in this turn, by tool and arguments compared on
         one line and case-folded, is answered by the numbers its answer showed or named,
-        and needs no I/O. Otherwise the tool checks its arguments: an error it finds is the
-        answer, never remembered; else the prepared call carries the tool's work.
+        and needs no I/O; a read is left to :meth:`finish`, since an earlier call in its
+        round may still grow its passage. Otherwise the tool checks its arguments: an error
+        it finds is the answer, never remembered; else the prepared call carries its work.
 
         Args:
             call (ToolCall): The call as the model made it.
@@ -567,7 +575,7 @@ class ToolRegistry:
             )
             return PreparedCall(action=tool.name, detail="", reply=reply)
         key = (tool.name, json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False))
-        remembered = _recall(key, ctx)
+        remembered = _recall(key, ctx, final=False)
         if remembered is not None:
             return PreparedCall(action=tool.name, detail=remembered.detail, reply=remembered, key=key)
         work = tool.prepare(arguments)
@@ -601,7 +609,7 @@ class ToolRegistry:
             return prepared.reply
         if prepared.work is None or prepared.key is None:
             raise ValueError("A prepared call holds neither an answer nor work.")
-        remembered = _recall(prepared.key, ctx)
+        remembered = _recall(prepared.key, ctx, final=True)
         if remembered is not None:
             return remembered
         reply = prepared.work.answer(fetched, ctx)

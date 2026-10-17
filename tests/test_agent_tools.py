@@ -787,6 +787,45 @@ def test_a_read_is_shown_anew_once_its_passage_gained_a_match() -> None:
     assert ctx.ledger.entries()[0].node.get_content() == body
 
 
+def test_a_remembered_read_waits_for_finish_when_its_round_may_grow_the_passage() -> None:
+    """A read remembered in an earlier round is decided at finish, after a search before it in its round grew [1]."""
+
+    def last_reply(two_phase: bool) -> ToolReply:
+        """Run two rounds: a search and a read of [1], then a search extending [1] and the same read.
+
+        Args:
+            two_phase (bool): Whether the second round is prepared together, as parallel calls are.
+
+        Returns:
+            ToolReply: The second round's read.
+        """
+        ctx = _context()
+        registry = _registry(_Search([_window(OPENING)], [_window(CLOSING)]))
+        registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
+        registry.call(_call("read", n=1), ctx)
+        calls = [_call("search", query="Band am Kai"), _call("read", n=1)]
+        replies = _two_phase(registry, calls, ctx) if two_phase else [registry.call(call, ctx) for call in calls]
+        return replies[1]
+
+    sequential, phased = last_reply(two_phase=False), last_reply(two_phase=True)
+
+    assert phased == sequential
+    assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in phased.text
+
+
+def test_an_unchanged_remembered_read_is_answered_from_memory_at_finish() -> None:
+    """A remembered read needs no I/O; memory answers it at finish, while its passage is unchanged."""
+    ctx = _context()
+    registry = _registry(_Search([_window(OPENING)]))
+    registry.call(_call("search", query="Hafenfest Sonntag"), ctx)
+    registry.call(_call("read", n=1), ctx)
+
+    prepared = registry.prepare(_call("read", n=1), ctx)
+
+    assert (prepared.reply, prepared.fetch) == (None, None)
+    assert registry.finish(prepared, None, ctx).text == "Already called read with these arguments; see [1]."
+
+
 def test_a_read_finished_after_an_extending_search_in_its_round_shows_the_growth() -> None:
     """Prepared together, the same read before and after a search that grows its passage is answered twice."""
     ctx = _context()

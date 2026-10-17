@@ -17,7 +17,7 @@ MIN_ROUND_ROOM = 1500
 #: Longest one tool reply in characters; shorter for a thinking model, whose larger reply reserve leaves less room.
 RESULT_CHARS = 3000
 RESULT_CHARS_REASONING = 2000
-#: Longest text of one passage within a tool reply in characters, its header excluded.
+#: Longest text of one passage within a search reply in characters, its header excluded.
 PASSAGE_CHARS = 900
 PASSAGE_CHARS_REASONING = 700
 #: Tokens of earlier conversation a turn sends as messages; a thinking model's reply reserve takes the difference.
@@ -125,7 +125,7 @@ class TurnBudget:
 
     @property
     def passage_chars(self) -> int:
-        """Longest text of one passage within a tool reply in characters, its header excluded.
+        """Longest text of one passage within a search reply in characters, its header excluded.
 
         Returns:
             int: Fewer for a thinking model, whose larger reply reserve leaves less room.
