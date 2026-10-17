@@ -1,13 +1,13 @@
-"""Whether a deployment can run assessment turns at all."""
+"""Whether a deployment can run assessment or agent turns at all."""
 
 from functools import cache
 
 from loguru import logger
 
-from docint.utils.env_cfg import load_assessment_env
+from docint.utils.env_cfg import load_agent_env, load_assessment_env
 
 #: Below this window the answer step cannot hold its evidence beside a
-#: judgement-sized reply, so the feature switches off rather than degrade.
+#: judgement-sized reply, nor an agent turn its tool replies, so the feature switches off rather than degrade.
 MIN_CTX_WINDOW = 8192
 
 
@@ -40,4 +40,36 @@ def assessment_available(ctx_window: int) -> bool:
     if ctx_window >= MIN_CTX_WINDOW:
         return True
     _warn_small_window(ctx_window)
+    return False
+
+
+@cache
+def _warn_small_agent_window(ctx_window: int) -> None:
+    """Warn once per window size that agent turns are switched off.
+
+    Args:
+        ctx_window (int): The context window that is too small.
+    """
+    logger.warning(
+        "Agent turns are off: the chat context window is {} tokens, below the {} they need. "
+        "Raise OPENAI_CTX_WINDOW (and the context window the chat endpoint serves) to enable them.",
+        ctx_window,
+        MIN_CTX_WINDOW,
+    )
+
+
+def agent_available(ctx_window: int) -> bool:
+    """Return whether agent turns may run under this deployment's config.
+
+    Args:
+        ctx_window (int): The chat model's resolved context window in tokens.
+
+    Returns:
+        bool: ``True`` when the feature is enabled and the window is large enough.
+    """
+    if not load_agent_env().enabled:
+        return False
+    if ctx_window >= MIN_CTX_WINDOW:
+        return True
+    _warn_small_agent_window(ctx_window)
     return False
