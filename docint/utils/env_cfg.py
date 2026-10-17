@@ -807,6 +807,7 @@ class ImageIngestionConfig:
     # reranked against a caption-style description of the question.
     rescore_enabled: bool = True
     rescore_min_score: float = 0.02
+    rescore_timeout: float = 10.0
     # The visual retrieval target draws deeper than the image lane: it is the
     # whole evidence set rather than a handful of candidates beside the text.
     visual_retrieve_top_k: int = 24
@@ -834,6 +835,7 @@ def load_image_ingestion_config(
     default_rerank_min_score: float = 0.05,
     default_rescore_enabled: bool = True,
     default_rescore_min_score: float = 0.02,
+    default_rescore_timeout: float = 10.0,
     default_visual_retrieve_top_k: int = 24,
     default_visual_answer_max_images: int = 6,
     default_tagging_max_image_dimension: int = 1024,
@@ -869,6 +871,8 @@ def load_image_ingestion_config(
             cost of one chat call per such turn. Default True.
         default_rescore_min_score (float): Description score that keeps such an image.
             Default is 0.02.
+        default_rescore_timeout (float): Seconds the description call may take, in one
+            attempt: it runs before the answer's first token. Default is 10.0.
         default_tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled. Default is 1024.
         default_image_ocr_enabled (bool | None): Whether to read the text inside an image.
@@ -891,6 +895,7 @@ def load_image_ingestion_config(
         - rerank_min_score (float): Minimum reranker relevance score for an image to surface.
         - rescore_enabled (bool): Whether sub-floor images inside the cut are re-scored.
         - rescore_min_score (float): Description score that keeps a re-scored image.
+        - rescore_timeout (float): Seconds the description call may take.
         - tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled.
         - ocr_enabled (bool): Whether the text inside an image is read.
@@ -919,6 +924,7 @@ def load_image_ingestion_config(
         rescore_enabled=str(os.getenv("IMAGE_RESCORE_ENABLED", default_rescore_enabled)).lower()
         in {"1", "true", "yes"},
         rescore_min_score=float(os.getenv("IMAGE_RESCORE_MIN_SCORE", default_rescore_min_score)),
+        rescore_timeout=_parse_image_rescore_timeout(default=default_rescore_timeout),
         visual_retrieve_top_k=int(os.getenv("VISUAL_RETRIEVE_TOP_K", default_visual_retrieve_top_k)),
         visual_answer_max_images=int(os.getenv("VISUAL_ANSWER_MAX_IMAGES", default_visual_answer_max_images)),
         tagging_max_image_dimension=int(os.getenv("IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension)),
@@ -927,6 +933,36 @@ def load_image_ingestion_config(
         in {"1", "true", "yes"},
         ocr_max_dimension=int(os.getenv("IMAGE_OCR_MAX_IMAGE_DIM", default_image_ocr_max_dimension)),
     )
+
+
+def _parse_image_rescore_timeout(*, default: float) -> float:
+    """Parse ``IMAGE_RESCORE_TIMEOUT``, the description call's deadline in seconds.
+
+    The call runs before an answer's first token, so a typo must neither lift
+    the deadline nor block startup: a value that is not a positive, finite
+    number of seconds keeps ``default`` and logs a warning.
+
+    Args:
+        default (float): Seconds used when the variable is unset or unusable.
+
+    Returns:
+        float: A positive number of seconds.
+    """
+    raw = os.getenv("IMAGE_RESCORE_TIMEOUT")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        parsed = math.nan
+    if not (math.isfinite(parsed) and parsed > 0):
+        logger.warning(
+            "IMAGE_RESCORE_TIMEOUT={!r} is not a positive number of seconds — using default {}",
+            raw,
+            default,
+        )
+        return default
+    return parsed
 
 
 @dataclass(frozen=True)

@@ -3,13 +3,15 @@
 A question *about* the imagery ("how is the weather?") scores the right
 caption in the same band as an unrelated one, so the image floor re-scores
 such images against what a matching picture's caption would say. The helper
-writing that description is one chat call: cached on success, fail-soft, and
-never carrying the model's reasoning into the rerank query.
+writing that description is one chat call: cached on success, fail-soft,
+bounded by its own deadline, and never carrying the model's reasoning into the
+rerank query.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
@@ -50,15 +52,25 @@ class _FakePipe:
             *replies: Reply texts, or exceptions to raise instead of replying.
         """
         self.replies = list(replies)
-        self.calls: list[dict[str, str | None]] = []
+        self.calls: list[dict[str, Any]] = []
 
-    def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+    def call_chat(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        *,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> str:
         """Record the call and answer the next canned reply.
 
         Args:
             prompt: The user message (the question).
             system_prompt: The localized description prompt.
             model: The chat model asked.
+            timeout: The per-call deadline.
+            max_retries: The per-call retry budget.
 
         Returns:
             str: The canned reply.
@@ -66,7 +78,15 @@ class _FakePipe:
         Raises:
             Exception: The canned exception, when that is the next reply.
         """
-        self.calls.append({"prompt": prompt, "system_prompt": system_prompt, "model": model})
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "model": model,
+                "timeout": timeout,
+                "max_retries": max_retries,
+            }
+        )
         reply = self.replies[min(len(self.calls), len(self.replies)) - 1]
         if isinstance(reply, Exception):
             raise reply
@@ -184,12 +204,8 @@ def test_the_description_is_asked_with_the_response_language_prompt(monkeypatch:
     image_description.describe_for_image_match(QUESTION)
 
     prompt_file = load_path_env().prompts / code / "image_rescore_description.txt"
-    assert pipe.calls == [
-        {
-            "prompt": QUESTION,
-            "system_prompt": prompt_file.read_text(encoding="utf-8").strip(),
-            "model": "stub-chat-model",
-        }
+    assert [(call["prompt"], call["system_prompt"], call["model"]) for call in pipe.calls] == [
+        (QUESTION, prompt_file.read_text(encoding="utf-8").strip(), "stub-chat-model")
     ]
 
 
@@ -221,3 +237,35 @@ def test_a_blank_question_asks_nothing(monkeypatch: pytest.MonkeyPatch, query: s
 
     assert image_description.describe_for_image_match(query) is None
     assert pipe.calls == []
+
+
+@pytest.mark.parametrize(("value", "seconds"), [(None, 10.0), ("4.5", 4.5)], ids=["default", "configured"])
+def test_the_description_call_has_its_own_deadline_and_no_retries(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, seconds: float
+) -> None:
+    """The call runs before the answer's first token, so it must not inherit the chat client's patience.
+
+    A retry would multiply the wait, and a miss only costs an image its second
+    look, so one attempt within ``IMAGE_RESCORE_TIMEOUT`` is the whole budget.
+
+    Args:
+        monkeypatch: Fixture used to patch the pipeline and environment.
+        value: ``IMAGE_RESCORE_TIMEOUT``, or ``None`` to leave it unset.
+        seconds: The deadline the call must carry.
+    """
+    if value is None:
+        monkeypatch.delenv("IMAGE_RESCORE_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("IMAGE_RESCORE_TIMEOUT", value)
+    pipe = _use(monkeypatch, _FakePipe(DESCRIPTION))
+
+    image_description.describe_for_image_match(QUESTION)
+
+    assert [(call["timeout"], call["max_retries"]) for call in pipe.calls] == [(seconds, 0)]
+
+
+def test_the_bundled_default_is_the_english_prompt() -> None:
+    """The fallback for a missing prompt file says what the English file says, so the two cannot drift."""
+    prompt_file = load_path_env().prompts / "en" / "image_rescore_description.txt"
+
+    assert image_description._DEFAULT_DESCRIPTION_PROMPT == prompt_file.read_text(encoding="utf-8").strip()

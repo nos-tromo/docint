@@ -548,13 +548,26 @@ class OpenAIPipeline:
             logger.info("Loaded prompt from '{}'", prompt_path)
             return f.read()
 
-    def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+    def call_chat(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        *,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> str:
         """Call OpenAI Chat completion.
 
         Args:
             prompt (str): The user prompt.
             system_prompt (str | None): Optional system prompt.
             model (str | None): Optional model override; defaults to the configured chat model.
+            timeout (float | None): Deadline in seconds for this call only; ``None``
+                keeps the client's own. Never passed on as ``None``, which would
+                lift the deadline altogether.
+            max_retries (int | None): Retry budget for this call only; ``None``
+                keeps the client's own.
 
         Returns:
             str: The response text.
@@ -572,7 +585,14 @@ class OpenAIPipeline:
             if self.reasoning_effort is not None:
                 request_kwargs["reasoning_effort"] = self.reasoning_effort
 
-            response = self.client.chat.completions.create(
+            options: dict[str, Any] = {}
+            if timeout is not None:
+                options["timeout"] = timeout
+            if max_retries is not None:
+                options["max_retries"] = max_retries
+            client = self.client.with_options(**options) if options else self.client
+
+            response = client.chat.completions.create(
                 model=model or self.text_model_id,
                 messages=messages,
                 seed=self.seed,

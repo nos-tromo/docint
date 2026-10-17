@@ -284,6 +284,136 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
     assert "reasoning_effort" not in captured
 
 
+class _OptionsClient:
+    """Chat client stand-in logging each ``with_options`` copy and which client served a call."""
+
+    def __init__(self, log: list[tuple[str, dict[str, Any]]], name: str = "shared") -> None:
+        """Share one log across the client and its copies.
+
+        Args:
+            log: Entries ``(event, options)`` in call order.
+            name: Which client this is, as logged when it serves a call.
+        """
+        self.log = log
+        self.name = name
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def with_options(self, **options: Any) -> _OptionsClient:
+        """Log the options and return a per-call copy.
+
+        Args:
+            **options: The client options for the copy.
+
+        Returns:
+            _OptionsClient: The copy.
+        """
+        self.log.append(("with_options", options))
+        return _OptionsClient(self.log, name="per-call")
+
+    def _create(self, **kwargs: Any) -> Any:
+        """Log which client served the call and answer it.
+
+        Args:
+            **kwargs: The completion request.
+
+        Returns:
+            Any: A fake chat completion response.
+        """
+        self.log.append((self.name, {}))
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+
+
+def _chat_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: _OptionsClient) -> OpenAIPipeline:
+    """Build an ``OpenAIPipeline`` whose clients are ``client``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        client: The chat client stand-in.
+
+    Returns:
+        OpenAIPipeline: The pipeline.
+    """
+    monkeypatch.setattr(
+        "docint.utils.openai_cfg.load_model_env",
+        lambda: SimpleNamespace(text_model="stub-chat-model", vision_model="stub-vision-model"),
+    )
+    monkeypatch.setattr(
+        "docint.utils.openai_cfg.load_openai_env",
+        lambda: OpenAIConfig(
+            api_base="http://localhost:11434/v1",
+            api_key="sk-test",
+            ctx_window=4096,
+            dimensions=None,
+            max_retries=2,
+            num_output=256,
+            inference_provider="ollama",
+            reuse_client=False,
+            seed=42,
+            temperature=0.0,
+            thinking_effort="medium",
+            thinking_enabled=False,
+            timeout=300.0,
+            top_p=0.1,
+        ),
+    )
+    monkeypatch.setattr("docint.utils.openai_cfg.load_path_env", lambda: SimpleNamespace(prompts=tmp_path))
+    monkeypatch.setattr("docint.utils.openai_cfg.OpenAI", lambda **_: client)
+    return OpenAIPipeline()
+
+
+@pytest.mark.parametrize(
+    ("timeout", "max_retries", "options"),
+    [
+        (10.0, 0, {"timeout": 10.0, "max_retries": 0}),
+        (10.0, None, {"timeout": 10.0}),
+        (None, 0, {"max_retries": 0}),
+    ],
+    ids=["both", "timeout-only", "retries-only"],
+)
+def test_call_chat_applies_per_call_options_to_that_call_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    timeout: float | None,
+    max_retries: int | None,
+    options: dict[str, Any],
+) -> None:
+    """A per-call deadline reaches that one request and never the shared client.
+
+    Only the options given are passed on: ``with_options(timeout=None)`` would
+    lift the client's own deadline altogether.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        timeout: The per-call deadline, if any.
+        max_retries: The per-call retry budget, if any.
+        options: The options the per-call copy must be made with.
+    """
+    log: list[tuple[str, dict[str, Any]]] = []
+    pipeline = _chat_pipeline(monkeypatch, tmp_path, _OptionsClient(log))
+
+    assert pipeline.call_chat("hello", timeout=timeout, max_retries=max_retries) == "ok"
+    pipeline.call_chat("hello again")
+
+    assert log == [("with_options", options), ("per-call", {}), ("shared", {})]
+
+
+def test_call_chat_without_options_uses_the_shared_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Callers that pass no options (translation among them) keep the configured client.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+    """
+    log: list[tuple[str, dict[str, Any]]] = []
+    pipeline = _chat_pipeline(monkeypatch, tmp_path, _OptionsClient(log))
+
+    pipeline.call_chat("hello", system_prompt="sys", model="override-model")
+
+    assert log == [("shared", {})]
+
+
 def _install_vision_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
