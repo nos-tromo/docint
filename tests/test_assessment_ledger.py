@@ -22,7 +22,6 @@ from docint.agents.assessment.ledger import (
     EvidenceLedger,
     Room,
     _allowances,
-    _parts,
     answer_budget,
     digest,
     effective_ratio,
@@ -30,6 +29,7 @@ from docint.agents.assessment.ledger import (
     fit_ledger,
     is_context_overflow,
     kept_ranges,
+    passage_parts,
     render_context,
     text_floor,
 )
@@ -65,6 +65,15 @@ def test_ledger_stops_at_its_cap() -> None:
 
     assert [number for number, _ in added] == [1, 2]
     assert ledger.full is True
+
+
+def test_number_of_names_an_entry_by_the_number_it_is_cited_by() -> None:
+    """A held passage answers with its ledger number, which a later window does not move; others with None."""
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([scored_node("a", "A"), scored_node("b", "B")])
+    ledger.add([scored_node("b", "B, and more"), scored_node("c", "C")])
+
+    assert [ledger.number_of(node_id) for node_id in ("a", "b", "c", "d")] == [1, 2, 3, None]
 
 
 def _window(text: str, *, score: float = 1.0) -> NodeWithScore:
@@ -1638,7 +1647,7 @@ def _render_legibly(nodes: list[NodeWithScore], budget: int) -> int:
     context, shortened, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
     assert len(context) <= budget
     assert [prefix for scored in nodes for prefix in _held_prefixes(scored) if prefix not in context] == []
-    headers, bodies, anchors = _parts(nodes, llm_view)
+    headers, bodies, anchors = passage_parts(nodes, llm_view)
     _, _, allowances = _allowances(
         headers, bodies, anchors, budget_tokens=budget, char_token_ratio=1.0, count_tokens=None
     )

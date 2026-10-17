@@ -258,7 +258,7 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     return NodeWithScore(node=node, score=max(scores, default=None))
 
 
-def _stamp(scored: NodeWithScore, number: int) -> NodeWithScore:
+def stamp(scored: NodeWithScore, number: int) -> NodeWithScore:
     """Clone a passage stamped with the ledger number it is cited by.
 
     Args:
@@ -409,7 +409,20 @@ class EvidenceLedger:
             list[NodeWithScore]: Clones carrying ``citation_index``; the cached
             originals are never written to.
         """
-        return [_stamp(scored, number) for number, scored in enumerate(self._entries, start=1)]
+        return [stamp(scored, number) for number, scored in enumerate(self._entries, start=1)]
+
+    def number_of(self, node_id: str) -> int | None:
+        """Return the number a held passage is cited by.
+
+        Args:
+            node_id (str): The passage's node id, the ledger's dedupe key.
+
+        Returns:
+            int | None: Its ledger number, which a later window never moves; ``None``
+            when the ledger holds no passage of that id.
+        """
+        position = self._positions.get(node_id)
+        return None if position is None else position + 1
 
 
 def kept_ranges(body: str, anchors: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -594,7 +607,7 @@ def text_floor(body: str, anchors: Sequence[tuple[int, int]]) -> int:
     return min(len(body), max(MIN_TEXT_CHARS, (len(windows) - 1) * SEAM_CHARS + max(len(windows), needed)))
 
 
-def _parts(
+def passage_parts(
     nodes: list[NodeWithScore], llm_view: Callable[[BaseNode], BaseNode], *, compact: bool = False
 ) -> tuple[list[str], list[str], list[list[tuple[int, int]]]]:
     """Split each passage's LLM view into its metadata header, its text and where its matches sit.
@@ -621,7 +634,7 @@ def _parts(
     return headers, bodies, anchors
 
 
-def _costs(header: str, body: str, anchors: Sequence[tuple[int, int]]) -> tuple[int, int]:
+def passage_costs(header: str, body: str, anchors: Sequence[tuple[int, int]]) -> tuple[int, int]:
     """Price one passage as packing does.
 
     Args:
@@ -666,12 +679,12 @@ class Room:
             count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
             compact (bool): Whether headers are priced compacted.
         """
-        headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
+        headers, bodies, anchors = passage_parts(nodes, llm_view, compact=compact)
         ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
         self._llm_view = llm_view
         self._compact = compact
         self._chars = int(budget_tokens * ratio)
-        self._costs = [_costs(*part) for part in zip(headers, bodies, anchors, strict=True)]
+        self._costs = [passage_costs(*part) for part in zip(headers, bodies, anchors, strict=True)]
         self._reserved = sum(reserve for reserve, _ in self._costs)
         self._floor = sum(floor for _, floor in self._costs)
 
@@ -725,8 +738,8 @@ class Room:
         Returns:
             bool: ``True`` when it fits; its cost is then counted in place of the entry it replaces.
         """
-        headers, bodies, anchors = _parts([_stamp(candidate, number)], self._llm_view, compact=self._compact)
-        reserve, floor = _costs(headers[0], bodies[0], anchors[0])
+        headers, bodies, anchors = passage_parts([stamp(candidate, number)], self._llm_view, compact=self._compact)
+        reserve, floor = passage_costs(headers[0], bodies[0], anchors[0])
         held_reserve, held_floor = self._costs[number - 1] if number <= len(self._costs) else (0, 0)
         reserved = self._reserved - held_reserve + reserve
         floors = self._floor - held_floor + floor
@@ -810,7 +823,7 @@ def evidence_fits(
         keeps its :func:`text_floor`: at least ``MIN_TEXT_CHARS``, and a region for
         every retrieved match it holds; a passage shown whole fits however short it is.
     """
-    headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
+    headers, bodies, anchors = passage_parts(nodes, llm_view, compact=compact)
     return _legible(
         *_allowances(
             headers,
@@ -946,7 +959,7 @@ def render_context(
         RenderedContext: The context block, how many entries were shortened, and
         whether the packing kept every passage legible.
     """
-    headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
+    headers, bodies, anchors = passage_parts(nodes, llm_view, compact=compact)
     char_budget, floors, allowances = _allowances(
         headers,
         bodies,
