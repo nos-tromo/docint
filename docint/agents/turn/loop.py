@@ -13,17 +13,10 @@ for one more full tool reply (``context_budget``), or two rounds in a row that a
 (``idle``). Limits are checked between rounds, and the time also bounds every call's I/O; a
 round is never cut off while it streams, so an answer already streaming is never abandoned.
 
-Calls. The calls of one round are prepared, fetched and finished as the tool registry requires:
-prepared in call order on the loop thread, their I/O started on the process-wide search slots so
-they run at once, then finished in call order on the loop thread, which numbers what they admit in
-call order. Every call id gets a reply: calls past ``max_calls_per_round`` are skipped, a call
-without room for a full reply never runs, and a call that cannot start, fails or outlives the time
-left gets an error reply. Work abandoned at the deadline keeps its search slot until it ends.
-
-Room. The turn's room for tool replies is the budget's ``round_room`` less the final note. A round
-first reserves its assistant message and a short reply for every call; a call then runs only
-while a full reply, ``result_chars`` at the turn's ratio plus its envelope, still fits in place of
-its short one. No reply enters the transcript longer than ``result_chars``.
+Calls and room. Every call id gets a reply, answered by
+:class:`~docint.agents.turn.calls.RoundCalls`: concurrently on the search slots, numbered in call
+order, within the room and the time left. The turn's room for tool replies is the budget's
+``round_room`` less the final note; a round's assistant message is counted before its calls.
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
 anything, a failure goes to the caller, who can still answer another way: no model slot within
@@ -49,9 +42,7 @@ exception types and reason tokens.
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
-import math
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -62,22 +53,15 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole, TextBlock
 from llama_index.core.schema import BaseNode, NodeWithScore
 from loguru import logger
 
-from docint.agents.assessment.bounded import (
-    MODEL_SLOT_POOL,
-    MODEL_SLOT_WAIT_S,
-    SEARCH_SLOT_POOL,
-    SEARCH_SLOT_WAIT_S,
-    NoSlot,
-    start_bounded,
-)
+from docint.agents.assessment.bounded import MODEL_SLOT_POOL, MODEL_SLOT_WAIT_S, SEARCH_SLOT_POOL, NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger, is_context_overflow
 from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget
+from docint.agents.turn.calls import RoundCalls, message_tokens
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
-from docint.agents.turn.tools import PreparedCall, ToolContext, ToolRegistry, ToolReply, error_reply
+from docint.agents.turn.tools import ToolContext, ToolRegistry
 from docint.agents.types import AgentAction, AgentProgress
-from docint.utils.embed_chunking import estimate_tokens
-from docint.utils.text_budget import MARKER_RESERVE_CHARS, fit_with_marker
+from docint.utils.text_budget import fit_with_marker
 
 if TYPE_CHECKING:
     from llama_index.core.llms import LLM
@@ -86,8 +70,6 @@ if TYPE_CHECKING:
 
 #: Longest note, in characters, that a round's text before its calls leaves in the trail and the transcript.
 NOTE_CHARS = 500
-#: Name of the thread a tool call's I/O runs on, so an abandoned one can be found.
-SEARCH_THREAD_NAME = "agent-turn-search"
 #: Share of each tool reply the overflow retry keeps.
 OVERFLOW_REPLY_SHARE = 0.5
 #: Rounds in a row that add no passage before the model must answer.
@@ -96,19 +78,6 @@ IDLE_ROUNDS = 2
 _REFUSED_STATUSES = frozenset({400, 422})
 #: What a second overflow raises; the API reports a ``ValueError`` naming the context window as ``context_overflow``.
 _OVERFLOW_MESSAGE = "The agent turn's prompt exceeds the model's context window."
-
-# The replies the loop writes itself, for calls it did not run or that did not answer in time;
-# model-facing protocol like the tools' own, each prefixed ``Error: `` by ``error_reply``.
-SKIPPED_REPLY = (
-    "not run: at most {limit} calls run in one round; call it again in your next round if you still need it."
-)
-NO_ROOM_REPLY = "not run: the context has no room left for its reply; answer from the passages shown."
-NO_TIME_REPLY = "not run: the time for this turn is up; answer from the passages shown."
-LATE_REPLY = "no reply in time: the time for this turn ran out first; answer from the passages shown."
-FAILED_REPLY = "the call failed; try other arguments, or answer from the passages shown."
-NO_CAPACITY_REPLY = (
-    "not run: no search capacity was free; call it again in your next round, or answer from the passages shown."
-)
 
 
 class ToolsUnavailable(Exception):
@@ -321,35 +290,19 @@ class AgentLoop:
         self._final_note = final_note
         self._max_rounds = max_rounds
         self._time_budget_s = time_budget_s
-        self._max_calls = max_calls_per_round
         self._ratio = char_token_ratio
         self._llm_view = llm_view
         self._clock = clock
         self._model_slots = model_slots
-        self._search_slots = search_slots
         self._reasoning_open = reasoning_open
-        self._room = budget.round_room - self._message_tokens(final_note)
-        self._full_reply = math.ceil(budget.result_chars / char_token_ratio) + MESSAGE_OVERHEAD_TOKENS
-        short = (
-            SKIPPED_REPLY.format(limit=max_calls_per_round),
-            NO_ROOM_REPLY,
-            NO_TIME_REPLY,
-            LATE_REPLY,
-            FAILED_REPLY,
-            NO_CAPACITY_REPLY,
+        self._room = budget.round_room - message_tokens(final_note, char_token_ratio)
+        self._calls = RoundCalls(
+            registry=registry,
+            result_chars=budget.result_chars,
+            max_calls_per_round=max_calls_per_round,
+            char_token_ratio=char_token_ratio,
+            search_slots=search_slots,
         )
-        self._short_reply = max(self._message_tokens(error_reply("", text).text) for text in short)
-
-    def _message_tokens(self, text: str) -> int:
-        """Estimate what one message costs: its text and its envelope.
-
-        Args:
-            text (str): The message's text.
-
-        Returns:
-            int: Estimated tokens.
-        """
-        return estimate_tokens(text, self._ratio) + MESSAGE_OVERHEAD_TOKENS
 
     def _time_left(self, turn: _Turn) -> float:
         """Return the seconds the turn has left.
@@ -437,7 +390,7 @@ class AgentLoop:
         if self._time_left(turn) <= 0:
             return "time_budget"
         # One full reply, and the envelope of the message that asks for it.
-        if self._room - turn.spent < self._full_reply + MESSAGE_OVERHEAD_TOKENS:
+        if self._room - turn.spent < self._calls.full_reply + MESSAGE_OVERHEAD_TOKENS:
             return "context_budget"
         if turn.idle >= IDLE_ROUNDS:
             return "idle"
@@ -672,140 +625,20 @@ class AgentLoop:
             json.dumps({"name": call.name, "arguments": arguments}, ensure_ascii=False)
             for call, arguments in zip(done.calls, echoed, strict=True)
         )
-        asked = self._message_tokens(written)
+        asked = message_tokens(written, self._ratio)
         prepared = [self._registry.prepare(call, turn.ctx) for call in done.calls]
-        replies = self._replies(turn, prepared, self._admitted(turn, prepared, asked))
+        replies = self._calls.answer(
+            prepared, turn.ctx, room=self._room - turn.spent - asked, time_left=lambda: self._time_left(turn)
+        )
         turn.transcript.append(ChatMessage(role=MessageRole.ASSISTANT, blocks=blocks))
         turn.spent += asked
         found = 0
         for call, reply in zip(done.calls, replies, strict=True):
-            text = self._bounded(reply)
             turn.transcript.append(
-                ChatMessage(role=MessageRole.TOOL, content=text, additional_kwargs={"tool_call_id": call.id})
+                ChatMessage(role=MessageRole.TOOL, content=reply.text, additional_kwargs={"tool_call_id": call.id})
             )
-            turn.spent += self._message_tokens(text)
+            turn.spent += message_tokens(reply.text, self._ratio)
             found += reply.found
             if reply.action in self._registry.names:
                 yield self._step(turn, reply.action, reply.detail, reply.found)
         turn.idle = 0 if found else turn.idle + 1
-
-    def _admitted(self, turn: _Turn, prepared: Sequence[PreparedCall], asked: int) -> list[bool | None]:
-        """Decide which calls may run: within the round's limit, and while a full reply still fits.
-
-        The round first reserves its assistant message and the least each call's reply costs: a
-        call answered when prepared costs its reply, any other the shortest reply this loop
-        writes. A call with work then runs, in call order, only while the rest of the room holds
-        its full reply in place of that shortest one.
-
-        Args:
-            turn (_Turn): The turn.
-            prepared (Sequence[PreparedCall]): The round's calls, prepared.
-            asked (int): Tokens the round's assistant message costs.
-
-        Returns:
-            list[bool | None]: Per call: ``None`` when it is past the round's limit, ``True`` when
-            it runs (or was answered when prepared), ``False`` when its reply has no room.
-        """
-        room = self._room - turn.spent - asked
-        for position, ready in enumerate(prepared):
-            within = position < self._max_calls
-            room -= self._message_tokens(ready.reply.text) if within and ready.reply else self._short_reply
-        admitted: list[bool | None] = []
-        for position, ready in enumerate(prepared):
-            if position >= self._max_calls:
-                admitted.append(None)
-            elif ready.reply is not None:
-                admitted.append(True)
-            elif room >= self._full_reply - self._short_reply:
-                room -= self._full_reply - self._short_reply
-                admitted.append(True)
-            else:
-                admitted.append(False)
-        return admitted
-
-    def _replies(
-        self, turn: _Turn, prepared: Sequence[PreparedCall], admitted: Sequence[bool | None]
-    ) -> list[ToolReply]:
-        """Run the admitted calls' I/O at once on the search slots, then finish every call in call order.
-
-        Args:
-            turn (_Turn): The turn.
-            prepared (Sequence[PreparedCall]): The round's calls, prepared.
-            admitted (Sequence[bool | None]): Which may run (see :meth:`_admitted`).
-
-        Returns:
-            list[ToolReply]: One reply per call, in call order.
-        """
-        replies: list[ToolReply | None] = [None] * len(prepared)
-        started: dict[int, concurrent.futures.Future[Any]] = {}
-        no_slot = 0
-        for position, (ready, runs) in enumerate(zip(prepared, admitted, strict=True)):
-            if runs is None:
-                replies[position] = error_reply(
-                    ready.action, SKIPPED_REPLY.format(limit=self._max_calls), detail=ready.detail
-                )
-            elif not runs:
-                replies[position] = error_reply(ready.action, NO_ROOM_REPLY, detail=ready.detail)
-            elif ready.fetch is not None:
-                left = self._time_left(turn)
-                if left <= 0:
-                    replies[position] = error_reply(ready.action, NO_TIME_REPLY, detail=ready.detail)
-                    continue
-                try:
-                    started[position] = start_bounded(
-                        ready.fetch,
-                        slots=self._search_slots,
-                        name=SEARCH_THREAD_NAME,
-                        slot_wait=min(SEARCH_SLOT_WAIT_S, left),
-                    )
-                except NoSlot:
-                    no_slot += 1
-                    replies[position] = error_reply(ready.action, NO_CAPACITY_REPLY, detail=ready.detail)
-                except Exception as exc:
-                    logger.warning("An agent's '{}' call could not start: {}", ready.action, type(exc).__name__)
-                    replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
-        if no_slot:
-            logger.warning("No search slot came free for {} of an agent round's tool calls", no_slot)
-        if started:
-            # Waited on, never asked for a result with a timeout: a search's own TimeoutError is no deadline.
-            concurrent.futures.wait(started.values(), timeout=max(0.0, self._time_left(turn)))
-        late = 0
-        for position, ready in enumerate(prepared):
-            if replies[position] is not None:
-                continue
-            fetched: Any = None
-            future = started.get(position)
-            if future is not None:
-                if not future.done():
-                    late += 1
-                    replies[position] = error_reply(ready.action, LATE_REPLY, detail=ready.detail)
-                    continue
-                failure = future.exception()
-                if failure is not None:
-                    logger.warning("An agent's '{}' call failed: {}", ready.action, type(failure).__name__)
-                    replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
-                    continue
-                fetched = future.result()
-            try:
-                replies[position] = self._registry.finish(ready, fetched, turn.ctx)
-            except Exception as exc:
-                logger.warning("An agent's '{}' call failed: {}", ready.action, type(exc).__name__)
-                replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
-        if late:
-            logger.warning("{} of an agent round's tool calls outlived the turn's time budget", late)
-        return [cast(ToolReply, reply) for reply in replies]
-
-    def _bounded(self, reply: ToolReply) -> str:
-        """Return a reply's text within ``result_chars``, cut with a marker when longer.
-
-        Args:
-            reply (ToolReply): The reply.
-
-        Returns:
-            str: The text the transcript holds.
-        """
-        limit = self._budget.result_chars
-        if len(reply.text) <= limit:
-            return reply.text
-        logger.warning("A '{}' tool reply ran past {} characters and was cut", reply.action, limit)
-        return fit_with_marker(reply.text, limit - MARKER_RESERVE_CHARS)[0]

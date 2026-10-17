@@ -932,6 +932,7 @@ def test_the_turn_package_imports_nothing_from_rag_or_state() -> None:
     loaded = subprocess.run([sys.executable, "-c", script, *modules], capture_output=True, text=True, check=True)
 
     assert {
+        "docint.agents.turn.calls",
         "docint.agents.turn.image_tools",
         "docint.agents.turn.loop",
         "docint.agents.turn.passages",
