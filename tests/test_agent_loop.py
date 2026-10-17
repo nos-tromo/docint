@@ -5,9 +5,9 @@ Every message, passage, query and tool call here is invented.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import threading
-import time
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from typing import Any, cast
@@ -598,7 +598,7 @@ def test_parallel_calls_run_on_search_slots_and_number_in_call_order() -> None:
 
 
 def test_every_call_gets_a_reply_even_on_timeout(held: threading.Event) -> None:
-    """A search that outlives the time left, an unoffered tool and malformed arguments each still get their reply.
+    """A search that outlives the time left, a read, an unoffered tool and malformed arguments each get their reply.
 
     Args:
         held (threading.Event): Holds the programme search.
@@ -618,29 +618,35 @@ def test_every_call_gets_a_reply_even_on_timeout(held: threading.Event) -> None:
             return [programme_passage()]
         return [weather_passage()]
 
+    now = [0.0]
     llm = streaming_tool_llm(
         [
+            _calls(_search_call("call_a", "Wetter")),
             _calls(
-                _search_call("call_a", "Programm"),
-                _search_call("call_b", "Wetter"),
-                ("call_c", "keyframes", {"file": "harbour_walk.webm"}),
-                ("call_d", "read", "nicht json"),
+                _search_call("call_b", "Programm"),
+                ("call_c", "read", {"n": 1}),
+                ("call_d", "keyframes", {"file": "harbour_walk.webm"}),
+                ("call_e", "read", "nicht json"),
             ),
             _answer(),
         ]
     )
+    # Each search slot takes 60 of the turn's 100 s to come free: the second search starts with
+    # 40 s left and is waited on with none, so it outlives the time left without a real wait.
+    loop = _loop(
+        llm, _documents(_search), search_slots=_SlowSlots(now, 60.0), time_budget_s=100.0, clock=lambda: now[0]
+    )
 
-    # A fixed clock: only the real wait for the searches spends the time left.
-    progress, _, result = _drain(_turn(_loop(llm, _documents(_search), time_budget_s=1.0, clock=lambda: 0.0)))
+    progress, _, result = _drain(_turn(loop))
 
-    replies = _tool_replies(llm, 1)
-    assert list(replies) == ["call_a", "call_b", "call_c", "call_d"]
-    assert replies["call_a"] == error_reply("search", LATE_REPLY).text
-    assert shown_numbers(replies["call_b"]) == [1]
-    assert replies["call_c"].startswith("Error: there is no tool named 'keyframes'")
-    assert replies["call_d"].startswith("Error: the arguments for read must be a JSON object")
-    # Only the call its tool answered is a step; a time-out is no failed search, it ends in time_budget.
-    assert (_steps(progress), result.reason) == ([("search", "Wetter", 1)], None)
+    replies = _tool_replies(llm, 2)
+    assert list(replies) == ["call_a", "call_b", "call_c", "call_d", "call_e"]
+    assert replies["call_b"] == error_reply("search", LATE_REPLY).text
+    assert shown_numbers(replies["call_c"]) == [1]
+    assert replies["call_d"].startswith("Error: there is no tool named 'keyframes'")
+    assert replies["call_e"].startswith("Error: the arguments for read must be a JSON object")
+    # Only calls their tool answered are steps; the time-out is no failed search, the time limit reports it.
+    assert (_steps(progress), result.reason) == ([("search", "Wetter", 1), ("read", "1", 0)], "time_budget")
     held.set()
     join_threads(SEARCH_THREAD_NAME)
     assert [scored.node.node_id for scored in result.nodes] == ["weather"]
@@ -1005,7 +1011,9 @@ def test_a_search_that_outlives_the_time_left_keeps_its_slot_until_it_ends(
         held (threading.Event): Holds the search.
         loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
     """
-    slots = threading.BoundedSemaphore(1)
+    now = [0.0]
+    # Taking the slot spends the turn's whole time, so the search is waited on with none left.
+    slots = _SlowSlots(now, 100.0)
 
     def _search(query: str) -> list[NodeWithScore]:
         """Wait for the release, then find a passage too late.
@@ -1020,23 +1028,16 @@ def test_a_search_that_outlives_the_time_left_keeps_its_slot_until_it_ends(
         return [programme_passage()]
 
     ledger = EvidenceLedger(cap=MAX_LEDGER_ENTRIES)
-    started = time.monotonic()
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "zzsecretzz Programm")), _answer()])
 
-    # A fixed clock: only the real wait for the search spends the time left.
     _drain(
         _turn(
-            _loop(
-                streaming_tool_llm([_calls(_search_call("call_a", "zzsecretzz Programm")), _answer()]),
-                _documents(_search),
-                search_slots=slots,
-                time_budget_s=0.2,
-                clock=lambda: 0.0,
-            ),
+            _loop(llm, _documents(_search), search_slots=slots, time_budget_s=100.0, clock=lambda: now[0]),
             ledger=ledger,
         )
     )
 
-    assert time.monotonic() - started < 3.0
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY).text}
     assert len(ledger) == 0
     assert slots.acquire(blocking=False) is False
     held.set()
@@ -1080,8 +1081,9 @@ def test_abandoned_searches_are_capped_at_the_slot_count(held: threading.Event) 
     replies: list[str] = []
     for turn in range(SEARCH_SLOTS + 1):
         llm = streaming_tool_llm([_calls(_search_call("call_a", f"Hafenfest {turn}")), _answer()])
-        # A fixed clock: only the real waits, for a slot and for the search, spend the time left.
-        _drain(_turn(_loop(llm, _documents(_search), time_budget_s=0.2, clock=lambda: 0.0)))
+        # A fixed clock: only the real waits spend the time left. They are short, and the outcome does
+        # not hang on them: a held search never answers, and the ninth call never finds a slot.
+        _drain(_turn(_loop(llm, _documents(_search), time_budget_s=0.05, clock=lambda: 0.0)))
         replies.extend(_tool_replies(llm, 1).values())
 
     assert replies == [error_reply("search", LATE_REPLY).text] * SEARCH_SLOTS + [
@@ -1230,13 +1232,32 @@ def test_a_search_raising_its_own_timeout_is_a_failed_call_not_a_spent_budget(
     assert loguru_caplog.messages == ["An agent's 'search' call failed: TimeoutError"]
 
 
-def test_the_slot_wait_comes_out_of_the_time_budget(held: threading.Event) -> None:
+def test_the_slot_wait_comes_out_of_the_time_budget(held: threading.Event, monkeypatch: pytest.MonkeyPatch) -> None:
     """A search slot that takes nearly the whole budget to free leaves the search only what remains.
 
     Args:
         held (threading.Event): Holds the search.
+        monkeypatch (pytest.MonkeyPatch): Records how long the round waits for its searches.
     """
     now = [0.0]
+    waits: list[float | None] = []
+    real_wait = concurrent.futures.wait
+
+    def _recorded_wait(futures: Any, timeout: float | None = None, **kwargs: Any) -> Any:
+        """Record the wait asked for, then wait as asked.
+
+        Args:
+            futures (Any): The futures waited on.
+            timeout (float | None): The longest wait.
+            **kwargs (Any): Further options.
+
+        Returns:
+            Any: What the real wait returns.
+        """
+        waits.append(timeout)
+        return real_wait(futures, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "wait", _recorded_wait)
 
     def _search(query: str) -> list[NodeWithScore]:
         """Hang until the test ends.
@@ -1251,7 +1272,6 @@ def test_the_slot_wait_comes_out_of_the_time_budget(held: threading.Event) -> No
         return [programme_passage()]
 
     llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), _answer()])
-    started = time.monotonic()
 
     _drain(
         _turn(
@@ -1265,7 +1285,7 @@ def test_the_slot_wait_comes_out_of_the_time_budget(held: threading.Event) -> No
         )
     )
 
-    assert time.monotonic() - started < 3.0
+    assert waits == [pytest.approx(0.1)]
     assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY).text}
 
 
@@ -1444,6 +1464,31 @@ def test_the_final_note_joins_a_user_message_it_would_follow(path: str) -> None:
     wire = to_openai_message_dicts(sent)
     assert isinstance(wire, list)
     assert wire[-1] == {"role": "user", "content": f"{QUESTION}\n\n{FINAL_NOTE}"}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("invented outage"),
+        _status_error(openai.RateLimitError, 429, "rate limit reached"),
+        bad_request(TOOL_CHOICE_REJECTED),
+    ],
+    ids=["outage", "rate-limit", "refused-after-the-first-call"],
+)
+def test_an_answer_round_that_fails_before_any_token_raises_after_the_steps(error: Exception) -> None:
+    """A started turn whose answer round fails at once, with no overflow and no first-call refusal, raises; no result.
+
+    Args:
+        error (Exception): What the answer round's first pull raises.
+    """
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), error])
+    loop = _loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})), max_rounds=1)
+
+    shown, raised = _until_raised(_turn(loop))
+
+    assert raised is error
+    assert _steps(item for item in shown if isinstance(item, AgentProgress)) == [("search", "Programm", 1)]
+    assert not any(isinstance(item, (str, AgentResult)) for item in shown)
 
 
 def test_an_answer_round_that_breaks_off_raises_after_its_text() -> None:
