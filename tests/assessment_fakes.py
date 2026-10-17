@@ -6,7 +6,7 @@ import contextlib
 import json
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import MagicMock
@@ -359,6 +359,67 @@ def fragmented_endpoint(body: dict[str, Any]) -> Iterator[str]:
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@contextlib.contextmanager
+def sse_endpoint(*streams: Sequence[dict[str, Any]]) -> Generator[tuple[str, list[dict[str, Any]]], None, None]:
+    """Serve scripted chat-completion streams over loopback as server-sent events.
+
+    The SSE variant of :func:`fragmented_endpoint`: request ``n`` is answered with stream
+    ``n`` (the last one again once they run out), one ``data:`` event per chunk and then
+    ``data: [DONE]``, each written and flushed in turn with no pause. Every request body
+    is recorded, parsed, in arrival order.
+
+    Args:
+        *streams (Sequence[dict[str, Any]]): Each reply's chunks, in wire shape.
+
+    Yields:
+        tuple[str, list[dict[str, Any]]]: The base URL, ending in ``/v1``, and the recorded request bodies.
+    """
+    done = b"data: [DONE]\n\n"
+    replies = [[*(f"data: {json.dumps(item)}\n\n".encode() for item in stream), done] for stream in streams]
+    requests: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    class _Events(BaseHTTPRequestHandler):
+        """Answers each request with its scripted stream of events."""
+
+        def do_POST(self) -> None:
+            """Record the request, then send its stream; a client that has gone is ignored."""
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            with lock:
+                requests.append(body)
+                events = replies[min(len(requests), len(replies)) - 1]
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(sum(len(event) for event in events)))
+                self.end_headers()
+                for event in events:
+                    self.wfile.write(event)
+                    self.wfile.flush()
+            except OSError:
+                return
+
+        @override
+        def log_message(self, format: str, *args: Any) -> None:
+            """Keep the test output quiet.
+
+            Args:
+                format (str): The message template, unused.
+                *args (Any): Its values, unused.
+            """
+
+    server = _LoopbackServer(("127.0.0.1", 0), _Events)
+    # A short poll lets shutdown return at once rather than after the default half second.
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1", requests
     finally:
         server.shutdown()
         server.server_close()
