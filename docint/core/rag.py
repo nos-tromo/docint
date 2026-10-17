@@ -279,9 +279,9 @@ RERANK_ERROR_KEY = "docint_rerank_error"
 # and ignored by ``_source_from_payload``.
 IMAGE_LANE_METADATA_KEY = "docint_image_lane"
 
-# Fallback for ``IMAGE_RERANK_MIN_SCORE`` when the image service (which owns
-# the loaded config) has not been constructed yet. Mirrors the default in
-# ``env_cfg.load_image_ingestion_config``.
+# Fallback for ``IMAGE_RERANK_MIN_SCORE`` when the config in hand lacks the
+# field (``RAG._image_config_value`` loads the environment when the image
+# service is unbuilt). Mirrors ``env_cfg.load_image_ingestion_config``.
 DEFAULT_IMAGE_RERANK_MIN_SCORE = 0.05
 
 # Fallbacks for ``IMAGE_RESCORE_ENABLED`` / ``IMAGE_RESCORE_MIN_SCORE`` under
@@ -4159,8 +4159,8 @@ class RAG:
         """Return how many stored thumbnails a visual answer may look at.
 
         Returns:
-            int: ``VISUAL_ANSWER_MAX_IMAGES``, or its default when the image
-            service has not been constructed yet.
+            int: ``VISUAL_ANSWER_MAX_IMAGES``, loaded from the environment when
+            the image service has not been constructed yet.
         """
         return max(0, int(self._image_config_value("visual_answer_max_images", DEFAULT_VISUAL_ANSWER_MAX_IMAGES)))
 
@@ -4191,8 +4191,8 @@ class RAG:
         """Return the reranker score an image caption must reach to surface.
 
         Returns:
-            float: ``IMAGE_RERANK_MIN_SCORE``, or its default when the image
-            service has not been constructed yet.
+            float: ``IMAGE_RERANK_MIN_SCORE``, loaded from the environment when
+            the image service has not been constructed yet.
         """
         return float(self._image_config_value("rerank_min_score", DEFAULT_IMAGE_RERANK_MIN_SCORE))
 
@@ -4200,8 +4200,8 @@ class RAG:
         """Return whether a sub-floor image inside the cut gets a description re-score.
 
         Returns:
-            bool: ``IMAGE_RESCORE_ENABLED``, or its default when the image
-            service has not been constructed yet.
+            bool: ``IMAGE_RESCORE_ENABLED``, loaded from the environment when
+            the image service has not been constructed yet.
         """
         return bool(self._image_config_value("rescore_enabled", DEFAULT_IMAGE_RESCORE_ENABLED))
 
@@ -4209,8 +4209,8 @@ class RAG:
         """Return the description score that keeps a re-scored image.
 
         Returns:
-            float: ``IMAGE_RESCORE_MIN_SCORE``, or its default when the image
-            service has not been constructed yet.
+            float: ``IMAGE_RESCORE_MIN_SCORE``, loaded from the environment when
+            the image service has not been constructed yet.
         """
         return float(self._image_config_value("rescore_min_score", DEFAULT_IMAGE_RESCORE_MIN_SCORE))
 
