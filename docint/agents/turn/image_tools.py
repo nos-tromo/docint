@@ -60,13 +60,13 @@ SEARCH_IMAGES_DESCRIPTION = (
 )
 SEARCH_IMAGES_PARAMETERS: dict[str, Any] = {
     "type": "object",
-    "properties": {"description": {"type": "string", "description": "What the picture should show, in a few words."}},
+    "properties": {"description": {"type": "string", "description": "A short caption of the picture."}},
     "required": ["description"],
 }
 KEYFRAMES_DESCRIPTION = (
     "Show one video clip's frames in time order; use it when a question concerns a specific clip or follows up a "
     "passage from one. Each frame is numbered [n] to cite it by and labelled #n @ mm:ss (frame number, time); "
-    "a long clip shows evenly spaced frames, and index opens one frame."
+    "a long clip shows evenly spaced frames, and index opens the frame labelled #n."
 )
 KEYFRAMES_PARAMETERS: dict[str, Any] = {
     "type": "object",

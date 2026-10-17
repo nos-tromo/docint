@@ -16,10 +16,13 @@ from docint.agents.turn.tools import ReadTool, SearchFn, SearchTool, ToolRegistr
 def toolset_for(target: str, *, search: SearchFn, search_images: SearchFn, list_keyframes: KeyframesFn) -> ToolRegistry:
     """Build the tools one turn offers for its retrieval target.
 
-    ``documents`` offers ``search`` and ``read``; ``visual`` offers ``search_images``,
-    ``keyframes`` and ``read``; ``all`` offers ``search``, ``search_images``,
-    ``keyframes`` and ``read``, in that order. The registry is the turn's own: its tools
-    hold no state of the turn, but the callables belong to the request.
+    The tools, in the order the model is shown them:
+
+    * ``documents``: ``search``, ``read``;
+    * ``visual``: ``search_images``, ``keyframes``, ``read``;
+    * ``all``: ``search``, ``search_images``, ``keyframes``, ``read``.
+
+    Build one per turn; the callables are bound to the request, so a registry is never shared.
 
     Args:
         target (str): The turn's retrieval target: ``all``, ``documents`` or ``visual``.

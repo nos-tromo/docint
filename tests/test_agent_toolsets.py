@@ -280,3 +280,11 @@ def test_a_description_says_what_the_tool_is_for(tool: str, anchors: tuple[str, 
     text = _descriptions()[tool].lower()
 
     assert [anchor for anchor in anchors if anchor not in text] == []
+
+
+def test_the_keyframes_index_is_the_frame_label_not_the_citation_number() -> None:
+    """A frame has a citation number [n] and a label #n; a model that sees both must know index takes the label."""
+    schema = next(item["function"] for item in _toolset("visual").schemas() if item["function"]["name"] == "keyframes")
+
+    assert re.search(r"\bindex\b[^.;]*#n", schema["description"])
+    assert "#n" in schema["parameters"]["properties"]["index"]["description"]
