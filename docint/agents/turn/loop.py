@@ -11,7 +11,8 @@ as a user message, the tools still declared but ``tool_choice="none"``. ``agent.
 first cause: the rounds spent (``round_budget``), the time spent (``time_budget``), no room left
 for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
 row that added no passage (``idle``). Limits are checked between rounds, and the time also bounds every call's I/O; a
-round is never cut off while it streams, so an answer already streaming is never abandoned.
+round is never cut off while it streams, so an answer already streaming is never abandoned. An
+answer the endpoint cut at its length limit is kept, as shown, and flagged ``context_budget``.
 
 Calls and room. Every call id gets a reply, answered by
 :class:`~docint.agents.turn.calls.RoundCalls`: concurrently on the search slots, numbered in call
@@ -107,7 +108,8 @@ class AgentResult:
         actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
             per call its tool answered, in order.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
-            limit, a failed round or a failed search; ``None`` when there was none.
+            limit, a failed round, a failed search or an answer cut at the length limit; ``None``
+            when there was none.
         images_attached (int): Pictures sent to the model with the evidence.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.
@@ -377,8 +379,7 @@ class AgentLoop:
             if streamed.done.reasoning:
                 turn.reasoning.append(streamed.done.reasoning)
             if not streamed.done.calls:
-                yield from self._answer_tail(turn, streamed)
-                yield self._result(turn, streamed.done.text)
+                yield from self._answer(turn, streamed)
                 return
             withdrawn = yield from self._tool_round(turn, streamed.done)
             if withdrawn:
@@ -452,6 +453,26 @@ class AgentLoop:
             return streamed
         finally:
             self._model_slots.release()
+
+    def _answer(self, turn: _Turn, streamed: _Streamed) -> Iterator[str | AgentResult]:
+        """End the turn with the answer a round wrote: send its rest, then the result.
+
+        An answer the endpoint cut at its length limit is kept, since it was shown, and flagged
+        ``context_budget`` unless an earlier cause stands.
+
+        Args:
+            turn (_Turn): The turn.
+            streamed (_Streamed): The answer round, ended.
+
+        Yields:
+            str | AgentResult: The rest of the answer, then the result.
+        """
+        done = cast(RoundDone, streamed.done)
+        if done.finish_reason == "length":
+            turn.stop("context_budget")
+            logger.warning("An agent turn's answer was cut at the length limit ({})", turn.reason)
+        yield from self._answer_tail(turn, streamed)
+        yield self._result(turn, done.text)
 
     def _answer_tail(self, turn: _Turn, streamed: _Streamed) -> Iterator[str]:
         """Send what an answer round wrote and has not released yet, then what the splitter holds.
@@ -587,8 +608,7 @@ class AgentLoop:
             turn.reasoning.append(done.reasoning)
         if done.calls:
             logger.warning("An agent turn's answer round asked for {} tool calls anyway; none ran", len(done.calls))
-        yield from self._answer_tail(turn, streamed)
-        yield self._result(turn, done.text)
+        yield from self._answer(turn, streamed)
 
     def _step(self, turn: _Turn, action: str, detail: str, found: int, *, step: int | None = None) -> AgentProgress:
         """Record one step in the trail.

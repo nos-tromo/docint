@@ -775,6 +775,28 @@ def test_two_idle_rounds_force_the_answer() -> None:
     assert (result.reason, result.steps, "".join(texts)) == ("idle", 2, ANSWER)
 
 
+@pytest.mark.parametrize(
+    ("max_rounds", "reason"), [(6, "context_budget"), (0, "round_budget")], ids=["by-choice", "made-to-answer"]
+)
+def test_an_answer_cut_at_the_length_limit_is_kept_and_flagged(
+    max_rounds: int, reason: str, loguru_caplog: LogCaptureFixture
+) -> None:
+    """An answer the endpoint cut at its length limit stays as shown, but the turn says evidence was cut short.
+
+    Args:
+        max_rounds (int): Tool rounds allowed; with none, the answer round is forced and has a reason already.
+        reason (str): The reason the turn reports: ``context_budget``, unless an earlier one stands.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    cut = ANSWER[:90]
+    llm = streaming_tool_llm([[*text_chunks(cut, 30), chunk(finish_reason="length")]])
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})), max_rounds=max_rounds)))
+
+    assert ("".join(texts), result.raw_text, result.reason) == (cut, cut, reason)
+    assert loguru_caplog.messages == [f"An agent turn's answer was cut at the length limit ({reason})"]
+
+
 def test_the_sentinel_is_swapped_for_the_label() -> None:
     """The answer shows the localized label where the model wrote the sentinel; the result keeps the sentinel."""
     judged = (
