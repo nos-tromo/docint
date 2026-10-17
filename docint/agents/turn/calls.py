@@ -9,9 +9,10 @@ or outlives the time left gets an error reply. Work abandoned at the deadline ke
 until it ends. A call whose I/O failed or found no search slot is counted, since the evidence it
 would have found is missing; one that ran out of time is not, the turn's time limit says so.
 
-Room. A round first reserves a short reply for every call; a call then runs only while a full
-reply, ``result_chars`` at the turn's ratio plus its envelope, still fits in place of its short
-one. No reply leaves here longer than ``result_chars``.
+Room. A round first reserves the least reply every call needs (:meth:`RoundCalls.least`), which
+the loop has already checked fits; a call then runs only while a full reply, ``result_chars`` at
+the turn's ratio plus its envelope, still fits in place of its short one. No reply leaves here
+longer than ``result_chars``.
 
 Nothing here logs a query, a tool argument or document text: only counts, tool names and
 exception types.
@@ -168,22 +169,53 @@ class RoundCalls:
             prepared (PreparedRound): The round's calls, prepared in call order (see :meth:`prepare`).
             ctx (ToolContext): The turn's evidence, budget, LLM view and memory.
             room (int): Tokens the round's replies may take: the turn's room less the transcript
-                so far and the round's assistant message.
+                so far and the round's assistant message. Never less than :meth:`least`, which
+                every call's reply needs: the loop withdraws a round that does not fit.
             time_left (Callable[[], float]): Reads the seconds the turn has left.
 
         Returns:
             RoundReplies: The replies, each within ``result_chars``, and how many calls failed.
         """
+        assert room >= self.least(prepared), "a round that does not fit is withdrawn before it is answered"
         calls = prepared.calls
         replies, failed = self._replies(calls, self._admitted(calls, room), ctx, time_left)
         return RoundReplies(replies=[self._bounded(reply) for reply in replies], failed=prepared.failed + failed)
 
+    def least(self, prepared: PreparedRound) -> int:
+        """Return the fewest tokens a round's replies can take: one reply per call, each as short as it can be.
+
+        A call answered when prepared costs its reply; any other, past the round's limit or not,
+        at least the longest reply written here, which is how it is answered when it cannot run.
+
+        Args:
+            prepared (PreparedRound): The round's calls, prepared.
+
+        Returns:
+            int: The tokens.
+        """
+        return sum(self._least(position, ready) for position, ready in enumerate(prepared.calls))
+
+    def _least(self, position: int, ready: PreparedCall) -> int:
+        """Return the fewest tokens one call's reply can take.
+
+        Args:
+            position (int): The call's place in its round, from zero.
+            ready (PreparedCall): The call, prepared.
+
+        Returns:
+            int: Its reply's cost when it was answered at prepare within the round's limit, else
+            the cost of the longest reply written here.
+        """
+        if position < self._max_calls and ready.reply is not None:
+            return message_tokens(ready.reply.text, self._ratio)
+        return self.short_reply
+
     def _admitted(self, prepared: Sequence[PreparedCall], room: int) -> list[bool | None]:
         """Decide which calls may run: within the round's limit, and while a full reply still fits.
 
-        The round first reserves the least each call's reply costs: a call answered when prepared
-        costs its reply, any other the longest reply written here. A call with work then runs,
-        in call order, only while the rest of the room holds its full reply in place of that one.
+        The round first reserves the least each call's reply costs (see :meth:`least`). A call
+        with work then runs, in call order, only while the rest of the room holds its full reply
+        in place of the short one reserved for it.
 
         Args:
             prepared (Sequence[PreparedCall]): The round's calls, prepared.
@@ -193,9 +225,7 @@ class RoundCalls:
             list[bool | None]: Per call: ``None`` when it is past the round's limit, ``True`` when
             it runs (or was answered when prepared), ``False`` when its reply has no room.
         """
-        for position, ready in enumerate(prepared):
-            within = position < self._max_calls
-            room -= message_tokens(ready.reply.text, self._ratio) if within and ready.reply else self.short_reply
+        room -= sum(self._least(position, ready) for position, ready in enumerate(prepared))
         admitted: list[bool | None] = []
         for position, ready in enumerate(prepared):
             if position >= self._max_calls:

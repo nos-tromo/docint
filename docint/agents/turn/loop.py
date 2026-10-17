@@ -9,14 +9,16 @@ becomes a ``note`` step, which tells the client to withdraw whatever of it was s
 Limits make the model answer in one more round, its last: the same transcript plus the final note
 as a user message, the tools still declared but ``tool_choice="none"``. ``agent.reason`` names the
 first cause: the rounds spent (``round_budget``), the time spent (``time_budget``), no room left
-for one more full tool reply (``context_budget``), or two rounds in a row that added no passage
-(``idle``). Limits are checked between rounds, and the time also bounds every call's I/O; a
+for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
+row that added no passage (``idle``). Limits are checked between rounds, and the time also bounds every call's I/O; a
 round is never cut off while it streams, so an answer already streaming is never abandoned.
 
 Calls and room. Every call id gets a reply, answered by
 :class:`~docint.agents.turn.calls.RoundCalls`: concurrently on the search slots, numbered in call
 order, within the room and the time left. The turn's room for tool replies is the budget's
-``round_room`` less the final note; a round's assistant message is counted before its calls.
+``round_room`` less the final note. A round's own cost, its assistant message and the least
+reply each of its calls needs, must fit the room left; a round that does not is withdrawn
+before any of its calls runs, its shown text withdrawn by its note, and the model answers.
 Only a call its tool answered is a step in the trail; an error reply, for arguments that will
 not do or for a call that did not run or failed, reaches the model alone. A call whose search
 failed or found no slot marks the turn ``research_failed`` without ending it: evidence may be
@@ -378,7 +380,9 @@ class AgentLoop:
                 yield from self._answer_tail(turn, streamed)
                 yield self._result(turn, streamed.done.text)
                 return
-            yield from self._tool_round(turn, streamed.done)
+            withdrawn = yield from self._tool_round(turn, streamed.done)
+            if withdrawn:
+                break
         yield from self._final_round(turn)
 
     def _limit(self, turn: _Turn) -> str | None:
@@ -604,8 +608,13 @@ class AgentLoop:
         number = turn.steps if step is None else step
         return AgentProgress(step=number, action=cast(AgentAction, action), detail=detail, found=found)
 
-    def _tool_round(self, turn: _Turn, done: RoundDone) -> Iterator[AgentProgress]:
-        """Answer a round's calls and add the round to the transcript.
+    def _tool_round(self, turn: _Turn, done: RoundDone) -> Generator[AgentProgress, None, bool]:
+        """Answer a round's calls and add the round to the transcript, or withdraw it when it does not fit.
+
+        The round's own cost, its assistant message and the least reply each call needs, calls
+        past the round's limit included, must fit the room left. A round that does not is
+        withdrawn: its calls never reach the transcript, so they need no replies, it is no tool
+        round, and the model answers next (``context_budget``).
 
         Args:
             turn (_Turn): The turn.
@@ -613,11 +622,14 @@ class AgentLoop:
 
         Yields:
             AgentProgress: The round's note, if it wrote text, then one step per call its tool answered.
+
+        Returns:
+            bool: Whether the round was withdrawn.
         """
-        turn.steps += 1
+        number = turn.steps + 1
         note = " ".join(done.text.split())[:NOTE_CHARS]
         if note:
-            yield self._step(turn, "note", note, 0)
+            yield self._step(turn, "note", note, 0, step=number)
         preface = fit_with_marker(done.text, NOTE_CHARS)[0] if done.text else ""
         echoed = [_echoed(call.arguments) for call in done.calls]
         blocks: list[Any] = [TextBlock(text=preface)] if preface else []
@@ -631,9 +643,16 @@ class AgentLoop:
         )
         asked = message_tokens(written, self._ratio)
         prepared = self._calls.prepare(done.calls, turn.ctx)
-        answered = self._calls.answer(
-            prepared, turn.ctx, room=self._room - turn.spent - asked, time_left=lambda: self._time_left(turn)
-        )
+        room = self._room - turn.spent - asked
+        if room < self._calls.least(prepared):
+            logger.warning(
+                "An agent round's {} tool calls do not fit the room left; it is withdrawn and the model answers",
+                len(done.calls),
+            )
+            turn.stop("context_budget")
+            return True
+        turn.steps = number
+        answered = self._calls.answer(prepared, turn.ctx, room=room, time_left=lambda: self._time_left(turn))
         if answered.failed:
             # Evidence a failed search would have found is missing; the turn goes on, and says so.
             turn.stop("research_failed")
@@ -649,3 +668,4 @@ class AgentLoop:
             if not reply.error:
                 yield self._step(turn, reply.action, reply.detail, reply.found)
         turn.idle = 0 if found else turn.idle + 1
+        return False

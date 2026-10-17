@@ -1482,6 +1482,35 @@ def test_every_calls_reply_is_reserved_before_any_call_runs() -> None:
     assert _tool_replies(llm, 1)["call_a"] == error_reply("search", NO_ROOM_REPLY).text
 
 
+@pytest.mark.parametrize(("count", "withdrawn"), [(20, True), (2, False)], ids=["too-many", "fits"])
+def test_a_round_whose_own_calls_do_not_fit_the_room_is_withdrawn(count: int, withdrawn: bool) -> None:
+    """A round's calls, echoed and each given at least a short reply, must fit the room left, or the round is withdrawn.
+
+    A withdrawn round's calls never reach the transcript, so they need no replies; it is no tool
+    round, and the model answers next for want of room.
+
+    Args:
+        count (int): How many calls the round makes, each to a tool the turn does not offer.
+        withdrawn (bool): Whether they are too many for the room left.
+    """
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(count)]
+    llm = streaming_tool_llm([_calls(*unoffered, text=PREFACE), _answer()])
+
+    progress, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})), budget=TIGHT)))
+
+    kept = [message for message in _sent(llm, 1) if message.role in (MessageRole.ASSISTANT, MessageRole.TOOL)]
+    assert progress == [AgentProgress(step=1, action="note", detail=PREFACE, found=0)]
+    assert "".join(texts) == ANSWER
+    if withdrawn:
+        assert kept == []
+        assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
+        assert (result.reason, result.steps) == ("context_budget", 0)
+    else:
+        assert len(kept) == 1 + count
+        assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "auto"
+        assert (result.reason, result.steps) == (None, 1)
+
+
 def test_a_round_that_adds_evidence_resets_the_idle_count() -> None:
     """Only rounds in a row count as idle: one that adds a passage starts the count again."""
     search = QuerySearch({"Programm": [programme_passage()]})
