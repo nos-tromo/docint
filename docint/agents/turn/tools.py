@@ -18,17 +18,17 @@ from __future__ import annotations
 import copy
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from llama_index.core.schema import BaseNode, NodeWithScore
 from loguru import logger
 
-from docint.agents.assessment.ledger import EvidenceLedger, passage_costs, passage_parts, render_context, stamp
+from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import TurnBudget
+from docint.agents.turn.passages import answer_passages, refs, render_entry
 from docint.agents.turn.stream import ToolCall
-from docint.utils.text_budget import allocate_with_floors
 
 SearchFn = Callable[[str], list[NodeWithScore]]
 """Run one search through the turn's engine and return its ranked passages."""
@@ -39,12 +39,6 @@ DETAIL_CHARS = 200
 MAX_QUERY_CHARS = 300
 #: Longest tool name an error reply repeats back.
 NAME_CHARS = 64
-#: Longest header a reply shows whole; a longer one keeps its citation line and ``COMPACT_HEADER_CHARS`` of the rest.
-HEADER_CHARS = 500
-#: What a search reply says when it found nothing the turn had not shown.
-NO_NEW_PASSAGES = "No new passages."
-#: How a reply joins its passages, and its passages to the notes after them; ``render_context`` reserves it.
-_JOIN = "\n\n"
 #: A passage number as a model may write it: ``3``, or ``[3]`` as it is cited.
 _NUMBER_RE = re.compile(r"\s*\[?\s*(\d{1,6})\s*\]?\s*")
 #: First number no passage can have; a reply never repeats a number this long back.
@@ -188,223 +182,8 @@ def _detail(value: Any) -> str:
     return " ".join(text.split())[:DETAIL_CHARS]
 
 
-def _refs(numbers: Iterable[int]) -> str:
-    """Name passages by number, as the answer cites them.
-
-    Args:
-        numbers (Iterable[int]): Their ledger numbers.
-
-    Returns:
-        str: ``[1], [4]`` in ascending order.
-    """
-    return ", ".join(f"[{number}]" for number in sorted(numbers))
-
-
-def _numbered(entry: NodeWithScore, number: int) -> NodeWithScore:
-    """Stamp an entry with its number, its citation line first, so every passage a reply shows opens with it.
-
-    Args:
-        entry (NodeWithScore): The ledger entry; never written to.
-        number (int): Its ledger number.
-
-    Returns:
-        NodeWithScore: A stamped clone (see :func:`~docint.agents.assessment.ledger.stamp`).
-    """
-    stamped = stamp(entry, number)
-    metadata = {"citation_index": number, **stamped.node.metadata}
-    return NodeWithScore(node=stamped.node.model_copy(update={"metadata": metadata}), score=stamped.score)
-
-
-def _compact(stamped: NodeWithScore, ctx: ToolContext) -> bool:
-    """Return whether a passage's header is too long to show whole.
-
-    Args:
-        stamped (NodeWithScore): The numbered passage.
-        ctx (ToolContext): The turn's LLM view.
-
-    Returns:
-        bool: ``True`` when its header runs past ``HEADER_CHARS``.
-    """
-    headers, _, _ = passage_parts([stamped], ctx.llm_view)
-    return len(headers[0]) > HEADER_CHARS
-
-
-@dataclass(frozen=True)
-class _Planned:
-    """A passage a reply may show, priced as the reply renders it.
-
-    Attributes:
-        number (int): Its ledger number.
-        passage (NodeWithScore): The ledger entry, numbered (see :func:`_numbered`).
-        compact (bool): Whether its header is compacted (see :func:`_compact`).
-        reserve (int): What its header, joins and cut marker take.
-        floor (int): The least text it shows: its legible floor, or ``passage_chars`` if less.
-        need (int): The most text it shows: all of it, or ``passage_chars`` if less.
-    """
-
-    number: int
-    passage: NodeWithScore
-    compact: bool
-    reserve: int
-    floor: int
-    need: int
-
-
-def _plan(entry: NodeWithScore, number: int, ctx: ToolContext) -> _Planned:
-    """Price one entry under its number, with the header a reply gives it.
-
-    Args:
-        entry (NodeWithScore): The ledger entry, or the entry a new passage would become.
-        number (int): Its ledger number.
-        ctx (ToolContext): The turn's budget and LLM view.
-
-    Returns:
-        _Planned: The numbered entry and its costs.
-    """
-    numbered = _numbered(entry, number)
-    compact = _compact(numbered, ctx)
-    headers, bodies, anchors = passage_parts([numbered], ctx.llm_view, compact=compact)
-    reserve, floor = passage_costs(headers[0], bodies[0], anchors[0])
-    cap = ctx.budget.passage_chars
-    return _Planned(
-        number=number,
-        passage=numbered,
-        compact=compact,
-        reserve=reserve,
-        floor=min(floor, cap),
-        need=min(len(bodies[0]), cap),
-    )
-
-
-def _fits(planned: Sequence[_Planned], room: int) -> bool:
-    """Return whether passages can all be shown, each at least at its floor, in the room.
-
-    Args:
-        planned (Sequence[_Planned]): The passages.
-        room (int): Characters they may take together.
-
-    Returns:
-        bool: ``True`` when text room remains after their reserves and covers their floors.
-    """
-    text_room = room - sum(passage.reserve for passage in planned)
-    return text_room > 0 and text_room >= sum(passage.floor for passage in planned)
-
-
-def _render(planned: Sequence[_Planned], room: int, ctx: ToolContext) -> str:
-    """Render passages in number order, sharing the room with each kept within its cap.
-
-    Each passage first gets its floor; the rest is shared shortest-first up to its need.
-    Each is then rendered alone, so its text is cut window by window around its matches
-    to exactly its share, which no shared packing would cap. ``render_context`` defuses
-    sentinels in each, and each starts with its citation line, so no join completes one.
-
-    Args:
-        planned (Sequence[_Planned]): Passages that fit together (see :func:`_fits`).
-        room (int): Characters they may take together.
-        ctx (ToolContext): The turn's LLM view.
-
-    Returns:
-        str: The passages, each its header and its text, joined by blank lines.
-    """
-    ordered = sorted(planned, key=lambda passage: passage.number)
-    text_room = room - sum(passage.reserve for passage in ordered)
-    shares = allocate_with_floors(
-        [passage.need for passage in ordered], [passage.floor for passage in ordered], max(0, text_room)
-    )
-    return _JOIN.join(
-        render_context(
-            [passage.passage],
-            llm_view=ctx.llm_view,
-            budget_tokens=passage.reserve + share,
-            # The budget is in characters: a reply is sized in characters.
-            char_token_ratio=1.0,
-            compact=passage.compact,
-        ).context
-        for passage, share in zip(ordered, shares, strict=True)
-    )
-
-
-def _sections(found: Iterable[NodeWithScore]) -> list[list[NodeWithScore]]:
-    """Group a search's passages by node id, so the windows of one section are one passage.
-
-    Args:
-        found (Iterable[NodeWithScore]): The passages, best first.
-
-    Returns:
-        list[list[NodeWithScore]]: Each section's windows in arrival order, sections in the
-        order they first appear.
-    """
-    sections: dict[str, list[NodeWithScore]] = {}
-    for scored in found:
-        sections.setdefault(scored.node.node_id, []).append(scored)
-    return list(sections.values())
-
-
-def _merged(windows: Sequence[NodeWithScore]) -> NodeWithScore:
-    """Return the entry a section not yet held becomes once its windows are admitted.
-
-    Args:
-        windows (Sequence[NodeWithScore]): The section's windows, in arrival order.
-
-    Returns:
-        NodeWithScore: The entry, merged by the ledger's own rules on a scratch ledger.
-    """
-    scratch = EvidenceLedger(cap=1)
-    scratch.add(windows)
-    return scratch.entries()[0]
-
-
-def _left_out(count: int, *, full: bool) -> str:
-    """Say how many new passages a reply did not show, and what to do about them.
-
-    Args:
-        count (int): How many it left out.
-        full (bool): Whether the evidence was full, rather than the reply.
-
-    Returns:
-        str: One sentence.
-    """
-    passages = "passage" if count == 1 else "passages"
-    if full:
-        return (
-            f"{count} more matching {passages} left out: the evidence holds all it can, "
-            "so answer from the passages shown."
-        )
-    return f"{count} more matching {passages} did not fit in this reply; search with narrower words to see them."
-
-
-def _trailer(*, shown: bool, again: Sequence[int], left_out: int, full: bool) -> str:
-    """Write the notes after a search reply's passages.
-
-    Args:
-        shown (bool): Whether the reply shows any passage.
-        again (Sequence[int]): Passages shown before that matched again, by number.
-        left_out (int): New passages the reply did not show.
-        full (bool): Whether they were left out because the evidence was full.
-
-    Returns:
-        str: The notes, one per line; empty when there is nothing to note.
-    """
-    lines: list[str] = []
-    if not shown and not left_out:
-        lines.append(NO_NEW_PASSAGES)
-    if again:
-        lines.append(f"Also matched, shown before: {_refs(again)}.")
-    if left_out:
-        lines.append(_left_out(left_out, full=full))
-    return "\n".join(lines)
-
-
-def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str, detail: str) -> PassageReply:
-    """Admit what a search found into the turn's evidence and answer the call with it.
-
-    Passages are taken best first, the windows of one section as one passage. A passage
-    held before keeps its number: when the search extends it, its grown entry is shown if
-    it fits; otherwise it is named by number. A new passage is admitted, under the next
-    number, only while the reply can still show every passage at least at its floor; one
-    that does not fit, or finds the evidence full, stays unnumbered and the reply says how
-    many more matched. The reply keeps within ``result_chars``, room for its notes
-    reserved first, and each passage's text within ``passage_chars``.
+def passage_reply(found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str, detail: str) -> PassageReply:
+    """Answer a call with what its search found (see :func:`~docint.agents.turn.passages.answer_passages`).
 
     Args:
         found (Iterable[NodeWithScore]): The search's passages, best first.
@@ -413,51 +192,12 @@ def answer_passages(found: Iterable[NodeWithScore], ctx: ToolContext, *, action:
         detail (str): The call's main argument, for the trail.
 
     Returns:
-        PassageReply: The reply; ``found`` counts the passages it admitted or extended.
+        PassageReply: The passages new to the turn under their numbers, the ones shown
+        before named by number, and the notes; ``found`` counts what was admitted or extended.
     """
-    ledger = ctx.ledger
-    sections = _sections(found)
-    held = [number for windows in sections if (number := ledger.number_of(windows[0].node.node_id)) is not None]
-    fresh = len(sections) - len(held)
-    notes = max(len(_trailer(shown=False, again=held, left_out=fresh, full=full)) for full in (False, True))
-    room = ctx.budget.result_chars - notes - len(_JOIN)
-    shown: list[_Planned] = []
-    again: list[int] = []
-    left_out, full, added = 0, False, 0
-    for windows in sections:
-        number = ledger.number_of(windows[0].node.node_id)
-        if number is not None:
-            if ledger.add(windows):
-                added += 1
-                planned = _plan(ledger.entries()[number - 1], number, ctx)
-                if _fits([*shown, planned], room):
-                    shown.append(planned)
-                    continue
-            again.append(number)
-        elif ledger.full:
-            left_out, full = left_out + 1, True
-        else:
-            planned = _plan(_merged(windows), len(ledger) + 1, ctx)
-            if _fits([*shown, planned], room) and ledger.add(windows):
-                added += 1
-                shown.append(planned)
-            else:
-                left_out += 1
-    trailer = _trailer(shown=bool(shown), again=again, left_out=left_out, full=full)
-    text = _JOIN.join(part for part in (_render(shown, room, ctx), trailer) if part)
-    logger.debug(
-        "The '{}' tool showed {} passages, named {} shown before and left {} out",
-        action,
-        len(shown),
-        len(again),
-        left_out,
-    )
+    rendered = answer_passages(found, ctx, action=action)
     return PassageReply(
-        text=text,
-        found=added,
-        action=action,
-        detail=detail,
-        numbers=tuple(sorted({passage.number for passage in shown} | set(again))),
+        text=rendered.text, found=rendered.found, action=action, detail=detail, numbers=rendered.numbers
     )
 
 
@@ -477,7 +217,7 @@ class SearchTool:
         self._search = search
 
     def run(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply:
-        """Search for the query and answer with the passages found (see :func:`answer_passages`).
+        """Search for the query and answer with the passages found (see :func:`passage_reply`).
 
         Args:
             arguments (Mapping[str, Any]): ``query``, the words to look for.
@@ -493,7 +233,7 @@ class SearchTool:
             return error_reply(
                 self.name, "search needs a query: a few specific words to look for.", detail=_detail(raw)
             )
-        return answer_passages(self._search(query), ctx, action=self.name, detail=_detail(query))
+        return passage_reply(self._search(query), ctx, action=self.name, detail=_detail(query))
 
 
 def _passage_number(value: Any) -> int | None:
@@ -552,16 +292,8 @@ class ReadTool:
             else:
                 known = f"the passages run from [1] to [{held}]"
             return error_reply(self.name, f"there is no passage [{number}]; {known}.", detail=detail)
-        numbered = _numbered(ctx.ledger.entries()[number - 1], number)
-        rendered = render_context(
-            [numbered],
-            llm_view=ctx.llm_view,
-            budget_tokens=ctx.budget.result_chars,
-            # The budget is in characters, as a search reply's is.
-            char_token_ratio=1.0,
-            compact=_compact(numbered, ctx),
-        )
-        return PassageReply(text=rendered.context, found=0, action=self.name, detail=detail, numbers=(number,))
+        text = render_entry(ctx.ledger.entries()[number - 1], number, ctx)
+        return PassageReply(text=text, found=0, action=self.name, detail=detail, numbers=(number,))
 
 
 def _arguments(raw: str) -> dict[str, Any] | None:
@@ -707,7 +439,7 @@ class ToolRegistry:
         if answered is not None:
             logger.info("A repeated call to the '{}' tool was answered from memory", tool.name)
             text = f"Already called {tool.name} with these arguments; " + (
-                f"see {_refs(answered.numbers)}." if answered.numbers else "it showed no passages."
+                f"see {refs(answered.numbers)}." if answered.numbers else "it showed no passages."
             )
             return ToolReply(text=text, found=0, action=tool.name, detail=answered.detail)
         reply = tool.run(arguments, ctx)

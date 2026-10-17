@@ -27,17 +27,9 @@ from docint.agents.assessment.ledger import (
     stamp,
 )
 from docint.agents.turn.budget import TurnBudget
+from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import (
-    HEADER_CHARS,
-    NO_NEW_PASSAGES,
-    ReadTool,
-    SearchTool,
-    ToolContext,
-    ToolRegistry,
-    _fits,
-    _plan,
-)
+from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -778,5 +770,5 @@ def test_the_turn_package_imports_nothing_from_rag_or_state() -> None:
 
     loaded = subprocess.run([sys.executable, "-c", script, *modules], capture_output=True, text=True, check=True)
 
-    assert "docint.agents.turn.tools" in modules
+    assert {"docint.agents.turn.passages", "docint.agents.turn.tools"} <= set(modules)
     assert loaded.stdout.split() == []
