@@ -966,6 +966,18 @@ def test_a_long_file_name_is_cut_where_a_reply_repeats_it() -> None:
     )
 
 
+def test_a_long_file_name_is_cut_before_the_frame_number_in_the_trail() -> None:
+    """The trail keeps which frame was opened: a run-on file name is cut to make room for it, not the frame number."""
+    name = "hafen_" + "x" * 500 + ".mp4"
+    lister = _Lister({name: [_frame(position, clip=name) for position in range(5)]})
+
+    reply = _registry(list_keyframes=lister).call(tool_call("keyframes", file=name, index=4), _context())
+
+    assert shown_numbers(reply.text) == [1]
+    assert reply.detail == f"{name[: DETAIL_CHARS - len(' #4')]} #4"
+    assert len(reply.detail) == DETAIL_CHARS
+
+
 def test_an_unknown_clip_before_any_clip_was_seen_says_to_search_first() -> None:
     """With no clip in the evidence yet, the reply says to find one first."""
     reply = _registry().call(tool_call("keyframes", file=CLIP), _context())

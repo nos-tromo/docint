@@ -340,7 +340,9 @@ class KeyframesTool:
                     "index is the number of one frame, the n of its #n label, such as 3.",
                     detail=trail_detail(clip.name),
                 )
-        detail = trail_detail(clip.name if index is None else f"{clip.name} #{index}")
+        suffix = "" if index is None else f" #{index}"
+        # Cut the name, not the frame number: a long name must not hide which frame was opened.
+        detail = trail_detail(clip.name)[: DETAIL_CHARS - len(suffix)] + suffix
         return ToolWork(
             detail=detail,
             fetch=functools.partial(self._list_keyframes, clip.key),
@@ -393,9 +395,11 @@ class KeyframesTool:
 
         Returns:
             ToolReply: The frames as passages under their numbers, with a note of how many
-            the clip has when it has more than ``MAX_FRAMES``; an error reply when the clip
-            has no stored frames or none of that number, or when its frames come from more
-            than one clip, which a file name two clips share lists, so it is never shown as one.
+            the clip has when it has more than ``MAX_FRAMES``. An error reply when the clip
+            has no stored frames or none of that number, and when the listing holds the
+            frames of several clips, as a file name that two clips share does: the reply
+            then names each clip by a passage from it or by its id, so two clips are never
+            shown as one.
         """
         numbered = [(number, frame) for frame in fetched or () if (number := _frame_number(frame)) is not None]
         if not numbered:
