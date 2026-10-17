@@ -287,9 +287,10 @@ def test_floor_stands_down_on_a_stamped_rerank_failure_even_with_retrieval_score
 
     ``VLLMRerankPostprocessor`` falls back to the nodes it was handed, scores
     intact, so the set is never wholly unscored. An image then carries its CLIP
-    cosine, and measuring that against a reranker threshold would drop the
-    image for the scale it was scored on. The floor sits above the CLIP band
-    here, which is the setting under which that comparison deletes the lane.
+    cosine, and measuring that against a reranker threshold says nothing about
+    relevance: at the default floor every cosine would clear it, and a floor
+    above the CLIP band drops them all. The floor sits above the band here,
+    which is the setting under which that comparison deletes the lane.
     One stamped node is enough: the mark means the rerank did not run, wherever
     it landed.
     """

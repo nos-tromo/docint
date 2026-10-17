@@ -520,7 +520,7 @@ candidate (the pre-gate behavior). If the rerank endpoint is unreachable the flo
 stands down: images are neither gated nor re-scored, and they keep their place beside
 the text hits (retrieval order, cut to the top-n) rather than the lane going silent.
 
-The re-score is the answer to those question-phrased misses. A sub-floor image that
+The re-score targets those question-phrased misses. A sub-floor image that
 would land inside the top-n is reranked once more, this time against a caption-style
 description of the query that the chat model (`TEXT_MODEL`) writes in
 `RESPONSE_LANGUAGE`; an image reaching `IMAGE_RESCORE_MIN_SCORE` is kept at its position

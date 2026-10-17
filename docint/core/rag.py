@@ -2178,9 +2178,12 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     When the rerank degraded (:func:`_rerank_degraded`) the floor stands down:
     the scores left on the nodes are retrieval scores, and an image's CLIP
     cosine is not on the reranker's scale, so measuring it against ``min_score``
-    would drop the image for the scale it was scored on. No image is gated or
-    re-scored then and the set is only cut, in the order it arrived — the fused
-    lane order, which is what keeps an outage from deleting a whole modality.
+    says nothing about relevance (every cosine in the ~0.20-0.30 band clears the
+    default floor, and a floor raised above the band would drop them all). No
+    image is gated or re-scored then and the set is only cut, in the order it
+    arrived. That is the fused lane order, which is what keeps the cut from
+    deleting a whole modality: with the text hits stacked ahead of the images it
+    removes the images.
 
     Attributes:
         min_score: The reranker score an image caption must reach.

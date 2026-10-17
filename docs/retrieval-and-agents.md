@@ -265,12 +265,16 @@ remove a whole modality.
 
 **If the rerank endpoint is down, the floor stands down.** A failed rerank hands
 the nodes back with their retrieval scores, and an image's CLIP cosine is not on
-the reranker's scale, so measuring it against `IMAGE_RERANK_MIN_SCORE` would
-drop every image for the scale it was scored on. The stamp on the nodes
-(`docint_rerank_applied=false`) tells the floor so, and so does a set with no
-scores at all. No image is gated or re-scored then; the set is only cut to the
-top-n in its fused order, so each lane keeps its best hits instead of the answer
-shipping text alone. The response reports the turn as `rerank.applied: false`.
+the reranker's scale, so measuring it against `IMAGE_RERANK_MIN_SCORE` says
+nothing about relevance: CLIP cosines sit in a ~0.20–0.30 band whatever the
+query, so every one would clear the default floor, and a floor raised above the
+band would drop them all. The stamp on the nodes (`docint_rerank_applied=false`)
+tells the floor so, and so does a set with no scores at all. No image is gated
+or re-scored then; the set is only cut to the top-n, in its fused order. The cut
+is what matters here: with the text hits stacked ahead of the images it removes
+the images, and in the fused order it leaves each lane its best hits instead of
+the answer shipping text alone. The response reports the turn as
+`rerank.applied: false`.
 
 **A sub-floor image inside the cut gets one second look.** While the rerank is
 healthy, an image under the floor that would still land inside the top-n —
@@ -297,10 +301,10 @@ second rerank.
 Measured with a local reranker (eight descriptions against nine captions), the
 true matches that cleared `0.02` scored 0.039–0.86 against their description,
 the true matches that did not 0.0003–0.0119, and the strongest non-match 0.0072.
-The re-score rescues many question-phrased misses and admitted no measured
-non-match, but it does not rescue them all: a true match under the re-score
-floor drops as it would without the re-score. The figures belong to that
-reranker; raise `IMAGE_RESCORE_MIN_SCORE` if unrelated images are rescued.
+The re-score rescues some question-phrased misses and admitted no measured
+non-match; a true match under the re-score floor still drops, as it would
+without the re-score. The figures come from one small run on that reranker;
+raise `IMAGE_RESCORE_MIN_SCORE` if unrelated images are rescued.
 
 Full defaults and rationale:
 [configuration.md](configuration.md#image-ingestion--imageingestionconfig).
