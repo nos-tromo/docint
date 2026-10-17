@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 from _pytest.logging import LogCaptureFixture
 
-from docint.utils import env_cfg
 from docint.utils.env_cfg import AgentConfig, load_agent_env
 
 _VARS = (
@@ -21,14 +20,13 @@ DEFAULTS = AgentConfig(enabled=True, max_rounds=6, time_budget_s=120.0, max_call
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Start every test with no agent variable set and no warning remembered.
+    """Start every test with no agent variable set, so an ambient ``.env`` cannot skew it.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
     for var in _VARS:
         monkeypatch.delenv(var, raising=False)
-    env_cfg._warn_agent_setting.cache_clear()
 
 
 def test_defaults() -> None:
@@ -134,37 +132,47 @@ def test_agent_turns_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> Non
         ("TRUE", True),
         ("1", True),
         ("yes", True),
-        ("on", True),
+        (" Yes ", True),
         ("false", False),
         ("FALSE", False),
         ("0", False),
         ("no", False),
         ("off", False),
-        (" off ", False),
+        ("on", False),
+        ("maybe", False),
+        ("disabled", False),
     ],
 )
-def test_the_switch_accepts_the_usual_spellings(monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool) -> None:
-    """Every spelling of on and off other docint flags accept is understood.
+def test_the_switch_reads_the_spellings_every_docint_flag_does(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, raw: str, expected: bool
+) -> None:
+    """Only ``true``, ``1`` and ``yes`` switch it on; any other value is false, ``on`` included, and none warns.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
         raw (str): The environment value.
         expected (bool): The parsed flag.
     """
     monkeypatch.setenv("AGENT_TURNS_ENABLED", raw)
 
     assert load_agent_env().enabled is expected
+    assert loguru_caplog.messages == []
 
 
-def test_a_blank_value_counts_as_unset(monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture) -> None:
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_value_counts_as_unset(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, blank: str
+) -> None:
     """An empty ``NAME=`` line in ``.env`` or compose is the default: not "off", and not a typo.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        blank (str): The blank environment value.
     """
     for var in _VARS:
-        monkeypatch.setenv(var, "")
+        monkeypatch.setenv(var, blank)
 
     assert load_agent_env() == DEFAULTS
     assert loguru_caplog.messages == []
@@ -173,18 +181,12 @@ def test_a_blank_value_counts_as_unset(monkeypatch: pytest.MonkeyPatch, loguru_c
 @pytest.mark.parametrize(
     ("var", "raw", "used"),
     [
-        ("AGENT_TURNS_ENABLED", "maybe", "true"),
         ("AGENT_MAX_ROUNDS", "many", "6"),
         ("AGENT_MAX_ROUNDS", "2.5", "6"),
-        ("AGENT_TIME_BUDGET_S", "soon", "120.0"),
-        ("AGENT_TIME_BUDGET_S", "nan", "120.0"),
-        ("AGENT_TIME_BUDGET_S", "inf", "120.0"),
-        ("AGENT_TIME_BUDGET_S", "0", "120.0"),
-        ("AGENT_TIME_BUDGET_S", "-30", "120.0"),
         ("AGENT_MAX_CALLS_PER_ROUND", "several", "4"),
     ],
 )
-def test_an_unusable_value_falls_back_to_the_default_and_warns(
+def test_an_unusable_integer_falls_back_to_the_default_and_warns(
     monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, var: str, raw: str, used: str
 ) -> None:
     """A typo keeps the default, and the warning names the variable, the value and what is used instead.
@@ -202,10 +204,37 @@ def test_an_unusable_value_falls_back_to_the_default_and_warns(
     assert loguru_caplog.messages == [f"Invalid {var} {raw!r}; using {used}."]
 
 
-def test_an_unusable_agent_max_rounds_counts_as_unset(
+@pytest.mark.parametrize(
+    ("raw", "problem"),
+    [
+        ("soon", "is not a number"),
+        ("nan", "must be a positive, finite number of seconds"),
+        ("inf", "must be a positive, finite number of seconds"),
+        ("0", "must be a positive, finite number of seconds"),
+        ("-30", "must be a positive, finite number of seconds"),
+    ],
+)
+def test_an_unusable_time_budget_falls_back_to_the_default_and_says_why(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, raw: str, problem: str
+) -> None:
+    """A budget that is not a number, or not positive and finite, keeps the default and the warning says which.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        raw (str): The unusable value.
+        problem (str): What the warning says is wrong with it.
+    """
+    monkeypatch.setenv("AGENT_TIME_BUDGET_S", raw)
+
+    assert load_agent_env() == DEFAULTS
+    assert loguru_caplog.messages == [f"AGENT_TIME_BUDGET_S={raw!r} {problem}; using default 120.0."]
+
+
+def test_an_unusable_agent_max_rounds_gets_the_default_not_the_older_value(
     monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
 ) -> None:
-    """A typo in the new variable does not discard the budget the older one set.
+    """Once ``AGENT_MAX_ROUNDS`` is set it is the variable in force, so a typo in it earns the default.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -214,14 +243,14 @@ def test_an_unusable_agent_max_rounds_counts_as_unset(
     monkeypatch.setenv("ASSESSMENT_MAX_STEPS", "3")
     monkeypatch.setenv("AGENT_MAX_ROUNDS", "many")
 
-    assert load_agent_env().max_rounds == 3
-    assert loguru_caplog.messages == ["Invalid AGENT_MAX_ROUNDS 'many'; using 3."]
+    assert load_agent_env().max_rounds == 6
+    assert loguru_caplog.messages == ["Invalid AGENT_MAX_ROUNDS 'many'; using 6."]
 
 
 def test_an_unusable_assessment_max_steps_leaves_the_default(
     monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
 ) -> None:
-    """The inherited variable is read as carefully as the new ones.
+    """While it stands in for ``AGENT_MAX_ROUNDS``, the older variable is read as carefully as the new ones.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -231,6 +260,22 @@ def test_an_unusable_assessment_max_steps_leaves_the_default(
 
     assert load_agent_env().max_rounds == 6
     assert loguru_caplog.messages == ["Invalid ASSESSMENT_MAX_STEPS 'many'; using 6."]
+
+
+def test_assessment_max_steps_is_not_read_while_agent_max_rounds_is_set(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A malformed older variable is not reported, and no misleading "using 6" appears, when it is not consulted.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    monkeypatch.setenv("AGENT_MAX_ROUNDS", "2")
+    monkeypatch.setenv("ASSESSMENT_MAX_STEPS", "many")
+
+    assert load_agent_env().max_rounds == 2
+    assert loguru_caplog.messages == []
 
 
 @pytest.mark.parametrize("var", ["AGENT_MAX_ROUNDS", "ASSESSMENT_MAX_STEPS"])
@@ -274,21 +319,4 @@ def test_a_clamped_value_warns(monkeypatch: pytest.MonkeyPatch, loguru_caplog: L
 
     load_agent_env()
 
-    assert loguru_caplog.messages == ["AGENT_MAX_CALLS_PER_ROUND 0 is below 1; using 1."]
-
-
-def test_a_bad_value_is_reported_once_per_process(
-    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
-) -> None:
-    """The loader runs on every chat turn; a typo must not repeat itself in the log.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
-    """
-    monkeypatch.setenv("AGENT_MAX_ROUNDS", "many")
-
-    for _ in range(3):
-        load_agent_env()
-
-    assert loguru_caplog.messages == ["Invalid AGENT_MAX_ROUNDS 'many'; using 6."]
+    assert loguru_caplog.messages == ["AGENT_MAX_CALLS_PER_ROUND 0 is < 1; clamping."]

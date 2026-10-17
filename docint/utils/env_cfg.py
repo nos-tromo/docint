@@ -4,7 +4,6 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass, field
-from functools import cache
 from pathlib import Path
 from typing import Literal, cast
 
@@ -2345,91 +2344,36 @@ class AgentConfig:
     max_calls_per_round: int
 
 
-@cache
-def _warn_agent_setting(message: str, *args: object) -> None:
-    """Warn once per process about one unusable agent setting.
-
-    The loader runs on every chat turn, so a typo in ``.env`` would otherwise
-    log on each of them.
-
-    Args:
-        message (str): Loguru ``{}`` template.
-        *args (object): Hashable template arguments.
-    """
-    logger.warning(message, *args)
-
-
-def _agent_flag(name: str, default: bool) -> bool:
-    """Read one boolean agent setting.
-
-    Args:
-        name (str): Environment variable to read.
-        default (bool): Value used when the variable is unset, blank or unrecognized.
-
-    Returns:
-        bool: The configured flag.
-    """
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    spelling = raw.lower()
-    if spelling in {"1", "true", "yes", "on"}:
-        return True
-    if spelling in {"0", "false", "no", "off"}:
-        return False
-    _warn_agent_setting("Invalid {} {!r}; using {}.", name, raw, str(default).lower())
-    return default
-
-
-def _agent_int(name: str, default: int, *, minimum: int) -> int:
-    """Read one integer agent setting, raising a value below ``minimum`` to it.
-
-    Args:
-        name (str): Environment variable to read.
-        default (int): Value used when the variable is unset, blank or not an integer.
-        minimum (int): Lower bound of the result.
-
-    Returns:
-        int: The configured value, at least ``minimum``.
-    """
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        _warn_agent_setting("Invalid {} {!r}; using {}.", name, raw, default)
-        return default
-    if value < minimum:
-        _warn_agent_setting("{0} {1} is below {2}; using {2}.", name, value, minimum)
-        return minimum
-    return value
-
-
-def _agent_seconds(name: str, default: float) -> float:
-    """Read one agent duration in seconds.
+def _parse_agent_time_budget(*, default: float) -> float:
+    """Parse ``AGENT_TIME_BUDGET_S``, which must be a positive, finite number of seconds.
 
     Zero or less would never let a turn start, and an infinite value would
-    never end one, so neither is accepted.
+    never end one. Like :func:`_parse_parent_context_safety_margin`, an unusable
+    value is logged and replaced by ``default`` rather than raised, so a typo
+    cannot fail a chat turn.
 
     Args:
-        name (str): Environment variable to read.
-        default (float): Value used when the variable is unset, blank or unusable.
+        default (float): The value returned when the variable is unset, blank or unusable.
 
     Returns:
-        float: The configured duration, positive and finite.
+        float: Seconds, positive and finite.
     """
-    raw = os.getenv(name, "").strip()
+    raw = os.getenv("AGENT_TIME_BUDGET_S", "").strip()
     if not raw:
         return default
     try:
-        value: float | None = float(raw)
+        parsed = float(raw)
     except ValueError:
-        value = None
-    if value is None or not math.isfinite(value) or value <= 0:
-        _warn_agent_setting("Invalid {} {!r}; using {}.", name, raw, default)
+        logger.warning("AGENT_TIME_BUDGET_S={!r} is not a number; using default {}.", raw, default)
         return default
-    return value
+    if not (math.isfinite(parsed) and parsed > 0):
+        logger.warning(
+            "AGENT_TIME_BUDGET_S={!r} must be a positive, finite number of seconds; using default {}.",
+            raw,
+            default,
+        )
+        return default
+    return parsed
 
 
 def load_agent_env(
@@ -2440,10 +2384,10 @@ def load_agent_env(
 ) -> AgentConfig:
     """Load agent-turn configuration from environment variables.
 
-    A blank variable counts as unset, and so does one that cannot be used (not a
-    number, an unrecognized flag, a time budget that is not positive and finite),
-    after one warning per process: a typo must neither fail a turn nor repeat
-    itself in the log.
+    A blank value counts as unset for every variable, ``AGENT_TURNS_ENABLED``
+    included, so an empty ``NAME=`` line in ``.env`` or compose keeps the
+    default. A number that cannot be used falls back to its default with a
+    warning rather than failing a chat turn.
 
     Args:
         default_enabled (bool): Whether agent turns are enabled by default.
@@ -2456,21 +2400,25 @@ def load_agent_env(
     Returns:
         AgentConfig: Parsed agent settings.
         - enabled (bool): Whether every chat turn runs as one tool-calling agent
-          loop. Off means a plain retrieve-then-answer lookup.
+          loop; off means a plain retrieve-then-answer lookup. When set, it is
+          true for ``true``, ``1`` or ``yes`` (any case) and false for any other
+          value, without a warning, as for the other docint flags.
         - max_rounds (int): Upper bound on tool-calling rounds per turn; ``0``
-          allows none. Unset, it follows ``ASSESSMENT_MAX_STEPS``, the older
-          assessment setting, so a deployment that tuned that keeps its budget.
+          allows none. When ``AGENT_MAX_ROUNDS`` is unset or blank it follows
+          ``ASSESSMENT_MAX_STEPS``, the older assessment setting, so a deployment
+          that tuned that keeps its budget; that variable is not read otherwise.
         - time_budget_s (float): Wall-clock seconds a turn may spend before the
-          model is made to answer.
+          model is made to answer; positive and finite.
         - max_calls_per_round (int): Most tool calls the model may make in one
           round; at least ``1``.
     """
-    inherited_rounds = _agent_int("ASSESSMENT_MAX_STEPS", default_max_rounds, minimum=0)
+    raw_enabled = os.getenv("AGENT_TURNS_ENABLED", "").strip().lower()
+    rounds_var = "AGENT_MAX_ROUNDS" if os.getenv("AGENT_MAX_ROUNDS", "").strip() else "ASSESSMENT_MAX_STEPS"
     return AgentConfig(
-        enabled=_agent_flag("AGENT_TURNS_ENABLED", default_enabled),
-        max_rounds=_agent_int("AGENT_MAX_ROUNDS", inherited_rounds, minimum=0),
-        time_budget_s=_agent_seconds("AGENT_TIME_BUDGET_S", default_time_budget_s),
-        max_calls_per_round=_agent_int("AGENT_MAX_CALLS_PER_ROUND", default_max_calls_per_round, minimum=1),
+        enabled=raw_enabled in {"true", "1", "yes"} if raw_enabled else default_enabled,
+        max_rounds=_extract_int(rounds_var, default_max_rounds, minimum=0),
+        time_budget_s=_parse_agent_time_budget(default=default_time_budget_s),
+        max_calls_per_round=_extract_int("AGENT_MAX_CALLS_PER_ROUND", default_max_calls_per_round, minimum=1),
     )
 
 
