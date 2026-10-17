@@ -54,13 +54,18 @@ KEYFRAMES_HINT = "call keyframes(file, index) for one"
 
 SEARCH_IMAGES_DESCRIPTION = (
     "Search the collection's pictures and video frames for what can be seen: who appears and how many people, "
-    "clothing, weather and sky, places, objects, visible text. Returns the pictures new to this turn, each under "
-    "the number [n] to cite it by, and names pictures shown before by their number; describe what the picture "
-    "would show."
+    "clothing, weather and sky, places, objects, visible text. Returns pictures new to this turn, each under "
+    "the number [n] to cite it by, and names pictures shown before by number; name the visible cues the question "
+    "needs, not a guessed answer."
 )
 SEARCH_IMAGES_PARAMETERS: dict[str, Any] = {
     "type": "object",
-    "properties": {"description": {"type": "string", "description": "A short caption of the picture."}},
+    "properties": {
+        "description": {
+            "type": "string",
+            "description": "The visible cues to look for, in a few words; never a guessed answer.",
+        }
+    },
     "required": ["description"],
 }
 KEYFRAMES_DESCRIPTION = (
@@ -101,7 +106,7 @@ class SearchImagesTool:
         """Check the description; the image search is the call's fetch, and its answer a search's.
 
         Args:
-            arguments (Mapping[str, Any]): ``description``, what the picture should show.
+            arguments (Mapping[str, Any]): ``description``, the visible cues to look for.
             ctx (ToolContext): Unused; a search needs nothing of the evidence to start.
 
         Returns:
