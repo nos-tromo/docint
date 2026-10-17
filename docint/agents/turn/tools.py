@@ -57,9 +57,9 @@ _NUMBER_RE = re.compile(r"\s*\[?\s*(\d{1,6})\s*\]?\s*")
 _NUMBER_LIMIT = 1_000_000
 
 SEARCH_DESCRIPTION = (
-    "Search the collection. Returns the passages new to this turn, each under the number [n] to cite it by, "
-    "and names passages shown before by their number. Use a few specific words; search again with other words "
-    "to find more."
+    "Search the collection's documents and transcripts for what they say: names, statements, numbers, dates, "
+    "quotes. Returns the passages new to this turn, each under the number [n] to cite it by, and names passages "
+    "shown before by their number; search again with other words to find more."
 )
 SEARCH_PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -68,7 +68,7 @@ SEARCH_PARAMETERS: dict[str, Any] = {
 }
 READ_DESCRIPTION = (
     "Show the text of passage [n], one shown before, as much of it as one reply holds; "
-    "use it when a search showed only part of a passage."
+    "use it for the rest of a passage a reply showed only in part."
 )
 READ_PARAMETERS: dict[str, Any] = {
     "type": "object",

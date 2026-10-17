@@ -53,9 +53,10 @@ MAX_FRAMES = 8
 KEYFRAMES_HINT = "call keyframes(file, index) for one"
 
 SEARCH_IMAGES_DESCRIPTION = (
-    "Search the collection's pictures and video frames by what they show: people, clothing, weather, places, "
-    "objects. Returns the pictures new to this turn, each under the number [n] to cite it by, and names pictures "
-    "shown before by their number."
+    "Search the collection's pictures and video frames for what can be seen: who appears and how many people, "
+    "clothing, weather and sky, places, objects, visible text. Returns the pictures new to this turn, each under "
+    "the number [n] to cite it by, and names pictures shown before by their number; describe what the picture "
+    "would show."
 )
 SEARCH_IMAGES_PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -63,8 +64,9 @@ SEARCH_IMAGES_PARAMETERS: dict[str, Any] = {
     "required": ["description"],
 }
 KEYFRAMES_DESCRIPTION = (
-    "Show the frames of one video clip in time order, each labelled #n @ mm:ss with its frame number and when it "
-    "appears; a long clip shows evenly spaced frames and says how many there are. Give index to open one frame."
+    "Show one video clip's frames in time order; use it when a question concerns a specific clip or follows up a "
+    "passage from one. Each frame is numbered [n] to cite it by and labelled #n @ mm:ss (frame number, time); "
+    "a long clip shows evenly spaced frames, and index opens one frame."
 )
 KEYFRAMES_PARAMETERS: dict[str, Any] = {
     "type": "object",
