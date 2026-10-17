@@ -967,6 +967,31 @@ def test_frames_shown_before_are_named_by_number() -> None:
     assert reply.numbers == (1, 2, 3)
 
 
+def test_a_social_frame_keeps_its_label_when_its_header_is_compacted() -> None:
+    """A social clip's frame carries its posting in a long header; the reply compacts it, and the label stays."""
+    posting = {
+        "posting_uuid": "0" * 24,
+        "posting_network": "examplenet",
+        "posting_author": "Hafenverein",
+        "posting_url": "https://social.invalid/p/1234567890",
+        "posting_text": "Das Hafenfest wird wegen der Sturmwarnung auf Sonntag verschoben. " * 8,
+    }
+    payload = {
+        **_frame_payload(2),
+        "source_type": "social_media",
+        **posting,
+        "reference_metadata": {"type": "keyframe", "source_file": CLIP, "media_file_hash": CLIP_HASH, **posting},
+        "node_id": "social-frame-3",
+    }
+    frame = _builder()._image_caption_node(payload, RAG._image_caption_text(payload))
+
+    reply = _registry(list_keyframes=_Lister({CLIP: [frame]})).call(_call("keyframes", file=CLIP), _context())
+
+    header = reply.text.partition("\n\n")[0]
+    assert "characters not shown" in header
+    assert header.startswith("citation_index: 1\nkeyframe: #3 @ 00:12\n")
+
+
 def test_the_image_tools_offer_their_arguments() -> None:
     """search_images takes a description; keyframes takes a file and an optional frame number."""
     schemas = {schema["function"]["name"]: schema["function"] for schema in _registry().schemas()}

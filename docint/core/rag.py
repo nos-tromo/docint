@@ -4813,7 +4813,9 @@ class RAG:
             metadata.setdefault("filename", filename)
         keyframe = RAG._keyframe_label(payload)
         if keyframe:
-            metadata["keyframe"] = keyframe
+            # First, so a header cut to its opening (a social frame's long posting block) still names the frame.
+            metadata.pop("keyframe", None)
+            metadata = {"keyframe": keyframe, **metadata}
 
         node = TextNode(text=caption, metadata=metadata)
         node_id = str(payload.get("node_id") or payload.get("image_id") or "").strip()
