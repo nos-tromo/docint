@@ -28,19 +28,16 @@ from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
 from typing_extensions import override
 
-from docint.agents.assessment.ledger import EvidenceLedger, Room
-from docint.agents.assessment.research import (
+from docint.agents.assessment.bounded import (
     MODEL_SLOT_POOL,
     MODEL_SLOT_WAIT_S,
     MODEL_SLOTS,
-    MODEL_THREAD_NAME,
     SEARCH_SLOT_POOL,
     SEARCH_SLOT_WAIT_S,
     SEARCH_SLOTS,
-    SEARCH_THREAD_NAME,
-    ResearchLoop,
-    _bounded,
 )
+from docint.agents.assessment.ledger import EvidenceLedger, Room
+from docint.agents.assessment.research import MODEL_THREAD_NAME, SEARCH_THREAD_NAME, ResearchLoop, _bounded
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn
 from docint.agents.types import AgentProgress
 from docint.core.rag import ParentContextPostprocessor

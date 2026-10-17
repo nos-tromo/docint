@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures
 import contextvars
 import threading
-import time
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from typing import TypeVar
@@ -46,7 +45,7 @@ def _start(work: Callable[[], T], slots: threading.Semaphore, slot_wait: float =
     Returns:
         concurrent.futures.Future[T]: The started work's future.
     """
-    return start_bounded(work, slots=slots, clock=time.monotonic, name=WORKER, slot_wait=slot_wait)
+    return start_bounded(work, slots=slots, name=WORKER, slot_wait=slot_wait)
 
 
 def test_start_bounded_returns_without_waiting(release: threading.Event) -> None:

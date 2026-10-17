@@ -25,7 +25,14 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole, ToolCallB
 from llama_index.core.tools import FunctionTool
 from loguru import logger
 
-from docint.agents.assessment.bounded import NoSlot, run_bounded
+from docint.agents.assessment.bounded import (
+    MODEL_SLOT_POOL,
+    MODEL_SLOT_WAIT_S,
+    SEARCH_SLOT_POOL,
+    SEARCH_SLOT_WAIT_S,
+    NoSlot,
+    run_bounded,
+)
 from docint.agents.assessment.ledger import EvidenceLedger, digest, is_context_overflow
 from docint.agents.assessment.runner import ResearchOutcome, SearchFn, prior_turn_block
 from docint.agents.types import AgentProgress, PriorTurn
@@ -45,20 +52,8 @@ RESEARCH_WALL_CLOCK_S = 120.0
 MAX_QUERY_CHARS = 300
 #: Name of the thread a search runs on, so an abandoned one can be found.
 SEARCH_THREAD_NAME = "assessment-research-search"
-#: Searches that may run at once in this process, abandoned ones included.
-SEARCH_SLOTS = 8
-#: Longest a search waits for a free slot; the wait comes out of the research budget.
-SEARCH_SLOT_WAIT_S = 5.0
-#: The process-wide slots every research search takes; a resource cap, not session state.
-SEARCH_SLOT_POOL = threading.BoundedSemaphore(SEARCH_SLOTS)
 #: Name of the thread a model call runs on, so an abandoned one can be found.
 MODEL_THREAD_NAME = "assessment-research-model"
-#: Research model calls that may run at once in this process, abandoned ones included.
-MODEL_SLOTS = 8
-#: Longest a model call waits for a free slot; the wait comes out of the research budget.
-MODEL_SLOT_WAIT_S = 5.0
-#: The process-wide slots every research model call takes; a resource cap, not session state.
-MODEL_SLOT_POOL = threading.BoundedSemaphore(MODEL_SLOTS)
 
 DEFAULT_ASSESSMENT_RESEARCH_PROMPT = (
     "Gather the evidence a careful judgement of the material needs; do not answer yet.\n\n"

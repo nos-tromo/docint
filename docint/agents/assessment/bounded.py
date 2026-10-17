@@ -1,4 +1,8 @@
-"""Run work on its own thread, in a free slot: start it and carry on, or wait for it no longer than a deadline."""
+"""Run work on its own thread, in a free slot: start it and carry on, or wait for it no longer than a deadline.
+
+The process-wide slot pools live here, so every caller that searches or calls the model
+competes for the same slots: a second pool would double the bound.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,19 @@ from collections.abc import Callable
 from typing import TypeVar
 
 T = TypeVar("T")
+
+#: Searches that may run at once in this process, abandoned ones included.
+SEARCH_SLOTS = 8
+#: Longest a search waits for a free slot; the wait comes out of its turn's time budget.
+SEARCH_SLOT_WAIT_S = 5.0
+#: The process-wide slots every search takes; a resource cap, not session state.
+SEARCH_SLOT_POOL = threading.BoundedSemaphore(SEARCH_SLOTS)
+#: Model calls that may run at once in this process, abandoned ones included.
+MODEL_SLOTS = 8
+#: Longest a model call waits for a free slot; the wait comes out of its turn's time budget.
+MODEL_SLOT_WAIT_S = 5.0
+#: The process-wide slots every model call takes; a resource cap, not session state.
+MODEL_SLOT_POOL = threading.BoundedSemaphore(MODEL_SLOTS)
 
 
 class NoSlot(Exception):
@@ -64,7 +81,6 @@ def start_bounded(
     work: Callable[[], T],
     *,
     slots: threading.Semaphore,
-    clock: Callable[[], float],
     name: str,
     slot_wait: float,
 ) -> concurrent.futures.Future[T]:
@@ -87,11 +103,9 @@ def start_bounded(
     Args:
         work (Callable[[], T]): The work to run.
         slots (threading.Semaphore): The slots to take one from.
-        clock (Callable[[], float]): Monotonic clock, taken for the call shape it
-            shares with :func:`run_bounded`; this call never reads it, since the
-            semaphore times the slot wait.
         name (str): The worker thread's name, so abandoned work can be found.
-        slot_wait (float): The longest the call waits for a slot.
+        slot_wait (float): The longest the call waits for a slot; the semaphore times
+            it. A caller with a deadline passes no more than the time it has left.
 
     Returns:
         concurrent.futures.Future[T]: The running work's future, holding its result
