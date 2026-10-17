@@ -26,6 +26,11 @@ WEAK_ANSWER_PHRASES: tuple[str, ...] = (
     "cannot answer based on the provided",
     "the retrieved context does not",
     "no information",
+    "does not mention",
+    "not mentioned",
+    "does not say",
+    "no details",
+    "cannot be determined",
     # German refusals, for RESPONSE_LANGUAGE=de deployments. The phrase list
     # can only ever cover the wordings we have seen; the length check below is
     # the locale-agnostic half of the signal and does the heavier lifting.
@@ -35,6 +40,10 @@ WEAK_ANSWER_PHRASES: tuple[str, ...] = (
     "belege sind unzureichend",
     "kann auf grundlage der bereitgestellten",
     "konnte keine antwort",
+    "geht nicht hervor",
+    "keine angaben",
+    "nicht zu entnehmen",
+    "nicht erwähnt",
 )
 WEAK_ANSWER_FALLBACK_MESSAGE = (
     "I couldn't find enough specific evidence to elaborate. Could you tell me "
