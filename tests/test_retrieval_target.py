@@ -404,3 +404,51 @@ def test_the_visual_synthesizer_starts_with_nothing_stamped(monkeypatch: pytest.
 
     assert synth._attached == []  # type: ignore[attr-defined]
     assert synth._stamped == []  # type: ignore[attr-defined]
+
+
+def _image_floor(engine_capture: dict[str, Any]) -> rag_module.ImageRelevanceFloorPostprocessor:
+    """Return the one image floor in the captured chain.
+
+    Args:
+        engine_capture (dict[str, Any]): The captured engine arguments.
+
+    Returns:
+        rag_module.ImageRelevanceFloorPostprocessor: The floor.
+    """
+    floors = [
+        processor
+        for processor in engine_capture["node_postprocessors"]
+        if isinstance(processor, rag_module.ImageRelevanceFloorPostprocessor)
+    ]
+    assert len(floors) == 1
+    return floors[0]
+
+
+def test_the_all_chain_gives_sub_floor_images_their_description_rescore(
+    monkeypatch: pytest.MonkeyPatch, engine_capture: dict[str, Any]
+) -> None:
+    """By default the ``all`` floor re-scores a sub-floor image inside the cut, at the measured floor."""
+    monkeypatch.delenv("IMAGE_RESCORE_ENABLED", raising=False)
+    monkeypatch.delenv("IMAGE_RESCORE_MIN_SCORE", raising=False)
+    rag = _rag(monkeypatch)
+
+    rag.build_query_engine()
+
+    floor = _image_floor(engine_capture)
+    assert floor.rescore == rag._rescore_images_by_description
+    assert floor.rescore_min_score == 0.02
+
+
+def test_the_description_rescore_follows_its_settings(
+    monkeypatch: pytest.MonkeyPatch, engine_capture: dict[str, Any]
+) -> None:
+    """Switched off, the floor drops sub-floor images unasked; its own floor is retunable."""
+    monkeypatch.setenv("IMAGE_RESCORE_ENABLED", "false")
+    monkeypatch.setenv("IMAGE_RESCORE_MIN_SCORE", "0.07")
+    rag = _rag(monkeypatch)
+
+    rag.build_query_engine()
+
+    floor = _image_floor(engine_capture)
+    assert floor.rescore is None
+    assert floor.rescore_min_score == 0.07

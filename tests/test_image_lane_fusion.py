@@ -520,3 +520,240 @@ def test_the_floor_leaves_the_set_uncut_without_a_top_n() -> None:
     kept = ImageRelevanceFloorPostprocessor(min_score=0.05)._postprocess_nodes(nodes)
 
     assert [node.node.node_id for node in kept] == ["img-1", "txt-1"]
+
+
+WEATHER = QueryBundle(query_str="Wie ist das Wetter am Hafen?")
+
+
+class _Rescore:
+    """Description re-score stand-in: fixed scores by node id, every call recorded."""
+
+    def __init__(self, scores: dict[str, float] | None = None, *, error: Exception | None = None) -> None:
+        """Store the canned answer.
+
+        Args:
+            scores (dict[str, float] | None): Description score per node id.
+            error (Exception | None): Raised instead of answering, when set.
+        """
+        self.scores = scores or {}
+        self.error = error
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def __call__(self, query: str, candidates: list[NodeWithScore]) -> dict[str, float]:
+        """Record the query and the candidates' ids, then answer.
+
+        Args:
+            query (str): The query the floor saw.
+            candidates (list[NodeWithScore]): Sub-floor images inside the cut.
+
+        Returns:
+            dict[str, float]: The canned scores.
+
+        Raises:
+            Exception: The canned error, when one is set.
+        """
+        self.calls.append((query, [node.node.node_id for node in candidates]))
+        if self.error is not None:
+            raise self.error
+        return dict(self.scores)
+
+
+def _ids(nodes: list[NodeWithScore]) -> list[str]:
+    """Return the node ids in order.
+
+    Args:
+        nodes (list[NodeWithScore]): Nodes the floor kept.
+
+    Returns:
+        list[str]: Their ids.
+    """
+    return [node.node.node_id for node in nodes]
+
+
+@pytest.mark.parametrize("description_score", [0.86, 0.02], ids=["clear-match", "at-the-floor"])
+def test_a_sub_floor_image_inside_the_cut_is_kept_when_its_description_score_clears_the_rescore_floor(
+    description_score: float,
+) -> None:
+    """A question about the imagery scores the right image under the floor; its description rescues it.
+
+    Asked as a question, the right picture lands in the band of an unrelated
+    one, while the text beside it passes because text is never floored. The
+    re-score only decides whether the image stays: it keeps its place and the
+    score the turn's rerank gave it.
+
+    Args:
+        description_score (float): The image's score against the description.
+    """
+    nodes = [
+        _text_node("t1", "Handbook section 1.", 0.3),
+        _image_node("i1", 0.0044),
+        _text_node("t2", "Handbook section 2.", 0.0001),
+    ]
+    rescore = _Rescore({"i1": description_score})
+
+    out = ImageRelevanceFloorPostprocessor(
+        min_score=0.05, top_n=5, rescore=rescore, rescore_min_score=0.02
+    )._postprocess_nodes(nodes, WEATHER)
+
+    assert _ids(out) == ["t1", "i1", "t2"]
+    assert out[1].score == 0.0044
+    assert rescore.calls == [("Wie ist das Wetter am Hafen?", ["i1"])]
+
+
+def test_a_sub_floor_image_inside_the_cut_is_dropped_when_its_description_score_does_not() -> None:
+    """An image the description does not match is dropped, as it was before the re-score."""
+    nodes = [
+        _text_node("t1", "Handbook section 1.", 0.3),
+        _image_node("i1", 0.0044),
+        _text_node("t2", "Handbook section 2.", 0.0001),
+    ]
+
+    out = ImageRelevanceFloorPostprocessor(
+        min_score=0.05, top_n=5, rescore=_Rescore({"i1": 0.0072}), rescore_min_score=0.02
+    )._postprocess_nodes(nodes, WEATHER)
+
+    assert _ids(out) == ["t1", "t2"]
+
+
+@pytest.mark.parametrize(
+    ("nodes", "rescored"),
+    [
+        (
+            [
+                _text_node("t1", "Handbook section 1.", 0.3),
+                _image_node("i1", 0.0044),
+                _image_node("i2", 0.004),
+                _text_node("t2", "Handbook section 2.", 0.0001),
+            ],
+            [["i1"]],
+        ),
+        (
+            [
+                _text_node("t1", "Handbook section 1.", 0.3),
+                _text_node("t2", "Handbook section 2.", 0.2),
+                _image_node("i1", 0.0044),
+            ],
+            [],
+        ),
+    ],
+    ids=["one-inside-one-outside", "all-outside"],
+)
+def test_the_rescore_never_runs_for_an_image_outside_the_cut(
+    nodes: list[NodeWithScore], rescored: list[list[str]]
+) -> None:
+    """Only an image that would land inside the top-n cut is worth a chat call.
+
+    Each sub-floor image is weighed as it is reached, counting every node kept
+    or already a candidate ahead of it: with two slots, ``i1`` is reached with
+    one taken and ``i2`` with both (``t1`` and the candidate ``i1``). With no
+    candidate there is no call at all.
+    """
+    rescore = _Rescore({"i1": 0.5, "i2": 0.5})
+
+    ImageRelevanceFloorPostprocessor(min_score=0.05, top_n=2, rescore=rescore)._postprocess_nodes(nodes, WEATHER)
+
+    assert [ids for _query, ids in rescore.calls] == rescored
+
+
+def test_without_a_cut_every_sub_floor_image_is_rescored_in_one_call() -> None:
+    """With no ``top_n`` every sub-floor image is inside the cut; an image over the floor needs no second look."""
+    nodes = [
+        _text_node("t1", "Handbook section 1.", 0.3),
+        _image_node("i0", 0.42),
+        _image_node("i1", 0.0044),
+        _text_node("t2", "Handbook section 2.", 0.2),
+        _image_node("i2", 0.004),
+    ]
+    rescore = _Rescore({"i1": 0.5, "i2": 0.001})
+
+    out = ImageRelevanceFloorPostprocessor(min_score=0.05, rescore=rescore)._postprocess_nodes(nodes, WEATHER)
+
+    assert rescore.calls == [("Wie ist das Wetter am Hafen?", ["i1", "i2"])]
+    assert _ids(out) == ["t1", "i0", "i1", "t2"]
+
+
+@pytest.mark.parametrize("raises", [True, False], ids=["raises", "returns-nothing"])
+def test_a_failed_rescore_drops_the_image_as_before(raises: bool) -> None:
+    """A re-score that fails costs the image its second look and nothing else.
+
+    Args:
+        raises (bool): Whether the re-score raises, rather than scoring nothing.
+    """
+    nodes = [_text_node("t1", "Handbook section 1.", 0.3), _image_node("i1", 0.0044)]
+    rescore = _Rescore(error=RuntimeError("chat endpoint down")) if raises else _Rescore({})
+
+    out = ImageRelevanceFloorPostprocessor(min_score=0.05, top_n=5, rescore=rescore)._postprocess_nodes(nodes, WEATHER)
+
+    assert _ids(out) == ["t1"]
+    assert len(rescore.calls) == 1
+
+
+@pytest.mark.parametrize("shape", ["stamped", "unscored"])
+def test_the_rescore_never_runs_on_a_degraded_rerank(shape: str) -> None:
+    """A degraded rerank gates nothing, so there is nothing to rescue and no call to pay for.
+
+    Args:
+        shape (str): How the rerank degraded: stamped as not applied, or left wholly unscored.
+    """
+    if shape == "stamped":
+        nodes = _unreranked([_text_node("t1", "The gate is sealed.", 0.9), _image_node("i1", 0.28)])
+    else:
+        nodes = [_text_node("t1", "The gate is sealed.", None), _image_node("i1", None)]
+    rescore = _Rescore({"i1": 0.9})
+
+    out = ImageRelevanceFloorPostprocessor(min_score=0.5, top_n=5, rescore=rescore)._postprocess_nodes(nodes, WEATHER)
+
+    assert rescore.calls == []
+    assert _ids(out) == ["t1", "i1"]
+
+
+@pytest.mark.parametrize("query_bundle", [None, QueryBundle(query_str="   ")], ids=["no-bundle", "blank-query"])
+def test_the_rescore_needs_a_query_to_describe(query_bundle: QueryBundle | None) -> None:
+    """Without a query there is no picture to describe, so the image drops as before.
+
+    Args:
+        query_bundle (QueryBundle | None): A missing or blank query.
+    """
+    nodes = [_text_node("t1", "Handbook section 1.", 0.3), _image_node("i1", 0.0044)]
+    rescore = _Rescore({"i1": 0.9})
+
+    out = ImageRelevanceFloorPostprocessor(min_score=0.05, top_n=5, rescore=rescore)._postprocess_nodes(
+        nodes, query_bundle
+    )
+
+    assert rescore.calls == []
+    assert _ids(out) == ["t1"]
+
+
+def test_the_floor_cuts_after_it_gates_not_before_when_the_rescore_rescues_nothing() -> None:
+    """The re-score leaves the gate-then-cut order alone.
+
+    The same nodes as :func:`test_the_floor_cuts_after_it_gates_not_before`:
+    the two images inside the cut get their second look and fail it, so the
+    text chunks behind them still take both slots.
+    """
+    nodes = [
+        _image_node("img-1", 0.003),
+        _image_node("img-2", 0.003),
+        _image_node("img-3", 0.002),
+        _text_node("txt-1", "first chunk", 0.001),
+        _text_node("txt-2", "second chunk", 0.0009),
+    ]
+
+    def _nothing_matches(query: str, candidates: list[NodeWithScore]) -> dict[str, float]:
+        """Score every candidate 0.0.
+
+        Args:
+            query (str): The query.
+            candidates (list[NodeWithScore]): Sub-floor images inside the cut.
+
+        Returns:
+            dict[str, float]: A zero for each candidate.
+        """
+        return {node.node.node_id: 0.0 for node in candidates}
+
+    kept = ImageRelevanceFloorPostprocessor(min_score=0.05, top_n=2, rescore=_nothing_matches)._postprocess_nodes(
+        nodes, WEATHER
+    )
+
+    assert [node.node.node_id for node in kept] == ["txt-1", "txt-2"]

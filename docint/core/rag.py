@@ -220,6 +220,7 @@ from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_hash, source_file_name
+from docint.utils import image_description
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.duration import format_elapsed
@@ -282,6 +283,11 @@ IMAGE_LANE_METADATA_KEY = "docint_image_lane"
 # the loaded config) has not been constructed yet. Mirrors the default in
 # ``env_cfg.load_image_ingestion_config``.
 DEFAULT_IMAGE_RERANK_MIN_SCORE = 0.05
+
+# Fallbacks for ``IMAGE_RESCORE_ENABLED`` / ``IMAGE_RESCORE_MIN_SCORE`` under
+# the same condition: the description re-score of sub-floor images.
+DEFAULT_IMAGE_RESCORE_ENABLED = True
+DEFAULT_IMAGE_RESCORE_MIN_SCORE = 0.02
 
 # Fallback for ``IMAGE_RETRIEVE_TOP_K`` under the same condition — how many
 # CLIP candidates the image lane draws before the rerank ranks them against
@@ -2155,6 +2161,14 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     Text nodes pass through untouched: their relevance is the reranker's and
     the top-n cut's business, not this floor's.
 
+    A query *about* the imagery ("how is the weather?") is the floor's blind
+    spot: a cross-encoder asks whether a passage answers it, so the right
+    picture's caption scores in the band of an unrelated one. A sub-floor image
+    that would land inside the cut therefore gets a second look (``rescore``),
+    reranked against a caption-style description of the query, and stays if
+    that score clears ``rescore_min_score``. A miss, or a failed re-score,
+    drops it exactly as before.
+
     It also owns the top-n cut for the chain it sits in, because the order is
     load-bearing: cutting first let three sub-floor image captions take slots
     on a query nothing matched (every score ~0.003), and the floor then
@@ -2164,18 +2178,29 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     When the rerank degraded (:func:`_rerank_degraded`) the floor stands down:
     the scores left on the nodes are retrieval scores, and an image's CLIP
     cosine is not on the reranker's scale, so measuring it against ``min_score``
-    would drop the image for the scale it was scored on. No image is dropped
-    then and the set is only cut, in the order it arrived -- the fused lane
-    order, which is what keeps an outage from deleting a whole modality.
+    would drop the image for the scale it was scored on. No image is gated or
+    re-scored then and the set is only cut, in the order it arrived — the fused
+    lane order, which is what keeps an outage from deleting a whole modality.
 
     Attributes:
         min_score: The reranker score an image caption must reach.
         top_n: How many nodes survive, applied after the floor. ``None``
             leaves the set uncut.
+        rescore: The second look, as ``(query, candidates) -> {node_id:
+            score}``, or ``None`` to drop sub-floor images unasked. Typed
+            ``Any`` like :attr:`LazyRerankerPostprocessor.rag`: it is a bound
+            :meth:`RAG._rescore_images_by_description`.
+        rescore_min_score: The description score that keeps a re-scored
+            image. Measured with a local reranker, every rescued match scored
+            at least 0.039 against its description and no non-match more than
+            0.0072, so the default 0.02 sits in that gap. Some true matches
+            score lower still; they drop as they would without the re-score.
     """
 
     min_score: float = 0.05
     top_n: int | None = None
+    rescore: Any = None
+    rescore_min_score: float = 0.02
 
     @override
     @classmethod
@@ -2191,15 +2216,20 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
     ) -> list[NodeWithScore]:
         """Apply the floor to image-lane nodes only.
 
+        A sub-floor image is a re-score candidate only while it would land
+        inside the cut: weighed as it is reached, against every node kept or
+        already a candidate ahead of it. A rescued image keeps its place and
+        its rerank score.
+
         Args:
             nodes (list[NodeWithScore]): Reranked nodes from both lanes.
-            query_bundle (QueryBundle | None): Unused; required by the
-                postprocessor contract.
+            query_bundle (QueryBundle | None): The query the re-score
+                describes; without one no image is re-scored.
 
         Returns:
-            list[NodeWithScore]: The input minus sub-floor image nodes, cut to
-            ``top_n``. After a degraded rerank no image is gated: the input in
-            its given order, cut to ``top_n``.
+            list[NodeWithScore]: The input minus the sub-floor image nodes the
+            re-score did not keep, cut to ``top_n``. After a degraded rerank
+            no image is gated: the input in its given order, cut to ``top_n``.
         """
         if not any(node.node.metadata.get(IMAGE_LANE_METADATA_KEY) for node in nodes):
             return self._cut(nodes)
@@ -2207,14 +2237,48 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
             logger.warning("Rerank did not re-score the sources; surfacing image sources ungated.")
             return self._cut(nodes)
 
-        kept: list[NodeWithScore] = []
+        slots = self._slots()
+        walk: list[tuple[NodeWithScore, bool]] = []  # (node, is a re-score candidate)
         for node in nodes:
-            if not node.node.metadata.get(IMAGE_LANE_METADATA_KEY):
-                kept.append(node)
-                continue
-            if node.score is not None and float(node.score) >= self.min_score:
-                kept.append(node)
-        return self._cut(kept)
+            is_image = bool(node.node.metadata.get(IMAGE_LANE_METADATA_KEY))
+            if not is_image or (node.score is not None and float(node.score) >= self.min_score):
+                walk.append((node, False))
+            elif slots is None or len(walk) < slots:
+                walk.append((node, True))
+        rescued = self._rescued([node for node, candidate in walk if candidate], query_bundle)
+        return self._cut([node for node, candidate in walk if not candidate or node.node.node_id in rescued])
+
+    def _rescued(self, candidates: list[NodeWithScore], query_bundle: QueryBundle | None) -> set[str]:
+        """Give the sub-floor images inside the cut their second look, in one call.
+
+        Args:
+            candidates (list[NodeWithScore]): Sub-floor images that would land
+                inside the cut.
+            query_bundle (QueryBundle | None): The query the re-score describes.
+
+        Returns:
+            set[str]: Ids of the candidates whose description score reaches
+            ``rescore_min_score``. Empty with no candidate, no re-score or no
+            query, and when the re-score raises.
+        """
+        query = str(getattr(query_bundle, "query_str", "") or "").strip()
+        if not candidates or self.rescore is None or not query:
+            return set()
+        try:
+            scores = self.rescore(query, candidates)
+            return {node_id for node_id, score in scores.items() if float(score) >= self.rescore_min_score}
+        except Exception as exc:  # fail-soft: a failed second look drops the images as before
+            logger.warning("Image re-score failed ({}); dropping the sub-floor images.", type(exc).__name__)
+            return set()
+
+    def _slots(self) -> int | None:
+        """Return how many nodes the cut keeps.
+
+        Returns:
+            int | None: ``top_n`` (at least one), or ``None`` when no cut is
+            configured.
+        """
+        return None if self.top_n is None else max(1, int(self.top_n))
 
     def _cut(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
         """Trim the floored set to ``top_n``.
@@ -2226,7 +2290,8 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
             list[NodeWithScore]: The first ``top_n`` nodes, or all of them
             when no cut is configured.
         """
-        return nodes if self.top_n is None else nodes[: max(1, int(self.top_n))]
+        slots = self._slots()
+        return nodes if slots is None else nodes[:slots]
 
 
 class CitationNumberingPostprocessor(BaseNodePostprocessor):
@@ -4127,6 +4192,63 @@ class RAG:
             service has not been constructed yet.
         """
         return float(self._image_config_value("rerank_min_score", DEFAULT_IMAGE_RERANK_MIN_SCORE))
+
+    def _image_rescore_enabled(self) -> bool:
+        """Return whether a sub-floor image inside the cut gets a description re-score.
+
+        Returns:
+            bool: ``IMAGE_RESCORE_ENABLED``, or its default when the image
+            service has not been constructed yet.
+        """
+        return bool(self._image_config_value("rescore_enabled", DEFAULT_IMAGE_RESCORE_ENABLED))
+
+    def _image_rescore_floor(self) -> float:
+        """Return the description score that keeps a re-scored image.
+
+        Returns:
+            float: ``IMAGE_RESCORE_MIN_SCORE``, or its default when the image
+            service has not been constructed yet.
+        """
+        return float(self._image_config_value("rescore_min_score", DEFAULT_IMAGE_RESCORE_MIN_SCORE))
+
+    def _rescore_images_by_description(self, query: str, candidates: list[NodeWithScore]) -> dict[str, float]:
+        """Score image captions against a caption-style description of ``query``.
+
+        The second look :class:`ImageRelevanceFloorPostprocessor` gives a
+        sub-floor image inside the cut: asked as a question, the right
+        picture's caption scores in the band of an unrelated one, while against
+        a description of what such a picture shows the two separate.
+
+        The rerank runs on clones carrying only each candidate's id and text.
+        The reranker stamps its outcome on the nodes it is handed
+        (:func:`_stamp_rerank_outcome`), and the candidates' stamps are what
+        the turn reports as its rerank, so a failed second look must never
+        land there. The clones' stamps are read directly rather than through
+        :func:`_rerank_degraded`, whose verdict on an empty set is vacuous: an
+        empty result, or any clone stamped as not reranked, rescues nothing.
+
+        Args:
+            query (str): The query the turn retrieved for.
+            candidates (list[NodeWithScore]): Sub-floor image nodes inside the cut.
+
+        Returns:
+            dict[str, float]: Description score by node id; empty when no
+            description could be written or the rerank did not run.
+        """
+        description = image_description.describe_for_image_match(query)
+        if not description:
+            return {}
+        clones = [
+            NodeWithScore(node=TextNode(id_=node.node.node_id, text=node.node.get_content()), score=None)
+            for node in candidates
+        ]
+        reranker = self.reranker
+        if getattr(reranker, "top_n", None) != len(clones):
+            reranker = reranker.model_copy(update={"top_n": len(clones)})
+        scored = reranker.postprocess_nodes(clones, query_bundle=QueryBundle(query_str=description))
+        if any(node.node.metadata.get(RERANK_APPLIED_KEY) is False for node in scored):
+            return {}
+        return {node.node.node_id: float(node.score) for node in scored if node.score is not None}
 
     def _retrieve_image_nodes(
         self,
@@ -6145,7 +6267,12 @@ class RAG:
             LazyRerankerPostprocessor(rag=self, keep_all=True),
             # Directly after the rerank, where image captions and text chunks
             # first carry comparable scores.
-            ImageRelevanceFloorPostprocessor(min_score=self._image_relevance_floor(), top_n=self.rerank_top_n),
+            ImageRelevanceFloorPostprocessor(
+                min_score=self._image_relevance_floor(),
+                top_n=self.rerank_top_n,
+                rescore=self._rescore_images_by_description if self._image_rescore_enabled() else None,
+                rescore_min_score=self._image_rescore_floor(),
+            ),
         ]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
             usable_tokens, per_hit_floor = self._compute_parent_context_budget(

@@ -212,3 +212,22 @@ def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
     for locale in ("en", "de"):
         text = Path(f"docint/utils/prompts/{locale}/{name}.txt").read_text(encoding="utf-8")
         assert "Markdown" in text, f"{locale}/{name}.txt no longer asks for Markdown"
+
+
+def test_image_rescore_description_prompt_exists_in_both_locales_with_matching_placeholders() -> None:
+    """The image re-score prompt ships in every locale, alike in placeholders, each in its own language.
+
+    The description is reranked against stored captions, which are written in
+    the response language, so each locale's prompt must ask for its own.
+    """
+    import re
+
+    texts = {
+        locale: Path(f"docint/utils/prompts/{locale}/image_rescore_description.txt").read_text(encoding="utf-8")
+        for locale in ("en", "de")
+    }
+
+    assert all(text.strip() for text in texts.values())
+    assert set(re.findall(r"\{(\w+)\}", texts["de"])) == set(re.findall(r"\{(\w+)\}", texts["en"]))
+    assert "English" in texts["en"]
+    assert "Deutsch" in texts["de"]
