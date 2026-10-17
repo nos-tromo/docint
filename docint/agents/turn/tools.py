@@ -8,14 +8,19 @@ registry cannot run (a tool the turn does not offer, arguments that are not a JS
 gets an error reply saying what to call instead, and a call made before is answered by
 number from memory, never run again.
 
-Nothing here is thread-safe: a call admits passages into the turn's ledger and its answer is
-remembered in the turn's context, so the calls of one turn are answered one at a time, in
-the order the model made them.
+A call is answered in two steps, so a turn can run the I/O of several calls at once:
+:meth:`ToolRegistry.prepare` checks a call and answers it at once (an error, or a call made
+before) or returns the work it needs, and :meth:`ToolRegistry.finish` admits and renders.
+Only a prepared call's ``fetch``, its I/O, is meant to run off the loop thread: it reads
+neither the turn's context nor its ledger. Nothing else here is thread-safe, so ``prepare``
+and ``finish`` run on the loop thread, each in the order the model made the calls.
+:meth:`ToolRegistry.call` does the steps one after another.
 """
 
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
@@ -126,6 +131,26 @@ class ToolContext:
     answered: dict[tuple[str, str], _Answered] = field(default_factory=dict, init=False, repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class ToolWork:
+    """The work a call with valid arguments still needs: its I/O, then its answer.
+
+    Attributes:
+        detail (str): The call's main argument, cut to ``DETAIL_CHARS``, for the trail.
+        fetch (Callable[[], Any] | None): The call's I/O, such as a search. It reads neither
+            the turn's context nor its ledger, so it may run off the loop thread; ``None``
+            when the answer needs nothing fetched.
+        answer (Callable[[Any, ToolContext], ToolReply]): Admits and renders, on the loop
+            thread and in call order, from what ``fetch`` returned (``None`` without one).
+            It returns a :class:`PassageReply` when it answered the call, so the registry
+            can answer the call again by number.
+    """
+
+    detail: str
+    fetch: Callable[[], Any] | None
+    answer: Callable[[Any, ToolContext], ToolReply]
+
+
 class Tool(Protocol):
     """One tool the model may call.
 
@@ -139,16 +164,17 @@ class Tool(Protocol):
     description: str
     parameters: dict[str, Any]
 
-    def run(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply:
-        """Answer one call.
+    def prepare(self, arguments: Mapping[str, Any]) -> ToolReply | ToolWork:
+        """Check a call's arguments and say what answering it takes.
+
+        Reads neither the turn's context nor its ledger, which it is not given.
 
         Args:
             arguments (Mapping[str, Any]): The call's arguments, parsed from JSON.
-            ctx (ToolContext): The turn's evidence and budget.
 
         Returns:
-            ToolReply: The reply; a :class:`PassageReply` when the call was answered, so
-            the registry can answer it again by number.
+            ToolReply | ToolWork: An error reply when the arguments will not do, which is
+            never remembered; otherwise the call's work.
         """
         ...
 
@@ -216,16 +242,15 @@ class SearchTool:
         self.parameters = copy.deepcopy(SEARCH_PARAMETERS)
         self._search = search
 
-    def run(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply:
-        """Search for the query and answer with the passages found (see :func:`passage_reply`).
+    def prepare(self, arguments: Mapping[str, Any]) -> ToolReply | ToolWork:
+        """Check the query; the search is the call's fetch, and :func:`passage_reply` its answer.
 
         Args:
             arguments (Mapping[str, Any]): ``query``, the words to look for.
-            ctx (ToolContext): The turn's evidence, budget and LLM view.
 
         Returns:
-            ToolReply: The passages found, or an error reply when the query is missing,
-            blank or not text; the search does not run then.
+            ToolReply | ToolWork: An error reply when the query is missing, blank or not
+            text; otherwise the search to run and the answer to give with what it found.
         """
         raw = arguments.get("query")
         query = " ".join(raw.split())[:MAX_QUERY_CHARS] if isinstance(raw, str) else ""
@@ -233,7 +258,12 @@ class SearchTool:
             return error_reply(
                 self.name, "search needs a query: a few specific words to look for.", detail=_detail(raw)
             )
-        return passage_reply(self._search(query), ctx, action=self.name, detail=_detail(query))
+        detail = _detail(query)
+        return ToolWork(
+            detail=detail,
+            fetch=functools.partial(self._search, query),
+            answer=functools.partial(passage_reply, action=self.name, detail=detail),
+        )
 
 
 def _passage_number(value: Any) -> int | None:
@@ -265,16 +295,18 @@ class ReadTool:
         self.description = READ_DESCRIPTION
         self.parameters = copy.deepcopy(READ_PARAMETERS)
 
-    def run(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply:
-        """Show passage ``n`` under its number, as much of it as one reply holds.
+    def prepare(self, arguments: Mapping[str, Any]) -> ToolReply | ToolWork:
+        """Check that ``n`` reads as a passage number; a read fetches nothing.
+
+        Whether a passage of that number exists is decided at ``answer``, on the loop
+        thread, so a search earlier in the same round counts.
 
         Args:
             arguments (Mapping[str, Any]): ``n``, the passage's number.
-            ctx (ToolContext): The turn's evidence, budget and LLM view.
 
         Returns:
-            ToolReply: The passage with its header, its text cut around its matches
-            only past ``result_chars``; an error reply when ``n`` is no passage's number.
+            ToolReply | ToolWork: An error reply when ``n`` is no number; otherwise the
+            answer, with no fetch.
         """
         raw = arguments.get("n")
         detail = _detail(raw)
@@ -283,6 +315,21 @@ class ReadTool:
             return error_reply(
                 self.name, "read needs n, the number of a passage shown before, such as 3.", detail=detail
             )
+        return ToolWork(detail=detail, fetch=None, answer=functools.partial(self._answer, number, detail))
+
+    def _answer(self, number: int, detail: str, fetched: Any, ctx: ToolContext) -> ToolReply:
+        """Show passage ``number`` under its number, as much of it as one reply holds.
+
+        Args:
+            number (int): The passage's number.
+            detail (str): The call's main argument, for the trail.
+            fetched (Any): Nothing; a read has no fetch.
+            ctx (ToolContext): The turn's evidence, budget and LLM view.
+
+        Returns:
+            ToolReply: The passage with its header, its text cut around its matches only
+            past ``result_chars``; an error reply when no passage has that number.
+        """
         held = len(ctx.ledger)
         if not 1 <= number <= held:
             if not held:
@@ -353,6 +400,60 @@ def _example(parameters: Mapping[str, Any]) -> str:
     return json.dumps(sample, ensure_ascii=False)
 
 
+def _recall(key: tuple[str, str], ctx: ToolContext) -> ToolReply | None:
+    """Answer a call from memory, when the same call was answered before in this turn.
+
+    Args:
+        key (tuple[str, str]): The tool's name and the call's normalized arguments.
+        ctx (ToolContext): The turn's memory.
+
+    Returns:
+        ToolReply | None: The numbers the earlier answer showed or named, admitting
+        nothing; ``None`` when nothing is remembered.
+    """
+    answered = ctx.answered.get(key)
+    if answered is None:
+        return None
+    name = key[0]
+    logger.info("A repeated call to the '{}' tool was answered from memory", name)
+    text = f"Already called {name} with these arguments; " + (
+        f"see {refs(answered.numbers)}." if answered.numbers else "it showed no passages."
+    )
+    return ToolReply(text=text, found=0, action=name, detail=answered.detail)
+
+
+@dataclass(frozen=True)
+class PreparedCall:
+    """A call checked by :meth:`ToolRegistry.prepare`: answered already, or waiting on its work.
+
+    Attributes:
+        action (str): The tool's name, for the trail; for a call naming no offered tool,
+            the name the model wrote, cut to ``NAME_CHARS``.
+        detail (str): The call's main argument, cut to ``DETAIL_CHARS``, for the trail;
+            what a reply the loop writes itself, for a fetch that timed out, should show.
+        reply (ToolReply | None): The answer when the call needs no work: an error, or the
+            memory of the same call earlier in the turn.
+        work (ToolWork | None): The work still to do; ``None`` exactly when ``reply`` is set.
+        key (tuple[str, str] | None): The tool's name and the normalized arguments, under
+            which the answer is remembered.
+    """
+
+    action: str
+    detail: str
+    reply: ToolReply | None = None
+    work: ToolWork | None = None
+    key: tuple[str, str] | None = None
+
+    @property
+    def fetch(self) -> Callable[[], Any] | None:
+        """The call's I/O, which may run off the loop thread.
+
+        Returns:
+            Callable[[], Any] | None: The fetch; ``None`` when the call needs none.
+        """
+        return None if self.work is None else self.work.fetch
+
+
 class ToolRegistry:
     """The tools one turn offers, and the answer to every call the model makes to them."""
 
@@ -399,50 +500,96 @@ class ToolRegistry:
         """
         return frozenset(self._tools)
 
-    def call(self, call: ToolCall, ctx: ToolContext) -> ToolReply:
-        """Answer one call with a reply the model can read.
+    def prepare(self, call: ToolCall, ctx: ToolContext) -> PreparedCall:
+        """Check one call, and answer it at once or return the work it still needs.
 
-        A call naming no offered tool, or sending arguments that are not a JSON object, is
-        answered with an error saying what to call instead. A call made before in this
-        turn, by tool and arguments compared on one line and case-folded, is answered by
-        the numbers its first answer showed or named, and does not run again; an error is
-        never remembered, so the same call can still be answered once it can be.
+        Runs on the loop thread, in call order. A call naming no offered tool, or sending
+        arguments that are not a JSON object, is answered with an error saying what to
+        call instead. A call made before in this turn, by tool and arguments compared on
+        one line and case-folded, is answered by the numbers its answer showed or named,
+        and needs no I/O. Otherwise the tool checks its arguments: an error it finds is the
+        answer, never remembered; else the prepared call carries the tool's work.
 
         Args:
             call (ToolCall): The call as the model made it.
-            ctx (ToolContext): The turn's evidence, budget and LLM view.
+            ctx (ToolContext): The turn's context; only its memory is read.
 
         Returns:
-            ToolReply: The reply.
-
-        Raises:
-            Exception: Whatever the tool raises while it runs, such as a failed search;
-                nothing is remembered for the call then.
+            PreparedCall: The answer, or the work to fetch and finish.
         """
         name = call.name.strip()
         tool = self._tools.get(name)
         if tool is None:
             logger.warning("A model called a tool this turn does not offer; offered: {}", ", ".join(self._tools))
             called = name[:NAME_CHARS]
-            return error_reply(
-                called, f"there is no tool named {called!r}; the tools you can call are {', '.join(self._tools)}."
-            )
+            offered = ", ".join(self._tools)
+            reply = error_reply(called, f"there is no tool named {called!r}; the tools you can call are {offered}.")
+            return PreparedCall(action=called, detail="", reply=reply)
         arguments = _arguments(call.arguments)
         if arguments is None:
             logger.warning("A model sent arguments for the '{}' tool that are not a JSON object", tool.name)
-            return error_reply(
+            reply = error_reply(
                 tool.name,
                 f"the arguments for {tool.name} must be a JSON object, such as {_example(tool.parameters)}.",
             )
+            return PreparedCall(action=tool.name, detail="", reply=reply)
         key = (tool.name, json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False))
-        answered = ctx.answered.get(key)
-        if answered is not None:
-            logger.info("A repeated call to the '{}' tool was answered from memory", tool.name)
-            text = f"Already called {tool.name} with these arguments; " + (
-                f"see {refs(answered.numbers)}." if answered.numbers else "it showed no passages."
-            )
-            return ToolReply(text=text, found=0, action=tool.name, detail=answered.detail)
-        reply = tool.run(arguments, ctx)
+        remembered = _recall(key, ctx)
+        if remembered is not None:
+            return PreparedCall(action=tool.name, detail=remembered.detail, reply=remembered, key=key)
+        work = tool.prepare(arguments)
+        if isinstance(work, ToolReply):
+            return PreparedCall(action=tool.name, detail=work.detail, reply=work, key=key)
+        return PreparedCall(action=tool.name, detail=work.detail, work=work, key=key)
+
+    def finish(self, prepared: PreparedCall, fetched: Any, ctx: ToolContext) -> ToolReply:
+        """Answer a prepared call, with what its fetch returned.
+
+        Runs on the loop thread, in call order. A call answered when it was prepared keeps
+        that answer. Otherwise memory is checked again first: an identical call earlier in
+        the round, prepared beside this one, may have been answered since, and this call
+        is then answered from that memory, its own fetch discarded, never admitted again.
+        Otherwise the work's answer admits and renders, and a :class:`PassageReply` is
+        remembered.
+
+        Args:
+            prepared (PreparedCall): The call, from :meth:`prepare`.
+            fetched (Any): What its fetch returned; ``None`` when it has none.
+            ctx (ToolContext): The turn's evidence, budget, LLM view and memory.
+
+        Returns:
+            ToolReply: The reply.
+
+        Raises:
+            ValueError: When the prepared call holds neither an answer nor work.
+            Exception: Whatever the answer raises; nothing is remembered for the call then.
+        """
+        if prepared.reply is not None:
+            return prepared.reply
+        if prepared.work is None or prepared.key is None:
+            raise ValueError("A prepared call holds neither an answer nor work.")
+        remembered = _recall(prepared.key, ctx)
+        if remembered is not None:
+            return remembered
+        reply = prepared.work.answer(fetched, ctx)
         if isinstance(reply, PassageReply):
-            ctx.answered[key] = _Answered(numbers=reply.numbers, detail=reply.detail)
+            ctx.answered[prepared.key] = _Answered(numbers=reply.numbers, detail=reply.detail)
         return reply
+
+    def call(self, call: ToolCall, ctx: ToolContext) -> ToolReply:
+        """Answer one call with a reply the model can read: prepare, fetch and finish in a row.
+
+        Args:
+            call (ToolCall): The call as the model made it.
+            ctx (ToolContext): The turn's evidence, budget, LLM view and memory.
+
+        Returns:
+            ToolReply: The reply (see :meth:`prepare` and :meth:`finish`).
+
+        Raises:
+            Exception: Whatever the call's fetch or answer raises, such as a failed search;
+                nothing is remembered for the call then.
+        """
+        prepared = self.prepare(call, ctx)
+        fetch = prepared.fetch
+        return self.finish(prepared, None if fetch is None else fetch(), ctx)

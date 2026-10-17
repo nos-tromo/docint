@@ -7,6 +7,7 @@ import pkgutil
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -29,7 +30,7 @@ from docint.agents.assessment.ledger import (
 from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
+from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry, ToolReply
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -412,6 +413,156 @@ def test_a_call_missing_its_argument_gets_the_tools_own_error(name: str, argumen
 
     assert (reply.text, reply.found, reply.action) == (expected, 0, name)
     assert search.queries == []
+
+
+def _two_phase(registry: ToolRegistry, calls: Sequence[ToolCall], ctx: ToolContext) -> list[ToolReply]:
+    """Answer calls as a turn with parallel calls does: all prepared in order, all fetched, then all finished in order.
+
+    Args:
+        registry (ToolRegistry): The turn's tools.
+        calls (Sequence[ToolCall]): One round's calls, in the order the model made them.
+        ctx (ToolContext): The turn's context.
+
+    Returns:
+        list[ToolReply]: One reply per call, in call order.
+    """
+    prepared = [registry.prepare(call, ctx) for call in calls]
+    fetched = [None if ready.fetch is None else ready.fetch() for ready in prepared]
+    return [registry.finish(ready, result, ctx) for ready, result in zip(prepared, fetched, strict=True)]
+
+
+def test_a_two_phase_run_answers_as_call_does() -> None:
+    """Preparing a round's calls, fetching, then finishing them in call order answers as calling them one by one."""
+    calls = [
+        _call("search", query="Hafenfest"),
+        _call("search", query="Wetter am Sonntag"),
+        _call("read", n=1),
+        _call("read", n=7),
+        _call("search", query="   "),
+        ToolCall(id="call_5", name="browse", arguments="{}"),
+        ToolCall(id="call_6", name="read", arguments='{"n": 1'),
+    ]
+    results = ([_programme(), _window(OPENING)], [_weather(), _programme()])
+    sequential_ctx, phased_ctx = _context(), _context()
+    one_by_one = _registry(_Search(*results))
+
+    sequential = [one_by_one.call(call, sequential_ctx) for call in calls]
+    phased = _two_phase(_registry(_Search(*results)), calls, phased_ctx)
+
+    assert phased == sequential
+    for ctx in (phased_ctx, sequential_ctx):
+        assert [scored.node.node_id for scored in ctx.ledger.entries()] == ["programme", "programme-2", "weather"]
+
+
+def test_two_identical_calls_prepared_together_are_admitted_once() -> None:
+    """Both pass prepare and fetch; the second is answered from what the first's finish remembered."""
+    ctx = _context()
+    search = _Search([_programme(), _weather()], [_programme(), _weather()])
+    calls = [_call("search", query="Hafenfest Sonntag"), _call("search", query="hafenfest  SONNTAG")]
+
+    first, second = _two_phase(_registry(search), calls, ctx)
+
+    assert search.queries == ["Hafenfest Sonntag", "hafenfest SONNTAG"]
+    assert (_shown(first.text), first.found) == ([1, 2], 2)
+    assert (second.text, second.found) == ("Already called search with these arguments; see [1], [2].", 0)
+    assert len(ctx.ledger) == 2
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        ToolCall(id="call_0", name="search", arguments='{"query": "  "}'),
+        ToolCall(id="call_0", name="browse", arguments="{}"),
+        ToolCall(id="call_0", name="search", arguments='{"query": '),
+    ],
+    ids=["argument-error", "unoffered", "malformed"],
+)
+def test_a_call_answered_at_prepare_needs_no_io(call: ToolCall) -> None:
+    """A call whose answer is an error is answered when it is prepared; nothing is fetched or admitted.
+
+    Args:
+        call (ToolCall): The call the model made.
+    """
+    ctx = _context()
+    search = _Search()
+    registry = _registry(search)
+
+    prepared = registry.prepare(call, ctx)
+
+    assert prepared.fetch is None
+    assert registry.finish(prepared, None, ctx).text.startswith("Error: ")
+    assert (search.queries, len(ctx.ledger)) == ([], 0)
+
+
+def test_a_prepare_that_hits_memory_needs_no_io() -> None:
+    """A call answered before in the turn is answered when it is prepared, without fetching again."""
+    ctx = _context()
+    search = _Search([_programme()])
+    registry = _registry(search)
+    registry.call(_call("search", query="Hafenfest"), ctx)
+
+    prepared = registry.prepare(_call("search", query="HAFENFEST"), ctx)
+
+    assert prepared.fetch is None
+    assert registry.finish(prepared, None, ctx).text == "Already called search with these arguments; see [1]."
+    assert search.queries == ["Hafenfest"]
+
+
+def test_read_has_no_io_step() -> None:
+    """A read fetches nothing; its range check and render happen at finish, after the calls before it."""
+    ctx = _context()
+    registry = _registry(_Search([_programme()]))
+
+    prepared = registry.prepare(_call("read", n=1), ctx)
+    registry.call(_call("search", query="Hafenfest"), ctx)
+    reply = registry.finish(prepared, None, ctx)
+
+    assert prepared.fetch is None
+    assert _shown(reply.text) == [1]
+    assert PROGRAMME in reply.text
+
+
+def test_a_prepared_call_carries_what_the_trail_shows() -> None:
+    """The loop answers a call whose fetch timed out itself, so a prepared call names its action and argument."""
+    ctx = _context()
+    registry = _registry(_Search())
+
+    search = registry.prepare(_call("search", query="  Hafenfest   Sonntag "), ctx)
+    unoffered = registry.prepare(ToolCall(id="call_1", name="browse", arguments="{}"), ctx)
+
+    assert (search.action, search.detail, search.fetch is not None) == ("search", "Hafenfest Sonntag", True)
+    assert (unoffered.action, unoffered.detail, unoffered.fetch) == ("browse", "", None)
+
+
+def test_a_failed_search_propagates_and_is_not_remembered() -> None:
+    """A search that raises fails its call and leaves nothing remembered, so the same call runs again."""
+    ctx = _context()
+    runs: list[str] = []
+
+    def flaky(query: str) -> list[NodeWithScore]:
+        """Fail the first search, then find the programme.
+
+        Args:
+            query (str): What the tool searched for.
+
+        Returns:
+            list[NodeWithScore]: The programme passage.
+
+        Raises:
+            TimeoutError: On the first search.
+        """
+        runs.append(query)
+        if len(runs) == 1:
+            raise TimeoutError("The invented search timed out.")
+        return [_programme()]
+
+    registry = ToolRegistry([SearchTool(flaky), ReadTool()])
+    with pytest.raises(TimeoutError):
+        registry.call(_call("search", query="Hafenfest"), ctx)
+
+    reply = registry.call(_call("search", query="Hafenfest"), ctx)
+
+    assert (_shown(reply.text), runs) == ([1], ["Hafenfest", "Hafenfest"])
 
 
 def test_the_registry_offers_each_tool_as_a_function_schema() -> None:
