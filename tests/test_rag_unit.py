@@ -1225,6 +1225,55 @@ def test_retrieve_image_sources_shapes_standalone_video_keyframe() -> None:
     assert "posting_uuid" not in src
 
 
+@pytest.mark.parametrize(
+    ("time_sec", "label"),
+    [(72.4, "#3 @ 01:12"), (None, "#3"), (float("inf"), "#3")],
+    ids=["timed", "untimed", "unprintable-time"],
+)
+def test_a_keyframe_node_shows_its_label_to_the_model(time_sec: float | None, label: str) -> None:
+    """A frame's number in its clip and its time reach the prompt as one label; a frame without a time keeps its number.
+
+    Args:
+        time_sec (float | None): When the frame appears; ``None`` for a clip ingested without Nextext's time
+            manifest, and a time no clock can show for a damaged payload.
+        label (str): The label the model reads.
+    """
+    payload = {
+        "image_id": "frame-3",
+        "source_type": "video_keyframe",
+        "source_file": "harbour_walk.webm",
+        "media_file_hash": "c" * 64,
+        "keyframe_index": 2,
+        "keyframe_time_sec": time_sec,
+        "llm_description": "Zwei Personen in Regenjacken am Hafen, bedeckter Himmel",
+    }
+
+    node = RAG(qdrant_collection="coll")._image_caption_node(payload, RAG._image_caption_text(payload)).node
+
+    assert node.metadata["keyframe"] == label
+    for view in (node, rag_module.ParentContextPostprocessor._emit_with_llm_exclusion(node)):
+        header = view.get_metadata_str(mode=MetadataMode.LLM)
+        assert re.search(rf"^keyframe: {re.escape(label)}$", header, flags=re.MULTILINE)
+        assert "keyframe_index" not in header
+        assert "keyframe_time_sec" not in header
+
+
+def test_a_still_image_has_no_keyframe_label() -> None:
+    """Only a video frame has a place in a clip; a picture is labelled by nothing but its file."""
+    payload = {
+        "image_id": "picture-1",
+        "source_type": "standalone",
+        "source_path": "uploads/hafenamt.jpg",
+        "llm_description": "Person A vor dem Hafenamt, bedeckter Himmel",
+        "llm_tags": ["hafen", "person"],
+    }
+
+    node = RAG(qdrant_collection="coll")._image_caption_node(payload, RAG._image_caption_text(payload)).node
+
+    assert "keyframe" not in node.metadata
+    assert "keyframe:" not in node.get_metadata_str(mode=MetadataMode.LLM)
+
+
 def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     """Test that directory ingestion attaches file hashes to documents.
 

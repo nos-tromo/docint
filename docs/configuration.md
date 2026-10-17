@@ -185,8 +185,9 @@ The postprocessor adds every non-whitelisted metadata key to each
 emitted node's `excluded_llm_metadata_keys`, so the chat prompt only
 carries a tight set of locator fields: `filename`, `origin`, `page` /
 `page_number`, `start_ts` / `end_ts` / `speaker` / `sentence_index`,
-`table` (containing `row_index`), `reference_metadata`, and
-`docint_doc_kind`. Everything else (`entities`, `relations`,
+`table` (containing `row_index`), `reference_metadata`,
+`docint_doc_kind`, and for a video frame `keyframe` (its number in
+the clip and when it appears, such as `#3 @ 01:12`). Everything else (`entities`, `relations`,
 `llm_description`, `file_hash`, per-column row dumps, internal
 hierarchical / ingest markers) stays in `node.metadata` on the
 docstore-side parent but is hidden from the LLM prompt.

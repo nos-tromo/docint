@@ -249,6 +249,7 @@ from docint.utils.retry import (
     retry_with_backoff,
 )
 from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
+from docint.utils.timefmt import format_short
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -510,6 +511,10 @@ def _quantization_matches(
 #   answer's evidence set, stamped by
 #   :class:`CitationNumberingPostprocessor` so the answer's "source 3"
 #   and the chat window's third card are the same chunk.
+# * Video keyframes: ``keyframe`` — the frame's number in its clip and
+#   when it appears (``#3 @ 01:12``), derived by
+#   :meth:`RAG._image_caption_node` from ``keyframe_index`` and
+#   ``keyframe_time_sec``, which stay hidden.
 #
 # Explicitly excluded via absence: ``entities`` / ``relations`` (NER
 # output, can exceed 60 KB), per-column row dumps in ``tables.py``
@@ -537,6 +542,7 @@ LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
         "table",
         "reference_metadata",
         "docint_doc_kind",
+        "keyframe",
     }
 )
 
@@ -4777,6 +4783,9 @@ class RAG:
         filename = RAG._source_from_payload(collection=self.qdrant_collection, payload=payload).get("filename")
         if filename:
             metadata.setdefault("filename", filename)
+        keyframe = RAG._keyframe_label(payload)
+        if keyframe:
+            metadata["keyframe"] = keyframe
 
         node = TextNode(text=caption, metadata=metadata)
         node_id = str(payload.get("node_id") or payload.get("image_id") or "").strip()
@@ -4789,6 +4798,28 @@ class RAG:
         # enabled for this collection.
         node.excluded_llm_metadata_keys = sorted(k for k in metadata if k not in LLM_VISIBLE_METADATA_KEYS)
         return NodeWithScore(node=node, score=float(raw_score) if isinstance(raw_score, (int, float)) else None)
+
+    @staticmethod
+    def _keyframe_label(payload: dict[str, Any]) -> str | None:
+        """Name a video frame as the model reads it: its number in the clip and when it appears.
+
+        Args:
+            payload (dict[str, Any]): An `_images` companion point payload.
+
+        Returns:
+            str | None: ``#<keyframe_index + 1> @ <mm:ss>``, or ``#<n>`` alone for a frame
+            stored without Nextext's time manifest or with a time it cannot print; ``None``
+            for a point with no ``keyframe_index``, which is no video frame.
+        """
+        index = payload.get("keyframe_index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            return None
+        seconds = payload.get("keyframe_time_sec")
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            return f"#{index + 1}"
+        if not math.isfinite(seconds) or seconds < 0:
+            return f"#{index + 1}"
+        return f"#{index + 1} @ {format_short(seconds)}"
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.
