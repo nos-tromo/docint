@@ -934,7 +934,11 @@ class SessionManager:
             session_id (str): The ID of the session.
             user_msg (str): The user message.
             resp (Any): The assistant's response.
-            data (dict): Additional data to persist.
+            data (dict): Additional data to persist. Its ``retrieval_target`` is
+                stored as the evidence target the turn answered under, except
+                on a scoped turn (``retrieval_mode == "scoped"``): the pinned
+                scope outranks the target and ran no retrieval to apply it to,
+                so nothing is recorded.
             owner (str | None): The principal that owns the session. Threaded
                 from the chat turn and used only if the conversation row has to
                 be created here as a fallback (it normally already exists).
@@ -960,6 +964,7 @@ class SessionManager:
             rewritten = str(rewritten_candidate).strip() if isinstance(rewritten_candidate, str) else None
 
             reasoning = data.get("reasoning")
+            retrieval_target = None if data.get("retrieval_mode") == "scoped" else data.get("retrieval_target")
             existing = (
                 s.query(Turn).filter_by(conversation_id=conv.id, idx=replace_idx).one_or_none()
                 if replace_idx is not None
@@ -978,6 +983,7 @@ class SessionManager:
                 t.rewritten_query = rewritten  # type: ignore[assignment]
                 t.model_response = data.get("response") or ""  # type: ignore[assignment]
                 t.reasoning = reasoning  # type: ignore[assignment]
+                t.retrieval_target = retrieval_target
                 # Flush the delete-orphan cascade before the replacements are
                 # inserted, so the turn never momentarily holds both sets and
                 # replay cannot renumber citations against a stale row.
@@ -992,6 +998,7 @@ class SessionManager:
                     rewritten_query=rewritten,
                     model_response=data.get("response") or "",
                     reasoning=reasoning,
+                    retrieval_target=retrieval_target,
                 )
                 s.add(t)
             s.flush()
@@ -1207,7 +1214,8 @@ class SessionManager:
         Returns:
             list[dict[str, Any]]: A list of message dictionaries, or an
                 empty list when the session is missing or not owned by
-                ``owner``.
+                ``owner``. An assistant entry carries the turn's
+                ``retrieval_target`` when one was recorded.
         """
         with self._session_scope() as s:
             conv = s.query(Conversation).filter_by(id=session_id).first()
@@ -1249,6 +1257,8 @@ class SessionManager:
                     if t.retried:
                         msg_entry["retried"] = True
                         msg_entry["retry_query"] = t.retry_query
+                    if t.retrieval_target:
+                        msg_entry["retrieval_target"] = t.retrieval_target
                     messages.append(msg_entry)
 
             return messages

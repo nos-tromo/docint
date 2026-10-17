@@ -36,6 +36,9 @@ class Turn(Base):
     # able to say so, or the retry would read as the original answer.
     retried: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     retry_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Evidence target the turn answered under (``all``/``documents``/``visual``).
+    # NULL: a scoped turn, where the scope outranks it, or one from before this column.
+    retrieval_target: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Callable, like every other model here: a bare ``datetime.now(UTC)`` is
     # evaluated once at import, stamping every turn the process ever writes
     # with the moment it booted.
