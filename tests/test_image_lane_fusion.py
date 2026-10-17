@@ -301,6 +301,22 @@ def test_floor_stands_down_on_a_stamped_rerank_failure_even_with_retrieval_score
     assert [n.node.node_id for n in out] == ["t1", "point-77"]
 
 
+def test_a_healthy_stamped_rerank_still_gates_sub_floor_images() -> None:
+    """A rerank that ran stamps ``True`` and its scores are on the floor's scale, so the floor applies.
+
+    Every healthy rerank carries the mark, which is why the stand-down has to
+    read it as ``False`` and not as merely present: a presence check would turn
+    ``IMAGE_RERANK_MIN_SCORE`` into a no-op on every turn.
+    """
+    nodes = [_text_node("t1", "The gate is sealed.", 0.9), _image_node("point-77", 0.003)]
+    for node in nodes:
+        node.node.metadata[RERANK_APPLIED_KEY] = True
+
+    out = ImageRelevanceFloorPostprocessor(min_score=0.05)._postprocess_nodes(nodes, None)
+
+    assert [n.node.node_id for n in out] == ["t1"]
+
+
 def test_a_rerank_outage_keeps_the_best_image_inside_the_cut(monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole chain, with the reranker really failing, still shows the best image.
 
