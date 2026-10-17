@@ -1,11 +1,14 @@
-"""Caption-style description of a query, for re-scoring images against it.
+"""The visible cues a query needs, written out for re-scoring images against it.
 
 A cross-encoder answers "does this passage answer this question", so a
 question *about* the imagery ("how is the weather?") scores the right caption
-in the same band as an unrelated one. Rephrased as the caption a matching
-picture would carry, the same query separates them. The description comes
-from the shared chat model behind the LiteLLM router, as translation does, and
-fails soft: a missing description only costs an image its second look.
+in the same band as an unrelated one. Rewritten as the cues a matching picture
+would show, each with its usual alternatives, the same query separates them.
+Asked for the caption of a picture that answers the query instead, the model
+guessed a scene (a sunny sky for a weather question) that contradicted the
+right image. The description comes from the shared chat model behind the
+LiteLLM router, as translation does, and fails soft: a missing description
+only costs an image its second look.
 """
 
 from __future__ import annotations
@@ -20,12 +23,12 @@ from docint.utils.openai_cfg import OpenAIPipeline
 from docint.utils.prompt_loader import load_localized_prompt
 
 _DEFAULT_DESCRIPTION_PROMPT = (
-    "Write the caption of a picture that would answer the user's query. Output exactly one line of "
-    "concrete visual terms, mentioning only what such a picture would show. Of these kinds of terms, use "
-    "only those the query needs and never fill in the others: the people and how many there are, their "
-    "clothing, objects, the setting, the sky and the weather, visible text. Describe people by what can "
-    "be seen, never by name. Output only that line: no question, no explanation, no quotation marks. "
-    "Write it in English."
+    "List every visible cue from which the answer to the user's query could be read off a picture, and the "
+    "kind of shot (indoors or outdoors) when it matters. Output exactly one line of concrete visual terms, "
+    "giving each cue's usual alternatives instead of guessing one — never decide the answer. Name only the "
+    "cues the query needs, from: the people and how many there are, their clothing, objects, the setting, "
+    "the sky and the weather, visible text. Describe people by what can be seen, never by name. Output only "
+    "that line: no question, no explanation, no quotation marks. Write it in English."
 )
 
 
@@ -41,7 +44,7 @@ def _pipeline() -> OpenAIPipeline:
 
 @lru_cache(maxsize=1024)
 def _describe_cached(query: str, lang: str, model: str) -> str:
-    """Describe ``query`` as a caption (cached).
+    """List the visible cues ``query`` needs (cached).
 
     Raises on failure, so only successful descriptions are cached: an outage
     costs one turn its rescue, not every later turn asking the same. The call
@@ -75,7 +78,7 @@ def _describe_cached(query: str, lang: str, model: str) -> str:
 
 
 def describe_for_image_match(query: str) -> str | None:
-    """Describe what a picture answering ``query`` would show, in the response language.
+    """List the visible cues a picture answering ``query`` would show, in the response language.
 
     The stored captions are written in ``RESPONSE_LANGUAGE``, so the
     description is too; the locale and the chat model are part of the cache
