@@ -291,7 +291,11 @@ re-scores.
 
 The description is a chat call that runs before the answer's first token, so it
 has its own deadline, `IMAGE_RESCORE_TIMEOUT`, and a single attempt rather than
-the chat client's timeout and retries. Like the rest of the lane it fails soft:
+the chat client's timeout and retries. It also asks for no reasoning whatever
+`OPENAI_ENABLE_THINKING` says (no `reasoning_effort`, and on
+`INFERENCE_PROVIDER=vllm` `chat_template_kwargs.enable_thinking` sent as
+`false`), because a model that thought first could spend the whole deadline.
+Like the rest of the lane it fails soft:
 no description, a failed rerank (counted as described under
 [Reranking](#reranking)) or any other error drops the sub-floor images exactly
 as the floor alone would, and never fails the turn. Successful descriptions are

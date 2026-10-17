@@ -62,6 +62,7 @@ class _FakePipe:
         *,
         timeout: float | None = None,
         max_retries: int | None = None,
+        reasoning: bool | None = None,
     ) -> str:
         """Record the call and answer the next canned reply.
 
@@ -71,6 +72,7 @@ class _FakePipe:
             model: The chat model asked.
             timeout: The per-call deadline.
             max_retries: The per-call retry budget.
+            reasoning: Whether the call may reason; ``None`` leaves it to the process default.
 
         Returns:
             str: The canned reply.
@@ -85,6 +87,7 @@ class _FakePipe:
                 "model": model,
                 "timeout": timeout,
                 "max_retries": max_retries,
+                "reasoning": reasoning,
             }
         )
         reply = self.replies[min(len(self.calls), len(self.replies)) - 1]
@@ -262,6 +265,23 @@ def test_the_description_call_has_its_own_deadline_and_no_retries(
     image_description.describe_for_image_match(QUESTION)
 
     assert [(call["timeout"], call["max_retries"]) for call in pipe.calls] == [(seconds, 0)]
+
+
+def test_the_description_call_asks_for_no_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stack that defaults thinking on must not think this call out of its deadline.
+
+    The description is a short rewrite that runs before the answer's first
+    token, with ``IMAGE_RESCORE_TIMEOUT`` as its whole budget, so it opts out of
+    reasoning whatever ``OPENAI_ENABLE_THINKING`` says.
+
+    Args:
+        monkeypatch: Fixture used to patch the pipeline.
+    """
+    pipe = _use(monkeypatch, _FakePipe(DESCRIPTION))
+
+    image_description.describe_for_image_match(QUESTION)
+
+    assert [call["reasoning"] for call in pipe.calls] == [False]
 
 
 def test_the_bundled_default_is_the_english_prompt() -> None:

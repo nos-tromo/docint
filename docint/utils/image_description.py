@@ -46,7 +46,9 @@ def _describe_cached(query: str, lang: str, model: str) -> str:
     Raises on failure, so only successful descriptions are cached: an outage
     costs one turn its rescue, not every later turn asking the same. The call
     gets one attempt within ``IMAGE_RESCORE_TIMEOUT``, read on a miss so the
-    deadline stays out of the cache key.
+    deadline stays out of the cache key, and asks for no reasoning whatever
+    ``OPENAI_ENABLE_THINKING`` says, so a stack that defaults thinking on cannot
+    spend the deadline thinking.
 
     Args:
         query (str): The query the images are scored for.
@@ -62,7 +64,9 @@ def _describe_cached(query: str, lang: str, model: str) -> str:
     system_prompt = load_localized_prompt("image_rescore_description", default=_DEFAULT_DESCRIPTION_PROMPT, lang=lang)
     timeout = load_image_ingestion_config().rescore_timeout
     reply, _reasoning = strip_reasoning(
-        _pipeline().call_chat(query, system_prompt=system_prompt, model=model, timeout=timeout, max_retries=0)
+        _pipeline().call_chat(
+            query, system_prompt=system_prompt, model=model, timeout=timeout, max_retries=0, reasoning=False
+        )
     )
     description = " ".join(reply.split())
     if not description:

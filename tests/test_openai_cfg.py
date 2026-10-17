@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from openai.resources.chat.completions import Completions
 
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.openai_cfg import (
@@ -296,6 +298,7 @@ class _OptionsClient:
         """
         self.log = log
         self.name = name
+        self.requests: list[dict[str, Any]] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def with_options(self, **options: Any) -> _OptionsClient:
@@ -311,7 +314,7 @@ class _OptionsClient:
         return _OptionsClient(self.log, name="per-call")
 
     def _create(self, **kwargs: Any) -> Any:
-        """Log which client served the call and answer it.
+        """Log which client served the call, keep the request and answer it.
 
         Args:
             **kwargs: The completion request.
@@ -320,16 +323,26 @@ class _OptionsClient:
             Any: A fake chat completion response.
         """
         self.log.append((self.name, {}))
+        self.requests.append(kwargs)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
 
-def _chat_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: _OptionsClient) -> OpenAIPipeline:
+def _chat_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client: _OptionsClient,
+    *,
+    provider: str = "ollama",
+    thinking_enabled: bool = False,
+) -> OpenAIPipeline:
     """Build an ``OpenAIPipeline`` whose clients are ``client``.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
         tmp_path: Temporary prompt root.
         client: The chat client stand-in.
+        provider: ``INFERENCE_PROVIDER`` to emulate.
+        thinking_enabled: The ``OPENAI_ENABLE_THINKING`` default.
 
     Returns:
         OpenAIPipeline: The pipeline.
@@ -347,12 +360,12 @@ def _chat_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: _Opt
             dimensions=None,
             max_retries=2,
             num_output=256,
-            inference_provider="ollama",
+            inference_provider=provider,
             reuse_client=False,
             seed=42,
             temperature=0.0,
             thinking_effort="medium",
-            thinking_enabled=False,
+            thinking_enabled=thinking_enabled,
             timeout=300.0,
             top_p=0.1,
         ),
@@ -412,6 +425,115 @@ def test_call_chat_without_options_uses_the_shared_client(monkeypatch: pytest.Mo
     pipeline.call_chat("hello", system_prompt="sys", model="override-model")
 
     assert log == [("shared", {})]
+
+
+def _chat_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    provider: str,
+    thinking_enabled: bool,
+    **call_options: Any,
+) -> dict[str, Any]:
+    """Make one ``call_chat`` and return the completion request it sent.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: ``INFERENCE_PROVIDER`` to emulate.
+        thinking_enabled: The ``OPENAI_ENABLE_THINKING`` default.
+        **call_options: Keyword options passed to ``call_chat``.
+
+    Returns:
+        dict[str, Any]: The keyword arguments the completion was created with.
+    """
+    client = _OptionsClient([])
+    pipeline = _chat_pipeline(monkeypatch, tmp_path, client, provider=provider, thinking_enabled=thinking_enabled)
+
+    pipeline.call_chat("hello", **call_options)
+
+    return client.requests[0]
+
+
+def test_call_chat_without_reasoning_switches_thinking_off_on_vllm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A call that must not think says so in vLLM's own dialect, whatever the stack defaults to.
+
+    ``reasoning_effort`` is OpenAI's knob; a Qwen3/Gemma-style template on vLLM
+    reads ``chat_template_kwargs.enable_thinking`` instead, so a stack whose
+    ``.env`` defaults thinking on would otherwise think a short call out of its
+    deadline. The switch rides in ``extra_body``, a real parameter of the SDK's
+    ``create`` (the SDK rejects an unknown top-level key before any request).
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+    """
+    request = _chat_request(monkeypatch, tmp_path, provider="vllm", thinking_enabled=True, reasoning=False)
+
+    assert "reasoning_effort" not in request
+    assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert set(request) <= set(inspect.signature(Completions.create).parameters)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+def test_call_chat_without_reasoning_sends_no_template_kwarg_off_vllm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str
+) -> None:
+    """Off vLLM the effort is simply left off; OpenAI proper rejects unknown body fields.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: A provider with no ``enable_thinking`` switch.
+    """
+    request = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=True, reasoning=False)
+
+    assert "reasoning_effort" not in request
+    assert "extra_body" not in request
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "vllm"])
+@pytest.mark.parametrize("call_options", [{}, {"reasoning": None}], ids=["omitted", "none"])
+def test_call_chat_keeps_the_process_default_without_the_option(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str, call_options: dict[str, Any]
+) -> None:
+    """Callers that do not choose (translation among them) are untouched: the default decides.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: The emulated provider.
+        call_options: No ``reasoning`` option, or an explicit ``None``.
+    """
+    thinking = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=True, **call_options)
+    plain = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=False, **call_options)
+
+    assert thinking["reasoning_effort"] == "medium"
+    assert "reasoning_effort" not in plain
+    assert "extra_body" not in thinking
+    assert "extra_body" not in plain
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "vllm"])
+def test_call_chat_with_reasoning_asks_for_it_whatever_the_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str
+) -> None:
+    """``reasoning=True`` mirrors ``RAG._create_text_model(enable_reasoning=True)``, on vLLM too.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: The emulated provider.
+    """
+    request = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=False, reasoning=True)
+
+    assert request["reasoning_effort"] == "medium"
+    if provider == "vllm":
+        assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+    else:
+        assert "extra_body" not in request
 
 
 def _install_vision_pipeline(
