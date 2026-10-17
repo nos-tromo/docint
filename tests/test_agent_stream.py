@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 import openai
@@ -19,6 +20,7 @@ from docint.agents.turn.stream import (
     ToolCallAccumulator,
     stream_round,
 )
+from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.openai_cfg import LocalOpenAI
 
 QUESTION = "Wann findet das Hafenfest statt, und wer ist auf den Bildern vom Hafen zu sehen?"
@@ -86,6 +88,9 @@ USAGE_CHUNK: dict[str, Any] = {
     "choices": [],
     "usage": {"prompt_tokens": 40, "completion_tokens": 30, "total_tokens": 70},
 }
+#: ``ANSWER`` streamed in 30-character chunks: the held 120 at once, then a piece per chunk. The
+#: space at 209 goes out with the next piece, since trailing whitespace waits for text to follow it.
+ANSWER_EVENTS = [ANSWER[:120], ANSWER[120:150], ANSWER[150:180], ANSWER[180:209], ANSWER[209:]]
 
 
 def _whole(call: ToolCall, index: int | None) -> dict[str, Any]:
@@ -135,16 +140,17 @@ def _round(llm: Any, **kwargs: Any) -> tuple[list[str], RoundDone]:
     return texts, done
 
 
-def _scripted(chunks: list[dict[str, Any]]) -> tuple[list[str], RoundDone]:
+def _scripted(chunks: list[dict[str, Any]], **kwargs: Any) -> tuple[list[str], RoundDone]:
     """Stream one round of a scripted model that sends ``chunks``.
 
     Args:
         chunks (list[dict[str, Any]]): The raw chunks, in order.
+        **kwargs (Any): Further arguments for :func:`stream_round`.
 
     Returns:
         tuple[list[str], RoundDone]: Each provisional text in order, and how the round ended.
     """
-    return _round(streaming_tool_llm([chunks]))
+    return _round(streaming_tool_llm([chunks]), **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -299,7 +305,7 @@ def test_text_past_the_hold_is_forwarded_provisionally() -> None:
     """Nothing goes out before 120 characters; then the held text goes out at once, and each later piece on arrival."""
     texts, done = _scripted([*text_chunks(ANSWER, 30), chunk(finish_reason="stop")])
 
-    assert texts == [ANSWER[:120], ANSWER[120:150], ANSWER[150:180], ANSWER[180:210], ANSWER[210:]]
+    assert texts == ANSWER_EVENTS
     assert done == RoundDone(text=ANSWER, calls=[], finish_reason="stop", provisional_sent=True)
 
 
@@ -341,6 +347,34 @@ def test_calls_after_the_hold_leave_the_sent_text_provisional() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(ANSWER[:180], ANSWER[180:]), (LONG_PREFACE[:100], LONG_PREFACE[100:])],
+    ids=["after-the-hold", "within-the-hold"],
+)
+def test_an_answer_whose_calls_are_all_dropped_is_sent_in_full(before: str, after: str) -> None:
+    """A nameless fragment holds the text as a call would; once it is dropped, the round is an answer and loses nothing.
+
+    Released text then covers all of it, the part after the fragment included; with nothing
+    released, the caller sends it all.
+
+    Args:
+        before (str): Text ahead of the nameless fragment.
+        after (str): Text behind it.
+    """
+    texts, done = _scripted(
+        [
+            *text_chunks(before, 30),
+            chunk(tool_calls=[tool_call_delta(index=0, call_id="call_x", arguments=SEARCH_ARGS)]),
+            *text_chunks(after, 30),
+            chunk(finish_reason="stop"),
+        ]
+    )
+
+    assert (done.text, done.calls, done.provisional_sent) == (before + after, [], len(before) >= HOLD_CHARS)
+    assert "".join(texts) == (done.text if done.provisional_sent else "")
+
+
 @pytest.mark.parametrize("size", [1, 7, 4096])
 def test_reasoning_in_think_tags_never_counts_toward_the_hold(size: int) -> None:
     """146 characters of thinking and a 63-character answer leave the answer held, the thinking gone.
@@ -353,7 +387,7 @@ def test_reasoning_in_think_tags_never_counts_toward_the_hold(size: int) -> None
     texts, done = _scripted([*text_chunks(raw, size), chunk(finish_reason="stop")])
 
     assert texts == []
-    assert (done.text, done.provisional_sent) == (PREFACE, False)
+    assert (done.text, done.provisional_sent, done.reasoning) == (PREFACE, False, REASONING.strip())
 
 
 @pytest.mark.parametrize("size", [1, 7, 4096])
@@ -370,6 +404,7 @@ def test_reasoning_in_think_tags_is_never_forwarded(size: int) -> None:
     assert len(texts[0]) >= HOLD_CHARS
     assert "".join(texts) == ANSWER
     assert (done.text, done.provisional_sent) == (ANSWER, True)
+    assert done.reasoning == f"{REASONING.strip()}\n{REASONING.strip()}"
 
 
 def test_reasoning_left_open_at_the_end_is_never_shown() -> None:
@@ -377,7 +412,7 @@ def test_reasoning_left_open_at_the_end_is_never_shown() -> None:
     texts, done = _scripted([*text_chunks(f"{ANSWER}<think>{REASONING}</thi", 7), chunk(finish_reason="length")])
 
     assert "".join(texts) == ANSWER
-    assert (done.text, done.finish_reason) == (ANSWER, "length")
+    assert (done.text, done.finish_reason, done.reasoning) == (ANSWER, "length", f"{REASONING}</thi".strip())
 
 
 def test_a_tail_that_never_becomes_a_tag_is_kept() -> None:
@@ -489,31 +524,136 @@ def test_the_real_client_reads_both_calls_from_a_loopback_sse_stream(shape: str)
             PREFACE,
             [SEARCH_CALL],
         ),
-        (
-            text_chunks(ANSWER, 30),
-            [ANSWER[:120], ANSWER[120:150], ANSWER[150:180], ANSWER[180:210], ANSWER[210:]],
-            ANSWER,
-            [],
-        ),
+        (text_chunks(ANSWER, 30), ANSWER_EVENTS, ANSWER, []),
     ],
     ids=["then-calls", "then-answer"],
 )
+@pytest.mark.parametrize("reasoning_open", [False, True], ids=["plain", "may-open-in-reasoning"])
 def test_a_reasoning_field_never_counts_toward_the_hold(
-    after: list[dict[str, Any]], texts: list[str], text: str, calls: list[ToolCall]
+    after: list[dict[str, Any]], texts: list[str], text: str, calls: list[ToolCall], reasoning_open: bool
 ) -> None:
-    """Reasoning a parser sends in its own field is neither counted toward the hold nor released.
+    """Reasoning a parser sends in its own field is neither counted toward the hold nor released, but reported.
+
+    It also ends the wait of a reply that may open in reasoning: the content that follows streams
+    as usual instead of waiting for a close tag that never comes.
 
     Args:
         after (list[dict[str, Any]]): What follows the 146 characters of reasoning.
         texts (list[str]): The provisional texts expected.
         text (str): The round's visible text.
         calls (list[ToolCall]): The calls expected.
+        reasoning_open (bool): Whether the reply may open inside a think block.
     """
     thinking = [chunk(reasoning_content=REASONING[start : start + 40]) for start in range(0, len(REASONING), 40)]
 
     with sse_endpoint([*thinking, *after, chunk(finish_reason="stop")]) as (base, _):
         llm = LocalOpenAI(api_base=base, api_key="test", model="invented-model", max_retries=0)
-        released, done = _round(llm)
+        released, done = _round(llm, reasoning_open=reasoning_open)
 
     assert released == texts
-    assert (done.text, done.calls) == (text, calls)
+    assert (done.text, done.calls, done.reasoning) == (text, calls, REASONING.strip())
+
+
+@pytest.mark.parametrize(
+    ("after", "texts", "text", "calls"),
+    [
+        (text_chunks(ANSWER, 30), ANSWER_EVENTS, ANSWER, []),
+        ([*text_chunks(PREFACE, 20), chunk(tool_calls=[_whole(SEARCH_CALL, 0)])], [], PREFACE, [SEARCH_CALL]),
+    ],
+    ids=["then-answer", "then-calls"],
+)
+def test_a_reply_opened_in_reasoning_is_held_until_its_close_tag(
+    after: list[dict[str, Any]], texts: list[str], text: str, calls: list[ToolCall]
+) -> None:
+    """The template opened the think block, so only a close tag ends it: the 146 characters before it are reasoning.
+
+    Args:
+        after (list[dict[str, Any]]): What follows the close tag.
+        texts (list[str]): The provisional texts expected.
+        text (str): The round's visible text.
+        calls (list[ToolCall]): The calls expected.
+    """
+    thinking = text_chunks(f"{REASONING}</think>\n\n", 7)
+
+    released, done = _scripted([*thinking, *after, chunk(finish_reason="stop")], reasoning_open=True)
+
+    assert released == texts
+    assert (done.text, done.calls, done.reasoning) == (text, calls, REASONING.strip())
+
+
+def test_a_reply_opened_in_reasoning_that_never_closes_is_the_answer() -> None:
+    """With no close tag by the end, the held text was the answer: none of it went out, so the caller sends it all."""
+    texts, done = _scripted([*text_chunks(ANSWER, 30), chunk(finish_reason="stop")], reasoning_open=True)
+
+    assert texts == []
+    assert done == RoundDone(text=ANSWER, calls=[], finish_reason="stop", provisional_sent=False, reasoning=None)
+
+
+def test_reasoning_from_think_tags_comes_before_a_separate_field() -> None:
+    """Both kinds of reasoning are reported, the think text first, joined by a newline."""
+    _, done = _scripted(
+        [
+            chunk(reasoning_content="Erst die Texte. "),
+            chunk("<think>Dann die Bilder.</think>"),
+            chunk(PREFACE, finish_reason="stop"),
+        ]
+    )
+
+    assert (done.text, done.reasoning) == (PREFACE, "Dann die Bilder.\nErst die Texte.")
+
+
+#: Replies whose reasoning is read as ``strip_reasoning`` reads it, and whether each may open in reasoning.
+REASONING_REPLIES = {
+    "paired": (f"<think>{REASONING}</think>\n\n{ANSWER}\n", False),
+    "paired-short": ("<think>Erst das Datum.</think>Das Hafenfest ist am Sonntag.", False),
+    "paired-attributes": ('<think mode="plan">Erst das Datum.</think >Das Hafenfest ist am Sonntag.', False),
+    "paired-twice": (f"Kurz: <think>Datum?</think>{ANSWER[:150]}<THINK>Bilder?</Think> {ANSWER[150:]}", False),
+    "unclosed": (f"{ANSWER}\n<think>{REASONING}", False),
+    "unclosed-mid-tag": (f"{PREFACE}<think>{REASONING}</thi", False),
+    "dangling": (f"{REASONING}</think>\n\n{ANSWER}", True),
+    "dangling-short": ("Erst das Datum.\n</think>\n\nDas Hafenfest ist am Sonntag.", True),
+    "dangling-then-paired": (f"Datum?</think>{PREFACE}<think>Bilder?</think> {ANSWER}", True),
+    "self-opened": (f"<think>{REASONING}</think>{ANSWER}", True),
+    "self-opened-then-paired": (f"<think>Datum?</think>{PREFACE}<think>Bilder?</think> {ANSWER}", True),
+    "self-opened-unclosed": (f"<think>{REASONING}", True),
+    "never-closed": (ANSWER, True),
+}
+
+
+def _cuts(text: str, seed: int) -> list[list[str]]:
+    """Cut a reply into pieces in many ways: fixed sizes, one character at a time included, and seeded random cuts.
+
+    Args:
+        text (str): The reply.
+        seed (int): Seeds the random cuts, so every run cuts alike.
+
+    Returns:
+        list[list[str]]: Each way of cutting, its pieces in order.
+    """
+    ways = [[text[start : start + size] for start in range(0, len(text), size)] for size in (1, 2, 3, 7, 4096)]
+    rng = random.Random(seed)
+    for _ in range(24):
+        cuts = sorted(rng.sample(range(1, len(text)), rng.randint(1, min(12, len(text) - 1))))
+        ways.append([text[start:end] for start, end in zip([0, *cuts], [*cuts, len(text)], strict=True)])
+    return ways
+
+
+@pytest.mark.parametrize("name", list(REASONING_REPLIES))
+def test_the_round_reads_reasoning_as_strip_reasoning_does(name: str) -> None:
+    """Cut anywhere, a reply's visible text and reasoning are what ``strip_reasoning`` makes of the whole reply.
+
+    Whatever went out provisionally is the whole visible text; when nothing did, the caller sends it.
+
+    Args:
+        name (str): Which reply.
+    """
+    raw, reasoning_open = REASONING_REPLIES[name]
+    expected = strip_reasoning(raw)
+
+    for pieces in _cuts(raw, seed=len(raw)):
+        texts, done = _scripted(
+            [*(chunk(piece) for piece in pieces), chunk(finish_reason="stop")], reasoning_open=reasoning_open
+        )
+
+        assert (done.text, done.reasoning) == expected, pieces
+        assert "".join(texts) == (done.text if done.provisional_sent else ""), pieces

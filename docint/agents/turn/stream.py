@@ -8,8 +8,10 @@ of each chunk and joins fragments by ``index`` alone, so a chunk carrying two wh
 A round's text stays provisional while it may still turn out to be a preface to tool
 calls: it is held until ``HOLD_CHARS`` visible characters have arrived, and text held
 when a tool call starts is never released. Reasoning never counts and is never released:
-text inside ``<think>…</think>`` is left out here, and a reasoning field the endpoint sends
-apart from the content never reaches ``ChatResponse.delta``.
+think blocks in the content are read out by :class:`~docint.utils.llm_sanitize.ReasoningStripper`,
+and a reasoning field the endpoint sends apart from the content reaches llama-index's
+``additional_kwargs["thinking_delta"]``, never ``ChatResponse.delta``. Both are reported on
+:class:`RoundDone`.
 """
 
 from __future__ import annotations
@@ -20,8 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-# The sentinel splitter's think-tag reading, so both agree on what is reasoning.
-from docint.agents.assessment.split import _ASCII_LOWER, _THINK_CLOSE, _THINK_OPEN, _partial_suffix
+from docint.utils.llm_sanitize import ReasoningStripper
 
 if TYPE_CHECKING:
     from llama_index.core.base.llms.types import ChatMessage
@@ -63,18 +64,23 @@ class RoundDone:
     """How a round ended; always its last event.
 
     Attributes:
-        text (str): The round's visible text in full, released or not; reasoning left out.
+        text (str): The round's visible text in full, released or not; reasoning left out, and
+            leading and trailing whitespace too.
         calls (list[ToolCall]): The tool calls, in the order the model began them; empty when
             the text is the answer.
         finish_reason (str | None): The endpoint's finish reason, or ``None`` if it sent none.
         provisional_sent (bool): Whether any of ``text`` went out as :class:`Provisional`. When
-            set and the round has no calls, all of ``text`` went out.
+            set and ``calls`` is empty, all of ``text`` went out; when not set, none of it did.
+        reasoning (str | None): The reasoning the round wrote, from think blocks and from a
+            separate reasoning field, joined by newlines as ``strip_reasoning`` joins it;
+            ``None`` when there was none. Never counted, released or logged.
     """
 
     text: str
     calls: list[ToolCall]
     finish_reason: str | None
     provisional_sent: bool
+    reasoning: str | None = None
 
 
 RoundEvent = Provisional | RoundDone
@@ -250,56 +256,6 @@ class ToolCallAccumulator:
         return calls
 
 
-class _VisibleText:
-    """Pass a round's text through a token at a time, leaving out what it writes inside think blocks.
-
-    Reads tags as :class:`~docint.agents.assessment.split.SentinelStreamSplitter` does, and
-    holds back only a tail that could still grow into one.
-    """
-
-    def __init__(self) -> None:
-        """Start outside any think block, with nothing held."""
-        self._buffer = ""
-        self._in_think = False
-
-    def feed(self, token: str) -> str:
-        """Accept one token and return the visible text it completes.
-
-        Args:
-            token (str): The next piece of the round's content.
-
-        Returns:
-            str: Visible text safe to count; empty while a tag may be forming.
-        """
-        self._buffer += token
-        out: list[str] = []
-        while self._buffer:
-            tag = _THINK_CLOSE if self._in_think else _THINK_OPEN
-            lower = self._buffer.translate(_ASCII_LOWER)
-            found = lower.find(tag)
-            if found < 0:
-                kept = len(self._buffer) - _partial_suffix(lower, tag)
-                if not self._in_think:
-                    out.append(self._buffer[:kept])
-                self._buffer = self._buffer[kept:]
-                break
-            if not self._in_think:
-                out.append(self._buffer[:found])
-            self._buffer = self._buffer[found + len(tag) :]
-            self._in_think = not self._in_think
-        return "".join(out)
-
-    def flush(self) -> str:
-        """Release a held tail once the round has ended.
-
-        Returns:
-            str: The tail, which never became a tag; ``""`` inside a think block the round
-            never closed, whose text is reasoning.
-        """
-        rest, self._buffer = self._buffer, ""
-        return "" if self._in_think else rest
-
-
 def _finish_reason(raw_chunk: Any) -> str | None:
     """Read the finish reason a raw chunk carries.
 
@@ -318,21 +274,28 @@ def stream_round(
     *,
     tools: Sequence[dict[str, Any]],
     tool_choice: str = "auto",
+    reasoning_open: bool = False,
     **kwargs: Any,
 ) -> Iterator[RoundEvent]:
     """Stream one model round, releasing its text only once it is unlikely to be a preface.
 
-    Visible text is held until ``HOLD_CHARS`` characters have arrived with no tool call
-    begun; then the held text goes out as one :class:`Provisional` and every later piece as
-    its own. Once a tool-call fragment arrives, nothing more is released. A round that ends
-    with less than ``HOLD_CHARS`` characters releases nothing, and its text is in
-    :class:`RoundDone` for the caller to send.
+    Visible text is held until ``HOLD_CHARS`` characters have arrived with no tool-call
+    fragment; then the held text goes out as one :class:`Provisional` and every later piece
+    as its own. Once a fragment arrives, nothing more is released while the round streams.
+    If every call it began is then dropped, the round is an answer: whatever followed the
+    text already released goes out at the end. A round that never passed the hold releases
+    nothing, and its text is in :class:`RoundDone` for the caller to send.
 
     Args:
         llm (LLM): The chat model; its ``stream_chat`` must pass the raw chunks on ``raw``.
         messages (Sequence[ChatMessage]): The conversation so far.
         tools (Sequence[dict[str, Any]]): The tool schemas offered, as the endpoint receives them.
         tool_choice (str): ``auto`` lets the model choose; ``none`` asks for an answer.
+        reasoning_open (bool): Whether the reply may open in reasoning: thinking was asked for,
+            and the chat template may have begun the think block in the prompt. The content is
+            then held, uncounted, until a close tag (what came before it is reasoning), a
+            separate reasoning field (the endpoint keeps reasoning apart, so the held content is
+            text), or the end of the reply (the held content was the answer, for the caller to send).
         **kwargs (Any): Further options for ``stream_chat``.
 
     Yields:
@@ -343,7 +306,8 @@ def stream_round(
             first pull, before anything is yielded.
     """
     accumulator = ToolCallAccumulator()
-    reader = _VisibleText()
+    reader = ReasoningStripper(reasoning_open=reasoning_open)
+    separate: list[str] = []
     text = ""
     released = 0
     calling = False
@@ -351,13 +315,25 @@ def stream_round(
     for response in llm.stream_chat(messages, tools=list(tools), tool_choice=tool_choice, **kwargs):
         calling = accumulator.feed(response.raw) or calling
         finish_reason = _finish_reason(response.raw) or finish_reason
+        thinking = _text(response.additional_kwargs.get("thinking_delta"))
+        if thinking:
+            separate.append(thinking)
+            text += reader.cancel_open_reasoning()
         text += reader.feed(response.delta or "")
         if not calling and len(text) > released and (released or len(text) >= HOLD_CHARS):
             yield Provisional(text[released:])
             released = len(text)
     text += reader.flush()
-    if released and not calling and len(text) > released:
+    calls = accumulator.calls()
+    if released and not calls and len(text) > released:
         yield Provisional(text[released:])
     if accumulator.dropped:
         logger.warning("A model round sent tool calls without a name; dropped: {}", accumulator.dropped)
-    yield RoundDone(text=text, calls=accumulator.calls(), finish_reason=finish_reason, provisional_sent=released > 0)
+    parts = (reader.reasoning, "".join(separate).strip())
+    yield RoundDone(
+        text=text,
+        calls=calls,
+        finish_reason=finish_reason,
+        provisional_sent=released > 0,
+        reasoning="\n".join(part for part in parts if part) or None,
+    )
