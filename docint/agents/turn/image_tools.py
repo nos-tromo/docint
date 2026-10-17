@@ -13,13 +13,16 @@ a frame as it cites a page, and a frame both tools find is one passage.
 ``file`` is a clip's file name, as a passage header shows it, or the number of a passage from
 the clip, which names the clip by that passage's media hash (else its file name) as the
 evidence stood when the round's calls were prepared. A clip with no stored frames is answered
-with the clips the turn's passages came from, so the model can pick one.
+with the clips the turn's passages came from, so the model can pick one. A file name is not
+an identity: two clips from different folders can share one, and such a name is answered
+with a way to each clip, a passage from it or its id, rather than with both clips' frames.
 """
 
 from __future__ import annotations
 
 import copy
 import functools
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -148,11 +151,33 @@ def _quoted(name: str) -> str:
     return repr(neutralize_sentinel(" ".join(name.split())))
 
 
+def _held_clips(ctx: ToolContext) -> dict[str, tuple[str, int]]:
+    """Find the clips the turn's passages came from, each once, in evidence order.
+
+    A passage came from a clip when it carries the clip's media hash, as its transcript
+    segments and frames do. The hash tells clips apart, since a file name need not.
+
+    Args:
+        ctx (ToolContext): The turn's evidence.
+
+    Returns:
+        dict[str, tuple[str, int]]: By media hash, the clip's ``source_file`` (its hash
+        when it has none) and the number of its first passage.
+    """
+    clips: dict[str, tuple[str, int]] = {}
+    for number, entry in enumerate(ctx.ledger.entries(), start=1):
+        metadata = entry.node.metadata
+        media_hash = _text(metadata.get("media_file_hash"))
+        if media_hash and media_hash not in clips:
+            clips[media_hash] = (_text(metadata.get("source_file")) or media_hash, number)
+    return clips
+
+
 def _clips_seen(ctx: ToolContext) -> str:
     """Name the clips the turn's passages came from, for a reply that needs a clip.
 
-    A passage came from a clip when it carries the clip's media hash, as its transcript
-    segments and frames do; it is named by its ``source_file``, once, in evidence order.
+    Each clip is named by its ``source_file``, in evidence order; clips that share a name
+    each carry the number of a passage from them, so the list never shows two as one.
 
     Args:
         ctx (ToolContext): The turn's evidence.
@@ -160,14 +185,38 @@ def _clips_seen(ctx: ToolContext) -> str:
     Returns:
         str: ``the clips seen so far are 'a.webm', 'b.mp4'``, or what to do when there are none.
     """
-    names = dict.fromkeys(
-        _quoted(name)
-        for entry in ctx.ledger.entries()
-        if (name := _text(entry.node.metadata.get("source_file"))) and _text(entry.node.metadata.get("media_file_hash"))
-    )
-    if not names:
+    clips = [(_quoted(name), number) for name, number in _held_clips(ctx).values()]
+    if not clips:
         return "no clip has been seen yet, so search for one first"
-    return "the clips seen so far are " + ", ".join(names)
+    names = Counter(name for name, _ in clips)
+    return "the clips seen so far are " + ", ".join(
+        f"{name} (passage [{number}])" if names[name] > 1 else name for name, number in clips
+    )
+
+
+def _ambiguous(name: str, hashes: Sequence[str], ctx: ToolContext) -> str:
+    """Say that several clips carry one file name, and name each so the model can pick one.
+
+    Args:
+        name (str): The file name they share.
+        hashes (Sequence[str]): Their media hashes.
+        ctx (ToolContext): The turn's evidence, for a passage from each.
+
+    Returns:
+        str: The refusal, naming each clip by its first passage in the evidence, or by its
+        id when the evidence holds none of its passages: held passages first, by number.
+    """
+    held = _held_clips(ctx)
+    ways = sorted(
+        (0, held[media_hash][1], f"[{held[media_hash][1]}]") if media_hash in held else (1, 0, _quoted(media_hash))
+        for media_hash in hashes
+    )
+    return (
+        f"{len(hashes)} clips are named {_quoted(name)}; call keyframes with file set to the number of a passage "
+        "from the clip you mean, or to its id if none of its passages was shown, one per clip: "
+        + ", ".join(way for _, _, way in ways)
+        + "."
+    )
 
 
 def _frame_number(frame: NodeWithScore) -> int | None:
@@ -326,13 +375,21 @@ class KeyframesTool:
         Returns:
             ToolReply: The frames as passages under their numbers, with a note of how many
             the clip has when it has more than ``MAX_FRAMES``; an error reply when the clip
-            has no stored frames, or none of that number.
+            has no stored frames or none of that number, or when its frames come from more
+            than one clip, which a file name two clips share lists, so it is never shown as one.
         """
         numbered = [(number, frame) for frame in fetched or () if (number := _frame_number(frame)) is not None]
         if not numbered:
             return error_reply(
                 self.name, f"no keyframes are stored for {_quoted(clip.name)}; {_clips_seen(ctx)}.", detail=detail
             )
+        hashes = list(
+            dict.fromkeys(
+                media_hash for _, frame in numbered if (media_hash := _text(frame.node.metadata.get("media_file_hash")))
+            )
+        )
+        if len(hashes) > 1:
+            return error_reply(self.name, _ambiguous(clip.name, hashes, ctx), detail=detail)
         if index is not None:
             chosen = [frame for number, frame in numbered if number == index]
             if not chosen:

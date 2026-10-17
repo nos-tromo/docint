@@ -45,6 +45,10 @@ CAPTIONS = (
 )
 #: The request filter of a turn that asks only about the clip from its thirtieth second on.
 FROM_THIRTY_SECONDS = [{"field": "keyframe_time_sec", "operator": "gte", "value": 30}]
+#: One file name two different clips carry, from two folders of one batch.
+SHARED = "hafen_rundgang.mov"
+FIRST_HASH = "a" * 64
+SECOND_HASH = "b" * 64
 
 
 def _context(*, reasoning: bool = False) -> ToolContext:
@@ -769,6 +773,80 @@ def test_a_keyframes_reply_with_its_notes_never_outgrows_result_chars(reasoning:
     )
     assert "narrower words" not in reply.text
     assert len(reply.text) <= ctx.budget.result_chars
+
+
+def _two_clips_of_one_name() -> _Companion:
+    """Build an image companion holding two clips that share a file name, three frames each.
+
+    Returns:
+        _Companion: The companion.
+    """
+    return _Companion(
+        [
+            _stored(_frame_payload(index, clip=SHARED, media_hash=media_hash))
+            for media_hash in (FIRST_HASH, SECOND_HASH)
+            for index in range(3)
+        ],
+        page=4,
+    )
+
+
+@pytest.mark.parametrize("index", [None, 2], ids=["listing", "one-frame"])
+def test_a_name_two_clips_share_is_answered_with_a_way_to_each(index: int | None) -> None:
+    """Two clips under one file name are never listed as one: the reply names a passage from one, the other's id.
+
+    Args:
+        index (int | None): The frame asked for; ``None`` asks for the clip's frames.
+    """
+    ctx = _context()
+    ctx.ledger.add([programme_passage(), _segment(1, clip=SHARED, media_hash=SECOND_HASH)])
+    arguments: dict[str, object] = {"file": SHARED} if index is None else {"file": SHARED, "index": index}
+
+    reply = _registry(list_keyframes=_rag(_two_clips_of_one_name())._agent_list_keyframes).call(
+        tool_call("keyframes", **arguments), ctx
+    )
+
+    assert reply.text == (
+        f"Error: 2 clips are named '{SHARED}'; call keyframes with file set to the number of a passage from the "
+        f"clip you mean, or to its id if none of its passages was shown, one per clip: [2], '{FIRST_HASH}'."
+    )
+    assert (reply.found, len(ctx.ledger)) == (0, 2)
+
+
+def test_a_passage_or_an_id_lists_only_its_clip() -> None:
+    """The ways the refusal names each lead to that clip's frames alone, by its passage or by its id."""
+    ctx = _context()
+    ctx.ledger.add([programme_passage(), _segment(1, clip=SHARED, media_hash=SECOND_HASH)])
+    registry = _registry(list_keyframes=_rag(_two_clips_of_one_name())._agent_list_keyframes)
+
+    by_passage = registry.call(tool_call("keyframes", file=2), ctx)
+    by_id = registry.call(tool_call("keyframes", file=FIRST_HASH), ctx)
+
+    for reply in (by_passage, by_id):
+        assert _labels(reply.text) == ["#1 @ 00:00", "#2 @ 00:06", "#3 @ 00:12"]
+    clips = [entry.node.metadata["media_file_hash"] for entry in ctx.ledger.entries()[2:]]
+    assert clips == [SECOND_HASH] * 3 + [FIRST_HASH] * 3
+
+
+def test_clips_seen_show_two_clips_of_one_name_apart() -> None:
+    """Two clips of one name are two clips in the list too, each named with a passage from it."""
+    ctx = _context()
+    ctx.ledger.add(
+        [
+            _segment(1, clip=SHARED, media_hash=FIRST_HASH),
+            programme_passage(),
+            _frame(0, clip=SHARED, media_hash=SECOND_HASH),
+            _segment(2, clip=OTHER_CLIP, media_hash=OTHER_HASH),
+            _segment(3, clip=SHARED, media_hash=FIRST_HASH),
+        ]
+    )
+
+    reply = _registry().call(tool_call("keyframes", file="unbekannt.mp4"), ctx)
+
+    assert reply.text == (
+        "Error: no keyframes are stored for 'unbekannt.mp4'; the clips seen so far are "
+        f"'{SHARED}' (passage [1]), '{SHARED}' (passage [3]), '{OTHER_CLIP}'."
+    )
 
 
 def test_an_unknown_clip_names_the_clips_seen() -> None:
