@@ -6,7 +6,7 @@ import contextlib
 import json
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import MagicMock
@@ -20,6 +20,8 @@ from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import BaseNode, NodeWithScore, QueryBundle, TextNode
 from typing_extensions import override
+
+from docint.agents.assessment.keyword import KeywordResult, KeywordTool
 
 #: What the production LLM view lets through for these doubles.
 _VISIBLE = frozenset({"citation_index", "filename", "page"})
@@ -296,6 +298,73 @@ def search_call(query: str, call_id: str = "call_x") -> ToolSelection:
         ToolSelection: The scripted call.
     """
     return ToolSelection(tool_id=call_id, tool_name="search", tool_kwargs={"query": query})
+
+
+def keyword_call(words: str, field: str | None = None, call_id: str = "call_x") -> ToolSelection:
+    """Build a scripted ``keyword`` tool call.
+
+    Args:
+        words (str): The words to match.
+        field (str | None): The field to match them in; left out when ``None``.
+        call_id (str): The tool-call id the model returns.
+
+    Returns:
+        ToolSelection: The scripted call.
+    """
+    kwargs: dict[str, Any] = {"words": words} if field is None else {"words": words, "field": field}
+    return ToolSelection(tool_id=call_id, tool_name="keyword", tool_kwargs=kwargs)
+
+
+def keyword_tool(
+    results: dict[tuple[str, str], KeywordResult] | None = None,
+    *,
+    fields: tuple[str, ...] = ("text",),
+    problems: dict[str, str] | None = None,
+    ran: list[tuple[str, str]] | None = None,
+    run: Callable[[str, str], KeywordResult] | None = None,
+) -> KeywordTool:
+    """Build a keyword tool over canned matches.
+
+    Args:
+        results (dict[tuple[str, str], KeywordResult] | None): The result per
+            ``(words, field)``; anything else matches nothing.
+        fields (tuple[str, ...]): The fields offered.
+        problems (dict[str, str] | None): The ``check`` answer per words.
+        ran (list[tuple[str, str]] | None): Records every run.
+        run (Callable[[str, str], KeywordResult] | None): Replaces the canned run.
+
+    Returns:
+        KeywordTool: The tool.
+    """
+    table = dict(results or {})
+
+    def _check(words: str, field: str) -> str | None:
+        """Return the scripted problem with ``words``, if any.
+
+        Args:
+            words (str): The words.
+            field (str): The field, unused.
+
+        Returns:
+            str | None: The problem token.
+        """
+        return (problems or {}).get(words)
+
+    def _run(words: str, field: str) -> KeywordResult:
+        """Return the canned result for ``(words, field)``.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            KeywordResult: The result, or an empty zero count.
+        """
+        if ran is not None:
+            ran.append((words, field))
+        return table.get((words, field), KeywordResult(nodes=[], matches=0, unchecked=0, keywords=tuple(words.split())))
+
+    return KeywordTool(fields=fields, check=_check, run=run or _run)
 
 
 class _LoopbackServer(ThreadingHTTPServer):

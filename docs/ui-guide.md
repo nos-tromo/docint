@@ -116,7 +116,11 @@ does.
 
 A question that asks for a judgement — what could be improved, whether a
 method convinces — gets an **assessment**. While it is researched, the turn
-lists each search the model makes. The answer then opens with what the sources
+lists each search the model makes, and each keyword check with how many chunks
+of the collection contain its words (or that the count was unavailable), and
+how many chunks it could not check when the keyword index does not cover them
+all. The
+answer then opens with what the sources
 say, cited as usual, and continues under a **Model assessment** label with the
 model's own judgement, which may draw on general knowledge and is not checked
 against the sources. A note under the answer says so and, behind a disclosure

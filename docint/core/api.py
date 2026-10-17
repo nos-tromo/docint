@@ -1018,13 +1018,17 @@ def _assessment_validation(
 def _sse_agent_frame(progress: AgentProgress) -> str:
     """Render one step of an assessment turn as an SSE frame.
 
+    Fields a step leaves unset are left out, so seed, search and answer frames
+    keep exactly the keys they always had.
+
     Args:
         progress (AgentProgress): The step.
 
     Returns:
         str: The ``data: {"agent": ...}`` frame.
     """
-    return f"data: {json.dumps({'agent': asdict(progress)})}\n\n"
+    step = {key: value for key, value in asdict(progress).items() if value is not None}
+    return f"data: {json.dumps({'agent': step})}\n\n"
 
 
 def _iter_text_tokens(text: str) -> list[str]:

@@ -128,6 +128,14 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from docint.agents.assessment.keyword import (
+    LONG_WORD,
+    NO_USABLE_WORD,
+    ONE_VALUE_ONLY,
+    UNINDEXABLE_WORD,
+    KeywordResult,
+    KeywordTool,
+)
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
 from docint.core.collection_overview import summarize_document_types
@@ -181,22 +189,28 @@ from docint.core.retrieval.visual import (
 )
 from docint.core.retrieval_filters import build_qdrant_filter, matches_metadata_filters, merge_qdrant_filters
 from docint.core.search.fields import (
+    DEFAULT_SEARCH_FIELD,
     IMAGE_LANE_FIELDS,
     SEARCH_FIELDS,
     UnknownSearchFieldError,
     ensure_field_indexes,
     field_indexes_ready,
+    field_ready_in_schema,
+    read_payload_schema,
     search_field_spec,
 )
 from docint.core.search.fulltext import (
     build_any_keyword_filter,
     build_scan_filter,
     build_search_filter,
+    index_tokens,
     matches_any_phrase,
     not_coarse_condition,
     parse_keywords,
 )
 from docint.core.search.index import (
+    SEARCH_MAX_TOKEN_LEN,
+    SEARCH_MIN_TOKEN_LEN,
     SEARCH_TEXT_FIELD,
     ensure_search_index,
     image_companion_name,
@@ -6322,6 +6336,45 @@ class RAG:
                 ),
             )
 
+        return RetrieverQueryEngine.from_args(
+            retriever=self._build_retriever(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+                retrieval_options=retrieval_options,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
+                include_images=retrieval_target != "documents",
+            ),
+            llm=self.post_retrieval_text_model,
+            node_postprocessors=self._text_postprocessors(profile=profile, retrieval_options=retrieval_options),
+            response_synthesizer=self._build_response_synthesizer(
+                streaming=streaming,
+                social_table=bool(profile.get("is_social_table")),
+            ),
+        )
+
+    def _text_postprocessors(
+        self,
+        *,
+        profile: dict[str, Any],
+        retrieval_options: dict[str, Any] | None = None,
+        social_links: bool = True,
+    ) -> list[BaseNodePostprocessor]:
+        """Build the postprocessor chain of the ``all`` and ``documents`` targets.
+
+        Args:
+            profile (dict[str, Any]): The collection profile.
+            retrieval_options (dict[str, Any] | None): Runtime overrides for
+                parent-context expansion.
+            social_links (bool): Whether a social collection's diversity cap and
+                link-following join the chain. A keyword check leaves them out:
+                its passages must be matches, and the cap would thin an author's
+                postings.
+
+        Returns:
+            list[BaseNodePostprocessor]: Rerank, image floor, parent context
+            when enabled, the social steps when asked, then citation numbering.
+        """
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
@@ -6353,7 +6406,7 @@ class RAG:
                     budget_enforced=True,
                 )
             )
-        if bool(profile.get("is_social_table")):
+        if social_links and bool(profile.get("is_social_table")):
             # Configurable via SOCIAL_SOURCE_DIVERSITY_LIMIT (RetrievalConfig)
             # — this knob used to be sourced from the (now-deleted) sampling
             # summarizer's social config, but this call site is on the
@@ -6363,23 +6416,7 @@ class RAG:
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.
         node_postprocessors.append(CitationNumberingPostprocessor())
-
-        return RetrieverQueryEngine.from_args(
-            retriever=self._build_retriever(
-                metadata_filters=metadata_filters,
-                vector_store_kwargs=vector_store_kwargs,
-                retrieval_options=retrieval_options,
-                metadata_filter_rules=metadata_filter_rules,
-                metadata_filters_active=metadata_filters_active,
-                include_images=retrieval_target != "documents",
-            ),
-            llm=self.post_retrieval_text_model,
-            node_postprocessors=node_postprocessors,
-            response_synthesizer=self._build_response_synthesizer(
-                streaming=streaming,
-                social_table=bool(profile.get("is_social_table")),
-            ),
-        )
+        return node_postprocessors
 
     def _build_response_synthesizer(
         self,
@@ -8337,7 +8374,16 @@ class RAG:
             answer_mode=answer_mode,
         )
 
-    def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:
+    def assessment_runner(
+        self,
+        engine: Any,
+        *,
+        scoped: bool,
+        metadata_filter_rules: Sequence[Any] | None = None,
+        metadata_filters_active: bool = False,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+        social: bool = False,
+    ) -> AssessmentRunner:
         """Build the runner for one assessment turn over this turn's engine.
 
         Research runs on the plain (non-reasoning) chat model, which picks the
@@ -8352,6 +8398,14 @@ class RAG:
                 returns kept (see :class:`EveryChildQuery`).
             scoped (bool): Whether the turn answers from a pinned scope, which
                 forbids searching beyond it.
+            metadata_filter_rules (Sequence[Any] | None): The turn's raw filter
+                rules, which a keyword check compiles as the API compiles them.
+            metadata_filters_active (bool): Whether the turn carries filters at all.
+            retrieval_target (RetrievalTarget): Which evidence may answer; a
+                keyword check counts and searches the same.
+            social (bool): Whether the turn's collection profiles as a social
+                export, as its coverage unit says; a keyword check then may match
+                posting metadata too.
 
         Returns:
             AssessmentRunner: A runner bound to this request's models and limits.
@@ -8369,6 +8423,12 @@ class RAG:
                 max_steps=load_assessment_env().max_steps,
                 ctx_window=int(self.openai_ctx_window),
                 char_token_ratio=ratio,
+                keyword=self._assessment_keyword_tool(
+                    metadata_filter_rules=metadata_filter_rules,
+                    metadata_filters_active=metadata_filters_active,
+                    retrieval_target=retrieval_target,
+                    social=social,
+                ),
             )
         )
         return AssessmentRunner(
@@ -8380,6 +8440,184 @@ class RAG:
             researcher=researcher,
             count_tokens=(lambda text: len(counter(text))) if counter is not None else None,
         )
+
+    def _assessment_keyword_tool(
+        self,
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        retrieval_target: RetrievalTarget,
+        social: bool = False,
+    ) -> KeywordTool | None:
+        """Offer research an exact word match over this turn's collection, when its indexes allow one.
+
+        Deciding only reads: the keyword index's coverage per lane and each
+        collection's payload schema. It creates no index, and it does not
+        profile the collection, whose social flag the turn already holds. The
+        tool is withheld when the turn's filters cannot be compiled for Qdrant
+        (a check would count the wrong material), when an image companion in
+        scope could not be looked up or counted, when the text field is not
+        ready, and on any fault; research then keeps ``search`` and ``finish``.
+        A field is ready when every key it searches carries its own index kind,
+        the text field also needing chunks that carry its text. Text is
+        required, being what a check matches by default; author, network and
+        uuid join it on social collections, the one place they hold anything.
+        The image lane joins a field's check only when the companion carries the
+        same indexes; otherwise its chunks are reported unchecked, never counted
+        as misses.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): The turn's raw filter rules.
+            metadata_filters_active (bool): Whether the turn carries filters at all.
+            retrieval_target (RetrievalTarget): Which evidence may answer.
+            social (bool): Whether the collection profiles as a social export.
+
+        Returns:
+            KeywordTool | None: The tool, or ``None`` when it is withheld.
+        """
+        request_filter = build_qdrant_filter(metadata_filter_rules)
+        if retrieval_target == "visual" or (metadata_filters_active and request_filter is None):
+            return None
+        collection = self.qdrant_collection
+        companion = image_companion_name(collection)
+        try:
+            client = self.qdrant_client
+            lanes = search_index_status(client, collection, by_lane=True).get("lanes") or {}
+            main = lanes.get(collection)
+            images = lanes.get(companion)
+            # Asked directly, so an outage withholds the tool rather than reading as "no companion".
+            in_scope = retrieval_target != "documents" and (
+                images is not None or bool(client.collection_exists(collection_name=companion))
+            )
+            if main is None or (in_scope and images is None):
+                return None
+            main_schema = read_payload_schema(client, collection)
+            image_schema: dict[str, Any] = read_payload_schema(client, companion) if in_scope else {}
+        except Exception as exc:
+            logger.debug("Keyword tool withheld: {}", type(exc).__name__)
+            return None
+        image_total = int(images["total"]) if in_scope and images is not None else 0
+        image_missing = image_total - int(images["with_search_text"]) if in_scope and images is not None else 0
+        main_missing = int(main["total"]) - int(main["with_search_text"])
+        profile = {"is_social_table": social}
+        names = list(SEARCH_FIELDS) if social else [DEFAULT_SEARCH_FIELD]
+        joins: dict[str, bool] = {}
+        unchecked: dict[str, int] = {}
+        for name in names:
+            if not field_ready_in_schema(main_schema, name):
+                continue
+            if name == DEFAULT_SEARCH_FIELD and int(main["with_search_text"]) == 0:
+                continue
+            reaches_images = in_scope and name in IMAGE_LANE_FIELDS
+            joins[name] = reaches_images and field_ready_in_schema(image_schema, name)
+            left_out = image_total if reaches_images and not joins[name] else 0
+            covered = image_missing if joins[name] else 0
+            unchecked[name] = left_out + (main_missing + covered if name == DEFAULT_SEARCH_FIELD else 0)
+        if DEFAULT_SEARCH_FIELD not in joins:
+            return None
+
+        def _filter(words: str, field: str, base: qdrant_models.Filter | None) -> qdrant_models.Filter | None:
+            """Compile a check as the Search panel compiles a field search.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+                base (qdrant_models.Filter | None): The request filter to AND in.
+
+            Returns:
+                qdrant_models.Filter | None: The filter; ``None`` when nothing compiles.
+            """
+            spec = search_field_spec(field)
+            return build_search_filter(
+                parse_keywords(words),
+                text_keys=spec.text_keys,
+                value_keys=spec.value_keys,
+                value_forms=spec.value_forms(words),
+                base_filter=base,
+            )
+
+        def _check(words: str, field: str) -> str | None:
+            """Say why a check cannot run, without touching Qdrant.
+
+            Every typed word is read as the index reads it, before
+            :func:`parse_keywords` drops the short ones. The index skips a piece
+            under ``SEARCH_MIN_TOKEN_LEN`` characters and cuts one over
+            ``SEARCH_MAX_TOKEN_LEN``, so a check holding either would count a
+            broader query than the one it names: ``vitamin D`` would count
+            every ``vitamin``. Exact-value fields are matched whole and never split.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+
+            Returns:
+                str | None: ``NO_USABLE_WORD``, ``UNINDEXABLE_WORD``,
+                ``LONG_WORD``, ``ONE_VALUE_ONLY`` or ``None``.
+            """
+            keywords = parse_keywords(words)
+            if not keywords:
+                return NO_USABLE_WORD
+            if search_field_spec(field).text_keys:
+                pieces = [piece for word in words.split() for piece in index_tokens(word)]
+                # A keyword with no letter or digit at all (``...``) would compile to a match on nothing.
+                if not all(map(index_tokens, keywords)) or any(len(piece) < SEARCH_MIN_TOKEN_LEN for piece in pieces):
+                    return UNINDEXABLE_WORD
+                if any(len(piece) > SEARCH_MAX_TOKEN_LEN for piece in pieces):
+                    return LONG_WORD
+            return ONE_VALUE_ONLY if _filter(words, field, None) is None else None
+
+        def _run(words: str, field: str) -> KeywordResult:
+            """Count the matches exactly, then retrieve the best of them as a search does.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+
+            Returns:
+                KeywordResult: The matches, their count and what the index leaves unchecked.
+            """
+            keywords = tuple(parse_keywords(words))
+            conditions = _filter(words, field, request_filter)
+            if conditions is None:
+                return KeywordResult(nodes=[], matches=None, unchecked=unchecked[field], keywords=keywords)
+            matches = self._keyword_count(collection, conditions)
+            if matches is not None and joins[field]:
+                in_images = self._keyword_count(companion, conditions)
+                matches = None if in_images is None else matches + in_images
+            nodes: list[NodeWithScore] = []
+            if matches != 0:
+                bundle = EveryChildQuery(words)
+                retriever = self._build_retriever(
+                    vector_store_kwargs={"qdrant_filters": conditions},
+                    metadata_filter_rules=metadata_filter_rules,
+                    metadata_filters_active=metadata_filters_active,
+                    include_images=joins[field],
+                )
+                nodes = list(retriever.retrieve(bundle))
+                for postprocessor in self._text_postprocessors(profile=profile, social_links=False):
+                    nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
+            return KeywordResult(nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords)
+
+        return KeywordTool(fields=tuple(joins), check=_check, run=_run)
+
+    def _keyword_count(self, collection: str, conditions: qdrant_models.Filter) -> int | None:
+        """Count exactly how many chunks of one collection a keyword check matches.
+
+        Unlike :meth:`_search_total`, a failed count is ``None``: a check
+        reports its count as a fact, and a failure must never read as zero.
+
+        Args:
+            collection (str): The collection to count.
+            conditions (qdrant_models.Filter): The compiled check.
+
+        Returns:
+            int | None: The count, or ``None`` when it failed.
+        """
+        try:
+            return int(self.qdrant_client.count(collection_name=collection, count_filter=conditions, exact=True).count)
+        except Exception as exc:
+            logger.warning("Keyword count unavailable for '{}': {}", collection, type(exc).__name__)
+            return None
 
     def stream_stateless_assessment(
         self,

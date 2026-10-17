@@ -17,6 +17,8 @@ from docint.core.search.fields import (
     ensure_field_indexes,
     field_index_kind,
     field_indexes_ready,
+    field_ready_in_schema,
+    read_payload_schema,
     search_field_spec,
 )
 from docint.core.search.fulltext import uuid_match_forms, value_match_forms
@@ -274,6 +276,36 @@ def test_field_indexes_ready_rejects_an_id_key_indexed_as_text() -> None:
 def test_field_indexes_ready_is_trivially_true_for_the_text_field() -> None:
     """`search_text` has its own index, checked separately by search_index_status."""
     assert field_indexes_ready(_FakeClient(), "col", "text") is True
+
+
+def _schema(pairs: list[tuple[str, str]]) -> dict[str, Any]:
+    """Build a payload schema mapping as ``get_collection`` reports it."""
+    return {key: types.SimpleNamespace(data_type=kind, params=None) for key, kind in pairs}
+
+
+def test_field_ready_in_schema_judges_every_field_on_one_read_schema() -> None:
+    """One schema read answers every field, the text field's own index included."""
+    schema = _schema([*_all_expected(), (SEARCH_TEXT_FIELD, "text")])
+
+    assert all(field_ready_in_schema(schema, name) for name in SEARCH_FIELDS)
+
+
+def test_field_ready_in_schema_checks_the_text_index_rather_than_trusting_it() -> None:
+    """Unlike ``field_indexes_ready``, the text field needs its ``search_text`` TEXT index."""
+    assert field_ready_in_schema({}, "text") is False
+    assert field_ready_in_schema(_schema([(SEARCH_TEXT_FIELD, "keyword")]), "text") is False
+
+
+def test_field_ready_in_schema_rejects_an_id_key_indexed_as_text() -> None:
+    """A TEXT index on a numeric key matches nothing, read from a schema as from a client."""
+    pairs = [(key, "text" if key == "reference_metadata.author_id" else kind) for key, kind in _all_expected()]
+
+    assert field_ready_in_schema(_schema(pairs), "author") is False
+
+
+def test_read_payload_schema_treats_an_outage_as_empty() -> None:
+    """An unreadable schema reads as no index at all, never as a partial view."""
+    assert read_payload_schema(_FakeClient(fail=True), "col") == {}
 
 
 def test_field_spec_is_hashable_and_frozen() -> None:

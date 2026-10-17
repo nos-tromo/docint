@@ -206,6 +206,12 @@ export const de: Strings = {
   'chat.assessment_trail_seed_other': 'Erste Suche: {count} Passagen',
   'chat.assessment_trail_search_one': 'Gesucht nach „{query}“: {count} neue Passage',
   'chat.assessment_trail_search_other': 'Gesucht nach „{query}“: {count} neue Passagen',
+  'chat.assessment_trail_keyword_one': 'Wortprüfung „{query}“{where}: 1 Treffer{unchecked}, {count} neu',
+  'chat.assessment_trail_keyword_other': 'Wortprüfung „{query}“{where}: {matches} Treffer{unchecked}, {count} neu',
+  'chat.assessment_trail_keyword_unchecked_one': ' (1 Abschnitt nicht geprüft)',
+  'chat.assessment_trail_keyword_unchecked_other': ' ({count} Abschnitte nicht geprüft)',
+  'chat.assessment_trail_keyword_unknown': 'Wortprüfung „{query}“{where}: Anzahl nicht verfügbar, {count} neu',
+  'chat.assessment_trail_keyword_field': ' im Feld {field}',
   'chat.assessment_trail_answer': 'Einschätzung wird geschrieben…',
   'chat.assessment_reason.tools_unavailable':
     'Das Modell konnte keine eigenen Suchen ausführen; diese Einschätzung beruht nur auf den Passagen der ersten Suche.',

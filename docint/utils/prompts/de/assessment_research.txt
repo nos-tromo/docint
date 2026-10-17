@@ -9,8 +9,8 @@ Vorheriger Austausch:
 Bereits gefundene Passagen, nummeriert:
 {digest}
 
-Dir stehen zwei Werkzeuge zur Verfügung:
+Deine Werkzeuge:
 - search(query): durchsucht die Sammlung und liefert neue, nummerierte Passagen. Nutze kurze, konkrete Suchanfragen zu den Teilen des Materials, von denen das Urteil abhängt – bei einer Studie meist ihre Behauptungen, Methode, Daten, Evaluation, Ergebnisse und benannten Grenzen; bei anderem Material das, wovon seine Qualität abhängt. Wiederhole keine Suchanfrage.
-- finish(): rufe es auf, wenn die Passagen abdecken, was das Urteil braucht, oder wenn die Suche nichts Neues mehr findet.
+{keyword_tool}- finish(): rufe es auf, wenn die Passagen abdecken, was das Urteil braucht, oder wenn die Suche nichts Neues mehr findet.
 
 Rufe pro Schritt genau ein Werkzeug auf.

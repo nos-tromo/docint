@@ -780,7 +780,7 @@ Loaded by `load_assessment_env()`.
 | Variable | Default | Description |
 |---|---|---|
 | `ASSESSMENT_ENABLED` | `true` | Classify each chat turn and answer evaluative questions with a researched, labelled model assessment. Off means every turn is a lookup and no classifier call is made. Needs a chat context window of at least 8192 tokens: `OPENAI_CTX_WINDOW` must say so, and the chat endpoint must actually serve it. With `OPENAI_CTX_WINDOW` below 8192 the feature stays off and logs one warning. |
-| `ASSESSMENT_MAX_STEPS` | `6` | Research rounds per assessment turn. Each round is one tool-calling request on the plain chat model plus one search; `0` answers from the first search alone. |
+| `ASSESSMENT_MAX_STEPS` | `6` | Research rounds per assessment turn. Each round is one tool-calling request on the plain chat model plus one search or keyword check; `0` answers from the first search alone. |
 
 The research step calls tools with `tool_choice="required"`, so the chat
 endpoint must support OpenAI-style tool calling with a required tool choice.

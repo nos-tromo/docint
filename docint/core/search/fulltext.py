@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+import regex
 from qdrant_client import models
 
 from docint.core.retrieval_filters import merge_qdrant_filters
@@ -15,6 +16,12 @@ _HIER_TYPE_FIELD = "docint_hier_type"
 
 #: Hierarchy value for an oversize parent chunk kept for context expansion.
 _HIER_COARSE = "coarse"
+
+#: What the index counts as part of a word, as a class body: Unicode alphabetic (vowel signs included) or numeric.
+INDEX_WORD_CLASS = r"\p{Alphabetic}\p{N}"
+
+#: A run of what the index counts as letters or digits.
+_INDEX_TOKEN_RE = regex.compile(rf"[{INDEX_WORD_CLASS}]+")
 
 
 class KeywordTooShortError(ValueError):
@@ -48,6 +55,41 @@ def parse_keywords(raw: str) -> list[str]:
         seen.add(folded)
         keywords.append(keyword)
     return keywords
+
+
+def index_pieces(word: str) -> list[str]:
+    """Split a keyword where the full-text index splits it, keeping each piece as written.
+
+    These are :func:`index_tokens` before lowercasing, which a case-insensitive
+    search of the original text needs: a lowercased ``İ`` no longer matches the
+    letter it came from.
+
+    Args:
+        word (str): One keyword.
+
+    Returns:
+        list[str]: Its letter-and-digit runs, in order.
+    """
+    return _INDEX_TOKEN_RE.findall(word)
+
+
+def index_tokens(word: str) -> list[str]:
+    """Split a keyword into the tokens the full-text index matches it by.
+
+    The index's tokenizer splits on every character that is neither alphabetic
+    nor numeric in Unicode's sense, then lowercases each piece, so ``2.5``
+    reaches it as ``2`` and ``5``, both under its minimum token length; a caller
+    that promises an exact match can refuse such a word instead of letting it
+    match nothing, or too much. The order matters: lowercased first, ``İ``
+    becomes ``i`` and a combining dot, which would split ``İstanbul`` in two.
+
+    Args:
+        word (str): One keyword.
+
+    Returns:
+        list[str]: Its lowercased letter-and-digit runs, in order.
+    """
+    return [piece.lower() for piece in index_pieces(word)]
 
 
 def matches_phrase(text: str, keywords: list[str]) -> bool:

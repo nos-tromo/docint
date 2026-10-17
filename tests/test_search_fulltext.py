@@ -10,6 +10,8 @@ from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.fulltext import (
     build_scan_filter,
     build_search_filter,
+    index_pieces,
+    index_tokens,
     matches_any_phrase,
     matches_phrase,
     not_coarse_condition,
@@ -335,3 +337,31 @@ def test_build_scan_filter_keeps_the_callers_metadata_filter() -> None:
     f = build_scan_filter(base)
     assert cast(list[Any], f.must)[0] == cast(list[Any], base.must)[0]
     assert not_coarse_condition() in cast(list[Any], f.must)
+
+
+def test_index_tokens_split_a_word_where_the_index_does() -> None:
+    """The index splits on everything but letters and digits, so a number or abbreviation falls apart."""
+    assert index_tokens("COVID-19") == ["covid", "19"]
+    assert index_tokens("2.5") == ["2", "5"]
+    assert index_tokens("U.S.") == ["u", "s"]
+    assert index_tokens("snake_case") == ["snake", "case"]
+    assert index_tokens("Straße") == ["straße"]
+    assert index_tokens("...") == []
+
+
+def test_index_tokens_keep_a_word_whole_where_the_index_does() -> None:
+    """A word splits only where the index splits it, and is lowercased after that.
+
+    Lowercased first, the dotted capital I turns into an ``i`` and a combining
+    dot, which split the word apart; and a vowel sign counts as a letter to the
+    index, though ``re`` does not count it as a word character.
+    """
+    assert index_tokens("İstanbul") == ["İstanbul".lower()]
+    assert index_tokens("भारत") == ["भारत"]
+
+
+def test_index_pieces_split_as_the_index_does_and_keep_their_case() -> None:
+    """The pieces are the index's tokens before lowercasing, as a case-insensitive search needs them."""
+    assert index_pieces("Placebo-Controlled") == ["Placebo", "Controlled"]
+    assert index_pieces("İstanbul") == ["İstanbul"]
+    assert index_tokens("Placebo-Controlled") == [piece.lower() for piece in index_pieces("Placebo-Controlled")]

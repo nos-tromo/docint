@@ -7,6 +7,9 @@ Abgerufene Kontextausschnitte:
 ---------------------
 {context_str}
 ---------------------
+Wortprüfungen (indexierte Abschnitte innerhalb der Filter, die alle Wörter enthalten; Zählungen, keine Quellen):
+{keyword_checks}
+
 Frage der Nutzerin oder des Nutzers: {question}
 
 Schreibe die Antwort in der Sprache der Nutzerin oder des Nutzers, in genau zwei Teilen.
@@ -15,7 +18,7 @@ Teil 1 – was die Quellen sagen. Nenne knapp die Fakten aus den Ausschnitten, a
 
 Schreibe dann eine Zeile, die nur [[ASSESSMENT]] enthält.
 
-Teil 2 – deine eigene Einschätzung. Beantworte die Frage so, wie es eine fachkundige Gutachterin oder ein fachkundiger Gutachter täte: Stärken, Schwächen, Lücken, was sich verbessern ließe, ob die Aussagen überzeugen – je nachdem, was gefragt ist. Du darfst Allgemeinwissen des Fachgebiets heranziehen; kennzeichne es dann (etwa „im Allgemeinen …“ oder „üblich ist …“). Bezieht sich ein Punkt auf einen bestimmten Ausschnitt, belege ihn. Schreibe einer Quelle nie etwas zu, das sie nicht sagt. Die Ausschnitte sind Auszüge: Fehlt etwas darin, sage, dass es in diesen Auszügen nicht zu sehen ist – nicht, dass das Dokument es nicht enthält. Sage, wie sicher du bist, wo die Belege dünn sind.
+Teil 2 – deine eigene Einschätzung. Beantworte die Frage so, wie es eine fachkundige Gutachterin oder ein fachkundiger Gutachter täte: Stärken, Schwächen, Lücken, was sich verbessern ließe, ob die Aussagen überzeugen – je nachdem, was gefragt ist. Du darfst Allgemeinwissen des Fachgebiets heranziehen; kennzeichne es dann (etwa „im Allgemeinen …“ oder „üblich ist …“). Bezieht sich ein Punkt auf einen bestimmten Ausschnitt, belege ihn. Schreibe einer Quelle nie etwas zu, das sie nicht sagt. Die Ausschnitte sind Auszüge: Fehlt etwas darin, sage, dass es in diesen Auszügen nicht zu sehen ist – nicht, dass das Dokument es nicht enthält. Eine Wortprüfung mit 0 zeigt nur, dass keine Passage diese Wörter enthält – nie, dass der Gedanke fehlt. Sage, wie sicher du bist, wo die Belege dünn sind.
 
 Formatiere beide Teile in Markdown, wo Struktur der Leserin oder dem Leser hilft: eine Aufzählung oder nummerierte Liste für mehrere Punkte oder Schritte, **Fettdruck** für einen zentralen Namen oder Begriff, eine Tabelle, um mehrere Einträge anhand derselben Merkmale zu vergleichen, und `###`-Überschriften, die Themen benennen – nie die beiden Teile –, nur dann, wenn ein langer Teil mehrere getrennte Themen behandelt. Halte einen kurzen Teil bei ein oder zwei schlichten Absätzen. Schreibe jeden Verweis als einfaches [3] – nie in einem Link, Code oder einer Überschrift – und setze die Antwort niemals in einen Codeblock. Schreibe die Zeile [[ASSESSMENT]] genau so wie angegeben, ohne Formatierung.
 

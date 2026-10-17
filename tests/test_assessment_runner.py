@@ -74,6 +74,7 @@ def _runner(
     failures: list[Exception] | None = None,
     view: Callable[[BaseNode], BaseNode] = llm_view,
     ctx_window: int = 8192,
+    answer_prompt: str | None = None,
 ) -> tuple[AssessmentRunner, Any]:
     """Build a runner over a streaming double.
 
@@ -85,6 +86,7 @@ def _runner(
         failures (list[Exception] | None): Errors the first answer calls raise.
         view (Callable[[BaseNode], BaseNode]): The LLM view; the test double by default.
         ctx_window (int): The context window in tokens.
+        answer_prompt (str | None): An answer template override; the localized one by default.
 
     Returns:
         tuple[AssessmentRunner, Any]: The runner and its model double.
@@ -97,6 +99,7 @@ def _runner(
         char_token_ratio=3.5,
         reasoning=reasoning,
         researcher=researcher,
+        answer_prompt=answer_prompt,
         count_tokens=count_tokens,
     )
     return runner, llm
@@ -1567,3 +1570,82 @@ def test_a_research_step_without_the_keyword_receives_the_block_as_its_question(
     assert recorder.asked == [f"{FOLLOW_UP}\n{RESOLVED_QUESTION_LABEL}: {RESOLVED}"]
     assert isinstance(result, AssessmentResult)
     assert result.reason is None
+
+
+class _CheckingResearcher:
+    """Records keyword checks as research does, adding no passage."""
+
+    def __init__(self, actions: list[dict[str, Any]]) -> None:
+        """Keep the actions to report.
+
+        Args:
+            actions (list[dict[str, Any]]): The research actions.
+        """
+        self.actions = actions
+
+    def run(
+        self, *, question: str, prior_turn: PriorTurn | None, ledger: EvidenceLedger
+    ) -> Iterator[AgentProgress | ResearchOutcome]:
+        """End at once with the recorded actions.
+
+        Args:
+            question (str): The question as the prompts show it.
+            prior_turn (PriorTurn | None): The previous exchange.
+            ledger (EvidenceLedger): The evidence so far.
+
+        Yields:
+            AgentProgress | ResearchOutcome: The outcome alone.
+        """
+        yield ResearchOutcome(steps=len(self.actions), actions=list(self.actions))
+
+
+CHECKS = [
+    {"action": "keyword", "detail": "Kontrollgruppe", "field": "text", "found": 0, "matches": 0},
+    {"action": "keyword", "detail": "Krieger", "field": "author", "found": 0, "matches": None},
+]
+
+
+def test_keyword_checks_reach_the_answer_as_counts_beside_the_snippets() -> None:
+    """The answer reads every check with a known count; a check whose count failed says nothing."""
+    runner, llm = _runner(researcher=_CheckingResearcher(CHECKS), answer_prompt="{context_str}<<{keyword_checks}>>")
+
+    prompt = _prompt(runner, llm, _seed())
+
+    assert prompt.endswith('<<- "Kontrollgruppe" (text): 0>>')
+
+
+def test_an_answer_without_checks_says_so() -> None:
+    """The block is always there, so a turn with no check states it rather than leaving a gap."""
+    runner, llm = _runner(answer_prompt="{context_str}<<{keyword_checks}>>")
+
+    assert _prompt(runner, llm, _seed()).endswith("<<(none)>>")
+
+
+def test_both_localized_answer_prompts_carry_the_checks() -> None:
+    """Either locale places the checks, so a check made in German reaches a German answer."""
+    for code in ("en", "de"):
+        template = load_localized_prompt("assessment_answer", default=DEFAULT_ASSESSMENT_ANSWER_PROMPT, lang=code)
+        assert "{keyword_checks}" in template
+
+
+def test_the_checks_come_out_of_the_evidence_room_once_the_reserve_is_spent() -> None:
+    """A long prior turn spends the reserve, so the checks cost evidence; no check costs nothing."""
+    template = "{prior_turn}{question}<<{context_str}>>{keyword_checks}"
+    prior = PriorTurn(user_text="Earlier question?", assistant_text="An earlier answer. " * 300)
+    checks = [
+        {"action": "keyword", "detail": f"term{i} word{i}", "field": "text", "found": 0, "matches": i} for i in range(6)
+    ]
+
+    def _evidence(actions: list[dict[str, Any]]) -> str:
+        """Return the evidence an answer is shown after research reported ``actions``.
+
+        Args:
+            actions (list[dict[str, Any]]): The research actions.
+
+        Returns:
+            str: The rendered context.
+        """
+        runner, llm = _runner(researcher=_CheckingResearcher(actions), answer_prompt=template)
+        return _prompt(runner, llm, _long_seed(10), prior).split("<<", 1)[1].split(">>", 1)[0]
+
+    assert len(_evidence(checks)) < len(_evidence([]))

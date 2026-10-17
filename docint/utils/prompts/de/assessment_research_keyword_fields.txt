@@ -1,0 +1,1 @@
+Es nimmt auch field an, eines von {fields}: text ist der Text der Passagen (Standard), author, wer einen Beitrag verfasst hat, network die Plattform, uuid die Kennung eines Beitrags.

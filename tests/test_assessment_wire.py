@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import httpx
 import openai
 import pytest
-from assessment_fakes import FixedRetriever, RecordingPostprocessor, scored_node
+from assessment_fakes import FixedRetriever, RecordingPostprocessor, keyword_tool, scored_node
 from llama_index.core.llms import MockLLM
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.response_synthesizers import Refine
@@ -30,6 +30,16 @@ from docint.agents.assessment.research import ResearchLoop
 from docint.core.rag import RAG
 from docint.core.retrieval.evidence import EveryChildQuery
 from docint.utils.env_cfg import OpenAIConfig
+
+
+@pytest.fixture(autouse=True)
+def _no_keyword_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offer research no keyword tool, so building a runner never reads a Qdrant over the patched transport.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(RAG, "_assessment_keyword_tool", lambda self, **kwargs: None)
 
 
 def _rag(*, max_retries: int = 0) -> RAG:
@@ -171,6 +181,33 @@ def test_a_research_step_sends_required_single_non_strict_tool_calls(monkeypatch
     assert all(tool["function"]["strict"] is False for tool in body["tools"])
 
 
+def test_the_keyword_tool_reaches_the_wire_with_its_ready_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The field enum and its default survive into the request, where guided decoding enforces them.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    sent = _serve(monkeypatch, [_completion("finish", "{}", "call_1")])
+    loop = ResearchLoop(
+        llm=_rag().text_model,
+        search=lambda _query: [],
+        max_steps=3,
+        ctx_window=32768,
+        char_token_ratio=3.5,
+        keyword=keyword_tool(fields=("text", "author")),
+    )
+
+    list(loop.run(question="What could be improved?", prior_turn=None, ledger=EvidenceLedger(cap=5)))
+
+    tools = {tool["function"]["name"]: tool["function"] for tool in sent[0]["tools"]}
+    assert list(tools) == ["search", "keyword", "finish"]
+    keyword = tools["keyword"]
+    assert keyword["strict"] is False
+    assert keyword["parameters"]["required"] == ["words"]
+    assert keyword["parameters"]["properties"]["field"]["enum"] == ["text", "author"]
+    assert keyword["parameters"]["properties"]["field"]["default"] == "text"
+
+
 def test_the_second_request_answers_the_first_call_by_its_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """The tool reply reaches the endpoint as a ``tool`` message keyed by the call's id.
 
@@ -265,6 +302,49 @@ def test_the_research_step_cap_is_assessment_max_steps(monkeypatch: pytest.Monke
 
     assert isinstance(researcher, ResearchLoop)
     assert researcher._max_steps == 4
+
+
+def test_research_gets_a_keyword_tool_bound_to_the_turns_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tool counts what the turn may answer from; a scoped turn researches nothing and builds none.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    built: list[dict[str, Any]] = []
+    tool = keyword_tool()
+
+    def _tool(self: RAG, **kwargs: Any) -> Any:
+        """Record the request the tool is built for.
+
+        Args:
+            self (RAG): The engine.
+            **kwargs (Any): The turn's filters and target.
+
+        Returns:
+            Any: The tool.
+        """
+        built.append(kwargs)
+        return tool
+
+    monkeypatch.setattr(RAG, "_assessment_keyword_tool", _tool)
+    rules = [{"field": "mimetype", "operator": "eq", "value": "text/plain"}]
+
+    runner = _rag().assessment_runner(
+        MagicMock(),
+        scoped=False,
+        metadata_filter_rules=rules,
+        metadata_filters_active=True,
+        retrieval_target="all",
+        social=True,
+    )
+    scoped = _rag().assessment_runner(MagicMock(), scoped=True, metadata_filter_rules=rules)
+
+    assert isinstance(runner._researcher, ResearchLoop)
+    assert runner._researcher._keyword is tool
+    assert built == [
+        {"metadata_filter_rules": rules, "metadata_filters_active": True, "retrieval_target": "all", "social": True}
+    ]
+    assert scoped._researcher is None
 
 
 def test_the_runner_counts_with_the_embedding_tokenizer_when_one_is_loaded() -> None:
