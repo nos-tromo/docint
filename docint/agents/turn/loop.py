@@ -630,7 +630,7 @@ class AgentLoop:
             for call, arguments in zip(done.calls, echoed, strict=True)
         )
         asked = message_tokens(written, self._ratio)
-        prepared = [self._registry.prepare(call, turn.ctx) for call in done.calls]
+        prepared = self._calls.prepare(done.calls, turn.ctx)
         answered = self._calls.answer(
             prepared, turn.ctx, room=self._room - turn.spent - asked, time_left=lambda: self._time_left(turn)
         )

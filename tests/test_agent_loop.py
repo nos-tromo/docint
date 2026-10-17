@@ -1674,6 +1674,59 @@ def test_a_call_whose_answer_fails_gets_its_reply_and_marks_research_failed(
     assert loguru_caplog.messages == ["An agent's 'brittle' call failed: RuntimeError"]
 
 
+class _Unpreparable:
+    """A tool whose ``prepare`` raises, as a tool with a bug in its argument check would."""
+
+    def __init__(self) -> None:
+        """Describe the tool."""
+        self.name = "unpreparable"
+        self.description = "Fail while checking the arguments."
+        self.parameters: dict[str, Any] = {"type": "object", "properties": {}}
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Fail.
+
+        Args:
+            arguments (Mapping[str, Any]): Unused.
+            ctx (ToolContext): Unused.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("invented check failure")
+
+
+def test_a_call_whose_prepare_raises_gets_its_reply_and_the_turn_answers(loguru_caplog: LogCaptureFixture) -> None:
+    """A call that cannot even be prepared is answered as a failed call; the started turn goes on and answers.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    registry = ToolRegistry([SearchTool(QuerySearch({"Programm": [programme_passage()]})), _Unpreparable()])
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_a", "Programm")), _calls(("call_b", "unpreparable", {})), _answer()]
+    )
+
+    progress, texts, result = _drain(_turn(_loop(llm, registry)))
+
+    assert _tool_replies(llm, 2)["call_b"] == error_reply("unpreparable", FAILED_REPLY).text
+    assert _steps(progress) == [("search", "Programm", 1)]
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
+    assert (result.reason, "".join(texts)) == ("research_failed", ANSWER)
+    assert loguru_caplog.messages == ["An agent tool call could not be prepared: RuntimeError"]
+
+
+def test_arguments_nested_too_deeply_get_an_argument_error_and_no_step() -> None:
+    """Arguments that read as JSON but nest too deeply to compare are the model's mistake: an error reply, no crash."""
+    nested = '{"n": ' + "[" * 600 + "]" * 600 + "}"
+    llm = streaming_tool_llm([_calls(("call_a", "read", nested)), _answer()])
+
+    progress, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    assert _tool_replies(llm, 1)["call_a"].startswith("Error: the arguments for read")
+    assert (progress, result.reason, "".join(texts)) == ([], None, ANSWER)
+
+
 def test_a_failed_calls_reason_is_kept_when_a_limit_ends_the_turn() -> None:
     """The first cause stands: a limit reached after a failed call does not replace ``research_failed``."""
     llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), _answer()])

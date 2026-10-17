@@ -29,7 +29,8 @@ from loguru import logger
 
 from docint.agents.assessment.bounded import SEARCH_SLOT_WAIT_S, NoSlot, start_bounded
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS
-from docint.agents.turn.tools import PreparedCall, ToolContext, ToolRegistry, ToolReply, error_reply
+from docint.agents.turn.stream import ToolCall
+from docint.agents.turn.tools import NAME_CHARS, PreparedCall, ToolContext, ToolRegistry, ToolReply, error_reply
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.text_budget import MARKER_RESERVE_CHARS, fit_with_marker
 
@@ -48,6 +49,19 @@ FAILED_REPLY = "the call failed; try other arguments, or answer from the passage
 NO_CAPACITY_REPLY = (
     "not run: no search capacity was free; call it again in your next round, or answer from the passages shown."
 )
+
+
+class PreparedRound(NamedTuple):
+    """One round's calls, prepared in call order.
+
+    Attributes:
+        calls (list[PreparedCall]): One per call; a call whose ``prepare`` raised carries the
+            failed-call reply.
+        failed (int): Calls whose ``prepare`` raised.
+    """
+
+    calls: list[PreparedCall]
+    failed: int
 
 
 class RoundReplies(NamedTuple):
@@ -120,13 +134,38 @@ class RoundCalls:
         #: What the longest reply written here costs.
         self.short_reply = max(message_tokens(error_reply("", text).text, char_token_ratio) for text in short)
 
+    def prepare(self, calls: Sequence[ToolCall], ctx: ToolContext) -> PreparedRound:
+        """Prepare a round's calls on the loop thread, in call order.
+
+        A call whose ``prepare`` raises is answered with the failed-call reply, as one whose
+        ``finish`` raises is, and counted as failed: the round's other calls still run.
+
+        Args:
+            calls (Sequence[ToolCall]): The round's calls, as the model made them.
+            ctx (ToolContext): The turn's context, read and never written.
+
+        Returns:
+            PreparedRound: The prepared calls, and how many could not be prepared.
+        """
+        prepared: list[PreparedCall] = []
+        failed = 0
+        for call in calls:
+            try:
+                prepared.append(self._registry.prepare(call, ctx))
+            except Exception as exc:
+                logger.warning("An agent tool call could not be prepared: {}", type(exc).__name__)
+                failed += 1
+                action = call.name.strip()[:NAME_CHARS]
+                prepared.append(PreparedCall(action=action, detail="", reply=error_reply(action, FAILED_REPLY)))
+        return PreparedRound(calls=prepared, failed=failed)
+
     def answer(
-        self, prepared: Sequence[PreparedCall], ctx: ToolContext, *, room: int, time_left: Callable[[], float]
+        self, prepared: PreparedRound, ctx: ToolContext, *, room: int, time_left: Callable[[], float]
     ) -> RoundReplies:
         """Answer a round's calls, one reply per call in call order.
 
         Args:
-            prepared (Sequence[PreparedCall]): The round's calls, prepared in call order.
+            prepared (PreparedRound): The round's calls, prepared in call order (see :meth:`prepare`).
             ctx (ToolContext): The turn's evidence, budget, LLM view and memory.
             room (int): Tokens the round's replies may take: the turn's room less the transcript
                 so far and the round's assistant message.
@@ -135,8 +174,9 @@ class RoundCalls:
         Returns:
             RoundReplies: The replies, each within ``result_chars``, and how many calls failed.
         """
-        replies, failed = self._replies(prepared, self._admitted(prepared, room), ctx, time_left)
-        return RoundReplies(replies=[self._bounded(reply) for reply in replies], failed=failed)
+        calls = prepared.calls
+        replies, failed = self._replies(calls, self._admitted(calls, room), ctx, time_left)
+        return RoundReplies(replies=[self._bounded(reply) for reply in replies], failed=prepared.failed + failed)
 
     def _admitted(self, prepared: Sequence[PreparedCall], room: int) -> list[bool | None]:
         """Decide which calls may run: within the round's limit, and while a full reply still fits.

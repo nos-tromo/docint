@@ -897,6 +897,16 @@ def test_a_reply_says_whether_the_tool_answered_the_call() -> None:
     assert ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="").error is False
 
 
+def test_arguments_nested_too_deeply_get_an_error_reply() -> None:
+    """Arguments that parse as JSON but nest too deeply to compare get an argument error, never a crash."""
+    nested = '{"n": ' + "[" * 600 + "]" * 600 + "}"
+
+    reply = _registry(ScriptedSearch()).call(ToolCall(id="call_0", name="read", arguments=nested), tool_context())
+
+    assert reply.error
+    assert reply.text.startswith("Error: the arguments for read")
+
+
 def test_read_of_a_number_beyond_the_evidence_names_the_range() -> None:
     """An unknown number is answered with the numbers there are, so the model can pick one."""
     ctx = tool_context()

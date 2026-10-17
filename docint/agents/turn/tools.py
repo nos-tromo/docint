@@ -597,8 +597,8 @@ class ToolRegistry:
         """Check one call, and answer it at once or return the work it still needs.
 
         Runs on the loop thread, in call order. A call naming no offered tool, or sending
-        arguments that are not a JSON object, is answered with an error saying what to
-        call instead. A call made before in this turn, by tool and arguments compared on
+        arguments that are not a JSON object or nest too deeply to compare, is answered with
+        an error saying what to call instead. A call made before in this turn, by tool and arguments compared on
         one line and case-folded, is answered by the numbers its answer showed or named,
         and needs no I/O; a read is left to :meth:`finish`, since an earlier call in its
         round may still grow its passage. Otherwise the tool checks its arguments, reading
@@ -629,7 +629,17 @@ class ToolRegistry:
                 f"the arguments for {tool.name} must be a JSON object, such as {_example(tool.parameters)}.",
             )
             return PreparedCall(action=tool.name, detail="", reply=reply)
-        key = (tool.name, json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False))
+        try:
+            key = (tool.name, json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False))
+        except RecursionError:
+            # JSON can parse deeper than it can be compared; such arguments are the model's mistake.
+            logger.warning("A model sent arguments for the '{}' tool nested too deeply to read", tool.name)
+            reply = error_reply(
+                tool.name,
+                f"the arguments for {tool.name} are nested too deeply; send a flat JSON object, "
+                f"such as {_example(tool.parameters)}.",
+            )
+            return PreparedCall(action=tool.name, detail="", reply=reply)
         remembered = _recall(key, ctx, final=False)
         if remembered is not None:
             return PreparedCall(action=tool.name, detail=remembered.detail, reply=remembered, key=key)
