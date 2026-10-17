@@ -273,14 +273,20 @@ def _evenly_spaced(frames: Sequence[NodeWithScore], count: int) -> list[NodeWith
 def _frame_range(numbers: Sequence[int]) -> str:
     """Name the frame numbers a clip has, for a reply to one it lacks.
 
+    Nextext numbers frames before it drops near-duplicates, so the numbers have gaps: a clip
+    of at most ``MAX_FRAMES`` frames has them listed, a longer one its range.
+
     Args:
         numbers (Sequence[int]): The numbers of its frames, at least one.
 
     Returns:
-        str: ``its frames run from #1 to #9``, or ``its only frame is #1``.
+        str: ``its frames are #1, #2, #4``, ``its frames run from #1 to #20``, or ``its only
+        frame is #1``.
     """
     if len(numbers) == 1:
         return f"its only frame is #{numbers[0]}"
+    if len(numbers) <= MAX_FRAMES:
+        return "its frames are " + ", ".join(f"#{number}" for number in sorted(numbers))
     return f"its frames run from #{min(numbers)} to #{max(numbers)}"
 
 

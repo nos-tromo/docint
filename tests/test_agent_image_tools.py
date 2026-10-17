@@ -674,11 +674,20 @@ def test_keyframes_opens_one_frame_by_its_label_number(index: object) -> None:
 
 @pytest.mark.parametrize(
     ("indexes", "index", "known"),
-    [((0, 1, 3, 4), 3, "its frames run from #1 to #5"), ((0,), 2, "its only frame is #1")],
-    ids=["pruned", "single-frame"],
+    [
+        ((0, 1, 3, 4), 3, "its frames are #1, #2, #4, #5"),
+        ((0,), 2, "its only frame is #1"),
+        (tuple(range(10)), 12, "its frames run from #1 to #10"),
+    ],
+    ids=["pruned", "single-frame", "long-clip"],
 )
-def test_a_frame_the_clip_lacks_is_answered_with_its_range(indexes: tuple[int, ...], index: int, known: str) -> None:
-    """An index the clip has no frame for is answered with the numbers its frames run between; nothing is admitted.
+def test_a_frame_the_clip_lacks_is_answered_with_the_frames_it_has(
+    indexes: tuple[int, ...], index: int, known: str
+) -> None:
+    """An index the clip has no frame for is answered with the frames it has; nothing is admitted.
+
+    Nextext numbers frames before it drops near-duplicates, so a clip's numbers have gaps:
+    a short clip's are listed, a long clip's range is given.
 
     Args:
         indexes (tuple[int, ...]): The ``keyframe_index`` of each frame the clip kept.
