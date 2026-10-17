@@ -580,6 +580,52 @@ describe('Chat retrieval target', () => {
     expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
   })
 
+  it('New chat resets the target in a chat that never minted a session', async () => {
+    // With no session there is none to clear, so nothing the effect on the
+    // effective session watches changes: the button resets the target itself.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }))
+
+    renderChat()
+
+    await userEvent.click(picker())
+    expect(picker()).toHaveAccessibleName(/documents/i)
+
+    await userEvent.click(screen.getByRole('button', { name: /new chat/i }))
+
+    await waitFor(() => {
+      expect(picker()).toHaveAccessibleName(/everything/i)
+    })
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+  })
+
+  it('New chat resets the target after a stateless turn, which mints no session either', async () => {
+    const frames =
+      'data: {"token":"Answer"}\n\n' +
+      'data: {"response":"Answer","sources":[],"session_id":null,"retrieval_target":"documents"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useChatFiltersStore.setState({ retrievalMode: 'stateless' })
+
+    renderChat()
+
+    await userEvent.click(picker())
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Answer')).toBeInTheDocument()
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+    expect(picker()).toHaveAccessibleName(/documents/i)
+
+    await userEvent.click(screen.getByRole('button', { name: /new chat/i }))
+
+    await waitFor(() => {
+      expect(picker()).toHaveAccessibleName(/everything/i)
+    })
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+  })
+
   it('does not carry a leftover target into a chat opened fresh', () => {
     useChatFiltersStore.setState({ retrievalTarget: 'visual' })
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }))

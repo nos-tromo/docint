@@ -206,6 +206,9 @@ export function Chat() {
 
   const onNewChat = () => {
     setCurrentSessionId(null)
+    // The effect above only sees a session going away; a chat with no turns, or
+    // a stateless one, never had one to lose.
+    setRetrievalTarget('all')
     // Required even when the id lived only in the store: from a pinned
     // `/chat/:sessionId` the param effect would otherwise put it straight back.
     navigate('/chat')
