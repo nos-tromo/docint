@@ -2960,6 +2960,49 @@ _reasoning_override: ContextVar[bool | None] = ContextVar("docint_reasoning_over
 # request keeps its own reference and the OS reclaims the fd once it is gone.
 _RETRIEVAL_HANDLE_CACHE_MAX = 32
 
+#: Longest LLM-visible metadata string an agent turn's passage header shows; a longer one is cut with an ellipsis.
+AGENT_METADATA_VALUE_CHARS = 200
+
+
+def _cut_strings(value: Any) -> Any:
+    """Cut every string in a metadata value to ``AGENT_METADATA_VALUE_CHARS``, an ellipsis last.
+
+    Args:
+        value (Any): A metadata value: a string, or a dict or list that may hold some.
+
+    Returns:
+        Any: The value with each longer string cut; containers rebuilt, other leaves as given.
+    """
+    if isinstance(value, str):
+        return value if len(value) <= AGENT_METADATA_VALUE_CHARS else value[: AGENT_METADATA_VALUE_CHARS - 1] + "…"
+    if isinstance(value, dict):
+        return {key: _cut_strings(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_cut_strings(item) for item in value]
+    return value
+
+
+def agent_llm_view(node: BaseNode) -> BaseNode:
+    """Render a passage as an agent turn's model reads it: the chat prompt's view, its long strings cut.
+
+    A social row carries long text in its header, such as the post a comment answers,
+    which pushes the header past what a reply shows whole: it is compacted, and loses who
+    wrote the passage and where it came from. Every LLM-visible string is cut to
+    ``AGENT_METADATA_VALUE_CHARS``; hidden keys and the passage's text stay as the chat view
+    has them. The view is a clone, so the stored node is never written to.
+
+    Args:
+        node (BaseNode): A passage of the turn's evidence.
+
+    Returns:
+        BaseNode: The clone :meth:`ParentContextPostprocessor._emit_with_llm_exclusion` makes,
+        its LLM-visible strings cut.
+    """
+    view = ParentContextPostprocessor._emit_with_llm_exclusion(node)
+    hidden = set(view.excluded_llm_metadata_keys)
+    metadata = {key: value if key in hidden else _cut_strings(value) for key, value in view.metadata.items()}
+    return view.model_copy(update={"metadata": metadata})
+
 
 # ``slots=True`` is intentionally NOT used here. ``qdrant_collection`` is a
 # normal field for the type checker / generated ``__init__`` signature, but its

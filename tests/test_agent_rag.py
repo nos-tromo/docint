@@ -5,17 +5,26 @@ Every message, passage, clip, filter and collection here is invented.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import openai
 import pytest
+from agent_fakes import tool_call, turn_budget
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
+from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
 
-from docint.core.rag import RAG
+from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
+from docint.core.rag import AGENT_METADATA_VALUE_CHARS, RAG, ParentContextPostprocessor, agent_llm_view
 from docint.utils.env_cfg import OpenAIConfig
 
 MESSAGE = "Wann öffnen die Stände beim Hafenfest, und hat jemand das Wetter am Sonntag erwähnt?"
+#: The post an invented comment answers, as a social export repeats it on the comment's row.
+ANCHOR = ("Der Hafenverein verschiebt das Hafenfest wegen der Sturmwarnung auf Sonntag. " * 25)[:1500]
+SOCIAL_FILE = "example_profile/dossier.json"
+AUTHOR = "Person A"
 
 
 def _rag(
@@ -163,3 +172,66 @@ def test_the_agent_model_makes_one_attempt_per_call(monkeypatch: pytest.MonkeyPa
         next(iter(rag.agent_text_model.stream_chat([ChatMessage(role=MessageRole.USER, content=MESSAGE)])))
 
     assert len(attempts) == 1
+
+
+def _comment_row() -> NodeWithScore:
+    """Build an invented social comment row: the 1,500-character post it answers, then its author, then its file.
+
+    Returns:
+        NodeWithScore: The row, with a hidden description as long as the post.
+    """
+    metadata = {
+        "file_hash": "f" * 64,
+        "source": "table",
+        "llm_description": ANCHOR,
+        "reference_metadata": {"type": "comment", "anchor_text": ANCHOR, "author": AUTHOR},
+        "filename": SOCIAL_FILE,
+    }
+    text = "Danke für die Info, wir kommen am Sonntag mit den Kindern vorbei."
+    return NodeWithScore(node=TextNode(id_="comment-4", text=text, metadata=metadata), score=1.0)
+
+
+def _search_reply(view: Callable[[BaseNode], BaseNode]) -> str:
+    """Show the comment row as an agent turn's search reply does, through a view of its passages.
+
+    Args:
+        view (Callable[[BaseNode], BaseNode]): The LLM view the turn renders passages through.
+
+    Returns:
+        str: The reply the model reads.
+    """
+    registry = ToolRegistry([SearchTool(lambda _query: [_comment_row()]), ReadTool()])
+    ctx = ToolContext(ledger=EvidenceLedger(cap=8), budget=turn_budget(), llm_view=view)
+    return registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx).text
+
+
+def test_the_agent_view_keeps_a_social_rows_author_and_file_in_its_header() -> None:
+    """The post a comment answers pushes the chat view's header into compaction; cut short, it leaves both shown."""
+    chat = _search_reply(ParentContextPostprocessor._emit_with_llm_exclusion)
+    agent = _search_reply(agent_llm_view)
+
+    assert AUTHOR not in chat
+    assert SOCIAL_FILE not in chat
+    assert AUTHOR in agent
+    assert SOCIAL_FILE in agent
+
+
+def test_the_agent_view_cuts_only_the_visible_strings_of_a_clone() -> None:
+    """Every LLM-visible string is cut to its limit with an ellipsis; hidden keys, the text and the stored node stay."""
+    row = _comment_row()
+
+    view = agent_llm_view(row.node)
+
+    cut = view.metadata["reference_metadata"]["anchor_text"]
+    assert len(cut) == AGENT_METADATA_VALUE_CHARS
+    assert cut.endswith("…")
+    assert ANCHOR.startswith(cut[:-1])
+    assert view.metadata["reference_metadata"]["author"] == AUTHOR
+    assert view.metadata["filename"] == SOCIAL_FILE
+    chat = ParentContextPostprocessor._emit_with_llm_exclusion(row.node)
+    assert view.metadata["llm_description"] == chat.metadata["llm_description"]
+    assert view.excluded_llm_metadata_keys == chat.excluded_llm_metadata_keys
+    assert view.node_id == row.node.node_id
+    assert view.get_content(metadata_mode=MetadataMode.NONE) == row.node.get_content(metadata_mode=MetadataMode.NONE)
+    assert row.node.metadata["reference_metadata"]["anchor_text"] == ANCHOR
+    assert row.node.metadata["llm_description"] == ANCHOR
