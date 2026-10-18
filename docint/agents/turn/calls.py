@@ -126,8 +126,10 @@ class RoundCalls:
     def prepare(self, calls: Sequence[ToolCall], ctx: ToolContext) -> PreparedRound:
         """Prepare a round's calls on the loop thread, in call order.
 
-        A call whose ``prepare`` raises is answered with the failed-call reply, as one whose
-        ``finish`` raises is, and counted as failed: the round's other calls still run.
+        A call past the round's limit is not prepared at all: it is answered with the skipped
+        reply and never runs. A call whose ``prepare`` raises is answered with the failed-call
+        reply, as one whose ``finish`` raises is, and counted as failed: the round's other calls
+        still run.
 
         Args:
             calls (Sequence[ToolCall]): The round's calls, as the model made them.
@@ -138,15 +140,30 @@ class RoundCalls:
         """
         prepared: list[PreparedCall] = []
         failed = 0
-        for call in calls:
+        for position, call in enumerate(calls):
+            action = call.name.strip()[:NAME_CHARS]
+            if position >= self._max_calls:
+                prepared.append(PreparedCall(action=action, detail="", reply=self._skipped(action, "")))
+                continue
             try:
                 prepared.append(self._registry.prepare(call, ctx))
             except Exception as exc:
                 logger.warning("An agent tool call could not be prepared: {}", type(exc).__name__)
                 failed += 1
-                action = call.name.strip()[:NAME_CHARS]
                 prepared.append(PreparedCall(action=action, detail="", reply=error_reply(action, FAILED_REPLY)))
         return PreparedRound(calls=prepared, failed=failed)
+
+    def _skipped(self, action: str, detail: str) -> ToolReply:
+        """Build the reply to a call past the round's limit.
+
+        Args:
+            action (str): The call's tool name, as the model wrote it.
+            detail (str): The call's main argument, for the trail.
+
+        Returns:
+            ToolReply: The skipped reply, an error reply.
+        """
+        return error_reply(action, SKIPPED_REPLY.format(limit=self._max_calls), detail=detail)
 
     def answer(
         self, prepared: PreparedRound, ctx: ToolContext, *, room: int, time_left: Callable[[], float]
@@ -252,9 +269,7 @@ class RoundCalls:
         no_slot, failed = 0, 0
         for position, (ready, runs) in enumerate(zip(prepared, admitted, strict=True)):
             if runs is None:
-                replies[position] = error_reply(
-                    ready.action, SKIPPED_REPLY.format(limit=self._max_calls), detail=ready.detail
-                )
+                replies[position] = self._skipped(ready.action, ready.detail)
             elif not runs:
                 replies[position] = error_reply(ready.action, NO_ROOM_REPLY, detail=ready.detail)
             elif ready.fetch is not None:

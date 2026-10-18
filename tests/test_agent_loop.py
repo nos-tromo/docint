@@ -1903,6 +1903,22 @@ def test_a_call_whose_prepare_raises_gets_its_reply_and_the_turn_answers(loguru_
     assert loguru_caplog.messages == ["An agent tool call could not be prepared: RuntimeError"]
 
 
+def test_a_call_past_the_rounds_limit_is_never_prepared(loguru_caplog: LogCaptureFixture) -> None:
+    """A call the round's limit skips is not looked at: it gets the skipped reply and never fails the turn.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    registry = ToolRegistry([SearchTool(QuerySearch({"Programm": [programme_passage()]})), _Unpreparable()])
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), ("call_b", "unpreparable", {})), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, registry, max_calls_per_round=1)))
+
+    assert _tool_replies(llm, 1)["call_b"] == error_reply("unpreparable", SKIPPED_REPLY.format(limit=1)).text
+    assert (_steps(progress), result.reason) == ([("search", "Programm", 1)], None)
+    assert loguru_caplog.messages == []
+
+
 def test_arguments_nested_too_deeply_get_an_argument_error_and_no_step() -> None:
     """Arguments that read as JSON but nest too deeply to compare are the model's mistake: an error reply, no crash."""
     nested = '{"n": ' + "[" * 600 + "]" * 600 + "}"
