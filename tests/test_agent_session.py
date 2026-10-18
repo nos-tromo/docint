@@ -404,6 +404,9 @@ def test_tools_unavailable_falls_back_to_the_plain_lookup_with_the_reason(
 ) -> None:
     """An endpoint refusing tools: the plain path answers, reports the reason, keeps its own mode, and says why.
 
+    The refusal is noted at INFO with its status: the API, which keeps agent turns off after it,
+    gives the one warning naming what the endpoint must accept.
+
     Args:
         session_manager (SessionManager): The session manager fixture.
         loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
@@ -420,8 +423,10 @@ def test_tools_unavailable_falls_back_to_the_plain_lookup_with_the_reason(
     cast(Any, session_manager.rag).rewrite_retrieval_query.assert_called_once()
     assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, "rewritten question"))
     assert (assistant["answer_mode"], assistant["agent"]) == ("lookup", trail)
-    warnings = [message for message in loguru_caplog_info.messages if "tool_choice=auto" in message]
-    assert len(warnings) == 1
+    refusals = [record for record in loguru_caplog_info.records if "offering tools" in record.getMessage()]
+    assert [(record.levelname, record.getMessage()) for record in refusals] == [
+        ("INFO", "The chat endpoint refused a request offering tools (HTTP 400); answering as a lookup")
+    ]
     assert "reason=tools_unavailable" in next(m for m in loguru_caplog_info.messages if "Turn complete" in m)
     assert TOOLS_REFUSED not in loguru_caplog_info.text
 

@@ -50,11 +50,10 @@ from docint.agents import (
     Turn,
     is_weak_answer,
 )
-from docint.agents.assessment.classify import classify_turn
-from docint.agents.assessment.gate import assessment_available
+from docint.agents.assessment.gate import agent_available, record_tools_rejection, tools_rejection_cached
 from docint.agents.assessment.split import cited_sources
 from docint.agents.history import build_prior_turn
-from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
+from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
@@ -957,33 +956,48 @@ def _reformulated_query(question: str, failed_query: str | None, reason: str | N
 ASSESSMENT_NOT_VALIDATED_REASON = "Assessment without a separate source-backed part."
 
 
-def _classify_turn(question: str, prior_turn: PriorTurn | None, retrieval_target: str) -> AnswerMode:
-    """Decide whether this turn is answered as an assessment.
+def _agent_turn_allowed(retrieval_target: str) -> bool:
+    """Decide whether this turn is answered as an agent turn, before any model call.
 
-    Gated before any model call: the visual target answers from imagery alone,
-    and below the minimum context window there is no room for a judgement.
-    Fail-soft: a misconfigured assessment setting or an unavailable model
-    answers the turn as a lookup, so lookup chat never breaks on this feature.
-    The classifier abandons its call at its deadline however the reply arrives;
-    the model makes a single attempt, so an abandoned call ends at its own timeout.
+    It is when a text model is configured, agent turns are enabled at a context window that
+    holds them (:func:`agent_available`), and no tools rejection is cached
+    (:func:`tools_rejection_cached`). Every target may run the agent: the visual one with its
+    image tools. Fail-soft: any error answers the turn on the plain path, so chat never breaks
+    on this feature.
 
     Args:
-        question (str): The user's message, verbatim.
-        prior_turn (PriorTurn | None): The previous exchange, for follow-ups.
-        retrieval_target (str): The turn's retrieval target.
+        retrieval_target (str): The turn's retrieval target; named in the warning a failed check
+            logs, since no target is refused.
 
     Returns:
-        AnswerMode: ``"assessment"`` or ``"lookup"``.
+        bool: Whether to ask for an agent turn.
     """
-    if retrieval_target == "visual" or not getattr(rag, "text_model_id", None):
-        return "lookup"
     try:
-        if not assessment_available(int(getattr(rag, "openai_ctx_window", 0) or 0)):
-            return "lookup"
-        return classify_turn(rag.bounded_text_model, question=question, prior_turn=prior_turn)
+        if not getattr(rag, "text_model_id", None):
+            return False
+        return agent_available(int(getattr(rag, "openai_ctx_window", 0) or 0)) and not tools_rejection_cached()
     except Exception as exc:
-        logger.warning("Assessment classification unavailable ({}); answering as a lookup", type(exc).__name__)
-        return "lookup"
+        logger.warning(
+            "Agent turns are unavailable ({}) for the {} target; answering as a lookup",
+            type(exc).__name__,
+            retrieval_target,
+        )
+        return False
+
+
+def _note_tools_rejection(data: Any) -> None:
+    """Cache a tools rejection when the turn fell back because the chat endpoint refused tools.
+
+    Read off the turn's payload, which is how the session layer's tools-unavailable fallback
+    reports it. Only a refused first call with tools offered reports that reason: a pinned round
+    offers none, so its refusal is the turn's error and is never cached.
+
+    Args:
+        data (Any): The turn's payload, as the first pass returned it.
+    """
+    trail = data.get("agent") if isinstance(data, dict) else None
+    if isinstance(trail, dict) and trail.get("reason") == "tools_unavailable":
+        record_tools_rejection()
 
 
 def _assessment_validation(
@@ -1354,11 +1368,14 @@ class QueryOut(BaseModel):
     #: visual turn that must not pass as a normal one. ``None`` on any other
     #: target.
     visual: dict[str, Any] | None = None
-    #: ``"assessment"`` when the turn added a labelled model judgement to the
-    #: cited evidence; ``None`` on an ordinary lookup.
+    #: How an agent turn answered: ``"lookup"``, or ``"assessment"`` when it
+    #: added a labelled model judgement to the cited evidence. ``None`` on a
+    #: plain turn.
     answer_mode: str | None = None
-    #: The assessment's trail: ``steps``, ``actions``, ``reason``, ``answer``,
-    #: ``shortened`` and ``evidence_chars``. ``None`` on a lookup.
+    #: An agent turn's trail: ``steps``, ``actions``, ``reason`` and ``answer``,
+    #: plus an assessment's ``evidence_chars``. ``None`` on a plain turn, unless
+    #: an agent turn handed it the message because the endpoint refused tools:
+    #: its trail then says ``reason: "tools_unavailable"``.
     agent: dict[str, Any] | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
@@ -2489,7 +2506,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                         )
 
                 data = {}
-                if _classify_turn(payload.question, None, payload.retrieval_target) == "assessment":
+                if _agent_turn_allowed(payload.retrieval_target):
+                    # Drained to its final payload; a fallback reports this expansion itself.
                     for item in rag.stream_stateless_agent_turn(
                         payload.question,
                         expanded_query=retrieval_query,
@@ -2512,8 +2530,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                         scoped_node_ids=stateless_scope or None,
                         retrieval_target=payload.retrieval_target,
                     )
-                if graph_debug is not None:
-                    data["graph_debug"] = graph_debug
+                    if graph_debug is not None:
+                        data["graph_debug"] = graph_debug
                 session_id = payload.session_id
             else:
                 session_id = rag.start_session(
@@ -2529,13 +2547,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     principal.effective_owner,
                     payload.scope_chunk_ids,
                 )
-                prior_turn = (
-                    rag.sessions.get_prior_turn(session_id, owner=principal.effective_owner)
-                    if rag.sessions is not None
-                    else None
-                )
                 # An agent turn reads its own history, and its fallback binds none on this endpoint.
-                agent = _classify_turn(payload.question, prior_turn, payload.retrieval_target) == "assessment"
+                agent = _agent_turn_allowed(payload.retrieval_target)
                 data = rag.chat(
                     payload.question,
                     session_id=session_id,
@@ -2549,6 +2562,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     agent=agent,
                 )
 
+        _note_tools_rejection(data)
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
         graph_debug = (
@@ -2708,8 +2722,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             exc,
                         )
 
-                answer_mode = await to_thread.run_sync(_classify_turn, payload.question, None, payload.retrieval_target)
-                if answer_mode == "assessment":
+                if _agent_turn_allowed(payload.retrieval_target):
 
                     def _make_stateless_agent_turn() -> Iterator[Any]:
                         """Build the stateless agent turn's stream off the event loop.
@@ -2824,10 +2837,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             )
                             or None
                         )
-                        stream_state["agent"] = (
-                            _classify_turn(payload.question, stream_state["prior_turn"], payload.retrieval_target)
-                            == "assessment"
-                        )
+                        stream_state["agent"] = _agent_turn_allowed(payload.retrieval_target)
                     # The retry re-answers a rejected lookup, so any second pass is a plain lookup.
                     agent: bool = stream_state["agent"] if question is None else False
                     prior_turn = stream_state["prior_turn"]
@@ -2862,6 +2872,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         final_payload = chunk
 
             payload_out = dict(final_payload or {})
+            # Read off the first pass: the corrective retry below replaces the payload.
+            _note_tools_rejection(payload_out)
             answer = str(payload_out.get("response") or payload_out.get("answer") or "")
             if not answer:
                 answer = full_answer

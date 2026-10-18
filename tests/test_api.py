@@ -5,15 +5,17 @@ import contextlib
 import io
 import json
 import types
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Sequence
 from pathlib import Path
 from typing import Any, cast, get_args
 
 import pytest
 from _pytest.logging import LogCaptureFixture
+from assessment_fakes import bad_request
 from conftest import run_ingest
 from fastapi.testclient import TestClient
 
+import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
 from docint.agents.types import AgentProgress, IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
@@ -5592,6 +5594,528 @@ def test_stream_query_final_frame_carries_the_retrieval_target(
     assert frames[-1]["retrieval_target"] == "visual"
 
 
+def _open_agent_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the API ask for agent turns: the switch on, a text model and an 8k window.
+
+    The model itself is ``None``, so validation and reformulation call none unless a test binds one.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("AGENT_TURNS_ENABLED", "true")
+    rag = cast(Any, api_module.rag)
+    rag.text_model_id = "invented-chat-model"
+    rag.text_model = None
+    rag.openai_ctx_window = 8192
+
+
+#: What an agent lookup answers in these tests.
+AGENT_ANSWER = "Die Stände öffnen um zehn Uhr [1]."
+
+#: The trail of an agent lookup that ran one search.
+LOOKUP_TRAIL: dict[str, Any] = {
+    "steps": 1,
+    "actions": [{"action": "search", "detail": "Hafenfest Stände", "found": 2}],
+    "reason": None,
+    "answer": "plain",
+}
+
+#: What a plain answer reports when the endpoint refused tools and the agent turn handed it the message.
+TOOLS_UNAVAILABLE_TRAIL: dict[str, Any] = {"steps": 0, "actions": [], "reason": "tools_unavailable", "answer": "plain"}
+
+#: Engine-specific switch names the tools-rejection warning must never name.
+ENGINE_FLAGS = ("vllm", "auto-tool-choice", "tool-call-parser")
+
+
+def _agent_final(**overrides: Any) -> dict[str, Any]:
+    """Build the final payload an agent lookup ends with, as the session layer builds it.
+
+    Args:
+        **overrides (Any): Fields to replace.
+
+    Returns:
+        dict[str, Any]: The payload, ``turn_idx`` included.
+    """
+    final: dict[str, Any] = {
+        "response": AGENT_ANSWER,
+        "sources": [{"id": "programme", "citation_index": 1}],
+        "session_id": "generated-session",
+        "reasoning": None,
+        "graph_debug": {"applied": False, "reason": "agent"},
+        "retrieval_query": None,
+        "coverage_unit": "documents",
+        "retrieval_mode": "agent",
+        "rerank": None,
+        "retrieval_target": "all",
+        "visual": None,
+        "answer_mode": "lookup",
+        "agent": LOOKUP_TRAIL,
+        "turn_idx": 0,
+    }
+    final.update(overrides)
+    return final
+
+
+def _plain_final(**overrides: Any) -> dict[str, Any]:
+    """Build the final payload of a plain lookup.
+
+    Args:
+        **overrides (Any): Fields to replace or add.
+
+    Returns:
+        dict[str, Any]: The payload, ``turn_idx`` included.
+    """
+    final: dict[str, Any] = {
+        "response": "Die Musik beginnt am Mittag [1].",
+        "sources": [{"id": "programme", "citation_index": 1}],
+        "session_id": "generated-session",
+        "retrieval_query": "Hafenfest Musik",
+        "coverage_unit": "documents",
+        "retrieval_mode": "rewrite_compact",
+        "retrieval_target": "all",
+        "turn_idx": 0,
+    }
+    final.update(overrides)
+    return final
+
+
+def _fallback_final(**overrides: Any) -> dict[str, Any]:
+    """Build the final payload of a turn the agent handed to the plain path because the endpoint refused tools.
+
+    Args:
+        **overrides (Any): Fields to replace.
+
+    Returns:
+        dict[str, Any]: A plain lookup's payload carrying the tools-unavailable trail.
+    """
+    return _plain_final(**{"agent": TOOLS_UNAVAILABLE_TRAIL, **overrides})
+
+
+def _scripted_stream(calls: list[dict[str, Any]], items: Sequence[Any]) -> Callable[..., Iterator[Any]]:
+    """Build a ``stream_chat`` double that records each call and yields ``items``.
+
+    Args:
+        calls (list[dict[str, Any]]): Receives each call's question and keywords.
+        items (Sequence[Any]): Steps, text and the final payload, in order.
+
+    Returns:
+        Callable[..., Iterator[Any]]: The double.
+    """
+
+    def _stream(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Record the call, then yield the scripted items.
+
+        Args:
+            question (str): The question asked.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: The scripted items.
+        """
+        calls.append({"question": question, **kwargs})
+        yield from items
+
+    return _stream
+
+
+def _stream_frames(client: TestClient, **body: Any) -> list[dict[str, Any]]:
+    """Post one ``/stream_query`` request and decode its frames.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        **body (Any): The request body; ``question`` defaults to one about the harbour festival.
+
+    Returns:
+        list[dict[str, Any]]: The decoded ``data:`` frames, in order.
+    """
+    body.setdefault("question", "Wann öffnen die Stände beim Hafenfest?")
+    with client.stream("POST", "/stream_query", json=body) as resp:
+        assert resp.status_code == 200
+        return _sse_frames("".join(chunk.decode() for chunk in resp.iter_raw()))
+
+
+def _trail_of(steps: Sequence[AgentProgress]) -> dict[str, Any]:
+    """Build the trail a lookup reports for the steps it streamed.
+
+    Args:
+        steps (Sequence[AgentProgress]): The steps, in order.
+
+    Returns:
+        dict[str, Any]: The trail: its rounds, its actions, no reason, a plain answer.
+    """
+    return {
+        "steps": max(step.step for step in steps),
+        "actions": [{"action": step.action, "detail": step.detail, "found": step.found} for step in steps],
+        "reason": None,
+        "answer": "plain",
+    }
+
+
+@pytest.mark.parametrize(
+    ("switch", "model", "window", "rejected", "allowed"),
+    [
+        ("true", "invented-chat-model", 8192, False, True),
+        ("false", "invented-chat-model", 8192, False, False),
+        ("true", None, 8192, False, False),
+        ("true", "invented-chat-model", 4096, False, False),
+        ("true", "invented-chat-model", 8192, True, False),
+    ],
+    ids=["open", "switched-off", "no-text-model", "small-window", "tools-rejected"],
+)
+def test_an_agent_turn_needs_the_switch_a_text_model_the_window_and_no_cached_rejection(
+    monkeypatch: pytest.MonkeyPatch, switch: str, model: str | None, window: int, rejected: bool, allowed: bool
+) -> None:
+    """The gate opens only when every condition holds, and it calls no model to decide.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        switch (str): ``AGENT_TURNS_ENABLED``.
+        model (str | None): The configured text model.
+        window (int): The chat model's context window.
+        rejected (bool): Whether a tools rejection is cached.
+        allowed (bool): Whether the turn may be an agent turn.
+    """
+    monkeypatch.setenv("AGENT_TURNS_ENABLED", switch)
+    rag = cast(Any, api_module.rag)
+    rag.text_model_id = model
+    rag.openai_ctx_window = window
+    if rejected:
+        gate_module.record_tools_rejection()
+
+    assert api_module._agent_turn_allowed("all") is allowed
+
+
+@pytest.mark.parametrize("target", ["all", "documents", "visual"])
+def test_every_retrieval_target_may_run_an_agent_turn(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    """No target closes the gate: the visual one runs the agent with its image tools.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The turn's retrieval target.
+    """
+    _open_agent_gate(monkeypatch)
+
+    assert api_module._agent_turn_allowed(target) is True
+
+
+@pytest.mark.parametrize("check", ["agent_available", "tools_rejection_cached"])
+@pytest.mark.parametrize("error", [ValueError, RuntimeError, KeyError])
+def test_a_failing_check_answers_the_turn_on_the_plain_path(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, check: str, error: type[Exception]
+) -> None:
+    """A broken setting must never break chat: the turn is a plain lookup, with one warning naming the error's type.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        check (str): The check that fails.
+        error (type[Exception]): What it raises; any class must degrade the same way.
+    """
+    _open_agent_gate(monkeypatch)
+
+    def _fail(*_args: Any, **_kwargs: Any) -> bool:
+        """Fail as a broken check would.
+
+        Args:
+            *_args (Any): Ignored.
+            **_kwargs (Any): Ignored.
+
+        Raises:
+            Exception: Always, of the parametrized class.
+        """
+        raise error("invented failure")
+
+    monkeypatch.setattr(api_module, check, _fail)
+
+    assert api_module._agent_turn_allowed("visual") is False
+
+    warnings = [message for message in loguru_caplog.messages if "Agent turns are unavailable" in message]
+    assert warnings == [f"Agent turns are unavailable ({error.__name__}) for the visual target; answering as a lookup"]
+    assert "invented failure" not in loguru_caplog.text
+
+
+def test_agent_turns_stay_off_unless_a_test_opts_in(client: TestClient) -> None:
+    """The suite keeps ``AGENT_TURNS_ENABLED`` off, so a test written for the plain path stays on it.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(Any, api_module.rag)
+    rag.text_model_id = "invented-chat-model"
+    rag.text_model = None
+    rag.openai_ctx_window = 8192
+
+    _stream_text(client)
+
+    assert [call["agent"] for call in rag.stream_calls] == [False]
+
+
+def test_stream_query_emits_note_and_step_frames(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Steps and notes go out as ``agent`` frames in order, text as tokens, and the envelope names the agent turn.
+
+    A note withdraws the text its round streamed before its calls, so it follows that text as a frame of its own.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    _open_agent_gate(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    search = AgentProgress(step=1, action="search", detail="Hafenfest Stände", found=2)
+    note = AgentProgress(step=2, action="note", detail="Ich lese das Programm.", found=0)
+    read = AgentProgress(step=2, action="read", detail="1", found=1)
+    final = _agent_final(reasoning="Erst das Programm lesen.", agent=_trail_of([search, note, read]))
+    stream = [search, "Ich lese ", "das Programm.", note, read, "Die Stände öffnen ", "um zehn Uhr [1].", final]
+    monkeypatch.setattr(api_module.rag, "stream_chat", _scripted_stream(calls, stream))
+
+    frames = _stream_frames(client)
+
+    assert frames[:-1] == [
+        {"agent": {"step": 1, "action": "search", "detail": "Hafenfest Stände", "found": 2}},
+        {"token": "Ich lese "},
+        {"token": "das Programm."},
+        {"agent": {"step": 2, "action": "note", "detail": "Ich lese das Programm.", "found": 0}},
+        {"agent": {"step": 2, "action": "read", "detail": "1", "found": 1}},
+        {"token": "Die Stände öffnen "},
+        {"token": "um zehn Uhr [1]."},
+    ]
+    envelope = frames[-1]
+    assert (envelope["retrieval_mode"], envelope["answer_mode"]) == ("agent", "lookup")
+    assert envelope["agent"] == _trail_of([search, note, read])
+    assert (envelope["response"], envelope["reasoning"]) == (AGENT_ANSWER, "Erst das Programm lesen.")
+    assert "turn_idx" not in envelope
+    assert [call["agent"] for call in calls] == [True]
+
+
+@pytest.mark.parametrize("path", ["/stream_query", "/query"])
+def test_the_visual_target_runs_the_agent_with_image_tools(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """A visual turn is an agent turn: its image searches and keyframe listings reach the client, its pictures counted.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    _open_agent_gate(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    steps = [
+        AgentProgress(step=1, action="search_images", detail="zwei Personen, Regenjacken, Hafen", found=2),
+        AgentProgress(step=2, action="keyframes", detail="harbour_walk.webm", found=3),
+    ]
+    answer = "Zwei Personen in Regenjacken stehen am Hafen [1]."
+    final = _agent_final(
+        response=answer,
+        sources=[{"id": "frame-1", "citation_index": 1, "image_id": "frame-1"}],
+        retrieval_target="visual",
+        visual={"images_attached": 2},
+        agent=_trail_of(steps),
+    )
+
+    def _chat(question: str, **kwargs: Any) -> dict[str, Any]:
+        """Record the call and answer as a drained agent turn.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Returns:
+            dict[str, Any]: The agent turn's final payload.
+        """
+        calls.append({"question": question, **kwargs})
+        return dict(final)
+
+    monkeypatch.setattr(api_module.rag, "chat", _chat)
+    monkeypatch.setattr(api_module.rag, "stream_chat", _scripted_stream(calls, [*steps, answer, final]))
+    request = {"question": "Was tragen die Personen am Hafen?", "retrieval_target": "visual"}
+    shown: list[str] = []
+
+    if path == "/query":
+        body = client.post(path, json=request).json()
+    else:
+        frames = _stream_frames(client, **request)
+        body, shown = frames[-1], [frame["agent"]["action"] for frame in frames[:-1] if "agent" in frame]
+
+    assert (calls[0]["agent"], calls[0]["retrieval_target"]) == (True, "visual")
+    assert (body["retrieval_target"], body["visual"]) == ("visual", {"images_attached": 2})
+    assert body["agent"] == _trail_of(steps)
+    assert shown == ([] if path == "/query" else ["search_images", "keyframes"])
+
+
+@pytest.mark.parametrize("mode", ["session", "stateless"])
+def test_query_drains_an_agent_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient, mode: str) -> None:
+    """``/query`` answers with an agent turn's final payload: its steps and text drained, its own graph report kept.
+
+    The API's own expansion only widens a stateless fallback's retrieval; an agent turn wrote its own searches.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        mode (str): The request's session routing.
+    """
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    asked: list[dict[str, Any]] = []
+    streamed = [AgentProgress(step=1, action="search", detail="Hafenfest Stände", found=2), AGENT_ANSWER]
+
+    def _chat(question: str, **kwargs: Any) -> dict[str, Any]:
+        """Answer as ``SessionManager.chat`` does: an agent turn drained to its final payload.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Returns:
+            dict[str, Any]: The agent turn's payload, or a plain one when no agent turn was asked for.
+        """
+        asked.append(kwargs)
+        return _agent_final() if kwargs["agent"] else _plain_final()
+
+    def _stateless(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Stream a stateless agent turn: its step, its text, then its final payload.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: The turn's output.
+        """
+        asked.append(kwargs)
+        yield from [*streamed, _agent_final(session_id=None, turn_idx=None)]
+
+    monkeypatch.setattr(rag, "chat", _chat)
+    monkeypatch.setattr(rag, "stream_stateless_agent_turn", _stateless)
+
+    body = client.post("/query", json={"question": "Wann öffnen die Stände?", "retrieval_mode": mode}).json()
+
+    assert len(asked) == 1
+    assert (body["answer"], body["sources"]) == (AGENT_ANSWER, [{"id": "programme", "citation_index": 1}])
+    assert (body["retrieval_mode"], body["answer_mode"], body["agent"]) == ("agent", "lookup", LOOKUP_TRAIL)
+    assert body["graph_debug"] == {"applied": False, "reason": "agent"}
+    assert rag.stateless_queries == []
+
+
+def test_a_tools_rejection_is_cached_for_the_cooldown(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, loguru_caplog: LogCaptureFixture
+) -> None:
+    """An endpoint that refused tools gets no agent turn for ten minutes, and each rejection one warning.
+
+    The warning names what the endpoint must accept and no engine's switches.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    now = [1000.0]
+    monkeypatch.setattr(gate_module, "TOOLS_REJECTION", gate_module.ToolsRejection(clock=lambda: now[0]))
+    _open_agent_gate(monkeypatch)
+    asked: list[bool] = []
+
+    def _refusing_endpoint(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Answer as an endpoint refusing tools does: every agent turn falls back and says why.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: The plain answer, then its payload.
+        """
+        asked.append(kwargs["agent"])
+        yield "Die Musik beginnt am Mittag [1]."
+        yield _fallback_final() if kwargs["agent"] else _plain_final()
+
+    monkeypatch.setattr(api_module.rag, "stream_chat", _refusing_endpoint)
+
+    first = _stream_frames(client)[-1]
+    now[0] += 599
+    _stream_frames(client)
+    now[0] += 1
+    _stream_frames(client)
+
+    warnings = [message for message in loguru_caplog.messages if "offering tools" in message]
+    assert first["agent"] == TOOLS_UNAVAILABLE_TRAIL
+    assert asked == [True, False, True]
+    assert len(warnings) == 2
+    assert 'The chat endpoint must accept `tools` with `tool_choice: "auto"`.' in warnings[0]
+    assert "for the next 10 minutes" in warnings[0]
+    assert not any(flag in warnings[0].lower() for flag in ENGINE_FLAGS)
+
+
+@pytest.mark.parametrize(
+    ("path", "mode"),
+    [("/stream_query", "session"), ("/stream_query", "stateless"), ("/query", "session"), ("/query", "stateless")],
+)
+def test_every_chat_endpoint_caches_a_tools_rejection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str, mode: str
+) -> None:
+    """Each endpoint reads the reason off the turn it answered, so none keeps asking an endpoint that refuses tools.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+        mode (str): The request's session routing.
+    """
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    answer = "Die Musik beginnt am Mittag [1]."
+    monkeypatch.setattr(rag, "stream_chat", lambda question, **kwargs: iter([answer, _fallback_final()]))
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: _fallback_final())
+    monkeypatch.setattr(
+        rag, "stream_stateless_agent_turn", lambda question, **kwargs: iter([answer, _fallback_final(session_id=None)])
+    )
+
+    response = client.post(path, json={"question": "Wann beginnt die Musik?", "retrieval_mode": mode})
+
+    assert response.status_code == 200
+    assert api_module._agent_turn_allowed("all") is False
+
+
+def test_a_scoped_turns_refusal_caches_nothing(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A pinned round offers no tools, so the endpoint's 400 is the turn's error, never a tools rejection.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    _open_agent_gate(monkeypatch)
+    calls: list[dict[str, Any]] = []
+
+    def _refused(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Fail as a scoped agent turn does when the endpoint refuses its pinned round.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: Nothing for a scoped turn.
+
+        Raises:
+            openai.BadRequestError: For a scoped turn, before anything is shown.
+        """
+        calls.append(kwargs)
+        if kwargs["scoped_node_ids"]:
+            raise bad_request("invented refusal of a pinned round")
+        yield _plain_final()
+
+    monkeypatch.setattr(api_module.rag, "stream_chat", _refused)
+
+    frames = _stream_frames(client, scope_chunk_ids=["c1"])
+
+    assert frames == [{"error": "Internal server error", "code": "generation_failed"}]
+    assert (calls[0]["agent"], calls[0]["scoped_node_ids"]) == (True, ["c1"])
+    assert api_module._agent_turn_allowed("all") is True
+    assert not any("offering tools" in message for message in loguru_caplog.messages)
+
+
 def _assessment_stream(
     calls: list[dict[str, Any]], *, agent: dict[str, Any], answer: str
 ) -> Callable[..., Generator[Any, None, None]]:
@@ -5646,7 +6170,7 @@ def test_stream_query_streams_agent_frames_and_validates_only_the_evidence_part(
     """
     calls: list[dict[str, Any]] = []
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
     monkeypatch.setattr(
         api_module.rag,
         "stream_chat",
@@ -5681,7 +6205,7 @@ def test_stream_query_never_retries_an_assessment_turn(monkeypatch: pytest.Monke
         client (TestClient): The TestClient instance.
     """
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
     monkeypatch.setattr(
         api_module.rag, "stream_chat", _assessment_stream(calls, agent=SPLIT_AGENT, answer="Fact [1]. x")
     )
@@ -5707,7 +6231,7 @@ def test_an_unsplit_assessment_is_not_validated(monkeypatch: pytest.MonkeyPatch,
     """
     calls: list[dict[str, Any]] = []
     unsplit = {**SPLIT_AGENT, "answer": "unsplit", "evidence_chars": 0}
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
     monkeypatch.setattr(api_module.rag, "stream_chat", _assessment_stream(calls, agent=unsplit, answer="View."))
 
     def _must_not_validate(**_kwargs: Any) -> dict[str, Any]:
@@ -5743,10 +6267,10 @@ def test_stream_query_gives_lookups_only_the_evidence_part_of_an_assessment(
     assert call["prior_turn"] == PriorTurn(user_text="What could be improved?", assistant_text="Fact [1].")
 
 
-def test_stream_query_hands_an_assessment_turn_the_full_prior_turn(
+def test_stream_query_hands_an_agent_turn_the_full_prior_turn(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """An assessment may build on its own earlier judgement.
+    """An agent turn reads its own window; only a fallback binds the prior turn, and cuts it to its source part itself.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -5754,7 +6278,7 @@ def test_stream_query_hands_an_assessment_turn_the_full_prior_turn(
     """
     prior = PriorTurn(user_text="Q", assistant_text="Fact [1]. View.", evidence_chars=9)
     cast(Any, api_module.rag.sessions).prior_turn = prior
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
 
     _stream_text(client)
 
@@ -5789,50 +6313,6 @@ def test_the_retry_pass_is_always_a_lookup(monkeypatch: pytest.MonkeyPatch, clie
     assert [call["agent"] for call in calls] == [False, False]
 
 
-def test_classify_turn_is_gated_before_any_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Visual turns, model-less stubs and small windows never reach the classifier.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-    """
-    called: list[str] = []
-    models: list[Any] = []
-
-    def _classify(llm: Any, *, question: str, prior_turn: Any) -> str:
-        """Record the call and classify it as an assessment.
-
-        Args:
-            llm (Any): The model the classifier was given.
-            question (str): The question.
-            prior_turn (Any): The prior turn, unused.
-
-        Returns:
-            str: Always ``assessment``.
-        """
-        called.append(question)
-        models.append(llm)
-        return "assessment"
-
-    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
-    monkeypatch.setattr(api_module, "classify_turn", _classify)
-    rag = cast(Any, api_module.rag)
-
-    assert api_module._classify_turn("Q", None, "all") == "lookup"  # the stub has no text_model_id
-    rag.text_model_id = "m"
-    rag.text_model = object()
-    rag.bounded_text_model = object()
-    rag.openai_ctx_window = 4096
-    assert api_module._classify_turn("Q", None, "all") == "lookup"
-    rag.openai_ctx_window = 8192
-    assert api_module._classify_turn("Q", None, "visual") == "lookup"
-    assert called == []
-    assert api_module._classify_turn("Q", None, "all") == "assessment"
-    assert called == ["Q"]
-    # The classifier's 15 s bound is for one attempt, so it never gets the retrying model.
-    assert models == [rag.bounded_text_model]
-    assert models[0] is not rag.text_model
-
-
 def test_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """``/query`` carries the mode and trail, and validates only the evidence part.
 
@@ -5841,7 +6321,7 @@ def test_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, cl
         client (TestClient): The TestClient instance.
     """
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
     monkeypatch.setattr(
         api_module.rag,
         "chat",
@@ -5867,52 +6347,36 @@ def test_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, cl
     assert seen["answer"] == "Fact [1]."
 
 
-def test_a_turn_is_classified_once_and_its_retry_is_a_lookup(
+def test_the_gate_is_asked_once_and_the_retry_is_a_plain_pass(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """The retry pass never inherits an assessment mode, and never reclassifies.
+    """The retry pass never inherits the agent flag, and the gate is not asked again for it.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-    classified: list[tuple[Any, ...]] = []
+    asked: list[str] = []
 
-    def _classify(*args: Any) -> str:
-        classified.append(args)
-        return "assessment"
+    def _gate(retrieval_target: str) -> bool:
+        """Record the question to the gate and open it.
 
-    monkeypatch.setattr(api_module, "_classify_turn", _classify)
+        Args:
+            retrieval_target (str): The turn's target.
+
+        Returns:
+            bool: Always ``True``.
+        """
+        asked.append(retrieval_target)
+        return True
+
+    monkeypatch.setattr(api_module, "_agent_turn_allowed", _gate)
     calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient.", "A grounded answer of length."])
 
     _stream_text(client)
 
     assert [call["agent"] for call in calls] == [True, False]
-    assert len(classified) == 1
-
-
-def test_stream_query_classifies_against_the_full_prior_turn(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
-    """The classifier resolves a follow-up against the whole earlier answer, judgement included.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        client (TestClient): The TestClient instance.
-    """
-    prior = PriorTurn(user_text="Q", assistant_text="Fact [1]. View.", evidence_chars=9)
-    cast(Any, api_module.rag.sessions).prior_turn = prior
-    classified: list[tuple[Any, ...]] = []
-
-    def _classify(*args: Any) -> str:
-        classified.append(args)
-        return "lookup"
-
-    monkeypatch.setattr(api_module, "_classify_turn", _classify)
-
-    _stream_text(client, "And what could be improved?")
-
-    assert classified == [("And what could be improved?", prior, "all")]
+    assert asked == ["all"]
 
 
 @pytest.mark.parametrize(
@@ -5987,65 +6451,38 @@ def test_query_passes_the_agent_flag_and_binds_no_prior_turn(
     """
     prior = PriorTurn(user_text="Q", assistant_text="Fact [1]. View.", evidence_chars=9)
     cast(Any, api_module.rag.sessions).prior_turn = prior
-    modes = iter(["lookup", "assessment"])
-    classified: list[tuple[Any, ...]] = []
+    answers = iter([False, True])
+    asked: list[str] = []
     calls: list[dict[str, Any]] = []
     real_chat = api_module.rag.chat
 
-    def _classify(*args: Any) -> str:
-        classified.append(args)
-        return next(modes)
+    def _gate(retrieval_target: str) -> bool:
+        """Record the question to the gate and give the next answer.
+
+        Args:
+            retrieval_target (str): The turn's target.
+
+        Returns:
+            bool: Closed for the first turn, open for the second.
+        """
+        asked.append(retrieval_target)
+        return next(answers)
 
     def _chat(question: str, **kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
         return real_chat(question, **kwargs)
 
-    monkeypatch.setattr(api_module, "_classify_turn", _classify)
+    monkeypatch.setattr(api_module, "_agent_turn_allowed", _gate)
     monkeypatch.setattr(api_module.rag, "chat", _chat)
 
     for _ in range(2):
         assert client.post("/query", json={"question": "And what could be improved?"}).status_code == 200
 
-    assert classified == [("And what could be improved?", prior, "all")] * 2
+    assert asked == ["all"] * 2
     assert cast(Any, api_module.rag).chat_agents == [False, True]
     for passed in calls:
         assert "prior_turn" not in passed
         assert "skip_query_rewrite" not in passed
-
-
-@pytest.mark.parametrize(("broken", "error"), [("gate", ValueError), ("model", RuntimeError), ("classifier", KeyError)])
-def test_classify_turn_answers_as_a_lookup_when_a_step_fails(
-    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, broken: str, error: type[Exception]
-) -> None:
-    """A misconfigured assessment setting or a dead model must never break a lookup turn.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
-        broken (str): The step that fails: the gate, the model property or the classifier.
-        error (type[Exception]): What it raises; any class must degrade the same way.
-    """
-    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
-    rag = cast(Any, api_module.rag)
-    rag.text_model_id = "m"
-    rag.openai_ctx_window = 8192
-
-    def _fail(*_args: Any, **_kwargs: Any) -> Any:
-        raise error("bad config")
-
-    if broken == "gate":
-        monkeypatch.setattr(api_module, "assessment_available", _fail)
-    elif broken == "model":
-        monkeypatch.setattr(type(rag), "bounded_text_model", property(_fail), raising=False)
-    else:
-        rag.bounded_text_model = object()
-        monkeypatch.setattr(api_module, "classify_turn", _fail)
-
-    assert api_module._classify_turn("Q", None, "all") == "lookup"
-
-    warnings = [message for message in loguru_caplog.messages if "Assessment classification unavailable" in message]
-    assert warnings == [f"Assessment classification unavailable ({error.__name__}); answering as a lookup"]
-    assert "bad config" not in loguru_caplog.text
 
 
 def test_stateless_stream_query_answers_an_assessment(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -6055,7 +6492,7 @@ def test_stateless_stream_query_answers_an_assessment(monkeypatch: pytest.Monkey
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
 
     with client.stream(
         "POST", "/stream_query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}
@@ -6081,7 +6518,7 @@ def test_a_stateless_stream_query_assessment_is_validated_as_one_and_never_retri
     """
     calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient."])
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
 
     def _fake_validation(**kwargs: Any) -> dict[str, Any]:
         """Record the validator's inputs and reject the answer, as would invite a retry.
@@ -6118,7 +6555,7 @@ def test_stateless_query_returns_the_assessment_fields(monkeypatch: pytest.Monke
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    _open_agent_gate(monkeypatch)
 
     body = client.post("/query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}).json()
 
@@ -6140,8 +6577,10 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
         client (TestClient): The TestClient instance.
         path (str): The endpoint under test.
     """
-    classified: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *args: classified.append(args) or "assessment")
+    asked: list[str] = []
+    _open_agent_gate(monkeypatch)
+    real_gate = api_module._agent_turn_allowed
+    monkeypatch.setattr(api_module, "_agent_turn_allowed", lambda target: asked.append(target) or real_gate(target))
 
     response = client.post(
         path,
@@ -6157,7 +6596,7 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
     call = cast(Any, api_module.rag).stateless_agent_turns[0]
     final = response.json() if path == "/query" else _sse_frames(response.text)[-1]
     assert response.status_code == 200
-    assert classified == [("What could be improved?", None, "documents")]
+    assert asked == ["documents"]
     assert (call["scoped_node_ids"], call["retrieval_target"]) == (["c1"], "documents")
     assert call["expanded_query"] == "What could be improved?"
     assert [rule.field for rule in call["metadata_filter_rules"]] == ["mimetype"]

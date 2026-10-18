@@ -694,7 +694,7 @@ def served(monkeypatch: pytest.MonkeyPatch) -> _Served:
     monkeypatch.setattr(RAG, "ensure_collection_owner_manager", lambda self: _Owners())
     monkeypatch.setattr(api_module, "rag", RAG(qdrant_collection=""))
     monkeypatch.setattr(api_module, "_validation_payload", lambda **kwargs: {})
-    monkeypatch.setattr(api_module, "_classify_turn", lambda *args: "lookup")
+    monkeypatch.setattr(api_module, "_agent_turn_allowed", lambda *args: False)
     monkeypatch.setattr(api_module, "build_metadata_filters", lambda rules: object())
     monkeypatch.setattr(api_module, "build_qdrant_filter", lambda rules: None)
     monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")

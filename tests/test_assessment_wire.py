@@ -23,7 +23,6 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
     Function,
 )
 
-import docint.core.api as api_module
 from docint.agents.assessment.classify import classify_turn
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
@@ -361,20 +360,6 @@ def test_the_plain_model_retries_a_stalled_endpoint(monkeypatch: pytest.MonkeyPa
         _rag(max_retries=2).text_model.complete("Is this a judgement?", timeout=15.0)
 
     assert len(attempts) > 1
-
-
-def test_the_turn_classifier_makes_one_attempt_at_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One attempt per call, so a classification abandoned at its deadline frees its slot at its own timeout.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-    """
-    attempts = _stalled_endpoint(monkeypatch)
-    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
-    monkeypatch.setattr(api_module, "rag", _rag(max_retries=2))
-
-    assert api_module._classify_turn("Is the method convincing?", None, "all") == "lookup"
-    assert len(attempts) == 1
 
 
 def test_research_makes_one_attempt_per_call_at_a_stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -297,7 +297,8 @@ def _first_item(
     """Pull an agent loop's first item; a failure that leaves the plain path open becomes a fallback.
 
     Nothing has been shown before the first item, so the plain path can still answer the
-    turn. Logs say why in counts and tokens alone, never the endpoint's own words.
+    turn. Logs say why in counts and tokens alone, never the endpoint's own words; a refusal of
+    tools is noted at INFO, since the API, which keeps agent turns off after one, gives the warning.
 
     Args:
         run (Iterator[AgentProgress | str | AgentResult]): The loop's output.
@@ -314,9 +315,8 @@ def _first_item(
     try:
         return next(run, None)
     except ToolsUnavailable as exc:
-        logger.warning(
-            "The chat endpoint refused a request offering tools (HTTP {}); agent turns need it to accept "
-            "tools with tool_choice=auto. Answering as a lookup.",
+        logger.info(
+            "The chat endpoint refused a request offering tools (HTTP {}); answering as a lookup",
             getattr(exc.__cause__, "status_code", None),
         )
         raise AgentTurnFallback(_fallback_trail("tools_unavailable")) from exc

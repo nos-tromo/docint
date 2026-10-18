@@ -151,6 +151,29 @@ def _hermetic_assessment_env() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_agent_env() -> Iterator[None]:
+    """Keep agent turns off unless a test opts in, and start with no tools rejection remembered.
+
+    The chat endpoints ask for an agent turn whenever ``AGENT_TURNS_ENABLED`` (on by default),
+    a text model and the context window allow it, so a test written for the plain path would
+    take the agent path, and send real model calls under a developer ``.env``. Tests of agent
+    turns set the variable themselves. A tools rejection is remembered per process, so each
+    test gets a fresh one rather than one a test before it recorded. A private ``MonkeyPatch``
+    for the reason :func:`_hermetic_hybrid_env` gives.
+
+    Yields:
+        None.
+    """
+    from docint.agents.assessment.gate import ToolsRejection
+
+    mp = pytest.MonkeyPatch()
+    mp.setenv("AGENT_TURNS_ENABLED", "false")
+    mp.setattr("docint.agents.assessment.gate.TOOLS_REJECTION", ToolsRejection())
+    yield
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_preprocess() -> Iterator[None]:
     """Keep the preprocessing pool from doing real work behind a test.
 
