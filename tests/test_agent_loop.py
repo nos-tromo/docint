@@ -2515,7 +2515,7 @@ def _image_call(call_id: str, description: str) -> tuple[str, str, Any]:
 
     Args:
         call_id (str): The call's id.
-        description (str): What the picture should show.
+        description (str): The visible cues to look for.
 
     Returns:
         tuple[str, str, Any]: The call, as :func:`_calls` takes it.

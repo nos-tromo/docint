@@ -4979,7 +4979,7 @@ class RAG:
         Runs under the caller's collection scope (:meth:`collection_scope`).
 
         Args:
-            description (str): What the picture should show.
+            description (str): The visible cues to look for.
             qdrant_filter (Any | None): The request's compiled native filter, which the
                 image companion applies itself.
 

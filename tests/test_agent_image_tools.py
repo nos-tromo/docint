@@ -545,7 +545,7 @@ def test_search_images_needs_a_description(arguments: str) -> None:
         ToolCall(id="call_0", name="search_images", arguments=arguments), _context()
     )
 
-    assert reply.text == "Error: search_images needs a description: what the picture should show."
+    assert reply.text == "Error: search_images needs a description: the visible cues to look for."
     assert (reply.found, reply.action) == (0, "search_images")
     assert search.queries == []
 

@@ -117,7 +117,7 @@ class SearchImagesTool:
             self.name,
             arguments.get("description"),
             self._search_images,
-            missing="search_images needs a description: what the picture should show.",
+            missing="search_images needs a description: the visible cues to look for.",
         )
 
 
