@@ -27,6 +27,7 @@ from agent_fakes import (
     streaming_tool_llm,
     text_chunks,
     thumbnail,
+    thumbnail_url,
     tool_call_delta,
     turn_budget,
 )
@@ -2540,19 +2541,6 @@ def _visual(llm: Any, registry: ToolRegistry, store: ThumbnailStore, **overrides
     return _loop(llm, registry, fetch_thumbnails=store, legend_template=LEGEND, **{"max_images": 6, **overrides})
 
 
-def _url(index: int) -> str:
-    """Return the data URL a frame's thumbnail is shown by.
-
-    Args:
-        index (int): The frame's place in the clip.
-
-    Returns:
-        str: The URL.
-    """
-    mime, data = thumbnail(index)
-    return f"data:{mime};base64,{data}"
-
-
 def _picture_messages(llm: Any, call: int) -> list[ChatMessage]:
     """Return the messages of one model call that carry pictures.
 
@@ -2592,7 +2580,7 @@ def _picture_wire(legend: list[tuple[int, int]], *, note: str = "") -> dict[str,
     """
     text = render_legend(LEGEND, [(number, *thumbnail(frame)) for number, frame in legend])
     parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
-    parts.extend({"type": "image_url", "image_url": {"url": _url(frame)}} for _, frame in legend)
+    parts.extend({"type": "image_url", "image_url": {"url": thumbnail_url(frame)}} for _, frame in legend)
     if note:
         parts.append({"type": "text", "text": note})
     return {"role": "user", "content": parts}
@@ -2762,34 +2750,36 @@ def test_a_picture_shown_before_is_not_attached_again() -> None:
     assert (result.images_attached, _stamped(result)) == (2, [1, 2])
 
 
-@pytest.mark.parametrize(("max_rounds", "calls"), [(6, 4), (1, 3)], ids=["tool-round", "answer-round"])
-def test_a_retried_round_that_fails_too_follows_the_failure_policy(max_rounds: int, calls: int) -> None:
-    """The retry without pictures is the round's one: if it fails too, the round fails as any round does.
-
-    A tool round then makes the model answer from what was found (``research_failed``); the
-    answer round raises its error as it came.
-
-    Args:
-        max_rounds (int): Tool rounds allowed: the refused round is a tool round, or the forced answer.
-        calls (int): The model calls the turn makes.
-    """
-    outage = RuntimeError("invented outage")
+def test_a_retried_tool_round_that_fails_too_makes_the_model_answer_from_what_it_found() -> None:
+    """The retry without pictures is the round's one: a tool round failing it too ends research, as any does."""
     store = ThumbnailStore(0)
     llm = streaming_tool_llm(
-        [_calls(_image_call("call_a", "Regenjacken")), bad_request(REFUSED_PICTURES), outage, _answer()]
+        [
+            _calls(_image_call("call_a", "Regenjacken")),
+            bad_request(REFUSED_PICTURES),
+            RuntimeError("invented outage"),
+            _answer(),
+        ]
     )
-    turn = _turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store, max_rounds=max_rounds))
 
-    if max_rounds == 1:
-        shown, raised = _until_raised(turn)
-        assert raised is outage
-        assert not any(isinstance(item, (str, AgentResult)) for item in shown)
-    else:
-        _, texts, result = _drain(turn)
-        assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "none"
-        assert _picture_messages(llm, 3) == []
-        assert (result.reason, result.images_attached, "".join(texts)) == ("research_failed", 0, ANSWER)
-    assert llm.stream_chat.call_count == calls
+    _, texts, result = _drain(_turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store)))
+
+    assert (llm.stream_chat.call_count, llm.stream_chat.call_args_list[3].kwargs["tool_choice"]) == (4, "none")
+    assert _picture_messages(llm, 3) == []
+    assert (result.reason, result.images_attached, "".join(texts)) == ("research_failed", 0, ANSWER)
+
+
+def test_a_retried_answer_round_that_fails_too_raises_its_error() -> None:
+    """The retry without pictures is the round's one: an answer round failing it too raises its error as it came."""
+    outage = RuntimeError("invented outage")
+    store = ThumbnailStore(0)
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), bad_request(REFUSED_PICTURES), outage])
+    turn = _turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store, max_rounds=1))
+
+    shown, raised = _until_raised(turn)
+
+    assert (raised, llm.stream_chat.call_count) == (outage, 3)
+    assert not any(isinstance(item, (str, AgentResult)) for item in shown)
 
 
 def test_a_round_that_fails_after_its_first_event_keeps_its_pictures() -> None:

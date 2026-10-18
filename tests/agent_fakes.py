@@ -331,6 +331,19 @@ def thumbnail(index: int) -> tuple[str, str]:
     return "image/jpeg", base64.b64encode(f"invented thumbnail of frame {index}".encode()).decode()
 
 
+def thumbnail_url(index: int) -> str:
+    """Return the data URL a frame's invented thumbnail is shown to the model by.
+
+    Args:
+        index (int): The frame's place in the clip.
+
+    Returns:
+        str: The URL, as a picture message carries it.
+    """
+    mime, data = thumbnail(index)
+    return f"data:{mime};base64,{data}"
+
+
 class ThumbnailStore:
     """A thumbnail fetcher double: answers by point id with the frames it stores, records every fetch, and can fail."""
 

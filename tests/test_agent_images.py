@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
-from agent_fakes import ThumbnailStore, frame_passage, programme_passage, thumbnail
+from agent_fakes import ThumbnailStore, frame_passage, programme_passage, thumbnail, thumbnail_url
 from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRole, TextBlock
 from llama_index.core.schema import NodeWithScore
 
@@ -80,19 +80,6 @@ def _parts(message: ChatMessage) -> tuple[str, list[str]]:
     return first.text, [str(block.url) for block in rest if isinstance(block, ImageBlock)]
 
 
-def _url(index: int) -> str:
-    """Return the data URL a frame's thumbnail is shown by.
-
-    Args:
-        index (int): The frame's place in the clip.
-
-    Returns:
-        str: The URL.
-    """
-    mime, data = thumbnail(index)
-    return f"data:{mime};base64,{data}"
-
-
 def _price(*numbers: int) -> int:
     """Return what one message showing pictures under these numbers costs as it is sent.
 
@@ -131,7 +118,11 @@ def test_a_rounds_new_pictures_are_shown_after_a_legend_in_number_order() -> Non
     assert shown is not None
     message, cost = shown
     legend = render_legend(LEGEND, [(2, *thumbnail(0)), (3, *thumbnail(1))])
-    assert (message.role, _parts(message), cost) == (MessageRole.USER, (legend, [_url(0), _url(1)]), _price(2, 3))
+    assert (message.role, _parts(message), cost) == (
+        MessageRole.USER,
+        (legend, [thumbnail_url(0), thumbnail_url(1)]),
+        _price(2, 3),
+    )
     assert store.fetches == [["frame-0", "frame-1"]]
     assert images.count == 2
 
@@ -174,7 +165,7 @@ def test_a_turn_shows_no_more_pictures_than_its_cap(max_images: int, round_room:
     second = images.attach(_numbered(frame_passage(1), frame_passage(2), frame_passage(3), first=2), room=WIDE)
 
     assert first is not None and second is not None
-    assert (len(_parts(first[0])[1]), _parts(second[0])[1], images.count) == (1, [_url(1)], shown)
+    assert (len(_parts(first[0])[1]), _parts(second[0])[1], images.count) == (1, [thumbnail_url(1)], shown)
 
 
 @pytest.mark.parametrize(
@@ -207,7 +198,11 @@ def test_the_fetch_waits_only_for_room_for_the_first_new_picture_alone() -> None
     shown = images.attach(_numbered(frame_passage(0), frame_passage(1), first=first), room=_price(first))
 
     assert shown is not None
-    assert (_parts(shown[0])[1], shown[1], store.fetches) == ([_url(0)], _price(first), [["frame-0", "frame-1"]])
+    assert (_parts(shown[0])[1], shown[1], store.fetches) == (
+        [thumbnail_url(0)],
+        _price(first),
+        [["frame-0", "frame-1"]],
+    )
 
 
 def test_a_failed_fetch_shows_nothing_and_names_only_its_type(loguru_caplog: LogCaptureFixture) -> None:
@@ -230,7 +225,7 @@ def test_a_picture_without_a_stored_thumbnail_is_passed_over() -> None:
     shown = images.attach(_numbered(frame_passage(0), frame_passage(1)), room=WIDE)
 
     assert shown is not None
-    assert (_parts(shown[0]), images.count) == ((render_legend(LEGEND, [(2, *thumbnail(1))]), [_url(1)]), 1)
+    assert (_parts(shown[0]), images.count) == ((render_legend(LEGEND, [(2, *thumbnail(1))]), [thumbnail_url(1)]), 1)
 
 
 def test_a_picture_shown_before_is_not_shown_again() -> None:
@@ -257,7 +252,7 @@ def test_two_passages_of_one_picture_in_a_round_show_it_once() -> None:
 
     assert shown is not None
     assert (_parts(shown[0]), shown[1], images.count) == (
-        (render_legend(LEGEND, [(1, *thumbnail(0))]), [_url(0)]),
+        (render_legend(LEGEND, [(1, *thumbnail(0))]), [thumbnail_url(0)]),
         _price(1),
         1,
     )
@@ -288,7 +283,7 @@ def test_a_drop_takes_back_only_the_messages_it_built() -> None:
     built = images.attach(_numbered(frame_passage(0)), room=WIDE)
     assert built is not None
     foreign = ChatMessage(
-        role=MessageRole.USER, blocks=[TextBlock(text="Ein Bild vom Anleger."), ImageBlock(url=_url(1))]
+        role=MessageRole.USER, blocks=[TextBlock(text="Ein Bild vom Anleger."), ImageBlock(url=thumbnail_url(1))]
     )
     equal = built[0].model_copy(deep=True)
 
