@@ -18,7 +18,7 @@ from llama_index.core.schema import QueryBundle
 from docint.agents.turn.history import ConversationWindow
 from docint.agents.turn.tools import ToolContext
 from docint.core.rag import RAG, agent_llm_view
-from docint.core.retrieval.evidence import EveryChildQuery
+from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.utils.env_cfg import OpenAIConfig
 
 
@@ -96,7 +96,8 @@ def test_an_agent_search_asks_a_real_engine_for_every_child(monkeypatch: pytest.
     reply = turn.loop._registry.call(tool_call("search", query="method"), ctx)
 
     assert reply.found == 1
-    assert [type(bundle) for bundle in recorder.bundles] == [EveryChildQuery]
+    assert [type(bundle) for bundle in recorder.bundles] == [AgentSearchQuery]
+    assert isinstance(recorder.bundles[0], EveryChildQuery)
     assert [cast(QueryBundle, bundle).query_str for bundle in recorder.bundles] == ["method"]
 
 
