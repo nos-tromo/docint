@@ -45,7 +45,7 @@ from docint.core.rag import (
     ParentContextPostprocessor,
     agent_llm_view,
 )
-from docint.core.retrieval.evidence import EveryChildQuery
+from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS, RetrievalTarget
 from docint.core.retrieval_filters import build_qdrant_filter
 from docint.utils.embed_chunking import estimate_tokens
@@ -1208,6 +1208,8 @@ def test_each_search_expands_its_own_query_for_retrieval_only(monkeypatch: pytes
 
     (bundle,) = [call.args[0] for call in engine.retrieve.call_args_list]
     assert isinstance(bundle, EveryChildQuery)
+    # An agent's own search: its sub-floor images get no description re-score.
+    assert isinstance(bundle, AgentSearchQuery)
     assert bundle.query_str == "Hafenfest Sonntag\n\nRelated entities for retrieval: Person B"
     assert reply.detail == "Hafenfest Sonntag"
     assert "Person B" not in reply.text

@@ -457,7 +457,7 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 | `IMAGE_FAIL_ON_TAG_ERROR` | `false` | Treat tagging failures as fatal. |
 | `IMAGE_RETRIEVE_TOP_K` | `5` | CLIP candidates the image lane contributes to each query's ranking. |
 | `IMAGE_RERANK_MIN_SCORE` | `0.05` | Minimum reranker relevance score for a retrieved image to surface as a source. A sub-floor image that would land inside the top-n still gets the re-score below before it is dropped. |
-| `IMAGE_RESCORE_ENABLED` | `true` | Give such a sub-floor image one second look: its caption is reranked against a one-line list of the visible cues the query needs, with their alternatives rather than a guessed answer, which costs one chat call and one rerank call on a turn that has such an image. `false` drops sub-floor images unasked. |
+| `IMAGE_RESCORE_ENABLED` | `true` | Give such a sub-floor image one second look: its caption is reranked against a one-line list of the visible cues the query needs, with their alternatives rather than a guessed answer, which costs one chat call and one rerank call on a turn that has such an image. `false` drops sub-floor images unasked. An agent turn's own searches never re-score. |
 | `IMAGE_RESCORE_MIN_SCORE` | `0.02` | Description score that keeps a re-scored image, at the position and with the score it already had. |
 | `IMAGE_RESCORE_TIMEOUT` | `10` | Seconds the description call may take, in one attempt with no retries: it runs before the answer's first token. A value that is not a positive number keeps the default and logs a warning. |
 | `IMAGE_TAGGING_MAX_IMAGE_DIM` | `1024` | Max dimension for images sent to the vision tagging endpoint. |

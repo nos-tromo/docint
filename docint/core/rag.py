@@ -171,7 +171,7 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
-from docint.core.retrieval.evidence import EveryChildQuery
+from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval.visual import (
     BLOB_PAYLOAD_KEYS,
     DEFAULT_RETRIEVAL_TARGET,
@@ -2497,11 +2497,12 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
         Returns:
             set[str]: Ids of the candidates whose description score reaches
             ``rescore_min_score``. Empty with no candidate, no re-score or no
-            query, and when the re-score raises. A completed call logs its
+            query, for an agent's own search (:class:`AgentSearchQuery`), and
+            when the re-score raises. A completed call logs its
             counts and duration at DEBUG, never the query or the description.
         """
         query = str(getattr(query_bundle, "query_str", "") or "").strip()
-        if not candidates or self.rescore is None or not query:
+        if not candidates or self.rescore is None or not query or isinstance(query_bundle, AgentSearchQuery):
             return set()
         started_at = time.monotonic()
         try:
@@ -8994,7 +8995,7 @@ class RAG:
         )
         registry = toolset_for(
             retrieval_target,
-            search=lambda query: list(engine.retrieve(EveryChildQuery(self.expand_query_with_graph(query)))),
+            search=lambda query: list(engine.retrieve(AgentSearchQuery(self.expand_query_with_graph(query)))),
             search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
             list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
         )

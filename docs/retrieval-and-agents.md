@@ -651,9 +651,10 @@ calls, says the round was sent again.
 
 - **`search(query)`** retrieves through the turn's own engine, so the request's
   filters, rerank and parent-context expansion apply as on a lookup. Every
-  retrieved child of a section is kept (`EveryChildQuery`). Each query is
+  retrieved child of a section is kept (`AgentSearchQuery`). Each query is
   expanded with graph neighbours for retrieval alone; the reply and the trail
-  show the model's own words.
+  show the model's own words. A sub-floor image gets no description re-score
+  here: the agent searches pictures with its own image tools.
 - **`search_images(description)`** runs the visual target's chain over the
   `{collection}_images` companion, under the request's filters: CLIP and the
   keyword lane fused, then reranked against the description, with no relevance

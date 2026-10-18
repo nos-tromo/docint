@@ -27,6 +27,7 @@ from docint.core.rag import (
     MultimodalRetriever,
     VLLMRerankPostprocessor,
 )
+from docint.core.retrieval.evidence import AgentSearchQuery
 
 IMAGE_PAYLOAD: dict[str, Any] = {
     "image_id": "img-9f2c",
@@ -602,6 +603,27 @@ def test_a_sub_floor_image_inside_the_cut_is_kept_when_its_description_score_cle
     assert _ids(out) == ["t1", "i1", "t2"]
     assert out[1].score == 0.0044
     assert rescore.calls == [("Wie ist das Wetter am Hafen?", ["i1"])]
+
+
+def test_an_agent_search_gives_a_sub_floor_image_no_second_look() -> None:
+    """An agent's own search drops a sub-floor image without the description re-score.
+
+    An agent turn has its own image tools, so each of its text searches stays one
+    retrieval rather than spending a chat call on a second look.
+    """
+    nodes = [
+        _text_node("t1", "Handbook section 1.", 0.3),
+        _image_node("i1", 0.0044),
+        _text_node("t2", "Handbook section 2.", 0.0001),
+    ]
+    rescore = _Rescore({"i1": 0.86})
+
+    out = ImageRelevanceFloorPostprocessor(
+        min_score=0.05, top_n=5, rescore=rescore, rescore_min_score=0.02
+    )._postprocess_nodes(nodes, AgentSearchQuery(query_str="Wie ist das Wetter am Hafen?"))
+
+    assert _ids(out) == ["t1", "t2"]
+    assert rescore.calls == []
 
 
 def test_a_sub_floor_image_inside_the_cut_is_dropped_when_its_description_score_does_not() -> None:
