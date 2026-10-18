@@ -788,6 +788,26 @@ describe('ChatTurn', () => {
     expect(screen.getByTestId('agent-trail-live')).toHaveTextContent('Hafen')
   })
 
+  it('draws a seed as passages, as a read is, never as a search', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 0, action: 'seed', detail: '', found: 2 },
+        { step: 1, action: 'search', detail: 'Hafen', found: 1 },
+        { step: 1, action: 'read', detail: '1', found: 0 }
+      ]
+    })
+
+    const [seed, search, read] = within(screen.getByTestId('agent-trail-live'))
+      .getAllByRole('listitem')
+      .map((row) => row.querySelector('svg')?.innerHTML)
+    expect(seed).toBe(read)
+    expect(seed).not.toBe(search)
+  })
+
   it('marks the steps that read the collection with an icon, and a note with none', () => {
     renderTurn({ user: 'Was zeigt der Clip?', assistant: '', done: false, meta: null, agentSteps: NEW_STEPS })
 

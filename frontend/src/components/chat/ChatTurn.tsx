@@ -205,6 +205,7 @@ function StepMarker({ action }: { action: AgentAction }) {
       return <span aria-hidden="true" className={className} />
     case 'keyframes':
       return <ImageIcon className={className} />
+    case 'seed':
     case 'read':
       return <DocumentsIcon className={className} />
     default:
