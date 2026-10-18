@@ -428,7 +428,7 @@ def _numbered(nodes: list[NodeWithScore]) -> list[NodeWithScore]:
     return ledger.numbered()
 
 
-def _renders_legibly(nodes: list[NodeWithScore], **kwargs: Any) -> bool:
+def _is_legible(nodes: list[NodeWithScore], **kwargs: Any) -> bool:
     """Return whether the evidence renders legibly, as a pinned scope is checked before it is sent.
 
     Args:
@@ -456,8 +456,8 @@ def test_every_cut_passage_must_keep_the_legible_minimum() -> None:
         for scored in nodes
     )
 
-    assert _renders_legibly(nodes, llm_view=llm_view, budget_tokens=reserved + 4 * MIN_TEXT_CHARS, char_token_ratio=1.0)
-    assert not _renders_legibly(
+    assert _is_legible(nodes, llm_view=llm_view, budget_tokens=reserved + 4 * MIN_TEXT_CHARS, char_token_ratio=1.0)
+    assert not _is_legible(
         nodes, llm_view=llm_view, budget_tokens=reserved + 4 * MIN_TEXT_CHARS - 1, char_token_ratio=1.0
     )
 
@@ -466,15 +466,15 @@ def test_passages_shown_whole_fit_however_short_they_are() -> None:
     """The minimum applies to what was cut; a short passage shown in full is legible as it is."""
     nodes = _numbered([scored_node(f"n{number}", "Short.", page=number) for number in range(1, 4)])
 
-    assert _renders_legibly(nodes, llm_view=llm_view, budget_tokens=200, char_token_ratio=3.5)
+    assert _is_legible(nodes, llm_view=llm_view, budget_tokens=200, char_token_ratio=3.5)
 
 
 def test_evidence_with_no_room_left_for_text_does_not_fit() -> None:
     """When the headers alone use the budget there is nothing to read, even where no text was cut."""
     nodes = _numbered([scored_node(f"n{number}", "", page=number) for number in range(1, 4)])
 
-    assert not _renders_legibly(nodes, llm_view=llm_view, budget_tokens=10, char_token_ratio=3.5)
-    assert _renders_legibly(nodes, llm_view=llm_view, budget_tokens=200, char_token_ratio=3.5)
+    assert not _is_legible(nodes, llm_view=llm_view, budget_tokens=10, char_token_ratio=3.5)
+    assert _is_legible(nodes, llm_view=llm_view, budget_tokens=200, char_token_ratio=3.5)
 
 
 def test_shared_budget_helpers_keep_the_validator_semantics() -> None:
@@ -907,7 +907,7 @@ def test_legibility_holds_exactly_at_its_boundaries(body: int, slack: int, legib
         "char_token_ratio": 1.0,
     }
 
-    assert _renders_legibly(nodes, **kwargs) is legible
+    assert _is_legible(nodes, **kwargs) is legible
 
 
 def test_a_compact_header_keeps_its_citation_line_first_and_caps_the_rest() -> None:
@@ -940,8 +940,8 @@ def test_compact_legibility_is_judged_on_the_headers_it_renders() -> None:
     budget = sum(len(header) + 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS for header in headers)
 
     assert len(headers) == 4
-    assert _renders_legibly(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
-    assert not _renders_legibly(nodes, llm_view=llm_view, budget_tokens=budget - 1, char_token_ratio=1.0, compact=True)
+    assert _is_legible(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
+    assert not _is_legible(nodes, llm_view=llm_view, budget_tokens=budget - 1, char_token_ratio=1.0, compact=True)
     packed, _, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0, compact=True)
     assert len(packed) <= budget
 
@@ -1104,7 +1104,7 @@ def test_a_merged_passage_keeps_every_match_beside_a_long_plain_one() -> None:
     merged = nodes[0]
     floor = text_floor(_text(merged), [(start, end) for start, end in merged.node.metadata[MATCH_SPANS_KEY]])
     budget = _header_chars(nodes) + floor + MIN_TEXT_CHARS
-    assert _renders_legibly(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
+    assert _is_legible(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
 
     context, shortened, _ = render_context(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0)
 
@@ -1207,7 +1207,7 @@ def test_legible_evidence_renders_every_match_it_holds() -> None:
                 ledger.add([_random_window(rng, f"e{entry}", seam=rng.random() < 0.15)])
         nodes = ledger.numbered()
         budget = rng.randrange(200, 9000)
-        if _renders_legibly(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0):
+        if _is_legible(nodes, llm_view=llm_view, budget_tokens=budget, char_token_ratio=1.0):
             legible += 1
             shortened += _render_legibly(nodes, budget) > 0
 

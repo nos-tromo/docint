@@ -1083,7 +1083,7 @@ def test_a_round_holds_its_model_slot_while_it_streams_and_gives_it_back() -> No
     slots.release()
 
 
-# --- Search slots and the deadline, ported from the research loop ----------------------------
+# --- Search slots and the deadline -----------------------------------------------------------
 
 
 def test_a_search_that_outlives_the_time_left_keeps_its_slot_until_it_ends(

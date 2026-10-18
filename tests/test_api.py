@@ -6702,7 +6702,7 @@ SPLIT_AGENT: dict[str, Any] = {
 def test_stream_query_streams_agent_frames_and_validates_only_the_evidence_part(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Research steps stream as agent frames; the validator sees part 1 and its citations.
+    """An agent turn's steps stream as agent frames; the validator sees part 1 and its citations.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.

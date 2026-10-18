@@ -281,7 +281,7 @@ def test_assessment_max_steps_is_not_read_while_agent_max_rounds_is_set(
 @pytest.mark.parametrize("var", ["AGENT_MAX_ROUNDS", "ASSESSMENT_MAX_STEPS"])
 @pytest.mark.parametrize(("raw", "expected"), [("3", 3), ("1", 1), ("0", 0), ("-2", 0)])
 def test_max_rounds_is_clamped_at_zero(monkeypatch: pytest.MonkeyPatch, var: str, raw: str, expected: int) -> None:
-    """A negative budget means no research rounds, never an error; zero stays a valid budget.
+    """A negative budget means no tool rounds, never an error; zero stays a valid budget.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.

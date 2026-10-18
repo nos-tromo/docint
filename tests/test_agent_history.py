@@ -546,7 +546,7 @@ def test_an_earlier_assessment_shows_its_two_parts_labelled() -> None:
 
 
 def test_a_long_source_backed_part_cannot_push_the_judgement_out() -> None:
-    """The two parts share the message's room shortest first, as the prior-turn block shares its own."""
+    """The two parts share the message's room shortest first, so the judgement keeps its share."""
     sourced = "The invented survey interviewed respondents at three piers. " * 120
 
     window = build_window([_assessment(sourced), _turn(2)], "", allowance_tokens=PLAIN, char_token_ratio=RATIO)
