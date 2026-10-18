@@ -24,6 +24,7 @@ from llama_index.core.base.llms.types import MessageRole
 import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
 from docint.agents.assessment.bounded import NoSlot
+from docint.agents.turn.loop import _OVERFLOW_MESSAGE
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
 from docint.agents.types import AgentProgress, IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
@@ -6400,32 +6401,20 @@ def test_the_probe_asks_the_model_client_the_turn_ran_on(
 ) -> None:
     """The probe runs within the request's reasoning toggle, so it asks the agent client the turn used.
 
+    The toggle is a ``ContextVar``, as the real one is, so the probe on ``/stream_query``'s
+    worker thread sees it only because the request's context travels there. The rejection is
+    cached under that toggle alone.
+
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
         path (str): The endpoint under test.
     """
     _open_agent_gate(monkeypatch)
+    toggle = _bind_reasoning(monkeypatch)
     rag = cast(Any, api_module.rag)
-    bound: list[bool | None] = [None]
     asked_with: list[bool | None] = []
     probe = streaming_tool_llm([bad_request(TOOLS_REFUSED)])
-
-    @contextlib.contextmanager
-    def _reasoning_scope(enabled: bool | None) -> Iterator[None]:
-        """Bind the request's toggle while the block runs.
-
-        Args:
-            enabled (bool | None): The request's toggle.
-
-        Yields:
-            None: Control, with the toggle bound.
-        """
-        bound.append(enabled)
-        try:
-            yield
-        finally:
-            bound.pop()
 
     def _agent_model(_self: Any) -> Any:
         """Hand out the probe's model, recording the toggle bound when it is asked for.
@@ -6436,10 +6425,9 @@ def test_the_probe_asks_the_model_client_the_turn_ran_on(
         Returns:
             Any: The probe's model double.
         """
-        asked_with.append(bound[-1])
+        asked_with.append(toggle.get())
         return probe
 
-    monkeypatch.setattr(rag, "reasoning_scope", _reasoning_scope)
     monkeypatch.setattr(DummyRAG, "agent_text_model", property(_agent_model), raising=False)
     monkeypatch.setattr(rag, "stream_chat", lambda question, **kwargs: iter([AGENT_ANSWER, _fallback_final()]))
     monkeypatch.setattr(rag, "chat", lambda question, **kwargs: _fallback_final())
@@ -6451,7 +6439,8 @@ def test_the_probe_asks_the_model_client_the_turn_ran_on(
         _stream_frames(client, **request)
 
     assert asked_with == [True]
-    assert api_module._agent_turn_allowed("all") is False
+    assert (gate_module.tools_rejection_cached(reasoning=True), toggle.get()) == (True, None)
+    assert gate_module.tools_rejection_cached(reasoning=False) is False
 
 
 def test_a_scoped_turns_refusal_caches_nothing(
@@ -6500,7 +6489,7 @@ def test_a_scoped_turns_refusal_caches_nothing(
     ("error", "code"),
     [
         (NoSlot(), "generation_failed"),
-        (ValueError("The agent turn's prompt exceeds the model's context window."), "context_overflow"),
+        (ValueError(_OVERFLOW_MESSAGE), "context_overflow"),
         (RuntimeError("invented outage"), "generation_failed"),
         (status_error(openai.InternalServerError, 500, "invented outage"), "generation_failed"),
     ],
