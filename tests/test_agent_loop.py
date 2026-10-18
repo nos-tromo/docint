@@ -18,6 +18,7 @@ import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
+    LEDGER_CAP,
     PROGRAMME,
     ThumbnailStore,
     chunk,
@@ -46,8 +47,7 @@ from docint.agents.assessment.bounded import (
     SEARCH_SLOTS,
     NoSlot,
 )
-from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger, render_context
-from docint.agents.assessment.runner import AssessmentDoesNotFit
+from docint.agents.assessment.ledger import EvidenceLedger, render_context
 from docint.agents.assessment.split import SENTINEL, assessment_label
 from docint.agents.turn import loop as turn_loop
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
@@ -318,7 +318,7 @@ def _turn(
         window=window or ConversationWindow(),
         message=QUESTION,
         # An empty ledger is falsy, so only a missing one is replaced.
-        ledger=EvidenceLedger(cap=MAX_LEDGER_ENTRIES) if ledger is None else ledger,
+        ledger=EvidenceLedger(cap=LEDGER_CAP) if ledger is None else ledger,
         pinned=pinned,
     )
 
@@ -1111,7 +1111,7 @@ def test_a_search_that_outlives_the_time_left_keeps_its_slot_until_it_ends(
         held.wait(timeout=30)
         return [programme_passage()]
 
-    ledger = EvidenceLedger(cap=MAX_LEDGER_ENTRIES)
+    ledger = EvidenceLedger(cap=LEDGER_CAP)
     llm = streaming_tool_llm([_calls(_search_call("call_a", "zzsecretzz Programm")), _answer()])
 
     _drain(
@@ -2489,11 +2489,6 @@ def test_an_empty_scope_is_still_answered_without_tools() -> None:
 
     assert progress == [AgentProgress(step=0, action="seed", detail="", found=0)]
     assert (result.nodes, llm.stream_chat.call_args.kwargs) == ([], {})
-
-
-def test_the_assessment_runners_error_is_the_agents_evidence_does_not_fit() -> None:
-    """The callers of #648's runner still catch the old name, which now names the agent's error."""
-    assert AssessmentDoesNotFit is EvidenceDoesNotFit
 
 
 # --- Pictures for the visual target ------------------------------------------------------------

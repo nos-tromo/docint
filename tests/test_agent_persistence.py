@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
-from docint.agents.types import AnswerMode
+from docint.agents.types import AnswerMode, PriorTurn
 from docint.core.rag import AGENT_LEDGER_CAP, AgentTurn
 from docint.core.state.base import Base
 from docint.core.state.session_manager import SessionManager
@@ -358,3 +358,70 @@ def test_each_path_stores_the_mode_it_answered_in(
         list(session_manager.stream_chat(QUESTION, session_id="s1", agent=agent))
 
     assert _stored_modes(session_manager) == [stored]
+
+
+def test_get_prior_turn_reads_the_last_exchange_with_its_evidence_boundary(session_manager: SessionManager) -> None:
+    """The prior-turn reader needs neither citation rehydration nor full history.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    session_manager._persist_turn("s1", "q1", _resp("n1"), {"response": "First [1]."})
+    session_manager._persist_turn(
+        "s1",
+        "q2",
+        _resp("n2"),
+        {"response": "Fact [1]. View."},
+        agent_trail=ASSESSMENT_TRAIL,
+        answer_mode="assessment",
+    )
+
+    prior = session_manager.get_prior_turn("s1", owner=None)
+
+    assert prior == PriorTurn(user_text="q2", assistant_text="Fact [1]. View.", evidence_chars=9)
+    cast(Any, session_manager.rag.get_source_by_node_id).assert_not_called()
+
+
+def test_get_prior_turn_is_owner_scoped(session_manager: SessionManager) -> None:
+    """Another principal's session reads as no prior turn at all.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    session_manager._persist_turn("s1", "q", _resp("n1"), {"response": "a"}, owner="alice")
+
+    assert session_manager.get_prior_turn("s1", owner="mallory") is None
+    assert session_manager.get_prior_turn("s1", owner="alice") is not None
+
+
+def test_get_prior_turn_is_none_for_an_unknown_session(session_manager: SessionManager) -> None:
+    """A first turn has nothing to build on.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    assert session_manager.get_prior_turn("missing", owner=None) is None
+
+
+def test_export_writes_the_answer_mode(session_manager: SessionManager, tmp_path: Path) -> None:
+    """The session export keeps the trail beside the answer text, under its schema version.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        tmp_path (Path): A temporary directory.
+    """
+    session_manager._persist_turn(
+        "s1",
+        "Q",
+        _resp("n1"),
+        {"response": "Fact [1]. View."},
+        agent_trail=ASSESSMENT_TRAIL,
+        answer_mode="assessment",
+    )
+
+    out = session_manager.export_session("s1", out_dir=tmp_path)
+
+    message = json.loads((out / "messages.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert message["answer_mode"] == "assessment"
+    assert message["agent"] == ASSESSMENT_TRAIL
+    assert json.loads((out / "session.json").read_text(encoding="utf-8"))["schema_version"] == "1.1.0"

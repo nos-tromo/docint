@@ -10,6 +10,7 @@ import sys
 
 import pytest
 from agent_fakes import (
+    LEDGER_CAP,
     PROGRAMME,
     ScriptedSearch,
     programme_passage,
@@ -26,7 +27,6 @@ import docint.agents.turn
 from docint.agents.assessment.ledger import (
     COMPACT_HEADER_CHARS,
     MARKER_RESERVE_CHARS,
-    MAX_LEDGER_ENTRIES,
     MIN_TEXT_CHARS,
     WINDOW_JOIN,
     passage_costs,
@@ -525,11 +525,11 @@ def _addendum(number: int) -> NodeWithScore:
 @pytest.mark.parametrize(
     ("again", "grown", "cap", "notes"),
     [
-        (8, 0, MAX_LEDGER_ENTRIES, ("Also matched, shown before: [1]", "did not fit in this reply")),
+        (8, 0, LEDGER_CAP, ("Also matched, shown before: [1]", "did not fit in this reply")),
         (
             4,
             4,
-            MAX_LEDGER_ENTRIES,
+            LEDGER_CAP,
             ("shown before: [1], [2], [3], [4].", "new text not shown here: [5], [6], [7], [8];", "did not fit"),
         ),
         (0, 0, 4, ("the evidence holds all it can",)),

@@ -1,6 +1,6 @@
-"""What an assessment asks of retrieval beyond what a lookup asks.
+"""What an agent turn's search asks of retrieval beyond what a lookup asks.
 
-An assessment searches through the turn's own engine, so filters, rerank and
+An agent turn searches through the turn's own engine, so filters, rerank and
 parent context apply as on a lookup. Its searches carry :class:`EveryChildQuery`
 as their bundle; the engine hands that same bundle to every postprocessor, which
 is how parent-context expansion knows to keep every retrieved child of a section

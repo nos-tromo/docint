@@ -8,7 +8,8 @@ AnswerMode = Literal["lookup", "assessment"]
 
 AgentAction = Literal["seed", "search", "answer", "note", "search_images", "keyframes", "read"]
 """What one step of an agent turn did: a tool call by the tool's name, or a ``note``, the text a
-round wrote before its calls. ``seed`` and ``answer`` are the steps of an earlier assessment turn."""
+round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages;
+``answer`` is found only in trails stored by the earlier assessment pipeline."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,8 +20,8 @@ class AgentProgress:
     chat stream yields as its final payload, and ``None`` as its end.
 
     Attributes:
-        step (int): The round the step belongs to, from ``1``; an assessment
-            turn's first search is ``0``.
+        step (int): The round the step belongs to, from ``1``; a scoped turn's
+            ``seed`` is ``0``.
         action (AgentAction): What the step did.
         detail (str): The call's main argument, such as a model-written search
             query, or a note's text; empty when there is none. Shown to the user,

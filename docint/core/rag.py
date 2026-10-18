@@ -132,8 +132,6 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from docint.agents.assessment.ledger import EvidenceLedger
-from docint.agents.assessment.research import ResearchLoop
-from docint.agents.assessment.runner import AssessmentRunner
 from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, message_cost, schema_tokens
 from docint.agents.turn.history import question_block
 from docint.agents.turn.loop import AgentLoop
@@ -531,7 +529,7 @@ def _quantization_matches(
 # bulky), pipeline artefacts, and our own
 # ``parent_context_windowed`` / ``parent_full_chars`` / ``window_chars``
 # debug markers and ``docint_match_spans`` (where the retrieved child sits
-# in an emitted parent; read by assessment packing, never by the prompt).
+# in an emitted parent; read by agent-turn packing, never by the prompt).
 # Any new metadata key added by a future reader defaults
 # to excluded — safer than accidentally reintroducing the overflow.
 LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
@@ -1527,7 +1525,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             match_spans: Where the retrieved child sits in *source*'s text,
                 as ``[start, end]`` spans. Written under
                 ``MATCH_SPANS_KEY`` before the exclusion list is built, so
-                the prompt never sees it; only assessment packing reads it.
+                the prompt never sees it; only agent-turn packing reads it.
 
         Returns:
             A fresh ``TextNode`` preserving the original ``node_id`` and
@@ -1784,7 +1782,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             seen_parent_ids.add(parent_id)
             parent_hits += 1
             parent_text = parent_node.get_content()
-            # An assessment folds this section's later hits into its one emission; a lookup skips them.
+            # An agent search folds this section's later hits into its one emission; a lookup skips them.
             group: list[NodeWithScore] = (
                 [hit for hit in nodes[position:] if self._parent_id(hit) == parent_id] if every_child else []
             )
@@ -3932,12 +3930,11 @@ class RAG:
 
         The SDK retries a failed call and llama-index retries it again, so with
         ``OPENAI_MAX_RETRIES`` set one call can outlast its own ``timeout`` several
-        times over. The turn classifier, the research step and every round of an
-        agent turn without reasoning (see :attr:`agent_text_model`), its answer
-        included, use this instance instead: a failure ends the call, and each
-        caller degrades or reports it on its own. They work to a deadline, and a
-        call abandoned at it holds its slot until it ends, so a single attempt
-        still bounds how long it holds it. Lookups keep ``OPENAI_MAX_RETRIES``.
+        times over. Every round of an agent turn without reasoning (see
+        :attr:`agent_text_model`), its answer included, uses this instance
+        instead: a failure ends the call, and the loop decides what follows. Its
+        time budget and its model slots assume one attempt per call. Lookups keep
+        ``OPENAI_MAX_RETRIES``.
 
         Returns:
             OpenAI: The non-reasoning model, making a single attempt per call.
@@ -8875,50 +8872,6 @@ class RAG:
             fallback_trail=fallback_trail,
         )
 
-    def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:
-        """Build the runner for one assessment turn over this turn's engine.
-
-        Research runs on the plain (non-reasoning) chat model, which picks the
-        queries, with retries off so a call research abandons at its time budget
-        frees its slot at its own timeout; the answer is written by whichever
-        model the request's reasoning toggle selects.
-
-        Args:
-            engine (Any): The turn's query engine; research searches through its
-                ``retrieve``, so filters, rerank and parent context apply as on a
-                lookup without building a second engine, every child the reranker
-                returns kept (see :class:`EveryChildQuery`).
-            scoped (bool): Whether the turn answers from a pinned scope, which
-                forbids searching beyond it.
-
-        Returns:
-            AssessmentRunner: A runner bound to this request's models and limits.
-        """
-        research_llm = self.bounded_text_model
-        answer_llm = self.post_retrieval_text_model
-        ratio = float(self.embed_char_token_ratio or 3.5)
-        counter = self._embed_token_counter
-        researcher = (
-            None
-            if scoped
-            else ResearchLoop(
-                llm=research_llm,
-                search=lambda query: list(engine.retrieve(EveryChildQuery(query))),
-                max_steps=load_assessment_env().max_steps,
-                ctx_window=int(self.openai_ctx_window),
-                char_token_ratio=ratio,
-            )
-        )
-        return AssessmentRunner(
-            answer_llm=answer_llm,
-            llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
-            ctx_window=int(self.openai_ctx_window),
-            char_token_ratio=ratio,
-            reasoning=answer_llm is not self.text_model,
-            researcher=researcher,
-            count_tokens=(lambda text: len(counter(text))) if counter is not None else None,
-        )
-
     @property
     def agent_char_token_ratio(self) -> float:
         """Characters per token an agent turn is measured with: its window, its budget and its loop.
@@ -8954,7 +8907,7 @@ class RAG:
 
         Returns:
             str: ``agent_system`` with the target's tools guide, the assessment rule while
-            assessment turns are enabled, and the window's summary block.
+            ``ASSESSMENT_ENABLED`` is on, and the window's summary block.
         """
         rule = self._agent_prompt("agent_assessment_rule") if load_assessment_env().enabled else ""
         return self._agent_prompt("agent_system").format(

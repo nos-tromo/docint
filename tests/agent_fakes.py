@@ -18,7 +18,7 @@ from assessment_fakes import llm_view, scored_node
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.schema import BaseNode, NodeWithScore
 
-from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger
+from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.stream import ToolCall
@@ -37,6 +37,8 @@ PROGRAMME = (
 
 #: Where the invented chat endpoint lives; nothing is ever sent there.
 INVENTED_ENDPOINT = "http://inference.invalid/v1/chat/completions"
+#: The ledger cap of a test turn that sets none; a production turn sizes its own (``AGENT_LEDGER_CAP``).
+LEDGER_CAP = 24
 
 
 def status_error(cls: type[openai.APIStatusError], status: int, message: str) -> openai.APIStatusError:
@@ -231,7 +233,7 @@ def turn_budget(*, reasoning: bool = False) -> TurnBudget:
 def tool_context(
     *,
     reasoning: bool = False,
-    cap: int = MAX_LEDGER_ENTRIES,
+    cap: int = LEDGER_CAP,
     view: Callable[[BaseNode], BaseNode] = llm_view,
 ) -> ToolContext:
     """Build the context of one turn whose evidence is still empty.

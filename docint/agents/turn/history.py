@@ -44,11 +44,11 @@ NO_HISTORY = "(none)"
 SUMMARY_HEADER = "Summary of the earlier conversation"
 QUESTIONS_HEADER = "Earlier questions, newest first (their answers are not shown)"
 
-#: How an earlier assessment's two parts are labelled, in the window's messages and the prior-turn block.
+#: How an earlier assessment's two parts are labelled in the window's messages.
 ANSWER_SOURCED_LABEL = "Previous assistant answer, source-backed part"
 ANSWER_ASSESSMENT_LABEL = "Previous assistant answer, the model's own assessment"
 
-#: Longest history-resolved rewrite, in characters, that research and the answer step are shown.
+#: Longest history-resolved rewrite, in characters, that a plain lookup's answer is shown beside the question.
 RESOLVED_QUESTION_CHARS = 1000
 #: How the question block labels that rewrite.
 RESOLVED_QUESTION_LABEL = (
@@ -157,14 +157,16 @@ def labelled_lines(labels: Sequence[str], parts: Sequence[str]) -> str:
 
 
 def question_block(question: str, resolved: str | None) -> str:
-    """Render the question as research and the answer step are shown it.
+    """Render the question a plain lookup's answer is asked: the user's words, then the rewrite.
 
-    The search rewrite a lookup answers from can carry what the conversation
-    settled before the last exchange, such as a constraint set two turns
-    earlier. It is model output, so it is shown sanitized: reasoning blocks and
-    bracketed citation numbers, which point at an earlier turn's sources, are
-    dropped, its whitespace collapses onto one line, sentinels are defused, and
-    it is cut to ``RESOLVED_QUESTION_CHARS`` with a marker.
+    A plain lookup retrieves with the history-resolved search rewrite, which can
+    carry what the conversation settled before the last exchange, such as a
+    constraint set two turns earlier, so its answer reads the rewrite on a
+    labelled line under the user's own words. The rewrite is model output, so it
+    is shown sanitized: reasoning blocks and bracketed citation numbers, which
+    point at an earlier turn's sources, are dropped, its whitespace collapses onto
+    one line, sentinels are defused, and it is cut to ``RESOLVED_QUESTION_CHARS``
+    with a marker.
 
     Args:
         question (str): The user's message, verbatim.
@@ -332,8 +334,8 @@ def _reply_parts(turn: ConversationTurn) -> tuple[tuple[str, ...], tuple[str, ..
 
     Returns:
         tuple[tuple[str, ...], tuple[str, ...]]: The labels and the parts, citation numbers
-        dropped: an assessment's two parts, each labelled by the rules of the prior-turn block,
-        or the whole answer with no label.
+        dropped: an assessment's two parts, each labelled where :func:`split_answer` trusts its
+        boundary, or the whole answer with no label.
     """
     sourced, assessment = split_answer(turn.assistant_text, turn.evidence_chars)
     if sourced or assessment:
@@ -420,8 +422,8 @@ def build_window(
     ``EARLIER_QUESTIONS_TOKENS``, and the newest part of the rolling summary up to
     ``SUMMARY_TOKENS``; both claim their share before the exchanges are cut, so long
     answers cannot push an open question out. Citation numbers are dropped from the
-    summary and every answer; an earlier assessment shows its two parts labelled, by the
-    rules of the prior-turn block.
+    summary and every answer; an earlier assessment shows its two parts labelled where
+    :func:`split_answer` trusts its stored boundary.
 
     The allowance covers the whole window: the block, every message's text and the
     ``MESSAGE_OVERHEAD_TOKENS`` envelope each message costs, so a caller that counts the block

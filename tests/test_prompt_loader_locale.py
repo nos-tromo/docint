@@ -13,11 +13,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from agent_fakes import ScriptedSearch, shown_numbers, tool_call, tool_context
+from agent_fakes import LEDGER_CAP, ScriptedSearch, shown_numbers, tool_call, tool_context
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.schema import NodeWithScore
 
-from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger
+from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.history import ANSWER_ASSESSMENT_LABEL, ANSWER_SOURCED_LABEL, NO_HISTORY, labelled_lines
 from docint.agents.turn.passages import _trailer, search_hint
@@ -252,59 +252,12 @@ def test_summary_fold_prompt_placeholders() -> None:
         assert "{summaries_block}" in text, f"missing {{summaries_block}} in {locale}/summary_fold.txt"
 
 
-@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine", "assessment_answer", "agent_system"])
+@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine", "agent_system"])
 def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
     """Both locales ask the chat model for Markdown, which the SPA and the report exports render."""
     for locale in ("en", "de"):
         text = Path(f"docint/utils/prompts/{locale}/{name}.txt").read_text(encoding="utf-8")
         assert "Markdown" in text, f"{locale}/{name}.txt no longer asks for Markdown"
-
-
-@pytest.mark.parametrize(
-    "name", ["assessment_classify", "assessment_answer", "assessment_research", "response_validator_assessment"]
-)
-def test_assessment_prompts_match_across_locales(name: str) -> None:
-    """German and English assessment prompts take the same placeholders and format cleanly.
-
-    Args:
-        name (str): The prompt basename.
-    """
-    import re
-
-    from docint.utils.env_cfg import load_path_env
-
-    root = load_path_env().prompts
-    texts = {code: (root / code / f"{name}.txt").read_text(encoding="utf-8") for code in ("en", "de")}
-
-    def placeholders(text: str) -> set[str]:
-        """Collect the ``{name}`` placeholders of a template.
-
-        Args:
-            text (str): The template text.
-
-        Returns:
-            set[str]: The placeholder names.
-        """
-        return set(re.findall(r"\{(\w+)\}", text))
-
-    assert placeholders(texts["de"]) == placeholders(texts["en"])
-    for text in texts.values():
-        text.format(**dict.fromkeys(placeholders(text), "X"))
-
-
-@pytest.mark.parametrize("code", ["en", "de"])
-def test_assessment_answer_prompt_carries_the_protocol_tokens(code: str) -> None:
-    """Both locales name the sentinel and the citation key verbatim; they are protocol.
-
-    Args:
-        code (str): The locale.
-    """
-    from docint.utils.env_cfg import load_path_env
-
-    text = (load_path_env().prompts / code / "assessment_answer.txt").read_text(encoding="utf-8")
-
-    assert "[[ASSESSMENT]]" in text
-    assert "citation_index" in text
 
 
 def _prompt(name: str, code: str) -> str:
@@ -427,9 +380,9 @@ def test_agent_prompts_match_across_locales(name: str) -> None:
         text.format(**dict.fromkeys(AGENT_PROMPTS[name], "X"))
 
 
-@pytest.mark.parametrize("name", ["response_validator", "rewrite_retrieval"])
+@pytest.mark.parametrize("name", ["response_validator", "response_validator_assessment", "rewrite_retrieval"])
 def test_formatted_plain_prompts_match_across_locales(name: str) -> None:
-    """The plain path's ``str.format`` prompts take the same placeholders in both locales and format cleanly.
+    """The validators' and the rewrite's ``str.format`` prompts share placeholders across locales and format cleanly.
 
     Args:
         name (str): The prompt basename.
@@ -475,7 +428,7 @@ def test_every_rule_on_citing_names_the_line_pinned_passages_show_too(code: str)
     pinned = scored_node("plan", "Der Hafenverein plant Stände am Kai.", filename="plan.pdf", page=1)
     message, _ = scope_message(
         [pinned],
-        ledger=EvidenceLedger(cap=MAX_LEDGER_ENTRIES),
+        ledger=EvidenceLedger(cap=LEDGER_CAP),
         note=_prompt("agent_scope", code),
         message="Was plant der Hafenverein?",
         llm_view=llm_view,

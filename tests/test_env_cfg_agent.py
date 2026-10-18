@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from _pytest.logging import LogCaptureFixture
 
-from docint.utils.env_cfg import AgentConfig, load_agent_env
+from docint.utils.env_cfg import AgentConfig, load_agent_env, load_assessment_env
 
 _VARS = (
     "AGENT_TURNS_ENABLED",
@@ -320,3 +320,40 @@ def test_a_clamped_value_warns(monkeypatch: pytest.MonkeyPatch, loguru_caplog: L
     load_agent_env()
 
     assert loguru_caplog.messages == ["AGENT_MAX_CALLS_PER_ROUND 0 is < 1; clamping."]
+
+
+def test_assessments_are_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset, ``ASSESSMENT_ENABLED`` lets an agent turn answer a judgement as a labelled assessment.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.delenv("ASSESSMENT_ENABLED", raising=False)
+
+    assert load_assessment_env().enabled is True
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("TRUE", True), ("yes", True)])
+def test_the_assessment_switch_parses_truthy_strings(monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool) -> None:
+    """The switch accepts the same truthy spellings as every other docint flag.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        raw (str): The environment value.
+        expected (bool): The parsed flag.
+    """
+    monkeypatch.setenv("ASSESSMENT_ENABLED", raw)
+
+    assert load_assessment_env().enabled is expected
+
+
+def test_a_malformed_older_round_count_cannot_fail_the_assessment_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ASSESSMENT_MAX_STEPS`` is only ``AGENT_MAX_ROUNDS``' fallback; every agent turn reads the switch beside it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.delenv("ASSESSMENT_ENABLED", raising=False)
+    monkeypatch.setenv("ASSESSMENT_MAX_STEPS", "many")
+
+    assert load_assessment_env().enabled is True

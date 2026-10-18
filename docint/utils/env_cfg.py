@@ -2306,31 +2306,29 @@ def load_corrective_retry_env(default_enabled: bool = True) -> CorrectiveRetryCo
 
 @dataclass(frozen=True)
 class AssessmentConfig:
-    """Dataclass for assessment-turn configuration."""
+    """Dataclass for assessment configuration."""
 
     enabled: bool
-    max_steps: int
 
 
-def load_assessment_env(default_enabled: bool = True, default_max_steps: int = 6) -> AssessmentConfig:
-    """Load assessment-turn configuration from environment variables.
+def load_assessment_env(default_enabled: bool = True) -> AssessmentConfig:
+    """Load assessment configuration from environment variables.
+
+    ``ASSESSMENT_MAX_STEPS`` is no longer read here: it survives only as the
+    fallback of ``AGENT_MAX_ROUNDS`` (see :func:`load_agent_env`).
 
     Args:
-        default_enabled (bool): Whether assessment turns are enabled by default.
-        default_max_steps (int): Research rounds an assessment turn may run by default.
+        default_enabled (bool): Whether assessments are enabled by default.
 
     Returns:
         AssessmentConfig: Parsed assessment settings.
-        - enabled (bool): Whether chat turns are classified and evaluative ones
-          answered with a researched, labelled model assessment. Off means
-          every turn is a lookup and no classifier call is made.
-        - max_steps (int): Upper bound on tool-calling research rounds per
-          assessment turn; ``0`` answers from the first search alone. A blank
-          value counts as unset.
+        - enabled (bool): Whether an agent turn's system prompt carries the
+          assessment rule, so a question asking for a judgement is answered in
+          two labelled parts: what the sources say, then the model's own
+          assessment. Off means every agent turn answers as a lookup.
     """
     return AssessmentConfig(
         enabled=str(os.getenv("ASSESSMENT_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
-        max_steps=max(0, int(os.getenv("ASSESSMENT_MAX_STEPS") or default_max_steps)),
     )
 
 

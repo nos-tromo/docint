@@ -1,4 +1,4 @@
-"""Whether a deployment can run assessment or agent turns at all."""
+"""Whether a deployment can run agent turns at all, and whether its chat endpoint accepts tools."""
 
 from __future__ import annotations
 
@@ -10,48 +10,15 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from docint.utils.env_cfg import load_agent_env, load_assessment_env
+from docint.utils.env_cfg import load_agent_env
 
 if TYPE_CHECKING:
     from docint.agents.turn.probe import ProbeOutcome
 
-#: Below this window the answer step cannot hold its evidence beside a
-#: judgement-sized reply, nor an agent turn its tool replies, so the feature switches off rather than degrade.
+#: Below this window an agent turn has no room for its tool replies, so agent turns switch off rather than degrade.
 MIN_CTX_WINDOW = 8192
 #: Seconds agent turns stay off after the chat endpoint rejected a request offering tools.
 TOOLS_REJECTION_COOLDOWN_S = 600
-
-
-@cache
-def _warn_small_window(ctx_window: int) -> None:
-    """Warn once per window size that assessment turns are switched off.
-
-    Args:
-        ctx_window (int): The context window that is too small.
-    """
-    logger.warning(
-        "Assessment turns are off: the chat context window is {} tokens, below the {} they need. "
-        "Raise OPENAI_CTX_WINDOW (and the context window the chat endpoint serves) to enable them.",
-        ctx_window,
-        MIN_CTX_WINDOW,
-    )
-
-
-def assessment_available(ctx_window: int) -> bool:
-    """Return whether assessment turns may run under this deployment's config.
-
-    Args:
-        ctx_window (int): The chat model's resolved context window in tokens.
-
-    Returns:
-        bool: ``True`` when the feature is enabled and the window is large enough.
-    """
-    if not load_assessment_env().enabled:
-        return False
-    if ctx_window >= MIN_CTX_WINDOW:
-        return True
-    _warn_small_window(ctx_window)
-    return False
 
 
 @cache
