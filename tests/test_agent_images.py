@@ -282,6 +282,21 @@ def test_a_drop_takes_every_picture_back_and_shows_no_more() -> None:
     assert len(store.fetches) == 2
 
 
+def test_a_drop_takes_back_only_the_messages_it_built() -> None:
+    """A drop takes back the messages ``attach`` built, by identity: other picture messages stay, even an equal one."""
+    images = _images(ThumbnailStore(0))
+    built = images.attach(_numbered(frame_passage(0)), room=WIDE)
+    assert built is not None
+    foreign = ChatMessage(
+        role=MessageRole.USER, blocks=[TextBlock(text="Ein Bild vom Anleger."), ImageBlock(url=_url(1))]
+    )
+    equal = built[0].model_copy(deep=True)
+
+    kept, freed = images.drop([foreign, equal, built[0]])
+
+    assert ([message is foreign for message in kept], kept[1:] == [equal], freed) == ([True, False], True, _price(1))
+
+
 def _ledger(*passages: NodeWithScore) -> list[NodeWithScore]:
     """Number passages as a turn's result returns them.
 
@@ -320,3 +335,18 @@ def test_the_stamp_marks_the_passages_whose_pictures_were_shown_until_a_drop() -
 
     assert (before, after) == ([None, None, True], [None, None, None])
     assert _stamped([NodeWithScore(node=scored.node) for scored in passages]) == [None, None, None]
+
+
+def test_the_stamp_finds_each_passage_by_its_number_not_its_place() -> None:
+    """The stamp reads the number each copy carries, so copies in any order are stamped right."""
+    passages = (programme_passage(), frame_passage(0), frame_passage(1))
+    images = _images(ThumbnailStore(1))
+    images.attach(_numbered(*passages), room=WIDE)
+
+    stamped = images.stamp(list(reversed(_ledger(*passages))))
+
+    assert [(scored.node.metadata["citation_index"], _stamped([scored])[0]) for scored in stamped] == [
+        (3, True),
+        (2, None),
+        (1, None),
+    ]

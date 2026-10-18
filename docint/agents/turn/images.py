@@ -57,18 +57,6 @@ def _picture(scored: NodeWithScore) -> str:
     return str(value) if value else ""
 
 
-def _shows_pictures(message: ChatMessage) -> bool:
-    """Say whether a message carries pictures.
-
-    Args:
-        message (ChatMessage): A message of the transcript.
-
-    Returns:
-        bool: Whether any of its blocks is a picture.
-    """
-    return any(isinstance(block, ImageBlock) for block in message.blocks)
-
-
 class TurnImages:
     """The pictures one turn shows the model: which passages, at what cost, and whether more may follow."""
 
@@ -99,6 +87,8 @@ class TurnImages:
         self._cap = max(0, min(max_images, round_room // VISUAL_IMAGE_TOKEN_ESTIMATE)) if fetch is not None else 0
         #: The pictures shown, by the number of the passage that shows each.
         self._shown: dict[int, str] = {}
+        #: The messages :meth:`attach` built, which :meth:`drop` takes back by identity.
+        self._messages: list[ChatMessage] = []
         self._cost = 0
         self._dropped = False
 
@@ -167,9 +157,11 @@ class TurnImages:
             return None
         blocks: list[Any] = [TextBlock(text=render_legend(self._template, shown))]
         blocks.extend(ImageBlock(url=f"data:{mime};base64,{data}") for _, mime, data in shown)
+        message = ChatMessage(role=MessageRole.USER, blocks=blocks)
         cost = self._price(shown)
+        self._messages.append(message)
         self._cost += cost
-        return ChatMessage(role=MessageRole.USER, blocks=blocks), cost
+        return message, cost
 
     def drop(self, transcript: Sequence[ChatMessage]) -> tuple[list[ChatMessage], int]:
         """Take every picture back, its message, stamp and room, and show no more this turn.
@@ -178,25 +170,28 @@ class TurnImages:
             transcript (Sequence[ChatMessage]): The turn's rounds so far; never changed.
 
         Returns:
-            tuple[list[ChatMessage], int]: The transcript without its picture messages, and the
-            tokens they took.
+            tuple[list[ChatMessage], int]: The transcript without the messages :meth:`attach`
+            built, found by identity, and the tokens they took.
         """
+        built = {id(message) for message in self._messages}
         freed, self._cost = self._cost, 0
+        self._messages.clear()
         self._shown.clear()
         self._dropped = True
-        return [message for message in transcript if not _shows_pictures(message)], freed
+        return [message for message in transcript if id(message) not in built], freed
 
     def stamp(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
         """Stamp the passages whose pictures the model was shown.
 
         Args:
-            nodes (list[NodeWithScore]): The turn's numbered copies, in number order, as the
-                result returns them; the ledger's own passages are never written.
+            nodes (list[NodeWithScore]): The turn's numbered copies, as the result returns them,
+                each found by the ``citation_index`` it carries; the ledger's own passages are
+                never written.
 
         Returns:
             list[NodeWithScore]: The same copies, those shown stamped ``VISUAL_IMAGES_ATTACHED_KEY``.
         """
-        for number, scored in enumerate(nodes, start=1):
-            if number in self._shown:
+        for scored in nodes:
+            if scored.node.metadata.get("citation_index") in self._shown:
                 scored.node.metadata[VISUAL_IMAGES_ATTACHED_KEY] = True
         return nodes
