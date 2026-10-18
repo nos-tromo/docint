@@ -819,6 +819,9 @@ endpoint that:
 - accepts `tool_choice: "none"` with the tools still declared, for the round
   in which the model must answer;
 - accepts a request with no tools at all, for a pinned scope;
+- accepts a request that carries earlier tool calls and their replies but
+  declares no tools, neither `tools` nor `tool_choice`. An answer round that
+  only called tools is sent once more this way;
 - renders the model's own earlier tool calls, and the `tool` replies matched
   to them by `tool_call_id`, in its chat template.
 
