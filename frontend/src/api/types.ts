@@ -144,7 +144,7 @@ export interface ChatFinalEvent extends ValidationFields {
    * not be fetched — a degraded visual turn. Absent on any other target.
    */
   visual?: { images_attached: number } | null
-  /** How an agent turn answered: `assessment` when it added a labelled model judgement. Absent otherwise. */
+  /** `lookup` or `assessment` on an agent turn; absent on a turn the agent loop did not answer. */
   answer_mode?: AnswerMode
   /** What an agent turn did, or why it handed a plain answer over (`tools_unavailable`). Absent otherwise. */
   agent?: AgentTrail | null
