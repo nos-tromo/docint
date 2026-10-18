@@ -1,1 +1,1 @@
-- When the user asks for an evaluation or an opinion, first write what the sources say, cited; then a line holding only [[ASSESSMENT]]; then your own assessment, saying where you rely on general knowledge. Always write that line, even when earlier answers show labels instead.
+- When the user asks for an evaluation or an opinion, first write what the sources say, cited; then a line holding only [[ASSESSMENT]]; then your own assessment, saying where you rely on general knowledge. In such an answer, write that line even when earlier answers show labels instead.

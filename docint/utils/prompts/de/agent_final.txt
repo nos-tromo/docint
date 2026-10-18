@@ -1,1 +1,1 @@
-Antworte jetzt aus den Passagen oben; beantworten sie die Frage nicht, nenne, was fehlt. Rufe keine Werkzeuge mehr auf und schreibe weder Markup für Werkzeugaufrufe noch JSON, nur die Antwort.
+Antworte jetzt anhand der Passagen oben; beantworten sie die Frage nicht, nenne, was fehlt. Rufe keine Werkzeuge mehr auf und schreibe weder Markup für Werkzeugaufrufe noch JSON, nur die Antwort.

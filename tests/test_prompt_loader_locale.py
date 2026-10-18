@@ -13,13 +13,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from agent_fakes import ScriptedSearch, tool_call, tool_context
-from assessment_fakes import scored_node
+from agent_fakes import ScriptedSearch, shown_numbers, tool_call, tool_context
+from assessment_fakes import llm_view, scored_node
 from llama_index.core.schema import NodeWithScore
 
+from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.history import ANSWER_ASSESSMENT_LABEL, ANSWER_SOURCED_LABEL, NO_HISTORY, labelled_lines
 from docint.agents.turn.passages import SEARCH_HINT, _trailer
+from docint.agents.turn.scope import scope_message
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
 from docint.utils.embed_chunking import estimate_tokens
@@ -458,6 +460,34 @@ def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str)
     assert _named_tools(rendered) <= offered, f"{code}/{target}: names a tool the target does not offer"
     assert ("#n" in guide) == ("keyframes" in offered), f"{code}/agent_tools_{target}.txt and the frame label #n"
     assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_every_rule_on_citing_names_the_line_pinned_passages_show_too(code: str) -> None:
+    """Each line of the system prompt about [n] ties it to the ``citation_index:`` line a scoped round shows too.
+
+    A scoped round sends the same system prompt with its passages in the user message, not
+    in a tool reply, so a rule tied to tool replies would forbid the citations its note asks for.
+
+    Args:
+        code (str): The locale.
+    """
+    pinned = scored_node("plan", "Der Hafenverein plant Stände am Kai.", filename="plan.pdf", page=1)
+    message, _ = scope_message(
+        [pinned],
+        ledger=EvidenceLedger(cap=MAX_LEDGER_ENTRIES),
+        note=_prompt("agent_scope", code),
+        message="Was plant der Hafenverein?",
+        llm_view=llm_view,
+        budget_tokens=1000,
+        char_token_ratio=CHAR_TOKEN_RATIO,
+    )
+    rules = [line for line in _prompt("agent_system", code).splitlines() if "[n]" in line]
+
+    assert shown_numbers(message) == [1]
+    assert rules
+    for line in rules:
+        assert "`citation_index:`" in line, f"{code}/agent_system.txt ties [n] to something else: {line!r}"
 
 
 @pytest.mark.parametrize("code", ["en", "de"])
