@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import gc
 import hashlib
 import json
@@ -29,6 +30,7 @@ from typing import TYPE_CHECKING, Any, cast
 from typing_extensions import override
 
 if TYPE_CHECKING:
+    from docint.agents.turn.history import ConversationWindow
     from docint.agents.types import AnswerMode, PriorTurn
 
 # isort: off
@@ -49,6 +51,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SparseClientConfig,
     SummaryConfig,
+    load_agent_env,
     load_assessment_env,
     load_embed_client_env,
     load_embedding_env,
@@ -128,8 +131,12 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, MIN_ROUND_ROOM, TurnBudget, schema_tokens
+from docint.agents.turn.loop import AgentLoop
+from docint.agents.turn.toolsets import toolset_for
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
     ResolutionSummary,
@@ -2960,8 +2967,28 @@ _reasoning_override: ContextVar[bool | None] = ContextVar("docint_reasoning_over
 # request keeps its own reference and the OS reclaims the fd once it is gone.
 _RETRIEVAL_HANDLE_CACHE_MAX = 32
 
+#: Most passages an agent turn's evidence holds; a larger pinned scope raises it to hold every pinned passage.
+AGENT_LEDGER_CAP = 64
 #: Longest LLM-visible metadata string an agent turn's passage header shows; a longer one is cut with an ellipsis.
 AGENT_METADATA_VALUE_CHARS = 200
+
+
+@dataclass(frozen=True)
+class AgentTurn:
+    """One chat turn's agent loop, built for a request and not yet run.
+
+    Attributes:
+        loop (AgentLoop): The loop, bound to the request's model, tools, prompts and limits.
+        ledger (EvidenceLedger): The turn's evidence, empty, for :meth:`AgentLoop.run`; it
+            holds every passage the turn's pinned scope needs.
+        budget (TurnBudget): How the turn spends the chat model's context window.
+        reasoning (bool): Whether the request's reasoning model runs the turn.
+    """
+
+    loop: AgentLoop
+    ledger: EvidenceLedger
+    budget: TurnBudget
+    reasoning: bool
 
 
 def _cut_strings(value: Any) -> Any:
@@ -8794,6 +8821,156 @@ class RAG:
             researcher=researcher,
             count_tokens=(lambda text: len(counter(text))) if counter is not None else None,
         )
+
+    @property
+    def agent_char_token_ratio(self) -> float:
+        """Characters per token an agent turn is measured with: its window, its budget and its loop.
+
+        Returns:
+            float: ``EMBED_CHAR_TOKEN_RATIO``, or 3.5 when it is unset or zero.
+        """
+        return float(self.embed_char_token_ratio or 3.5)
+
+    def _agent_prompt(self, name: str) -> str:
+        """Load one of an agent turn's prompts from the locale's prompt directory, as the other prompts load.
+
+        Args:
+            name (str): The prompt's file name without ``.txt``.
+
+        Returns:
+            str: The prompt, stripped.
+
+        Raises:
+            FileNotFoundError: When the locale lacks the file; agent prompts have no bundled default.
+            ValueError: When no prompt directory is configured.
+        """
+        path = None if self.prompt_dir is None else self.prompt_dir / f"{name}.txt"
+        return self._load_prompt_text(path, default="", required=True)
+
+    def _agent_system_prompt(self, retrieval_target: str, window: ConversationWindow) -> str:
+        """Render an agent turn's system prompt.
+
+        Args:
+            retrieval_target (str): The turn's retrieval target, which picks the tools guide.
+            window (ConversationWindow): The conversation before the message; its summary block
+                ends the prompt.
+
+        Returns:
+            str: ``agent_system`` with the target's tools guide, the assessment rule while
+            assessment turns are enabled, and the window's summary block.
+        """
+        rule = self._agent_prompt("agent_assessment_rule") if load_assessment_env().enabled else ""
+        return self._agent_prompt("agent_system").format(
+            tools_guide=self._agent_prompt(f"agent_tools_{retrieval_target}"),
+            assessment_rule=rule,
+            conversation_summary=window.summary_block(),
+        )
+
+    def agent_turn(
+        self,
+        engine: Any,
+        *,
+        retrieval_target: RetrievalTarget,
+        scoped: bool,
+        pinned_count: int,
+        window: ConversationWindow,
+        message: str,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        vector_store_kwargs: dict[str, Any] | None,
+    ) -> AgentTurn | None:
+        """Build one agent turn over this request's engine, or none when its budget leaves no room.
+
+        Every round runs on :attr:`agent_text_model`. The tools are the target's (see
+        :func:`~docint.agents.turn.toolsets.toolset_for`). ``search`` expands its own query
+        with graph neighbours for retrieval alone and retrieves through ``engine``, so the
+        request's filters, rerank and target apply, every child kept (:class:`EveryChildQuery`).
+        The image tools search the image companion under the request's filter, compiled as the
+        visual retriever compiles it. A tool's I/O runs on a search thread in a copy of the
+        request's context, so :meth:`collection_scope` holds there. The budget is measured on
+        the rendered system prompt, the offered schemas (none on a pinned scope, whose round
+        offers no tools), the window's messages, each with its envelope, and the message. Only
+        a visual turn shows the model the pictures it finds.
+
+        Args:
+            engine (Any): The turn's query engine.
+            retrieval_target (RetrievalTarget): Which evidence the turn may answer from.
+            scoped (bool): Whether the turn answers a pinned scope.
+            pinned_count (int): How many distinct passages the scope pinned; ``0`` without one.
+            window (ConversationWindow): The conversation before the message, built at
+                :attr:`agent_char_token_ratio` within the history allowance for
+                :attr:`reasoning_requested`.
+            message (str): The user's message, verbatim.
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters.
+            vector_store_kwargs (dict[str, Any] | None): Native query kwargs, carrying the
+                request's compiled filter when it has one.
+
+        Returns:
+            AgentTurn | None: The turn, its ledger empty; ``None`` when the budget leaves less
+            room for tool replies than a turn needs.
+
+        Raises:
+            ValueError: For a target without a tool set, or filters that reached the turn as
+                neither rules nor a compiled filter.
+            FileNotFoundError: When the locale lacks one of the agent prompts.
+        """
+        reasoning = self.reasoning_requested
+        llm = self.agent_text_model
+        ratio = self.agent_char_token_ratio
+        companion_filter = self._companion_filter(
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            vector_store_kwargs=vector_store_kwargs,
+        )
+        registry = toolset_for(
+            retrieval_target,
+            search=lambda query: list(engine.retrieve(EveryChildQuery(self.expand_query_with_graph(query)))),
+            search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
+            list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
+        )
+        system_prompt = self._agent_system_prompt(retrieval_target, window)
+        budget = TurnBudget(
+            ctx_window=int(self.openai_ctx_window),
+            reasoning=reasoning,
+            char_token_ratio=ratio,
+            system_tokens=estimate_tokens(system_prompt, ratio),
+            # A pinned round offers no tools.
+            tool_schema_tokens=0 if scoped else schema_tokens(registry.schemas(), ratio),
+            history_tokens=sum(
+                estimate_tokens(sent.content or "", ratio) + MESSAGE_OVERHEAD_TOKENS for sent in window.messages()
+            ),
+            message_tokens=estimate_tokens(message, ratio),
+        )
+        if not budget.available:
+            logger.warning(
+                "An agent turn would have {} tokens of room for tool replies, under the {} one needs; none is built",
+                budget.round_room,
+                MIN_ROUND_ROOM,
+            )
+            return None
+        visual = retrieval_target == "visual"
+        limits = load_agent_env()
+        loop = AgentLoop(
+            llm=llm,
+            registry=registry,
+            budget=budget,
+            system_prompt=system_prompt,
+            final_note=self._agent_prompt("agent_final"),
+            max_rounds=limits.max_rounds,
+            time_budget_s=limits.time_budget_s,
+            max_calls_per_round=limits.max_calls_per_round,
+            char_token_ratio=ratio,
+            llm_view=agent_llm_view,
+            # Only vLLM is sent ``enable_thinking``, so only there may a reply open inside a think block.
+            reasoning_open=reasoning and self.openai_config.inference_provider == "vllm",
+            scope_note=self._agent_prompt("agent_scope"),
+            fetch_thumbnails=self._fetch_companion_thumbnails if visual else None,
+            legend_template=self._agent_prompt("agent_image_legend") if visual else "",
+            max_images=self._visual_answer_max_images() if visual else 0,
+        )
+        ledger = EvidenceLedger(cap=max(AGENT_LEDGER_CAP, pinned_count))
+        return AgentTurn(loop=loop, ledger=ledger, budget=budget, reasoning=reasoning)
 
     def stream_stateless_assessment(
         self,

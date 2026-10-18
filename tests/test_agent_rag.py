@@ -5,22 +5,56 @@ Every message, passage, clip, filter and collection here is invented.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
+from unittest.mock import MagicMock
 
 import httpx
 import openai
 import pytest
-from agent_fakes import tool_call, turn_budget
+from agent_fakes import (
+    CLIP,
+    chunk,
+    programme_passage,
+    streaming_tool_llm,
+    text_chunks,
+    tool_call,
+    tool_call_delta,
+    turn_budget,
+)
+from assessment_fakes import scored_node
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
 
 from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.assessment.split import SENTINEL
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, schema_tokens
+from docint.agents.turn.calls import SEARCH_THREAD_NAME
+from docint.agents.turn.history import NO_HISTORY, ConversationTurn, ConversationWindow
+from docint.agents.turn.loop import AgentResult
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
-from docint.core.rag import AGENT_METADATA_VALUE_CHARS, RAG, ParentContextPostprocessor, agent_llm_view
+from docint.agents.turn.toolsets import toolset_for
+from docint.core.rag import (
+    AGENT_LEDGER_CAP,
+    AGENT_METADATA_VALUE_CHARS,
+    RAG,
+    AgentTurn,
+    ParentContextPostprocessor,
+    agent_llm_view,
+)
+from docint.core.retrieval.evidence import EveryChildQuery
+from docint.core.retrieval.visual import RETRIEVAL_TARGETS, RetrievalTarget
+from docint.core.retrieval_filters import build_qdrant_filter
+from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
+from docint.utils.prompt_loader import load_localized_prompt
 
 MESSAGE = "Wann öffnen die Stände beim Hafenfest, und hat jemand das Wetter am Sonntag erwähnt?"
+#: The physical name a request's collection scope binds.
+PHYSICAL = "u0123456789ab__hafen"
+#: An invented request filter: video frames only.
+RULES = [{"field": "source_type", "operator": "eq", "value": "video_keyframe"}]
 #: The post an invented comment answers, as a social export repeats it on the comment's row.
 ANCHOR = ("Der Hafenverein verschiebt das Hafenfest wegen der Sturmwarnung auf Sonntag. " * 25)[:1500]
 SOCIAL_FILE = "example_profile/dossier.json"
@@ -223,7 +257,7 @@ def test_the_agent_view_cuts_only_the_visible_strings_of_a_clone() -> None:
     view = agent_llm_view(row.node)
 
     cut = view.metadata["reference_metadata"]["anchor_text"]
-    assert len(cut) == AGENT_METADATA_VALUE_CHARS
+    assert len(cut) == AGENT_METADATA_VALUE_CHARS == 200
     assert cut.endswith("…")
     assert ANCHOR.startswith(cut[:-1])
     assert view.metadata["reference_metadata"]["author"] == AUTHOR
@@ -235,3 +269,642 @@ def test_the_agent_view_cuts_only_the_visible_strings_of_a_clone() -> None:
     assert view.get_content(metadata_mode=MetadataMode.NONE) == row.node.get_content(metadata_mode=MetadataMode.NONE)
     assert row.node.metadata["reference_metadata"]["anchor_text"] == ANCHOR
     assert row.node.metadata["llm_description"] == ANCHOR
+
+
+def test_the_agent_view_keeps_a_string_at_the_limit_and_cuts_one_in_a_list() -> None:
+    """A string of exactly the limit stays whole; one a character longer, or one inside a list, is cut."""
+    at_limit = "a" * AGENT_METADATA_VALUE_CHARS
+    metadata = {
+        "filename": at_limit,
+        "reference_metadata": {"author": "b" * (AGENT_METADATA_VALUE_CHARS + 1), "tags": ["c" * 300, "Hafen"]},
+    }
+
+    view = agent_llm_view(TextNode(id_="row-limit", text="Notiz zum Hafenfest.", metadata=metadata))
+
+    reference = view.metadata["reference_metadata"]
+    assert view.metadata["filename"] == at_limit
+    assert reference["author"] == "b" * (AGENT_METADATA_VALUE_CHARS - 1) + "…"
+    assert reference["tags"] == ["c" * (AGENT_METADATA_VALUE_CHARS - 1) + "…", "Hafen"]
+
+
+def _engine(*found: NodeWithScore) -> MagicMock:
+    """Build a turn engine double whose ``retrieve`` returns the passages given.
+
+    Args:
+        *found (NodeWithScore): What every retrieval returns.
+
+    Returns:
+        MagicMock: The engine; ``retrieve.call_args_list`` records each bundle.
+    """
+    engine = MagicMock()
+    engine.retrieve.return_value = list(found)
+    return engine
+
+
+def _turn(
+    rag: RAG,
+    *,
+    target: str = "all",
+    scoped: bool = False,
+    pinned_count: int = 0,
+    window: ConversationWindow | None = None,
+    message: str = MESSAGE,
+    engine: Any = None,
+    metadata_filter_rules: list[dict[str, Any]] | None = None,
+    metadata_filters_active: bool = False,
+    vector_store_kwargs: dict[str, Any] | None = None,
+) -> AgentTurn:
+    """Build an agent turn the budget has room for.
+
+    Args:
+        rag (RAG): The engine.
+        target (str): The turn's retrieval target.
+        scoped (bool): Whether the turn answers a pinned scope.
+        pinned_count (int): How many distinct passages the scope pinned.
+        window (ConversationWindow | None): The conversation before the message; empty by default.
+        message (str): The user's message.
+        engine (Any): The turn engine; one that finds nothing by default.
+        metadata_filter_rules (list[dict[str, Any]] | None): The request's raw filter rules.
+        metadata_filters_active (bool): Whether the request carries filters.
+        vector_store_kwargs (dict[str, Any] | None): Native query kwargs, the compiled filter in them.
+
+    Returns:
+        AgentTurn: The turn.
+    """
+    turn = rag.agent_turn(
+        _engine() if engine is None else engine,
+        retrieval_target=cast(RetrievalTarget, target),
+        scoped=scoped,
+        pinned_count=pinned_count,
+        window=ConversationWindow() if window is None else window,
+        message=message,
+        metadata_filter_rules=metadata_filter_rules,
+        metadata_filters_active=metadata_filters_active,
+        vector_store_kwargs=vector_store_kwargs,
+    )
+    assert turn is not None
+    return turn
+
+
+def _ctx(turn: AgentTurn) -> ToolContext:
+    """Build the context the turn's tools answer in, as its loop does.
+
+    Args:
+        turn (AgentTurn): The turn.
+
+    Returns:
+        ToolContext: Its ledger, budget and the agent view.
+    """
+    return ToolContext(ledger=turn.ledger, budget=turn.budget, llm_view=agent_llm_view)
+
+
+def _prompt(name: str, code: str) -> str:
+    """Load a prompt from a locale, apart from the engine's own loading.
+
+    Args:
+        name (str): The prompt's file name without ``.txt``.
+        code (str): The locale.
+
+    Returns:
+        str: The prompt, stripped.
+    """
+    return load_localized_prompt(name, default="", required=True, lang=code)
+
+
+def _system_prompt(code: str, target: str, *, rule: bool, summary: str) -> str:
+    """Render the system prompt a turn should be sent.
+
+    Args:
+        code (str): The locale.
+        target (str): The retrieval target, which picks the tools guide.
+        rule (bool): Whether the assessment rule is in it.
+        summary (str): The window's summary block.
+
+    Returns:
+        str: The rendered prompt.
+    """
+    return _prompt("agent_system", code).format(
+        tools_guide=_prompt(f"agent_tools_{target}", code),
+        assessment_rule=_prompt("agent_assessment_rule", code) if rule else "",
+        conversation_summary=summary,
+    )
+
+
+def _nothing(_key: str) -> list[NodeWithScore]:
+    """Find nothing, for a tool set built only for its schemas.
+
+    Args:
+        _key (str): The query or clip, unused.
+
+    Returns:
+        list[NodeWithScore]: No passage.
+    """
+    return []
+
+
+def _schemas(target: str) -> list[dict[str, Any]]:
+    """Return the schemas a target's tools are offered with.
+
+    Args:
+        target (str): The retrieval target.
+
+    Returns:
+        list[dict[str, Any]]: The schemas, as the endpoint receives them.
+    """
+    return toolset_for(target, search=_nothing, search_images=_nothing, list_keyframes=_nothing).schemas()
+
+
+@pytest.mark.parametrize("target", RETRIEVAL_TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_real_prompts_leave_a_thinking_model_room_for_a_turn_at_8k(
+    monkeypatch: pytest.MonkeyPatch, code: str, target: str
+) -> None:
+    """Measured on the real prompts, the assessment rule in, and the target's real schemas, 8k is enough.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+        target (str): The retrieval target.
+    """
+    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
+    rag = _rag(monkeypatch, code=code, ctx_window=8192)
+
+    with rag.reasoning_scope(True):
+        turn = rag.agent_turn(
+            _engine(),
+            retrieval_target=cast(RetrievalTarget, target),
+            scoped=False,
+            pinned_count=0,
+            window=ConversationWindow(),
+            message=MESSAGE,
+            metadata_filter_rules=None,
+            metadata_filters_active=False,
+            vector_store_kwargs=None,
+        )
+
+    assert turn is not None
+    budget = turn.budget
+    assert budget.available, f"{code}/{target}: {budget.round_room} tokens of room for tool replies"
+    assert (budget.ctx_window, budget.reasoning, budget.history_tokens) == (8192, True, 0)
+    assert budget.system_tokens == estimate_tokens(_system_prompt(code, target, rule=True, summary=NO_HISTORY), 3.5)
+    assert budget.tool_schema_tokens == schema_tokens(_schemas(target), 3.5)
+    assert budget.message_tokens == estimate_tokens(MESSAGE, 3.5)
+
+
+@pytest.mark.parametrize(
+    ("ctx_window", "message"),
+    [(4096, MESSAGE), (8192, "Bitte fasse jede Stellungnahme zum Hafenfest einzeln zusammen. " * 300)],
+    ids=["small-window", "long-message"],
+)
+def test_a_budget_without_room_for_tool_replies_builds_no_turn(
+    monkeypatch: pytest.MonkeyPatch, ctx_window: int, message: str
+) -> None:
+    """Too small a window, or a message that fills it, leaves no room: no turn, and nothing raised.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        ctx_window (int): The chat model's context window.
+        message (str): The user's message.
+    """
+    rag = _rag(monkeypatch, ctx_window=ctx_window)
+
+    turn = rag.agent_turn(
+        _engine(),
+        retrieval_target="all",
+        scoped=False,
+        pinned_count=0,
+        window=ConversationWindow(),
+        message=message,
+        metadata_filter_rules=None,
+        metadata_filters_active=False,
+        vector_store_kwargs=None,
+    )
+
+    assert turn is None
+
+
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_every_round_of_a_turn_runs_on_the_agent_model(monkeypatch: pytest.MonkeyPatch, reasoning: bool) -> None:
+    """The turn holds the model the toggle picked when it was built, and says which.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        reasoning (bool): The request's toggle.
+    """
+    rag = _rag(monkeypatch)
+
+    with rag.reasoning_scope(reasoning):
+        turn = _turn(rag)
+        model = rag.agent_text_model
+
+    assert turn.loop._llm is model
+    assert turn.reasoning is reasoning
+    assert turn.budget.reasoning is reasoning
+
+
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_a_turns_round_makes_one_attempt_at_a_stalled_endpoint(
+    monkeypatch: pytest.MonkeyPatch, reasoning: bool
+) -> None:
+    """The loop's own calls go out once each, whatever ``OPENAI_MAX_RETRIES`` says.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        reasoning (bool): The request's toggle.
+    """
+    attempts = _stalled_endpoint(monkeypatch)
+    rag = _rag(monkeypatch, max_retries=2)
+    with rag.reasoning_scope(reasoning):
+        turn = _turn(rag)
+
+    with pytest.raises(openai.APITimeoutError):
+        list(turn.loop.run(window=ConversationWindow(), message=MESSAGE, ledger=turn.ledger))
+
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(
+    ("provider", "reasoning", "opened"),
+    [("vllm", True, True), ("vllm", False, False), ("ollama", True, False), ("openai", True, False)],
+)
+def test_a_reply_may_open_in_reasoning_only_where_thinking_is_switched_on(
+    monkeypatch: pytest.MonkeyPatch, provider: str, reasoning: bool, opened: bool
+) -> None:
+    """Only vLLM is sent ``enable_thinking``, so only there can a reply open inside a think block.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        provider (str): ``INFERENCE_PROVIDER``.
+        reasoning (bool): The request's toggle.
+        opened (bool): Whether the loop reads a reply as opening in reasoning.
+    """
+    rag = _rag(monkeypatch, provider=provider)
+
+    with rag.reasoning_scope(reasoning):
+        turn = _turn(rag)
+
+    assert turn.loop._reasoning_open is opened
+
+
+@pytest.mark.parametrize(("configured", "ratio"), [(3.0, 3.0), (0.0, 3.5)])
+def test_the_budget_and_the_loop_measure_with_one_ratio(
+    monkeypatch: pytest.MonkeyPatch, configured: float, ratio: float
+) -> None:
+    """The configured characters per token, 3.5 when unset, sizes the budget and the loop alike.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        configured (float): ``EMBED_CHAR_TOKEN_RATIO``.
+        ratio (float): The ratio the turn is measured with.
+    """
+    rag = _rag(monkeypatch)
+    rag.embed_char_token_ratio = configured
+
+    turn = _turn(rag)
+
+    assert rag.agent_char_token_ratio == ratio
+    assert turn.budget.char_token_ratio == ratio
+    assert turn.loop._ratio == ratio
+    assert turn.budget.message_tokens == estimate_tokens(MESSAGE, ratio)
+
+
+@pytest.mark.parametrize("assessment", [False, True])
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_prompts_are_the_locales_with_the_targets_guide_and_the_windows_summary(
+    monkeypatch: pytest.MonkeyPatch, code: str, assessment: bool
+) -> None:
+    """The system prompt carries the target's guide, the rule while assessments are on, and the summary last.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+        assessment (bool): ``ASSESSMENT_ENABLED``.
+    """
+    monkeypatch.setenv("ASSESSMENT_ENABLED", str(assessment).lower())
+    rag = _rag(monkeypatch, code=code)
+    window = ConversationWindow(
+        summary="Person A fragte, wann das Hafenfest stattfindet.",
+        earlier_questions=("Wer organisiert das Hafenfest?",),
+    )
+
+    turn = _turn(rag, target="documents", window=window)
+
+    expected = _system_prompt(code, "documents", rule=assessment, summary=window.summary_block())
+    assert turn.loop._system_prompt == expected
+    assert turn.loop._system_prompt.endswith(window.summary_block())
+    assert (SENTINEL in turn.loop._system_prompt) is assessment
+    assert turn.budget.system_tokens == estimate_tokens(expected, 3.5)
+    assert turn.loop._final_note == _prompt("agent_final", code)
+    assert turn.loop._scope_note == _prompt("agent_scope", code)
+    assert turn.loop._llm_view is agent_llm_view
+
+
+def test_the_history_counts_each_recent_message_with_its_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every message the window sends costs its text and the envelope a chat template wraps it in.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    window = ConversationWindow(
+        recent=(
+            ConversationTurn("Wann ist das Hafenfest?", "Am Sonntag, wegen der Sturmwarnung."),
+            ConversationTurn("Und die Regatta?", "Sie fällt aus."),
+        )
+    )
+    texts = ("Wann ist das Hafenfest?", "Am Sonntag, wegen der Sturmwarnung.", "Und die Regatta?", "Sie fällt aus.")
+
+    turn = _turn(_rag(monkeypatch), window=window)
+
+    assert turn.budget.history_tokens == sum(estimate_tokens(text, 3.5) + MESSAGE_OVERHEAD_TOKENS for text in texts)
+
+
+@pytest.mark.parametrize("target", RETRIEVAL_TARGETS)
+def test_a_scoped_turn_counts_no_tool_schemas(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    """A pinned round offers no tools, so its budget pays for none; an open turn pays for its own.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+    """
+    rag = _rag(monkeypatch)
+
+    scoped = _turn(rag, target=target, scoped=True, pinned_count=3)
+    unscoped = _turn(rag, target=target)
+
+    assert scoped.budget.tool_schema_tokens == 0
+    assert unscoped.budget.tool_schema_tokens == schema_tokens(_schemas(target), 3.5) > 0
+    assert scoped.budget.round_room == unscoped.budget.round_room + unscoped.budget.tool_schema_tokens
+
+
+def _pinned(count: int) -> list[NodeWithScore]:
+    """Build distinct invented passages a user pinned.
+
+    Args:
+        count (int): How many.
+
+    Returns:
+        list[NodeWithScore]: The passages.
+    """
+    return [scored_node(f"pinned-{number}", f"Notiz {number} zum Hafenfest am Sonntag.") for number in range(count)]
+
+
+def test_a_scoped_ledger_holds_every_pinned_passage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinned evidence is never refused: a scope larger than the cap raises the cap to hold it all.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    pinned = _pinned(AGENT_LEDGER_CAP + 6)
+
+    turn = _turn(_rag(monkeypatch), scoped=True, pinned_count=len(pinned))
+    turn.ledger.add(pinned)
+
+    assert len(turn.ledger) == len(pinned)
+
+
+@pytest.mark.parametrize(("scoped", "pinned_count"), [(False, 0), (True, 3)])
+def test_a_turns_ledger_holds_the_cap_otherwise(
+    monkeypatch: pytest.MonkeyPatch, scoped: bool, pinned_count: int
+) -> None:
+    """An open turn, or a scope smaller than the cap, admits ``AGENT_LEDGER_CAP`` passages.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        scoped (bool): Whether the turn answers a pinned scope.
+        pinned_count (int): How many distinct passages it pinned.
+    """
+    turn = _turn(_rag(monkeypatch), scoped=scoped, pinned_count=pinned_count)
+    turn.ledger.add(_pinned(AGENT_LEDGER_CAP + 6))
+
+    assert len(turn.ledger) == AGENT_LEDGER_CAP == 64
+
+
+def test_the_limits_come_from_the_agent_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rounds, the time and the calls per round are the deployment's ``AGENT_*`` settings.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("AGENT_MAX_ROUNDS", "3")
+    monkeypatch.setenv("AGENT_TIME_BUDGET_S", "45")
+    monkeypatch.setenv("AGENT_MAX_CALLS_PER_ROUND", "2")
+
+    loop = _turn(_rag(monkeypatch)).loop
+
+    assert (loop._max_rounds, loop._time_budget_s, loop._calls._max_calls) == (3, 45.0, 2)
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_only_a_visual_turn_shows_the_model_its_pictures(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
+    """The visual target gets the thumbnail fetcher, the agent legend and the picture cap; the others get none.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+    """
+    monkeypatch.setenv("VISUAL_ANSWER_MAX_IMAGES", "3")
+    rag = _rag(monkeypatch, code=code)
+
+    visual = _turn(rag, target="visual")
+    others = [_turn(rag, target=target) for target in ("all", "documents")]
+
+    assert visual.loop._fetch_thumbnails == rag._fetch_companion_thumbnails
+    assert visual.loop._legend_template == _prompt("agent_image_legend", code)
+    assert visual.loop._max_images == 3
+    for other in others:
+        assert (other.loop._fetch_thumbnails, other.loop._legend_template, other.loop._max_images) == (None, "", 0)
+
+
+def test_each_search_expands_its_own_query_for_retrieval_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graph terms reach the engine, which asks for every child; the model's reply and trail show its own words.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    monkeypatch.setattr(
+        rag, "expand_query_with_graph", lambda query: f"{query}\n\nRelated entities for retrieval: Person B"
+    )
+    engine = _engine(programme_passage())
+    turn = _turn(rag, target="documents", engine=engine)
+
+    reply = turn.loop._registry.call(tool_call("search", query="Hafenfest Sonntag"), _ctx(turn))
+
+    (bundle,) = [call.args[0] for call in engine.retrieve.call_args_list]
+    assert isinstance(bundle, EveryChildQuery)
+    assert bundle.query_str == "Hafenfest Sonntag\n\nRelated entities for retrieval: Person B"
+    assert reply.detail == "Hafenfest Sonntag"
+    assert "Person B" not in reply.text
+
+
+def _record_image_tools(monkeypatch: pytest.MonkeyPatch, rag: RAG) -> tuple[list[Any], list[Any]]:
+    """Replace the engine's image searches with doubles that record the filter each call carries.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        rag (RAG): The engine, before the turn is built.
+
+    Returns:
+        tuple[list[Any], list[Any]]: The filters ``search_images`` and ``keyframes`` were called with.
+    """
+    searched: list[Any] = []
+    listed: list[Any] = []
+
+    def search_images(description: str, *, qdrant_filter: Any = None) -> list[NodeWithScore]:
+        """Record the filter an image search carries.
+
+        Args:
+            description (str): What the pictures should show.
+            qdrant_filter (Any): The companion filter.
+
+        Returns:
+            list[NodeWithScore]: No pictures.
+        """
+        searched.append(qdrant_filter)
+        return []
+
+    def list_keyframes(file_or_hash: str, *, qdrant_filter: Any = None) -> list[NodeWithScore]:
+        """Record the filter a keyframe listing carries.
+
+        Args:
+            file_or_hash (str): The clip.
+            qdrant_filter (Any): The companion filter.
+
+        Returns:
+            list[NodeWithScore]: No frames.
+        """
+        listed.append(qdrant_filter)
+        return []
+
+    monkeypatch.setattr(rag, "_agent_search_images", search_images)
+    monkeypatch.setattr(rag, "_agent_list_keyframes", list_keyframes)
+    return searched, listed
+
+
+@pytest.mark.parametrize(("with_rules", "with_compiled"), [(True, True), (True, False), (False, True)])
+def test_the_image_tools_search_the_companion_under_the_requests_filter(
+    monkeypatch: pytest.MonkeyPatch, with_rules: bool, with_compiled: bool
+) -> None:
+    """The filter the request compiled, or else its rules compiled here, reaches both image tools.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        with_rules (bool): Whether the request carries its raw rules.
+        with_compiled (bool): Whether the request carries its compiled filter.
+    """
+    rag = _rag(monkeypatch)
+    searched, listed = _record_image_tools(monkeypatch, rag)
+    compiled = build_qdrant_filter(RULES)
+    turn = _turn(
+        rag,
+        target="visual",
+        metadata_filter_rules=RULES if with_rules else None,
+        metadata_filters_active=True,
+        vector_store_kwargs={"qdrant_filters": compiled} if with_compiled else None,
+    )
+
+    turn.loop._registry.call(tool_call("search_images", description="Regenjacken am Hafen"), _ctx(turn))
+    turn.loop._registry.call(tool_call("keyframes", file=CLIP), _ctx(turn))
+
+    assert compiled is not None
+    assert searched == [compiled]
+    assert listed == [compiled]
+
+
+def test_an_unfiltered_turn_searches_the_whole_companion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a request filter the image tools carry none.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    searched, listed = _record_image_tools(monkeypatch, rag)
+    turn = _turn(rag, target="all")
+
+    turn.loop._registry.call(tool_call("search_images", description="Regenjacken am Hafen"), _ctx(turn))
+    turn.loop._registry.call(tool_call("keyframes", file=CLIP), _ctx(turn))
+
+    assert searched == [None]
+    assert listed == [None]
+
+
+def test_filters_that_reached_the_turn_in_neither_form_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unfiltered imagery must never answer a filtered question, so the turn refuses as the visual target does.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+
+    with pytest.raises(ValueError, match="filters are active"):
+        _turn(rag, target="all", metadata_filters_active=True)
+
+
+def test_a_search_runs_on_a_search_thread_inside_the_requests_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop starts each search on its own thread in a copy of the request's context, expansion included.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("AGENT_MAX_ROUNDS", "6")
+    rag = _rag(monkeypatch)
+    rag.graphrag_enabled = True
+    expanded_in: list[str] = []
+    searched_in: list[tuple[str, str]] = []
+
+    def aggregate(refresh: bool = False) -> dict[str, Any]:
+        """Record which collection the expansion reads its entities from.
+
+        Args:
+            refresh (bool): Unused.
+
+        Returns:
+            dict[str, Any]: No entities, so the query is not expanded.
+        """
+        expanded_in.append(rag.qdrant_collection)
+        return {"entities": []}
+
+    def retrieve(bundle: Any) -> list[NodeWithScore]:
+        """Record which collection and thread a search ran in.
+
+        Args:
+            bundle (Any): The query bundle.
+
+        Returns:
+            list[NodeWithScore]: The programme passage.
+        """
+        searched_in.append((rag.qdrant_collection, threading.current_thread().name))
+        return [programme_passage()]
+
+    monkeypatch.setattr(rag, "_get_collection_ner_aggregate", aggregate)
+    engine = MagicMock()
+    engine.retrieve.side_effect = retrieve
+    rag._bounded_text_model = cast(
+        Any,
+        streaming_tool_llm(
+            [
+                [
+                    chunk(
+                        tool_calls=[
+                            tool_call_delta(
+                                index=0, call_id="call_1", name="search", arguments='{"query": "Hafenfest Sonntag"}'
+                            )
+                        ],
+                        finish_reason="tool_calls",
+                    )
+                ],
+                [*text_chunks("Die Stände öffnen am Sonntag um zehn Uhr [1].", 12), chunk(finish_reason="stop")],
+            ]
+        ),
+    )
+
+    with rag.collection_scope(PHYSICAL):
+        turn = _turn(rag, target="documents", engine=engine)
+        items = list(turn.loop.run(window=ConversationWindow(), message=MESSAGE, ledger=turn.ledger))
+
+    assert expanded_in == [PHYSICAL]
+    assert searched_in == [(PHYSICAL, SEARCH_THREAD_NAME)]
+    result = items[-1]
+    assert isinstance(result, AgentResult)
+    assert [scored.node.node_id for scored in result.nodes] == ["programme"]
+    assert result.steps == 1
