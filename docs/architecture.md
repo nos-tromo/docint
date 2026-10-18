@@ -63,8 +63,8 @@ The diagram below expands what happens when the UI calls `POST /query` or
 
 1. **FastAPI entry** — `docint/core/api.py` validates the payload
    (`QueryIn` / `AgentChatIn`). For `/query`, it routes directly to
-   `RAG.run_query()` or `RAG.chat()` (a stateless assessment turn to
-   `RAG.stream_stateless_assessment()`); for `/agent/chat` it calls the
+   `RAG.run_query()` or `RAG.chat()` (a stateless agent turn to
+   `RAG.stream_stateless_agent_turn()`); for `/agent/chat` it calls the
    orchestrator.
 2. **AgentOrchestrator.handle_turn()** — `docint/agents/orchestrator.py:106`
    runs the four-step pipeline:
@@ -208,8 +208,8 @@ used on exactly one path: a lookup turn on `/stream_query` with
 whole answer before streaming starts. Every session path — `/stream_query`
 with the default mode, and `/agent/chat/stream` — streams from
 `RAG.stream_chat()` through `_aiter_sync_gen()`
-(`docint/core/api.py:673`), and so does a stateless assessment turn,
-through `RAG.stream_stateless_assessment()`; those tokens arrive as the
+(`docint/core/api.py:673`), and so does a stateless agent turn,
+through `RAG.stream_stateless_agent_turn()`; those tokens arrive as the
 model produces them rather than on a timer.
 
 Ingestion streams are also SSE, but carry **progress events** rather than

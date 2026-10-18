@@ -230,8 +230,8 @@ Request (`QueryIn`):
   explicit boolean every turn.
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
-  `RAG.run_query()` directly, or `RAG.stream_stateless_assessment()` on an
-  assessment turn, and persists nothing, so its `session_id` is `null` unless
+  `RAG.run_query()` directly, or `RAG.stream_stateless_agent_turn()` on an
+  agent turn, and persists nothing, so its `session_id` is `null` unless
   the request carried one.
 - `retrieval_target` — which evidence may answer the turn: `all` (default,
   documents and imagery fused), `documents` (no image lane), or `visual` (the
@@ -1238,7 +1238,7 @@ tokens are produced differs by path:
   and `POST /agent/chat/stream`) yields from `RAG.stream_chat()` through
   `_aiter_sync_gen()` (`docint/core/api.py:673`), so tokens arrive as the
   model produces them and no artificial delay applies. A stateless
-  assessment streams the same way, through `RAG.stream_stateless_assessment()`.
+  agent turn streams the same way, through `RAG.stream_stateless_agent_turn()`.
 
 The ingestion endpoints use a different pattern: they carry **progress
 events** rather than generated tokens. `POST /ingest/upload` streams the
