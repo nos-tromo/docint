@@ -162,7 +162,7 @@ def _index_kind_from_schema(schema: Any, key: str) -> str | None:
     return None if value is None else str(value).lower()
 
 
-def _read_schema(client: Any, collection: str) -> dict[str, Any]:
+def read_payload_schema(client: Any, collection: str) -> dict[str, Any]:
     """Read a collection's payload schema, treating an outage as empty.
 
     Args:
@@ -194,7 +194,30 @@ def field_index_kind(client: Any, collection: str, key: str) -> str | None:
             ``"text"``, …), or ``None`` when the key is unindexed or Qdrant
             is unreachable — an unknown state must never read as indexed.
     """
-    return _index_kind_from_schema(_read_schema(client, collection), key)
+    return _index_kind_from_schema(read_payload_schema(client, collection), key)
+
+
+def field_ready_in_schema(schema: Any, name: str) -> bool:
+    """Report whether one picker option's keys carry the right index in an already-read schema.
+
+    Unlike :func:`field_indexes_ready`, the text field is judged too: its
+    ``search_text`` key must carry a TEXT index. A caller that reads each
+    collection's schema once (see :func:`read_payload_schema`) can then judge
+    every field, on the main collection and its image companion alike.
+
+    Args:
+        schema (Any): The ``payload_schema`` mapping, or a falsy value when it
+            could not be read.
+        name (str): A key of :data:`SEARCH_FIELDS`.
+
+    Returns:
+        bool: ``True`` when every key carries its expected index.
+
+    Raises:
+        UnknownSearchFieldError: When ``name`` is not whitelisted.
+    """
+    spec = search_field_spec(name)
+    return all(_index_kind_from_schema(schema, key) == expected for key, expected in spec.indexed_keys())
 
 
 def field_indexes_ready(client: Any, collection: str, name: str) -> bool:
@@ -219,11 +242,10 @@ def field_indexes_ready(client: Any, collection: str, name: str) -> bool:
     Raises:
         UnknownSearchFieldError: When ``name`` is not whitelisted.
     """
-    spec = search_field_spec(name)
+    search_field_spec(name)
     if name == DEFAULT_SEARCH_FIELD:
         return True
-    schema = _read_schema(client, collection)
-    return all(_index_kind_from_schema(schema, key) == expected for key, expected in spec.indexed_keys())
+    return field_ready_in_schema(read_payload_schema(client, collection), name)
 
 
 def _index_schema_for(kind: str) -> Any:
@@ -263,7 +285,7 @@ def ensure_field_indexes(client: Any, collection: str) -> bool:
     Returns:
         bool: ``True`` when every key ends up with its expected index.
     """
-    schema = _read_schema(client, collection)
+    schema = read_payload_schema(client, collection)
 
     ok = True
     for name, spec in SEARCH_FIELDS.items():
