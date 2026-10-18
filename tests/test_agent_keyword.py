@@ -1,13 +1,46 @@
-"""Unit tests for the keyword check's pure parts: anchoring, the repeat key and the count note. All invented."""
+"""Unit tests for the keyword check: anchoring, the repeat key, the count note and the tool. All invented."""
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
+from typing import Any
+
 import pytest
+from agent_fakes import programme_passage, shown_numbers, tool_call, tool_context
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger, passage_costs, passage_parts, render_context, text_floor
-from docint.agents.turn.keyword import TERM_CONTEXT_CHARS, anchor_terms, check_key, keyword_note
+from docint.agents.turn.keyword import (
+    KEYWORD_DESCRIPTION,
+    KEYWORD_FIELD_NOTES,
+    LONG_WORD,
+    MAX_KEYWORD_CHARS,
+    NO_USABLE_WORD,
+    ONE_VALUE_ONLY,
+    TERM_CONTEXT_CHARS,
+    UNINDEXABLE_WORD,
+    KeywordMatcher,
+    KeywordResult,
+    KeywordTool,
+    anchor_terms,
+    check_key,
+    keyword_note,
+)
+from docint.agents.turn.passages import NO_NEW_PASSAGES
+from docint.agents.turn.stream import ToolCall
+from docint.agents.turn.tools import (
+    PassageReply,
+    ToolContext,
+    ToolRegistry,
+    ToolReply,
+    ToolWork,
+    passage_reply,
+    trail_detail,
+)
+from docint.core.search.fields import SEARCH_FIELDS
+from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
 from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS, WINDOW_JOIN
 
 LEAD = "The trial enrolled two hundred patients across four sites over two years. " * 3
@@ -260,6 +293,81 @@ def test_each_span_anchors_on_its_own_occurrence() -> None:
     assert 0 < moved[1][0] < len(first) and moved[1][1] == len(first)
 
 
+@pytest.mark.parametrize("keywords", [[], ["--"]], ids=["no-words", "no-letter-or-digit"])
+@pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "unstamped"])
+def test_keywords_without_a_word_leave_a_hit_as_it_is(keywords: list[str], stamped: bool) -> None:
+    """With no letter or digit to find there is nothing to anchor on: the very hit comes back, however deep its text.
+
+    Args:
+        keywords (list[str]): Words the index reads as nothing.
+        stamped (bool): Whether the hit carries match spans.
+    """
+    if stamped:
+        scored, word = scored_node("s", DEEP_TEXT, **{MATCH_SPANS_KEY: [[0, len(DEEP_TEXT)]]}), "Kontrollgruppe"
+    else:
+        scored, word = scored_node("u", UNSTAMPED_TEXT), "randomization"
+
+    assert anchor_terms(scored, keywords) is scored
+    # The same hit does move for a word it holds, so the identity above is the keywords' doing.
+    assert anchor_terms(scored, [word]) is not scored
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [[5, 3], "oops", [0, 10_000], [1.5, 9]],
+    ids=["inverted", "a-string", "past-the-text", "not-whole-numbers"],
+)
+def test_a_malformed_stored_span_is_kept_as_stored_while_a_valid_one_beside_it_moves(malformed: Any) -> None:
+    """Spans come from stored metadata: one that is no span is left alone and does not stop the others.
+
+    Args:
+        malformed (Any): A stored value that is no span of the passage.
+    """
+    scored = scored_node("s", TERM_TEXT, **{MATCH_SPANS_KEY: [malformed, [0, len(TERM_TEXT)]]})
+
+    anchored = anchor_terms(scored, ["Kontrollgruppe"])
+
+    kept, moved = anchored.node.metadata[MATCH_SPANS_KEY]
+    term = TERM_TEXT.index("Kontrollgruppe")
+    assert kept == malformed
+    assert term - TERM_CONTEXT_CHARS <= moved[0] < term and moved[1] == len(TERM_TEXT)
+    assert scored.node.metadata[MATCH_SPANS_KEY][0] == malformed
+
+
+@pytest.mark.parametrize("per_window", [True, False], ids=["span-per-window", "one-span-across-the-join"])
+def test_an_anchored_span_starts_in_the_window_holding_its_term(per_window: bool) -> None:
+    """A region never begins inside the seam between two windows, or in the window before the one with the term.
+
+    Args:
+        per_window (bool): Whether each window carries its own span, as a folded section's do, or one span
+            reaches across the join.
+    """
+    first = "Opening filler words. " * 40
+    text = f"{first}{WINDOW_JOIN}{TERM_TEXT}"
+    window = len(first) + len(WINDOW_JOIN)
+    spans = [[0, len(first)], [window, len(text)]] if per_window else [[0, len(text)]]
+    scored = scored_node("s", text, **{MATCH_SPANS_KEY: spans})
+
+    moved = _spans(anchor_terms(scored, ["Kontrollgruppe"]))
+
+    term = text.index("Kontrollgruppe")
+    assert moved[-1][1] == len(text)
+    assert window <= term - TERM_CONTEXT_CHARS <= moved[-1][0] < term
+    assert moved[:-1] == ([[0, len(first)]] if per_window else [])
+
+
+def test_a_term_just_after_a_window_join_keeps_its_span_where_the_window_starts() -> None:
+    """The 80 characters of left context would reach back over the join; a span never starts before its own start."""
+    first = "Opening filler words. " * 40
+    second = f"Short lead. Zielwert appears here.{' Trailing filler.' * 20}"
+    text = f"{first}{WINDOW_JOIN}{second}"
+    window = len(first) + len(WINDOW_JOIN)
+    scored = scored_node("s", text, **{MATCH_SPANS_KEY: [[0, len(first)], [window, len(text)]]})
+
+    assert text.index("Zielwert") - TERM_CONTEXT_CHARS < len(first)
+    assert _spans(anchor_terms(scored, ["Zielwert"])) == [[0, len(first)], [window, len(text)]]
+
+
 #: An invented chunk whose telling sentence lies well past the 300 characters its floor shows of its opening.
 DEEP_TEXT = f"{LEAD * 3}There was keine Kontrollgruppe in the design, which the authors acknowledge. {LEAD}"
 
@@ -351,6 +459,14 @@ def test_the_note_says_what_the_index_does_not_cover(unchecked: int, line: str) 
     ]
 
 
+def test_the_note_joins_its_count_line_and_its_coverage_line_with_a_newline() -> None:
+    """The lines of one note are a count and a coverage line; a carriage return in the joiner would pass splitlines."""
+    assert keyword_note(matches=0, unchecked=2) == (
+        "No indexed chunk in the searched material contains all of these words.\n"
+        "2 chunks are not in the keyword index yet, so they were not checked."
+    )
+
+
 def test_the_note_has_a_coverage_line_even_when_the_count_failed() -> None:
     """An unknown count does not hide that part of the collection was never checked."""
     assert keyword_note(matches=None, unchecked=3).splitlines() == [
@@ -392,3 +508,581 @@ def test_a_check_is_keyed_by_what_it_matches(first: tuple[str, str], second: tup
         same (bool): Whether the two are one check.
     """
     assert (check_key(*first) == check_key(*second)) is same
+
+
+# --- The keyword tool -----------------------------------------------------------------------------
+
+#: The fields a collection of social postings offers, the text first.
+ALL_FIELDS = ("text", "author", "network", "uuid")
+#: The most words the description may take: every round of every turn is sent all of them.
+MAX_DESCRIPTION_WORDS = 45
+WEATHER = "Für Sonntag meldet der Wetterdienst bedeckten Himmel, Wind aus West und kühle Temperaturen am Hafen."
+
+
+def _weather() -> NodeWithScore:
+    """Build the invented weather passage.
+
+    Returns:
+        NodeWithScore: The passage.
+    """
+    return scored_node("weather", WEATHER, filename="wetterbericht_hafen.pdf", page=2)
+
+
+def _result(
+    nodes: Sequence[NodeWithScore] = (),
+    *,
+    matches: int | None,
+    unchecked: int = 0,
+    keywords: Sequence[str] = ("hafenfest",),
+) -> KeywordResult:
+    """Build what a keyword match found.
+
+    Args:
+        nodes (Sequence[NodeWithScore]): The best matching passages.
+        matches (int | None): The exact count; ``None`` for a count that failed.
+        unchecked (int): Chunks the keyword index does not cover.
+        keywords (Sequence[str]): The words the match used.
+
+    Returns:
+        KeywordResult: The result.
+    """
+    return KeywordResult(nodes=list(nodes), matches=matches, unchecked=unchecked, keywords=tuple(keywords))
+
+
+class _Matcher:
+    """A keyword match double: refuses what it is told to, answers each run with its next result, records both."""
+
+    def __init__(
+        self,
+        *results: KeywordResult,
+        fields: tuple[str, ...] = ("text",),
+        refused: dict[str, str] | None = None,
+    ) -> None:
+        """Describe the match.
+
+        Args:
+            *results (KeywordResult): What the runs return in turn, the last one for every run after it; a
+                count of zero with no passage when none is given.
+            fields (tuple[str, ...]): The fields it offers.
+            refused (dict[str, str] | None): By words, the reason a check gives for them; it accepts the rest.
+        """
+        self._results = list(results) or [_result(matches=0)]
+        self._refused = refused or {}
+        self.fields = fields
+        self.checks: list[tuple[str, str]] = []
+        self.runs: list[tuple[str, str]] = []
+
+    @property
+    def tool(self) -> KeywordTool:
+        """The tool over this match.
+
+        Returns:
+            KeywordTool: A new tool.
+        """
+        return KeywordTool(KeywordMatcher(fields=self.fields, check=self._check, run=self._run))
+
+    def _check(self, words: str, field: str) -> str | None:
+        """Say why a check cannot run, and note that it was asked.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            str | None: The reason given for these words, or ``None``.
+        """
+        self.checks.append((words, field))
+        return self._refused.get(words)
+
+    def _run(self, words: str, field: str) -> KeywordResult:
+        """Answer a run with the next result, and note that it was asked.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            KeywordResult: The next result, or the last one once the others are used.
+        """
+        self.runs.append((words, field))
+        return self._results.pop(0) if len(self._results) > 1 else self._results[0]
+
+
+def _ask(tool: KeywordTool, ctx: ToolContext, **arguments: Any) -> ToolReply:
+    """Answer one call without the registry: check it, run its match and answer it.
+
+    Args:
+        tool (KeywordTool): The tool.
+        ctx (ToolContext): The turn's context.
+        **arguments (Any): The call's arguments.
+
+    Returns:
+        ToolReply: The tool's answer.
+    """
+    work = tool.prepare(arguments, ctx)
+    assert isinstance(work, ToolWork) and work.fetch is not None
+    return work.answer(work.fetch(), ctx)
+
+
+def test_the_tool_is_named_keyword_and_describes_itself_briefly() -> None:
+    """The description is the module's, and short: the schemas of every tool are sent in every round."""
+    tool = _Matcher().tool
+
+    assert (tool.name, tool.description) == ("keyword", KEYWORD_DESCRIPTION)
+    assert len(KEYWORD_DESCRIPTION.split()) <= MAX_DESCRIPTION_WORDS
+
+
+def test_a_tool_offering_only_the_text_takes_words_and_nothing_else() -> None:
+    """The words come with the limits the index puts on them, built from the index's own constant."""
+    assert _Matcher().tool.parameters == {
+        "type": "object",
+        "properties": {
+            "words": {
+                "type": "string",
+                "description": (
+                    "One to three words every match must contain, in any order; not a single letter or digit, "
+                    f"a word split by dots or signs (2.5, U.S.), nor one over {SEARCH_MAX_TOKEN_LEN} characters."
+                ),
+            }
+        },
+        "required": ["words"],
+    }
+
+
+def test_a_tool_offering_more_fields_takes_one_of_exactly_those_with_their_notes() -> None:
+    """The enum is the offered fields in order, defaulting to the text, and says what each one matches."""
+    schema = _Matcher(fields=ALL_FIELDS).tool.parameters
+
+    assert list(schema["properties"]) == ["words", "field"]
+    assert schema["required"] == ["words"]
+    assert schema["properties"]["field"] == {
+        "type": "string",
+        "enum": ["text", "author", "network", "uuid"],
+        "default": "text",
+        "description": (
+            "text: the passage text (the default); author: who wrote a posting; network: the platform; "
+            "uuid: one posting's id."
+        ),
+    }
+
+
+def test_the_field_notes_cover_only_the_fields_offered() -> None:
+    """A field the collection cannot match is not described, so the model is not invited to ask for it."""
+    field = _Matcher(fields=("text", "uuid")).tool.parameters["properties"]["field"]
+
+    assert field["enum"] == ["text", "uuid"]
+    assert field["description"] == "text: the passage text (the default); uuid: one posting's id."
+
+
+def test_every_field_the_search_knows_has_a_note() -> None:
+    """A field added to the search without a note would be offered with no word on what it matches."""
+    assert set(SEARCH_FIELDS) <= set(KEYWORD_FIELD_NOTES)
+
+
+#: Calls the tool refuses: the arguments, the reason the match's check gives, the message, and the checks asked.
+REFUSALS = [
+    pytest.param({}, None, "call keyword with the words to match.", [], id="no-words"),
+    pytest.param({"words": " \n "}, None, "call keyword with the words to match.", [], id="blank-words"),
+    pytest.param(
+        {"words": "w" * (MAX_KEYWORD_CHARS + 1)},
+        None,
+        f"keep the words within {MAX_KEYWORD_CHARS} characters; use the most telling ones.",
+        [],
+        id="too-long",
+    ),
+    pytest.param(
+        {"words": "Hafenfest", "field": "network"},
+        None,
+        "field must be one of: text, author, uuid.",
+        [],
+        id="field-not-offered",
+    ),
+    pytest.param(
+        {"words": "a b"},
+        NO_USABLE_WORD,
+        "give at least one word of two or more characters.",
+        [("a b", "text")],
+        id="no-usable-word",
+    ),
+    pytest.param(
+        {"words": "abc def", "field": "uuid"},
+        ONE_VALUE_ONLY,
+        "uuid matches one exact value; give a single one.",
+        [("abc def", "uuid")],
+        id="one-value-only",
+    ),
+    pytest.param(
+        {"words": "vitamin D"},
+        UNINDEXABLE_WORD,
+        "the index cannot match a single letter or digit, such as the D in vitamin D, nor a word it splits on dots "
+        "and signs, such as 2.5, U.S. or p<0.05; check the other words only, or use search.",
+        [("vitamin D", "text")],
+        id="unindexable-word",
+    ),
+    pytest.param(
+        {"words": "x" * (SEARCH_MAX_TOKEN_LEN + 1)},
+        LONG_WORD,
+        f"the index reads a word only up to its first {SEARCH_MAX_TOKEN_LEN} characters, so a longer one cannot be "
+        "checked exactly; check a shorter beginning of it, which also matches the longer words it begins.",
+        [("x" * (SEARCH_MAX_TOKEN_LEN + 1), "text")],
+        id="long-word",
+    ),
+    pytest.param(
+        {"words": "w" * (MAX_KEYWORD_CHARS + 1), "field": "network"},
+        None,
+        f"keep the words within {MAX_KEYWORD_CHARS} characters; use the most telling ones.",
+        [],
+        id="too-long-before-field",
+    ),
+    pytest.param({"field": "network"}, None, "call keyword with the words to match.", [], id="no-words-before-field"),
+    pytest.param(
+        {"words": "a b", "field": "network"},
+        NO_USABLE_WORD,
+        "field must be one of: text, author, uuid.",
+        [],
+        id="field-before-check",
+    ),
+]
+
+
+@pytest.mark.parametrize(("arguments", "problem", "message", "checks"), REFUSALS)
+def test_a_call_that_cannot_run_is_refused_with_its_reason_and_fetches_nothing(
+    arguments: dict[str, Any], problem: str | None, message: str, checks: list[tuple[str, str]]
+) -> None:
+    """Each reason has its own message, found in a fixed order, and the match is never run for a refused call.
+
+    Args:
+        arguments (dict[str, Any]): The call's arguments.
+        problem (str | None): What the match's check says about every words it is asked.
+        message (str): The message the reply carries after ``Error: ``.
+        checks (list[tuple[str, str]]): The checks the refusal needed, in order.
+    """
+    words = " ".join(str(arguments.get("words", "")).split())
+    double = _Matcher(fields=("text", "author", "uuid"), refused={} if problem is None else {words: problem})
+
+    reply = double.tool.prepare(arguments, tool_context())
+
+    assert type(reply) is ToolReply
+    assert (reply.text, reply.error, reply.action, reply.found) == (f"Error: {message}", True, "keyword", 0)
+    assert (reply.informative, reply.trail) == (False, None)
+    assert reply.detail == trail_detail(words)
+    assert (double.checks, double.runs) == (checks, [])
+
+
+@pytest.mark.parametrize(
+    ("arguments", "asked"),
+    [
+        ({"words": "Hafenfest"}, ("Hafenfest", "text")),
+        ({"words": "  Hafenfest \n Sturmwarnung\t"}, ("Hafenfest Sturmwarnung", "text")),
+        ({"words": "Hafenfest", "field": None}, ("Hafenfest", "text")),
+        ({"words": "Hafenfest", "field": ""}, ("Hafenfest", "text")),
+        ({"words": "Wolfgang Krieger", "field": "author"}, ("Wolfgang Krieger", "author")),
+        ({"words": 2024}, ("2024", "text")),
+    ],
+    ids=["plain", "whitespace", "null-field", "empty-field", "author", "number"],
+)
+def test_a_call_checks_then_fetches_its_words_on_one_line_in_the_field_it_names(
+    arguments: dict[str, Any], asked: tuple[str, str]
+) -> None:
+    """The check sees what the match will run, and the match runs only when the fetch does, off the loop thread.
+
+    Args:
+        arguments (dict[str, Any]): The call's arguments.
+        asked (tuple[str, str]): The words and field the check and the match are given.
+    """
+    double = _Matcher(fields=("text", "author"))
+
+    work = double.tool.prepare(arguments, tool_context())
+
+    assert isinstance(work, ToolWork) and work.fetch is not None
+    assert (work.detail, double.checks, double.runs) == (asked[0], [asked], [])
+    work.fetch()
+    assert double.runs == [asked]
+
+
+def test_words_of_exactly_the_longest_length_are_accepted() -> None:
+    """The limit is inclusive: words of exactly that length run, and one character more is refused."""
+    double = _Matcher()
+
+    work = double.tool.prepare({"words": "w" * MAX_KEYWORD_CHARS}, tool_context())
+
+    assert isinstance(work, ToolWork)
+
+
+def test_the_repeat_key_lists_the_tokens_and_the_values_in_order_whatever_order_the_words_come_in() -> None:
+    """The key does not depend on the order a set happens to iterate in: tokens and values are sorted."""
+    tool = _Matcher(fields=("text", "uuid")).tool
+
+    words = tool.recall_key({"words": "zebra Mango apfel Kirsche birne Dattel"})
+    uuid = tool.recall_key({"words": "0123456789abcdef0123456789abcdef", "field": "uuid"})
+
+    assert words == '["text", ["apfel", "birne", "dattel", "kirsche", "mango", "zebra"], []]'
+    assert uuid == '["uuid", [], ["01234567-89ab-cdef-0123-456789abcdef", "0123456789abcdef0123456789abcdef"]]'
+
+
+@pytest.mark.parametrize(
+    ("field", "anchored"),
+    [("text", True), ("author", False), ("network", False), ("uuid", False)],
+)
+def test_only_the_text_hits_are_anchored_on_the_words(field: str, anchored: bool) -> None:
+    """A text hit is moved to the words it was found by; the other fields match whole values, not words in text.
+
+    Args:
+        field (str): The field the call matched.
+        anchored (bool): Whether the hit's match is moved to the term.
+    """
+    hit = scored_node("trial", DEEP_TEXT, filename="trial.pdf", **{MATCH_SPANS_KEY: [[0, len(DEEP_TEXT)]]})
+    double = _Matcher(_result([hit], matches=1, keywords=("kontrollgruppe",)), fields=ALL_FIELDS)
+    ctx = tool_context()
+
+    _ask(double.tool, ctx, words="Kontrollgruppe", field=field)
+
+    [[start, end]] = _spans(ctx.ledger.entries()[0])
+    assert end == len(DEEP_TEXT)
+    assert (start > 0) is anchored
+
+
+def test_the_count_note_follows_the_passages_it_counts() -> None:
+    """The note is the reply's last paragraph, so a long passage can never push it out of a reply."""
+    double = _Matcher(_result([programme_passage()], matches=3, unchecked=2))
+    note = keyword_note(matches=3, unchecked=2)
+
+    reply = _ask(double.tool, tool_context(), words="Hafenfest")
+
+    assert shown_numbers(reply.text) == [1]
+    assert reply.text.endswith(f"\n\n{note}")
+    assert reply.text.index("citation_index: 1") < reply.text.index(note)
+
+
+def test_a_count_that_shows_no_new_passage_says_so_before_the_count() -> None:
+    """A zero is an answer, and so is a count of passages the turn holds: the reply names no passage and says why."""
+    reply = _ask(_Matcher(_result(matches=0)).tool, tool_context(), words="Hafenfest")
+
+    assert reply.text == f"{NO_NEW_PASSAGES}\n{keyword_note(matches=0, unchecked=0)}"
+    assert (reply.found, reply.error) == (0, False)
+
+
+def test_found_counts_the_passages_admitted_not_the_chunks_matched() -> None:
+    """Forty chunks match, two are new to the turn, and the same two found again are admitted no more."""
+    both = [programme_passage(), _weather()]
+    double = _Matcher(_result(both, matches=40), _result(both, matches=40))
+    tool, ctx = double.tool, tool_context()
+
+    first = _ask(tool, ctx, words="Hafenfest")
+    again = _ask(tool, ctx, words="Wetterdienst")
+
+    assert (first.found, again.found) == (2, 0)
+    assert "Also matched, shown before: [1], [2]." in again.text
+
+
+@pytest.mark.parametrize(
+    ("field", "matches", "unchecked", "trail"),
+    [
+        ("text", 3, 0, {"field": "text", "matches": 3}),
+        ("text", 0, 0, {"field": "text", "matches": 0}),
+        ("author", 3, 2, {"field": "author", "matches": 3, "unchecked": 2}),
+        ("text", None, 0, {"field": "text", "matches": None}),
+        ("text", None, 4, {"field": "text", "matches": None, "unchecked": 4}),
+    ],
+    ids=["count", "zero", "unchecked", "failed-count", "failed-count-unchecked"],
+)
+def test_the_trail_names_the_field_and_the_count_and_the_unchecked_only_when_there_are_some(
+    field: str, matches: int | None, unchecked: int, trail: dict[str, Any]
+) -> None:
+    """A failed count keeps ``matches`` as ``None``, which says it failed; ``unchecked`` is left out at zero.
+
+    Args:
+        field (str): The field the call matched.
+        matches (int | None): The count the match made.
+        unchecked (int): Chunks the keyword index does not cover.
+        trail (dict[str, Any]): The extra keys of the call's step, exactly.
+    """
+    double = _Matcher(_result([programme_passage()], matches=matches, unchecked=unchecked), fields=ALL_FIELDS)
+
+    reply = _ask(double.tool, tool_context(), words="Hafenfest", field=field)
+
+    assert reply.trail == trail
+    assert json.loads(json.dumps(reply.trail)) == trail
+
+
+@pytest.mark.parametrize("matches", [0, 1, 40])
+def test_a_known_count_is_news_even_when_it_is_zero_and_the_call_is_remembered(matches: int) -> None:
+    """The model learned something from the count, so the round is not idle, and the call can be recalled.
+
+    Args:
+        matches (int): The count the match made.
+    """
+    reply = _ask(_Matcher(_result(matches=matches)).tool, tool_context(), words="Hafenfest")
+
+    assert type(reply) is PassageReply
+    assert (reply.informative, reply.error) == (True, False)
+
+
+def test_a_failed_count_is_a_plain_reply_that_is_no_news() -> None:
+    """The number is unavailable, so nothing was learned about the collection; passages it did find still count."""
+    passages = [programme_passage()]
+    reply = _ask(_Matcher(_result(passages, matches=None, unchecked=1)).tool, tool_context(), words="Hafenfest")
+
+    note = keyword_note(matches=None, unchecked=1)
+    shown = passage_reply(passages, tool_context(), action="keyword", detail="Hafenfest", note=note)
+    assert type(reply) is ToolReply
+    assert (reply.text, reply.found, reply.action, reply.detail) == (shown.text, shown.found, "keyword", "Hafenfest")
+    assert (reply.informative, reply.error) == (False, False)
+    assert reply.trail == {"field": "text", "matches": None, "unchecked": 1}
+    assert reply.text.endswith(note)
+
+
+def test_reordered_or_recased_words_on_the_text_are_answered_from_memory() -> None:
+    """The same check asked again in other words is not run, admits nothing, and is no news."""
+    double = _Matcher(_result([programme_passage()], matches=2, unchecked=1))
+    registry = ToolRegistry([double.tool])
+    ctx = tool_context()
+
+    first = registry.call(tool_call("keyword", words="Hafenfest Sturmwarnung"), ctx)
+    again = registry.call(tool_call("keyword", words="  STURMWARNUNG   hafenfest"), ctx)
+
+    assert double.runs == [("Hafenfest Sturmwarnung", "text")]
+    assert again.text == "Already called keyword with these arguments; see [1]."
+    assert (first.found, first.informative) == (1, True)
+    assert first.trail == {"field": "text", "matches": 2, "unchecked": 1}
+    assert (again.found, again.informative, again.trail) == (0, False, first.trail)
+
+
+def test_two_fields_are_two_calls_even_for_the_same_words() -> None:
+    """The same words match different things in the text and in a network, so neither answers for the other."""
+    double = _Matcher(_result([programme_passage()], matches=2), fields=("text", "network"))
+    registry = ToolRegistry([double.tool])
+    ctx = tool_context()
+
+    registry.call(tool_call("keyword", words="Hafenfest"), ctx)
+    other = registry.call(tool_call("keyword", words="Hafenfest", field="network"), ctx)
+    again = registry.call(tool_call("keyword", words="hafenfest"), ctx)
+
+    assert double.runs == [("Hafenfest", "text"), ("Hafenfest", "network")]
+    assert other.trail == {"field": "network", "matches": 2}
+    assert again.text == "Already called keyword with these arguments; see [1]."
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "same"),
+    [
+        ({"words": "Hans Müller"}, {"words": "müller   HANS"}, True),
+        ({"words": "Kontrollgruppe"}, {"words": "kontrollgruppe."}, True),
+        ({"words": "Straße"}, {"words": "Strasse"}, False),
+        ({"words": "Hafenfest"}, {"words": "Hafenfest", "field": "network"}, False),
+        ({"words": "Krieger"}, {"words": "Krieger", "field": "author"}, False),
+        ({"words": "Krieger", "field": "author"}, {"words": "krieger", "field": "author"}, False),
+        ({"words": "Wolfgang Krieger", "field": "author"}, {"words": "krieger WOLFGANG", "field": "author"}, True),
+        (
+            {"words": "0123456789abcdef0123456789abcdef", "field": "uuid"},
+            {"words": "01234567-89ab-cdef-0123-456789abcdef", "field": "uuid"},
+            True,
+        ),
+        ({"words": "post_ab.cd", "field": "uuid"}, {"words": "post.ab_cd", "field": "uuid"}, False),
+        ({"words": "POST_AB", "field": "uuid"}, {"words": "post_ab", "field": "uuid"}, False),
+    ],
+    ids=[
+        "reordered",
+        "punctuation",
+        "umlaut-is-not-folded",
+        "same-tokens-two-fields",
+        "two-fields",
+        "an-id-is-exact",
+        "names-in-any-order",
+        "uuid-dashes",
+        "uuid-pieces",
+        "uuid-case",
+    ],
+)
+def test_calls_are_one_call_when_they_match_the_same_thing(
+    first: dict[str, Any], second: dict[str, Any], same: bool
+) -> None:
+    """Words match by the tokens the index reads, an id by its exact value; the field is always part of the call.
+
+    Args:
+        first (dict[str, Any]): One call's arguments.
+        second (dict[str, Any]): Another call's.
+        same (bool): Whether the registry remembers them as one call.
+    """
+    registry = ToolRegistry([_Matcher(fields=ALL_FIELDS).tool])
+
+    keys = [registry.prepare(tool_call("keyword", **arguments), tool_context()).key for arguments in (first, second)]
+
+    assert (keys[0] == keys[1]) is same
+
+
+def test_a_failed_count_is_never_remembered_so_the_same_call_runs_again() -> None:
+    """A retry can succeed where the count failed; the call that then succeeds is the one that is remembered."""
+    double = _Matcher(_result([programme_passage()], matches=None), _result([programme_passage()], matches=2))
+    registry = ToolRegistry([double.tool])
+    ctx = tool_context()
+
+    failed = registry.call(tool_call("keyword", words="Hafenfest"), ctx)
+    retried = registry.call(tool_call("keyword", words="Hafenfest"), ctx)
+    again = registry.call(tool_call("keyword", words="hafenfest"), ctx)
+
+    assert double.runs == [("Hafenfest", "text")] * 2
+    assert (type(failed), failed.informative, failed.trail) == (ToolReply, False, {"field": "text", "matches": None})
+    assert (type(retried), retried.informative, retried.trail) == (PassageReply, True, {"field": "text", "matches": 2})
+    assert again.text == "Already called keyword with these arguments; see [1]."
+
+
+def test_a_call_the_tool_refuses_is_never_answered_as_a_repeat_of_one_it_ran() -> None:
+    """The index drops the lone D of ``vitamin D``, so it keys like ``vitamin``; its refusal must still be given."""
+    double = _Matcher(_result([programme_passage()], matches=2), refused={"vitamin D": UNINDEXABLE_WORD})
+    registry = ToolRegistry([double.tool])
+    ctx = tool_context()
+    assert check_key("vitamin D", "text") == check_key("vitamin", "text")
+
+    ran = registry.call(tool_call("keyword", words="vitamin"), ctx)
+    refused = registry.call(tool_call("keyword", words="vitamin D"), ctx)
+
+    assert (ran.error, refused.error) == (False, True)
+    assert refused.text.startswith("Error: the index cannot match a single letter or digit")
+    assert double.runs == [("vitamin", "text")]
+
+
+#: Arguments a model may send, and whether the tool names such a call by a repeat key of its own.
+ODD_ARGUMENTS = [
+    pytest.param({}, False, id="no-arguments"),
+    pytest.param({"words": None}, False, id="null-words"),
+    pytest.param({"words": ""}, False, id="empty-words"),
+    pytest.param({"words": " \n "}, False, id="blank-words"),
+    pytest.param({"words": 0}, False, id="zero-words"),
+    pytest.param({"words": 2024}, True, id="number-words"),
+    pytest.param({"words": ["Hafenfest", "Sturm"]}, True, id="list-words"),
+    pytest.param({"words": {"w": "Hafenfest"}}, True, id="object-words"),
+    pytest.param({"words": "Hafenfest", "field": None}, True, id="null-field"),
+    pytest.param({"words": "Hafenfest", "field": "gibtsnicht"}, False, id="unknown-field"),
+    pytest.param({"words": "Hafenfest", "field": "network"}, False, id="field-not-offered"),
+    pytest.param({"words": "Hafenfest", "field": 7}, False, id="number-field"),
+    pytest.param({"words": "Hafenfest", "field": ["text"]}, False, id="list-field"),
+    pytest.param({"words": "Hafenfest", "field": {"text": 1}}, False, id="object-field"),
+    pytest.param({"field": "author"}, False, id="field-without-words"),
+    pytest.param({"words": "w" * (MAX_KEYWORD_CHARS + 1)}, False, id="over-long-words"),
+]
+
+
+@pytest.mark.parametrize(("arguments", "keyed"), ODD_ARGUMENTS)
+def test_the_repeat_key_copes_with_any_arguments_a_model_may_send(arguments: dict[str, Any], keyed: bool) -> None:
+    """The key is asked for before the arguments are checked, so a call the tool will refuse must not raise.
+
+    A call it has no key for falls to the registry's default key, and the refusal is given as ever.
+
+    Args:
+        arguments (dict[str, Any]): The call's arguments.
+        keyed (bool): Whether the tool names the call itself.
+    """
+    double = _Matcher(fields=("text", "author"))
+    tool = double.tool
+    registry = ToolRegistry([tool])
+    call = ToolCall(id="call_0", name="keyword", arguments=json.dumps(arguments))
+
+    key = tool.recall_key(arguments)
+    prepared = registry.prepare(call, tool_context())
+
+    assert isinstance(key, str) is keyed
+    assert prepared.key is not None and prepared.key[0] == "keyword"
+    assert (prepared.key[1] == key) is keyed
+    # A call the tool can key is one it can run; one it cannot is refused at once.
+    assert (prepared.work is not None) is keyed

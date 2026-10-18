@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 
 import pytest
-from agent_fakes import ScriptedSearch, programme_passage, tool_call, tool_context
+from agent_fakes import ScriptedSearch, programme_passage, shown_numbers, tool_call, tool_context
 from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.gate import MIN_CTX_WINDOW
 from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, history_allowance_tokens, schema_tokens
+from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.tools import SearchFn, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS
@@ -38,13 +39,57 @@ def _no_frames(key: str) -> list[NodeWithScore]:
     return []
 
 
-def _toolset(target: str, *, search: SearchFn | None = None, search_images: SearchFn | None = None) -> ToolRegistry:
+def _keyword_matcher(*fields: str) -> KeywordMatcher:
+    """Build a keyword matcher that accepts every call and fails the test if it runs.
+
+    Args:
+        *fields (str): The fields it offers; the text alone when none is given.
+
+    Returns:
+        KeywordMatcher: The matcher.
+    """
+
+    def _check(words: str, field: str) -> str | None:
+        """Accept the call.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            str | None: No reason to refuse.
+        """
+        return None
+
+    def _run(words: str, field: str) -> KeywordResult:
+        """Fail: no test here expects the match to run.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("The keyword match ran, which the test did not expect.")
+
+    return KeywordMatcher(fields=fields or ("text",), check=_check, run=_run)
+
+
+def _toolset(
+    target: str,
+    *,
+    search: SearchFn | None = None,
+    search_images: SearchFn | None = None,
+    keyword: KeywordMatcher | None = None,
+) -> ToolRegistry:
     """Build the tools of a turn whose searches fail the test if they run, unless given.
 
     Args:
         target (str): The turn's retrieval target.
         search (SearchFn | None): The text search; one that raises if it runs when not given.
         search_images (SearchFn | None): The image search; one that raises if it runs when not given.
+        keyword (KeywordMatcher | None): The keyword match the turn offers; none when not given.
 
     Returns:
         ToolRegistry: The tools the target offers.
@@ -54,6 +99,7 @@ def _toolset(target: str, *, search: SearchFn | None = None, search_images: Sear
         search=ScriptedSearch() if search is None else search,
         search_images=ScriptedSearch() if search_images is None else search_images,
         list_keyframes=_no_frames,
+        keyword=keyword,
     )
 
 
@@ -110,6 +156,72 @@ def test_all_offers_every_tool() -> None:
 
     assert _offered(registry) == ["search", "search_images", "keyframes", "read"]
     assert registry.names == {"search", "search_images", "keyframes", "read"}
+
+
+def test_keyword_is_offered_to_the_turns_that_search_text() -> None:
+    """A documents turn gains the keyword check between search and read, an all turn after the image tools."""
+    matcher = _keyword_matcher()
+
+    assert _offered(_toolset("documents", keyword=matcher)) == ["search", "keyword", "read"]
+    assert _offered(_toolset("all", keyword=matcher)) == ["search", "search_images", "keyframes", "keyword", "read"]
+    assert _toolset("all", keyword=matcher).names == {"search", "search_images", "keyframes", "keyword", "read"}
+
+
+def test_a_visual_turn_is_never_offered_keyword_even_when_given_one() -> None:
+    """A word match runs over text, so a visual turn keeps its tools and refuses a call to it as unknown."""
+    registry = _toolset("visual", keyword=_keyword_matcher())
+
+    assert _offered(registry) == ["search_images", "keyframes", "read"]
+    refused = registry.call(tool_call("keyword", words="Hafenfest"), tool_context())
+    assert _is_refusal_naming_the_offered_tools(refused, registry), refused.text
+
+
+@pytest.mark.parametrize(
+    ("target", "tools"),
+    [
+        ("documents", ["search", "read"]),
+        ("visual", ["search_images", "keyframes", "read"]),
+        ("all", ["search", "search_images", "keyframes", "read"]),
+    ],
+)
+def test_without_a_keyword_match_a_target_offers_the_tools_it_always_did(target: str, tools: list[str]) -> None:
+    """A turn given no keyword match, by leaving the argument out, is offered exactly the tools it was before.
+
+    Args:
+        target (str): A retrieval target.
+        tools (list[str]): The tools it offered before keyword existed, in order.
+    """
+    registry = toolset_for(target, search=ScriptedSearch(), search_images=ScriptedSearch(), list_keyframes=_no_frames)
+
+    assert _offered(registry) == tools
+
+
+def test_the_keyword_tool_runs_the_match_it_was_given() -> None:
+    """Keyword is wired to the turn's own match, with the fields it offers, not to a stand-in."""
+    runs: list[tuple[str, str]] = []
+
+    def _run(words: str, field: str) -> KeywordResult:
+        """Record the match and find the programme.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            KeywordResult: One passage and its count.
+        """
+        runs.append((words, field))
+        return KeywordResult(nodes=[programme_passage()], matches=1, unchecked=0, keywords=("hafenfest",))
+
+    matcher = KeywordMatcher(fields=("text", "uuid"), check=lambda words, field: None, run=_run)
+    registry = _toolset("documents", keyword=matcher)
+
+    reply = registry.call(tool_call("keyword", words="Hafenfest"), tool_context())
+
+    assert runs == [("Hafenfest", "text")]
+    assert shown_numbers(reply.text) == [1]
+    schema = next(item["function"] for item in registry.schemas() if item["function"]["name"] == "keyword")
+    assert schema["parameters"]["properties"]["field"]["enum"] == ["text", "uuid"]
 
 
 def test_each_tool_runs_the_callable_meant_for_it() -> None:
@@ -180,7 +292,8 @@ def _descriptions() -> dict[str, str]:
     Returns:
         dict[str, str]: Each description, by the tool's name.
     """
-    return {schema["function"]["name"]: schema["function"]["description"] for schema in _toolset("all").schemas()}
+    registry = _toolset("all", keyword=_keyword_matcher())
+    return {schema["function"]["name"]: schema["function"]["description"] for schema in registry.schemas()}
 
 
 def test_a_description_never_names_another_tool() -> None:
@@ -263,9 +376,10 @@ def test_a_plain_model_keeps_room_for_three_full_results_in_the_smallest_window(
         ("search", ("documents", "transcripts", "[n]")),
         ("search_images", ("who appears", "clothing", "weather", "places", "[n]")),
         ("keyframes", ("specific clip", "[n]")),
+        ("keyword", ("count", "exact", "[n]")),
         ("read", ("rest of a passage",)),
     ],
-    ids=["search", "search_images", "keyframes", "read"],
+    ids=["search", "search_images", "keyframes", "keyword", "read"],
 )
 def test_a_description_says_what_the_tool_is_for(tool: str, anchors: tuple[str, ...]) -> None:
     """The model routes by what a description names: text by documents, pictures by what is seen, a clip, a passage.

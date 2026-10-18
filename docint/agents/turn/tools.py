@@ -33,6 +33,7 @@ import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
@@ -99,7 +100,8 @@ class ToolReply:
             A reply answered from memory never is.
         trail (Mapping[str, Any] | None): Extra keys for this call's step in the turn's trail,
             copied verbatim; a key may hold ``None`` on purpose, as a failed count's ``matches``
-            does. ``None`` for none.
+            does. Its values must be JSON values (str, int, float, bool or ``None``), since the
+            stored step is persisted with ``json.dumps``. ``None`` for none.
     """
 
     text: str
@@ -137,8 +139,8 @@ class _Answered:
         detail (str): The call's main argument, for the trail.
         states (tuple[tuple[int, tuple[int, int]], ...]): Each entry the answer depends on,
             with how far it had grown when answered (see :func:`_state`).
-        trail (Mapping[str, Any] | None): The extra keys the answer's step carried, which the
-            step of a call answered from memory shows again.
+        trail (Mapping[str, Any] | None): A read-only copy of the extra keys the answer's step
+            carried, which the step of a call answered from memory shows again.
     """
 
     numbers: tuple[int, ...]
@@ -741,7 +743,7 @@ class ToolRegistry:
         may have been answered since, and a read remembered from an earlier round is
         decided here, while its passage is unchanged. Either way the call is answered from
         memory, its own fetch discarded, never admitted again. Otherwise the work's answer
-        admits and renders, and a :class:`PassageReply` is remembered with its trail.
+        admits and renders, and a :class:`PassageReply` is remembered with a copy of its trail.
 
         Args:
             prepared (PreparedCall): The call, from :meth:`prepare`.
@@ -765,8 +767,10 @@ class ToolRegistry:
         reply = prepared.work.answer(fetched, ctx)
         if isinstance(reply, PassageReply):
             states = tuple((number, _state(ctx.ledger, number)) for number in reply.depends_on)
+            # A copy, so a tool that reuses and mutates one dict cannot rewrite earlier steps.
+            trail = None if reply.trail is None else MappingProxyType(dict(reply.trail))
             ctx.answered[prepared.key] = _Answered(
-                numbers=reply.numbers, detail=reply.detail, states=states, trail=reply.trail
+                numbers=reply.numbers, detail=reply.detail, states=states, trail=trail
             )
         return reply
 

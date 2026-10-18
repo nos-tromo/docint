@@ -12,7 +12,7 @@ import math
 import threading
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, cast
 
 import httpx
@@ -2380,8 +2380,8 @@ class _Counter:
         Args:
             informative (bool): Whether the count tells the model something new.
             trail (Mapping[str, Any] | None): The extra keys of the call's step.
-            error (bool): Whether the reply says the call was not answered.
-            text (str): What the model reads.
+            error (bool): Whether the call is answered with an error reply, flagged informative all the same.
+            text (str): What the model reads; the message of the error reply when ``error``.
         """
         self.name = "count"
         self.description = "Count the chunks that hold the words."
@@ -2411,14 +2411,15 @@ class _Counter:
                 context (ToolContext): Unused.
 
             Returns:
-                ToolReply: The count, which admits no passage.
+                ToolReply: The count, which admits no passage; an error reply when the tool errs.
             """
+            if self._error:
+                return replace(error_reply(self.name, self._text, detail=detail), informative=self._informative)
             return PassageReply(
                 text=self._text,
                 found=0,
                 action=self.name,
                 detail=detail,
-                error=self._error,
                 informative=self._informative,
                 trail=self._trail,
             )
@@ -2494,7 +2495,7 @@ def test_one_informative_reply_keeps_its_round_from_being_idle(count_first: bool
 
 def test_an_error_reply_is_never_news() -> None:
     """The news must come from a call its tool answered: an error reply flagged informative leaves its round idle."""
-    registry = ToolRegistry([_Counter(error=True, text="Error: the count could not be made.")])
+    registry = ToolRegistry([_Counter(error=True, text="the count could not be made.")])
     llm = streaming_tool_llm([_calls(_count_call("call_a", "Hafen")), _calls(_count_call("call_b", "Fest")), _answer()])
 
     progress, _, result = _drain(_turn(_loop(llm, registry)))

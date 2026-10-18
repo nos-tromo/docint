@@ -7,11 +7,13 @@ import pkgutil
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import fields
 from typing import Any
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
     LEDGER_CAP,
     PROGRAMME,
@@ -36,6 +38,7 @@ from docint.agents.assessment.ledger import (
     passage_parts,
     stamp,
 )
+from docint.agents.turn.calls import FAILED_REPLY, RoundCalls
 from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import (
@@ -922,12 +925,19 @@ COUNT_TRAIL: dict[str, Any] = {"field": "text", "matches": 5, "unchecked": 2}
 class _Counting:
     """A tool that answers with the passages it finds and a count of words, news even when no passage is admitted."""
 
-    def __init__(self, *passages: NodeWithScore, plain: bool = False) -> None:
+    def __init__(
+        self,
+        *passages: NodeWithScore,
+        plain: bool = False,
+        trail_of: Callable[[int], Mapping[str, Any]] | None = None,
+    ) -> None:
         """Describe the tool.
 
         Args:
             *passages (NodeWithScore): What every call finds.
             plain (bool): Whether the answer is a plain reply, which the registry never remembers.
+            trail_of (Callable[[int], Mapping[str, Any]] | None): The trail of an answer, from how many answers
+                the tool has given including that one; ``COUNT_TRAIL`` for every answer when ``None``.
         """
         self.name = "count"
         self.description = "Count the chunks that hold the words."
@@ -937,8 +947,10 @@ class _Counting:
             "required": ["words"],
         }
         self.runs: list[str] = []
+        self.answers = 0
         self._passages = list(passages)
         self._plain = plain
+        self._trail_of = trail_of
 
     def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
         """Take any words; the count is the call's fetch and a reply carrying it the answer.
@@ -973,6 +985,8 @@ class _Counting:
                 ToolReply: A plain reply when the tool is plain, else a passage reply.
             """
             shown = passage_reply(fetched, context, action=self.name, detail=detail)
+            self.answers += 1
+            trail = COUNT_TRAIL if self._trail_of is None else self._trail_of(self.answers)
             if self._plain:
                 return ToolReply(
                     text=shown.text,
@@ -980,7 +994,7 @@ class _Counting:
                     action=self.name,
                     detail=detail,
                     informative=True,
-                    trail=COUNT_TRAIL,
+                    trail=trail,
                 )
             return PassageReply(
                 text=shown.text,
@@ -989,7 +1003,7 @@ class _Counting:
                 detail=detail,
                 numbers=shown.numbers,
                 informative=True,
-                trail=COUNT_TRAIL,
+                trail=trail,
             )
 
         return ToolWork(detail=detail, fetch=_fetch, answer=_answer)
@@ -1096,6 +1110,47 @@ def test_a_call_a_tool_gives_no_key_to_is_keyed_by_its_arguments() -> None:
     assert worded.key == ("count", "hans müller")
 
 
+class _Unkeyable(_Counting):
+    """A counting tool whose repeat key raises, as one with a bug in its handling of arguments would."""
+
+    def recall_key(self, arguments: Mapping[str, Any]) -> str | None:
+        """Fail.
+
+        Args:
+            arguments (Mapping[str, Any]): The call's arguments, unused.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("invented key failure")
+
+
+def test_a_repeat_key_that_raises_fails_its_call_alone(loguru_caplog: LogCaptureFixture) -> None:
+    """A call its tool cannot key is a call that cannot be prepared: it gets the failure reply, the round goes on.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    ctx = tool_context()
+    search = ScriptedSearch([programme_passage()])
+    calls = RoundCalls(
+        registry=ToolRegistry([SearchTool(search), _Unkeyable()]),
+        result_chars=ctx.budget.result_chars,
+        max_calls_per_round=4,
+        char_token_ratio=3.5,
+        search_slots=threading.BoundedSemaphore(2),
+    )
+
+    prepared = calls.prepare([tool_call("count", words="Hafenfest"), tool_call("search", query="Hafenfest")], ctx)
+    answered = calls.answer(prepared, ctx, room=10_000, time_left=lambda: 60.0)
+
+    assert (prepared.failed, answered.failed) == (1, 1)
+    assert answered.replies[0] == error_reply("count", FAILED_REPLY)
+    assert shown_numbers(answered.replies[1].text) == [1]
+    assert search.queries == ["Hafenfest"]
+    assert loguru_caplog.messages == ["An agent tool call could not be prepared: RuntimeError"]
+
+
 def test_a_call_answered_from_memory_keeps_its_trail_and_is_no_news() -> None:
     """A recalled step shows the fields it showed before, but it admits nothing and tells the model nothing new."""
     ctx = tool_context()
@@ -1109,17 +1164,46 @@ def test_a_call_answered_from_memory_keeps_its_trail_and_is_no_news() -> None:
     assert (again.found, again.informative, again.trail) == (0, False, COUNT_TRAIL)
 
 
+def _numbered_trail(answer: int) -> dict[str, Any]:
+    """Give an answer a trail that tells it from every other answer of the tool.
+
+    Args:
+        answer (int): How many answers the tool has given, this one included.
+
+    Returns:
+        dict[str, Any]: The count trail with the answer's number.
+    """
+    return {**COUNT_TRAIL, "answer": answer}
+
+
 def test_a_call_answered_from_memory_has_the_trail_of_the_first_answer_alone() -> None:
-    """What is remembered is the trail of the call's first answer, not a later call's."""
+    """A second answer to the same call, which would carry another trail, is never given or remembered."""
     ctx = tool_context()
-    tool = _Counting(programme_passage())
+    tool = _Counting(programme_passage(), trail_of=_numbered_trail)
     registry = ToolRegistry([tool])
+    calls = [tool_call("count", words="Hafenfest"), tool_call("count", words="hafenfest")]
+
+    first, duplicate = two_phase_round(registry, calls, ctx)
+    later = registry.call(tool_call("count", words="HAFENFEST"), ctx)
+
+    assert first.trail == _numbered_trail(1)
+    assert (duplicate.trail, later.trail) == (first.trail, first.trail)
+    # Both calls of the round fetched; the registry answered one and recalled the other.
+    assert (tool.runs, tool.answers) == (["Hafenfest", "hafenfest"], 1)
+
+
+def test_the_trail_a_call_is_remembered_by_is_a_copy_the_tool_cannot_rewrite() -> None:
+    """A tool that reuses and mutates one dict for its trails cannot rewrite the steps of calls answered before."""
+    ctx = tool_context()
+    shared = dict(COUNT_TRAIL)
+    registry = ToolRegistry([_Counting(programme_passage(), trail_of=lambda answer: shared)])
     registry.call(tool_call("count", words="Hafenfest"), ctx)
-    registry.call(tool_call("count", words="Hafenfest"), ctx)
+    shared["matches"] = 99
 
     again = registry.call(tool_call("count", words="hafenfest"), ctx)
 
-    assert (again.trail, tool.runs) == (COUNT_TRAIL, ["Hafenfest"])
+    assert again.trail == COUNT_TRAIL
+    assert shared["matches"] == 99
 
 
 def test_a_search_answered_from_memory_has_no_trail_and_is_no_news() -> None:

@@ -6,23 +6,28 @@ cannot promise. The count is exact over what the keyword index covers, so a
 zero is an answer rather than a miss. The match itself runs in RAG, which owns
 the index, the filters and the retrieval chain; this module holds what the turn
 does with a match (it anchors each hit on its words, writes the count note and
-keys a check so the same one asked again is known) and imports nothing from
-:mod:`docint.core.rag` or :mod:`docint.core.state`.
+keys a check so the same one asked again is known) and the :class:`KeywordTool`
+the model calls it by. It imports nothing from :mod:`docint.core.rag` or
+:mod:`docint.core.state`.
 """
 
 from __future__ import annotations
 
+import functools
+import json
 import re
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 import regex
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import kept_ranges
+from docint.agents.turn.tools import ToolContext, ToolReply, ToolWork, error_reply, passage_reply, trail_detail
 from docint.core.search.fields import search_field_spec
 from docint.core.search.fulltext import INDEX_WORD_CLASS, index_pieces, index_tokens, parse_keywords
+from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
 from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS, WINDOW_JOIN
 
 #: The field a keyword call matches when it names none: the passage text.
@@ -40,6 +45,23 @@ ONE_VALUE_ONLY = "one_value_only"
 UNINDEXABLE_WORD = "unindexable_word"
 #: Why a keyword call cannot run: a word is longer than the index reads, which would match more than it names.
 LONG_WORD = "long_word"
+
+KEYWORD_DESCRIPTION = (
+    "Count indexed chunks containing all these words, in any order (a word also matches longer words it begins), "
+    "and return the best new ones under [n]. For exact names, numbers and ids, or whether something is mentioned "
+    "at all: a count of 0 is exact."
+)
+KEYWORD_WORDS_DESCRIPTION = (
+    "One to three words every match must contain, in any order; not a single letter or digit, a word split by "
+    f"dots or signs (2.5, U.S.), nor one over {SEARCH_MAX_TOKEN_LEN} characters."
+)
+#: What each field matches, for the schema of a tool that offers more than the text.
+KEYWORD_FIELD_NOTES = {
+    "text": "the passage text (the default)",
+    "author": "who wrote a posting",
+    "network": "the platform",
+    "uuid": "one posting's id",
+}
 
 #: A word starts where the index starts one: no letter or digit right before it.
 _WORD_START = rf"(?<![{INDEX_WORD_CLASS}])"
@@ -72,8 +94,8 @@ class KeywordMatcher:
     """The keyword match an agent turn offers its model, bound to its collection, filters and target.
 
     Attributes:
-        fields (tuple[str, ...]): The fields whose indexes are ready, ``text``
-            first when it is.
+        fields (tuple[str, ...]): The fields whose indexes are ready, each a key of
+            :data:`~docint.core.search.fields.SEARCH_FIELDS`, ``text`` first when it is.
         check (Callable[[str, str], str | None]): Why ``(words, field)`` cannot
             run, :data:`NO_USABLE_WORD`, :data:`ONE_VALUE_ONLY`,
             :data:`UNINDEXABLE_WORD` or :data:`LONG_WORD`, or ``None``; it does no I/O.
@@ -265,3 +287,160 @@ def keyword_note(*, matches: int | None, unchecked: int) -> str:
     elif unchecked > 1:
         lines.append(f"{unchecked} chunks are not in the keyword index yet, so they were not checked.")
     return "\n".join(lines)
+
+
+def _keyword_parameters(fields: Sequence[str]) -> dict[str, Any]:
+    """Build the JSON schema of a keyword call's arguments, its field limited to the offered ones.
+
+    A tool that offers only the text takes no field at all: naming fields the
+    collection does not hold would only invite calls that fail.
+
+    Args:
+        fields (Sequence[str]): The fields whose indexes are ready.
+
+    Returns:
+        dict[str, Any]: The schema of one object: ``words``, and ``field`` when anything
+        besides the text is offered.
+    """
+    properties: dict[str, Any] = {"words": {"type": "string", "description": KEYWORD_WORDS_DESCRIPTION}}
+    if tuple(fields) != (DEFAULT_KEYWORD_FIELD,):
+        notes = "; ".join(f"{name}: {KEYWORD_FIELD_NOTES[name]}" for name in fields if name in KEYWORD_FIELD_NOTES)
+        properties["field"] = {
+            "type": "string",
+            "enum": list(fields),
+            "default": DEFAULT_KEYWORD_FIELD,
+            "description": f"{notes}.",
+        }
+    return {"type": "object", "properties": properties, "required": ["words"]}
+
+
+def _request(arguments: Mapping[str, Any]) -> tuple[str, str]:
+    """Read a keyword call's words and field, whatever types the model sent.
+
+    Args:
+        arguments (Mapping[str, Any]): The call's arguments.
+
+    Returns:
+        tuple[str, str]: The words on one line, and the field, the text when none is named.
+    """
+    words = " ".join(str(arguments.get("words") or "").split())
+    return words, str(arguments.get("field") or DEFAULT_KEYWORD_FIELD)
+
+
+class KeywordTool:
+    """``keyword(words[, field])``: count the indexed chunks that hold every word and show the best of them."""
+
+    def __init__(self, matcher: KeywordMatcher) -> None:
+        """Bind the match and describe the tool by the fields it offers.
+
+        Args:
+            matcher (KeywordMatcher): The turn's keyword match, with its collection, filters and
+                target; its fields are the ones the tool offers, the text first.
+        """
+        self.name = "keyword"
+        self.description = KEYWORD_DESCRIPTION
+        self.parameters = _keyword_parameters(matcher.fields)
+        self._matcher = matcher
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Check the words and the field; the match is the call's fetch.
+
+        Args:
+            arguments (Mapping[str, Any]): ``words``, and optionally ``field``, what to match them in.
+            ctx (ToolContext): Unused; a match needs nothing of the evidence to start.
+
+        Returns:
+            ToolReply | ToolWork: An error reply saying why the call cannot run, which is never
+            remembered; otherwise the match to run and the answer to give with what it found.
+        """
+        words, field = _request(arguments)
+        detail = trail_detail(words)
+        refusal = self._refusal(words, field)
+        if refusal is not None:
+            return error_reply(self.name, refusal, detail=detail)
+        return ToolWork(
+            detail=detail,
+            fetch=functools.partial(self._matcher.run, words, field),
+            answer=functools.partial(self._answer, field, detail),
+        )
+
+    def recall_key(self, arguments: Mapping[str, Any]) -> str | None:
+        """Name a call by what it matches, so the same check asked in other words is known.
+
+        Asked before the arguments are checked, so it takes any arguments and never raises on
+        them. A call the tool refuses has no key of its own: the index drops a lone ``D`` from
+        ``vitamin D``, which would otherwise be answered as a repeat of ``vitamin``.
+
+        Args:
+            arguments (Mapping[str, Any]): The call's arguments.
+
+        Returns:
+            str | None: The field, the index tokens of the words and their exact values, each
+            sorted (see :func:`check_key`); ``None`` for a call this tool refuses, which is left
+            to the default key.
+        """
+        words, field = _request(arguments)
+        if self._refusal(words, field) is not None:
+            return None
+        key_field, tokens, values = check_key(words, field)
+        return json.dumps([key_field, sorted(tokens), sorted(str(value) for value in values)], ensure_ascii=False)
+
+    def _refusal(self, words: str, field: str) -> str | None:
+        """Say why a call cannot run, in the order its problems are found.
+
+        Args:
+            words (str): The words on one line.
+            field (str): The field.
+
+        Returns:
+            str | None: The message for an error reply; ``None`` when the call can run.
+        """
+        if not words:
+            return "call keyword with the words to match."
+        if len(words) > MAX_KEYWORD_CHARS:
+            return f"keep the words within {MAX_KEYWORD_CHARS} characters; use the most telling ones."
+        if field not in self._matcher.fields:
+            return f"field must be one of: {', '.join(self._matcher.fields)}."
+        problem = self._matcher.check(words, field)
+        if problem == NO_USABLE_WORD:
+            return "give at least one word of two or more characters."
+        if problem == ONE_VALUE_ONLY:
+            return f"{field} matches one exact value; give a single one."
+        if problem == UNINDEXABLE_WORD:
+            return (
+                "the index cannot match a single letter or digit, such as the D in vitamin D, nor a word it splits "
+                "on dots and signs, such as 2.5, U.S. or p<0.05; check the other words only, or use search."
+            )
+        if problem == LONG_WORD:
+            return (
+                f"the index reads a word only up to its first {SEARCH_MAX_TOKEN_LEN} characters, so a longer one "
+                "cannot be checked exactly; check a shorter beginning of it, which also matches the longer words "
+                "it begins."
+            )
+        return None
+
+    def _answer(self, field: str, detail: str, fetched: KeywordResult, ctx: ToolContext) -> ToolReply:
+        """Show the best new matches under the exact count.
+
+        Args:
+            field (str): The field the call matched.
+            detail (str): The call's main argument, for the trail.
+            fetched (KeywordResult): What the match found.
+            ctx (ToolContext): The turn's evidence, budget and LLM view.
+
+        Returns:
+            ToolReply: The passages and the count note as a :class:`PassageReply` that is news even
+            when it admits nothing, so the same call can be answered by number. A plain reply when
+            the count failed, which is never remembered, so a retry runs again.
+        """
+        nodes = fetched.nodes
+        if field == DEFAULT_KEYWORD_FIELD:
+            nodes = [anchor_terms(scored, fetched.keywords) for scored in nodes]
+        note = keyword_note(matches=fetched.matches, unchecked=fetched.unchecked)
+        shown = passage_reply(nodes, ctx, action=self.name, detail=detail, note=note)
+        trail: dict[str, Any] = {"field": field, "matches": fetched.matches}
+        if fetched.unchecked > 0:
+            trail["unchecked"] = fetched.unchecked
+        if fetched.matches is None:
+            return ToolReply(text=shown.text, found=shown.found, action=shown.action, detail=shown.detail, trail=trail)
+        return replace(shown, informative=True, trail=trail)
