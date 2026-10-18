@@ -36,9 +36,12 @@ class Turn(Base):
     # able to say so, or the retry would read as the original answer.
     retried: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     retry_query: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Assessment provenance as JSON: what the research did and where the
-    # source-backed part ends. Present only on assessment turns.
+    # Agent provenance as JSON: what the research did and, on an assessment,
+    # where the source-backed part ends. Present on every agent turn.
     agent_trail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ``lookup`` or ``assessment``. NULL on rows from before the column existed;
+    # readers then infer it from the trail.
+    answer_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Evidence target the turn answered under (``all``/``documents``/``visual``).
     # NULL: a scoped turn, where the scope outranks it, or one from before this column.
     retrieval_target: Mapped[str | None] = mapped_column(Text, nullable=True)

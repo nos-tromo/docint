@@ -122,10 +122,10 @@ def _log_turn_summary(
 
 
 def _load_trail(raw: str | None) -> dict[str, Any] | None:
-    """Parse a turn's persisted assessment trail.
+    """Parse a turn's persisted agent trail.
 
     Args:
-        raw (str | None): The stored JSON, or ``None`` on a lookup turn.
+        raw (str | None): The stored JSON, or ``None`` on a turn without one.
 
     Returns:
         dict[str, Any] | None: The trail, or ``None`` when absent or unreadable.
@@ -143,7 +143,7 @@ def _evidence_chars(raw: str | None) -> int | None:
     """Read where a turn's source-backed part ends from its persisted trail.
 
     Args:
-        raw (str | None): The stored trail JSON, or ``None`` on a lookup turn.
+        raw (str | None): The stored trail JSON, or ``None`` on a turn without one.
 
     Returns:
         int | None: The recorded boundary, or ``None`` when the trail has none.
@@ -151,6 +151,21 @@ def _evidence_chars(raw: str | None) -> int | None:
     trail = _load_trail(raw)
     evidence_chars = trail.get("evidence_chars") if trail else None
     return evidence_chars if isinstance(evidence_chars, int) else None
+
+
+def _answer_mode_of(turn: Turn) -> str:
+    """Name how a stored turn was answered, for the readers that report it.
+
+    A row written before the mode was stored has none. Only assessments kept a
+    trail then, so on such a row a trail marks one.
+
+    Args:
+        turn (Turn): The stored turn.
+
+    Returns:
+        str: ``assessment`` or ``lookup``.
+    """
+    return turn.answer_mode or ("assessment" if turn.agent_trail else "lookup")
 
 
 class SessionCollectionMismatchError(Exception):
@@ -581,7 +596,7 @@ class SessionManager:
         if scoped_node_ids:
             response["scoped_chunk_count"] = len(list(scoped_node_ids))
         response["turn_idx"] = self._persist_turn(
-            session_id, user_msg, resp, response, owner=owner, replace_idx=replace_turn_idx
+            session_id, user_msg, resp, response, owner=owner, replace_idx=replace_turn_idx, answer_mode="lookup"
         )
         if replace_turn_idx is None:
             self._maybe_update_summary(session_id)
@@ -781,7 +796,13 @@ class SessionManager:
         if retrieval_target == "visual" and not scoped_node_ids and normalized.get("visual") is None:
             normalized["visual"] = {"images_attached": 0}
         turn_idx = self._persist_turn(
-            session_id, user_msg, final_response, normalized, owner=owner, replace_idx=replace_turn_idx
+            session_id,
+            user_msg,
+            final_response,
+            normalized,
+            owner=owner,
+            replace_idx=replace_turn_idx,
+            answer_mode="lookup",
         )
         if replace_turn_idx is None:
             self._maybe_update_summary(session_id)
@@ -931,6 +952,7 @@ class SessionManager:
                 owner=owner,
                 replace_idx=replace_turn_idx,
                 agent_trail=trail,
+                answer_mode="assessment",
             )
             if replace_turn_idx is None:
                 self._maybe_update_summary(session_id)
@@ -1026,7 +1048,7 @@ class SessionManager:
                         "rewritten_query": t.rewritten_query,
                         "assistant_text": t.model_response,
                         "reasoning": t.reasoning,
-                        "answer_mode": "assessment" if t.agent_trail else "lookup",
+                        "answer_mode": _answer_mode_of(t),
                         "agent": _load_trail(t.agent_trail),
                     }
                     f.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -1207,6 +1229,7 @@ class SessionManager:
         owner: str | None = None,
         replace_idx: int | None = None,
         agent_trail: dict[str, Any] | None = None,
+        answer_mode: AnswerMode | None = None,
     ) -> int:
         """Persist a user message and the assistant's response in the database.
 
@@ -1228,9 +1251,14 @@ class SessionManager:
                 ``user_text`` is deliberately preserved: the retry's
                 ``user_msg`` is a machine-reformulated query the user never
                 typed. Falls back to appending when the row is missing.
-            agent_trail (dict[str, Any] | None): The assessment trail to store;
-                ``None`` on a lookup turn, which also clears a replaced turn's
-                trail.
+            agent_trail (dict[str, Any] | None): The agent trail to store, for
+                a turn of any answer mode; ``None`` on a turn the agent loop
+                did not answer, which also clears a replaced turn's trail.
+            answer_mode (AnswerMode | None): How the turn was answered. Stored
+                as given, so a lookup that carries a trail is not read back as
+                an assessment. ``None`` stores nothing — readers then infer the
+                mode from the trail — and, like the trail, resets a replaced
+                turn's.
 
         Returns:
             int: The 0-based index of the persisted turn within the
@@ -1268,6 +1296,7 @@ class SessionManager:
                 t.model_response = data.get("response") or ""  # type: ignore[assignment]
                 t.reasoning = reasoning  # type: ignore[assignment]
                 t.agent_trail = trail_json
+                t.answer_mode = answer_mode
                 t.retrieval_target = retrieval_target
                 # Flush the delete-orphan cascade before the replacements are
                 # inserted, so the turn never momentarily holds both sets and
@@ -1284,6 +1313,7 @@ class SessionManager:
                     model_response=data.get("response") or "",
                     reasoning=reasoning,
                     agent_trail=trail_json,
+                    answer_mode=answer_mode,
                     retrieval_target=retrieval_target,
                 )
                 s.add(t)
@@ -1545,7 +1575,7 @@ class SessionManager:
                         msg_entry["retry_query"] = t.retry_query
                     trail = _load_trail(t.agent_trail)
                     if trail is not None:
-                        msg_entry["answer_mode"] = "assessment"
+                        msg_entry["answer_mode"] = _answer_mode_of(t)
                         msg_entry["agent"] = trail
                     if t.retrieval_target:
                         msg_entry["retrieval_target"] = t.retrieval_target
