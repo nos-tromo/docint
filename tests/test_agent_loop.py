@@ -539,12 +539,11 @@ def _status_error(cls: type[openai.APIStatusError], status: int, message: str) -
 
 
 @pytest.mark.parametrize("answer", [ANSWER, SHORT_ANSWER], ids=["past-the-hold", "within-the-hold"])
-def test_a_reply_without_calls_is_the_streamed_answer(answer: str) -> None:
-    """A round that calls no tool is the answer: sent, and returned whole with nothing found.
+def test_a_first_reply_without_calls_is_the_answer_sent_whole(answer: str) -> None:
+    """A first round that calls no tool is the answer: held whole, sent once it ends, and returned with nothing found.
 
     Args:
-        answer (str): The model's reply, past the hold or within it; the first round sends it
-            whole once it ends.
+        answer (str): The model's reply, past the hold or within it: held whole either way.
     """
     llm = streaming_tool_llm([_answer(answer)])
     registry = _documents(QuerySearch({}))
@@ -918,7 +917,10 @@ def test_a_cut_answer_replaces_whatever_reason_stood_before_it(cause: str) -> No
     assert ("".join(texts), result.raw_text, result.reason) == (ANSWER[:90], ANSWER[:90], "answer_cut")
     # The cut round: the second, answering by choice, or the resend, which declares no tools.
     calls = llm.stream_chat.call_args_list
-    assert (len(calls), calls[-1].kwargs) == ((2, calls[1].kwargs) if cause == "research_failed" else (3, {}))
+    if cause == "research_failed":
+        assert (len(calls), calls[1].kwargs["tool_choice"]) == (2, "auto")
+    else:
+        assert (len(calls), calls[-1].kwargs) == (3, {})
 
 
 def test_the_sentinel_is_swapped_for_the_label() -> None:
