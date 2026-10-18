@@ -423,7 +423,8 @@ def test_the_final_note_keeps_an_evaluations_judgement_but_leaves_the_sentinel_t
     """A forced answer to an evaluation still ends in the model's judgement, where the rules ask for one.
 
     The note goes to every forced answer, assessments switched off too, so it never writes the
-    sentinel itself: only a prompt carrying the assessment rule asks for it.
+    sentinel itself: only a prompt carrying the assessment rule asks for it. Nor does it speak of
+    a label, the word the system prompt uses for the display labels an answer must not copy.
 
     Args:
         code (str): The locale.
@@ -433,6 +434,7 @@ def test_the_final_note_keeps_an_evaluations_judgement_but_leaves_the_sentinel_t
 
     assert evaluation in note
     assert SENTINEL not in note
+    assert not re.search(r"label|kennzeichn", note, re.IGNORECASE)
 
 
 @pytest.mark.parametrize("code", ["en", "de"])

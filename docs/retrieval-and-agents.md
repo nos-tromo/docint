@@ -631,7 +631,7 @@ the last user message, so a strict chat template never sees two user messages
 in a row. The tools stay declared, with `tool_choice: "none"`. The final note
 asks the model to say what is missing when the passages do not answer. An
 evaluation or opinion question still gets its source-backed part, then the
-model's own labelled judgement where the rules ask for one.
+model's own assessment in the form the rules give, where they ask for one.
 
 An endpoint that ignores `tool_choice` may still answer that round with tool
 calls and no text. The round is then sent once more with no tools declared,
