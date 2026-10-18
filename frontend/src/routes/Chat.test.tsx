@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -1438,6 +1438,34 @@ describe('Chat session switching', () => {
     expect(screen.getByText(answer)).toBeInTheDocument()
     expect(screen.queryByText(new RegExp(provisional))).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
+  })
+
+  it('keeps the steps of an agent turn that fails behind the disclosure', async () => {
+    // An error frame ends the turn with no envelope, so the streamed steps are all that says what it did.
+    const note = { step: 1, action: 'note', detail: 'Ich sehe mir zuerst den Clip an', found: 0 }
+    const search = { step: 1, action: 'search', detail: 'Hafen Regenjacken', found: 2 }
+    const frames =
+      `data: ${JSON.stringify({ token: note.detail })}\n\n` +
+      `data: ${JSON.stringify({ agent: note })}\n\n` +
+      `data: ${JSON.stringify({ agent: search })}\n\n` +
+      'data: {"error":"Internal server error","code":"generation_failed"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'Wer steht am Hafen?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/answer could not be generated/i)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    expect(
+      within(screen.getByTestId('agent-trail'))
+        .getAllByRole('listitem')
+        .map((row) => row.textContent)
+    ).toEqual(['Note: Ich sehe mir zuerst den Clip an', 'Searched “Hafen Regenjacken”: 2 new passages'])
   })
 
   it('clears the provisional text on a note step and keeps the note on the open turn', () => {

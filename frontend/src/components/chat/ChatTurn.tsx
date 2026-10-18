@@ -241,9 +241,9 @@ function TrailSteps({
 }
 
 /** The steps the model took itself: not the seed it started from, nor an earlier assessment's answer marker. */
-function researchSteps(trail: AgentTrail): TrailStep[] {
-  if (!Array.isArray(trail.actions)) return []
-  return trail.actions.filter(
+function researchSteps(actions: TrailStep[] | undefined): TrailStep[] {
+  if (!Array.isArray(actions)) return []
+  return actions.filter(
     (step) =>
       typeof step === 'object' &&
       step !== null &&
@@ -331,7 +331,9 @@ export function ChatTurn({
   // Any agent turn's trail, and the one a plain answer carries when an agent turn handed it over.
   const trail = turn.done ? (turn.meta?.agent ?? null) : null
   const assessment = turn.meta?.answer_mode === 'assessment'
-  const research = trail ? researchSteps(trail) : []
+  // A failed turn sends no envelope: the steps it streamed are all that says what it did.
+  const failedSteps = turn.done && !turn.meta ? turn.agentSteps : undefined
+  const research = researchSteps(trail ? trail.actions : failedSteps)
   // Wire tokens reach `t()` only through the tables above, by own key: "constructor" is not copy.
   const reasonKey =
     trail?.reason && Object.hasOwn(REASON_COPY, trail.reason) ? REASON_COPY[trail.reason] : undefined
