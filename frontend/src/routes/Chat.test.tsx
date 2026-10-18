@@ -1390,6 +1390,82 @@ describe('Chat session switching', () => {
     expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
   })
 
+  it('a note frame moves streamed text out of the answer', async () => {
+    const enc = new TextEncoder()
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stream = controller
+      }
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, body }))
+    const send = (frame: object) => stream.enqueue(enc.encode(`data: ${JSON.stringify(frame)}\n\n`))
+    const provisional = 'Ich sehe mir zuerst den Clip an'
+    const note = { step: 1, action: 'note', detail: provisional, found: 0 }
+    const keyframes = { step: 1, action: 'keyframes', detail: 'harbour_walk.webm', found: 4 }
+    const answer = 'Zwei Personen in Regenjacken am Hafen [1].'
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'Wer steht am Hafen?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    send({ token: provisional })
+    expect(await screen.findByText(provisional)).toBeInTheDocument()
+
+    send({ agent: note })
+    send({ agent: keyframes })
+    const trail = await screen.findByTestId('agent-trail-live')
+    await waitFor(() => expect(trail).toHaveTextContent('harbour_walk.webm'))
+    // Withdrawn from the answer, the text stays in the trail as the note.
+    expect(screen.queryAllByText(new RegExp(provisional)).filter((el) => !trail.contains(el))).toEqual([])
+    expect(trail).toHaveTextContent(provisional)
+
+    // Tokens after the note start a fresh answer rather than continue the withdrawn text.
+    send({ token: answer })
+    expect(await screen.findByText(answer)).toBeInTheDocument()
+
+    send({
+      response: answer,
+      sources: [],
+      session_id: 'sess-1',
+      retrieval_mode: 'agent',
+      answer_mode: 'lookup',
+      agent: { steps: 1, actions: [note, keyframes], reason: null, answer: 'plain' }
+    })
+    stream.close()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy'))
+    expect(screen.getByText(answer)).toBeInTheDocument()
+    expect(screen.queryByText(new RegExp(provisional))).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
+  })
+
+  it('clears the provisional text on a note step and keeps the note on the open turn', () => {
+    const open = {
+      turns: [{ user: 'q', assistant: 'Ich sehe mir zuerst den Clip an', done: false, meta: null }],
+      inflight: true
+    }
+    const note = { step: 1, action: 'note' as const, detail: 'Ich sehe mir zuerst den Clip an', found: 0 }
+
+    const next = chatReducer(open, { type: 'agent', step: note })
+
+    expect(next.turns[0]).toMatchObject({ assistant: '', done: false, agentSteps: [note] })
+    expect(next.inflight).toBe(true)
+  })
+
+  it('keeps the streamed text on a step that is not a note', () => {
+    const open = {
+      turns: [{ user: 'q', assistant: 'Person A', done: false, meta: null }],
+      inflight: true
+    }
+    const read = { step: 2, action: 'read' as const, detail: '2', found: 0 }
+
+    expect(chatReducer(open, { type: 'agent', step: read }).turns[0]).toMatchObject({
+      assistant: 'Person A',
+      agentSteps: [read]
+    })
+  })
+
   it('sends the retrieval target with the question it applies to', async () => {
     const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
       void init

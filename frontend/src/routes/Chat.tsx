@@ -81,12 +81,13 @@ function reducer(s: State, a: Action): State {
       const updated = { ...last, assistant: '', retryQuery: a.query }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
-    // A research step of an assessment turn. The turn stays open: only the
-    // final envelope finishes it.
+    // A step of an agent turn; only the final envelope finishes the turn. A note
+    // withdraws the text streamed before it, as a retry does, and stays in the trail.
     case 'agent': {
       const last = s.turns[s.turns.length - 1]
       if (!last) return s
-      const updated = { ...last, agentSteps: [...(last.agentSteps ?? []), a.step] }
+      const assistant = a.step.action === 'note' ? '' : last.assistant
+      const updated = { ...last, assistant, agentSteps: [...(last.agentSteps ?? []), a.step] }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
     case 'finalize': {
@@ -100,7 +101,7 @@ function reducer(s: State, a: Action): State {
       const updated = { ...last, assistant: finalText, done: true, meta: a.meta }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
-    // An assessment's judgement is labelled once its answer is complete, so one
+    // An agent turn's judgement is labelled once its answer is complete, so one
     // cut off before that carries the caveat in its text, wherever the text goes.
     case 'fail': {
       const last = s.turns[s.turns.length - 1]
@@ -279,7 +280,7 @@ export function Chat() {
 
     const ac = new AbortController()
     abortRef.current = ac
-    // Passed with every failure; the reducer puts it only on a cut-off assessment.
+    // Passed with every failure; the reducer puts it only on a cut-off agent turn.
     const note = t('chat.assessment_interrupted')
     // Set once the turn has ended either way, so nothing arriving later can fail it.
     let settled = false
