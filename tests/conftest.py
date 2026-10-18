@@ -157,18 +157,21 @@ def _hermetic_agent_env() -> Iterator[None]:
     The chat endpoints ask for an agent turn whenever ``AGENT_TURNS_ENABLED`` (on by default),
     a text model and the context window allow it, so a test written for the plain path would
     take the agent path, and send real model calls under a developer ``.env``. Tests of agent
-    turns set the variable themselves. A tools rejection is remembered per process, so each
-    test gets a fresh one rather than one a test before it recorded. A private ``MonkeyPatch``
-    for the reason :func:`_hermetic_hybrid_env` gives.
+    turns set the variable themselves. A tools rejection is remembered per process, and so is
+    each unusable agent setting already warned about, so each test starts without either
+    rather than with what a test before it recorded. A private ``MonkeyPatch`` for the reason
+    :func:`_hermetic_hybrid_env` gives.
 
     Yields:
         None.
     """
     from docint.agents.assessment.gate import ToolsRejection
+    from docint.utils.env_cfg import _warn_agent_setting
 
     mp = pytest.MonkeyPatch()
     mp.setenv("AGENT_TURNS_ENABLED", "false")
     mp.setattr("docint.agents.assessment.gate.TOOLS_REJECTION", ToolsRejection())
+    _warn_agent_setting.cache_clear()
     yield
     mp.undo()
 

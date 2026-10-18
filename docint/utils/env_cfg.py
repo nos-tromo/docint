@@ -3,7 +3,9 @@
 import math
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Literal, cast
 
@@ -2342,13 +2344,27 @@ class AgentConfig:
     max_calls_per_round: int
 
 
+@cache
+def _warn_agent_setting(message: str, *args: object) -> None:
+    """Warn once per distinct message and values about an agent setting that cannot be used as written.
+
+    The settings are read at least twice a turn, so a typo would otherwise warn on every
+    turn. The values name the variable and the value read, so a new unusable value warns again.
+
+    Args:
+        message (str): The warning, with loguru ``{}`` placeholders.
+        *args (object): The values it is formatted with.
+    """
+    logger.warning(message, *args)
+
+
 def _parse_agent_time_budget(*, default: float) -> float:
     """Parse ``AGENT_TIME_BUDGET_S``, which must be a positive, finite number of seconds.
 
     Zero or less would never let a turn start, and an infinite value would
     never end one. Like :func:`_parse_parent_context_safety_margin`, an unusable
     value is logged and replaced by ``default`` rather than raised, so a typo
-    cannot fail a chat turn.
+    cannot fail a chat turn; each unusable value is logged once.
 
     Args:
         default (float): The value returned when the variable is unset, blank or unusable.
@@ -2362,10 +2378,10 @@ def _parse_agent_time_budget(*, default: float) -> float:
     try:
         parsed = float(raw)
     except ValueError:
-        logger.warning("AGENT_TIME_BUDGET_S={!r} is not a number; using default {}.", raw, default)
+        _warn_agent_setting("AGENT_TIME_BUDGET_S={!r} is not a number; using default {}.", raw, default)
         return default
     if not (math.isfinite(parsed) and parsed > 0):
-        logger.warning(
+        _warn_agent_setting(
             "AGENT_TIME_BUDGET_S={!r} must be a positive, finite number of seconds; using default {}.",
             raw,
             default,
@@ -2385,7 +2401,8 @@ def load_agent_env(
     A blank value counts as unset for every variable, ``AGENT_TURNS_ENABLED``
     included, so an empty ``NAME=`` line in ``.env`` or compose keeps the
     default. A number that cannot be used falls back to its default with a
-    warning rather than failing a chat turn.
+    warning rather than failing a chat turn. Each unusable value warns once per
+    process, since every turn reads these settings at least twice.
 
     Args:
         default_enabled (bool): Whether agent turns are enabled by default.
@@ -2416,9 +2433,11 @@ def load_agent_env(
     rounds_var = "AGENT_MAX_ROUNDS" if os.getenv("AGENT_MAX_ROUNDS", "").strip() else "ASSESSMENT_MAX_STEPS"
     return AgentConfig(
         enabled=raw_enabled in {"true", "1", "yes"} if raw_enabled else default_enabled,
-        max_rounds=_extract_int(rounds_var, default_max_rounds, minimum=1),
+        max_rounds=_extract_int(rounds_var, default_max_rounds, minimum=1, warn=_warn_agent_setting),
         time_budget_s=_parse_agent_time_budget(default=default_time_budget_s),
-        max_calls_per_round=_extract_int("AGENT_MAX_CALLS_PER_ROUND", default_max_calls_per_round, minimum=1),
+        max_calls_per_round=_extract_int(
+            "AGENT_MAX_CALLS_PER_ROUND", default_max_calls_per_round, minimum=1, warn=_warn_agent_setting
+        ),
     )
 
 
@@ -2795,13 +2814,14 @@ class ExtractConfig:
     sync_max_units: int
 
 
-def _extract_int(name: str, default: int, *, minimum: int = 0) -> int:
+def _extract_int(name: str, default: int, *, minimum: int = 0, warn: Callable[..., None] = logger.warning) -> int:
     """Read one non-negative integer knob, warning on anything unusable.
 
     Args:
         name (str): Environment variable to read.
         default (int): Value used when unset or unparseable.
         minimum (int): Lower bound the value is clamped to.
+        warn (Callable[..., None]): Logs a warning from a loguru message and its values.
 
     Returns:
         int: The configured value, at least ``minimum``.
@@ -2812,10 +2832,10 @@ def _extract_int(name: str, default: int, *, minimum: int = 0) -> int:
     try:
         value = int(raw)
     except ValueError:
-        logger.warning("Invalid {} {!r}; using {}.", name, raw, default)
+        warn("Invalid {} {!r}; using {}.", name, raw, default)
         return default
     if value < minimum:
-        logger.warning("{} {} is < {}; clamping.", name, value, minimum)
+        warn("{} {} is < {}; clamping.", name, value, minimum)
         return minimum
     return value
 

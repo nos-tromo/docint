@@ -801,7 +801,7 @@ runs as an agent turn when these settings and the endpoint allow it: the chat
 model searches the collection through tools, reads the replies, and answers.
 See [retrieval-and-agents.md](retrieval-and-agents.md#agent-turns). A blank
 value counts as unset. A number that cannot be used falls back to its default,
-with a warning, rather than failing a turn.
+with one warning per value, rather than failing a turn.
 
 | Variable | Default | Description |
 |---|---|---|

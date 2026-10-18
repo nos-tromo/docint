@@ -339,6 +339,48 @@ def test_a_clamped_value_warns(monkeypatch: pytest.MonkeyPatch, loguru_caplog: L
     assert loguru_caplog.messages == ["AGENT_MAX_CALLS_PER_ROUND 0 is < 1; clamping."]
 
 
+def test_an_unusable_value_warns_once_however_often_it_is_read(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """The settings are read at least twice a turn, so a typo is reported once rather than on every turn.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    monkeypatch.setenv("AGENT_MAX_ROUNDS", "many")
+    monkeypatch.setenv("AGENT_TIME_BUDGET_S", "soon")
+    monkeypatch.setenv("AGENT_MAX_CALLS_PER_ROUND", "0")
+
+    for _ in range(3):
+        assert load_agent_env() == AgentConfig(enabled=True, max_rounds=6, time_budget_s=120.0, max_calls_per_round=1)
+
+    assert loguru_caplog.messages == [
+        "Invalid AGENT_MAX_ROUNDS 'many'; using 6.",
+        "AGENT_TIME_BUDGET_S='soon' is not a number; using default 120.0.",
+        "AGENT_MAX_CALLS_PER_ROUND 0 is < 1; clamping.",
+    ]
+
+
+def test_a_different_unusable_value_warns_again(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """Once per value, not per variable: replacing one typo with another is reported too.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    for raw in ("soon", "soon", "later", "later"):
+        monkeypatch.setenv("AGENT_TIME_BUDGET_S", raw)
+        load_agent_env()
+
+    assert loguru_caplog.messages == [
+        "AGENT_TIME_BUDGET_S='soon' is not a number; using default 120.0.",
+        "AGENT_TIME_BUDGET_S='later' is not a number; using default 120.0.",
+    ]
+
+
 def test_assessments_are_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unset, ``ASSESSMENT_ENABLED`` lets an agent turn answer a judgement as a labelled assessment.
 
