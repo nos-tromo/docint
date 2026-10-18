@@ -152,6 +152,25 @@ describe('ValidationBanner', () => {
     expect(screen.queryByText(/no separate source-backed part/i)).not.toBeInTheDocument()
   })
 
+  it.each([
+    ['an agent lookup', 'lookup'],
+    ['a plain answer an agent turn handed over', undefined],
+    // The history reader calls a stored turn with a trail but no recorded mode an assessment.
+    ['a turn read back as an assessment', 'assessment']
+  ] as const)('never says %s with a plain answer lacks a source-backed part', (_name, answerMode) => {
+    render(
+      <ValidationBanner
+        v={{
+          validation_checked: false,
+          answer_mode: answerMode,
+          agent: { steps: 1, actions: [], reason: null, answer: 'plain' }
+        }}
+      />
+    )
+    expect(screen.getByText(/response validation unavailable/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no separate source-backed part/i)).not.toBeInTheDocument()
+  })
+
   it('names the source-backed part when the validator flagged an assessment', () => {
     render(
       <ValidationBanner
