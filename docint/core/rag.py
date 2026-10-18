@@ -3931,11 +3931,12 @@ class RAG:
 
         The SDK retries a failed call and llama-index retries it again, so with
         ``OPENAI_MAX_RETRIES`` set one call can outlast its own ``timeout`` several
-        times over. The turn classifier and the research step use this instance
-        instead: a failure ends the call and each degrades on its own. Both abandon
-        a call at their deadline, but an abandoned call holds its slot until it
-        ends, so a single attempt still bounds how long it holds it. Lookups and
-        the answer keep ``OPENAI_MAX_RETRIES``.
+        times over. The turn classifier, the research step and every round of an
+        agent turn without reasoning (see :attr:`agent_text_model`), its answer
+        included, use this instance instead: a failure ends the call, and each
+        caller degrades or reports it on its own. They work to a deadline, and a
+        call abandoned at it holds its slot until it ends, so a single attempt
+        still bounds how long it holds it. Lookups keep ``OPENAI_MAX_RETRIES``.
 
         Returns:
             OpenAI: The non-reasoning model, making a single attempt per call.
