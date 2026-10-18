@@ -108,9 +108,9 @@ def _log_turn_summary(
         if scoped is not None:
             fields.insert(4, f"scoped_chunks={scoped}")
         agent = response.get("agent")
-        if response.get("answer_mode") == "assessment" and isinstance(agent, dict):
+        if isinstance(agent, dict):
             # Counts and protocol tokens only: agent.actions carry user-derived queries.
-            fields.insert(-1, "answer=assessment")
+            fields.insert(-1, f"answer={response.get('answer_mode') or 'lookup'}")
             fields.insert(-1, f"steps={agent.get('steps')}")
             fields.insert(-1, f"outcome={agent.get('answer')}")
             fields.insert(-1, f"reason={agent.get('reason') or 'none'}")
