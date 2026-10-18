@@ -38,16 +38,12 @@ AGENT_PROMPTS: dict[str, frozenset[str]] = {
 }
 #: The retrieval targets, each with its own tools guide.
 TARGETS = ("all", "documents", "visual")
-#: How an answer marks a conclusion drawn from the evidence; the validators accept the same label.
+#: How an answer marks a conclusion drawn from the evidence, by the locale of its prompt.
 INFERENCE_LABELS = {"en": "Inference:", "de": "Schlussfolgerung:"}
-#: The prompts that teach the label, or accept it as grounded.
-INFERENCE_PROMPTS = (
-    "agent_system",
-    "grounded_qa",
-    "grounded_refine",
-    "response_validator",
-    "response_validator_assessment",
-)
+#: The prompts that teach an answer to mark an inference, each with its own locale's label.
+ANSWER_PROMPTS = ("agent_system", "grounded_qa", "grounded_refine")
+#: The prompts that judge an answer: they accept every label, since an answer follows the user's language.
+VALIDATOR_PROMPTS = ("response_validator", "response_validator_assessment")
 #: Tokens the turn budget plans for the rendered system prompt, at 3.5 characters per token.
 SYSTEM_PROMPT_TOKENS = 900
 CHAR_TOKEN_RATIO = 3.5
@@ -466,17 +462,24 @@ def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str)
 
 @pytest.mark.parametrize("code", ["en", "de"])
 def test_the_inference_marker_matches_between_answer_and_validator_prompts(code: str) -> None:
-    """The label an answer marks an inference with is the one the validators accept as grounded, in each locale.
+    """An answer prompt teaches its locale's label; the validators accept that label and every other locale's.
+
+    The answer follows the user's language while the prompts follow the deployment's, so a
+    German deployment may be validating an English answer marked "Inference:".
 
     Args:
         code (str): The locale.
     """
     label = INFERENCE_LABELS[code]
     others = [other for locale, other in INFERENCE_LABELS.items() if locale != code]
-    for name in INFERENCE_PROMPTS:
+    for name in ANSWER_PROMPTS:
         text = _prompt(name, code)
         assert label in text, f"{code}/{name}.txt does not name the inference label {label!r}"
-        assert not any(other in text for other in others), f"{code}/{name}.txt names another locale's label"
+        assert not any(other in text for other in others), f"{code}/{name}.txt teaches another locale's label"
+    for name in VALIDATOR_PROMPTS:
+        text = _prompt(name, code)
+        missing = [each for each in INFERENCE_LABELS.values() if each not in text]
+        assert not missing, f"{code}/{name}.txt does not accept {missing}"
 
 
 @pytest.mark.parametrize("target", TARGETS)
