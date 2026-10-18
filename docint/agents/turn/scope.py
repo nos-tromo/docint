@@ -20,10 +20,11 @@ PASSAGES_FENCE = "---------------------"
 
 
 class EvidenceDoesNotFit(ValueError):
-    """The evidence cannot be shown legibly in one answer, so the turn is answered as a lookup.
+    """The evidence cannot be shown legibly in one answer, so the caller answers the turn another way.
 
-    A ``ValueError`` naming the context window, so that if it ever escapes its
-    callers the API still reports ``context_overflow``.
+    Raised before anything is shown: a pinned scope then takes the caller's existing scoped
+    path. A ``ValueError`` naming the context window, so that if it ever escapes its callers
+    the API still reports ``context_overflow``.
 
     Attributes:
         passages (int): How many passages the evidence held.

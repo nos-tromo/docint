@@ -27,21 +27,12 @@ not do or for a call that did not run or failed, reaches the model alone. A call
 be prepared, whose search failed or found no slot, or whose answer raised, marks the turn
 ``research_failed`` without ending it: evidence may be missing.
 
-Pictures. With a thumbnail fetcher (the visual target), the model sees the pictures its rounds
-find, not only their captions: after a round's calls are answered, the pictures it admitted are
-shown in one user message after its tool replies, at most ``min(max_images, round_room //
-VISUAL_IMAGE_TOKEN_ESTIMATE)`` in the turn, and paid for from the room like a reply (see
-:mod:`~docint.agents.turn.images`). A round whose request carries pictures and fails before its
-first event is taken as refusing them: every picture is taken back, none is shown again, and the
-round is sent once more without; should that fail too, the failure policy below applies.
+Pictures. With a thumbnail fetcher, the pictures a round admits are shown to the model after its
+tool replies, and a round refused with them is sent once more without (see
+:mod:`~docint.agents.turn.images` and :meth:`AgentLoop._round`).
 
-A pinned scope. A turn the user scoped to passages they picked searches nothing: the passages
-enter the ledger and are rendered into one user message, between the scope note and the user's
-message, and one round that offers no tools answers from them. Its ``seed`` step goes out with
-the round's first event. Before that, passages that cannot all be held or shown legibly, or a
-round that overflows the context window, raise
-:class:`~docint.agents.turn.scope.EvidenceDoesNotFit`, so the caller can answer the scope another
-way; once begun, the round fails as the answer round does.
+A pinned scope is answered from the pinned passages alone, in one round that offers no tools (see
+:mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`).
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
 anything, a failure goes to the caller, who can still answer another way: no model slot within
