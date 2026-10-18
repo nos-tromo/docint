@@ -174,6 +174,38 @@ def test_only_a_refused_probe_keeps_agent_turns_off(
     assert f"reasoning {'on' if reasoning else 'off'}" in warnings[0]
 
 
+def test_a_cached_rejection_is_not_probed_again(loguru_caplog: LogCaptureFixture) -> None:
+    """While a flag's rejection is cached, a refusal there probes nothing, warns nothing and keeps the cooldown.
+
+    Turns that began before the rejection was confirmed fall back one by one; each would otherwise
+    probe again, warn again and push the cooldown back.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    now = [0.0]
+    rejection = ToolsRejection(clock=lambda: now[0])
+    probes: list[bool] = []
+
+    def _refused() -> ProbeOutcome:
+        """Report the endpoint refused tools, recording the probe.
+
+        Returns:
+            ProbeOutcome: ``refused``.
+        """
+        probes.append(True)
+        return "refused"
+
+    rejection.confirm(_refused, reasoning=True)
+    now[0] = 300.0
+    rejection.confirm(_refused, reasoning=True)
+    now[0] = 600.0
+
+    warnings = [message for message in loguru_caplog.messages if "offering tools" in message]
+    assert (len(probes), len(warnings)) == (1, 1)
+    assert rejection.cached(reasoning=True) is False
+
+
 def test_each_reasoning_flag_has_its_own_cooldown() -> None:
     """A rejection under one flag starts that flag's cooldown alone."""
     now = [0.0]

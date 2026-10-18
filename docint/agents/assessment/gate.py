@@ -122,7 +122,8 @@ class ToolsRejection:
         is remembered. An accepted probe means the refusal was that request's own; any other
         outcome shows nothing. Each probed refusal logs one warning saying which, with no text of
         any turn. At most one probe runs at a time per flag: a refusal arriving meanwhile neither
-        probes nor is remembered.
+        probes nor is remembered. While a rejection is remembered for the flag, a further refusal
+        tells nothing new: it neither probes nor warns, and the cooldown runs on unchanged.
 
         Args:
             probe (Callable[[], ProbeOutcome]): Asks the endpoint, in a request carrying nothing of
@@ -130,6 +131,8 @@ class ToolsRejection:
             reasoning (bool): The reasoning flag the refused turn and the probe ran under.
         """
         reasoning = bool(reasoning)
+        if self.cached(reasoning=reasoning):
+            return
         lock = self._probing[reasoning]
         if not lock.acquire(blocking=False):
             return
