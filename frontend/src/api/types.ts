@@ -59,35 +59,50 @@ export interface ValidationFields {
 /** How a chat turn was answered. */
 export type AnswerMode = 'lookup' | 'assessment'
 
-/** What one step of an assessment turn did. */
-export type AgentAction = 'seed' | 'search' | 'answer'
+/**
+ * What one step of an agent turn did: a tool the model called, or `note`, the
+ * text it wrote before calling tools. `seed` is a scoped turn's pinned passages;
+ * `answer` exists only in trails of the assessment turns that came before.
+ */
+export type AgentAction = 'seed' | 'search' | 'answer' | 'note' | 'search_images' | 'keyframes' | 'read'
 
-/** One step of an assessment turn, streamed as an `{agent}` frame. */
+/** One step of an agent turn, streamed as an `{agent}` frame. */
 export interface AgentStep {
   step: number
   action: AgentAction
-  /** The model-written search query; empty for `seed` and `answer`. */
+  /**
+   * The search's words or the image search's cues; the clip, with ` #n` when one
+   * frame was asked for; the passage number read; or the note's text. Empty for
+   * `seed` and `answer`.
+   */
   detail: string
   found: number
 }
 
-/** Why research stopped short. Protocol tokens, never prose. */
+/** Why an agent turn's research stopped short or fell back. Protocol tokens, never prose. */
 export type AgentReason =
   | 'tools_unavailable'
-  | 'research_failed'
-  | 'context_budget'
+  | 'round_budget'
   | 'time_budget'
+  | 'context_budget'
+  | 'idle'
+  | 'research_failed'
   | 'no_evidence'
 
-/** What an assessment turn did, as the final envelope and session history report it. */
+/** What an agent turn did, as the final envelope and session history report it. */
 export interface AgentTrail {
   steps: number
   actions: { action: AgentAction; detail: string; found: number }[]
   reason: AgentReason | null
-  /** `split`: separated cleanly; `unsplit`: the whole answer is labelled; `empty`: no answer text. */
-  answer: 'split' | 'unsplit' | 'empty'
-  shortened: number
-  evidence_chars: number | null
+  /**
+   * `plain`: a lookup. An assessment: `split`, separated cleanly; `unsplit`, the
+   * whole answer is labelled; `empty`, no answer text.
+   */
+  answer: 'plain' | 'split' | 'unsplit' | 'empty'
+  /** Passages shortened to fit; only the trails of earlier assessment turns carry it. */
+  shortened?: number
+  /** Where an assessment's source-backed part ends; absent on a lookup. */
+  evidence_chars?: number | null
 }
 
 export interface ChatFinalEvent extends ValidationFields {
@@ -129,9 +144,9 @@ export interface ChatFinalEvent extends ValidationFields {
    * not be fetched — a degraded visual turn. Absent on any other target.
    */
   visual?: { images_attached: number } | null
-  /** `'assessment'` when the turn added a labelled model judgement; absent on a lookup. */
+  /** How an agent turn answered: `assessment` when it added a labelled model judgement. Absent otherwise. */
   answer_mode?: AnswerMode
-  /** What the assessment did; absent on a lookup. */
+  /** What an agent turn did, or why it handed a plain answer over (`tools_unavailable`). Absent otherwise. */
   agent?: AgentTrail | null
 }
 
@@ -284,9 +299,9 @@ export interface SessionMessage extends Partial<ValidationFields> {
   retried?: boolean
   /** The reformulated retrieval query that retry used. */
   retry_query?: string
-  /** `'assessment'` on an assessment turn. */
+  /** How a turn that kept a trail answered. */
   answer_mode?: AnswerMode
-  /** The assessment's trail. */
+  /** The agent turn's trail. */
   agent?: AgentTrail | null
   /**
    * The evidence the turn answered under. Absent — not `all` — for a scoped

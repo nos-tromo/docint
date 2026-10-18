@@ -1,12 +1,13 @@
 import type { ReactElement } from 'react'
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { DocumentsIcon, ImageIcon } from '@infra/ui'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatTurn, type ChatTurnData } from './ChatTurn'
-import type { AgentTrail, ChatFinalEvent } from '@/api/types'
+import type { AgentReason, AgentStep, AgentTrail, ChatFinalEvent } from '@/api/types'
+import { en } from '@/i18n/en'
 import { LanguageContext } from '@/i18n/LanguageContext'
 import { useUiStore } from '@/stores/ui'
 
@@ -374,7 +375,7 @@ describe('ChatTurn', () => {
       ]
     })
     const trail = screen.getByTestId('agent-trail-live')
-    expect(trail).toHaveTextContent('Initial search: 2 passages')
+    expect(trail).toHaveTextContent('Started from 2 passages')
     expect(trail).toHaveTextContent('evaluation datasets')
   })
 
@@ -397,15 +398,12 @@ describe('ChatTurn', () => {
       done: true,
       meta: assessmentMeta({ ...TRAIL, reason: 'tools_unavailable' })
     })
-    expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(/could not run its own searches/i)
+    expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(/could not run its own searches/i)
   })
 
   it.each([
-    ['en', 'The model could not run its own searches, so this assessment rests on the first search’s passages only.'],
-    [
-      'de',
-      'Das Modell konnte keine eigenen Suchen ausführen; diese Einschätzung beruht nur auf den Passagen der ersten Suche.'
-    ]
+    ['en', 'The model could not run its own searches, so this answer rests on a standard search instead.'],
+    ['de', 'Das Modell konnte keine eigenen Suchen ausführen; diese Antwort beruht daher auf einer Standardsuche.']
   ] as const)('names no single cause for unavailable tools in the %s notice', (lang, copy) => {
     // The token covers a rejected tool call and a prose reply alike.
     renderTurn(
@@ -418,7 +416,7 @@ describe('ChatTurn', () => {
       lang
     )
 
-    expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(copy)
+    expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(copy)
   })
 
   it.each([
@@ -439,7 +437,7 @@ describe('ChatTurn', () => {
       lang
     )
 
-    expect(screen.getByTestId('assessment-research-degraded')).toHaveTextContent(copy)
+    expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(copy)
   })
 
   it('says when the model did not separate its judgement', () => {
@@ -499,7 +497,7 @@ describe('ChatTurn', () => {
 
     // An unknown answer token cannot say whether the text carries the label.
     expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('assessment-research-degraded')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-reason-notice')).not.toBeInTheDocument()
     expect(screen.queryByTestId('assessment-answer-degraded')).not.toBeInTheDocument()
   })
 
@@ -572,7 +570,7 @@ describe('ChatTurn', () => {
         { step: 1, action: 'search', detail: 'evaluation datasets', found: 1 }
       ]
     })
-    expect(screen.getByText('Initial search: 1 passage')).toBeInTheDocument()
+    expect(screen.getByText('Started from 1 passage')).toBeInTheDocument()
     expect(screen.getByText('Searched “evaluation datasets”: 1 new passage')).toBeInTheDocument()
   })
 
@@ -587,7 +585,7 @@ describe('ChatTurn', () => {
         { step: 1, action: 'search', detail: 'evaluation datasets', found: 0 }
       ]
     })
-    expect(screen.getByText('Initial search: 0 passages')).toBeInTheDocument()
+    expect(screen.getByText('Started from 0 passages')).toBeInTheDocument()
     expect(screen.getByText('Searched “evaluation datasets”: 0 new passages')).toBeInTheDocument()
   })
 
@@ -620,7 +618,7 @@ describe('ChatTurn', () => {
       },
       'de'
     )
-    expect(screen.getByText('Erste Suche: 1 Passage')).toBeInTheDocument()
+    expect(screen.getByText('Ausgangspunkt: 1 Passage')).toBeInTheDocument()
     expect(screen.getByText('Gesucht nach „Bewertungsdaten“: 1 neue Passage')).toBeInTheDocument()
     expect(screen.getByText('Gesucht nach „Messreihen“: 3 neue Passagen')).toBeInTheDocument()
     expect(screen.getByText('Einschätzung wird geschrieben…')).toBeInTheDocument()
@@ -677,5 +675,244 @@ describe('ChatTurn', () => {
 
     expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+  })
+
+  const LOOKUP_TRAIL: AgentTrail = {
+    steps: 1,
+    actions: [
+      { action: 'note', detail: 'Ich suche zuerst nach dem Hafen.', found: 0 },
+      { action: 'search', detail: 'Hafen Regenjacken', found: 3 },
+      { action: 'search_images', detail: 'zwei Personen in Regenjacken am Hafen', found: 2 }
+    ],
+    reason: null,
+    answer: 'plain'
+  }
+
+  function lookupMeta(trail: AgentTrail = LOOKUP_TRAIL): ChatFinalEvent {
+    return { session_id: 's', sources: [], retrieval_mode: 'agent', answer_mode: 'lookup', agent: trail } as ChatFinalEvent
+  }
+
+  function trailRows(testId: string): (string | null)[] {
+    return within(screen.getByTestId(testId))
+      .getAllByRole('listitem')
+      .map((row) => row.textContent)
+  }
+
+  /** One step of every kind the agent loop added, as a live trail streams them. */
+  const NEW_STEPS: AgentStep[] = [
+    { step: 1, action: 'note', detail: 'Ich sehe mir zuerst die Bilder an.', found: 0 },
+    { step: 1, action: 'search_images', detail: 'Regenjacken, bedeckter Himmel', found: 2 },
+    { step: 2, action: 'search_images', detail: 'Person A am Hafen', found: 1 },
+    { step: 2, action: 'keyframes', detail: 'harbour_walk.webm', found: 4 },
+    { step: 3, action: 'keyframes', detail: 'harbour_walk.webm #3', found: 1 },
+    { step: 3, action: 'read', detail: '2', found: 0 }
+  ]
+
+  it('a researched lookup shows its steps but no assessment notice', async () => {
+    renderTurn({ user: 'Wer steht am Hafen?', assistant: 'Person A steht am Hafen [1].', done: true, meta: lookupMeta() })
+
+    expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-reason-notice')).not.toBeInTheDocument()
+    const toggle = screen.getByRole('button', { name: 'Show the searches behind this answer' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(toggle)
+
+    expect(screen.getByRole('button', { name: 'Hide the searches behind this answer' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    expect(trailRows('agent-trail')).toEqual([
+      'Note: Ich suche zuerst nach dem Hafen.',
+      'Searched “Hafen Regenjacken”: 3 new passages',
+      'Searched the images for “zwei Personen in Regenjacken am Hafen”: 2 new images'
+    ])
+  })
+
+  it.each([
+    ['a lookup', 'lookup'],
+    ['a plain answer an agent turn handed over', undefined]
+  ] as const)('marks no judgement on %s, whatever its trail token says', (_name, answerMode) => {
+    const meta = { ...lookupMeta({ ...LOOKUP_TRAIL, answer: 'unsplit' }), answer_mode: answerMode } as ChatFinalEvent
+
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta })
+
+    expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('assessment-answer-degraded')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
+  })
+
+  it('image-search, keyframe, read and note steps have labels', () => {
+    renderTurn({ user: 'Was zeigt der Clip?', assistant: '', done: false, meta: null, agentSteps: NEW_STEPS })
+
+    expect(trailRows('agent-trail-live')).toEqual([
+      'Note: Ich sehe mir zuerst die Bilder an.',
+      'Searched the images for “Regenjacken, bedeckter Himmel”: 2 new images',
+      'Searched the images for “Person A am Hafen”: 1 new image',
+      'Viewed the keyframes of “harbour_walk.webm”: 4 new keyframes',
+      'Viewed keyframe #3 of “harbour_walk.webm”',
+      'Read passage [2]'
+    ])
+  })
+
+  it('labels the steps the agent loop added in German', () => {
+    renderTurn({ user: 'Was zeigt der Clip?', assistant: '', done: false, meta: null, agentSteps: NEW_STEPS }, 'de')
+
+    expect(trailRows('agent-trail-live')).toEqual([
+      'Notiz: Ich sehe mir zuerst die Bilder an.',
+      'Bilder durchsucht nach „Regenjacken, bedeckter Himmel“: 2 neue Bilder',
+      'Bilder durchsucht nach „Person A am Hafen“: 1 neues Bild',
+      'Keyframes von „harbour_walk.webm“ angesehen: 4 neue Keyframes',
+      'Keyframe #3 von „harbour_walk.webm“ angesehen',
+      'Passage [2] gelesen'
+    ])
+  })
+
+  it('names a passage the model asked for as it cites it, by its number alone', () => {
+    // `read` takes the number as the model wrote it, `[2]` included.
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [{ step: 1, action: 'read', detail: '[2]', found: 0 }]
+    })
+
+    expect(trailRows('agent-trail-live')).toEqual(['Read passage [2]'])
+  })
+
+  it('renders a step this build does not know by its detail, without crashing', () => {
+    const unknown = { step: 1, action: 'brand_new_tool', detail: 'Hafen', found: 1 } as unknown as AgentStep
+
+    renderTurn({ user: 'q', assistant: '', done: false, meta: null, agentSteps: [unknown] })
+
+    expect(screen.getByTestId('agent-trail-live')).toHaveTextContent('Hafen')
+  })
+
+  it('marks the steps that read the collection with an icon, and a note with none', () => {
+    renderTurn({ user: 'Was zeigt der Clip?', assistant: '', done: false, meta: null, agentSteps: NEW_STEPS })
+
+    const rows = within(screen.getByTestId('agent-trail-live')).getAllByRole('listitem')
+    expect(rows.map((row) => row.querySelector('svg') !== null)).toEqual([false, true, true, true, true, true])
+    expect(rows[0].firstElementChild).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('a legacy trail with seed and answer steps still renders', async () => {
+    // Live, as #648 streamed an assessment: its seed, its searches, then the answer step.
+    const live = renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 0, action: 'seed', detail: '', found: 2 },
+        { step: 1, action: 'search', detail: 'evaluation datasets', found: 1 },
+        { step: 2, action: 'answer', detail: '', found: 3 }
+      ]
+    })
+    expect(trailRows('agent-trail-live')).toEqual([
+      'Started from 2 passages',
+      'Searched “evaluation datasets”: 1 new passage',
+      'Writing the assessment…'
+    ])
+    live.unmount()
+
+    // Stored, with `shortened`. Seed and answer are no research of the model's own, so the list holds the search.
+    const stored: AgentTrail = {
+      ...TRAIL,
+      actions: [...TRAIL.actions, { action: 'answer', detail: '', found: 3 }],
+      shortened: 2
+    }
+    renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta(stored) })
+    expect(screen.getByTestId('assessment-notice')).toHaveTextContent('2 passages were shortened')
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    expect(trailRows('agent-trail')).toEqual(['Searched “evaluation datasets”: 1 new passage'])
+  })
+
+  it.each([
+    'tools_unavailable',
+    'round_budget',
+    'time_budget',
+    'context_budget',
+    'idle',
+    'research_failed',
+    'no_evidence'
+  ] as const)('explains the %s reason on an agent lookup', (reason: AgentReason) => {
+    renderTurn({
+      user: 'q',
+      assistant: 'Person A [1].',
+      done: true,
+      meta: lookupMeta({ ...LOOKUP_TRAIL, reason })
+    })
+
+    const copy: Record<string, string> = en
+    expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(copy[`chat.agent_reason.${reason}`])
+  })
+
+  it.each([
+    ['en', 'Some evidence may be missing'],
+    ['de', 'Möglicherweise fehlen einige Belege']
+  ] as const)('says in %s that evidence may be missing beside a complete answer, not that it failed', (lang, copy) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: 'Person A steht am Hafen [1].',
+        done: true,
+        meta: lookupMeta({ ...LOOKUP_TRAIL, reason: 'research_failed' })
+      },
+      lang
+    )
+
+    const notice = screen.getByTestId('agent-reason-notice')
+    expect(notice).toHaveTextContent(copy)
+    expect(notice).not.toHaveTextContent(/fail|fehlgeschlagen|abgebrochen/i)
+  })
+
+  it('explains a plain answer an agent turn handed over when its tools were refused', () => {
+    // The fallback's envelope: a plain lookup with no answer mode and a trail of no steps.
+    const meta = {
+      session_id: 's',
+      sources: [],
+      retrieval_mode: 'rewrite_compact',
+      agent: { steps: 0, actions: [], reason: 'tools_unavailable', answer: 'plain' }
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta })
+
+    expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(/could not run its own searches/i)
+    expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps every call of a round in the live trail as more steps arrive', () => {
+    // One round's calls share its step number.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const round: AgentStep[] = [
+      { step: 1, action: 'search', detail: 'Hafen', found: 2 },
+      { step: 1, action: 'search', detail: 'Regenjacken', found: 1 }
+    ]
+    const view = renderTurn({ user: 'q', assistant: '', done: false, meta: null, agentSteps: round })
+    view.update({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [...round, { step: 2, action: 'search', detail: 'bedeckter Himmel', found: 0 }]
+    })
+
+    expect(trailRows('agent-trail-live')).toEqual([
+      'Searched “Hafen”: 2 new passages',
+      'Searched “Regenjacken”: 1 new passage',
+      'Searched “bedeckter Himmel”: 0 new passages'
+    ])
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/i)
+    errors.mockRestore()
+  })
+
+  it('flags an agent turn on the visual target that saw no pictures, as any visual turn', () => {
+    const meta = { ...lookupMeta(), retrieval_target: 'visual', visual: { images_attached: 0 } } as ChatFinalEvent
+
+    renderTurn({ user: 'Was ist am Hafen zu sehen?', assistant: 'Zwei Personen [1].', done: true, meta })
+
+    expect(screen.getByTestId('visual-pixels-missing')).toBeInTheDocument()
   })
 })

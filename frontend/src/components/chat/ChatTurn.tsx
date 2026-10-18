@@ -1,7 +1,8 @@
 import { useId, useState } from 'react'
 import { DisclosureButton, DocumentsIcon, ImageIcon, InfoIcon, SearchIcon, WarningIcon } from '@infra/ui'
-import type { AgentReason, AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
+import type { AgentAction, AgentReason, AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
 import type { Strings } from '@/i18n'
+import { cn } from '@/lib/cn'
 import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
@@ -33,7 +34,7 @@ export interface ChatTurnData {
    * remove another.
    */
   unsavedId?: string
-  /** Research steps streamed while an assessment turn works; `meta.agent` replaces them once done. */
+  /** Steps streamed while an agent turn works; `meta.agent` replaces them once done. */
   agentSteps?: AgentStep[]
 }
 
@@ -143,11 +144,13 @@ function dedupeSources(sources: Source[]): Source[] {
 
 /** Catalog copy per trail token. A token missing here renders no notice, never a crash. */
 const REASON_COPY: Record<AgentReason, keyof Strings> = {
-  tools_unavailable: 'chat.assessment_reason.tools_unavailable',
-  research_failed: 'chat.assessment_reason.research_failed',
-  context_budget: 'chat.assessment_reason.context_budget',
-  time_budget: 'chat.assessment_reason.time_budget',
-  no_evidence: 'chat.assessment_reason.no_evidence'
+  tools_unavailable: 'chat.agent_reason.tools_unavailable',
+  round_budget: 'chat.agent_reason.round_budget',
+  time_budget: 'chat.agent_reason.time_budget',
+  context_budget: 'chat.agent_reason.context_budget',
+  idle: 'chat.agent_reason.idle',
+  research_failed: 'chat.agent_reason.research_failed',
+  no_evidence: 'chat.agent_reason.no_evidence'
 }
 
 const ANSWER_COPY: Partial<Record<AgentTrail['answer'], keyof Strings>> = {
@@ -157,86 +160,143 @@ const ANSWER_COPY: Partial<Record<AgentTrail['answer'], keyof Strings>> = {
 
 type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found'>
 
+/** A keyframes step's detail: the clip, then ` #n` when the model opened one frame. */
+const ONE_FRAME = /^(.*) #(\d+)$/s
+
 function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
   const single = step.found === 1
-  if (step.action === 'seed') {
-    return t(single ? 'chat.assessment_trail_seed_one' : 'chat.assessment_trail_seed_other', { count: step.found })
+  switch (step.action) {
+    case 'seed':
+      return t(single ? 'chat.agent_trail_seed_one' : 'chat.agent_trail_seed_other', { count: step.found })
+    case 'answer':
+      return t('chat.agent_trail_answer')
+    case 'note':
+      return t('chat.agent_trail_note', { text: step.detail })
+    case 'read':
+      // The model may write the number as it cites it, `[2]`.
+      return t('chat.agent_trail_read', { n: /\d+/.exec(step.detail)?.[0] ?? step.detail })
+    case 'search_images':
+      return t(single ? 'chat.agent_trail_search_images_one' : 'chat.agent_trail_search_images_other', {
+        query: step.detail,
+        count: step.found
+      })
+    case 'keyframes': {
+      const frame = ONE_FRAME.exec(step.detail)
+      if (frame) return t('chat.agent_trail_keyframe', { clip: frame[1], index: frame[2] })
+      return t(single ? 'chat.agent_trail_keyframes_one' : 'chat.agent_trail_keyframes_other', {
+        clip: step.detail,
+        count: step.found
+      })
+    }
+    default:
+      return t(single ? 'chat.agent_trail_search_one' : 'chat.agent_trail_search_other', {
+        query: step.detail,
+        count: step.found
+      })
   }
-  if (step.action === 'answer') return t('chat.assessment_trail_answer')
-  return t(single ? 'chat.assessment_trail_search_one' : 'chat.assessment_trail_search_other', {
-    query: step.detail,
-    count: step.found
-  })
 }
 
-/** The research steps of an assessment turn while it runs. */
-function AgentTrailLive({ steps }: { steps: AgentStep[] }) {
+/** What a step did, drawn. The model's own writing reads nothing: a same-size spacer keeps its text aligned. */
+function StepMarker({ action }: { action: AgentAction }) {
+  const className = 'mt-px h-3.5 w-3.5 shrink-0'
+  switch (action) {
+    case 'note':
+    case 'answer':
+      return <span aria-hidden="true" className={className} />
+    case 'keyframes':
+      return <ImageIcon className={className} />
+    case 'read':
+      return <DocumentsIcon className={className} />
+    default:
+      return <SearchIcon className={className} />
+  }
+}
+
+/** A trail's steps, one row each: live while the turn runs, behind the disclosure once it is done. */
+function TrailSteps({
+  steps,
+  id,
+  testId,
+  className
+}: {
+  steps: TrailStep[]
+  id?: string
+  testId?: string
+  className?: string
+}) {
   const t = useT()
   return (
-    <ul className="mt-3 space-y-1 text-xs text-muted-foreground" data-testid="agent-trail-live">
-      {steps.map((step) => (
-        <li key={`${step.step}-${step.action}`} className="flex items-center gap-2">
-          {/* Writing is not a search; a same-size spacer keeps its text aligned with the searches. */}
-          {step.action === 'answer' ? (
-            <span aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-          ) : (
-            <SearchIcon className="h-3.5 w-3.5 shrink-0" />
-          )}
-          <span>{stepLabel(step, t)}</span>
+    <ul id={id} className={cn('space-y-1', className)} data-testid={testId}>
+      {steps.map((step, index) => (
+        // Append-only and never reordered; one round's calls share their step number, so the index keys them.
+        // eslint-disable-next-line @eslint-react/no-array-index-key
+        <li key={index} className="flex items-start gap-2">
+          <StepMarker action={step.action} />
+          <span className="min-w-0 break-words">{stepLabel(step, t)}</span>
         </li>
       ))}
     </ul>
   )
 }
 
-/** Whether the answer text carries the assessment label the notice points to. */
-function carriesLabel(trail: AgentTrail): boolean {
-  return trail.answer === 'unsplit' || (trail.answer === 'split' && trail.evidence_chars !== null)
+/** The steps the model took itself: not the seed it started from, nor an earlier assessment's answer marker. */
+function researchSteps(trail: AgentTrail): TrailStep[] {
+  if (!Array.isArray(trail.actions)) return []
+  return trail.actions.filter(
+    (step) =>
+      typeof step === 'object' &&
+      step !== null &&
+      typeof step.action === 'string' &&
+      step.action !== 'seed' &&
+      step.action !== 'answer'
+  )
 }
 
-/** Says the answer carries the model's own judgement; the searches sit behind a disclosure. */
-function AssessmentNotice({ trail }: { trail: AgentTrail }) {
+/** The searches behind a finished agent turn, behind a disclosure where the live trail stood. */
+function AgentTrailDisclosure({ steps }: { steps: TrailStep[] }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const listId = useId()
-  const searches = Array.isArray(trail.actions) ? trail.actions.filter((action) => action.action === 'search') : []
-  const shortened =
-    trail.shortened > 0
-      ? t(trail.shortened === 1 ? 'chat.assessment_shortened_one' : 'chat.assessment_shortened_other', {
-          count: trail.shortened
-        })
-      : null
+  return (
+    <div className="mt-3 text-xs text-muted-foreground" data-testid="agent-trail">
+      <div className="flex items-center gap-2">
+        <span className="flex-1">{t('chat.agent_trail_title')}</span>
+        <DisclosureButton
+          expanded={open}
+          controls={listId}
+          label={open ? t('chat.agent_trail_hide') : t('chat.agent_trail_show')}
+          onClick={() => setOpen((value) => !value)}
+          className="h-6 w-6"
+        />
+      </div>
+      {open && <TrailSteps id={listId} steps={steps} className="mt-2" />}
+    </div>
+  )
+}
+
+/** Whether the answer text carries the assessment label the notice points to. */
+function carriesLabel(trail: AgentTrail): boolean {
+  return trail.answer === 'unsplit' || (trail.answer === 'split' && typeof trail.evidence_chars === 'number')
+}
+
+/** Says the answer carries the model's own judgement. */
+function AssessmentNotice({ trail }: { trail: AgentTrail }) {
+  const t = useT()
+  const shortened = trail.shortened ?? 0
   return (
     <div
-      className="mt-3 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground"
+      className="mt-3 flex items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground"
       data-testid="assessment-notice"
       role="note"
     >
-      <div className="flex items-center gap-2">
-        <InfoIcon className="h-3.5 w-3.5 shrink-0" />
-        <span className="flex-1">
-          {t('chat.assessment_notice')}
-          {shortened && ` ${shortened}`}
-        </span>
-        {searches.length > 0 && (
-          <DisclosureButton
-            expanded={open}
-            controls={listId}
-            label={open ? t('chat.assessment_trail_hide') : t('chat.assessment_trail_show')}
-            onClick={() => setOpen((value) => !value)}
-            className="h-6 w-6"
-          />
-        )}
-      </div>
-      {open && (
-        <ul id={listId} className="mt-2 list-disc space-y-1 pl-5">
-          {searches.map((action, index) => (
-            // A finished trail is read-only and never reordered; a repeated query rules out `detail` alone.
-            // eslint-disable-next-line @eslint-react/no-array-index-key
-            <li key={`${index}-${action.detail}`}>{stepLabel(action, t)}</li>
-          ))}
-        </ul>
-      )}
+      <InfoIcon className="h-3.5 w-3.5 shrink-0" />
+      <span className="flex-1">
+        {t('chat.assessment_notice')}
+        {shortened > 0 &&
+          ` ${t(shortened === 1 ? 'chat.assessment_shortened_one' : 'chat.assessment_shortened_other', {
+            count: shortened
+          })}`}
+      </span>
     </div>
   )
 }
@@ -267,11 +327,15 @@ export function ChatTurn({
         })
       : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
-  const trail = turn.done && turn.meta?.answer_mode === 'assessment' ? (turn.meta.agent ?? null) : null
+  // Any agent turn's trail, and the one a plain answer carries when an agent turn handed it over.
+  const trail = turn.done ? (turn.meta?.agent ?? null) : null
+  const assessment = turn.meta?.answer_mode === 'assessment'
+  const research = trail ? researchSteps(trail) : []
   // Wire tokens reach `t()` only through the tables above, by own key: "constructor" is not copy.
   const reasonKey =
     trail?.reason && Object.hasOwn(REASON_COPY, trail.reason) ? REASON_COPY[trail.reason] : undefined
-  const answerKey = trail && Object.hasOwn(ANSWER_COPY, trail.answer) ? ANSWER_COPY[trail.answer] : undefined
+  const answerKey =
+    assessment && trail && Object.hasOwn(ANSWER_COPY, trail.answer) ? ANSWER_COPY[trail.answer] : undefined
   const targetUsed = retrievalTargetUsed(turn.meta)
   return (
     <article className="space-y-3">
@@ -296,20 +360,27 @@ export function ChatTurn({
           // Mounted before the first step arrives, so a screen reader announces it; `atomic` off keeps
           // each new step from re-reading the whole list.
           <div role="status" aria-live="polite" aria-atomic="false">
-            {turn.agentSteps && turn.agentSteps.length > 0 && <AgentTrailLive steps={turn.agentSteps} />}
+            {turn.agentSteps && turn.agentSteps.length > 0 && (
+              <TrailSteps
+                steps={turn.agentSteps}
+                testId="agent-trail-live"
+                className="mt-3 text-xs text-muted-foreground"
+              />
+            )}
           </div>
         )}
+        {research.length > 0 && <AgentTrailDisclosure steps={research} />}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">{t('chat.error_title')}</div>
             <div className="mt-1 whitespace-pre-wrap">{turn.error}</div>
           </div>
         )}
-        {trail && carriesLabel(trail) && <AssessmentNotice trail={trail} />}
+        {assessment && trail && carriesLabel(trail) && <AssessmentNotice trail={trail} />}
         {reasonKey && (
           <div
             className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
-            data-testid="assessment-research-degraded"
+            data-testid="agent-reason-notice"
             role="alert"
           >
             <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />

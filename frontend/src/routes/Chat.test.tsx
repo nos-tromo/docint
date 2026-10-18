@@ -1373,7 +1373,7 @@ describe('Chat session switching', () => {
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
     stream.enqueue(enc.encode('data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n'))
 
-    expect(await screen.findByTestId('agent-trail-live')).toHaveTextContent('Initial search: 2 passages')
+    expect(await screen.findByTestId('agent-trail-live')).toHaveTextContent('Started from 2 passages')
     expect(screen.getByRole('button', { name: /send/i })).toHaveAttribute('aria-busy', 'true')
 
     stream.enqueue(

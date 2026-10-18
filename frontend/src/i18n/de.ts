@@ -202,22 +202,33 @@ export const de: Strings = {
     '{count} Passage wurde gekürzt, damit sie in den Kontext des Modells passt.',
   'chat.assessment_shortened_other':
     '{count} Passagen wurden gekürzt, damit sie in den Kontext des Modells passen.',
-  'chat.assessment_trail_show': 'Suchen hinter dieser Einschätzung anzeigen',
-  'chat.assessment_trail_hide': 'Suchen hinter dieser Einschätzung ausblenden',
-  'chat.assessment_trail_seed_one': 'Erste Suche: {count} Passage',
-  'chat.assessment_trail_seed_other': 'Erste Suche: {count} Passagen',
-  'chat.assessment_trail_search_one': 'Gesucht nach „{query}“: {count} neue Passage',
-  'chat.assessment_trail_search_other': 'Gesucht nach „{query}“: {count} neue Passagen',
-  'chat.assessment_trail_answer': 'Einschätzung wird geschrieben…',
-  'chat.assessment_reason.tools_unavailable':
-    'Das Modell konnte keine eigenen Suchen ausführen; diese Einschätzung beruht nur auf den Passagen der ersten Suche.',
-  'chat.assessment_reason.research_failed':
-    'Die Recherche brach unterwegs ab; diese Einschätzung beruht auf den bis dahin gefundenen Passagen.',
-  'chat.assessment_reason.context_budget':
-    'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder ein Teil der Belege wurde ausgelassen.',
-  'chat.assessment_reason.time_budget':
+  'chat.agent_trail_title': 'Suchen hinter dieser Antwort',
+  'chat.agent_trail_show': 'Suchen hinter dieser Antwort anzeigen',
+  'chat.agent_trail_hide': 'Suchen hinter dieser Antwort ausblenden',
+  'chat.agent_trail_seed_one': 'Ausgangspunkt: {count} Passage',
+  'chat.agent_trail_seed_other': 'Ausgangspunkt: {count} Passagen',
+  'chat.agent_trail_search_one': 'Gesucht nach „{query}“: {count} neue Passage',
+  'chat.agent_trail_search_other': 'Gesucht nach „{query}“: {count} neue Passagen',
+  'chat.agent_trail_search_images_one': 'Bilder durchsucht nach „{query}“: {count} neues Bild',
+  'chat.agent_trail_search_images_other': 'Bilder durchsucht nach „{query}“: {count} neue Bilder',
+  'chat.agent_trail_keyframes_one': 'Keyframes von „{clip}“ angesehen: {count} neuer Keyframe',
+  'chat.agent_trail_keyframes_other': 'Keyframes von „{clip}“ angesehen: {count} neue Keyframes',
+  'chat.agent_trail_keyframe': 'Keyframe #{index} von „{clip}“ angesehen',
+  'chat.agent_trail_read': 'Passage [{n}] gelesen',
+  'chat.agent_trail_note': 'Notiz: {text}',
+  'chat.agent_trail_answer': 'Einschätzung wird geschrieben…',
+  'chat.agent_reason.tools_unavailable':
+    'Das Modell konnte keine eigenen Suchen ausführen; diese Antwort beruht daher auf einer Standardsuche.',
+  'chat.agent_reason.round_budget':
+    'Die Recherche hat die Höchstzahl an Suchrunden erreicht; die Antwort beruht auf dem bis dahin Gefundenen.',
+  'chat.agent_reason.time_budget':
     'Die Recherche endete vorzeitig, weil die Zeit abgelaufen war.',
-  'chat.assessment_reason.no_evidence': 'Es wurden keine Passagen gefunden, die sich bewerten ließen.',
+  'chat.agent_reason.context_budget':
+    'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder ein Teil der Belege wurde ausgelassen.',
+  'chat.agent_reason.idle': 'Die Recherche endete, weil weitere Suchen nichts Neues ergaben.',
+  'chat.agent_reason.research_failed':
+    'Möglicherweise fehlen einige Belege: Nicht jede Suche konnte abgeschlossen werden.',
+  'chat.agent_reason.no_evidence': 'Es wurden keine Passagen gefunden, auf die sich die Antwort stützen könnte.',
   'chat.assessment_answer.unsplit':
     'Das Modell hat nicht getrennt, was die Quellen sagen und was es selbst urteilt; die ganze Antwort ist daher als seine Einschätzung markiert.',
   'chat.assessment_answer.empty': 'Das Modell hat keine Einschätzung geliefert.',
