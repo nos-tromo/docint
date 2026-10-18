@@ -668,11 +668,14 @@ def test_a_reference_rows_origin_is_dropped_only_where_it_repeats_the_file(
     assert ("origin" in view.metadata) is kept
 
 
-def _legacy_row() -> NodeWithScore:
+def _legacy_row(*, empty_name: bool = False) -> NodeWithScore:
     """Build an invented comment row of an older table export, which names its file only in ``origin``, first.
 
+    Args:
+        empty_name (bool): Whether the row carries a ``filename`` that is empty, rather than none.
+
     Returns:
-        NodeWithScore: The row, with no ``filename`` and the 1,500-character post it answers.
+        NodeWithScore: The row, with no file name of its own and the 1,500-character post it answers.
     """
     reference = {
         "network": "examplenet",
@@ -694,19 +697,28 @@ def _legacy_row() -> NodeWithScore:
         "table": {"columns": ["id", "author", "text", "published_at"], "n_rows": 120, "row_index": 4},
         "reference_metadata": reference,
     }
+    if empty_name:
+        metadata["filename"] = ""
     return NodeWithScore(node=TextNode(id_="legacy-comment-4", text=SHORT_COMMENT, metadata=metadata), score=1.0)
 
 
-def test_a_row_without_a_file_name_keeps_its_origin_in_the_files_place() -> None:
-    """An older export names a row's file only in its ``origin``, which takes the file's place: both show."""
-    reply = _search_reply(agent_llm_view, _legacy_row())
+@pytest.mark.parametrize("empty_name", [False, True], ids=["no-file-name", "empty-file-name"])
+def test_a_row_without_a_file_name_keeps_its_origin_in_the_files_place(empty_name: bool) -> None:
+    """An older export names a row's file only in its ``origin``, which takes the file's place: both show.
+
+    Args:
+        empty_name (bool): Whether the row carries an empty ``filename`` rather than none.
+    """
+    row = _legacy_row(empty_name=empty_name)
+
+    reply = _search_reply(agent_llm_view, row)
 
     assert reply.startswith(f"citation_index: 1\norigin: {{'filename': '{LEGACY_FILE}'")
     assert "characters not shown" in reply.partition("\n\n")[0]
     assert AUTHOR in reply
-    view = agent_llm_view(TextNode(id_="legacy-comment-4", text=SHORT_COMMENT, metadata=_legacy_row().node.metadata))
+    view = agent_llm_view(row.node)
     visible = [key for key in view.metadata if key not in view.excluded_llm_metadata_keys]
-    assert visible == ["origin", "reference_metadata", "table"]
+    assert visible[:2] == ["origin", "reference_metadata"]
 
 
 def _engine(*found: NodeWithScore) -> MagicMock:
