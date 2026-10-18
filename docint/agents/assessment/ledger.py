@@ -150,7 +150,7 @@ def _head_spans(text: str) -> list[tuple[int, int]]:
     each window's share of the opening becomes a match to the window's end, and
     a share longer than one match keeps gets a second, whose kept text ends
     where the share does. Merged with a stamped emission of the same text, the
-    passage then still keeps everything research read of it.
+    passage then still keeps everything the model was shown of it.
 
     Args:
         text (str): The passage text.
@@ -189,8 +189,8 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     keeps its opening, the other its match. Of one text they do, as when a
     keyword check anchors a passage held unstamped: the unstamped side counts
     its opening as matches (see :func:`_head_spans`), so the merged entry keeps
-    all that research read of either. Anything but a ``TextNode`` keeps the held
-    entry as is.
+    all that the model was shown of either. Anything but a ``TextNode`` keeps the
+    held entry as is.
 
     Args:
         held (NodeWithScore): The ledger's entry.

@@ -26,6 +26,7 @@ from docint.agents.assessment.ledger import (
     text_floor,
 )
 from docint.agents.assessment.split import SENTINEL, compose_labelled_answer
+from docint.agents.turn.keyword import anchor_terms
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.text_budget import (
@@ -855,27 +856,6 @@ def _kept_at_floor(entry: NodeWithScore) -> str:
     return _collapsed(_render_numbered([entry], text_floor(_text(entry), spans)))
 
 
-def _anchored_on(scored: NodeWithScore, term: str) -> NodeWithScore:
-    """Stamp a copy of an unstamped passage the way a keyword check anchors it on a term past its opening.
-
-    The one match starts at the first word start at most 80 characters before the term and
-    runs to the end of the passage, a single window.
-
-    Args:
-        scored (NodeWithScore): The unstamped passage; never written to.
-        term (str): The word the check found.
-
-    Returns:
-        NodeWithScore: A copy under the same id, with the same text and that match.
-    """
-    text = _text(scored)
-    lead = text.index(term) - 80
-    start = lead if text[lead - 1].isspace() else text.index(" ", lead) + 1
-    node = scored.node.model_copy(deep=True)
-    node.metadata[MATCH_SPANS_KEY] = [[start, len(text)]]
-    return NodeWithScore(node=node, score=scored.score)
-
-
 def test_an_anchored_hit_of_a_chunk_held_unstamped_keeps_both_at_its_floor() -> None:
     """A chunk held unstamped that a keyword check finds again keeps what was shown of it and gains the term's sentence.
 
@@ -885,7 +865,7 @@ def test_an_anchored_hit_of_a_chunk_held_unstamped_keeps_both_at_its_floor() -> 
     held = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
     ledger = EvidenceLedger(cap=5)
     ledger.add([held])
-    anchored = _anchored_on(held, "randomization")
+    anchored = anchor_terms(held, ["randomization"])
 
     assert ledger.add([anchored]) == [(1, anchored)]
 
@@ -898,7 +878,7 @@ def test_an_unstamped_arrival_of_a_chunk_held_anchored_adds_its_opening() -> Non
     """Found unstamped after a check anchored it, the chunk gains the opening it is shown from without a match."""
     plain = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
     ledger = EvidenceLedger(cap=5)
-    ledger.add([_anchored_on(plain, "randomization")])
+    ledger.add([anchor_terms(plain, ["randomization"])])
 
     assert ledger.add([plain]) == [(1, plain)]
 
@@ -926,7 +906,7 @@ def test_an_anchor_into_a_chunk_held_unstamped_raises_its_floor_from_300_to_750(
     assert MATCH_SPANS_KEY not in before.node.metadata
     assert text_floor(_text(before), []) == 300
 
-    ledger.add([_anchored_on(held, "randomization")])
+    ledger.add([anchor_terms(held, ["randomization"])])
 
     entry = ledger.entries()[0]
     assert _text(entry) == PLAIN_TEXT
