@@ -145,7 +145,7 @@ def test_the_probe_reads_only_the_reply_s_first_event_and_closes_it() -> None:
     ("outcome", "cached", "says"),
     [
         ("refused", True, "a probe confirmed it"),
-        ("accepted", False, "a probe offering tools was accepted"),
+        ("accepted", False, "something in that turn's own request, its messages, images or tool schemas, was refused"),
         ("inconclusive", False, "a probe could not tell"),
     ],
 )

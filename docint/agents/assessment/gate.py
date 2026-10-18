@@ -119,11 +119,12 @@ class ToolsRejection:
         """Probe the endpoint after a turn's refusal of tools; remember the rejection only if the probe is refused.
 
         The probe must ask with the client of the turn's reasoning flag, under which the rejection
-        is remembered. An accepted probe means the refusal was that request's own; any other
-        outcome shows nothing. Each probed refusal logs one warning saying which, with no text of
-        any turn. At most one probe runs at a time per flag: a refusal arriving meanwhile neither
-        probes nor is remembered. While a rejection is remembered for the flag, a further refusal
-        tells nothing new: it neither probes nor warns, and the cooldown runs on unchanged.
+        is remembered. An accepted probe means something in that turn's own request was refused:
+        its messages, images or tool schemas. Any other outcome shows nothing. Each probed refusal
+        logs one warning saying which, with no text of any turn. At most one probe runs at a time
+        per flag: a refusal arriving meanwhile neither probes nor is remembered. While a rejection
+        is remembered for the flag, a further refusal tells nothing new: it neither probes nor
+        warns, and the cooldown runs on unchanged.
 
         Args:
             probe (Callable[[], ProbeOutcome]): Asks the endpoint, in a request carrying nothing of
@@ -145,8 +146,8 @@ class ToolsRejection:
         elif outcome == "accepted":
             logger.warning(
                 "A turn with reasoning {} fell back after the chat endpoint rejected its request offering tools, but "
-                "a probe offering tools was accepted, so agent turns stay on: that request was rejected for its own "
-                "content.",
+                "a probe offering one tool was accepted, so agent turns stay on: something in that turn's own "
+                "request, its messages, images or tool schemas, was refused.",
                 _mode(reasoning),
             )
         else:

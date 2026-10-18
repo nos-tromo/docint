@@ -6239,7 +6239,8 @@ def test_a_refusal_whose_probe_is_accepted_caches_nothing(
     assert (asked, second["retrieval_mode"]) == ([True, True], "agent")
     assert rag.agent_text_model.stream_chat.call_count == 1
     assert len(warnings) == 1
-    assert "a probe offering tools was accepted" in warnings[0]
+    assert "a probe offering one tool was accepted" in warnings[0]
+    assert "its messages, images or tool schemas" in warnings[0]
     assert "zzsecretzz" not in loguru_caplog.text
 
 
