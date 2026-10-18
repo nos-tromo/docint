@@ -1604,11 +1604,12 @@ def test_a_call_without_room_for_its_reply_is_never_run() -> None:
     assert _steps(progress) == [("search", "Programm", 1)]
 
 
-def _budget_with_room(round_room: int) -> TurnBudget:
+def _budget_with_room(round_room: int, *, ratio: float | None = None) -> TurnBudget:
     """Build an 8k budget whose room for tool replies is ``round_room`` tokens.
 
     Args:
         round_room (int): The room wanted.
+        ratio (float | None): The characters per token it is measured at; the usual 3.5 by default.
 
     Returns:
         TurnBudget: The budget, its system prompt sized to leave that room.
@@ -1617,7 +1618,7 @@ def _budget_with_room(round_room: int) -> TurnBudget:
     return TurnBudget(
         ctx_window=budget.ctx_window,
         reasoning=False,
-        char_token_ratio=budget.char_token_ratio,
+        char_token_ratio=budget.char_token_ratio if ratio is None else ratio,
         system_tokens=budget.system_tokens + budget.round_room - round_room,
         tool_schema_tokens=budget.tool_schema_tokens,
         history_tokens=budget.history_tokens,
@@ -2642,6 +2643,33 @@ def test_visual_rounds_attach_thumbnails_within_the_allowance(
     assert (llm.stream_chat.call_args_list[1].kwargs["tool_choice"], result.reason) == (next_choice, reason)
     assert (result.images_attached, _stamped(result), "".join(texts)) == (len(shown), [n for n, _ in shown], ANSWER)
     assert all(VISUAL_IMAGES_ATTACHED_KEY not in frame.node.metadata for frame in frames)
+
+
+#: A legend long enough that the ratio a picture message is priced at decides whether it fits.
+WORDY_LEGEND = "Die Bilder unten sind die Quellen dieser Antwort, als Bilder beigefügt. " * 40 + "{image_legend}"
+
+
+def test_pictures_are_priced_at_the_ratio_the_turn_was_measured_with() -> None:
+    """A turn measured at 5.0 characters a token prices its picture message at 5.0, not at a ratio of its own.
+
+    The attach is offered 1345 tokens. One picture's message costs 1220 there at 5.0, so it is
+    shown; at 3.5 it would cost 1469 and at 1.0 3539, and nothing would be shown or fetched.
+    """
+    store = ThumbnailStore(0)
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), _answer()])
+    loop = _loop(
+        llm,
+        _pictures({"Regenjacken": [frame_passage(0)]}),
+        budget=_budget_with_room(1516, ratio=5.0),
+        char_token_ratio=5.0,
+        fetch_thumbnails=store,
+        legend_template=WORDY_LEGEND,
+        max_images=6,
+    )
+
+    _, _, result = _drain(_turn(loop))
+
+    assert (store.fetches, len(_picture_messages(llm, 1)), result.images_attached) == ([["frame-0"]], 1, 1)
 
 
 def test_a_forced_answer_after_a_picture_round_joins_its_note_to_the_picture_message() -> None:
