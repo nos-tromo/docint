@@ -511,7 +511,7 @@ class AgentLoop:
         A round whose request carries pictures and fails before its first event is taken as
         refusing them, as ``VisualImagesMixin`` takes it: every picture is taken back (see
         :meth:`~docint.agents.turn.images.TurnImages.drop`) and the round is sent again without
-        any. Should that fail too, it fails as any round does; a dead endpoint does.
+        any, once. Should that fail too, it fails as any round does; a dead endpoint does.
 
         Args:
             turn (_Turn): The turn.
@@ -523,6 +523,7 @@ class AgentLoop:
         Returns:
             _Streamed | None: How the round went; ``None`` when no model slot came free.
         """
+        retried = False
         while True:
             carried = turn.images.count
             time_left = max(0.0, self._time_left(turn))
@@ -535,7 +536,7 @@ class AgentLoop:
                 tool_choice="none" if answer else "auto",
                 wait=wait,
             )
-            if streamed is None or streamed.began or not carried:
+            if streamed is None or streamed.began or not carried or retried:
                 return streamed
             logger.warning(
                 "An agent round carrying {} pictures failed before its first event ({}); it is sent again without them",
@@ -544,6 +545,7 @@ class AgentLoop:
             )
             turn.transcript, freed = turn.images.drop(turn.transcript)
             turn.spent -= freed
+            retried = True
 
     def _show_pictures(self, turn: _Turn, held: int) -> None:
         """Show the model the pictures a round admitted, in one message after its tool replies.

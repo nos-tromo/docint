@@ -63,6 +63,7 @@ from docint.agents.turn.calls import (
 )
 from docint.agents.turn.history import ConversationTurn, ConversationWindow
 from docint.agents.turn.image_tools import SearchImagesTool
+from docint.agents.turn.images import TurnImages
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
 from docint.agents.turn.stream import Provisional
@@ -2687,6 +2688,55 @@ def test_a_refused_image_message_is_dropped_and_the_round_retried_once(
         "it is sent again without them"
     ]
     assert "zzsecretzz" not in loguru_caplog.text
+
+
+class _Clinging(TurnImages):
+    """Pictures a drop cannot take back, so only the loop itself can bound the retry of a refused round."""
+
+    @override
+    def drop(self, transcript: Sequence[ChatMessage]) -> tuple[list[ChatMessage], int]:
+        """Take nothing back.
+
+        Args:
+            transcript (Sequence[ChatMessage]): The turn's rounds so far.
+
+        Returns:
+            tuple[list[ChatMessage], int]: The transcript as it was, and no tokens freed.
+        """
+        return list(transcript), 0
+
+
+def test_a_refused_round_is_sent_again_at_most_once_whatever_its_pictures_hold(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """The loop bounds the retry itself: refused again, the round fails as any round does, pictures held or not.
+
+    A retry bounded only by the pictures would go on here; the script answers next, so it would
+    show as a third send of the tool round, not as a hang.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Puts the clinging pictures in the loop's place.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    monkeypatch.setattr(turn_loop, "TurnImages", _Clinging)
+    llm = streaming_tool_llm(
+        [
+            _calls(_image_call("call_a", "Regenjacken")),
+            bad_request(REFUSED_PICTURES),
+            bad_request(REFUSED_PICTURES),
+            _answer(),
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), ThumbnailStore(0))))
+
+    assert [call.kwargs["tool_choice"] for call in llm.stream_chat.call_args_list] == ["auto", "auto", "auto", "none"]
+    assert (result.reason, "".join(texts)) == ("research_failed", ANSWER)
+    assert loguru_caplog.messages == [
+        "An agent round carrying 1 pictures failed before its first event (BadRequestError); "
+        "it is sent again without them",
+        "An agent round failed (BadRequestError); the model answers from what it found",
+    ]
 
 
 def test_a_turn_whose_pictures_were_refused_shows_no_more() -> None:
