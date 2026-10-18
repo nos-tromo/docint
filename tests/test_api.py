@@ -349,6 +349,8 @@ class DummyRAG:
         # tests can assert /query and /stream_query thread the resolved name in.
         self.seen_collections: list[str] = []
         self.stateless_queries: list[str] = []
+        # What each stateless query retrieved with: the prompt, graph-expanded when the API expands it.
+        self.stateless_expansions: list[str | None] = []
         self.stateless_query_filters: list[dict[str, Any]] = []
         self.stateless_agent_turns: list[dict[str, Any]] = []
         self.chat_filters: list[Any] = []
@@ -634,6 +636,7 @@ class DummyRAG:
         self,
         prompt: str,
         *,
+        expanded_query: str | None = None,
         metadata_filters: Any = None,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
@@ -643,7 +646,8 @@ class DummyRAG:
         """Run a stateless retrieval query.
 
         Args:
-            prompt: Query prompt.
+            prompt: The user's question.
+            expanded_query: What retrieval runs on, the question graph-expanded; recorded by the stub.
             metadata_filters: Optional compiled metadata filters.
             metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
@@ -659,6 +663,7 @@ class DummyRAG:
         self.seen_collections.append(self.qdrant_collection)
         self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
         self.stateless_queries.append(prompt)
+        self.stateless_expansions.append(expanded_query)
         return {
             "response": "answer",
             "sources": [{"id": 1}],
@@ -668,6 +673,7 @@ class DummyRAG:
         self,
         prompt: str,
         *,
+        expanded_query: str | None = None,
         metadata_filters: Any = None,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
@@ -678,7 +684,8 @@ class DummyRAG:
         """Async stateless retrieval query mirroring :meth:`run_query`.
 
         Args:
-            prompt: Query prompt.
+            prompt: The user's question.
+            expanded_query: What retrieval runs on, the question graph-expanded.
             metadata_filters: Optional compiled metadata filters.
             metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
@@ -699,6 +706,7 @@ class DummyRAG:
         )
         return self.run_query(
             prompt,
+            expanded_query=expanded_query,
             metadata_filters=metadata_filters,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
@@ -2176,15 +2184,16 @@ def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
     # resumed by clients as if it were a real conversation.
     assert body["session_id"] is None
     assert len(rag.chats) == before_chats
-    assert rag.stateless_queries[-1].startswith("What?")
+    assert rag.stateless_queries[-1] == "What?"
+    assert rag.stateless_expansions[-1] == "What?\n\nRelated entities for retrieval: Acme"
     assert body["graph_debug"]["applied"] is True
 
 
 def test_stateless_visual_query_is_not_expanded_with_the_graph(client: TestClient) -> None:
     """Session mode skips graph expansion for the visual target; stateless must too.
 
-    The graph's terms are mined from text chunks, so they widen a lane the
-    visual target does not use and still land in the synthesis prompt.
+    The graph's terms are mined from text chunks, so they would widen a lane
+    the visual target does not use.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -2198,6 +2207,7 @@ def test_stateless_visual_query_is_not_expanded_with_the_graph(client: TestClien
 
     assert response.status_code == 200
     assert rag.stateless_queries[-1] == "What?"
+    assert rag.stateless_expansions[-1] == "What?"
     assert not (response.json().get("graph_debug") or {}).get("applied")
 
 
@@ -2279,6 +2289,8 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
     assert '"token"' in text
     assert '"session_id": null' in text
     assert '"graph_debug"' in text
+    assert rag.stateless_queries[-1] == "hello"
+    assert rag.stateless_expansions[-1] == "hello\n\nRelated entities for retrieval: Acme"
     # The async query path was exercised and carried the filter kwargs.
     assert len(rag.stateless_query_filters) == before + 1
     recorded = rag.stateless_query_filters[-1]

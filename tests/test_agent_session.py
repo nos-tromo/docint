@@ -1346,7 +1346,8 @@ def test_a_stateless_agent_turn_falls_back_to_run_query(
     data = items[-1]
     assert items[:-1] == [PLAIN_ANSWER]
     rag.run_query.assert_called_once_with(
-        "expanded question",
+        QUESTION,
+        expanded_query="expanded question",
         metadata_filters=filters,
         metadata_filter_rules=["rule"],
         vector_store_kwargs=store_kwargs,

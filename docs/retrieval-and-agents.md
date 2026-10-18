@@ -84,9 +84,11 @@ the contextual understanding agent.
   (`docint/core/storage/sqlite_kvstore.py`).
 - **Query engine construction** — `create_query_engine()` attaches the
   reranker, postprocessors, and response synthesiser.
-- **Stateless query** — `run_query(prompt, metadata_filters=...,
-  vector_store_kwargs=...)` returns a `dict` with `response`,
-  `sources`, `retrieval_query`, `coverage_unit`, and `retrieval_mode`.
+- **Stateless query** — `run_query(prompt, expanded_query=...,
+  metadata_filters=..., vector_store_kwargs=...)` retrieves with
+  `expanded_query` (the prompt itself when omitted), answers `prompt`, and
+  returns a `dict` with `response`, `sources`, `retrieval_query`,
+  `coverage_unit`, and `retrieval_mode`.
 - **Session chat** — `chat(...)` proxies to
   `SessionManager.chat()` (`docint/core/state/session_manager.py`).
 - **Streaming chat** — `stream_chat(...)` yields token-level events
@@ -416,8 +418,9 @@ rewritten, expanded query but is asked the user's own words, with the
 history-resolved rewrite on a labelled line beneath them when it adds any
 (`question_block` in `docint/agents/turn/history.py`). A follow-up such as
 "Are those all?" is therefore answered as asked, and the neighbour names never
-reach the generation prompt. The `retrieval_query` and `graph_debug` the
-response reports do not change.
+reach the generation prompt. A stateless query has no rewrite: it retrieves with
+the expanded question and is asked the question alone. The `retrieval_query` and
+`graph_debug` the response reports do not change.
 
 A `graph_debug` payload is returned in the `QueryOut` for the
 stateless path so the UI can visualise what was added.

@@ -135,6 +135,7 @@ from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import AssessmentRunner
 from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, message_cost, schema_tokens
+from docint.agents.turn.history import question_block
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.collection_overview import summarize_document_types
@@ -8354,6 +8355,7 @@ class RAG:
         self,
         prompt: str,
         *,
+        expanded_query: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -8363,8 +8365,14 @@ class RAG:
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
 
+        Retrieval runs on ``expanded_query`` and the answer is asked ``prompt``, so
+        the terms the entity graph appends widen the search and never reach the
+        synthesis prompt.
+
         Args:
-            prompt (str): The query prompt.
+            prompt (str): The user's question, which the answer is asked as it stands.
+            expanded_query (str | None): What retrieval runs on, the question with the
+                graph's terms appended. ``None`` retrieves with ``prompt``.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
@@ -8422,7 +8430,8 @@ class RAG:
             engine = self.build_query_engine()
             self.query_engine = engine
         try:
-            result = engine.query(prompt)
+            nodes = engine.retrieve(QueryBundle(expanded_query or prompt))
+            result = engine.synthesize(QueryBundle(question_block(prompt, None)), nodes)
         except ValueError as exc:
             if "context size" in str(exc):
                 logger.error(
@@ -8470,6 +8479,7 @@ class RAG:
         self,
         prompt: str,
         *,
+        expanded_query: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -8479,8 +8489,12 @@ class RAG:
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection asynchronously.
 
+        Retrieves and answers as :meth:`run_query` does.
+
         Args:
-            prompt (str): The query prompt.
+            prompt (str): The user's question, which the answer is asked as it stands.
+            expanded_query (str | None): What retrieval runs on, the question with the
+                graph's terms appended. ``None`` retrieves with ``prompt``.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
@@ -8536,7 +8550,8 @@ class RAG:
             engine = self.build_query_engine()
             self.query_engine = engine
         try:
-            result = await engine.aquery(prompt)
+            nodes = await engine.aretrieve(QueryBundle(expanded_query or prompt))
+            result = await engine.asynthesize(QueryBundle(question_block(prompt, None)), nodes)
         except ValueError as exc:
             if "context size" in str(exc):
                 logger.error(
@@ -9066,7 +9081,7 @@ class RAG:
 
         Args:
             question (str): The user's message, verbatim.
-            expanded_query (str): The graph-expanded query a fallback answers from.
+            expanded_query (str): The graph-expanded query a fallback retrieves with.
             graph_debug (dict[str, Any] | None): That expansion's debug payload;
                 ``None`` when expansion did not run.
             metadata_filters (MetadataFilters | None): Compiled request filters.
@@ -9109,7 +9124,8 @@ class RAG:
             yield from started.items
             return
         data = self.run_query(
-            expanded_query,
+            question,
+            expanded_query=expanded_query,
             metadata_filters=metadata_filters,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,

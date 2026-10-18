@@ -2475,8 +2475,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 # Session mode skips expansion for the visual target too: the
-                # graph's terms widen a text lane this target does not use and
-                # would still land in the synthesis prompt.
+                # graph's terms would widen a text lane this target does not use.
                 if callable(expand_with_debug) and not stateless_scope and payload.retrieval_target != "visual":
                     try:
                         expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
@@ -2505,7 +2504,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                             data = item
                 else:
                     data = rag.run_query(
-                        retrieval_query,
+                        payload.question,
+                        expanded_query=retrieval_query,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
@@ -2692,8 +2692,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 # Session mode skips expansion for the visual target too: the
-                # graph's terms widen a text lane this target does not use and
-                # would still land in the synthesis prompt.
+                # graph's terms would widen a text lane this target does not use.
                 if callable(expand_with_debug) and not stateless_scope and payload.retrieval_target != "visual":
                     try:
                         expanded, debug_payload = cast(
@@ -2742,7 +2741,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             final_payload = {**chunk, "session_id": payload.session_id}
                 else:
                     stateless_data = await rag.run_query_async(
-                        retrieval_query,
+                        payload.question,
+                        expanded_query=retrieval_query,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,

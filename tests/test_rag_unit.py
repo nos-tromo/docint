@@ -662,24 +662,38 @@ def test_run_query_lazy_builds_query_engine_when_missing(
     assert rag.query_engine is None
 
     class _SpyEngine:
-        """Records query prompts and returns a synthetic response."""
+        """Records what it retrieves with and what it is asked, and returns a synthetic response."""
 
         def __init__(self) -> None:
-            """Initialize with an empty list of observed prompts."""
+            """Initialize with empty lists of observed queries."""
+            self.retrieved: list[str] = []
             self.queries: list[str] = []
 
-        def query(self, prompt: str) -> Response:
-            """Record the prompt and return a stub ``Response``.
+        def retrieve(self, query_bundle: Any) -> list[Any]:
+            """Record the retrieval query and retrieve nothing.
 
             Args:
-                prompt (str): The query prompt forwarded by ``run_query``.
+                query_bundle (Any): The retrieval query forwarded by ``run_query``.
+
+            Returns:
+                list[Any]: No nodes.
+            """
+            self.retrieved.append(query_bundle.query_str)
+            return []
+
+        def synthesize(self, query_bundle: Any, nodes: list[Any]) -> Response:
+            """Record the question and return a stub ``Response``.
+
+            Args:
+                query_bundle (Any): The question forwarded by ``run_query``.
+                nodes (list[Any]): The retrieved nodes.
 
             Returns:
                 Response: A llama_index ``Response`` carrying a sentinel
                     response string so ``_normalize_response_data`` has
                     something to work with.
             """
-            self.queries.append(prompt)
+            self.queries.append(query_bundle.query_str)
             return Response(response="spy-result", source_nodes=[])
 
     spy = _SpyEngine()
@@ -722,6 +736,7 @@ def test_run_query_lazy_builds_query_engine_when_missing(
     assert rag.query_engine is spy, (
         "The lazily-built engine must be cached on self.query_engine so subsequent queries reuse it."
     )
+    assert spy.retrieved == ["what is the topic?"]
     assert spy.queries == ["what is the topic?"]
     assert result["response"] == "spy-result"
 
@@ -6669,7 +6684,10 @@ def test_run_query_wraps_context_window_overflow() -> None:
     """run_query should catch llama_index context-size ValueError and re-raise with guidance."""
 
     class _FakeEngine:
-        def query(self, prompt: str) -> None:
+        def retrieve(self, query_bundle: Any) -> list[Any]:
+            return []
+
+        def synthesize(self, query_bundle: Any, nodes: list[Any]) -> None:
             raise ValueError("Calculated available context size -907 was not non-negative.")
 
     rag = RAG(qdrant_collection="test")
@@ -6684,7 +6702,10 @@ def test_run_query_propagates_unrelated_value_error() -> None:
     """ValueError without 'context size' should propagate unchanged."""
 
     class _FakeEngine:
-        def query(self, prompt: str) -> None:
+        def retrieve(self, query_bundle: Any) -> list[Any]:
+            return []
+
+        def synthesize(self, query_bundle: Any, nodes: list[Any]) -> None:
             raise ValueError("Something else went wrong")
 
     rag = RAG(qdrant_collection="test")
@@ -6698,7 +6719,10 @@ def test_run_query_async_wraps_context_window_overflow() -> None:
     """Async variant should also catch context-size overflow."""
 
     class _FakeEngine:
-        async def aquery(self, prompt: str) -> None:
+        async def aretrieve(self, query_bundle: Any) -> list[Any]:
+            return []
+
+        async def asynthesize(self, query_bundle: Any, nodes: list[Any]) -> None:
             raise ValueError("Calculated available context size -907 was not non-negative.")
 
     rag = RAG(qdrant_collection="test")

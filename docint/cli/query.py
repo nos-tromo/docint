@@ -550,7 +550,7 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
         except Exception as exc:
             logger.warning("Graph debug expansion failed in query CLI: {}", exc)
 
-    result = rag.run_query(retrieval_query)
+    result = rag.run_query(query, expanded_query=retrieval_query)
     if graph_debug is not None:
         result["graph_debug"] = graph_debug
 

@@ -56,6 +56,18 @@ def _rag(monkeypatch: pytest.MonkeyPatch) -> RAG:
     return rag
 
 
+def _empty_engine() -> Any:
+    """Build an engine double that retrieves nothing and answers with an empty response.
+
+    Returns:
+        Any: The double, with the ``retrieve`` and ``synthesize`` pair the query calls.
+    """
+    return types.SimpleNamespace(
+        retrieve=lambda _query: [],
+        synthesize=lambda _query, _nodes: Response(response="", source_nodes=[]),
+    )
+
+
 def test_the_visual_target_retrieves_from_the_companion(
     monkeypatch: pytest.MonkeyPatch, engine_capture: dict[str, Any]
 ) -> None:
@@ -259,7 +271,7 @@ def test_a_non_default_target_never_reuses_the_cached_engine(monkeypatch: pytest
             Any: A marker engine that answers with an empty response.
         """
         built["target"] = kwargs.get("retrieval_target")
-        return types.SimpleNamespace(query=lambda _q: Response(response="", source_nodes=[]))
+        return _empty_engine()
 
     monkeypatch.setattr(RAG, "build_query_engine", _build)
     monkeypatch.setattr(RAG, "_normalize_response_data", lambda self, *args, **kwargs: {"response": ""})
@@ -287,7 +299,7 @@ def test_a_visual_turn_reports_what_the_model_was_shown(monkeypatch: pytest.Monk
     monkeypatch.setattr(
         RAG,
         "build_query_engine",
-        lambda self, **kwargs: types.SimpleNamespace(query=lambda _q: Response(response="", source_nodes=[])),
+        lambda self, **kwargs: _empty_engine(),
     )
     monkeypatch.setattr(RAG, "_normalize_response_data", lambda self, *args, **kwargs: {"response": ""})
     monkeypatch.setattr(RAG, "_resolve_runtime_retrieval_settings", lambda self, **kwargs: _RETRIEVAL_SETTINGS)
@@ -304,7 +316,7 @@ def test_a_documents_turn_reports_no_visual_block(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         RAG,
         "build_query_engine",
-        lambda self, **kwargs: types.SimpleNamespace(query=lambda _q: Response(response="", source_nodes=[])),
+        lambda self, **kwargs: _empty_engine(),
     )
     monkeypatch.setattr(RAG, "_normalize_response_data", lambda self, *args, **kwargs: {"response": ""})
     monkeypatch.setattr(RAG, "_resolve_runtime_retrieval_settings", lambda self, **kwargs: _RETRIEVAL_SETTINGS)
@@ -366,7 +378,7 @@ def test_a_scoped_visual_turn_is_not_reported_as_degraded(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         RAG,
         "build_query_engine",
-        lambda self, **kwargs: types.SimpleNamespace(query=lambda _q: Response(response="", source_nodes=[])),
+        lambda self, **kwargs: _empty_engine(),
     )
     monkeypatch.setattr(RAG, "_normalize_response_data", lambda self, *args, **kwargs: {"response": ""})
     monkeypatch.setattr(RAG, "_resolve_runtime_retrieval_settings", lambda self, **kwargs: _RETRIEVAL_SETTINGS)
