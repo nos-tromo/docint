@@ -568,23 +568,61 @@ def test_a_fallback_runs_the_rewrite_and_the_expansion(
         assert "context window" in loguru_caplog.text
 
 
-def test_no_slot_before_any_yield_falls_back(session_manager: SessionManager, loguru_caplog: LogCaptureFixture) -> None:
-    """A turn that found no model slot has shown nothing, so the plain path still answers it.
+def _search_outage(_query: str) -> list[NodeWithScore]:
+    """Fail as a search outage would.
+
+    Args:
+        _query (str): The query, unused.
+
+    Raises:
+        RuntimeError: Always.
+    """
+    raise RuntimeError("invented search outage")
+
+
+@pytest.mark.parametrize(
+    ("script", "slots", "model_calls"),
+    [([], 0, 0), ([call_round(_search("call_a", "Stände"))], 1, 1)],
+    ids=["first-round", "answer-after-unanswered-calls"],
+)
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+def test_no_slot_before_any_yield_falls_back(
+    session_manager: SessionManager,
+    loguru_caplog: LogCaptureFixture,
+    entry: str,
+    script: list[Any],
+    slots: int,
+    model_calls: int,
+) -> None:
+    """A turn that has shown nothing falls back when no model slot comes free, its answer round's included.
+
+    A call whose search failed shows no step, so a turn whose calls all went unanswered has shown
+    nothing when its answer round finds no slot: the plain path answers, and nothing of the agent
+    turn is stored.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
         loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        entry (str): The entry point under test.
+        script (list[Any]): The model's rounds.
+        slots (int): Model slots granted: none, or the first round's alone.
+        model_calls (int): Model calls the turn makes before it falls back.
     """
-    armed = _arm(session_manager, [], model_slots=GrantedSlots(0))
+    armed = _arm(session_manager, script, search=_search_outage, model_slots=GrantedSlots(slots), max_rounds=1)
 
-    items = list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True))
+    if entry == "chat":
+        final = session_manager.chat(QUESTION, session_id="s1", agent=True)
+    else:
+        items = list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True))
+        assert not any(isinstance(item, AgentProgress) for item in items)
+        final = _final(items)
 
-    final = _final(items)
-    assert not any(isinstance(item, AgentProgress) for item in items)
     assert (final["response"], final["retrieval_mode"]) == (PLAIN_ANSWER, "rewrite_compact")
     assert "agent" not in final
     armed.engine.query.assert_called_once_with("expanded question")
-    armed.llm.stream_chat.assert_not_called()
+    assert armed.llm.stream_chat.call_count == model_calls
+    assert _rows(session_manager) == [("lookup", "rewritten question")]
+    assert "agent" not in session_manager.get_session_history("s1", owner=None)[1]
     assert "No model slot" in loguru_caplog.text
 
 
@@ -1042,19 +1080,7 @@ def test_a_failed_search_is_a_reason_notice_on_a_complete_answer(session_manager
     Args:
         session_manager (SessionManager): The session manager fixture.
     """
-
-    def _outage(_query: str) -> list[NodeWithScore]:
-        """Fail as a search outage would.
-
-        Args:
-            _query (str): The query, unused.
-
-        Raises:
-            RuntimeError: Always.
-        """
-        raise RuntimeError("invented search outage")
-
-    _arm(session_manager, [call_round(_search("call_a", "Stände")), answer_round(LOOKUP)], search=_outage)
+    _arm(session_manager, [call_round(_search("call_a", "Stände")), answer_round(LOOKUP)], search=_search_outage)
 
     final = _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True)))
 
