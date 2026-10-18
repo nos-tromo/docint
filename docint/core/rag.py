@@ -4924,8 +4924,8 @@ class RAG:
         if qdrant_filter is None and metadata_filter_rules:
             qdrant_filter = build_qdrant_filter(metadata_filter_rules)
         if metadata_filters_active and not metadata_filter_rules and qdrant_filter is None:
-            logger.error("ValueError: Visual retrieval asked for filters that reached neither lane.")
-            raise ValueError("Metadata filters are active but none reached the visual retriever.")
+            logger.error("ValueError: An image companion search asked for filters that reached it in neither form.")
+            raise ValueError("Metadata filters are active but none reached the image companion.")
         return qdrant_filter
 
     def _build_visual_retriever(
