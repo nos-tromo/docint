@@ -203,8 +203,28 @@ describe('Chat SSE handling', () => {
     expect(await screen.findByText(/stream ended unexpectedly/i)).toBeInTheDocument()
     expect(screen.getByText(/The council met/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
-    // A lookup carries no judgement, so it gets no assessment caveat.
-    expect(screen.queryByText(/did not finish/i)).not.toBeInTheDocument()
+    // Cut off mid-answer, it says so; with no step shown, nothing says it may hold a judgement.
+    expect(screen.getByText(/did not finish and may be incomplete/i)).toBeInTheDocument()
+    expect(screen.queryByText(/judgement/i)).not.toBeInTheDocument()
+  })
+
+  it('marks an answer that an error frame cuts off before any research step', async () => {
+    // An agent turn that answers in its first round sends no step, just as a plain lookup does.
+    const frames = 'data: {"token":"The council met on Sunday"}\n\n' + 'data: {"error":"Internal server error"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'When did the council meet?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/did not finish and may be incomplete/i)).toBeInTheDocument()
+    expect(screen.getByText(/The council met on Sunday/)).toBeInTheDocument()
+    expect(screen.getByText(/answer could not be generated/i)).toBeInTheDocument()
+    expect(screen.queryByText(/judgement/i)).not.toBeInTheDocument()
   })
 
   it('keeps a finished answer when the connection drops after its final envelope', async () => {
@@ -1230,36 +1250,40 @@ describe('Chat session switching', () => {
     expect(next.inflight).toBe(true)
   })
 
-  it('heads the partial text of an assessment that fails with the interrupted note', () => {
-    // The label that marks the judgement arrives with the finished answer, so a
-    // cut-off answer carries the caveat in its text: the transcript and every
-    // other place the text goes keep it.
+  it('heads the partial text of an agent turn that fails with the agent caveat', () => {
+    // The label that marks a judgement arrives with the finished answer, so an
+    // agent turn cut off mid-answer says its text may hold one unlabelled.
     const seed = { step: 0, action: 'seed' as const, detail: '', found: 2 }
     const open = {
       turns: [{ user: 'q', assistant: 'A second dataset would help.', done: false, meta: null, agentSteps: [seed] }],
       inflight: true
     }
 
-    const next = chatReducer(open, { type: 'fail', error: 'boom', note: 'Cut off.' })
+    const next = chatReducer(open, { type: 'fail', error: 'boom', note: 'Cut off.', agentNote: 'Cut off, unlabelled.' })
 
-    expect(next.turns[0].assistant).toBe('*Cut off.*\n\nA second dataset would help.')
+    expect(next.turns[0].assistant).toBe('*Cut off, unlabelled.*\n\nA second dataset would help.')
     expect(next.turns[0]).toMatchObject({ done: true, error: 'boom' })
     expect(next.inflight).toBe(false)
-    expect(chatTranscriptToText(next.turns)).toContain('*Cut off.*')
+    expect(chatTranscriptToText(next.turns)).toContain('*Cut off, unlabelled.*')
   })
 
-  it('adds no interrupted note to a lookup, to an assessment with no text yet, or twice', () => {
+  it('heads any answer cut off mid-text with a caveat, but not blank text and never twice', () => {
     const seed = { step: 0, action: 'seed' as const, detail: '', found: 2 }
     const turn = (assistant: string, agentSteps?: (typeof seed)[]) => ({
       turns: [{ user: 'q', assistant, done: false, meta: null, agentSteps }],
       inflight: true
     })
-    const fail = { type: 'fail' as const, error: 'boom', note: 'Cut off.' }
+    const fail = { type: 'fail' as const, error: 'boom', note: 'Cut off.', agentNote: 'Cut off, unlabelled.' }
 
-    expect(chatReducer(turn('Partial'), fail).turns[0].assistant).toBe('Partial')
+    // A lookup and an agent turn that answered before any step look alike, and either may be incomplete.
+    const lookup = chatReducer(turn('Partial'), fail)
+    expect(lookup.turns[0].assistant).toBe('*Cut off.*\n\nPartial')
+    expect(chatTranscriptToText(lookup.turns)).toContain('*Cut off.*\n\nPartial')
+    expect(chatReducer(turn('  '), fail).turns[0].assistant).toBe('  ')
     expect(chatReducer(turn('  ', [seed]), fail).turns[0].assistant).toBe('  ')
+    expect(chatReducer(chatReducer(turn('Partial'), fail), fail).turns[0].assistant).toBe('*Cut off.*\n\nPartial')
     expect(chatReducer(chatReducer(turn('Partial', [seed]), fail), fail).turns[0].assistant).toBe(
-      '*Cut off.*\n\nPartial'
+      '*Cut off, unlabelled.*\n\nPartial'
     )
   })
 
@@ -1280,6 +1304,7 @@ describe('Chat session switching', () => {
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
 
     expect(await screen.findByText(/did not finish/i)).toBeInTheDocument()
+    expect(screen.getByText(/judgement without its label/i)).toBeInTheDocument()
     expect(screen.getByText(/A second dataset would help/)).toBeInTheDocument()
     expect(screen.getByText(/answer could not be generated/i)).toBeInTheDocument()
   })
