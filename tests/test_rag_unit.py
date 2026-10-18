@@ -98,7 +98,7 @@ class DummyResponse:
         self.source_nodes = nodes
 
 
-def test_default_prompts_handle_elaboration_followups() -> None:
+def test_the_bundled_rewrite_prompt_is_the_english_file() -> None:
     """Guard against regressions in the bundled fallback prompts.
 
     The rewrite fallback is the English prompt file, word for word: it stands in when the
