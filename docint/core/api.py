@@ -965,10 +965,11 @@ def _agent_turn_allowed(retrieval_target: str) -> bool:
     """Decide whether this turn is answered as an agent turn, before any model call.
 
     It is when a text model is configured, agent turns are enabled at a context window that
-    holds them (:func:`agent_available`), and no tools rejection is cached
-    (:func:`tools_rejection_cached`). Every target may run the agent: the visual one with its
-    image tools. Fail-soft: any error answers the turn on the plain path, so chat never breaks
-    on this feature.
+    holds them (:func:`agent_available`), and no tools rejection is cached for the request's
+    reasoning flag (:func:`tools_rejection_cached`), which picks the agent client. Every target
+    may run the agent: the visual one with its image tools. Fail-soft: any error answers the turn
+    on the plain path, so chat never breaks on this feature. Call it within the request's
+    reasoning scope.
 
     Args:
         retrieval_target (str): The turn's retrieval target; named in the warning a failed check
@@ -980,7 +981,9 @@ def _agent_turn_allowed(retrieval_target: str) -> bool:
     try:
         if not getattr(rag, "text_model_id", None):
             return False
-        return agent_available(int(getattr(rag, "openai_ctx_window", 0) or 0)) and not tools_rejection_cached()
+        if not agent_available(int(getattr(rag, "openai_ctx_window", 0) or 0)):
+            return False
+        return not tools_rejection_cached(reasoning=bool(rag.reasoning_requested))
     except Exception as exc:
         logger.warning(
             "Agent turns are unavailable ({}) for the {} target; answering as a lookup",
@@ -997,15 +1000,18 @@ def _confirm_tools_rejection(data: Any) -> None:
     fallback reports it. Only a refused first call with tools offered reports that reason: a pinned
     round offers none, so its refusal is the turn's error. A request can also be refused for its own
     content, and the cache keeps agent turns off for every user, so a fixed probe on the agent model
-    (:func:`probe_tools`) decides (:func:`confirm_tools_rejection`). The turn has fallen back
-    either way. Blocking for up to the probe's timeout: call it off the event loop.
+    (:func:`probe_tools`) decides (:func:`confirm_tools_rejection`). The request's reasoning flag
+    picks the probe's client, as it picked the turn's, and the rejection is cached under that flag
+    alone. The turn has fallen back either way. Blocking for up to the probe's timeout: call it off
+    the event loop, within the request's reasoning scope.
 
     Args:
         data (Any): The turn's payload, as the first pass returned it.
     """
     trail = data.get("agent") if isinstance(data, dict) else None
     if isinstance(trail, dict) and trail.get("reason") == "tools_unavailable":
-        confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model))
+        reasoning = bool(rag.reasoning_requested)
+        confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model), reasoning=reasoning)
 
 
 def _assessment_validation(

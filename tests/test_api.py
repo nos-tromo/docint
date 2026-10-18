@@ -7,6 +7,7 @@ import json
 import threading
 import types
 from collections.abc import Callable, Generator, Iterator, Sequence
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast, get_args
 from unittest.mock import MagicMock
@@ -233,6 +234,9 @@ class _DummyOwners:
 
 class DummyRAG:
     """Dummy Retrieval-Augmented Generation (RAG) class for testing purposes."""
+
+    #: The stub's reasoning toggle; a test needing the request's own binds it (``_bind_reasoning``).
+    reasoning_requested = False
 
     def measure_scope(self, chunk_ids: Any) -> dict[str, Any]:
         """Report a fixed budget measurement for the requested scope.
@@ -5621,6 +5625,41 @@ def _open_agent_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     rag.openai_ctx_window = 8192
 
 
+def _bind_reasoning(monkeypatch: pytest.MonkeyPatch) -> ContextVar[bool | None]:
+    """Give the RAG double a reasoning scope built on a ``ContextVar``, as the real one is.
+
+    ``reasoning_requested`` reads it, so only code running in the request's context, its worker
+    threads included, sees the request's toggle.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        ContextVar[bool | None]: The toggle; ``None`` outside a request.
+    """
+    toggle: ContextVar[bool | None] = ContextVar("invented_reasoning_toggle", default=None)
+
+    @contextlib.contextmanager
+    def _reasoning_scope(enabled: bool | None) -> Iterator[None]:
+        """Bind the request's toggle while the block runs.
+
+        Args:
+            enabled (bool | None): The request's toggle.
+
+        Yields:
+            None: Control, with the toggle bound.
+        """
+        token = toggle.set(enabled)
+        try:
+            yield
+        finally:
+            toggle.reset(token)
+
+    monkeypatch.setattr(api_module.rag, "reasoning_scope", _reasoning_scope)
+    monkeypatch.setattr(DummyRAG, "reasoning_requested", property(lambda _self: bool(toggle.get())), raising=False)
+    return toggle
+
+
 #: What an agent lookup answers in these tests.
 AGENT_ANSWER = "Die Stände öffnen um zehn Uhr [1]."
 
@@ -5792,7 +5831,7 @@ def test_an_agent_turn_needs_the_switch_a_text_model_the_window_and_no_cached_re
     rag.text_model_id = model
     rag.openai_ctx_window = window
     if rejected:
-        gate_module.TOOLS_REJECTION.record()
+        gate_module.TOOLS_REJECTION.record(reasoning=False)
 
     assert api_module._agent_turn_allowed("all") is allowed
 
@@ -6062,6 +6101,53 @@ def test_a_tools_rejection_is_cached_for_the_cooldown(
     assert 'The chat endpoint must accept `tools` with `tool_choice: "auto"`.' in warnings[0]
     assert "for the next 10 minutes" in warnings[0]
     assert not any(flag in warnings[0].lower() for flag in ENGINE_FLAGS)
+
+
+@pytest.mark.parametrize("rejected_with", [True, False], ids=["reasoning-on", "reasoning-off"])
+def test_a_rejection_confirmed_under_one_reasoning_flag_leaves_the_other_on_the_agent(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, rejected_with: bool
+) -> None:
+    """A rejection confirmed with reasoning on blocks only reasoning-on agent turns, and the reverse.
+
+    The toggle picks the agent client, and the two send different settings, so an endpoint can
+    refuse tools under one alone; one user's toggle must not switch agent turns off for everyone.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        rejected_with (bool): The reasoning flag under which the endpoint refuses tools.
+    """
+    _open_agent_gate(monkeypatch)
+    _bind_reasoning(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    rag.agent_text_model = streaming_tool_llm([bad_request(TOOLS_REFUSED)])
+    asked: list[tuple[bool, bool]] = []
+
+    def _endpoint(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Answer as an endpoint refusing tools under one reasoning flag only.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: The answer's text, then its payload.
+        """
+        reasoning = rag.reasoning_requested
+        asked.append((reasoning, kwargs["agent"]))
+        refused = kwargs["agent"] and reasoning == rejected_with
+        yield AGENT_ANSWER
+        yield _fallback_final() if refused else (_agent_final() if kwargs["agent"] else _plain_final())
+
+    monkeypatch.setattr(rag, "stream_chat", _endpoint)
+
+    for reasoning in (rejected_with, not rejected_with, rejected_with):
+        _stream_frames(client, reasoning=reasoning)
+
+    assert asked == [(rejected_with, True), (not rejected_with, True), (rejected_with, False)]
+    assert rag.agent_text_model.stream_chat.call_count == 1
+    assert gate_module.tools_rejection_cached(reasoning=rejected_with) is True
+    assert gate_module.tools_rejection_cached(reasoning=not rejected_with) is False
 
 
 @pytest.mark.parametrize(

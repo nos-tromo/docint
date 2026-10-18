@@ -140,6 +140,7 @@ def test_the_probe_reads_only_the_reply_s_first_event_and_closes_it() -> None:
     assert (read, closed, len(kept)) == (["po"], [True], 1)
 
 
+@pytest.mark.parametrize("reasoning", [True, False], ids=["reasoning-on", "reasoning-off"])
 @pytest.mark.parametrize(
     ("outcome", "cached", "says"),
     [
@@ -149,24 +150,69 @@ def test_the_probe_reads_only_the_reply_s_first_event_and_closes_it() -> None:
     ],
 )
 def test_only_a_refused_probe_keeps_agent_turns_off(
-    loguru_caplog: LogCaptureFixture, outcome: ProbeOutcome, cached: bool, says: str
+    loguru_caplog: LogCaptureFixture, outcome: ProbeOutcome, cached: bool, says: str, reasoning: bool
 ) -> None:
     """Each probed refusal gives one warning saying what the probe found; only a refused probe is remembered.
+
+    It is remembered for the reasoning flag it was probed with alone, which the warning names.
 
     Args:
         loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
         outcome (ProbeOutcome): What the probe found.
         cached (bool): Whether the refusal must be remembered.
         says (str): What the one warning must say.
+        reasoning (bool): The flag the refusal and its probe ran under.
     """
     rejection = ToolsRejection()
 
-    rejection.confirm(lambda: outcome)
+    rejection.confirm(lambda: outcome, reasoning=reasoning)
 
     warnings = [message for message in loguru_caplog.messages if "offering tools" in message]
-    assert rejection.cached is cached
+    assert (rejection.cached(reasoning=reasoning), rejection.cached(reasoning=not reasoning)) == (cached, False)
     assert len(warnings) == 1
     assert says in warnings[0]
+    assert f"reasoning {'on' if reasoning else 'off'}" in warnings[0]
+
+
+def test_each_reasoning_flag_has_its_own_cooldown() -> None:
+    """A rejection under one flag starts that flag's cooldown alone."""
+    now = [0.0]
+    rejection = ToolsRejection(clock=lambda: now[0])
+
+    rejection.record(reasoning=True)
+    now[0] = 300.0
+    rejection.record(reasoning=False)
+    now[0] = 600.0
+    halfway = (rejection.cached(reasoning=True), rejection.cached(reasoning=False))
+    now[0] = 900.0
+    over = (rejection.cached(reasoning=True), rejection.cached(reasoning=False))
+
+    assert (halfway, over) == ((False, True), (False, False))
+
+
+def test_a_probe_under_one_flag_leaves_a_refusal_under_the_other_free_to_probe() -> None:
+    """Each flag has its own probe: one in flight with reasoning on does not drop a refusal with it off."""
+    rejection = ToolsRejection()
+    started, release = threading.Event(), threading.Event()
+
+    def _slow() -> ProbeOutcome:
+        """Probe until released, then report the endpoint accepted tools.
+
+        Returns:
+            ProbeOutcome: ``accepted``.
+        """
+        started.set()
+        release.wait(5)
+        return "accepted"
+
+    first = threading.Thread(target=rejection.confirm, args=(_slow,), kwargs={"reasoning": True})
+    first.start()
+    assert started.wait(5)
+    rejection.confirm(lambda: "refused", reasoning=False)
+    release.set()
+    first.join(5)
+
+    assert (rejection.cached(reasoning=False), rejection.cached(reasoning=True)) == (True, False)
 
 
 def test_a_probe_that_cannot_run_remembers_nothing_and_frees_the_next(loguru_caplog: LogCaptureFixture) -> None:
@@ -185,11 +231,11 @@ def test_a_probe_that_cannot_run_remembers_nothing_and_frees_the_next(loguru_cap
         """
         raise RuntimeError("invented failure building the model")
 
-    rejection.confirm(_broken)
-    first = rejection.cached
-    rejection.confirm(lambda: "refused")
+    rejection.confirm(_broken, reasoning=False)
+    first = rejection.cached(reasoning=False)
+    rejection.confirm(lambda: "refused", reasoning=False)
 
-    assert (first, rejection.cached) == (False, True)
+    assert (first, rejection.cached(reasoning=False)) == (False, True)
     assert "invented failure" not in loguru_caplog.text
 
 
@@ -219,12 +265,12 @@ def test_a_refusal_while_a_probe_runs_neither_probes_nor_is_remembered() -> None
         probes.append("second")
         return "refused"
 
-    first = threading.Thread(target=rejection.confirm, args=(_slow,))
+    first = threading.Thread(target=rejection.confirm, args=(_slow,), kwargs={"reasoning": False})
     first.start()
     assert started.wait(5)
-    rejection.confirm(_second)
-    during = rejection.cached
+    rejection.confirm(_second, reasoning=False)
+    during = rejection.cached(reasoning=False)
     release.set()
     first.join(5)
 
-    assert (probes, during, rejection.cached) == (["first"], False, False)
+    assert (probes, during, rejection.cached(reasoning=False)) == (["first"], False, False)
