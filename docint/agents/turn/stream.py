@@ -290,7 +290,10 @@ def stream_round(
         llm (LLM): The chat model; its ``stream_chat`` must pass the raw chunks on ``raw``.
         messages (Sequence[ChatMessage]): The conversation so far.
         tools (Sequence[dict[str, Any]]): The tool schemas offered, as the endpoint receives them.
-        tool_choice (str): ``auto`` lets the model choose; ``none`` asks for an answer.
+            With none, the request carries neither ``tools`` nor ``tool_choice``: an
+            OpenAI-compatible endpoint may refuse an empty list.
+        tool_choice (str): ``auto`` lets the model choose; ``none`` asks for an answer. Not
+            sent when no tool is offered.
         reasoning_open (bool): Whether the reply may open in reasoning: thinking was asked for,
             and the chat template may have begun the think block in the prompt. The content is
             then held, uncounted, until a close tag (what came before it is reasoning), a
@@ -312,7 +315,8 @@ def stream_round(
     released = 0
     calling = False
     finish_reason: str | None = None
-    for response in llm.stream_chat(messages, tools=list(tools), tool_choice=tool_choice, **kwargs):
+    offered: dict[str, Any] = {"tools": list(tools), "tool_choice": tool_choice} if tools else {}
+    for response in llm.stream_chat(messages, **offered, **kwargs):
         calling = accumulator.feed(response.raw) or calling
         finish_reason = _finish_reason(response.raw) or finish_reason
         thinking = _text(response.additional_kwargs.get("thinking_delta"))

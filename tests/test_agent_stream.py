@@ -436,6 +436,36 @@ def test_stream_round_offers_the_tools_and_passes_options_through() -> None:
     assert second.kwargs == {"tools": SCHEMAS, "tool_choice": "none", "max_tokens": 512}
 
 
+def test_a_round_offered_no_tools_sends_neither_tools_nor_tool_choice() -> None:
+    """With no tool to offer, the request carries neither ``tools`` nor ``tool_choice``: an endpoint refuses ``[]``."""
+    stream = [*text_chunks(ANSWER, 30), chunk(finish_reason="stop"), USAGE_CHUNK]
+
+    with sse_endpoint(stream) as (base, requests):
+        llm = LocalOpenAI(api_base=base, api_key="test", model="invented-model", max_retries=0)
+        texts, done = _round_offering(llm, tools=[], tool_choice="none")
+
+    assert ("".join(texts), done.text, done.calls) == (ANSWER, ANSWER, [])
+    assert len(requests) == 1
+    assert ("tools" in requests[0], "tool_choice" in requests[0]) == (False, False)
+    assert requests[0]["messages"] == [{"role": "user", "content": QUESTION}]
+
+
+def _round_offering(llm: Any, *, tools: list[dict[str, Any]], **kwargs: Any) -> tuple[list[str], RoundDone]:
+    """Stream one round offering ``tools``, and split its events as :func:`_round` does.
+
+    Args:
+        llm (Any): The model.
+        tools (list[dict[str, Any]]): The tool schemas offered.
+        **kwargs (Any): Further arguments for :func:`stream_round`.
+
+    Returns:
+        tuple[list[str], RoundDone]: Each provisional text in order, and how the round ended.
+    """
+    *provisional, done = list(stream_round(llm, MESSAGES, tools=tools, **kwargs))
+    assert isinstance(done, RoundDone)
+    return [event.text for event in provisional if isinstance(event, Provisional)], done
+
+
 def test_an_error_on_the_first_pull_raises_before_any_event() -> None:
     """An endpoint's HTTP error surfaces from the first pull, before the round has yielded anything."""
     events = stream_round(streaming_tool_llm([bad_request("tool calls are not enabled")]), MESSAGES, tools=SCHEMAS)
