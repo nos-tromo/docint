@@ -1569,17 +1569,6 @@ def test_a_round_that_breaks_off_with_its_text_showing_is_withdrawn_and_answered
     ]
 
 
-def test_a_first_round_that_breaks_off_mid_reply_has_shown_nothing_and_raises() -> None:
-    """Held whole, a first round that breaks off past the hold has shown nothing: its failure goes to the caller."""
-    outage = RuntimeError("invented outage")
-    llm = streaming_tool_llm([[*text_chunks(ANSWER, 20)[:7], outage], _answer(SHORT_ANSWER)])
-
-    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({})))))
-
-    assert len(ANSWER[: 7 * 20]) >= 120
-    assert (shown, raised, llm.stream_chat.call_count) == ([], outage, 1)
-
-
 @pytest.mark.parametrize("path", ["first-round-withdrawn", "no-tool-round-allowed"])
 def test_the_final_note_joins_a_user_message_it_would_follow(path: str) -> None:
     """Strict chat templates refuse two user messages in a row, so the final note joins the user's message.
@@ -1887,6 +1876,8 @@ def test_a_first_reply_without_a_tool_call_is_dropped_unseen_and_round_one_asked
     asked_again = llm.stream_chat.call_args_list[1].kwargs
     assert (asked_again["tools"], asked_again["tool_choice"]) == (registry.schemas(), "auto")
     assert llm.stream_chat.call_count == 3
+    # The note stays joined for later rounds, once.
+    assert _wire(_sent(llm, 2)[1]) == {"role": "user", "content": f"{QUESTION}\n\n{SEARCH_NOTE}"}
 
 
 def test_a_second_reply_without_a_tool_call_is_the_answer_streamed_as_it_comes() -> None:
@@ -2010,21 +2001,32 @@ def test_no_model_slot_for_round_one_asked_again_raises_before_anything_is_yield
     assert (shown, type(raised), slots.waits, llm.stream_chat.call_count) == ([], NoSlot, [wait, wait], 1)
 
 
-def test_a_first_round_that_spends_the_time_is_answered_instead_of_asked_again() -> None:
-    """Limits are checked before round 1 runs again, as before any round: with the time spent, the model must answer."""
+def test_a_first_round_that_spends_the_time_is_answered_instead_of_asked_again(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """Limits are checked before round 1 runs again: with the time spent, the model answers with the final note alone.
+
+    The search note asks for a search the forced round cannot make, so it is never joined.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
     now = [0.0]
     llm = _advancing(streaming_tool_llm([_answer(MEMORY_ANSWER), _answer()]), now, after=0, to=500.0)
 
     _, texts, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({})), clock=lambda: now[0])))
 
     assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
-    assert _wire(_sent(llm, 1)[-1]) == {"role": "user", "content": f"{QUESTION}\n\n{SEARCH_NOTE}\n\n{FINAL_NOTE}"}
+    assert _wire(_sent(llm, 1)[-1]) == {"role": "user", "content": f"{QUESTION}\n\n{FINAL_NOTE}"}
     assert ("".join(texts), result.reason, result.steps, llm.stream_chat.call_count) == (ANSWER, "time_budget", 0, 2)
+    assert ASKED_AGAIN not in loguru_caplog_info.messages
 
 
 @pytest.mark.parametrize(("spare", "asked_again"), [(0, True), (-1, False)], ids=["fits", "a-token-short"])
 def test_the_search_note_counts_against_the_room(spare: int, asked_again: bool) -> None:
     """Joined to the message, the note costs room: round 1 runs again only while one more full reply still fits.
+
+    Answering for want of room, the model gets the final note alone: the search note is never joined.
 
     Args:
         spare (int): Tokens the room holds beyond one full reply once the final and the search note are paid.
@@ -2039,6 +2041,8 @@ def test_the_search_note_counts_against_the_room(spare: int, asked_again: bool) 
 
     assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == ("auto" if asked_again else "none")
     assert ("".join(texts), result.reason) == (ANSWER, None if asked_again else "context_budget")
+    joined = SEARCH_NOTE if asked_again else FINAL_NOTE
+    assert _wire(_sent(llm, 1)[-1]) == {"role": "user", "content": f"{QUESTION}\n\n{joined}"}
 
 
 @pytest.mark.parametrize(
@@ -2076,6 +2080,100 @@ def test_asking_round_one_again_is_logged_once_without_any_text(loguru_caplog_in
 
     assert loguru_caplog_info.messages == [ASKED_AGAIN]
     assert "zzsecretzz" not in loguru_caplog_info.text
+
+
+# --- A first round that breaks off takes the same one re-ask ---------------------------------
+
+#: The one line a first round's break-off logs: the error's type, no text of the turn.
+BROKE_OFF = "An agent turn's first round broke off (RuntimeError) before anything was shown"
+
+
+def _broken(*, pieces: int = 7, error: Exception | None = None) -> list[Any]:
+    """Script a round that breaks off after its first event, partway through the answer.
+
+    Args:
+        pieces (int): Twenty-character pieces streamed first; seven pass the hold, three do not.
+        error (Exception | None): What breaks the stream; an invented outage by default.
+
+    Returns:
+        list[Any]: The round's chunks, the error last.
+    """
+    return [*text_chunks(ANSWER, 20)[:pieces], error or RuntimeError("invented outage")]
+
+
+@pytest.mark.parametrize("search_note", ["", SEARCH_NOTE], ids=["unguarded", "guarded"])
+def test_a_first_round_that_breaks_off_is_asked_again_once_without_the_search_note(
+    search_note: str, loguru_caplog: LogCaptureFixture
+) -> None:
+    """Held whole, a first round that broke off showed nothing: the same request goes out once more, and answers.
+
+    The break-off is not about searching, so no note is joined; and the turn's one re-ask is
+    spent, so a second try that calls no tool is the answer, guard or none.
+
+    Args:
+        search_note (str): The loop's search note; none, or the guard's.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    llm = streaming_tool_llm([_broken(), _answer()])
+
+    progress, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})), search_note=search_note)))
+
+    assert len(ANSWER[: 7 * 20]) > 120
+    assert ("".join(texts), progress, llm.stream_chat.call_count) == (ANSWER, [], 2)
+    assert (result.raw_text, result.reason, result.steps, result.actions) == (ANSWER, None, 0, [])
+    asked = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": QUESTION}]
+    assert [[_wire(message) for message in _sent(llm, call)] for call in (0, 1)] == [asked, asked]
+    assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "auto"
+    assert loguru_caplog.messages == [BROKE_OFF]
+
+
+def test_a_second_break_off_raises_as_before() -> None:
+    """The one re-ask is spent: a second try that breaks off before showing anything fails the turn as round 1 would."""
+    second = RuntimeError("invented second outage")
+    llm = streaming_tool_llm([_broken(), _broken(pieces=3, error=second)])
+
+    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    assert (shown, raised, llm.stream_chat.call_count) == ([], second, 2)
+
+
+def test_a_break_off_after_the_guards_second_try_raises() -> None:
+    """The guard and a break-off share the one re-ask: once the guard has taken it, a break-off fails the turn."""
+    outage = RuntimeError("invented outage")
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), _broken(pieces=3, error=outage)])
+
+    shown, raised = _until_raised(_turn(_guarded(llm, _documents(QuerySearch({})))))
+
+    assert (shown, raised, llm.stream_chat.call_count) == ([], outage, 2)
+    assert _wire(_sent(llm, 1)[-1]) == {"role": "user", "content": f"{QUESTION}\n\n{SEARCH_NOTE}"}
+
+
+def test_a_first_round_that_broke_off_after_spending_the_time_is_answered() -> None:
+    """Round 1 asked again keeps round 1's rules: with the time spent, the model answers with the final note alone."""
+    now = [0.0]
+    llm = _advancing(streaming_tool_llm([_broken(), _answer()]), now, after=0, to=500.0)
+
+    _, texts, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({})), clock=lambda: now[0])))
+
+    assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
+    assert _wire(_sent(llm, 1)[-1]) == {"role": "user", "content": f"{QUESTION}\n\n{FINAL_NOTE}"}
+    assert ("".join(texts), result.reason, llm.stream_chat.call_count) == (ANSWER, "time_budget", 2)
+
+
+def test_a_second_try_that_breaks_off_after_showing_text_is_withdrawn_and_answered_anew() -> None:
+    """The second try streams as later rounds do: text it showed before it broke off is withdrawn, then answered."""
+    llm = streaming_tool_llm([_broken(), _broken(), _answer(SHORT_ANSWER)])
+
+    items = list(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    (note,) = [item for item in items if isinstance(item, AgentProgress)]
+    withdrawn = "".join(cast(list[str], items[: items.index(note)]))
+    assert (note.step, note.action, note.detail) == (1, "note", " ".join(withdrawn.split()))
+    assert len(withdrawn) >= 120
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
+    result = items[-1]
+    assert isinstance(result, AgentResult)
+    assert (result.raw_text, result.reason, llm.stream_chat.call_count) == (SHORT_ANSWER, "research_failed", 3)
 
 
 # --- Context room ---------------------------------------------------------------------------

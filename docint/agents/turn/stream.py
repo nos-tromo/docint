@@ -8,7 +8,9 @@ of each chunk and joins fragments by ``index`` alone, so a chunk carrying two wh
 A round's text stays provisional while it may still turn out to be a preface to tool
 calls: it is held until ``HOLD_CHARS`` visible characters have arrived, and text held
 when a tool call starts is never released. A caller may hold a round whole instead: nothing
-is released, and the caller sends its text from :class:`RoundDone` or drops it unseen.
+is released, and the caller sends its text from :class:`RoundDone` or drops it unseen. Such a
+round says :class:`Begun` at its first chunk, so a reply that breaks off is told from a request
+refused as sent.
 Reasoning never counts and is never released:
 think blocks in the content are read out by :class:`~docint.utils.llm_sanitize.ReasoningStripper`,
 and a reasoning field the endpoint sends apart from the content reaches llama-index's
@@ -62,6 +64,15 @@ class Provisional:
 
 
 @dataclass(frozen=True)
+class Begun:
+    """A round held whole received its first chunk.
+
+    Nothing else of such a round goes out while it streams, so this is how a caller tells a
+    reply that broke off from a request refused as sent.
+    """
+
+
+@dataclass(frozen=True)
 class RoundDone:
     """How a round ended; always its last event.
 
@@ -85,7 +96,7 @@ class RoundDone:
     reasoning: str | None = None
 
 
-RoundEvent = Provisional | RoundDone
+RoundEvent = Provisional | Begun | RoundDone
 """What :func:`stream_round` yields."""
 
 
@@ -303,11 +314,13 @@ def stream_round(
             separate reasoning field (the endpoint keeps reasoning apart, so the held content is
             text), or the end of the reply (the held content was the answer, for the caller to send).
         hold (bool): Hold the whole text, past ``HOLD_CHARS`` too: nothing is released while
-            the round streams, so the caller may still drop a reply nobody has seen.
+            the round streams, so the caller may still drop a reply nobody has seen. Such a
+            round says :class:`Begun` at its first chunk instead.
         **kwargs (Any): Further options for ``stream_chat``.
 
     Yields:
-        RoundEvent: :class:`Provisional` texts, then exactly one :class:`RoundDone`.
+        RoundEvent: :class:`Provisional` texts, or :class:`Begun` once for a round held whole,
+        then exactly one :class:`RoundDone`.
 
     Raises:
         Exception: Whatever the model call raises; an endpoint's HTTP error surfaces on the
@@ -320,8 +333,12 @@ def stream_round(
     released = 0
     calling = False
     finish_reason: str | None = None
+    begun = False
     offered: dict[str, Any] = {"tools": list(tools), "tool_choice": tool_choice} if tools else {}
     for response in llm.stream_chat(messages, **offered, **kwargs):
+        if hold and not begun:
+            begun = True
+            yield Begun()
         calling = accumulator.feed(response.raw) or calling
         finish_reason = _finish_reason(response.raw) or finish_reason
         thinking = _text(response.additional_kwargs.get("thinking_delta"))

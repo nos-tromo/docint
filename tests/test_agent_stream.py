@@ -14,6 +14,7 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 from docint.agents.turn.stream import (
     HOLD_CHARS,
+    Begun,
     Provisional,
     RoundDone,
     ToolCall,
@@ -393,17 +394,64 @@ def test_a_round_held_whole_releases_nothing_and_ends_with_all_of_its_text(
 ) -> None:
     """Held whole, a round releases no text even past the hold: its end carries all of it, to send or to drop.
 
+    It says only that it has begun, once, at its first chunk.
+
     Args:
         chunks (list[dict[str, Any]]): The round's chunks, its text longer than the hold.
         text (str): Its visible text in full.
         calls (list[ToolCall]): The calls it ends in, if any.
         finish_reason (str): Why it ended.
     """
-    texts, done = _scripted(chunks, hold=True)
+    events = list(stream_round(streaming_tool_llm([chunks]), MESSAGES, tools=SCHEMAS, hold=True))
 
     assert len(text) > HOLD_CHARS
-    assert texts == []
-    assert done == RoundDone(text=text, calls=calls, finish_reason=finish_reason, provisional_sent=False)
+    assert events == [
+        Begun(),
+        RoundDone(text=text, calls=calls, finish_reason=finish_reason, provisional_sent=False),
+    ]
+
+
+def test_a_round_held_whole_that_breaks_off_has_said_it_began() -> None:
+    """A held round that breaks off after its first chunk has said it began: the request was taken, not refused."""
+    outage = RuntimeError("invented outage")
+    events: list[Any] = []
+
+    with pytest.raises(RuntimeError) as raised:
+        for event in stream_round(
+            streaming_tool_llm([[*text_chunks(ANSWER, 30)[:5], outage]]), MESSAGES, tools=SCHEMAS, hold=True
+        ):
+            events.append(event)
+
+    assert (events, raised.value) == ([Begun()], outage)
+
+
+@pytest.mark.parametrize("hold", [False, True], ids=["released", "held-whole"])
+def test_a_round_refused_on_its_first_pull_yields_nothing(hold: bool) -> None:
+    """A round refused as sent never began, held whole or not: its error comes before any event.
+
+    Args:
+        hold (bool): Whether the round is held whole.
+    """
+    refusal = bad_request("invented refusal")
+    events: list[Any] = []
+
+    with pytest.raises(openai.BadRequestError):
+        for event in stream_round(streaming_tool_llm([refusal]), MESSAGES, tools=SCHEMAS, hold=hold):
+            events.append(event)
+
+    assert events == []
+
+
+@pytest.mark.parametrize("chunks", [text_chunks(ANSWER, 30), text_chunks(PREFACE, 30)], ids=["past", "within"])
+def test_a_round_not_held_never_says_it_began(chunks: list[dict[str, Any]]) -> None:
+    """Only a round held whole says it began; any other round's events are its texts and its end, as before.
+
+    Args:
+        chunks (list[dict[str, Any]]): The round's text chunks, past the hold or within it.
+    """
+    events = list(stream_round(streaming_tool_llm([[*chunks, chunk(finish_reason="stop")]]), MESSAGES, tools=SCHEMAS))
+
+    assert not any(isinstance(event, Begun) for event in events)
 
 
 @pytest.mark.parametrize("size", [1, 7, 4096])

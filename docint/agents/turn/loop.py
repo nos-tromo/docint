@@ -7,13 +7,16 @@ provisional (see :func:`~docint.agents.turn.stream.stream_round`); text written 
 becomes a ``note`` step, which tells the client to withdraw whatever of it was streamed.
 
 The first round is held whole: none of its text is shown before it ends, and text it wrote
-before calls becomes its note unseen. With a search note, a first reply that calls no tool is
-dropped as if never written, its reasoning too: the note joins the user's message, its cost
-counted against the room, and the first round runs again, once. That is no tool round, but a
-model call under the first round's rules: the limits are checked before it, it waits for a model
-slot as the first round does, and it fails as the first round does, though a refusal of it no
-longer means the endpoint takes no tools. It streams as later rounds do; if it too calls no
-tool, its reply is the answer.
+before calls becomes its note unseen. Held so, it can be asked again, once per turn, for the
+first of two causes. With a search note, a first reply that calls no tool is dropped as if never
+written, its reasoning too, and the round runs again with the note joined to the user's message.
+A first round that breaks off after its first chunk has shown nothing, and runs again as it was
+sent: the break-off is not about searching. The second try is no tool round, but a model call
+under the first round's rules: the limits are checked before it, counting a note still due, and
+a limit makes the model answer with the final note alone, since the search note asks for a
+search that round cannot make; it waits for a model slot as the first round does, and fails as
+the first round does, though a refusal of it no longer means the endpoint takes no tools. It
+streams as later rounds do; if it too calls no tool, its reply is the answer.
 
 Limits make the model answer in one more round, its last: the same transcript plus the final note
 as a user message (joined to a user message it would follow: strict chat templates refuse two in
@@ -47,8 +50,8 @@ A pinned scope is answered from the pinned passages alone, in one round that off
 :mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`).
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
-anything, as when a first round held whole breaks off mid-reply, a failure goes to the caller,
-who can still answer another way: no model slot within
+anything, as when the first round's second try breaks off before its text shows, a failure goes
+to the caller, who can still answer another way: no model slot within
 ``MODEL_SLOT_WAIT_S`` raises :class:`~docint.agents.assessment.bounded.NoSlot`, the first call
 refused as sent (HTTP 400 or 422, not an overflow) raises :class:`ToolsUnavailable`, and anything
 else is raised as it came. Once the turn has shown a step or text, it ends with an
@@ -177,7 +180,10 @@ class _Turn:
         shortened (bool): Whether the tool replies were cut after an overflow.
         actions (list[dict[str, Any]]): The trail so far.
         reasoning (list[str]): Each round's reasoning.
-        asked_again (bool): Whether the first round was asked again, the search note joined.
+        asked_again (bool): Whether the turn's one re-ask of the first round is taken, by a reply
+            that called no tool or by a break-off.
+        note_due (bool): Whether the search note waits to join the user's message: it does once the
+            first round runs again, and never when a limit makes the model answer first.
     """
 
     ctx: ToolContext
@@ -196,6 +202,7 @@ class _Turn:
     actions: list[dict[str, Any]] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     asked_again: bool = False
+    note_due: bool = False
 
     def stop(self, reason: str) -> None:
         """Record why the model must answer now, keeping the first cause.
@@ -216,8 +223,8 @@ class _Streamed:
         error (Exception | None): Why it failed.
         sent (str): The round's text that went out as provisional text.
         shown (bool): Whether any of its text was yielded.
-        began (bool): Whether its first event arrived; a round that failed without one was
-            refused as sent or never reached.
+        began (bool): Whether its first event arrived, for a round held whole its first chunk; a
+            round that failed without one was refused as sent or never reached.
     """
 
     splitter: SentinelStreamSplitter = field(default_factory=SentinelStreamSplitter)
@@ -495,6 +502,8 @@ class AgentLoop:
             if limit is not None:
                 turn.stop(limit)
                 break
+            if turn.note_due:
+                self._join_search_note(turn)
             first = not turn.steps and not turn.asked_again
             streamed = yield from self._round(turn, answer=False, hold=first)
             if streamed is None:
@@ -504,11 +513,21 @@ class AgentLoop:
                 turn.stop("research_failed")
                 break
             if streamed.done is None:
+                if first and streamed.began:
+                    # Held whole, it showed nothing: the break-off takes the turn's one re-ask, with no note.
+                    logger.warning(
+                        "An agent turn's first round broke off ({}) before anything was shown",
+                        type(streamed.error).__name__,
+                    )
+                    turn.asked_again = True
+                    continue
                 note = self._failed_round(turn, streamed)
                 if note is not None:
                     yield note
                 break
-            if first and not streamed.done.calls and self._search_first(turn):
+            if first and not streamed.done.calls and self._search_note and turn.schemas:
+                # Dropped unseen; the first round runs again with the search note, unless a limit comes first.
+                turn.asked_again = turn.note_due = True
                 continue
             if streamed.done.reasoning:
                 turn.reasoning.append(streamed.done.reasoning)
@@ -525,6 +544,8 @@ class AgentLoop:
     def _limit(self, turn: _Turn) -> str | None:
         """Say which limit, if any, makes the model answer before the next round.
 
+        The room counts a search note still due, which the next round would carry.
+
         Args:
             turn (_Turn): The turn.
 
@@ -536,33 +557,28 @@ class AgentLoop:
             return "round_budget"
         if self._time_left(turn) <= 0:
             return "time_budget"
+        due = message_cost(self._search_note, self._ratio) if turn.note_due else 0
         # One full reply, and the envelope of the message that asks for it.
-        if self._room - turn.spent < self._calls.full_reply + MESSAGE_OVERHEAD_TOKENS:
+        if self._room - turn.spent - due < self._calls.full_reply + MESSAGE_OVERHEAD_TOKENS:
             return "context_budget"
         if turn.idle >= IDLE_ROUNDS:
             return "idle"
         return None
 
-    def _search_first(self, turn: _Turn) -> bool:
-        """Ask the first round again when its reply, held whole and unseen, called no tool.
+    def _join_search_note(self, turn: _Turn) -> None:
+        """Join the search note to the user's message as the first round runs again, its cost now spent.
 
-        The reply is dropped: it reaches neither the transcript nor the trail, and its reasoning
-        goes with it. The search note joins the user's message, since strict chat templates
-        refuse two user messages in a row, and its cost counts against the room.
+        The first reply, held whole and unseen, called no tool and was dropped: it reaches neither
+        the transcript nor the trail, and its reasoning went with it. Strict chat templates refuse
+        two user messages in a row, so the note joins the user's.
 
         Args:
-            turn (_Turn): The turn, its first reply ended with no tool call.
-
-        Returns:
-            bool: Whether the first round runs again; never without a search note or a tool offered.
+            turn (_Turn): The turn, the search note due.
         """
-        if not self._search_note or not turn.schemas:
-            return False
-        turn.asked_again = True
+        turn.note_due = False
         turn.base = _with_note(turn.base, self._search_note)
         turn.spent += message_cost(self._search_note, self._ratio)
         logger.info("An agent turn's first round called no tool; it is asked once more, to search first")
-        return True
 
     def _round(
         self, turn: _Turn, *, answer: bool, hold: bool = False
@@ -693,7 +709,7 @@ class AgentLoop:
                         if text:
                             streamed.shown = turn.shown = True
                             yield text
-                    else:
+                    elif isinstance(event, RoundDone):
                         streamed.done = event
             except Exception as exc:
                 streamed.done, streamed.error = None, exc

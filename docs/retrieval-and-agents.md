@@ -581,23 +581,30 @@ Each round is one streamed model call, offered the turn's tools with
   tokens begin a fresh answer.
 - **The first round is held whole.** None of its text streams before it ends.
   Text it wrote before its calls becomes its note without ever showing as
-  answer text, and an answer goes out once it is complete. A first round that
-  breaks off has shown nothing, so its failure is handled as one before any
-  output (see [Fallback to the plain path](#fallback-to-the-plain-path)).
+  answer text, and an answer goes out once it is complete. Held so, the first
+  round can be asked again, once per turn, for one of two causes below.
 - **A first round that looks nothing up is asked again.** If the first round
   calls no tool, its reply is dropped unseen, its reasoning with it. The search
   note (`agent_search_first.txt`) is joined to the user's message, and the
   round runs once more. The note asks the model to look up what its answer
   relies on, including any phrase or name the user just gave, and to cite the
-  passages. Its cost counts against the room for tool replies.
-- **The second try runs under the first round's rules.** It is no tool round,
-  but it is a model call. The limits are checked before it, so a turn whose
-  first round used up the time or the room answers at once. It waits for a model
-  slot as the first round does. It fails as the first round does, except that a
-  refusal of it never reads as the endpoint taking no tools. It streams as later
-  rounds do; if it calls no tool either, its reply is the answer. A pinned scope
-  offers no tools and is never asked again. One INFO line, with no text, says
-  the round was asked again.
+  passages. Its cost counts against the room for tool replies. One INFO line,
+  with no text, says the round was asked again.
+- **A first round that breaks off is asked again.** If the first round breaks
+  off after its first chunk, it has shown nothing, so it is sent once more as
+  it was, with no search note: the break-off is not about searching. One
+  warning gives the error's type.
+- **The second try runs under the first round's rules.** A turn gets one, for
+  either cause. It is no tool round, but it is a model call. The limits are
+  checked before it, the search note's cost included. A turn whose first round
+  used up the time or the room therefore answers at once, with the final note
+  alone: the search note asks for a search that round cannot make. The second
+  try waits for a model slot as the first round does. It fails as the first
+  round does, except that a refusal of it never reads as the endpoint taking no
+  tools; a second break-off before it shows anything fails the turn. It streams
+  as later rounds do, so text it shows before breaking off is withdrawn by its
+  note like any later round's. If it calls no tool either, its reply is the
+  answer. A pinned scope offers no tools and is never asked again.
 - **Reasoning is never streamed as the answer.** Think blocks, and a reasoning
   field the endpoint sends apart from the content, are kept for the response's
   `reasoning` field, every round's in order.
@@ -717,10 +724,10 @@ plain path, which answers as it would without agent turns:
 - the prompt overflows the context window.
 
 Any other failure before anything was shown, such as a server error, a timeout
-or a first round breaking off mid-reply, is the turn's error, as it would be on
-a plain lookup. A refusal of a later call, the first round's second try
-included, is such a failure too: only the turn's first call can show that the
-endpoint takes no tools.
+or the first round's second try breaking off before it showed anything, is the
+turn's error, as it would be on a plain lookup. A refusal of a later call, the
+second try included, is such a failure too: only the turn's first call can
+show that the endpoint takes no tools.
 
 Once a step or text is out, a failed tool call or tool round no longer ends the
 turn: the model answers from what it found, with `research_failed`. What does
