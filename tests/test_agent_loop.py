@@ -5,6 +5,7 @@ Every message, passage, query and tool call here is invented.
 
 from __future__ import annotations
 
+import bisect
 import concurrent.futures
 import json
 import threading
@@ -17,6 +18,7 @@ import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
+    PROGRAMME,
     ThumbnailStore,
     chunk,
     frame_passage,
@@ -46,7 +48,7 @@ from docint.agents.assessment.bounded import (
 from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger, render_context
 from docint.agents.assessment.runner import AssessmentDoesNotFit
 from docint.agents.assessment.split import SENTINEL, assessment_label
-from docint.agents.turn.budget import TurnBudget
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
 from docint.agents.turn.calls import (
     FAILED_REPLY,
     LATE_REPLY,
@@ -2155,19 +2157,17 @@ def test_the_tools_render_through_the_llm_view_the_loop_was_given() -> None:
 # --- A pinned scope: one round that offers no tools -------------------------------------------
 
 
-def _pinned_message(nodes: list[NodeWithScore], *, note: str = SCOPE_NOTE) -> str:
-    """Write the one user message a pinned round sends: the note, the passages between fences, the question.
+def _pinned_message(nodes: list[NodeWithScore]) -> str:
+    """Write the one user message a pinned round sends: the scope note, the passages between fences, the question.
 
     Args:
         nodes (list[NodeWithScore]): The pinned passages, numbered; short enough to be shown whole.
-        note (str): The scope note; left out when empty.
 
     Returns:
         str: The message.
     """
     context = render_context(nodes, llm_view=llm_view, budget_tokens=100_000, char_token_ratio=3.5).context
-    fenced = f"{PASSAGES_FENCE}\n{context}\n{PASSAGES_FENCE}"
-    return "\n\n".join(part for part in (note, fenced, QUESTION) if part)
+    return f"{SCOPE_NOTE}\n\n{PASSAGES_FENCE}\n{context}\n{PASSAGES_FENCE}\n\n{QUESTION}"
 
 
 def _pulls(llm: Any) -> list[int]:
@@ -2230,15 +2230,21 @@ def test_a_tool_less_round_answers_from_pinned_evidence() -> None:
 
 
 def test_an_oversized_scope_raises_before_any_output() -> None:
-    """Pinned passages that cannot all be shown legibly in the round's room raise before the turn shows anything."""
+    """Pinned passages that cannot all be shown legibly in the round's room raise before the turn shows anything.
+
+    The ledger holds them all, as the caller sizes it for a scope: what does not fit is the room.
+    """
     llm = streaming_tool_llm([_answer()])
     pinned = [
         scored_node(f"plan-{number}", HARBOUR_PLAN, filename="hafenplan.pdf", page=number) for number in range(1, 51)
     ]
+    ledger = EvidenceLedger(cap=len(pinned))
 
-    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({})), scope_note=SCOPE_NOTE), pinned=pinned))
+    shown, raised = _until_raised(
+        _turn(_loop(llm, _documents(QuerySearch({})), scope_note=SCOPE_NOTE), ledger=ledger, pinned=pinned)
+    )
 
-    assert (shown, type(raised)) == ([], EvidenceDoesNotFit)
+    assert (shown, type(raised), len(ledger)) == ([], EvidenceDoesNotFit, 50)
     assert isinstance(raised, ValueError)
     assert "context window" in str(raised)
     assert cast(EvidenceDoesNotFit, raised).passages == 50
@@ -2263,18 +2269,59 @@ def test_a_ledger_too_small_for_the_pinned_passages_raises_before_any_output() -
     llm.stream_chat.assert_not_called()
 
 
-def test_the_scope_note_comes_out_of_the_room_the_pinned_passages_have() -> None:
-    """The passages share the round's room with the scope note: a longer note leaves them too little to be legible."""
-    pinned = [
-        scored_node(f"plan-{number}", HARBOUR_PLAN, filename="hafenplan.pdf", page=number) for number in range(1, 28)
-    ]
-    short_note = _loop(streaming_tool_llm([_answer()]), _documents(QuerySearch({})), scope_note=SCOPE_NOTE)
-    long_note = _loop(streaming_tool_llm([_answer()]), _documents(QuerySearch({})), scope_note=SCOPE_NOTE * 12)
+def _note_of(tokens: int) -> str:
+    """Write an invented scope note that costs exactly ``tokens`` at 3.5 characters a token.
 
-    _, _, result = _drain(_turn(short_note, ledger=EvidenceLedger(cap=len(pinned)), pinned=pinned))
-    shown, raised = _until_raised(_turn(long_note, ledger=EvidenceLedger(cap=len(pinned)), pinned=pinned))
+    Args:
+        tokens (int): Its cost.
 
-    assert len(result.nodes) == 27
+    Returns:
+        str: The note.
+    """
+    return (SCOPE_NOTE * (tokens // 20 + 1))[: int(3.5 * tokens)]
+
+
+def test_the_pinned_passages_get_the_loops_room_less_the_scope_note_to_the_token() -> None:
+    """The passages' room is the loop's room, the final note kept out, less the scope note and its envelope.
+
+    The note is sized to leave the passages exactly the least room they are legible in, then a token less.
+    """
+    pinned = [scored_node(f"plan-{number}", HARBOUR_PLAN, filename="hafenplan.pdf", page=number) for number in range(5)]
+    ledger = EvidenceLedger(cap=len(pinned))
+    ledger.add(pinned)
+    numbered = ledger.numbered()
+
+    def _legible(budget: int) -> bool:
+        """Say whether the passages are legible in a budget.
+
+        Args:
+            budget (int): Tokens the rendered passages may use.
+
+        Returns:
+            bool: Whether every passage keeps its floor.
+        """
+        return render_context(numbered, llm_view=llm_view, budget_tokens=budget, char_token_ratio=3.5).legible
+
+    least = bisect.bisect_left(range(10_000), True, key=_legible)
+    spare = turn_budget().round_room - message_cost(FINAL_NOTE, 3.5) - least - MESSAGE_OVERHEAD_TOKENS
+
+    def _scoped(note: str) -> Iterator[AgentProgress | str | AgentResult]:
+        """Run the scoped turn with a note.
+
+        Args:
+            note (str): The scope note.
+
+        Returns:
+            Iterator[AgentProgress | str | AgentResult]: The turn's output.
+        """
+        return _turn(
+            _loop(streaming_tool_llm([_answer()]), _documents(QuerySearch({})), scope_note=note), pinned=pinned
+        )
+
+    _, _, result = _drain(_scoped(_note_of(spare)))
+    shown, raised = _until_raised(_scoped(_note_of(spare + 1)))
+
+    assert (_legible(least), _legible(least - 1), len(result.nodes)) == (True, False, 5)
     assert (shown, type(raised)) == ([], EvidenceDoesNotFit)
 
 
@@ -2296,6 +2343,18 @@ def test_the_seed_step_comes_with_the_rounds_first_event(answer: str) -> None:
     assert (first, begun > 0) == (AgentProgress(step=0, action="seed", detail="", found=1), True)
     assert "".join(cast(list[str], rest[:-1])) == answer
     assert isinstance(rest[-1], AgentResult)
+
+
+def test_the_seed_step_counts_what_the_scope_admitted_or_extended() -> None:
+    """As a search step does, the seed counts each pinned window admitted or extended: one section, two windows."""
+    opening = scored_node("programme", PROGRAMME[:66], filename="hafenfest_programm.pdf", page=1)
+    closing = scored_node("programme", PROGRAMME[67:], filename="hafenfest_programm.pdf", page=1)
+    llm = streaming_tool_llm([_answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, _documents(QuerySearch({}))), pinned=[opening, closing]))
+
+    assert progress == [AgentProgress(step=0, action="seed", detail="", found=2)]
+    assert [scored.node.node_id for scored in result.nodes] == ["programme"]
 
 
 @pytest.mark.parametrize(
@@ -2330,15 +2389,21 @@ def test_a_pinned_round_that_fails_before_its_first_event_shows_nothing(
     assert (exc.__cause__ if raised is EvidenceDoesNotFit else exc) is cause
 
 
-def test_a_pinned_round_without_a_model_slot_raises_before_anything_is_yielded() -> None:
-    """The pinned round waits for a model slot as a first round does; without one, nothing was shown."""
+@pytest.mark.parametrize(("budget", "wait"), [(120.0, MODEL_SLOT_WAIT_S), (2.0, 2.0)])
+def test_a_pinned_round_without_a_model_slot_raises_before_anything_is_yielded(budget: float, wait: float) -> None:
+    """The pinned round waits for a model slot as a first round does, never past the time; without one, nothing shows.
+
+    Args:
+        budget (float): The turn's time budget in seconds.
+        wait (float): The longest the round may wait for a slot.
+    """
     slots = _Recording()
     llm = streaming_tool_llm([_answer()])
-    loop = _loop(llm, _documents(QuerySearch({})), model_slots=slots, clock=lambda: 0.0)
+    loop = _loop(llm, _documents(QuerySearch({})), model_slots=slots, time_budget_s=budget, clock=lambda: 0.0)
 
     shown, raised = _until_raised(_turn(loop, pinned=[programme_passage()]))
 
-    assert (shown, type(raised), slots.waits) == ([], NoSlot, [MODEL_SLOT_WAIT_S])
+    assert (shown, type(raised), slots.waits) == ([], NoSlot, [wait])
     llm.stream_chat.assert_not_called()
 
 
@@ -2510,7 +2575,7 @@ def _stamped(result: AgentResult) -> list[int]:
     ("overrides", "shown", "reason"),
     [
         ({"max_images": 2}, [(1, 0), (2, 1)], None),
-        ({"budget": _budget_with_room(1250)}, [(1, 0)], "context_budget"),
+        ({"budget": _budget_with_room(1480)}, [(1, 0)], "context_budget"),
     ],
     ids=["by-max-images", "by-the-room-left"],
 )
@@ -2523,7 +2588,8 @@ def test_visual_rounds_attach_thumbnails_within_the_allowance(
 
     Args:
         overrides (dict[str, Any]): What limits the pictures: the turn's most, or the room left
-            (1003 tokens: one picture fits, two would not, though the turn's room allows two).
+            (1233 tokens once the round's own messages are paid: one picture fits and two would
+            not, though the turn's room allows two and its 1420 before the round would hold two).
         shown (list[tuple[int, int]]): Per picture shown, the number it is cited by and its frame.
         reason (str | None): Why the turn answered: by choice, or for want of room.
     """
@@ -2532,9 +2598,7 @@ def test_visual_rounds_attach_thumbnails_within_the_allowance(
     store = ThumbnailStore(0, 1, 2)
     llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), _answer()])
 
-    _, texts, result = _drain(
-        _turn(_visual(llm, _pictures({"Regenjacken": frames}), store, **overrides), ledger=EvidenceLedger(cap=10))
-    )
+    _, texts, result = _drain(_turn(_visual(llm, _pictures({"Regenjacken": frames}), store, **overrides)))
 
     assert store.fetches == [["frame-0", "frame-1", "frame-2"]]
     sent = _sent(llm, 1)

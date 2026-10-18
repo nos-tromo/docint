@@ -204,6 +204,22 @@ def test_a_picture_shown_before_is_not_shown_again() -> None:
     assert (second, images.count, store.fetches) == (None, 1, [["frame-0"]])
 
 
+def test_two_passages_of_one_picture_in_a_round_show_it_once() -> None:
+    """Two passages a round admits that carry one picture show it once, under the first one's number."""
+    images = _images(ThumbnailStore(0, 1))
+    again = frame_passage(0)
+    again.node.id_ = "frame-1"
+
+    shown = images.attach(_numbered(frame_passage(0), again), room=WIDE)
+
+    assert shown is not None
+    assert (_parts(shown[0]), shown[1], images.count) == (
+        (render_legend(LEGEND, [(1, *thumbnail(0))]), [_url(0)]),
+        _cost(1),
+        1,
+    )
+
+
 def test_a_drop_takes_every_picture_back_and_shows_no_more() -> None:
     """A refused turn takes back each picture message and its room, keeps every other message, and shows no more."""
     store = ThumbnailStore(0, 1, 2)
