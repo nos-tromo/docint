@@ -23,9 +23,9 @@ order, within the room and the time left. The turn's room for tool replies is th
 reply each of its calls needs, must fit the room left; a round that does not is withdrawn
 before any of its calls runs, its shown text withdrawn by its note, and the model answers.
 Only a call its tool answered is a step in the trail; an error reply, for arguments that will
-not do or for a call that did not run or failed, reaches the model alone. A call whose search
-failed or found no slot marks the turn ``research_failed`` without ending it: evidence may be
-missing.
+not do or for a call that did not run or failed, reaches the model alone. A call that could not
+be prepared, whose search failed or found no slot, or whose answer raised, marks the turn
+``research_failed`` without ending it: evidence may be missing.
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
 anything, a failure goes to the caller, who can still answer another way: no model slot within
@@ -66,7 +66,7 @@ from loguru import logger
 from docint.agents.assessment.bounded import MODEL_SLOT_POOL, MODEL_SLOT_WAIT_S, SEARCH_SLOT_POOL, NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger, is_context_overflow
 from docint.agents.assessment.split import SentinelStreamSplitter
-from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_tokens
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
 from docint.agents.turn.calls import RoundCalls
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
 from docint.agents.turn.tools import ToolContext, ToolRegistry, nested_too_deeply
@@ -107,7 +107,8 @@ class AgentResult:
             an answer round that ran.
         nodes (list[NodeWithScore]): The turn's evidence numbered in ledger order: every passage
             a tool reply showed, stamped with its ``citation_index``.
-        steps (int): Rounds that called tools.
+        steps (int): Tool rounds whose calls were answered; a round withdrawn for want of room
+            is not counted.
         actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
             per call its tool answered, in order.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
@@ -138,7 +139,7 @@ class _Turn:
         started (float): The clock's reading when the turn began.
         transcript (list[ChatMessage]): The rounds so far: assistant messages and tool replies.
         spent (int): Tokens the transcript costs.
-        steps (int): Rounds that called tools.
+        steps (int): Tool rounds whose calls were answered; a withdrawn round is not counted.
         idle (int): Rounds in a row that added no passage.
         model_calls (int): Model calls begun.
         shown (bool): Whether anything has been yielded.
@@ -346,7 +347,7 @@ class AgentLoop:
         self._clock = clock
         self._model_slots = model_slots
         self._reasoning_open = reasoning_open
-        self._room = budget.round_room - message_tokens(final_note, char_token_ratio)
+        self._room = budget.round_room - message_cost(final_note, char_token_ratio)
         self._calls = RoundCalls(
             registry=registry,
             result_chars=budget.result_chars,
@@ -414,9 +415,9 @@ class AgentLoop:
                 turn.stop("research_failed")
                 break
             if streamed.done is None:
-                withdrawn = self._failed_round(turn, streamed)
-                if withdrawn is not None:
-                    yield withdrawn
+                note = self._failed_round(turn, streamed)
+                if note is not None:
+                    yield note
                 break
             if streamed.done.reasoning:
                 turn.reasoning.append(streamed.done.reasoning)
@@ -699,7 +700,7 @@ class AgentLoop:
             json.dumps({"name": call.name, "arguments": arguments}, ensure_ascii=False)
             for call, arguments in zip(done.calls, echoed, strict=True)
         )
-        asked = message_tokens(written, self._ratio)
+        asked = message_cost(written, self._ratio)
         prepared = self._calls.prepare(done.calls, turn.ctx)
         room = self._room - turn.spent - asked
         if room < self._calls.least(prepared):
@@ -721,7 +722,7 @@ class AgentLoop:
             turn.transcript.append(
                 ChatMessage(role=MessageRole.TOOL, content=reply.text, additional_kwargs={"tool_call_id": call.id})
             )
-            turn.spent += message_tokens(reply.text, self._ratio)
+            turn.spent += message_cost(reply.text, self._ratio)
             found += reply.found
             if not reply.error:
                 yield self._step(turn, reply.action, reply.detail, reply.found)

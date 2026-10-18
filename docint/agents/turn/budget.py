@@ -25,7 +25,7 @@ HISTORY_ALLOWANCE_TOKENS = 1300
 HISTORY_ALLOWANCE_TOKENS_REASONING = 750
 
 
-def message_tokens(text: str, char_token_ratio: float) -> int:
+def message_cost(text: str, char_token_ratio: float) -> int:
     """Estimate what one message of a turn's prompt costs: its text and its envelope.
 
     Args:

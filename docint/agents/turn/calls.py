@@ -31,7 +31,7 @@ from typing import Any, NamedTuple, cast
 from loguru import logger
 
 from docint.agents.assessment.bounded import SEARCH_SLOT_WAIT_S, NoSlot, start_bounded
-from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, message_tokens
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, message_cost
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import NAME_CHARS, PreparedCall, ToolContext, ToolRegistry, ToolReply, error_reply
 from docint.utils.text_budget import MARKER_RESERVE_CHARS, fit_with_marker
@@ -121,7 +121,7 @@ class RoundCalls:
             NO_CAPACITY_REPLY,
         )
         #: What the longest reply written here costs.
-        self.short_reply = max(message_tokens(error_reply("", text).text, char_token_ratio) for text in short)
+        self.short_reply = max(message_cost(error_reply("", text).text, char_token_ratio) for text in short)
 
     def prepare(self, calls: Sequence[ToolCall], ctx: ToolContext) -> PreparedRound:
         """Prepare a round's calls on the loop thread, in call order.
@@ -212,7 +212,7 @@ class RoundCalls:
             the cost of the longest reply written here.
         """
         if position < self._max_calls and ready.reply is not None:
-            return message_tokens(ready.reply.text, self._ratio)
+            return message_cost(ready.reply.text, self._ratio)
         return self.short_reply
 
     def _admitted(self, prepared: Sequence[PreparedCall], room: int) -> list[bool | None]:
