@@ -12,6 +12,8 @@ from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
+import openai
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.schema import BaseNode, NodeWithScore
@@ -32,6 +34,42 @@ An error among the chunks is raised where it stands, as a stream that breaks off
 PROGRAMME = (
     "Das Hafenfest wurde wegen der Sturmwarnung auf Sonntag verschoben. Die Stände öffnen um zehn Uhr, Musik ab Mittag."
 )
+
+#: Where the invented chat endpoint lives; nothing is ever sent there.
+INVENTED_ENDPOINT = "http://inference.invalid/v1/chat/completions"
+
+
+def status_error(cls: type[openai.APIStatusError], status: int, message: str) -> openai.APIStatusError:
+    """Build the error an OpenAI-compatible endpoint raises on an HTTP error status.
+
+    Args:
+        cls (type[openai.APIStatusError]): The SDK's error class for the status.
+        status (int): The HTTP status.
+        message (str): The error message.
+
+    Returns:
+        openai.APIStatusError: The error.
+    """
+    request = httpx.Request("POST", INVENTED_ENDPOINT)
+    return cls(message, response=httpx.Response(status, request=request), body=None)
+
+
+def timed_out() -> openai.APITimeoutError:
+    """Build the error a call raises when the endpoint does not answer in time.
+
+    Returns:
+        openai.APITimeoutError: The error.
+    """
+    return openai.APITimeoutError(request=httpx.Request("POST", INVENTED_ENDPOINT))
+
+
+def unreachable() -> openai.APIConnectionError:
+    """Build the error a call raises when the endpoint cannot be reached.
+
+    Returns:
+        openai.APIConnectionError: The error.
+    """
+    return openai.APIConnectionError(request=httpx.Request("POST", INVENTED_ENDPOINT))
 
 
 def tool_call_delta(

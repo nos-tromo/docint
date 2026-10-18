@@ -5,6 +5,7 @@ Every message, passage, clip, filter and collection here is invented.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable
 from typing import Any, cast
@@ -33,6 +34,7 @@ from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, schema_tokens
 from docint.agents.turn.calls import SEARCH_THREAD_NAME
 from docint.agents.turn.history import NO_HISTORY, ConversationTurn, ConversationWindow
 from docint.agents.turn.loop import AgentResult
+from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TOOL, probe_tools
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.rag import (
@@ -214,6 +216,27 @@ def test_the_agent_model_makes_one_attempt_per_call(monkeypatch: pytest.MonkeyPa
         next(iter(rag.agent_text_model.stream_chat([ChatMessage(role=MessageRole.USER, content=MESSAGE)])))
 
     assert len(attempts) == 1
+
+
+def test_a_probe_on_the_agent_model_makes_one_attempt_within_ten_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tools probe sends the fixed request once, streamed, waiting ten seconds, whatever retries are configured.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    attempts = _stalled_endpoint(monkeypatch)
+    rag = _rag(monkeypatch, max_retries=2)
+
+    assert probe_tools(rag.agent_text_model) == "inconclusive"
+
+    assert len(attempts) == 1
+    sent = json.loads(attempts[0].content)
+    assert attempts[0].extensions["timeout"]["read"] == 10.0
+    assert [(message["role"], message["content"]) for message in sent["messages"]] == [
+        ("system", PROBE_SYSTEM_PROMPT),
+        ("user", "ping"),
+    ]
+    assert (sent["tools"], sent["tool_choice"], sent["stream"]) == ([PROBE_TOOL], "auto", True)
 
 
 def _comment_row() -> NodeWithScore:

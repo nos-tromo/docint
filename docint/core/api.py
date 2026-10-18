@@ -50,9 +50,10 @@ from docint.agents import (
     Turn,
     is_weak_answer,
 )
-from docint.agents.assessment.gate import agent_available, record_tools_rejection, tools_rejection_cached
+from docint.agents.assessment.gate import agent_available, confirm_tools_rejection, tools_rejection_cached
 from docint.agents.assessment.split import cited_sources
 from docint.agents.history import build_prior_turn
+from docint.agents.turn.probe import probe_tools
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
@@ -985,19 +986,22 @@ def _agent_turn_allowed(retrieval_target: str) -> bool:
         return False
 
 
-def _note_tools_rejection(data: Any) -> None:
-    """Cache a tools rejection when the turn fell back because the chat endpoint refused tools.
+def _confirm_tools_rejection(data: Any) -> None:
+    """Cache a tools rejection a turn fell back on, once a probe carrying none of its content confirms it.
 
-    Read off the turn's payload, which is how the session layer's tools-unavailable fallback
-    reports it. Only a refused first call with tools offered reports that reason: a pinned round
-    offers none, so its refusal is the turn's error and is never cached.
+    The reason is read off the turn's payload, which is how the session layer's tools-unavailable
+    fallback reports it. Only a refused first call with tools offered reports that reason: a pinned
+    round offers none, so its refusal is the turn's error. A request can also be refused for its own
+    content, and the cache keeps agent turns off for every user, so a fixed probe on the agent model
+    (:func:`probe_tools`) decides (:func:`confirm_tools_rejection`). The turn has fallen back
+    either way. Blocking for up to the probe's timeout: call it off the event loop.
 
     Args:
         data (Any): The turn's payload, as the first pass returned it.
     """
     trail = data.get("agent") if isinstance(data, dict) else None
     if isinstance(trail, dict) and trail.get("reason") == "tools_unavailable":
-        record_tools_rejection()
+        confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model))
 
 
 def _assessment_validation(
@@ -2562,7 +2566,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     agent=agent,
                 )
 
-        _note_tools_rejection(data)
+        _confirm_tools_rejection(data)
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
         graph_debug = (
@@ -2880,7 +2884,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
 
             payload_out = dict(final_payload or {})
             # Read off the first pass: the corrective retry below replaces the payload.
-            _note_tools_rejection(payload_out)
+            await to_thread.run_sync(_confirm_tools_rejection, payload_out)
             answer = str(payload_out.get("response") or payload_out.get("answer") or "")
             if not answer:
                 answer = full_answer

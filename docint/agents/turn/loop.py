@@ -210,6 +210,20 @@ class _Streamed:
     began: bool = False
 
 
+def refused_as_sent(exc: BaseException) -> bool:
+    """Return whether an endpoint refused a request as sent rather than failed to serve it.
+
+    Args:
+        exc (BaseException): How a model call failed.
+
+    Returns:
+        bool: ``True`` for an HTTP 400 or 422 that is not a context overflow.
+    """
+    return (
+        isinstance(exc, openai.APIStatusError) and exc.status_code in _REFUSED_STATUSES and not is_context_overflow(exc)
+    )
+
+
 def _raise_if_refused(turn: _Turn, exc: Exception) -> None:
     """Raise :class:`ToolsUnavailable` when the endpoint refused the turn's first call as sent.
 
@@ -223,8 +237,7 @@ def _raise_if_refused(turn: _Turn, exc: Exception) -> None:
         ToolsUnavailable: For an HTTP 400 or 422 answer, not an overflow, to the turn's first
             model call with nothing shown yet; the refusal is its ``__cause__``.
     """
-    refused = isinstance(exc, openai.APIStatusError) and exc.status_code in _REFUSED_STATUSES
-    if refused and not turn.shown and turn.model_calls == 1:
+    if refused_as_sent(exc) and not turn.shown and turn.model_calls == 1:
         raise ToolsUnavailable("The chat endpoint refused a request offering tools.") from exc
 
 

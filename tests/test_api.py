@@ -4,19 +4,25 @@ import asyncio
 import contextlib
 import io
 import json
+import threading
 import types
 from collections.abc import Callable, Generator, Iterator, Sequence
 from pathlib import Path
 from typing import Any, cast, get_args
+from unittest.mock import MagicMock
 
+import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
+from agent_fakes import answer_round, status_error, streaming_tool_llm, timed_out, unreachable
 from assessment_fakes import bad_request
 from conftest import run_ingest
 from fastapi.testclient import TestClient
+from llama_index.core.base.llms.types import MessageRole
 
 import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
+from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
 from docint.agents.types import AgentProgress, IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
 from docint.core.entities.resolution import ResolutionSummary
@@ -5785,7 +5791,7 @@ def test_an_agent_turn_needs_the_switch_a_text_model_the_window_and_no_cached_re
     rag.text_model_id = model
     rag.openai_ctx_window = window
     if rejected:
-        gate_module.record_tools_rejection()
+        gate_module.TOOLS_REJECTION.record()
 
     assert api_module._agent_turn_allowed("all") is allowed
 
@@ -6002,12 +6008,16 @@ def test_query_drains_an_agent_turn(monkeypatch: pytest.MonkeyPatch, client: Tes
     assert rag.stateless_queries == []
 
 
+#: How an endpoint without tool support refuses a request offering tools, the probe's included.
+TOOLS_REFUSED = "auto tool choice is not enabled on this invented server"
+
+
 def test_a_tools_rejection_is_cached_for_the_cooldown(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, loguru_caplog: LogCaptureFixture
 ) -> None:
-    """An endpoint that refused tools gets no agent turn for ten minutes, and each rejection one warning.
+    """An endpoint that refuses tools, a probe confirming it, gets no agent turn for ten minutes.
 
-    The warning names what the endpoint must accept and no engine's switches.
+    Each confirmed rejection gives one warning, naming what the endpoint must accept and no engine's switches.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -6017,6 +6027,8 @@ def test_a_tools_rejection_is_cached_for_the_cooldown(
     now = [1000.0]
     monkeypatch.setattr(gate_module, "TOOLS_REJECTION", gate_module.ToolsRejection(clock=lambda: now[0]))
     _open_agent_gate(monkeypatch)
+    probe = streaming_tool_llm([bad_request(TOOLS_REFUSED), bad_request(TOOLS_REFUSED)])
+    cast(Any, api_module.rag).agent_text_model = probe
     asked: list[bool] = []
 
     def _refusing_endpoint(question: str, **kwargs: Any) -> Iterator[Any]:
@@ -6044,6 +6056,7 @@ def test_a_tools_rejection_is_cached_for_the_cooldown(
     warnings = [message for message in loguru_caplog.messages if "offering tools" in message]
     assert first["agent"] == TOOLS_UNAVAILABLE_TRAIL
     assert asked == [True, False, True]
+    assert probe.stream_chat.call_count == 2
     assert len(warnings) == 2
     assert 'The chat endpoint must accept `tools` with `tool_choice: "auto"`.' in warnings[0]
     assert "for the next 10 minutes" in warnings[0]
@@ -6067,6 +6080,7 @@ def test_every_chat_endpoint_caches_a_tools_rejection(
     """
     _open_agent_gate(monkeypatch)
     rag = cast(Any, api_module.rag)
+    rag.agent_text_model = streaming_tool_llm([bad_request(TOOLS_REFUSED)])
     answer = "Die Musik beginnt am Mittag [1]."
     monkeypatch.setattr(rag, "stream_chat", lambda question, **kwargs: iter([answer, _fallback_final()]))
     monkeypatch.setattr(rag, "chat", lambda question, **kwargs: _fallback_final())
@@ -6077,6 +6091,177 @@ def test_every_chat_endpoint_caches_a_tools_rejection(
     response = client.post(path, json={"question": "Wann beginnt die Musik?", "retrieval_mode": mode})
 
     assert response.status_code == 200
+    assert api_module._agent_turn_allowed("all") is False
+
+
+def _refused_then_agent(asked: list[bool]) -> Callable[..., Iterator[Any]]:
+    """Build a ``stream_chat`` double whose first turn the endpoint refused tools and whose later turns run the agent.
+
+    Args:
+        asked (list[bool]): Receives each call's agent flag.
+
+    Returns:
+        Callable[..., Iterator[Any]]: The double.
+    """
+
+    def _stream(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Fall back on the first turn; answer every later one as an agent lookup.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: The answer's text, then its payload.
+        """
+        asked.append(kwargs["agent"])
+        if len(asked) == 1:
+            yield "Die Musik beginnt am Mittag [1]."
+            yield _fallback_final()
+            return
+        yield AGENT_ANSWER
+        yield _agent_final()
+
+    return _stream
+
+
+def test_a_refusal_whose_probe_is_accepted_caches_nothing(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A request refused for its own content must not switch agent turns off for everyone.
+
+    The turn still falls back; a probe without its content is accepted, so nothing is cached, the
+    next turn runs the agent, and one warning without any text says so.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    rag.agent_text_model = streaming_tool_llm([answer_round("pong")])
+    asked: list[bool] = []
+    monkeypatch.setattr(rag, "stream_chat", _refused_then_agent(asked))
+
+    first = _stream_frames(client, question="Wann beginnt die Musik? zzsecretzz")[-1]
+    second = _stream_frames(client)[-1]
+
+    warnings = [message for message in loguru_caplog.messages if "offering tools" in message]
+    assert first["agent"] == TOOLS_UNAVAILABLE_TRAIL
+    assert (asked, second["retrieval_mode"]) == ([True, True], "agent")
+    assert rag.agent_text_model.stream_chat.call_count == 1
+    assert len(warnings) == 1
+    assert "a probe offering tools was accepted" in warnings[0]
+    assert "zzsecretzz" not in loguru_caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [timed_out(), status_error(openai.InternalServerError, 503, "invented outage"), unreachable()],
+    ids=["timeout", "5xx", "unreachable"],
+)
+def test_an_inconclusive_probe_caches_nothing(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, error: Exception
+) -> None:
+    """A probe that times out, meets a server error or reaches no endpoint shows nothing, so nothing is cached.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        error (Exception): How the probe fails.
+    """
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    rag.agent_text_model = streaming_tool_llm([error])
+    asked: list[bool] = []
+    monkeypatch.setattr(rag, "stream_chat", _refused_then_agent(asked))
+
+    _stream_frames(client)
+    _stream_frames(client)
+
+    assert asked == [True, True]
+    assert rag.agent_text_model.stream_chat.call_count == 1
+    assert api_module._agent_turn_allowed("all") is True
+
+
+def test_two_concurrent_rejections_run_one_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rejection arriving while a probe is in flight neither probes nor caches; the probe's own verdict stands.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _open_agent_gate(monkeypatch)
+    started, release = threading.Event(), threading.Event()
+    probes: list[dict[str, Any]] = []
+
+    def _held_refusal(messages: Any, **kwargs: Any) -> Iterator[Any]:
+        """Hold the probe until released, then refuse it as an endpoint without tool support does.
+
+        Args:
+            messages (Any): The probe's messages, unused.
+            **kwargs (Any): The call's options.
+
+        Yields:
+            Any: Nothing: the endpoint refuses.
+
+        Raises:
+            openai.BadRequestError: Once released.
+        """
+        probes.append(kwargs)
+        started.set()
+        release.wait(5)
+        if probes:
+            raise bad_request(TOOLS_REFUSED)
+        yield from ()
+
+    probe = MagicMock()
+    probe.stream_chat.side_effect = _held_refusal
+    cast(Any, api_module.rag).agent_text_model = probe
+
+    first = threading.Thread(target=api_module._confirm_tools_rejection, args=(_fallback_final(),))
+    first.start()
+    assert started.wait(5)
+    api_module._confirm_tools_rejection(_fallback_final())
+    during = api_module._agent_turn_allowed("all")
+    release.set()
+    first.join(5)
+
+    assert (len(probes), during) == (1, True)
+    assert api_module._agent_turn_allowed("all") is False
+
+
+def test_the_probe_carries_none_of_the_turns_content(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, loguru_caplog_info: LogCaptureFixture
+) -> None:
+    """No question, filter or answer of the turn reaches the probe, the cache or the log.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    rag.agent_text_model = streaming_tool_llm([bad_request(TOOLS_REFUSED)])
+    secret = "zzsecretzz"
+    reply = f"Die Musik beginnt am Mittag {secret} [1]."
+    monkeypatch.setattr(rag, "stream_chat", lambda question, **kwargs: iter([reply, _fallback_final(response=reply)]))
+
+    _stream_frames(
+        client,
+        question=f"Wann beginnt die Musik? {secret}",
+        metadata_filters=[{"field": "author", "operator": "eq", "value": secret}],
+    )
+
+    sent = rag.agent_text_model.stream_chat.call_args
+    assert [(message.role, message.content) for message in sent.args[0]] == [
+        (MessageRole.SYSTEM, PROBE_SYSTEM_PROMPT),
+        (MessageRole.USER, "ping"),
+    ]
+    assert sent.kwargs == {"tools": [PROBE_TOOL], "tool_choice": "auto", "timeout": PROBE_TIMEOUT_S}
+    assert secret not in repr(sent)
+    assert secret not in loguru_caplog_info.text
     assert api_module._agent_turn_allowed("all") is False
 
 
