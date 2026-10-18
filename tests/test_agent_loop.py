@@ -653,6 +653,60 @@ def test_every_call_gets_a_reply_even_on_timeout(held: threading.Event) -> None:
     assert [scored.node.node_id for scored in result.nodes] == ["weather"]
 
 
+def test_a_search_back_in_time_is_answered_while_one_that_is_late_is_not(
+    held: threading.Event, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Of two searches started together, the one back before the deadline shows its passage; the other is late.
+
+    Args:
+        held (threading.Event): Holds the programme search.
+        monkeypatch (pytest.MonkeyPatch): Lets the deadline pass the moment the first search is back.
+    """
+    now = [0.0]
+    real_wait = concurrent.futures.wait
+
+    def _deadline_after_the_first(futures: Any, timeout: float | None = None, **kwargs: Any) -> Any:
+        """Wait until one search is back, let the time run out, then wait as the deadline allows.
+
+        Args:
+            futures (Any): The searches waited on.
+            timeout (float | None): The wait the round asked for, overruled by the deadline.
+            **kwargs (Any): Further options.
+
+        Returns:
+            Any: What the real wait returns once no time is left.
+        """
+        started = list(futures)
+        real_wait(started, timeout=30, return_when=concurrent.futures.FIRST_COMPLETED)
+        now[0] = 500.0
+        return real_wait(started, timeout=0, **kwargs)
+
+    def _search(query: str) -> list[NodeWithScore]:
+        """Hold the programme search until the test ends; find the weather at once.
+
+        Args:
+            query (str): What the tool searched for.
+
+        Returns:
+            list[NodeWithScore]: The passage for the query.
+        """
+        if query == "Programm":
+            held.wait(timeout=30)
+            return [programme_passage()]
+        return [weather_passage()]
+
+    monkeypatch.setattr(concurrent.futures, "wait", _deadline_after_the_first)
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), _search_call("call_b", "Wetter")), _answer()])
+    loop = _loop(llm, _documents(_search), search_slots=_Granting(size=2), clock=lambda: now[0])
+
+    progress, _, result = _drain(_turn(loop))
+
+    replies = _tool_replies(llm, 1)
+    assert replies["call_a"] == error_reply("search", LATE_REPLY).text
+    assert shown_numbers(replies["call_b"]) == [1]
+    assert (_steps(progress), result.reason) == ([("search", "Wetter", 1)], "time_budget")
+
+
 @pytest.mark.parametrize("preface", [PREFACE, LONG_PREFACE], ids=["held", "sent"])
 def test_text_before_calls_becomes_a_note(preface: str) -> None:
     """A round's text before its calls is a note step ahead of the calls; text already streamed went out first.
