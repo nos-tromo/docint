@@ -793,6 +793,9 @@ While `ASSESSMENT_ENABLED` is on (the default), the system prompt carries the
 assessment rule. A question that asks for a judgement is then answered in two
 parts: what the sources say, a line holding only `[[ASSESSMENT]]`, then the
 model's own assessment, which may draw on general knowledge and must say so.
+The rule forbids answering such a question with "the passages do not say"
+alone: the answer gives what the passages show, however little, and then the
+model's own assessment.
 
 - **An assessment** is a reply carrying the sentinel: `answer_mode:
   "assessment"`, `agent.answer` `split` (or `empty` for a reply of nothing but
