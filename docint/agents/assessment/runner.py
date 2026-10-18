@@ -31,6 +31,7 @@ from docint.agents.assessment.ledger import (
 from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.turn import history
 from docint.agents.turn.history import ANSWER_ASSESSMENT_LABEL, ANSWER_SOURCED_LABEL, labelled_lines, split_answer
+from docint.agents.turn.scope import EvidenceDoesNotFit
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
@@ -69,24 +70,8 @@ RESOLVED_QUESTION_LABEL = history.RESOLVED_QUESTION_LABEL
 question_block = history.question_block
 
 
-class AssessmentDoesNotFit(ValueError):
-    """The evidence cannot be shown legibly in one answer, so the turn is answered as a lookup.
-
-    A ``ValueError`` naming the context window, so that if it ever escapes its
-    callers the API still reports ``context_overflow``.
-
-    Attributes:
-        passages (int): How many passages the evidence held.
-    """
-
-    def __init__(self, passages: int) -> None:
-        """Record how many passages did not fit.
-
-        Args:
-            passages (int): How many passages the evidence held.
-        """
-        super().__init__(f"{passages} passages cannot be shown legibly in the model's context window.")
-        self.passages = passages
+# Renamed to the agent turn's error; the old name stays for its callers until this module is deleted.
+AssessmentDoesNotFit = EvidenceDoesNotFit
 
 
 @dataclass(frozen=True)

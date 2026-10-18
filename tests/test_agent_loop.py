@@ -8,7 +8,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import threading
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from typing import Any, cast
 
@@ -40,7 +40,8 @@ from docint.agents.assessment.bounded import (
     SEARCH_SLOTS,
     NoSlot,
 )
-from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger
+from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger, render_context
+from docint.agents.assessment.runner import AssessmentDoesNotFit
 from docint.agents.assessment.split import SENTINEL, assessment_label
 from docint.agents.turn.budget import TurnBudget
 from docint.agents.turn.calls import (
@@ -55,6 +56,7 @@ from docint.agents.turn.calls import (
 )
 from docint.agents.turn.history import ConversationTurn, ConversationWindow
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
+from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
     ReadTool,
@@ -72,6 +74,7 @@ from docint.utils.text_budget import fit_with_marker
 QUESTION = "zzsecretzz Wann öffnen die Stände beim Hafenfest?"
 SYSTEM_PROMPT = "Beantworte Fragen zur Sammlung mit den Werkzeugen und belege jede Aussage mit [n]."
 FINAL_NOTE = "Antworte jetzt aus den Passagen oben; rufe keine Werkzeuge mehr auf."
+SCOPE_NOTE = "Der Nutzer hat diese Passagen ausgewählt; antworte nur aus ihnen und belege jede Aussage mit [n]."
 ANSWER = (
     "Die Stände öffnen am Sonntag um zehn Uhr [1]. Das Hafenfest wurde wegen der Sturmwarnung verschoben, "
     "und für Sonntag ist bedeckter Himmel gemeldet [2]."
@@ -287,6 +290,7 @@ def _turn(
     *,
     window: ConversationWindow | None = None,
     ledger: EvidenceLedger | None = None,
+    pinned: Sequence[NodeWithScore] | None = None,
 ) -> Iterator[AgentProgress | str | AgentResult]:
     """Run one turn of the user's invented question.
 
@@ -294,6 +298,7 @@ def _turn(
         loop (AgentLoop): The loop.
         window (ConversationWindow | None): The conversation before it; none by default.
         ledger (EvidenceLedger | None): The turn's evidence; an empty one by default.
+        pinned (Sequence[NodeWithScore] | None): The passages the user pinned; no scope by default.
 
     Returns:
         Iterator[AgentProgress | str | AgentResult]: The turn's output.
@@ -301,7 +306,9 @@ def _turn(
     return loop.run(
         window=window or ConversationWindow(),
         message=QUESTION,
-        ledger=ledger or EvidenceLedger(cap=MAX_LEDGER_ENTRIES),
+        # An empty ledger is falsy, so only a missing one is replaced.
+        ledger=EvidenceLedger(cap=MAX_LEDGER_ENTRIES) if ledger is None else ledger,
+        pinned=pinned,
     )
 
 
@@ -2138,3 +2145,236 @@ def test_the_tools_render_through_the_llm_view_the_loop_was_given() -> None:
     _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})), llm_view=view)))
 
     assert "programme" in seen
+
+
+# --- A pinned scope: one round that offers no tools -------------------------------------------
+
+
+def _pinned_message(nodes: list[NodeWithScore], *, note: str = SCOPE_NOTE) -> str:
+    """Write the one user message a pinned round sends: the note, the passages between fences, the question.
+
+    Args:
+        nodes (list[NodeWithScore]): The pinned passages, numbered; short enough to be shown whole.
+        note (str): The scope note; left out when empty.
+
+    Returns:
+        str: The message.
+    """
+    context = render_context(nodes, llm_view=llm_view, budget_tokens=100_000, char_token_ratio=3.5).context
+    fenced = f"{PASSAGES_FENCE}\n{context}\n{PASSAGES_FENCE}"
+    return "\n\n".join(part for part in (note, fenced, QUESTION) if part)
+
+
+def _pulls(llm: Any) -> list[int]:
+    """Count the chunks the model double has streamed, as they are pulled.
+
+    Args:
+        llm (Any): The model double.
+
+    Returns:
+        list[int]: One entry per chunk pulled so far, growing in place.
+    """
+    inner = llm.stream_chat.side_effect
+    pulled: list[int] = []
+
+    def _stream(messages: list[ChatMessage], **kwargs: Any) -> Iterator[Any]:
+        """Stream as scripted, counting each chunk as it is pulled.
+
+        Args:
+            messages (list[ChatMessage]): The prompt.
+            **kwargs (Any): Call options.
+
+        Yields:
+            Any: The scripted responses.
+        """
+        for response in inner(messages, **kwargs):
+            pulled.append(1)
+            yield response
+
+    llm.stream_chat.side_effect = _stream
+    return pulled
+
+
+def test_a_tool_less_round_answers_from_pinned_evidence() -> None:
+    """A pinned scope is answered in one round that offers no tools, from one user message holding the passages."""
+    window = ConversationWindow(recent=(ConversationTurn("Wann ist das Hafenfest?", "Am Sonntag."),))
+    search = QuerySearch({"Programm": [programme_passage()]})
+    llm = streaming_tool_llm([_answer()])
+    loop = _loop(llm, _documents(search), scope_note=SCOPE_NOTE)
+
+    items = list(_turn(loop, window=window, pinned=[programme_passage(), weather_passage()]))
+
+    progress, texts, result = _drain(items)
+    seed = AgentProgress(step=0, action="seed", detail="", found=2)
+    assert (items[0], progress, "".join(texts)) == (seed, [seed], ANSWER)
+    assert [(scored.node.node_id, scored.node.metadata["citation_index"]) for scored in result.nodes] == [
+        ("programme", 1),
+        ("weather", 2),
+    ]
+    assert (result.raw_text, result.steps, result.reason, result.images_attached) == (ANSWER, 0, None, 0)
+    assert result.actions == [{"action": "seed", "detail": "", "found": 2}]
+    (call,) = llm.stream_chat.call_args_list
+    assert call.kwargs == {}
+    assert [(message.role, message.content) for message in _sent(llm, 0)] == [
+        (MessageRole.SYSTEM, SYSTEM_PROMPT),
+        (MessageRole.USER, "Wann ist das Hafenfest?"),
+        (MessageRole.ASSISTANT, "Am Sonntag."),
+        (MessageRole.USER, _pinned_message(result.nodes)),
+    ]
+    assert search.queries == []
+
+
+def test_an_oversized_scope_raises_before_any_output() -> None:
+    """Pinned passages that cannot all be shown legibly in the round's room raise before the turn shows anything."""
+    llm = streaming_tool_llm([_answer()])
+    pinned = [
+        scored_node(f"plan-{number}", HARBOUR_PLAN, filename="hafenplan.pdf", page=number) for number in range(1, 51)
+    ]
+
+    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({})), scope_note=SCOPE_NOTE), pinned=pinned))
+
+    assert (shown, type(raised)) == ([], EvidenceDoesNotFit)
+    assert isinstance(raised, ValueError)
+    assert "context window" in str(raised)
+    assert cast(EvidenceDoesNotFit, raised).passages == 50
+    llm.stream_chat.assert_not_called()
+
+
+def test_a_ledger_too_small_for_the_pinned_passages_raises_before_any_output() -> None:
+    """Pinned evidence is never dropped: a ledger that cannot hold every pinned passage raises before the round."""
+    regatta = scored_node("regatta", "Die Regatta startet um drei Uhr am Kai.", filename="regatta.pdf", page=1)
+    llm = streaming_tool_llm([_answer()])
+
+    shown, raised = _until_raised(
+        _turn(
+            _loop(llm, _documents(QuerySearch({}))),
+            ledger=EvidenceLedger(cap=2),
+            pinned=[programme_passage(), weather_passage(), regatta],
+        )
+    )
+
+    assert (shown, type(raised)) == ([], EvidenceDoesNotFit)
+    assert cast(EvidenceDoesNotFit, raised).passages == 3
+    llm.stream_chat.assert_not_called()
+
+
+def test_the_scope_note_comes_out_of_the_room_the_pinned_passages_have() -> None:
+    """The passages share the round's room with the scope note: a longer note leaves them too little to be legible."""
+    pinned = [
+        scored_node(f"plan-{number}", HARBOUR_PLAN, filename="hafenplan.pdf", page=number) for number in range(1, 28)
+    ]
+    short_note = _loop(streaming_tool_llm([_answer()]), _documents(QuerySearch({})), scope_note=SCOPE_NOTE)
+    long_note = _loop(streaming_tool_llm([_answer()]), _documents(QuerySearch({})), scope_note=SCOPE_NOTE * 12)
+
+    _, _, result = _drain(_turn(short_note, ledger=EvidenceLedger(cap=len(pinned)), pinned=pinned))
+    shown, raised = _until_raised(_turn(long_note, ledger=EvidenceLedger(cap=len(pinned)), pinned=pinned))
+
+    assert len(result.nodes) == 27
+    assert (shown, type(raised)) == ([], EvidenceDoesNotFit)
+
+
+@pytest.mark.parametrize("answer", [ANSWER, SHORT_ANSWER], ids=["past-the-hold", "within-the-hold"])
+def test_the_seed_step_comes_with_the_rounds_first_event(answer: str) -> None:
+    """The seed step goes out once the round has begun to answer, ahead of the answer's first text.
+
+    Args:
+        answer (str): The reply, long enough to stream as it comes or short enough to be held whole.
+    """
+    llm = streaming_tool_llm([_answer(answer)])
+    pulled = _pulls(llm)
+    turn = _turn(_loop(llm, _documents(QuerySearch({}))), pinned=[programme_passage()])
+
+    first = next(turn)
+    begun = len(pulled)
+    rest = list(turn)
+
+    assert (first, begun > 0) == (AgentProgress(step=0, action="seed", detail="", found=1), True)
+    assert "".join(cast(list[str], rest[:-1])) == answer
+    assert isinstance(rest[-1], AgentResult)
+
+
+@pytest.mark.parametrize(
+    ("error", "raised"),
+    [
+        (bad_request(OVERFLOW), EvidenceDoesNotFit),
+        (bad_request(TOOL_CHOICE_REJECTED), openai.BadRequestError),
+        (_status_error(openai.RateLimitError, 429, "rate limit reached"), openai.RateLimitError),
+        (RuntimeError("invented outage"), RuntimeError),
+        ([chunk("Am Sonntag"), RuntimeError("invented outage")], RuntimeError),
+    ],
+    ids=["overflow", "refused", "rate-limit", "outage", "broken-before-any-event"],
+)
+def test_a_pinned_round_that_fails_before_its_first_event_shows_nothing(
+    error: Any, raised: type[BaseException]
+) -> None:
+    """Before the round's first event nothing is shown, so the caller can still answer the scope another way.
+
+    An overflow raises ``EvidenceDoesNotFit``, which sends the caller down its scoped path; any
+    other failure is raised as it came, a refusal included: the round offered no tools.
+
+    Args:
+        error (Any): What the endpoint raises, on its first pull or before the round's first event.
+        raised (type[BaseException]): What the turn raises.
+    """
+    llm = streaming_tool_llm([error])
+
+    shown, exc = _until_raised(_turn(_loop(llm, _documents(QuerySearch({}))), pinned=[programme_passage()]))
+
+    assert (shown, type(exc), llm.stream_chat.call_count) == ([], raised, 1)
+    cause = error[-1] if isinstance(error, list) else error
+    assert (exc.__cause__ if raised is EvidenceDoesNotFit else exc) is cause
+
+
+def test_a_pinned_round_without_a_model_slot_raises_before_anything_is_yielded() -> None:
+    """The pinned round waits for a model slot as a first round does; without one, nothing was shown."""
+    slots = _Recording()
+    llm = streaming_tool_llm([_answer()])
+    loop = _loop(llm, _documents(QuerySearch({})), model_slots=slots, clock=lambda: 0.0)
+
+    shown, raised = _until_raised(_turn(loop, pinned=[programme_passage()]))
+
+    assert (shown, type(raised), slots.waits) == ([], NoSlot, [MODEL_SLOT_WAIT_S])
+    llm.stream_chat.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("invented outage"), bad_request(OVERFLOW)], ids=["outage", "overflow-mid-answer"]
+)
+def test_a_pinned_answer_that_breaks_off_raises_after_its_text(error: Exception) -> None:
+    """An answer the endpoint stops sending partway is not passed off as whole, whatever stopped it.
+
+    Args:
+        error (Exception): What breaks the stream once text has gone out.
+    """
+    llm = streaming_tool_llm([[*text_chunks(ANSWER, 20)[:7], error]])
+
+    shown, exc = _until_raised(_turn(_loop(llm, _documents(QuerySearch({}))), pinned=[programme_passage()]))
+
+    assert exc is error
+    assert shown[0] == AgentProgress(step=0, action="seed", detail="", found=1)
+    assert len(shown) > 1 and all(isinstance(item, str) for item in shown[1:])
+
+
+def test_a_pinned_answer_cut_at_the_length_limit_is_kept_and_flagged() -> None:
+    """The pinned round is an answer round: an answer cut at the length limit stays, flagged ``context_budget``."""
+    cut = ANSWER[:90]
+    llm = streaming_tool_llm([[*text_chunks(cut, 30), chunk(finish_reason="length")]])
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({}))), pinned=[programme_passage()]))
+
+    assert ("".join(texts), result.raw_text, result.reason) == (cut, cut, "context_budget")
+
+
+def test_an_empty_scope_is_still_answered_without_tools() -> None:
+    """A scope that pins nothing is still a scope: it is never widened into a turn that searches."""
+    llm = streaming_tool_llm([_answer(SHORT_ANSWER)])
+
+    progress, _, result = _drain(_turn(_loop(llm, _documents(QuerySearch({}))), pinned=[]))
+
+    assert progress == [AgentProgress(step=0, action="seed", detail="", found=0)]
+    assert (result.nodes, llm.stream_chat.call_args.kwargs) == ([], {})
+
+
+def test_the_assessment_runners_error_is_the_agents_evidence_does_not_fit() -> None:
+    """The callers of #648's runner still catch the old name, which now names the agent's error."""
+    assert AssessmentDoesNotFit is EvidenceDoesNotFit

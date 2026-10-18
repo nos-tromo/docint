@@ -27,6 +27,14 @@ not do or for a call that did not run or failed, reaches the model alone. A call
 be prepared, whose search failed or found no slot, or whose answer raised, marks the turn
 ``research_failed`` without ending it: evidence may be missing.
 
+A pinned scope. A turn the user scoped to passages they picked searches nothing: the passages
+enter the ledger and are rendered into one user message, between the scope note and the user's
+message, and one round that offers no tools answers from them. Its ``seed`` step goes out with
+the round's first event. Before that, passages that cannot all be held or shown legibly, or a
+round that overflows the context window, raise
+:class:`~docint.agents.turn.scope.EvidenceDoesNotFit`, so the caller can answer the scope another
+way; once begun, the round fails as the answer round does.
+
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
 anything, a failure goes to the caller, who can still answer another way: no model slot within
 ``MODEL_SLOT_WAIT_S`` raises :class:`~docint.agents.assessment.bounded.NoSlot`, the first call
@@ -68,6 +76,7 @@ from docint.agents.assessment.ledger import EvidenceLedger, is_context_overflow
 from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
 from docint.agents.turn.calls import RoundCalls
+from docint.agents.turn.scope import EvidenceDoesNotFit, scope_message
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
 from docint.agents.turn.tools import ToolContext, ToolRegistry, nested_too_deeply
 from docint.agents.types import AgentAction, AgentProgress
@@ -183,6 +192,8 @@ class _Streamed:
         error (Exception | None): Why it failed.
         sent (str): The round's text that went out as provisional text.
         shown (bool): Whether any of its text was yielded.
+        began (bool): Whether its first event arrived; a round that failed without one was
+            refused as sent or never reached.
     """
 
     splitter: SentinelStreamSplitter = field(default_factory=SentinelStreamSplitter)
@@ -190,6 +201,7 @@ class _Streamed:
     error: Exception | None = None
     sent: str = ""
     shown: bool = False
+    began: bool = False
 
 
 def _raise_if_refused(turn: _Turn, exc: Exception) -> None:
@@ -302,6 +314,7 @@ class AgentLoop:
         model_slots: threading.Semaphore = MODEL_SLOT_POOL,
         search_slots: threading.Semaphore = SEARCH_SLOT_POOL,
         reasoning_open: bool = False,
+        scope_note: str = "",
     ) -> None:
         """Bind the model, the tools and the limits.
 
@@ -325,6 +338,8 @@ class AgentLoop:
                 (``SEARCH_SLOT_POOL``); injectable for tests.
             reasoning_open (bool): Whether thinking was asked for, so a reply may open in reasoning
                 the chat template began; pass it only when the request enables thinking.
+            scope_note (str): What a scoped turn's message tells the model ahead of the pinned
+                passages: answer from them alone; left out when empty.
 
         Raises:
             ValueError: If ``char_token_ratio`` is not positive, or is not the ratio the budget
@@ -347,7 +362,10 @@ class AgentLoop:
         self._clock = clock
         self._model_slots = model_slots
         self._reasoning_open = reasoning_open
+        self._scope_note = scope_note
         self._room = budget.round_room - message_cost(final_note, char_token_ratio)
+        #: What the pinned passages may take of the room: the scope note and its envelope come first.
+        self._scope_room = self._room - message_cost(scope_note, char_token_ratio)
         self._calls = RoundCalls(
             registry=registry,
             result_chars=budget.result_chars,
@@ -368,7 +386,12 @@ class AgentLoop:
         return self._time_budget_s - (self._clock() - turn.started)
 
     def run(
-        self, *, window: ConversationWindow, message: str, ledger: EvidenceLedger
+        self,
+        *,
+        window: ConversationWindow,
+        message: str,
+        ledger: EvidenceLedger,
+        pinned: Sequence[NodeWithScore] | None = None,
     ) -> Iterator[AgentProgress | str | AgentResult]:
         """Run the turn.
 
@@ -377,12 +400,17 @@ class AgentLoop:
                 is already in the system prompt, and its recent exchanges are sent as messages.
             message (str): The user's message, verbatim.
             ledger (EvidenceLedger): The turn's evidence, empty, its cap set by the caller.
+            pinned (Sequence[NodeWithScore] | None): The passages the user pinned: the turn then
+                answers from them alone, in one round that offers no tools (see :meth:`_scoped`).
+                ``None`` for a turn without a scope; an empty scope is still one, never widened.
 
         Yields:
             AgentProgress | str | AgentResult: Steps and answer text as they come, the label
             swapped in for the sentinel, then exactly one result.
 
         Raises:
+            EvidenceDoesNotFit: Before anything is yielded, when the pinned passages cannot all be
+                held, shown legibly in the room, or sent without overflowing the context window.
             NoSlot: When a round finds no model slot before anything is yielded (the first round,
                 or a later one of a turn that has shown nothing), or the answer round finds none.
             ToolsUnavailable: Before anything is yielded, when the first call is refused as sent.
@@ -391,13 +419,14 @@ class AgentLoop:
             Exception: The endpoint's error, raised as it came, when it fails before anything is
                 yielded or fails the answer.
         """
+        ctx = ToolContext(ledger=ledger, budget=self._budget, llm_view=self._llm_view)
+        system = ChatMessage(role=MessageRole.SYSTEM, content=self._system_prompt)
+        if pinned is not None:
+            yield from self._scoped(ctx, [system, *window.messages()], message, pinned)
+            return
         turn = _Turn(
-            ctx=ToolContext(ledger=ledger, budget=self._budget, llm_view=self._llm_view),
-            base=[
-                ChatMessage(role=MessageRole.SYSTEM, content=self._system_prompt),
-                *window.messages(),
-                ChatMessage(role=MessageRole.USER, content=message),
-            ],
+            ctx=ctx,
+            base=[system, *window.messages(), ChatMessage(role=MessageRole.USER, content=message)],
             schemas=self._registry.schemas(),
             started=self._clock(),
         )
@@ -451,8 +480,14 @@ class AgentLoop:
         return None
 
     def _stream(
-        self, turn: _Turn, messages: list[ChatMessage], *, tool_choice: str, wait: float
-    ) -> Generator[str, None, _Streamed | None]:
+        self,
+        turn: _Turn,
+        messages: list[ChatMessage],
+        *,
+        tool_choice: str,
+        wait: float,
+        opening: Callable[[], AgentProgress] | None = None,
+    ) -> Generator[AgentProgress | str, None, _Streamed | None]:
         """Stream one round in a model slot, yielding what it releases with the label swapped in.
 
         The slot is held while the round streams and given back when it ends, fails, or the
@@ -463,9 +498,11 @@ class AgentLoop:
             messages (list[ChatMessage]): What the round is sent.
             tool_choice (str): ``auto`` for a tool round, ``none`` for the answer round.
             wait (float): The longest the round waits for a model slot.
+            opening (Callable[[], AgentProgress] | None): Records the step the round opens with,
+                yielded when its first event arrives: a round that fails before then shows nothing.
 
         Yields:
-            str: Answer text the round releases.
+            AgentProgress | str: The opening step, then the answer text the round releases.
 
         Returns:
             _Streamed | None: How the round went; ``None`` when no model slot came free.
@@ -483,6 +520,10 @@ class AgentLoop:
                     tool_choice=tool_choice,
                     reasoning_open=self._reasoning_open,
                 ):
+                    if not streamed.began:
+                        streamed.began = True
+                        if opening is not None:
+                            yield opening()
                     if isinstance(event, Provisional):
                         streamed.sent += event.text
                         text = streamed.splitter.feed(event.text)
@@ -605,14 +646,14 @@ class AgentLoop:
         turn.stop("research_failed")
         return None
 
-    def _final_round(self, turn: _Turn) -> Iterator[str | AgentResult]:
+    def _final_round(self, turn: _Turn) -> Iterator[AgentProgress | str | AgentResult]:
         """Make the model answer with no tool to choose, and end the turn.
 
         Args:
             turn (_Turn): The turn, its reason recorded.
 
         Yields:
-            str | AgentResult: The answer text, then the result.
+            AgentProgress | str | AgentResult: The answer text, then the result.
 
         Raises:
             NoSlot: When no model slot comes free for the answer, whether or not anything was shown.
@@ -642,12 +683,84 @@ class AgentLoop:
                 continue
             _raise_if_refused(turn, exc)
             raise exc
-        done = streamed.done
+        yield from self._finish(turn, streamed)
+
+    def _finish(self, turn: _Turn, streamed: _Streamed) -> Iterator[str | AgentResult]:
+        """End the turn with an answer round that ran: keep its reasoning, run none of its calls, send the answer.
+
+        Args:
+            turn (_Turn): The turn.
+            streamed (_Streamed): The answer round, ended.
+
+        Yields:
+            str | AgentResult: The rest of the answer, then the result.
+        """
+        done = cast(RoundDone, streamed.done)
         if done.reasoning:
             turn.reasoning.append(done.reasoning)
         if done.calls:
             logger.warning("An agent turn's answer round asked for {} tool calls anyway; none ran", len(done.calls))
         yield from self._answer(turn, streamed)
+
+    def _scoped(
+        self, ctx: ToolContext, history: list[ChatMessage], message: str, pinned: Sequence[NodeWithScore]
+    ) -> Iterator[AgentProgress | str | AgentResult]:
+        """Answer a pinned scope in one round that offers no tools, from one user message holding the passages.
+
+        The passages enter the ledger and are rendered within the loop's room less the scope
+        note and its envelope (see :func:`~docint.agents.turn.scope.scope_message`). The seed
+        step goes out with the round's first event, so a round that fails before it has shown
+        nothing: an overflow then raises :class:`EvidenceDoesNotFit`, which sends the caller
+        down its scoped path, and any other failure is raised as it came, a refusal included,
+        since no tools were offered. Once begun, the round fails as the answer round does. A
+        scope outranks the retrieval target: no picture is attached.
+
+        Args:
+            ctx (ToolContext): The turn's evidence, budget and LLM view.
+            history (list[ChatMessage]): The system prompt and the window's messages.
+            message (str): The user's message, verbatim.
+            pinned (Sequence[NodeWithScore]): The passages the user pinned.
+
+        Yields:
+            AgentProgress | str | AgentResult: The seed step, the answer text, then the result.
+
+        Raises:
+            EvidenceDoesNotFit: Before anything is yielded, when the passages cannot all be held
+                or shown legibly, or the round overflows the context window.
+            NoSlot: When no model slot comes free; nothing was yielded.
+            Exception: The endpoint's error, as it came, when the round fails.
+        """
+        text, found = scope_message(
+            pinned,
+            ledger=ctx.ledger,
+            note=self._scope_note,
+            message=message,
+            llm_view=self._llm_view,
+            budget_tokens=self._scope_room,
+            char_token_ratio=self._ratio,
+        )
+        turn = _Turn(
+            ctx=ctx,
+            base=[*history, ChatMessage(role=MessageRole.USER, content=text)],
+            schemas=[],
+            started=self._clock(),
+        )
+        logger.info("An agent turn answers from {} pinned passages", len(ctx.ledger))
+        streamed = yield from self._stream(
+            turn,
+            list(turn.base),
+            tool_choice="none",
+            wait=min(MODEL_SLOT_WAIT_S, max(0.0, self._time_left(turn))),
+            opening=lambda: self._step(turn, "seed", "", found, step=0),
+        )
+        if streamed is None:
+            raise NoSlot
+        if streamed.done is None:
+            exc = cast(Exception, streamed.error)
+            if not turn.shown and is_context_overflow(exc):
+                raise EvidenceDoesNotFit(len(ctx.ledger)) from exc
+            raise exc
+        yield from self._finish(turn, streamed)
 
     def _step(self, turn: _Turn, action: str, detail: str, found: int, *, step: int | None = None) -> AgentProgress:
         """Record one step in the trail.
