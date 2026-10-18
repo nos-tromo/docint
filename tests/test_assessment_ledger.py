@@ -17,8 +17,10 @@ from docint.agents.assessment.ledger import (
     WINDOW_JOIN,
     EvidenceLedger,
     _allowances,
+    _head_spans,
     effective_ratio,
     is_context_overflow,
+    kept_ranges,
     passage_parts,
     render_context,
     text_floor,
@@ -799,7 +801,7 @@ def test_a_held_recut_of_a_long_child_survives_a_fuller_window_only_when_the_chi
 
 @pytest.mark.parametrize("stamped_first", [False, True], ids=["unstamped-first", "stamped-first"])
 def test_a_stamped_and_an_unstamped_emission_of_one_id_never_merge(stamped_first: bool) -> None:
-    """One keeps its opening, the other its match, so neither may replace or extend the other.
+    """Of two different texts, one keeps its opening, the other its match, so neither may replace or extend the other.
 
     A section's whole text arrives unstamped when its child cannot be located in it, and a window
     of it arrives stamped from another search; whichever comes second is nothing new.
@@ -817,6 +819,118 @@ def test_a_stamped_and_an_unstamped_emission_of_one_id_never_merge(stamped_first
 
     assert ledger.add([arriving]) == []
     assert ledger.entries()[0] is held
+
+
+#: An invented chunk as a collection without parent sections stores it, its telling sentence past its opening.
+PLAIN_FACT = "No randomization was used."
+PLAIN_TEXT = (
+    "The cohort was followed for twelve months at three clinics. " * 12
+    + PLAIN_FACT
+    + " The authors call it a limitation."
+)
+
+
+def _collapsed(text: str) -> str:
+    """Collapse every run of whitespace to one space.
+
+    Args:
+        text (str): The text.
+
+    Returns:
+        str: The collapsed text.
+    """
+    return " ".join(text.split())
+
+
+def _kept_at_floor(entry: NodeWithScore) -> str:
+    """Render one passage at exactly its floor, as the tightest legible packing shows it.
+
+    Args:
+        entry (NodeWithScore): The passage, alone in its ledger.
+
+    Returns:
+        str: The rendered context, its whitespace collapsed.
+    """
+    spans = [(lo, hi) for lo, hi in entry.node.metadata.get(MATCH_SPANS_KEY, [])]
+    return _collapsed(_render_numbered([entry], text_floor(_text(entry), spans)))
+
+
+def _anchored_on(scored: NodeWithScore, term: str) -> NodeWithScore:
+    """Stamp a copy of an unstamped passage the way a keyword check anchors it on a term past its opening.
+
+    The one match starts at the first word start at most 80 characters before the term and
+    runs to the end of the passage, a single window.
+
+    Args:
+        scored (NodeWithScore): The unstamped passage; never written to.
+        term (str): The word the check found.
+
+    Returns:
+        NodeWithScore: A copy under the same id, with the same text and that match.
+    """
+    text = _text(scored)
+    lead = text.index(term) - 80
+    start = lead if text[lead - 1].isspace() else text.index(" ", lead) + 1
+    node = scored.node.model_copy(deep=True)
+    node.metadata[MATCH_SPANS_KEY] = [[start, len(text)]]
+    return NodeWithScore(node=node, score=scored.score)
+
+
+def test_an_anchored_hit_of_a_chunk_held_unstamped_keeps_both_at_its_floor() -> None:
+    """A chunk held unstamped that a keyword check finds again keeps what was shown of it and gains the term's sentence.
+
+    Unstamped, the chunk was shown from its opening; one text with and without a match merges, the
+    opening counting as matches of its own, so every legible packing shows both.
+    """
+    held = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+    anchored = _anchored_on(held, "randomization")
+
+    assert ledger.add([anchored]) == [(1, anchored)]
+
+    shown = _kept_at_floor(ledger.entries()[0])
+    assert PLAIN_FACT in shown
+    assert all(_collapsed(PLAIN_TEXT[lo:hi]) in shown for lo, hi in kept_ranges(PLAIN_TEXT, []))
+
+
+def test_an_unstamped_arrival_of_a_chunk_held_anchored_adds_its_opening() -> None:
+    """Found unstamped after a check anchored it, the chunk gains the opening it is shown from without a match."""
+    plain = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([_anchored_on(plain, "randomization")])
+
+    assert ledger.add([plain]) == [(1, plain)]
+
+    shown = _kept_at_floor(ledger.entries()[0])
+    assert PLAIN_FACT in shown
+    assert all(_collapsed(PLAIN_TEXT[lo:hi]) in shown for lo, hi in kept_ranges(PLAIN_TEXT, []))
+
+
+def test_a_stamped_arrival_inside_the_opening_held_unstamped_adds_nothing() -> None:
+    """A match the unstamped entry already shows is no news."""
+    held = scored_node("u", PLAIN_TEXT)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+
+    assert ledger.add([scored_node("u", PLAIN_TEXT, **{MATCH_SPANS_KEY: [[0, len(PLAIN_TEXT)]]})]) == []
+    assert ledger.entries()[0] is held
+
+
+def test_an_anchor_into_a_chunk_held_unstamped_raises_its_floor_from_300_to_750() -> None:
+    """Merged, the chunk's floor rises from 300 to 750: its opening as two matches, the term as a third."""
+    held = scored_node("u", PLAIN_TEXT, filename="trial.pdf", page=3)
+    ledger = EvidenceLedger(cap=5)
+    ledger.add([held])
+    before = ledger.entries()[0]
+    assert MATCH_SPANS_KEY not in before.node.metadata
+    assert text_floor(_text(before), []) == 300
+
+    ledger.add([_anchored_on(held, "randomization")])
+
+    entry = ledger.entries()[0]
+    assert _text(entry) == PLAIN_TEXT
+    assert text_floor(PLAIN_TEXT, [(lo, hi) for lo, hi in entry.node.metadata[MATCH_SPANS_KEY]]) == 750
 
 
 #: An invented section whose decisive sentence sits deep inside it.
@@ -1055,6 +1169,109 @@ def test_a_seed_passage_keeps_todays_floor(length: int, span: tuple[float, float
     anchors: list[tuple[int, int]] = [] if span is None else [(int(span[0] * length), int(span[1] * length))]
 
     assert text_floor("s" * length, anchors) == min(length, MIN_TEXT_CHARS)
+
+
+@pytest.mark.parametrize(
+    ("body", "anchors", "ranges"),
+    [
+        ("x" * 1000, [(100, 700)], [(100, 300)]),
+        ("x" * 1000, [(100, 150)], [(100, 150)]),
+        ("x" * 120, [(10, 20)], [(10, 20)]),
+        ("x" * 1000, [(800, 850), (100, 150)], [(800, 850), (100, 150)]),
+        ("x" * 1000, [(100, 150), (150, 220)], [(100, 150), (150, 220)]),
+        ("x" * 1000, [(100, 400), (150, 220)], [(100, 300), (150, 220)]),
+        ("x" * 1000, [(100, 150), (100, 150)], [(100, 150)]),
+        ("x" * 1000, [(100, 400), (100, 500)], [(100, 300)]),
+        ("x" * 1000, [(950, 1100)], [(950, 1000)]),
+        ("x" * 1000, [(-40, -10), (1005, 1050)], [(0, 300)]),
+        (_join("a" * 1000, "b" * 1000), [(990, SECOND + 10)], [(990, 1000), (SECOND, SECOND + 10)]),
+        (_join("a" * 1000, "b" * 1000), [(500, SECOND + 600)], [(500, 700), (SECOND, SECOND + 200)]),
+        (_join("a" * 1000, "b" * 1000), [(990, SECOND - 2)], [(990, 1000)]),
+        (_join("a" * 1000, "b" * 1000), [(1000, SECOND)], [(0, 122)]),
+        ("x" * 1000, [], [(0, 300)]),
+        ("x" * 120, [], [(0, 120)]),
+        (_join("a" * 1000, "b" * 1000), [], [(0, 122)]),
+        (_join("a" * 100, "b" * 1000), [], [(0, 100)]),
+        (_join("a" * 100, "b" * 100), [], [(0, 205)]),
+        (_join(*["w" * 100] * 7), [], [(0, 1)]),
+        (_join("", "b" * 1000), [], []),
+    ],
+    ids=[
+        "a-long-match-keeps-its-first-200",
+        "a-short-match-keeps-itself",
+        "a-short-matched-passage-keeps-only-its-match",
+        "matches-in-stored-order",
+        "touching-matches",
+        "nested-matches",
+        "an-exactly-repeated-match",
+        "matches-repeated-once-cut",
+        "a-match-partly-outside-the-text",
+        "matches-outside-the-text-read-as-unstamped",
+        "a-match-across-a-join-the-text-holds",
+        "a-long-match-across-a-join",
+        "a-match-ending-inside-the-join",
+        "a-match-on-the-join-alone-reads-as-unstamped",
+        "unstamped-one-window",
+        "unstamped-under-its-floor",
+        "unstamped-two-windows",
+        "unstamped-short-first-window",
+        "unstamped-two-windows-under-their-floor",
+        "unstamped-seven-windows",
+        "unstamped-empty-first-window",
+    ],
+)
+def test_kept_ranges_are_what_every_packing_at_the_floor_keeps(
+    body: str, anchors: list[tuple[int, int]], ranges: list[tuple[int, int]]
+) -> None:
+    """Each match keeps its first 200 characters per window, in stored order; without one, the opening its floor buys.
+
+    Args:
+        body (str): The passage text.
+        anchors (list[tuple[int, int]]): Its match spans, in stored order.
+        ranges (list[tuple[int, int]]): What every packing at or above its floor keeps.
+    """
+    assert kept_ranges(body, anchors) == ranges
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "x" * 1000,
+        "x" * 250,
+        "x" * 120,
+        _join("a" * 1000, "b" * 1000),
+        _join("a" * 100, "b" * 1000),
+        _join("a" * 100, "b" * 100),
+        _join(*["w" * 100] * 7),
+        _join("", "b" * 1000),
+    ],
+    ids=[
+        "one-long-window",
+        "under-the-floor",
+        "under-one-region",
+        "two-windows",
+        "short-first-window",
+        "two-windows-under-their-floor",
+        "seven-windows",
+        "empty-first-window",
+    ],
+)
+def test_an_opening_as_matches_keeps_all_an_unstamped_passage_keeps(body: str) -> None:
+    """A merge that counts an unstamped passage's opening as matches never drops text research read of it.
+
+    Args:
+        body (str): The passage text.
+    """
+    kept: set[int] = set()
+    for lo, hi in kept_ranges(body, _head_spans(body)):
+        kept.update(range(lo, hi))
+    offset = 0
+    for window in body.split(WINDOW_JOIN):
+        end = offset + len(window)
+        for lo, hi in kept_ranges(body, []):
+            # The join between two kept windows is the packer's own, not the passage's text.
+            assert set(range(max(lo, offset), min(hi, end))) <= kept
+        offset = end + len(WINDOW_JOIN)
 
 
 def _header_chars(nodes: list[NodeWithScore]) -> int:
