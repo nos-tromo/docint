@@ -1693,6 +1693,24 @@ def test_an_answer_round_that_only_calls_tools_is_sent_once_more_without_tools(
     assert "zzsecretzz" not in loguru_caplog.text
 
 
+def test_a_resend_keeps_the_reasoning_of_the_round_it_resends() -> None:
+    """The answer round that only called tools still thought: its reasoning is kept, in order, before the resend's."""
+    llm = streaming_tool_llm(
+        [
+            [chunk(reasoning_content="Erst das Programm suchen."), *_calls(_search_call("call_a", "Programm"))],
+            [chunk(reasoning_content="Noch das Wetter prüfen."), *_calls(_search_call("call_b", "Wetter"))],
+            [chunk(reasoning_content="Das Programm reicht für die Antwort."), *_answer()],
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_made_to_answer(llm)))
+
+    assert (llm.stream_chat.call_count, llm.stream_chat.call_args.kwargs, "".join(texts)) == (3, {}, ANSWER)
+    assert result.reasoning == (
+        "Erst das Programm suchen.\n\nNoch das Wetter prüfen.\n\nDas Programm reicht für die Antwort."
+    )
+
+
 @pytest.mark.parametrize(
     ("resend", "warned"),
     [
