@@ -7,16 +7,17 @@ provisional (see :func:`~docint.agents.turn.stream.stream_round`); text written 
 becomes a ``note`` step, which tells the client to withdraw whatever of it was streamed.
 
 The first round is held whole: none of its text is shown before it ends, and text it wrote
-before calls becomes its note unseen. Held so, it can be asked again, once per turn, for the
-first of two causes. With a search note, a first reply that calls no tool is dropped as if never
+before calls becomes its note unseen. Held so, it can be asked again, once per turn, for either
+of two causes. With a search note, a first reply that calls no tool is dropped as if never
 written, its reasoning too, and the round runs again with the note joined to the user's message.
 A first round that breaks off after its first chunk has shown nothing, and runs again as it was
 sent: the break-off is not about searching. The second try is no tool round, but a model call
-under the first round's rules: the limits are checked before it, counting a note still due, and
-a limit makes the model answer with the final note alone, since the search note asks for a
-search that round cannot make; it waits for a model slot as the first round does, and fails as
-the first round does, though a refusal of it no longer means the endpoint takes no tools. It
-streams as later rounds do; if it too calls no tool, its reply is the answer.
+under the first round's rules: the limits are checked before it, counting a note still due; it
+waits for a model slot as the first round does, and fails as the first round does, though a
+refusal of it no longer means the endpoint takes no tools. It streams as later rounds do; if it
+too calls no tool, its reply is the answer. Until a round's calls are in the transcript, nothing
+has answered the search note, so an answer round sent before then carries the final note alone:
+the search note asks for a search that round cannot make.
 
 Limits make the model answer in one more round, its last: the same transcript plus the final note
 as a user message (joined to a user message it would follow: strict chat templates refuse two in
@@ -184,6 +185,8 @@ class _Turn:
             that called no tool or by a break-off.
         note_due (bool): Whether the search note waits to join the user's message: it does once the
             first round runs again, and never when a limit makes the model answer first.
+        bare_base (list[ChatMessage] | None): The base as it was before the search note joined it,
+            for an answer round sent while no round has answered to the note; ``None`` until then.
     """
 
     ctx: ToolContext
@@ -203,6 +206,7 @@ class _Turn:
     reasoning: list[str] = field(default_factory=list)
     asked_again: bool = False
     note_due: bool = False
+    bare_base: list[ChatMessage] | None = None
 
     def stop(self, reason: str) -> None:
         """Record why the model must answer now, keeping the first cause.
@@ -576,7 +580,7 @@ class AgentLoop:
             turn (_Turn): The turn, the search note due.
         """
         turn.note_due = False
-        turn.base = _with_note(turn.base, self._search_note)
+        turn.bare_base, turn.base = turn.base, _with_note(turn.base, self._search_note)
         turn.spent += message_cost(self._search_note, self._ratio)
         logger.info("An agent turn's first round called no tool; it is asked once more, to search first")
 
@@ -604,10 +608,9 @@ class AgentLoop:
         retried = False
         while True:
             carried = turn.images.count
-            messages = [*turn.base, *turn.transcript]
             streamed = yield from self._stream(
                 turn,
-                _with_note(messages, self._final_note) if answer else messages,
+                self._answer_prompt(turn) if answer else [*turn.base, *turn.transcript],
                 tool_choice="none" if answer else "auto",
                 wait=self._slot_wait(turn, answer=answer),
                 hold=hold,
@@ -622,6 +625,21 @@ class AgentLoop:
             turn.transcript, freed = turn.images.drop(turn.transcript)
             turn.spent -= freed
             retried = True
+
+    def _answer_prompt(self, turn: _Turn) -> list[ChatMessage]:
+        """Return what an answer round is sent: the turn so far, the final note joined last.
+
+        While the transcript is empty, no round has answered to the search note, so the base it
+        joined is left out: the note asks for a search the answer round cannot make.
+
+        Args:
+            turn (_Turn): The turn.
+
+        Returns:
+            list[ChatMessage]: The prompt.
+        """
+        base = turn.bare_base if turn.bare_base is not None and not turn.transcript else turn.base
+        return _with_note([*base, *turn.transcript], self._final_note)
 
     def _slot_wait(self, turn: _Turn, *, answer: bool) -> float:
         """Return the longest a round waits for a model slot.
@@ -905,7 +923,7 @@ class AgentLoop:
             turn.reasoning.append(done.reasoning)
         resent = yield from self._stream(
             turn,
-            _with_note([*turn.base, *turn.transcript], self._final_note),
+            self._answer_prompt(turn),
             tool_choice="none",
             wait=self._slot_wait(turn, answer=True),
             offer_tools=False,

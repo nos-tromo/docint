@@ -596,15 +596,20 @@ Each round is one streamed model call, offered the turn's tools with
   warning gives the error's type.
 - **The second try runs under the first round's rules.** A turn gets one, for
   either cause. It is no tool round, but it is a model call. The limits are
-  checked before it, the search note's cost included. A turn whose first round
-  used up the time or the room therefore answers at once, with the final note
-  alone: the search note asks for a search that round cannot make. The second
-  try waits for a model slot as the first round does. It fails as the first
-  round does, except that a refusal of it never reads as the endpoint taking no
-  tools; a second break-off before it shows anything fails the turn. It streams
-  as later rounds do, so text it shows before breaking off is withdrawn by its
-  note like any later round's. If it calls no tool either, its reply is the
-  answer. A pinned scope offers no tools and is never asked again.
+  checked before it, the search note's cost included, so a turn whose first
+  round used up the time, or whose room cannot hold the search note as well,
+  answers at once. The second try waits for a model slot as the first round
+  does. It fails as the first round does, except that a refusal of it never
+  reads as the endpoint taking no tools; a second break-off before it shows
+  anything fails the turn. It streams as later rounds do, so text it shows
+  before breaking off is withdrawn by its note like any later round's. If it
+  calls no tool either, its reply is the answer. A pinned scope offers no tools
+  and is never asked again.
+- **An answer no call has led to carries the final note alone.** Until a
+  round's calls are in the transcript, nothing has answered the search note,
+  and it asks for a search the answer round cannot make. An answer forced
+  before the second try, or after the second try broke off or had its calls
+  withdrawn, is therefore sent the user's message without the search note.
 - **Reasoning is never streamed as the answer.** Think blocks, and a reasoning
   field the endpoint sends apart from the content, are kept for the response's
   `reasoning` field, every round's in order.

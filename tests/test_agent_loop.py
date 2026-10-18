@@ -2160,6 +2160,69 @@ def test_a_first_round_that_broke_off_after_spending_the_time_is_answered() -> N
     assert ("".join(texts), result.reason, llm.stream_chat.call_count) == (ANSWER, "time_budget", 2)
 
 
+#: What an answer round is sent when no round has answered yet: the question and the final note alone.
+FORCED_ALONE = [
+    {"role": "system", "content": SYSTEM_PROMPT},
+    {"role": "user", "content": f"{QUESTION}\n\n{FINAL_NOTE}"},
+]
+
+
+def test_a_forced_answer_after_the_second_try_broke_off_carries_no_search_note() -> None:
+    """The guard's second try broke off after its text showed, adding nothing: the answer has the final note alone.
+
+    No round answered to the search note, and it asks for a search the answer round cannot make.
+    """
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), _broken(), _answer(SHORT_ANSWER)])
+
+    _, _, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({})))))
+
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
+    assert [_wire(message) for message in _sent(llm, 2)] == FORCED_ALONE
+    assert (result.raw_text, result.reason) == (SHORT_ANSWER, "research_failed")
+
+
+@pytest.mark.parametrize("answered", ["at-once", "resent"])
+def test_a_forced_answer_after_the_second_try_was_withdrawn_carries_no_search_note(answered: str) -> None:
+    """The guard's second try had calls the room could not hold, withdrawn unrun: no answer round carries the note.
+
+    Args:
+        answered (str): How the forced round answers: at once, or by a resend after it only called tools.
+    """
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(20)]
+    forced = [_answer(SHORT_ANSWER)]
+    if answered == "resent":
+        forced.insert(0, _calls(_search_call("call_x", "Programm")))
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), _calls(*unoffered), *forced])
+
+    _, _, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({})), budget=TIGHT)))
+
+    answer_rounds = range(2, llm.stream_chat.call_count)
+    assert len(answer_rounds) == len(forced)
+    assert [[_wire(message) for message in _sent(llm, call)] for call in answer_rounds] == [FORCED_ALONE] * len(forced)
+    assert (result.raw_text, result.reason, result.steps) == (SHORT_ANSWER, "context_budget", 0)
+
+
+def test_a_forced_answer_after_the_second_try_searched_keeps_the_search_note() -> None:
+    """With the second try's calls in the transcript, the note stays where they answered it; the final note follows."""
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), _calls(_search_call("call_a", "Programm")), _answer()])
+    registry = _documents(QuerySearch({"Programm": [programme_passage()]}))
+
+    _, _, result = _drain(_turn(_guarded(llm, registry, max_rounds=1)))
+
+    sent = _sent(llm, 2)
+    roles = [MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL, MessageRole.USER]
+    assert [message.role for message in sent] == roles
+    assert (_wire(sent[1]), _wire(sent[-1])) == (
+        {"role": "user", "content": f"{QUESTION}\n\n{SEARCH_NOTE}"},
+        {"role": "user", "content": FINAL_NOTE},
+    )
+    assert (result.reason, result.steps, llm.stream_chat.call_args_list[2].kwargs["tool_choice"]) == (
+        "round_budget",
+        1,
+        "none",
+    )
+
+
 def test_a_second_try_that_breaks_off_after_showing_text_is_withdrawn_and_answered_anew() -> None:
     """The second try streams as later rounds do: text it showed before it broke off is withdrawn, then answered."""
     llm = streaming_tool_llm([_broken(), _broken(), _answer(SHORT_ANSWER)])
