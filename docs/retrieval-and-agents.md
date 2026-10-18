@@ -599,6 +599,12 @@ sends the same conversation, with the final note (`agent_final.txt`) joined to
 the last user message, so a strict chat template never sees two user messages
 in a row. The tools stay declared, with `tool_choice: "none"`.
 
+An endpoint that ignores `tool_choice` may still answer that round with tool
+calls and no text. The round is then sent once more with no tools declared,
+neither `tools` nor `tool_choice`, and its reply is the answer. Only if that
+reply is empty too is the answer left empty. One warning, with the number of
+calls, says the round was sent again.
+
 ### Tools offered
 
 | Target | Tools |
@@ -694,7 +700,8 @@ the turn's error, as it would be on a plain lookup.
 Once a step or text is out, a failed tool call or tool round no longer ends the
 turn: the model answers from what it found, with `research_failed`. What does
 end it is a failure of the answer itself: the answer round failing, finding no
-model slot, or overflowing once its tool replies were already cut. The turn
+model slot, or overflowing once its tool replies were already cut. Its resend
+without tools ends the turn in the same ways, and on any overflow. The turn
 then sends one `error` frame and stores nothing. The code is `context_overflow`
 for an overflow, and `generation_failed` otherwise.
 

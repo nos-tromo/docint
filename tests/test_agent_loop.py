@@ -1587,6 +1587,166 @@ def test_an_answer_round_that_breaks_off_raises_after_its_text() -> None:
     assert isinstance(shown[-1], str)
 
 
+# --- An answer round that only calls tools ---------------------------------------------------
+
+#: The one warning a resend logs: a count, never a call's arguments.
+RESENT = "An agent turn's answer round only called tools (1); it is sent once more with no tools declared"
+
+
+def _made_to_answer(llm: Any, **overrides: Any) -> AgentLoop:
+    """Build a loop allowed one tool round, so the round after a search is the answer round.
+
+    Args:
+        llm (Any): The model double.
+        **overrides (Any): Constructor arguments to change.
+
+    Returns:
+        AgentLoop: The loop.
+    """
+    return _loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})), max_rounds=1, **overrides)
+
+
+def test_an_answer_round_that_only_calls_tools_is_sent_once_more_without_tools(
+    loguru_caplog: LogCaptureFixture,
+) -> None:
+    """An endpoint that ignores ``tool_choice`` answers with calls; sent again declaring no tools, it answers.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Programm")),
+            _calls(_search_call("call_b", "zzsecretzz Wetter")),
+            _answer(),
+        ]
+    )
+
+    progress, texts, result = _drain(_turn(_made_to_answer(llm)))
+
+    assert llm.stream_chat.call_count == 3
+    answer_round, resent = llm.stream_chat.call_args_list[1:]
+    assert answer_round.kwargs["tool_choice"] == "none"
+    assert resent.kwargs == {}
+    assert resent.args == answer_round.args
+    assert ("".join(texts), result.raw_text, result.reason) == (ANSWER, ANSWER, "round_budget")
+    assert _steps(progress) == [("search", "Programm", 1)]
+    assert [scored.node.node_id for scored in result.nodes] == ["programme"]
+    assert loguru_caplog.messages == [RESENT]
+    assert "zzsecretzz" not in loguru_caplog.text
+
+
+@pytest.mark.parametrize(
+    ("resend", "warned"),
+    [
+        (
+            _calls(_search_call("call_c", "Regatta")),
+            ["An agent turn's answer round asked for 1 tool calls anyway; none ran"],
+        ),
+        ([chunk(finish_reason="stop")], []),
+    ],
+    ids=["calls-again", "nothing"],
+)
+def test_a_resend_that_is_still_empty_leaves_the_answer_empty_as_before(
+    resend: list[dict[str, Any]], warned: list[str], loguru_caplog: LogCaptureFixture
+) -> None:
+    """The resend is the only one: a reply with no text again ends the turn as an answer round of calls did.
+
+    Args:
+        resend (list[dict[str, Any]]): What the resend streams.
+        warned (list[str]): The warnings that follow the resend's.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_a", "Programm")), _calls(_search_call("call_b", "Wetter")), resend]
+    )
+
+    _, texts, result = _drain(_turn(_made_to_answer(llm)))
+
+    assert llm.stream_chat.call_count == 3
+    assert (texts, result.raw_text, result.reason) == ([], "", "round_budget")
+    assert [scored.node.node_id for scored in result.nodes] == ["programme"]
+    assert loguru_caplog.messages == [RESENT, *warned]
+
+
+def test_an_answer_round_with_text_beside_its_calls_is_not_resent(loguru_caplog: LogCaptureFixture) -> None:
+    """Text is the answer: a round that wrote some beside its calls keeps it, and none of its calls runs.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_a", "Programm")), _calls(_search_call("call_b", "Wetter"), text=SHORT_ANSWER)]
+    )
+
+    _, texts, result = _drain(_turn(_made_to_answer(llm)))
+
+    assert llm.stream_chat.call_count == 2
+    assert ("".join(texts), result.raw_text) == (SHORT_ANSWER, SHORT_ANSWER)
+    assert loguru_caplog.messages == ["An agent turn's answer round asked for 1 tool calls anyway; none ran"]
+
+
+def test_a_pinned_round_that_only_calls_tools_is_not_resent() -> None:
+    """The pinned round declares no tools already, so it is never sent again without them."""
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"))])
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({}))), pinned=[programme_passage()]))
+
+    assert llm.stream_chat.call_count == 1
+    assert (texts, result.raw_text) == ([], "")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("invented outage"),
+        _status_error(openai.RateLimitError, 429, "rate limit reached"),
+        bad_request(TOOL_CHOICE_REJECTED),
+    ],
+    ids=["outage", "rate-limit", "refused"],
+)
+def test_a_resend_that_fails_raises_as_a_failed_answer_round_does(error: Exception) -> None:
+    """The resend is the answer round once more: its failure ends the turn, and no empty answer passes as one.
+
+    Args:
+        error (Exception): What the resend's first pull raises.
+    """
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_a", "Programm")), _calls(_search_call("call_b", "Wetter")), error]
+    )
+
+    shown, raised = _until_raised(_turn(_made_to_answer(llm)))
+
+    assert (raised, llm.stream_chat.call_count) == (error, 3)
+    assert _steps(item for item in shown if isinstance(item, AgentProgress)) == [("search", "Programm", 1)]
+    assert not any(isinstance(item, (str, AgentResult)) for item in shown)
+
+
+def test_a_resend_that_overflows_raises_naming_the_context_window() -> None:
+    """An overflowing resend is reported as an answer round's second overflow is."""
+    overflow = bad_request(OVERFLOW)
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_a", "Programm")), _calls(_search_call("call_b", "Wetter")), overflow]
+    )
+
+    _, raised = _until_raised(_turn(_made_to_answer(llm)))
+
+    assert (type(raised), raised.__cause__, llm.stream_chat.call_count) == (ValueError, overflow, 3)
+    assert "context window" in str(raised)
+
+
+def test_a_resend_without_a_model_slot_raises_after_waiting_as_the_answer_does() -> None:
+    """The resend waits for a model slot as the answer round does, and without one the turn fails."""
+    slots = _Granting(True, True, False)
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), _calls(_search_call("call_b", "Wetter"))])
+
+    shown, raised = _until_raised(_turn(_made_to_answer(llm, model_slots=slots, clock=lambda: 0.0)))
+
+    assert (type(raised), llm.stream_chat.call_count) == (NoSlot, 2)
+    assert not any(isinstance(item, (str, AgentResult)) for item in shown)
+    assert slots.waits == [MODEL_SLOT_WAIT_S, 120.0, 120.0]
+
+
 # --- Context room ---------------------------------------------------------------------------
 
 

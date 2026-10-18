@@ -8,7 +8,9 @@ becomes a ``note`` step, which tells the client to withdraw whatever of it was s
 
 Limits make the model answer in one more round, its last: the same transcript plus the final note
 as a user message (joined to a user message it would follow: strict chat templates refuse two in
-a row), the tools still declared but ``tool_choice="none"``. ``agent.reason`` names the
+a row), the tools still declared but ``tool_choice="none"``. An endpoint that ignores
+``tool_choice`` may answer that round with tool calls and no text: the round is then sent once
+more declaring no tools, and that reply is the answer. ``agent.reason`` names the
 first cause: the rounds spent (``round_budget``), the time spent (``time_budget``), no room left
 for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
 row that added no passage (``idle``). Limits are checked between rounds, and the time also
@@ -50,7 +52,8 @@ round that ran:
   raises ``ValueError`` naming the context window;
 * the answer round waits for a model slot up to the time left, and at least ``MODEL_SLOT_WAIT_S``;
   without one it raises ``NoSlot``, and any other failure of it raises the error as it came: there
-  is no answer to keep, and an empty or partial one must not pass as whole.
+  is no answer to keep, and an empty or partial one must not pass as whole. Its resend without
+  tools fails the same way, an overflow of it raising ``ValueError`` naming the context window.
 
 Nothing here logs a query, an answer, a tool argument or document text: only counts, tool names,
 exception types and reason tokens.
@@ -539,15 +542,12 @@ class AgentLoop:
         retried = False
         while True:
             carried = turn.images.count
-            time_left = max(0.0, self._time_left(turn))
-            # A started turn owes its answer: it waits the time left, and at least the usual wait.
-            wait = max(MODEL_SLOT_WAIT_S, time_left) if answer and turn.shown else min(MODEL_SLOT_WAIT_S, time_left)
             messages = [*turn.base, *turn.transcript]
             streamed = yield from self._stream(
                 turn,
                 _with_note(messages, self._final_note) if answer else messages,
                 tool_choice="none" if answer else "auto",
-                wait=wait,
+                wait=self._slot_wait(turn, answer=answer),
             )
             if streamed is None or streamed.began or not carried or retried:
                 return streamed
@@ -559,6 +559,21 @@ class AgentLoop:
             turn.transcript, freed = turn.images.drop(turn.transcript)
             turn.spent -= freed
             retried = True
+
+    def _slot_wait(self, turn: _Turn, *, answer: bool) -> float:
+        """Return the longest a round waits for a model slot.
+
+        Args:
+            turn (_Turn): The turn.
+            answer (bool): Whether the round is the answer round.
+
+        Returns:
+            float: Seconds: a started turn's answer waits the time left, and at least
+            ``MODEL_SLOT_WAIT_S``; any other round waits that at most, never past the time left.
+        """
+        time_left = max(0.0, self._time_left(turn))
+        # A started turn owes its answer: it waits the time left, and at least the usual wait.
+        return max(MODEL_SLOT_WAIT_S, time_left) if answer and turn.shown else min(MODEL_SLOT_WAIT_S, time_left)
 
     def _show_pictures(self, turn: _Turn, held: int) -> None:
         """Show the model the pictures a round admitted, in one message after its tool replies.
@@ -582,6 +597,7 @@ class AgentLoop:
         tool_choice: str,
         wait: float,
         opening: Callable[[], AgentProgress] | None = None,
+        offer_tools: bool = True,
     ) -> Generator[AgentProgress | str, None, _Streamed | None]:
         """Stream one round in a model slot, yielding what it releases with the label swapped in.
 
@@ -595,6 +611,8 @@ class AgentLoop:
             wait (float): The longest the round waits for a model slot.
             opening (Callable[[], AgentProgress] | None): Records the step the round opens with,
                 yielded when its first event arrives: a round that fails before then shows nothing.
+            offer_tools (bool): Whether the round declares the turn's tools; without them it sends
+                neither ``tools`` nor ``tool_choice``.
 
         Yields:
             AgentProgress | str: The opening step, then the answer text the round releases.
@@ -611,7 +629,7 @@ class AgentLoop:
                 for event in stream_round(
                     self._llm,
                     messages,
-                    tools=turn.schemas,
+                    tools=turn.schemas if offer_tools else [],
                     tool_choice=tool_choice,
                     reasoning_open=self._reasoning_open,
                 ):
@@ -745,6 +763,9 @@ class AgentLoop:
     def _final_round(self, turn: _Turn) -> Iterator[AgentProgress | str | AgentResult]:
         """Make the model answer with no tool to choose, and end the turn.
 
+        A reply that holds tool calls and no text is sent once more, declaring no tools (see
+        :meth:`_resend_without_tools`).
+
         Args:
             turn (_Turn): The turn, its reason recorded.
 
@@ -752,10 +773,12 @@ class AgentLoop:
             AgentProgress | str | AgentResult: The answer text, then the result.
 
         Raises:
-            NoSlot: When no model slot comes free for the answer, whether or not anything was shown.
+            NoSlot: When no model slot comes free for the answer or its resend, whether or not
+                anything was shown.
             ToolsUnavailable: When this is the turn's first call and it is refused as sent.
-            ValueError: Naming the context window, on an overflow with nothing left to cut.
-            Exception: The endpoint's error, when the answer fails.
+            ValueError: Naming the context window, on an overflow with nothing left to cut, or
+                when the resend overflows.
+            Exception: The endpoint's error, when the answer or its resend fails.
         """
         logger.info("An agent turn answers after {} tool rounds ({})", turn.steps, turn.reason)
         while True:
@@ -775,7 +798,57 @@ class AgentLoop:
                 continue
             _raise_if_refused(turn, exc)
             raise exc
+        if streamed.done.calls and not streamed.done.text.strip():
+            streamed = yield from self._resend_without_tools(turn, streamed)
         yield from self._finish(turn, streamed)
+
+    def _resend_without_tools(
+        self, turn: _Turn, streamed: _Streamed
+    ) -> Generator[AgentProgress | str, None, _Streamed]:
+        """Send an answer round that only called tools once more, declaring no tools.
+
+        An endpoint that ignores ``tool_choice`` answers the forced round with calls. The same
+        messages go out once more with neither ``tools`` nor ``tool_choice``, and that reply is
+        the answer, empty or not. The resend fails as the answer round does: there is no answer
+        to keep, and an empty one must not pass as whole.
+
+        Args:
+            turn (_Turn): The turn.
+            streamed (_Streamed): The answer round, ended in calls with no text.
+
+        Yields:
+            AgentProgress | str: Answer text the resend releases.
+
+        Returns:
+            _Streamed: The resend, ended.
+
+        Raises:
+            NoSlot: When no model slot comes free for it.
+            ValueError: Naming the context window, when it overflows before any text.
+            Exception: The endpoint's error, as it came, when it fails otherwise.
+        """
+        done = cast(RoundDone, streamed.done)
+        logger.warning(
+            "An agent turn's answer round only called tools ({}); it is sent once more with no tools declared",
+            len(done.calls),
+        )
+        if done.reasoning:
+            turn.reasoning.append(done.reasoning)
+        resent = yield from self._stream(
+            turn,
+            _with_note([*turn.base, *turn.transcript], self._final_note),
+            tool_choice="none",
+            wait=self._slot_wait(turn, answer=True),
+            offer_tools=False,
+        )
+        if resent is None:
+            raise NoSlot
+        if resent.done is None:
+            exc = cast(Exception, resent.error)
+            if not resent.shown and is_context_overflow(exc):
+                raise ValueError(_OVERFLOW_MESSAGE) from exc
+            raise exc
+        return resent
 
     def _finish(self, turn: _Turn, streamed: _Streamed) -> Iterator[str | AgentResult]:
         """End the turn with an answer round that ran: keep its reasoning, run none of its calls, send the answer.
