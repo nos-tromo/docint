@@ -20,7 +20,8 @@ RESULT_CHARS_REASONING = 2000
 #: Longest text of one passage within a search reply in characters, its header excluded.
 PASSAGE_CHARS = 900
 PASSAGE_CHARS_REASONING = 700
-#: Tokens of earlier conversation a turn sends as messages; a thinking model's reply reserve takes the difference.
+#: Tokens of earlier conversation a turn sends: its summary block in the system prompt and its recent exchanges
+#: as messages, each with its envelope; a thinking model's reply reserve takes the difference.
 HISTORY_ALLOWANCE_TOKENS = 1300
 HISTORY_ALLOWANCE_TOKENS_REASONING = 750
 
@@ -42,10 +43,13 @@ def message_cost(text: str, char_token_ratio: float) -> int:
 
 
 def history_allowance_tokens(reasoning: bool) -> int:
-    """Return how many tokens of earlier conversation a turn may send as messages.
+    """Return how many tokens of earlier conversation a turn may send.
 
-    A thinking model reserves more of the window for its reply, so its allowance is
-    smaller: the history gives way before the turn runs out of room for tool replies.
+    The allowance covers the whole conversation window: its summary block
+    (``ConversationWindow.summary_block()``), which the system prompt carries, and its
+    recent exchanges, sent as messages each with its envelope. A thinking model
+    reserves more of the window for its reply, so its allowance is smaller: the
+    history gives way before the turn runs out of room for tool replies.
 
     Args:
         reasoning (bool): Whether the answer model thinks before it answers.
