@@ -19,6 +19,7 @@ from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.types import AnswerMode, PriorTurn
 from docint.core.rag import AGENT_LEDGER_CAP, AgentTurn
+from docint.core.retrieval.visual import RetrievalTarget
 from docint.core.state.base import Base
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.turn import Turn
@@ -363,14 +364,14 @@ def test_each_path_stores_the_mode_it_answered_in(
 @pytest.mark.parametrize("entry", ["chat", "stream_chat"])
 @pytest.mark.parametrize("target", ["all", "documents", "visual"])
 def test_an_agent_turn_stores_the_target_it_answered_under(
-    session_manager: SessionManager, entry: str, target: str
+    session_manager: SessionManager, entry: str, target: RetrievalTarget
 ) -> None:
     """An agent turn records its evidence target as a plain turn does, so a reloaded chat keeps its chip.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
         entry (str): The entry point under test, ``chat`` or ``stream_chat``.
-        target (str): The evidence target the turn is asked under.
+        target (RetrievalTarget): The evidence target the turn is asked under.
     """
     engine = MagicMock()
     rag = cast(Any, session_manager.rag)
