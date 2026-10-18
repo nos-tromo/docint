@@ -1256,9 +1256,9 @@ class SessionManager:
                 did not answer, which also clears a replaced turn's trail.
             answer_mode (AnswerMode | None): How the turn was answered. Stored
                 as given, so a lookup that carries a trail is not read back as
-                an assessment. ``None`` stores nothing — readers then infer the
-                mode from the trail — and, like the trail, resets a replaced
-                turn's.
+                an assessment. ``None`` stores NULL, so readers infer the mode
+                from the trail; on a replaced turn it also resets the stored
+                mode, as ``agent_trail=None`` resets the trail.
 
         Returns:
             int: The 0-based index of the persisted turn within the
