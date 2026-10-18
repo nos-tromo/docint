@@ -3126,6 +3126,7 @@ class RAG:
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _bounded_text_model: OpenAI | None = field(default=None, init=False, repr=False)
+    _agent_reasoning_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
     sparse_client_config: SparseClientConfig | None = field(default=None, init=False, repr=False)
     embed_client_config: EmbedClientConfig | None = field(default=None, init=False, repr=False)
@@ -3760,14 +3761,27 @@ class RAG:
         Returns:
             OpenAI: The post-retrieval generation model.
         """
-        override = _reasoning_override.get()
-        enabled = self.openai_config.thinking_enabled if override is None else override
-        if not enabled or get_openai_reasoning_effort(self.openai_config, enabled=True) is None:
+        if not self.reasoning_requested:
             return self.text_model
 
         if self._post_retrieval_text_model is None:
             self._post_retrieval_text_model = self._create_text_model(enable_reasoning=True)
         return self._post_retrieval_text_model
+
+    @property
+    def reasoning_requested(self) -> bool:
+        """Whether this request's answer runs on the reasoning model.
+
+        The request's toggle decides while a :meth:`reasoning_scope` is active, else the
+        ``OPENAI_ENABLE_THINKING`` default; either way only when a reasoning effort is
+        configured. :attr:`post_retrieval_text_model` and :attr:`agent_text_model` follow it.
+
+        Returns:
+            bool: ``True`` when the reasoning model answers.
+        """
+        override = _reasoning_override.get()
+        enabled = self.openai_config.thinking_enabled if override is None else override
+        return bool(enabled) and get_openai_reasoning_effort(self.openai_config, enabled=True) is not None
 
     @property
     def bounded_text_model(self) -> OpenAI:
@@ -3787,6 +3801,23 @@ class RAG:
         if self._bounded_text_model is None:
             self._bounded_text_model = self._create_text_model(max_retries=0)
         return self._bounded_text_model
+
+    @property
+    def agent_text_model(self) -> OpenAI:
+        """Return the chat model every round of an agent turn calls, one attempt per call.
+
+        It follows the request's reasoning toggle as :attr:`post_retrieval_text_model` does
+        (see :attr:`reasoning_requested`): the reasoning model, else :attr:`bounded_text_model`.
+        Retries are off for both, since the loop's time budget and model slots assume none.
+
+        Returns:
+            OpenAI: The model; each kind is built once.
+        """
+        if not self.reasoning_requested:
+            return self.bounded_text_model
+        if self._agent_reasoning_text_model is None:
+            self._agent_reasoning_text_model = self._create_text_model(enable_reasoning=True, max_retries=0)
+        return self._agent_reasoning_text_model
 
     @property
     def qdrant_client(self) -> QdrantClient:
