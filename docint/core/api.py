@@ -875,6 +875,7 @@ def _validation_payload(
     rewritten_query: str | None = None,
     intent: str | None = None,
     tool_used: str | None = None,
+    previous_user_input: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate a response against retrieved sources and return metadata.
 
@@ -887,6 +888,8 @@ def _validation_payload(
         rewritten_query (str | None): Rewritten query from the understanding agent, if any.
         intent (str | None): Detected intent label, if any.
         tool_used (str | None): Retrieval tool that produced the sources, if any.
+        previous_user_input (str | None): The user's message before this one, shown to the
+            validator ahead of the question; ``None`` shows none.
 
     Returns:
         dict[str, bool | str | None]: Validation metadata dictionary suitable for API responses.
@@ -912,7 +915,7 @@ def _validation_payload(
         intent=intent,
         tool_used=tool_used,
     )
-    validated = validator.finalize(retrieval, Turn(user_input=question))
+    validated = validator.finalize(retrieval, Turn(user_input=question, previous_user_input=previous_user_input))
     return {
         "validation_checked": validated.validation_checked,
         "validation_mismatch": validated.validation_mismatch,
@@ -1030,6 +1033,55 @@ def _assessment_validation(
         }
     return _validation_payload(
         question=question, answer=evidence, sources=cited_sources(evidence, sources), intent="assessment"
+    )
+
+
+def _turn_validation(
+    data: dict[str, Any],
+    *,
+    question: str,
+    answer: str,
+    sources: list[dict[str, Any]],
+    previous_user_input: str | None,
+    summary_diagnostics: dict[str, Any] | None,
+    retrieval_query: str | None,
+) -> dict[str, bool | str | None]:
+    """Validate a chat turn's answer as its answer mode asks.
+
+    An assessment is checked on its source-backed part alone (:func:`_assessment_validation`).
+    An agent lookup is checked against the sources it cites, since its evidence holds every
+    passage its tools showed, with the previous user message ahead of the question: the agent
+    read the conversation, so a follow-up is only judged right against what it follows. A plain
+    lookup is checked as it always was.
+
+    Args:
+        data (dict[str, Any]): The turn's payload; ``answer_mode`` names an agent turn's mode.
+        question (str): The user's question, verbatim.
+        answer (str): The answer text.
+        sources (list[dict[str, Any]]): The turn's numbered sources.
+        previous_user_input (str | None): The user's message before this one, if any.
+        summary_diagnostics (dict[str, Any] | None): A plain lookup's coverage diagnostics.
+        retrieval_query (str | None): The query a plain lookup retrieved with.
+
+    Returns:
+        dict[str, bool | str | None]: Validation metadata.
+    """
+    mode = data.get("answer_mode")
+    if mode == "assessment":
+        return _assessment_validation(question=question, answer=answer, sources=sources, agent=data.get("agent"))
+    if mode == "lookup":
+        return _validation_payload(
+            question=question,
+            answer=answer,
+            sources=cited_sources(answer, sources),
+            previous_user_input=previous_user_input,
+        )
+    return _validation_payload(
+        question=question,
+        answer=answer,
+        sources=sources,
+        summary_diagnostics=summary_diagnostics,
+        retrieval_query=retrieval_query,
     )
 
 
@@ -2488,6 +2540,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 rag.create_query_engine()
 
             data: dict[str, Any]
+            previous_user_input: str | None = None
             if payload.retrieval_mode == "stateless":
                 # Stateless mode has no session to pin a scope to, so the
                 # request is the only place one can come from.
@@ -2553,6 +2606,10 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 )
                 # An agent turn reads its own history, and its fallback binds none on this endpoint.
                 agent = _agent_turn_allowed(payload.retrieval_target)
+                if agent and rag.sessions is not None:
+                    # Read before the turn is stored: an agent lookup is validated beside the message it follows.
+                    prior_turn = rag.sessions.get_prior_turn(session_id, owner=principal.effective_owner)
+                    previous_user_input = prior_turn.user_text if prior_turn is not None else None
                 data = rag.chat(
                     payload.question,
                     session_id=session_id,
@@ -2596,18 +2653,15 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
         # ("session"/"stateless"), not the retrieval tool, so it is not
         # forwarded as `tool_used`. The orchestrator path populates
         # `tool_used` directly on the RetrievalResult instead.
-        if isinstance(data, dict) and data.get("answer_mode") == "assessment":
-            validation = _assessment_validation(
-                question=payload.question, answer=answer, sources=sources, agent=data.get("agent")
-            )
-        else:
-            validation = _validation_payload(
-                question=payload.question,
-                answer=answer,
-                sources=sources,
-                summary_diagnostics=summary_diagnostics_query,
-                retrieval_query=retrieval_query_value,
-            )
+        validation = _turn_validation(
+            data if isinstance(data, dict) else {},
+            question=payload.question,
+            answer=answer,
+            sources=sources,
+            previous_user_input=previous_user_input,
+            summary_diagnostics=summary_diagnostics_query,
+            retrieval_query=retrieval_query_value,
+        )
         return {
             "answer": answer,
             "sources": sources,
@@ -2702,6 +2756,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         try:
             full_answer = ""
             final_payload: dict[str, Any] | None = None
+            previous_user_input: str | None = None
             if payload.retrieval_mode == "stateless":
                 # Stateless mode has no session to pin a scope to, so the
                 # request is the only place one can come from.
@@ -2881,6 +2936,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         yield _sse_agent_frame(chunk)
                     elif isinstance(chunk, dict):
                         final_payload = chunk
+                previous_user_input = getattr(stream_state.get("prior_turn"), "user_text", None)
 
             payload_out = dict(final_payload or {})
             # Read off the first pass: the corrective retry below replaces the payload.
@@ -2901,18 +2957,15 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             )
             # `retrieval_mode` here is the session-routing mode, not the
             # retrieval tool, so it is not forwarded as `tool_used`.
-            if payload_out.get("answer_mode") == "assessment":
-                validation = _assessment_validation(
-                    question=payload.question, answer=answer, sources=sources, agent=payload_out.get("agent")
-                )
-            else:
-                validation = _validation_payload(
-                    question=payload.question,
-                    answer=answer,
-                    sources=sources,
-                    summary_diagnostics=stream_summary_diagnostics,
-                    retrieval_query=stream_retrieval_query,
-                )
+            validation = _turn_validation(
+                payload_out,
+                question=payload.question,
+                answer=answer,
+                sources=sources,
+                previous_user_input=previous_user_input,
+                summary_diagnostics=stream_summary_diagnostics,
+                retrieval_query=stream_retrieval_query,
+            )
             payload_out.update(validation)
             # Persist validation onto the row stream_chat already wrote so
             # restored sessions see the same banner state as fresh turns.

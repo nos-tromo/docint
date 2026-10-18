@@ -6306,6 +6306,114 @@ def test_a_scoped_turns_refusal_caches_nothing(
     assert not any("offering tools" in message for message in loguru_caplog.messages)
 
 
+class _PromptRecorder:
+    """A validation model double: records each prompt and answers one fixed verdict."""
+
+    def __init__(self, verdict: str) -> None:
+        """Hold the verdict.
+
+        Args:
+            verdict (str): The JSON the model answers.
+        """
+        self.verdict = verdict
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str) -> types.SimpleNamespace:
+        """Record the prompt and answer the verdict.
+
+        Args:
+            prompt (str): The validation prompt.
+
+        Returns:
+            types.SimpleNamespace: A response carrying the verdict as its ``text``.
+        """
+        self.prompts.append(prompt)
+        return types.SimpleNamespace(text=self.verdict)
+
+
+@pytest.mark.parametrize("path", ["/stream_query", "/query"])
+def test_agent_lookup_validation_uses_cited_sources_and_the_previous_question(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """An agent lookup is checked against the passages it cites, beside the message it follows.
+
+    Its evidence holds every passage its tools showed, and it read the conversation, so a
+    follow-up is only judged right against what it follows.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    rag.sessions.prior_turn = PriorTurn(
+        user_text="Wer leitet den Hafenverein?", assistant_text="Person A leitet den Hafenverein [1]."
+    )
+    validator = _PromptRecorder('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    rag.text_model = validator
+    sources = [
+        {"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."},
+        {"id": "b", "citation_index": 2, "text": "Person A ist seit 2019 Vorsitzende des Hafenvereins."},
+        {"id": "c", "citation_index": 3, "text": "Die Stände öffnen um zehn Uhr."},
+    ]
+    final = _agent_final(response="Seit 2019 [2].", sources=sources)
+    monkeypatch.setattr(rag, "stream_chat", _scripted_stream([], ["Seit 2019 [2].", final]))
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    if path == "/query":
+        body = client.post(path, json={"question": "Und seit wann?"}).json()
+    else:
+        body = _stream_frames(client, question="Und seit wann?")[-1]
+
+    [prompt] = validator.prompts
+    assert "Previous user message:\nWer leitet den Hafenverein?\n\nUser query:\nUnd seit wann?\n\n" in prompt
+    assert "Person A ist seit 2019" in prompt
+    assert "plant das Fest" not in prompt
+    assert "Stände öffnen" not in prompt
+    assert (body["validation_checked"], body["validation_mismatch"]) == (True, False)
+
+
+def test_a_plain_lookup_is_validated_as_before(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """The plain path's validator sees every source and the retrieval query, and no previous message.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    cast(Any, api_module.rag.sessions).prior_turn = PriorTurn(
+        user_text="Wer leitet den Hafenverein?", assistant_text="Person A leitet den Hafenverein [1]."
+    )
+    seen: list[dict[str, Any]] = []
+
+    def _validation(**kwargs: Any) -> dict[str, Any]:
+        """Record the validator's inputs and pass the answer.
+
+        Args:
+            **kwargs (Any): The inputs.
+
+        Returns:
+            dict[str, Any]: A passing verdict.
+        """
+        seen.append(kwargs)
+        return {"validation_checked": True, "validation_mismatch": False, "validation_reason": None}
+
+    monkeypatch.setattr(api_module, "_validation_payload", _validation)
+
+    _stream_text(client)
+
+    assert seen == [
+        {
+            "question": "What did the UN say?",
+            "answer": "answer",
+            "sources": [{"id": 1}],
+            "summary_diagnostics": None,
+            "retrieval_query": "rewritten::What did the UN say?",
+        }
+    ]
+
+
 def _assessment_stream(
     calls: list[dict[str, Any]], *, agent: dict[str, Any], answer: str
 ) -> Callable[..., Generator[Any, None, None]]:

@@ -36,10 +36,18 @@ class AgentProgress:
 
 @dataclass
 class Turn:
-    """Represents a single user turn."""
+    """Represents a single user turn.
+
+    Attributes:
+        user_input (str): The user's message, verbatim.
+        session_id (str | None): The conversation it belongs to, if any.
+        previous_user_input (str | None): The user's message before this one, for a validator
+            judging a follow-up; ``None`` when it is not shown one.
+    """
 
     user_input: str
     session_id: str | None = None
+    previous_user_input: str | None = None
 
 
 @dataclass

@@ -148,6 +148,7 @@ class ResultValidationResponseAgent(ResponseAgent):
                 rewritten_query=result.rewritten_query,
                 intent=result.intent,
                 tool_used=result.tool_used,
+                previous_query=turn.previous_user_input,
             )
             response = self.llm.complete(prompt)
             response_text = str(getattr(response, "text", "") or "").strip()
@@ -225,6 +226,7 @@ class ResultValidationResponseAgent(ResponseAgent):
         rewritten_query: str | None = None,
         intent: str | None = None,
         tool_used: str | None = None,
+        previous_query: str | None = None,
     ) -> str:
         """Build validation prompt for the secondary LLM check.
 
@@ -237,6 +239,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             rewritten_query (str | None): The rewritten query produced by the understanding agent, if any.
             intent (str | None): Detected intent label.
             tool_used (str | None): Retrieval tool that produced the sources.
+            previous_query (str | None): The user's message before this one, shown ahead of the query.
 
         Returns:
             str: Prompt asking for groundedness/relevance validation.
@@ -251,6 +254,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             rewritten_query=rewritten_query,
             intent=intent,
             tool_used=tool_used,
+            previous_query=previous_query,
         )
         if intent == "assessment":
             retrieval_context = f"{retrieval_context}{self._assessment_note}\n\n"
@@ -269,8 +273,12 @@ class ResultValidationResponseAgent(ResponseAgent):
         rewritten_query: str | None,
         intent: str | None,
         tool_used: str | None,
+        previous_query: str | None = None,
     ) -> str:
         """Render retrieval context (original query + rewrite + intent) for the validator.
+
+        A previous message comes first: a follow-up such as "And since when?" is only judged
+        right against what it follows.
 
         Args:
             user_query (str): Verbatim user input.
@@ -278,11 +286,14 @@ class ResultValidationResponseAgent(ResponseAgent):
             rewritten_query (str | None): Rewritten query from the understanding agent.
             intent (str | None): Detected intent label.
             tool_used (str | None): Retrieval tool that produced the sources.
+            previous_query (str | None): The user's message before this one; left out when blank.
 
         Returns:
             str: Prompt context block ending in a blank line.
         """
-        lines = [f"User query:\n{user_query}"]
+        previous = (previous_query or "").strip()
+        lines = [f"Previous user message:\n{previous}"] if previous else []
+        lines.append(f"User query:\n{user_query}")
         effective_retrieval = retrieval_query or rewritten_query
         if effective_retrieval and effective_retrieval.strip().casefold() != user_query.strip().casefold():
             lines.append(f"Retrieval query (after rewrite):\n{effective_retrieval}")

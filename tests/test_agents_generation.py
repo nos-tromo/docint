@@ -548,3 +548,35 @@ def test_validation_assessment_note_is_localized(monkeypatch: pytest.MonkeyPatch
     prompt = agent._build_prompt(query="q", answer="a", sources=[{"text": "t"}], intent="assessment")
 
     assert "nicht Gegenstand der Prüfung" in prompt
+
+
+def test_the_validator_reads_the_previous_user_message_ahead_of_the_query() -> None:
+    """A follow-up is judged against what it follows, so the message before it comes first, labelled."""
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(answer="Seit 2019 [1].", sources=[{"text": "Person A leitet den Hafenverein seit 2019."}])
+
+    agent.finalize(result, Turn(user_input="Und seit wann?", previous_user_input="Wer leitet den Hafenverein?"))
+
+    assert llm.last_prompt is not None
+    assert "Previous user message:\nWer leitet den Hafenverein?\n\nUser query:\nUnd seit wann?\n\n" in llm.last_prompt
+
+
+@pytest.mark.parametrize("previous", [None, "", "   "], ids=["none", "empty", "blank"])
+def test_without_a_previous_message_the_validator_context_is_unchanged(previous: str | None) -> None:
+    """A turn that follows nothing is validated as before: no previous-message line.
+
+    Args:
+        previous (str | None): What the turn carries as the previous message.
+    """
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+
+    agent.finalize(
+        RetrievalResult(answer="answer", sources=[{"text": "source"}]),
+        Turn(user_input="question", previous_user_input=previous),
+    )
+
+    assert llm.last_prompt is not None
+    assert "Previous user message" not in llm.last_prompt
+    assert "User query:\nquestion\n\n" in llm.last_prompt
