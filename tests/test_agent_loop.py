@@ -12,6 +12,7 @@ import math
 import threading
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import asdict
 from typing import Any, cast
 
 import httpx
@@ -70,6 +71,7 @@ from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
 from docint.agents.turn.stream import Provisional
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
+    PassageReply,
     ReadTool,
     SearchFn,
     SearchTool,
@@ -78,6 +80,7 @@ from docint.agents.turn.tools import (
     ToolReply,
     ToolWork,
     error_reply,
+    trail_detail,
 )
 from docint.agents.types import AgentProgress
 from docint.core.retrieval.visual import VISUAL_IMAGES_ATTACHED_KEY, render_legend
@@ -2359,6 +2362,215 @@ def test_a_round_that_adds_evidence_resets_the_idle_count() -> None:
 
     assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "auto"
     assert (result.reason, result.steps) == (None, 3)
+
+
+class _Counter:
+    """A tool that answers with a count and admits no passage, as a word count does."""
+
+    def __init__(
+        self,
+        *,
+        informative: bool = True,
+        trail: Mapping[str, Any] | None = None,
+        error: bool = False,
+        text: str = "3 Treffer.",
+    ) -> None:
+        """Describe the tool and what every call is answered with.
+
+        Args:
+            informative (bool): Whether the count tells the model something new.
+            trail (Mapping[str, Any] | None): The extra keys of the call's step.
+            error (bool): Whether the reply says the call was not answered.
+            text (str): What the model reads.
+        """
+        self.name = "count"
+        self.description = "Count the chunks that hold the words."
+        self.parameters: dict[str, Any] = {"type": "object", "properties": {"words": {"type": "string"}}}
+        self._informative = informative
+        self._trail = trail
+        self._error = error
+        self._text = text
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Answer without a fetch.
+
+        Args:
+            arguments (Mapping[str, Any]): ``words``.
+            ctx (ToolContext): Unused.
+
+        Returns:
+            ToolReply | ToolWork: The work.
+        """
+        detail = trail_detail(arguments.get("words"))
+
+        def _count(fetched: Any, context: ToolContext) -> ToolReply:
+            """Build the reply.
+
+            Args:
+                fetched (Any): Nothing.
+                context (ToolContext): Unused.
+
+            Returns:
+                ToolReply: The count, which admits no passage.
+            """
+            return PassageReply(
+                text=self._text,
+                found=0,
+                action=self.name,
+                detail=detail,
+                error=self._error,
+                informative=self._informative,
+                trail=self._trail,
+            )
+
+        return ToolWork(detail=detail, fetch=None, answer=_count)
+
+
+def _count_call(call_id: str, words: str) -> tuple[str, str, Any]:
+    """Name one ``count`` call.
+
+    Args:
+        call_id (str): The call's id.
+        words (str): The words it counts.
+
+    Returns:
+        tuple[str, str, Any]: The call, as :func:`_calls` takes it.
+    """
+    return (call_id, "count", {"words": words})
+
+
+def test_rounds_whose_replies_only_count_are_not_idle() -> None:
+    """A reply that told the model something without admitting a passage is news, so its round is not idle."""
+    llm = streaming_tool_llm(
+        [
+            _calls(_count_call("call_a", "Hafen")),
+            _calls(_count_call("call_b", "Fest")),
+            _calls(_count_call("call_c", "Kai")),
+            _answer(),
+        ]
+    )
+
+    progress, texts, result = _drain(_turn(_loop(llm, ToolRegistry([_Counter()]))))
+
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
+    assert _steps(progress) == [("count", "Hafen", 0), ("count", "Fest", 0), ("count", "Kai", 0)]
+    assert (result.reason, result.steps, "".join(texts)) == (None, 3, ANSWER)
+
+
+def test_rounds_whose_replies_tell_the_model_nothing_new_are_still_idle() -> None:
+    """The same rounds with replies that are no news make the model answer after two, as ever."""
+    llm = streaming_tool_llm([_calls(_count_call("call_a", "Hafen")), _calls(_count_call("call_b", "Fest")), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, ToolRegistry([_Counter(informative=False)]))))
+
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
+    assert _steps(progress) == [("count", "Hafen", 0), ("count", "Fest", 0)]
+    assert (result.reason, result.steps) == ("idle", 2)
+
+
+@pytest.mark.parametrize("count_first", [True, False], ids=["count-first", "count-last"])
+def test_one_informative_reply_keeps_its_round_from_being_idle(count_first: bool) -> None:
+    """A round is idle only when none of its replies is news: a count beside a search that finds nothing resets it.
+
+    Args:
+        count_first (bool): Whether the count is called before the search, or after it.
+    """
+    registry = ToolRegistry([SearchTool(QuerySearch({})), _Counter(), ReadTool()])
+    first_round = [_count_call("call_a", "Hafen"), _search_call("call_b", "Regatta")]
+    llm = streaming_tool_llm(
+        [
+            _calls(*(first_round if count_first else first_round[::-1])),
+            _calls(_search_call("call_c", "Feuerwerk")),
+            _calls(_search_call("call_d", "Musik")),
+            _answer(),
+        ]
+    )
+
+    _, _, result = _drain(_turn(_loop(llm, registry)))
+
+    assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "none"
+    assert (result.reason, result.steps) == ("idle", 3)
+
+
+def test_an_error_reply_is_never_news() -> None:
+    """The news must come from a call its tool answered: an error reply flagged informative leaves its round idle."""
+    registry = ToolRegistry([_Counter(error=True, text="Error: the count could not be made.")])
+    llm = streaming_tool_llm([_calls(_count_call("call_a", "Hafen")), _calls(_count_call("call_b", "Fest")), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, registry)))
+
+    assert (progress, result.reason, result.steps) == ([], "idle", 2)
+
+
+def test_a_replys_trail_joins_the_stored_step_and_its_typed_keys_the_progress() -> None:
+    """A trail's keys are copied after the three every step has; only field, matches and unchecked are typed."""
+    trail = {"field": "author", "matches": 4, "unchecked": 2, "scope": "postings"}
+    llm = streaming_tool_llm([_calls(_count_call("call_a", "Hafen")), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, ToolRegistry([_Counter(trail=trail)]))))
+
+    (step,) = progress
+    assert result.actions == [{"action": "count", "detail": "Hafen", "found": 0, **trail}]
+    assert list(result.actions[0]) == ["action", "detail", "found", "field", "matches", "unchecked", "scope"]
+    assert asdict(step) == {
+        "step": 1,
+        "action": "count",
+        "detail": "Hafen",
+        "found": 0,
+        "field": "author",
+        "matches": 4,
+        "unchecked": 2,
+    }
+
+
+def test_a_trail_value_of_none_is_kept_in_the_stored_step() -> None:
+    """A failed count keeps ``matches: None`` in the stored step, which says it failed; the progress has none."""
+    llm = streaming_tool_llm([_calls(_count_call("call_a", "Hafen")), _answer()])
+    counter = _Counter(informative=False, trail={"field": "text", "matches": None})
+
+    progress, _, result = _drain(_turn(_loop(llm, ToolRegistry([counter]))))
+
+    (step,) = progress
+    assert result.actions == [{"action": "count", "detail": "Hafen", "found": 0, "field": "text", "matches": None}]
+    assert (step.field, step.matches, step.unchecked) == ("text", None, None)
+
+
+def test_a_trail_never_replaces_the_keys_every_step_has() -> None:
+    """The reply's own action, detail and found stand, whatever a trail says; its other keys are kept."""
+    trail = {"action": "elsewhere", "detail": "other words", "found": 99, "field": "text"}
+    llm = streaming_tool_llm([_calls(_count_call("call_a", "Hafen")), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, ToolRegistry([_Counter(trail=trail)]))))
+
+    assert result.actions == [{"action": "count", "detail": "Hafen", "found": 0, "field": "text"}]
+    assert _steps(progress) == [("count", "Hafen", 0)]
+
+
+def test_a_step_without_a_trail_leaves_the_typed_fields_unset() -> None:
+    """A note and a search carry no trail: the stored step keeps its three keys, the progress its fields unset."""
+    search = QuerySearch({"Programm": [programme_passage()]})
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), text=PREFACE), _answer()])
+
+    progress, _, result = _drain(_turn(_loop(llm, _documents(search))))
+
+    assert [(step.action, step.field, step.matches, step.unchecked) for step in progress] == [
+        ("note", None, None, None),
+        ("search", None, None, None),
+    ]
+    assert [sorted(action) for action in result.actions] == [["action", "detail", "found"]] * 2
+
+
+def test_a_reply_cut_to_the_reply_length_keeps_its_trail_and_is_still_news() -> None:
+    """Cutting a long reply for the transcript changes its text alone."""
+    counter = _Counter(text="Hafen " * 2000, trail={"field": "text", "matches": 7})
+    llm = streaming_tool_llm([_calls(_count_call("call_a", "Hafen")), _calls(_count_call("call_b", "Fest")), _answer()])
+
+    _, _, result = _drain(_turn(_loop(llm, ToolRegistry([counter]))))
+
+    assert len(_tool_replies(llm, 1)["call_a"]) <= turn_budget().result_chars
+    assert [action["matches"] for action in result.actions] == [7, 7]
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
+    assert (result.reason, result.steps) == (None, 2)
 
 
 class _Verbose:

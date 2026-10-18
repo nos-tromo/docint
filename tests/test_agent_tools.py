@@ -7,6 +7,9 @@ import pkgutil
 import re
 import subprocess
 import sys
+from collections.abc import Callable, Mapping
+from dataclasses import fields
+from typing import Any
 
 import pytest
 from agent_fakes import (
@@ -40,10 +43,14 @@ from docint.agents.turn.tools import (
     PassageReply,
     ReadTool,
     SearchTool,
+    ToolContext,
     ToolRegistry,
     ToolReply,
+    ToolWork,
     error_reply,
     nested_too_deeply,
+    passage_reply,
+    trail_detail,
 )
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
@@ -904,6 +911,250 @@ def test_a_reply_says_whether_the_tool_answered_the_call() -> None:
     assert [reply.error for reply in errors] == [True, True, True, True]
     assert error_reply("search", "invented").error is True
     assert ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="").error is False
+
+
+# --- News, trail fields and a tool's own repeat key ---------------------------------------------
+
+#: The extra keys of the invented counting tool's step.
+COUNT_TRAIL: dict[str, Any] = {"field": "text", "matches": 5, "unchecked": 2}
+
+
+class _Counting:
+    """A tool that answers with the passages it finds and a count of words, news even when no passage is admitted."""
+
+    def __init__(self, *passages: NodeWithScore, plain: bool = False) -> None:
+        """Describe the tool.
+
+        Args:
+            *passages (NodeWithScore): What every call finds.
+            plain (bool): Whether the answer is a plain reply, which the registry never remembers.
+        """
+        self.name = "count"
+        self.description = "Count the chunks that hold the words."
+        self.parameters: dict[str, Any] = {
+            "type": "object",
+            "properties": {"words": {"type": "string"}},
+            "required": ["words"],
+        }
+        self.runs: list[str] = []
+        self._passages = list(passages)
+        self._plain = plain
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Take any words; the count is the call's fetch and a reply carrying it the answer.
+
+        Args:
+            arguments (Mapping[str, Any]): ``words``.
+            ctx (ToolContext): Unused.
+
+        Returns:
+            ToolReply | ToolWork: The work.
+        """
+        words = str(arguments.get("words", ""))
+        detail = trail_detail(words)
+
+        def _fetch() -> list[NodeWithScore]:
+            """Run the count, noting the words it ran for.
+
+            Returns:
+                list[NodeWithScore]: The passages found.
+            """
+            self.runs.append(words)
+            return list(self._passages)
+
+        def _answer(fetched: Any, context: ToolContext) -> ToolReply:
+            """Show what was found, as news that carries its trail.
+
+            Args:
+                fetched (Any): What the fetch returned.
+                context (ToolContext): The turn's evidence.
+
+            Returns:
+                ToolReply: A plain reply when the tool is plain, else a passage reply.
+            """
+            shown = passage_reply(fetched, context, action=self.name, detail=detail)
+            if self._plain:
+                return ToolReply(
+                    text=shown.text,
+                    found=shown.found,
+                    action=self.name,
+                    detail=detail,
+                    informative=True,
+                    trail=COUNT_TRAIL,
+                )
+            return PassageReply(
+                text=shown.text,
+                found=shown.found,
+                action=self.name,
+                detail=detail,
+                numbers=shown.numbers,
+                informative=True,
+                trail=COUNT_TRAIL,
+            )
+
+        return ToolWork(detail=detail, fetch=_fetch, answer=_answer)
+
+
+class _Keyed(_Counting):
+    """A counting tool that says itself which calls are one call."""
+
+    def __init__(self, key: Callable[[Mapping[str, Any]], str | None]) -> None:
+        """Bind the rule.
+
+        Args:
+            key (Callable[[Mapping[str, Any]], str | None]): Maps a call's arguments to its repeat key, or
+                ``None`` to leave the call to the default key.
+        """
+        super().__init__()
+        self._key = key
+
+    def recall_key(self, arguments: Mapping[str, Any]) -> str | None:
+        """Name the call by the rule.
+
+        Args:
+            arguments (Mapping[str, Any]): The call's arguments.
+
+        Returns:
+            str | None: The repeat key, or ``None``.
+        """
+        return self._key(arguments)
+
+
+def _in_any_order(arguments: Mapping[str, Any]) -> str | None:
+    """Key a call by its words in any order and case; a call with no words has no key of its own.
+
+    Args:
+        arguments (Mapping[str, Any]): The call's arguments.
+
+    Returns:
+        str | None: The folded words, sorted; ``None`` when there are none.
+    """
+    return " ".join(sorted(str(arguments.get("words", "")).casefold().split())) or None
+
+
+def test_a_tool_says_which_calls_are_one_call() -> None:
+    """Calls its ``recall_key`` maps to one string are one call whatever their arguments: only the first runs."""
+    ctx = tool_context()
+    tool = _Keyed(_in_any_order)
+    registry = ToolRegistry([tool])
+    registry.call(tool_call("count", words="Hans Müller"), ctx)
+
+    again = registry.prepare(tool_call("count", words="  müller   HANS "), ctx)
+    other = registry.call(tool_call("count", words="Hans Meier"), ctx)
+
+    assert again.key == ("count", "hans müller")
+    assert again.fetch is None
+    assert registry.finish(again, None, ctx).text == "Already called count with these arguments; it showed no passages."
+    assert (other.informative, tool.runs) == (True, ["Hans Müller", "Hans Meier"])
+
+
+def test_two_calls_with_one_repeat_key_prepared_together_are_admitted_once() -> None:
+    """Both pass prepare and fetch; the second is answered at finish from what the first remembered, as no news."""
+    ctx = tool_context()
+    registry = ToolRegistry([_Keyed(_in_any_order)])
+    calls = [tool_call("count", words="Hans Müller"), tool_call("count", words="müller HANS")]
+
+    first, second = two_phase_round(registry, calls, ctx)
+
+    assert (first.informative, first.trail) == (True, COUNT_TRAIL)
+    assert (second.text, second.found, second.informative, second.trail) == (
+        "Already called count with these arguments; it showed no passages.",
+        0,
+        False,
+        COUNT_TRAIL,
+    )
+
+
+@pytest.mark.parametrize("keyed", [False, True], ids=["no-method", "returns-none"])
+def test_a_call_without_a_repeat_key_of_its_own_keeps_the_case_folded_arguments(keyed: bool) -> None:
+    """A tool without ``recall_key``, or whose ``recall_key`` returns ``None``, is keyed as every tool was before.
+
+    Args:
+        keyed (bool): Whether the tool defines ``recall_key``, answering ``None``.
+    """
+    ctx = tool_context()
+    tool = _Keyed(lambda arguments: None) if keyed else _Counting()
+    registry = ToolRegistry([tool])
+    registry.call(tool_call("count", words="Hans Müller"), ctx)
+
+    spaced = registry.prepare(tool_call("count", words="  hans   MÜLLER "), ctx)
+    reordered = registry.prepare(tool_call("count", words="müller hans"), ctx)
+
+    assert spaced.key == ("count", '{"words": "hans müller"}')
+    assert (spaced.fetch is None, reordered.fetch is None) == (True, False)
+
+
+def test_a_call_a_tool_gives_no_key_to_is_keyed_by_its_arguments() -> None:
+    """The tool decides per call: one it cannot key, such as a call with no words, gets the default key."""
+    ctx = tool_context()
+    registry = ToolRegistry([_Keyed(_in_any_order)])
+
+    blank = registry.prepare(tool_call("count", words="   "), ctx)
+    worded = registry.prepare(tool_call("count", words="Hans Müller"), ctx)
+
+    assert blank.key == ("count", '{"words": ""}')
+    assert worded.key == ("count", "hans müller")
+
+
+def test_a_call_answered_from_memory_keeps_its_trail_and_is_no_news() -> None:
+    """A recalled step shows the fields it showed before, but it admits nothing and tells the model nothing new."""
+    ctx = tool_context()
+    registry = ToolRegistry([_Counting(programme_passage())])
+    first = registry.call(tool_call("count", words="Hafenfest"), ctx)
+
+    again = registry.call(tool_call("count", words="HAFENFEST"), ctx)
+
+    assert (first.found, first.informative, first.trail) == (1, True, COUNT_TRAIL)
+    assert again.text == "Already called count with these arguments; see [1]."
+    assert (again.found, again.informative, again.trail) == (0, False, COUNT_TRAIL)
+
+
+def test_a_call_answered_from_memory_has_the_trail_of_the_first_answer_alone() -> None:
+    """What is remembered is the trail of the call's first answer, not a later call's."""
+    ctx = tool_context()
+    tool = _Counting(programme_passage())
+    registry = ToolRegistry([tool])
+    registry.call(tool_call("count", words="Hafenfest"), ctx)
+    registry.call(tool_call("count", words="Hafenfest"), ctx)
+
+    again = registry.call(tool_call("count", words="hafenfest"), ctx)
+
+    assert (again.trail, tool.runs) == (COUNT_TRAIL, ["Hafenfest"])
+
+
+def test_a_search_answered_from_memory_has_no_trail_and_is_no_news() -> None:
+    """A tool that sets no trail leaves none, so a repeated search reads as it always did."""
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage()]))
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
+
+    again = registry.call(tool_call("search", query="hafenfest"), ctx)
+
+    assert (again.found, again.informative, again.trail) == (0, False, None)
+
+
+def test_a_plain_reply_is_not_remembered_whatever_it_carries() -> None:
+    """Only a passage reply is remembered: a count answered plain, as a failed one is, runs again when called again."""
+    ctx = tool_context()
+    tool = _Counting(plain=True)
+    registry = ToolRegistry([tool])
+
+    first = registry.call(tool_call("count", words="Hafenfest"), ctx)
+    second = registry.call(tool_call("count", words="Hafenfest"), ctx)
+
+    assert (type(first), first.informative, first.trail) == (ToolReply, True, COUNT_TRAIL)
+    assert (second.text, tool.runs) == (first.text, ["Hafenfest", "Hafenfest"])
+
+
+def test_a_reply_is_by_default_no_news_and_carries_no_trail() -> None:
+    """The two new fields follow ``error`` and default to nothing, in a plain reply and a passage reply alike."""
+    plain = ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="")
+    shown = PassageReply(text="[1]", found=1, action="search", detail="Hafenfest", numbers=(1,))
+
+    assert [(reply.informative, reply.trail) for reply in (plain, shown)] == [(False, None), (False, None)]
+    base = ["text", "found", "action", "detail", "error", "informative", "trail"]
+    assert [field.name for field in fields(ToolReply)] == base
+    assert [field.name for field in fields(PassageReply)] == [*base, "numbers", "depends_on"]
 
 
 def test_arguments_nested_too_deeply_get_an_error_reply() -> None:

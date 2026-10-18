@@ -1105,13 +1105,17 @@ def _turn_validation(
 def _sse_agent_frame(progress: AgentProgress) -> str:
     """Render one step of an agent turn, a note included, as an SSE frame.
 
+    Fields a step leaves unset are left out, so a step with none of the keyword fields keeps
+    exactly the keys it always had. A count of 0 is set and stays.
+
     Args:
         progress (AgentProgress): The step.
 
     Returns:
         str: The ``data: {"agent": ...}`` frame.
     """
-    return f"data: {json.dumps({'agent': asdict(progress)})}\n\n"
+    step = {key: value for key, value in asdict(progress).items() if value is not None}
+    return f"data: {json.dumps({'agent': step})}\n\n"
 
 
 def _iter_text_tokens(text: str) -> list[str]:

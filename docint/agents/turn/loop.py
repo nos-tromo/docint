@@ -26,7 +26,8 @@ a row), the tools still declared but ``tool_choice="none"``. An endpoint that ig
 more declaring no tools, and that reply is the answer. ``agent.reason`` names the
 first cause: the rounds spent (``round_budget``), the time spent (``time_budget``), no room left
 for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
-row that added no passage (``idle``). Limits are checked between rounds, and the time also
+row that added no passage and told the model nothing new (``idle``): a reply that answered with a
+count, say, is news even when it admits nothing. Limits are checked between rounds, and the time also
 bounds every call's I/O; a round is never cut off while it streams, so an answer already streaming
 is never abandoned. An answer the endpoint cut at its length limit is kept, as written, and flagged
 ``answer_cut``, the one reason that replaces the first cause: a cut answer matters more than a
@@ -79,7 +80,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -140,7 +141,8 @@ class AgentResult:
         steps (int): Tool rounds whose calls were answered; a round withdrawn for want of room
             is not counted.
         actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
-            per call its tool answered, in order; a scoped turn's is its ``seed`` alone.
+            per call its tool answered, in order, with the keys the reply's trail adds; a scoped
+            turn's is its ``seed`` alone.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
             limit, a failed round, a call that could not be prepared, a failed search or missing
             search slot; ``answer_cut``, replacing any of these, when the endpoint cut the answer
@@ -173,7 +175,7 @@ class _Turn:
         transcript (list[ChatMessage]): The rounds so far: assistant messages and tool replies.
         spent (int): Tokens the transcript costs, and the search note once it is joined.
         steps (int): Tool rounds whose calls were answered; a withdrawn round is not counted.
-        idle (int): Rounds in a row that added no passage.
+        idle (int): Rounds in a row that added no passage and told the model nothing new.
         model_calls (int): Model calls begun.
         shown (bool): Whether anything has been yielded.
         reason (str | None): The first cause that cut the turn short or left evidence out, until
@@ -1021,7 +1023,16 @@ class AgentLoop:
             raise ValueError(_OVERFLOW_MESSAGE) from exc
         yield from self._finish(turn, streamed)
 
-    def _step(self, turn: _Turn, action: str, detail: str, found: int, *, step: int | None = None) -> AgentProgress:
+    def _step(
+        self,
+        turn: _Turn,
+        action: str,
+        detail: str,
+        found: int,
+        *,
+        step: int | None = None,
+        trail: Mapping[str, Any] | None = None,
+    ) -> AgentProgress:
         """Record one step in the trail.
 
         Args:
@@ -1030,14 +1041,28 @@ class AgentLoop:
             detail (str): The note's text, or the call's main argument.
             found (int): Passages the call admitted or extended.
             step (int | None): The round it belongs to; the last tool round by default.
+            trail (Mapping[str, Any] | None): The reply's extra keys. The stored step takes them
+                verbatim after its own three, which they never replace, a ``None`` value
+                included; the progress takes ``field``, ``matches`` and ``unchecked`` from them.
 
         Returns:
             AgentProgress: The step, numbered by its round.
         """
-        turn.actions.append({"action": action, "detail": detail, "found": found})
+        extra = trail or {}
+        entry: dict[str, Any] = {"action": action, "detail": detail, "found": found}
+        entry.update((key, value) for key, value in extra.items() if key not in entry)
+        turn.actions.append(entry)
         turn.shown = True
         number = turn.steps if step is None else step
-        return AgentProgress(step=number, action=cast(AgentAction, action), detail=detail, found=found)
+        return AgentProgress(
+            step=number,
+            action=cast(AgentAction, action),
+            detail=detail,
+            found=found,
+            field=extra.get("field"),
+            matches=extra.get("matches"),
+            unchecked=extra.get("unchecked"),
+        )
 
     def _tool_round(self, turn: _Turn, done: RoundDone) -> Generator[AgentProgress, None, bool]:
         """Answer a round's calls and add the round to the transcript, or withdraw it when it does not fit.
@@ -1090,6 +1115,7 @@ class AgentLoop:
         turn.transcript.append(ChatMessage(role=MessageRole.ASSISTANT, blocks=blocks))
         turn.spent += asked
         found = 0
+        news = False
         for call, reply in zip(done.calls, answered.replies, strict=True):
             turn.transcript.append(
                 ChatMessage(role=MessageRole.TOOL, content=reply.text, additional_kwargs={"tool_call_id": call.id})
@@ -1097,6 +1123,8 @@ class AgentLoop:
             turn.spent += message_cost(reply.text, self._ratio)
             found += reply.found
             if not reply.error:
-                yield self._step(turn, reply.action, reply.detail, reply.found)
-        turn.idle = 0 if found else turn.idle + 1
+                news = news or reply.informative
+                yield self._step(turn, reply.action, reply.detail, reply.found, trail=reply.trail)
+        # A passage, or an answer that told the model something without one, ends the run of idle rounds.
+        turn.idle = 0 if found or news else turn.idle + 1
         return False

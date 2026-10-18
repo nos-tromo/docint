@@ -6,7 +6,7 @@ from typing import Any, Literal, Protocol
 AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
-AgentAction = Literal["seed", "search", "answer", "note", "search_images", "keyframes", "read"]
+AgentAction = Literal["seed", "search", "answer", "note", "search_images", "keyframes", "keyword", "read"]
 """What one step of an agent turn did: a tool call by the tool's name, or a ``note``, the text a
 round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages;
 ``answer`` is found only in trails stored by the earlier assessment pipeline."""
@@ -27,12 +27,20 @@ class AgentProgress:
             query, or a note's text; empty when there is none. Shown to the user,
             never logged.
         found (int): Passages the step added to the evidence or extended there.
+        field (str | None): The field a keyword check matched; ``None`` on any other step.
+        matches (int | None): Indexed chunks a keyword check counted, 0 included; ``None`` on any
+            other step, or when the count failed.
+        unchecked (int | None): Chunks a keyword check could not reach because the keyword index
+            does not cover them; ``None`` on any other step, or when it covers all.
     """
 
     step: int
     action: AgentAction
     detail: str
     found: int
+    field: str | None = None
+    matches: int | None = None
+    unchecked: int | None = None
 
 
 @dataclass

@@ -7,8 +7,10 @@ for; those stay unnumbered, so every number the model can cite was shown to it. 
 shows one passage again, as much of it as one reply holds. A call the registry cannot run
 (a tool the turn does not offer, arguments that are not a JSON object) gets an error reply
 saying what to call instead, and a call made before is answered by number from memory,
-never run again; a read only while its passage is unchanged. The image tools,
-``search_images`` and ``keyframes``, live in :mod:`docint.agents.turn.image_tools`.
+never run again; a read only while its passage is unchanged. Which calls are one call is the
+tool's to say when it defines ``recall_key`` (see :class:`Tool`), else their arguments decide,
+compared on one line and case-folded. The image tools, ``search_images`` and ``keyframes``,
+live in :mod:`docint.agents.turn.image_tools`.
 
 A call is answered in two steps, so a turn can run the I/O of several calls at once:
 :meth:`ToolRegistry.prepare` checks a call and either answers it at once (an error, or a
@@ -31,7 +33,7 @@ import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
 from loguru import logger
@@ -92,6 +94,12 @@ class ToolReply:
             empty when it has none to show. Shown to the user, never logged.
         error (bool): Whether the reply says why the call was not answered, as every
             :func:`error_reply` does; a turn's trail shows only calls their tool answered.
+        informative (bool): Whether the reply told the model something about the collection
+            without admitting a passage, as a word count does, so a round with it is not idle.
+            A reply answered from memory never is.
+        trail (Mapping[str, Any] | None): Extra keys for this call's step in the turn's trail,
+            copied verbatim; a key may hold ``None`` on purpose, as a failed count's ``matches``
+            does. ``None`` for none.
     """
 
     text: str
@@ -99,6 +107,8 @@ class ToolReply:
     action: str
     detail: str
     error: bool = False
+    informative: bool = False
+    trail: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -127,11 +137,14 @@ class _Answered:
         detail (str): The call's main argument, for the trail.
         states (tuple[tuple[int, tuple[int, int]], ...]): Each entry the answer depends on,
             with how far it had grown when answered (see :func:`_state`).
+        trail (Mapping[str, Any] | None): The extra keys the answer's step carried, which the
+            step of a call answered from memory shows again.
     """
 
     numbers: tuple[int, ...]
     detail: str
     states: tuple[tuple[int, tuple[int, int]], ...] = ()
+    trail: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -144,7 +157,7 @@ class ToolContext:
         llm_view (Callable[[BaseNode], BaseNode]): Hides the metadata the model must not see,
             as the grounded prompt does.
         answered (dict[tuple[str, str], _Answered]): The calls this turn has answered, by tool
-            name and normalized arguments; kept by the registry.
+            name and repeat key (see :func:`_repeat_key`); kept by the registry.
     """
 
     ledger: EvidenceLedger
@@ -176,6 +189,16 @@ class ToolWork:
 class Tool(Protocol):
     """One tool the model may call.
 
+    A tool may also define ``recall_key(arguments: Mapping[str, Any]) -> str | None`` to say
+    which calls are one call (see :class:`HasRecallKey`, which the registry checks for; it is
+    left out of this protocol so a tool without it still satisfies it). The registry remembers
+    an answer under the tool's name and that string, and answers a later call with the same
+    string from memory, whatever its raw arguments. It runs on the loop thread for a call whose
+    arguments are a JSON object within ``MAX_ARGUMENT_DEPTH``, before :meth:`prepare` checks them,
+    so it must cope with arguments that are missing or of the wrong type. ``None`` leaves the
+    call to the default key, its arguments compared on one line and case-folded, as does a tool
+    without the method.
+
     Attributes:
         name (str): The name the model calls it by.
         description (str): When to call it, as the model reads it.
@@ -200,6 +223,23 @@ class Tool(Protocol):
         Returns:
             ToolReply | ToolWork: An error reply when the arguments will not do, which is
             never remembered; otherwise the call's work.
+        """
+        ...
+
+
+@runtime_checkable
+class HasRecallKey(Protocol):
+    """A tool that says itself which calls are one call: the optional ``recall_key`` of a :class:`Tool`."""
+
+    def recall_key(self, arguments: Mapping[str, Any]) -> str | None:
+        """Name the call by what makes it the same call as another.
+
+        Args:
+            arguments (Mapping[str, Any]): The call's arguments, parsed from JSON.
+
+        Returns:
+            str | None: The string the call is remembered by, under the tool's name; ``None`` to
+            leave the call to the default key.
         """
         ...
 
@@ -473,6 +513,24 @@ def _normalized(value: Any) -> Any:
     return value
 
 
+def _repeat_key(tool: Tool, arguments: Mapping[str, Any]) -> str:
+    """Return what a call is remembered by besides its tool: the tool's own repeat key, else its arguments.
+
+    Args:
+        tool (Tool): The tool called.
+        arguments (Mapping[str, Any]): The call's arguments, a JSON object within ``MAX_ARGUMENT_DEPTH``.
+
+    Returns:
+        str: What ``tool.recall_key`` returns, when the tool has it and it returns text; otherwise
+        the arguments normalized as :func:`_normalized` does, as sorted JSON.
+    """
+    if isinstance(tool, HasRecallKey):
+        own = tool.recall_key(arguments)
+        if isinstance(own, str):
+            return own
+    return json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False)
+
+
 def _example(parameters: Mapping[str, Any]) -> str:
     """Write an example of a tool's arguments from its schema.
 
@@ -517,14 +575,15 @@ def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> ToolReply
     still grow the entry. An answer without states, a search's, is recalled at any time.
 
     Args:
-        key (tuple[str, str]): The tool's name and the call's normalized arguments.
+        key (tuple[str, str]): The tool's name and the call's repeat key (see :func:`_repeat_key`).
         ctx (ToolContext): The turn's evidence and memory.
         final (bool): Whether every earlier call in the round has finished.
 
     Returns:
-        ToolReply | None: The numbers the earlier answer showed or named, admitting
-        nothing; ``None`` when nothing is remembered, when the answer's states cannot be
-        trusted yet, or when an entry the answer depends on has grown since.
+        ToolReply | None: The numbers the earlier answer showed or named, admitting nothing
+        and no news, under the trail the earlier answer carried; ``None`` when nothing is
+        remembered, when the answer's states cannot be trusted yet, or when an entry the
+        answer depends on has grown since.
     """
     answered = ctx.answered.get(key)
     if answered is None or (answered.states and not final):
@@ -536,7 +595,7 @@ def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> ToolReply
     text = f"Already called {name} with these arguments; " + (
         f"see {refs(answered.numbers)}." if answered.numbers else "it showed no passages."
     )
-    return ToolReply(text=text, found=0, action=name, detail=answered.detail)
+    return ToolReply(text=text, found=0, action=name, detail=answered.detail, trail=answered.trail)
 
 
 @dataclass(frozen=True)
@@ -553,8 +612,8 @@ class PreparedCall:
             change it, as for a search. A remembered read is decided at
             :meth:`ToolRegistry.finish`, once the calls before it in its round have run.
         work (ToolWork | None): The work still to do; ``None`` exactly when ``reply`` is set.
-        key (tuple[str, str] | None): The tool's name and the normalized arguments, under
-            which the answer is remembered.
+        key (tuple[str, str] | None): The tool's name and its repeat key for the call (see
+            :func:`_repeat_key`), under which the answer is remembered.
     """
 
     action: str
@@ -625,13 +684,13 @@ class ToolRegistry:
         Runs on the loop thread, in call order. A call naming no offered tool, or sending
         arguments that are not a JSON object or nest deeper than ``MAX_ARGUMENT_DEPTH``, is
         answered with an error saying what to call instead. A call made before in this turn,
-        by tool and arguments compared on one line and case-folded, is answered by the
-        numbers its answer showed or named, and needs no I/O; a read is left to
-        :meth:`finish`, since an earlier call in its round may still grow its passage.
-        Otherwise the tool checks its arguments, reading the evidence where it must: a
-        passage number names an entry as the evidence stood when the round's calls were
-        prepared. An error it finds is the answer, never remembered; else the prepared call
-        carries its work.
+        by tool and repeat key (the tool's own, else its arguments compared on one line and
+        case-folded), is answered by the numbers its answer showed or named, and needs no
+        I/O; a read is left to :meth:`finish`, since an earlier call in its round may still
+        grow its passage. Otherwise the tool checks its arguments, reading the evidence where
+        it must: a passage number names an entry as the evidence stood when the round's calls
+        were prepared. An error it finds is the answer, never remembered; else the prepared
+        call carries its work.
 
         Args:
             call (ToolCall): The call as the model made it.
@@ -664,7 +723,7 @@ class ToolRegistry:
                 f"such as {_example(tool.parameters)}.",
             )
             return PreparedCall(action=tool.name, detail="", reply=reply)
-        key = (tool.name, json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False))
+        key = (tool.name, _repeat_key(tool, arguments))
         remembered = _recall(key, ctx, final=False)
         if remembered is not None:
             return PreparedCall(action=tool.name, detail=remembered.detail, reply=remembered, key=key)
@@ -682,7 +741,7 @@ class ToolRegistry:
         may have been answered since, and a read remembered from an earlier round is
         decided here, while its passage is unchanged. Either way the call is answered from
         memory, its own fetch discarded, never admitted again. Otherwise the work's answer
-        admits and renders, and a :class:`PassageReply` is remembered.
+        admits and renders, and a :class:`PassageReply` is remembered with its trail.
 
         Args:
             prepared (PreparedCall): The call, from :meth:`prepare`.
@@ -706,7 +765,9 @@ class ToolRegistry:
         reply = prepared.work.answer(fetched, ctx)
         if isinstance(reply, PassageReply):
             states = tuple((number, _state(ctx.ledger, number)) for number in reply.depends_on)
-            ctx.answered[prepared.key] = _Answered(numbers=reply.numbers, detail=reply.detail, states=states)
+            ctx.answered[prepared.key] = _Answered(
+                numbers=reply.numbers, detail=reply.detail, states=states, trail=reply.trail
+            )
         return reply
 
     def call(self, call: ToolCall, ctx: ToolContext) -> ToolReply:

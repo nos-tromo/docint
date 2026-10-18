@@ -5939,6 +5939,81 @@ def test_stream_query_emits_note_and_step_frames(monkeypatch: pytest.MonkeyPatch
     assert [call["agent"] for call in calls] == [True]
 
 
+@pytest.mark.parametrize(
+    ("step", "frame"),
+    [
+        (
+            {"step": 1, "action": "search", "detail": "Hafenfest Stände", "found": 2},
+            'data: {"agent": {"step": 1, "action": "search", "detail": "Hafenfest St\\u00e4nde", "found": 2}}\n\n',
+        ),
+        (
+            {"step": 0, "action": "seed", "detail": "", "found": 1},
+            'data: {"agent": {"step": 0, "action": "seed", "detail": "", "found": 1}}\n\n',
+        ),
+        (
+            {"step": 2, "action": "keyword", "detail": "Hafen Kai", "found": 0, "field": "text", "matches": None},
+            'data: {"agent": {"step": 2, "action": "keyword", "detail": "Hafen Kai", "found": 0, "field": "text"}}\n\n',
+        ),
+        (
+            {
+                "step": 2,
+                "action": "keyword",
+                "detail": "Kai",
+                "found": 0,
+                "field": "text",
+                "matches": 0,
+                "unchecked": 3,
+            },
+            'data: {"agent": {"step": 2, "action": "keyword", "detail": "Kai", "found": 0, "field": "text", '
+            '"matches": 0, "unchecked": 3}}\n\n',
+        ),
+    ],
+    ids=["search", "seed", "failed-count", "zero-count"],
+)
+def test_an_agent_frame_leaves_out_what_a_step_does_not_set(step: dict[str, Any], frame: str) -> None:
+    """A step leaves its keyword fields unset, and a frame then holds the keys it always did; a count of 0 is set.
+
+    Args:
+        step (dict[str, Any]): The step's fields.
+        frame (str): The exact frame, as a step without those fields was sent before they existed.
+    """
+    assert api_module._sse_agent_frame(AgentProgress(**step)) == frame
+
+
+def test_stream_query_sends_a_keyword_steps_fields_unless_they_are_unset(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A step's field, matches and unchecked reach the client in its frame; one that is ``None`` is not sent.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    _open_agent_gate(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    counted = AgentProgress(step=1, action="keyword", detail="Hafenfest", found=0, field="text", matches=0, unchecked=3)
+    failed = AgentProgress(step=2, action="keyword", detail="Kai", found=1, field="text", matches=None)
+    final = _agent_final(agent=_trail_of([counted, failed]))
+    monkeypatch.setattr(api_module.rag, "stream_chat", _scripted_stream(calls, [counted, failed, AGENT_ANSWER, final]))
+
+    frames = _stream_frames(client)
+
+    assert frames[:2] == [
+        {
+            "agent": {
+                "step": 1,
+                "action": "keyword",
+                "detail": "Hafenfest",
+                "found": 0,
+                "field": "text",
+                "matches": 0,
+                "unchecked": 3,
+            }
+        },
+        {"agent": {"step": 2, "action": "keyword", "detail": "Kai", "found": 1, "field": "text"}},
+    ]
+
+
 @pytest.mark.parametrize("path", ["/stream_query", "/query"])
 def test_the_visual_target_runs_the_agent_with_image_tools(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
