@@ -411,6 +411,14 @@ the retriever, the engine:
 4. Appends the neighbour names to the retrieval query so that Qdrant
    sees a richer embedding.
 
+The appended names serve retrieval alone. A session lookup retrieves with the
+rewritten, expanded query but is asked the user's own words, with the
+history-resolved rewrite on a labelled line beneath them when it adds any
+(`question_block` in `docint/agents/turn/history.py`). A follow-up such as
+"Are those all?" is therefore answered as asked, and the neighbour names never
+reach the generation prompt. The `retrieval_query` and `graph_debug` the
+response reports do not change.
+
 A `graph_debug` payload is returned in the `QueryOut` for the
 stateless path so the UI can visualise what was added.
 

@@ -42,7 +42,7 @@ from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.history import build_prior_turn
-from docint.agents.turn.history import ConversationWindow
+from docint.agents.turn.history import ConversationWindow, question_block
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.rag import AGENT_LEDGER_CAP, RAG, AgentTurn, agent_llm_view
@@ -180,7 +180,7 @@ def _arm(
     """Route the turn's engine and its agent turn to doubles; the loop is real, its model scripted.
 
     The engine's ``retrieve`` returns ``retrieved``, as a scoped engine returns its pinned
-    passages, and its ``query`` answers the plain path with ``PLAIN_ANSWER``, streaming or not.
+    passages, and its ``synthesize`` answers the plain path with ``PLAIN_ANSWER``, streaming or not.
 
     Args:
         sm (SessionManager): The session manager under test.
@@ -193,7 +193,7 @@ def _arm(
     """
     engine = MagicMock()
     engine.retrieve.return_value = list(retrieved)
-    engine.query.side_effect = lambda _query: SimpleNamespace(
+    engine.synthesize.side_effect = lambda _query, _nodes: SimpleNamespace(
         response=PLAIN_ANSWER, response_gen=iter([PLAIN_ANSWER]), source_nodes=[]
     )
     rag = cast(Any, sm.rag)
@@ -280,6 +280,19 @@ def _sent(llm: MagicMock, call_index: int = 0) -> list[ChatMessage]:
         list[ChatMessage]: The messages.
     """
     return list(llm.stream_chat.call_args_list[call_index].args[0])
+
+
+def _plain_asked(engine: MagicMock) -> tuple[str, str]:
+    """Read what the plain path asked the engine: the query it retrieved with, then the question it answered.
+
+    Args:
+        engine (MagicMock): The engine double; the last ``retrieve`` is the plain path's.
+
+    Returns:
+        tuple[str, str]: The retrieval query and the question the synthesizer was handed.
+    """
+    engine.synthesize.assert_called_once()
+    return engine.retrieve.call_args.args[0].query_str, engine.synthesize.call_args.args[0].query_str
 
 
 def _search(call_id: str, query: str) -> tuple[str, str, dict[str, Any]]:
@@ -405,7 +418,7 @@ def test_tools_unavailable_falls_back_to_the_plain_lookup_with_the_reason(
     assert (final["agent"], final["retrieval_mode"], final["response"]) == (trail, "rewrite_compact", PLAIN_ANSWER)
     assert "answer_mode" not in final
     cast(Any, session_manager.rag).rewrite_retrieval_query.assert_called_once()
-    armed.engine.query.assert_called_once_with("expanded question")
+    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, "rewritten question"))
     assert (assistant["answer_mode"], assistant["agent"]) == ("lookup", trail)
     warnings = [message for message in loguru_caplog_info.messages if "tool_choice=auto" in message]
     assert len(warnings) == 1
@@ -464,7 +477,9 @@ def test_a_scope_too_large_for_the_round_falls_back_to_the_scoped_lookup(
     assert "answer_mode" not in final
     assert "agent" not in final
     assert (final["retrieval_mode"], final["scoped_chunk_count"], final["response"]) == ("scoped", 50, PLAIN_ANSWER)
-    armed.engine.query.assert_called_once()
+    # A prior turn handed in without skip_query_rewrite stands for the rewrite, which is then skipped.
+    resolved = QUESTION if bound_prior is not None else "rewritten question"
+    assert _plain_asked(armed.engine) == (resolved, question_block(QUESTION, resolved))
     armed.llm.stream_chat.assert_not_called()
     assert bound == [bound_prior]
     assert "(50 passages)" in loguru_caplog.text
@@ -563,7 +578,7 @@ def test_a_fallback_runs_the_rewrite_and_the_expansion(
     rag.rewrite_retrieval_query.assert_called_once()
     assert rag.rewrite_retrieval_query.call_args.kwargs["user_msg"] == QUESTION
     rag.expand_query_with_graph_with_debug.assert_called_once_with("rewritten question")
-    armed.engine.query.assert_called_once_with("expanded question")
+    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, "rewritten question"))
     assert "agent" not in final
     assert "answer_mode" not in final
     assert (final["retrieval_mode"], final["response"]) == ("rewrite_compact", PLAIN_ANSWER)
@@ -623,7 +638,7 @@ def test_no_slot_before_any_yield_falls_back(
 
     assert (final["response"], final["retrieval_mode"]) == (PLAIN_ANSWER, "rewrite_compact")
     assert "agent" not in final
-    armed.engine.query.assert_called_once_with("expanded question")
+    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, "rewritten question"))
     assert armed.llm.stream_chat.call_count == model_calls
     assert _rows(session_manager) == [("lookup", "rewritten question")]
     assert "agent" not in session_manager.get_session_history("s1", owner=None)[1]
@@ -671,7 +686,7 @@ def test_an_error_after_the_first_yield_propagates_and_persists_nothing(
         assert isinstance(exc, raised)
         assert [item.action for item in shown if isinstance(item, AgentProgress)] == ["search"]
 
-    armed.engine.query.assert_not_called()
+    armed.engine.synthesize.assert_not_called()
     cast(Any, session_manager.rag).rewrite_retrieval_query.assert_not_called()
     assert _rows(session_manager) == []
 
@@ -757,7 +772,7 @@ def test_a_first_round_failure_outside_the_fallbacks_propagates(
     with pytest.raises(type(error)):
         _answer(session_manager, entry, agent=True)
 
-    armed.engine.query.assert_not_called()
+    armed.engine.synthesize.assert_not_called()
     cast(Any, session_manager.rag).rewrite_retrieval_query.assert_not_called()
     assert _rows(session_manager) == []
 

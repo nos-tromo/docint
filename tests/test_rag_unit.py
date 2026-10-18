@@ -1324,7 +1324,7 @@ def test_session_manager_chat_lazy_inits_query_engine(monkeypatch: pytest.Monkey
     rag._text_model = cast(Any, object())
 
     sentinel_engine = MagicMock(name="sentinel_query_engine")
-    sentinel_engine.query.return_value = MagicMock(name="raw_response")
+    sentinel_engine.synthesize.return_value = MagicMock(name="raw_response")
 
     build_calls: list[dict[str, Any]] = []
 
@@ -1411,7 +1411,8 @@ def test_session_manager_chat_lazy_inits_query_engine(monkeypatch: pytest.Monkey
     assert len(build_calls) == 1, (
         "SessionManager.chat must lazily call rag.build_query_engine() exactly once when rag.query_engine is None"
     )
-    sentinel_engine.query.assert_called_once()
+    sentinel_engine.retrieve.assert_called_once()
+    sentinel_engine.synthesize.assert_called_once()
 
 
 def test_select_collection_resets_image_service(

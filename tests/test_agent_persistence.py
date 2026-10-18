@@ -338,7 +338,7 @@ def test_each_path_stores_the_mode_it_answered_in(
     """
     engine = MagicMock()
     engine.retrieve.return_value = cast(list[Any], [])
-    engine.query.side_effect = lambda _query: SimpleNamespace(
+    engine.synthesize.side_effect = lambda _query, _nodes: SimpleNamespace(
         response=ANSWER, response_gen=iter([ANSWER]), source_nodes=[], metadata={}
     )
     rag = cast(Any, session_manager.rag)

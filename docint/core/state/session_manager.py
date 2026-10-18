@@ -26,7 +26,7 @@ from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.split import LabelledAnswer, compose_labelled_answer
 from docint.agents.context import TurnContext as AgentTurnContext
 from docint.agents.turn.budget import history_allowance_tokens
-from docint.agents.turn.history import ConversationTurn, ConversationWindow, build_window
+from docint.agents.turn.history import ConversationTurn, ConversationWindow, build_window, question_block
 from docint.agents.turn.loop import AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import EvidenceDoesNotFit
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
@@ -335,6 +335,27 @@ def _first_item(
         raise AgentTurnFallback from exc
 
 
+def _answer_plain(engine: Any, user_msg: str, *, retrieval_query: str, expanded_query: str) -> Any:
+    """Retrieve with the expanded query, then answer the user's own words.
+
+    The rewrite and the graph's terms exist to find evidence. The answer is asked the message as
+    typed, with the rewrite labelled beside it (:func:`question_block`), so a follow-up such as
+    "Are those all?" is answered as asked, and the terms, which only widen the search, never
+    reach the synthesis prompt.
+
+    Args:
+        engine (Any): The turn's query engine: its ``retrieve`` finds and ranks, its ``synthesize`` answers.
+        user_msg (str): The user's message, verbatim.
+        retrieval_query (str): The history-resolved rewrite, before the graph expands it.
+        expanded_query (str): The rewrite with the graph's terms, what retrieval runs on.
+
+    Returns:
+        Any: The engine's response, which streams when the engine does.
+    """
+    nodes = engine.retrieve(QueryBundle(expanded_query))
+    return engine.synthesize(QueryBundle(question_block(user_msg, retrieval_query)), nodes)
+
+
 class SessionCollectionMismatchError(Exception):
     """Raised when a chat turn targets a session pinned to another collection.
 
@@ -586,6 +607,9 @@ class SessionManager:
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
+        The grounded pipeline retrieves with the rewritten, graph-expanded query and answers
+        the message itself, the rewrite labelled beside it (see :func:`_answer_plain`).
+
         Args:
             user_msg (str): The message from the user.
             session_id (str | None): The conversation to append this turn to.
@@ -723,15 +747,13 @@ class SessionManager:
                 conversation_context=session_context,
             )
         if scoped_node_ids:
-            # Expansion widens *retrieval*, and there is none here — but the
-            # string it appends is also what the synthesizer is asked to
-            # answer, so running it would only add noise to the prompt.
+            # Expansion widens *retrieval*, and a scope retrieves by id: it
+            # would only pay for loading the NER aggregate.
             expanded_query = retrieval_query
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
         elif retrieval_target == "visual":
-            # The entity graph is built from text chunks, so its terms widen a
-            # lane the visual target does not use — and they would still land
-            # in the synthesis prompt.
+            # The entity graph is built from text chunks, so its terms would
+            # widen a lane the visual target does not use.
             expanded_query = retrieval_query
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
         else:
@@ -739,7 +761,7 @@ class SessionManager:
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
         self._bind_prior_turn_context(engine, prior_turn)
-        resp = engine.query(expanded_query)
+        resp = _answer_plain(engine, user_msg, retrieval_query=retrieval_query, expanded_query=expanded_query)
         response = self.rag._normalize_response_data(
             user_msg,
             resp,
@@ -798,6 +820,8 @@ class SessionManager:
         agent: bool = False,
     ) -> Iterator[AgentProgress | str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
+
+        Retrieves and answers as :meth:`chat` does.
 
         Args:
             user_msg (str): The message from the user.
@@ -904,15 +928,13 @@ class SessionManager:
                 conversation_context=session_context,
             )
         if scoped_node_ids:
-            # Expansion widens *retrieval*, and there is none here — but the
-            # string it appends is also what the synthesizer is asked to
-            # answer, so running it would only add noise to the prompt.
+            # Expansion widens *retrieval*, and a scope retrieves by id: it
+            # would only pay for loading the NER aggregate.
             expanded_query = retrieval_query
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
         elif retrieval_target == "visual":
-            # The entity graph is built from text chunks, so its terms widen a
-            # lane the visual target does not use — and they would still land
-            # in the synthesis prompt.
+            # The entity graph is built from text chunks, so its terms would
+            # widen a lane the visual target does not use.
             expanded_query = retrieval_query
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
         else:
@@ -920,7 +942,9 @@ class SessionManager:
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
         self._bind_prior_turn_context(streaming_engine, prior_turn)
-        response = streaming_engine.query(expanded_query)
+        response = _answer_plain(
+            streaming_engine, user_msg, retrieval_query=retrieval_query, expanded_query=expanded_query
+        )
         response_gen = getattr(response, "response_gen", None)
         if response_gen is None:
             logger.error("RuntimeError: Streaming response generator is unavailable.")

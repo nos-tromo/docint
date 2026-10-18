@@ -238,7 +238,7 @@ def _wire_chat_engine(sm: SessionManager) -> None:
         sm: The session manager whose RAG mock should answer chat turns.
     """
     engine = MagicMock()
-    engine.query.return_value = _response([])
+    engine.synthesize.return_value = _response([])
     sm.rag.query_engine = engine
     cast(Any, sm.rag).build_query_engine.return_value = engine
     cast(Any, sm.rag).expand_query_with_graph_with_debug.return_value = ("expanded", {})
