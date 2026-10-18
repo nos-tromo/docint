@@ -213,7 +213,7 @@ from docint.core.search.index import (
 )
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
-from docint.core.state.session_manager import AgentTurnFallback, SessionManager
+from docint.core.state.session_manager import SessionManager, start_agent_turn
 from docint.core.storage.artifact_gc import (
     collection_artifacts,
     recorded_sources,
@@ -9089,7 +9089,8 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             retrieval_target=retrieval_target,
         )
-        stream = self.ensure_session_manager().stream_agent_turn(
+        started = start_agent_turn(
+            self.ensure_session_manager(),
             question,
             engine=engine,
             scoped_node_ids=scoped_node_ids,
@@ -9104,28 +9105,23 @@ class RAG:
             turn_started_at=turn_started_at,
             persist=False,
         )
-        try:
-            first = next(stream, None)
-        except AgentTurnFallback as fallback:
-            data = self.run_query(
-                expanded_query,
-                metadata_filters=metadata_filters,
-                metadata_filter_rules=metadata_filter_rules,
-                vector_store_kwargs=vector_store_kwargs,
-                scoped_node_ids=scoped_node_ids,
-                retrieval_target=retrieval_target,
-            )
-            if graph_debug is not None:
-                data["graph_debug"] = graph_debug
-            if fallback.trail is not None:
-                data["agent"] = fallback.trail
-            yield str(data.get("response") or "")
-            yield data
+        if started.items is not None:
+            yield from started.items
             return
-        if first is None:
-            return
-        yield first
-        yield from stream
+        data = self.run_query(
+            expanded_query,
+            metadata_filters=metadata_filters,
+            metadata_filter_rules=metadata_filter_rules,
+            vector_store_kwargs=vector_store_kwargs,
+            scoped_node_ids=scoped_node_ids,
+            retrieval_target=retrieval_target,
+        )
+        if graph_debug is not None:
+            data["graph_debug"] = graph_debug
+        if started.trail is not None:
+            data["agent"] = started.trail
+        yield str(data.get("response") or "")
+        yield data
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:
         """Build the not-yet-applied GraphRAG debug payload for a query.

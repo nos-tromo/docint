@@ -190,6 +190,60 @@ class AgentTurnFallback(Exception):
         self.trail = trail
 
 
+@dataclass(frozen=True)
+class AgentTurnStart:
+    """How an agent turn began: its output from the first item on, or a hand-over to the plain path.
+
+    Attributes:
+        items (Iterator[AgentProgress | str | dict[str, Any]] | None): The turn's output, its
+            first item included; ``None`` when the plain path answers instead.
+        trail (dict[str, Any] | None): On a hand-over, the trail the plain answer reports;
+            ``None`` when the client is told nothing.
+    """
+
+    items: Iterator[AgentProgress | str | dict[str, Any]] | None
+    trail: dict[str, Any] | None = None
+
+
+def start_agent_turn(manager: SessionManager, user_msg: str, **turn: Any) -> AgentTurnStart:
+    """Start an agent turn and pull its first item, the one point at which it may still hand over.
+
+    Args:
+        manager (SessionManager): Runs the turn (:meth:`SessionManager.stream_agent_turn`).
+        user_msg (str): The user's message, verbatim.
+        **turn (Any): The rest of :meth:`SessionManager.stream_agent_turn`'s keywords.
+
+    Returns:
+        AgentTurnStart: The turn's output from its first item on; or, when the plain path is to
+        answer instead, no output and the trail that answer reports.
+    """
+    stream = manager.stream_agent_turn(user_msg, **turn)
+    try:
+        first = next(stream, None)
+    except AgentTurnFallback as fallback:
+        return AgentTurnStart(items=None, trail=fallback.trail)
+    return AgentTurnStart(items=_resumed(first, stream))
+
+
+def _resumed(
+    first: AgentProgress | str | dict[str, Any] | None,
+    stream: Iterator[AgentProgress | str | dict[str, Any]],
+) -> Iterator[AgentProgress | str | dict[str, Any]]:
+    """Yield a turn's first item again, then the rest of the turn.
+
+    Args:
+        first (AgentProgress | str | dict[str, Any] | None): The item already pulled; ``None``
+            when the turn yielded nothing.
+        stream (Iterator[AgentProgress | str | dict[str, Any]]): The rest of the turn.
+
+    Yields:
+        AgentProgress | str | dict[str, Any]: The turn's output.
+    """
+    if first is not None:
+        yield first
+    yield from stream
+
+
 def _fallback_trail(reason: str) -> dict[str, Any]:
     """Build the trail a plain answer reports when an agent turn handed it the message.
 
@@ -608,7 +662,8 @@ class SessionManager:
 
         fallback_trail: dict[str, Any] | None = None
         if agent:
-            stream = self.stream_agent_turn(
+            started = start_agent_turn(
+                self,
                 user_msg,
                 engine=engine,
                 scoped_node_ids=scoped_node_ids,
@@ -623,18 +678,15 @@ class SessionManager:
                 turn_started_at=turn_started_at,
                 persist=True,
             )
-            try:
-                first = next(stream, None)
-            except AgentTurnFallback as fallback:
-                fallback_trail = fallback.trail
-                # Bind none, like any /query lookup: the cached engine is shared and would keep it.
-                prior_turn = None
-            else:
+            if started.items is not None:
                 final: dict[str, Any] = {}
-                for item in itertools.chain((first,), stream):
+                for item in started.items:
                     if isinstance(item, dict):
                         final = item
                 return final
+            fallback_trail = started.trail
+            # Bind none, like any /query lookup: the cached engine is shared and would keep it.
+            prior_turn = None
 
         # ``skip_query_rewrite`` decouples "bind the prior turn for generation"
         # from "skip the internal retrieval rewrite". Default (``None``) skips
@@ -800,7 +852,8 @@ class SessionManager:
 
         fallback_trail: dict[str, Any] | None = None
         if agent:
-            stream = self.stream_agent_turn(
+            started = start_agent_turn(
+                self,
                 user_msg,
                 engine=streaming_engine,
                 scoped_node_ids=scoped_node_ids,
@@ -815,17 +868,11 @@ class SessionManager:
                 turn_started_at=turn_started_at,
                 persist=True,
             )
-            try:
-                first = next(stream, None)
-            except AgentTurnFallback as fallback:
-                fallback_trail = fallback.trail
-                prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
-            else:
-                if first is None:
-                    return
-                yield first
-                yield from stream
+            if started.items is not None:
+                yield from started.items
                 return
+            fallback_trail = started.trail
+            prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
 
         # See :meth:`chat`: ``skip_query_rewrite`` decouples prior-turn binding
         # from the internal rewrite (``None`` -> skip iff ``prior_turn`` given).
