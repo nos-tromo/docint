@@ -993,25 +993,35 @@ def _agent_turn_allowed(retrieval_target: str) -> bool:
         return False
 
 
-def _confirm_tools_rejection(data: Any) -> None:
-    """Cache a tools rejection a turn fell back on, once a probe carrying none of its content confirms it.
+def _refused_tools(data: Any) -> bool:
+    """Return whether a turn fell back because the chat endpoint refused tools.
 
-    The reason is read off the turn's payload, which is how the session layer's tools-unavailable
-    fallback reports it. Only a refused first call with tools offered reports that reason: a pinned
-    round offers none, so its refusal is the turn's error. A request can also be refused for its own
-    content, and the cache keeps agent turns off for every user, so a fixed probe on the agent model
-    (:func:`probe_tools`) decides (:func:`confirm_tools_rejection`). The request's reasoning flag
-    picks the probe's client, as it picked the turn's, and the rejection is cached under that flag
-    alone. The turn has fallen back either way. Blocking for up to the probe's timeout: call it off
-    the event loop, within the request's reasoning scope.
+    Read off the turn's payload, which is how the session layer's tools-unavailable fallback
+    reports it. Only a refused first call with tools offered reports that reason: a pinned round
+    offers none, so its refusal is the turn's error. A dict read, so it may run on the event loop.
 
     Args:
         data (Any): The turn's payload, as the first pass returned it.
+
+    Returns:
+        bool: ``True`` when the turn's trail says ``tools_unavailable``.
     """
     trail = data.get("agent") if isinstance(data, dict) else None
-    if isinstance(trail, dict) and trail.get("reason") == "tools_unavailable":
-        reasoning = bool(rag.reasoning_requested)
-        confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model), reasoning=reasoning)
+    return isinstance(trail, dict) and trail.get("reason") == "tools_unavailable"
+
+
+def _confirm_tools_rejection() -> None:
+    """Cache a refusal of tools a turn fell back on, once a probe carrying none of its content confirms it.
+
+    A request can be refused for its own content, and the cache keeps agent turns off for every
+    user, so a fixed probe on the agent model (:func:`probe_tools`) decides
+    (:func:`confirm_tools_rejection`). The request's reasoning flag picks the probe's client, as it
+    picked the turn's, and the rejection is cached under that flag alone. The turn has fallen back
+    either way. Blocking for up to the probe's timeout: call it off the event loop, within the
+    request's reasoning scope, and only for a turn :func:`_refused_tools` names.
+    """
+    reasoning = bool(rag.reasoning_requested)
+    confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model), reasoning=reasoning)
 
 
 def _assessment_validation(
@@ -2630,7 +2640,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     agent=agent,
                 )
             # Within the request's reasoning scope, so a probe asks the agent client the turn used.
-            _confirm_tools_rejection(data)
+            if _refused_tools(data):
+                _confirm_tools_rejection()
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
@@ -2947,8 +2958,9 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 previous_user_input = getattr(stream_state.get("prior_turn"), "user_text", None)
 
             payload_out = dict(final_payload or {})
-            # Read off the first pass: the corrective retry below replaces the payload.
-            await to_thread.run_sync(_confirm_tools_rejection, payload_out)
+            # Read off the first pass, on the loop: only a probe takes a thread, and the retry replaces the payload.
+            if _refused_tools(payload_out):
+                await to_thread.run_sync(_confirm_tools_rejection)
             answer = str(payload_out.get("response") or payload_out.get("answer") or "")
             if not answer:
                 answer = full_answer

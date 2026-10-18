@@ -6273,6 +6273,47 @@ def test_an_inconclusive_probe_caches_nothing(
     assert api_module._agent_turn_allowed("all") is True
 
 
+def test_only_a_turn_with_a_probe_to_run_leaves_the_event_loop_for_it(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The reason is checked on the event loop: only a turn that fell back on refused tools hops to a thread to probe.
+
+    A stream holds a worker-thread token for its whole length, so a turn with nothing to probe
+    must not wait for another one before its envelope goes out.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    _open_agent_gate(monkeypatch)
+    hops: list[str] = []
+    real_run_sync = api_module.to_thread.run_sync
+
+    async def _run_sync(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Record what goes to a worker thread, then send it there.
+
+        Args:
+            func (Callable[..., Any]): The blocking call.
+            *args (Any): Its arguments.
+            **kwargs (Any): The thread options.
+
+        Returns:
+            Any: What the call returned.
+        """
+        hops.append(getattr(func, "__name__", ""))
+        return await real_run_sync(func, *args, **kwargs)
+
+    monkeypatch.setattr(api_module.to_thread, "run_sync", _run_sync)
+    plain_answer = "Die Musik beginnt am Mittag [1]."
+    turns = [[AGENT_ANSWER, _agent_final()], [plain_answer, _plain_final()], [plain_answer, _fallback_final()]]
+
+    for items in turns:
+        monkeypatch.setattr(api_module.rag, "stream_chat", _scripted_stream([], items))
+        _stream_frames(client)
+
+    assert hops.count("_confirm_tools_rejection") == 1
+
+
 def test_two_concurrent_rejections_run_one_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """A rejection arriving while a probe is in flight neither probes nor caches; the probe's own verdict stands.
 
@@ -6307,10 +6348,10 @@ def test_two_concurrent_rejections_run_one_probe(monkeypatch: pytest.MonkeyPatch
     probe.stream_chat.side_effect = _held_refusal
     cast(Any, api_module.rag).agent_text_model = probe
 
-    first = threading.Thread(target=api_module._confirm_tools_rejection, args=(_fallback_final(),))
+    first = threading.Thread(target=api_module._confirm_tools_rejection)
     first.start()
     assert started.wait(5)
-    api_module._confirm_tools_rejection(_fallback_final())
+    api_module._confirm_tools_rejection()
     during = api_module._agent_turn_allowed("all")
     release.set()
     first.join(5)
