@@ -112,8 +112,8 @@ class AgentResult:
         actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
             per call its tool answered, in order.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
-            limit, a failed round, a failed search or an answer cut at the length limit; ``None``
-            when there was none.
+            limit, a failed round, a call that could not be prepared, a failed search or missing
+            search slot, or an answer cut at the length limit; ``None`` when there was none.
         images_attached (int): Pictures sent to the model with the evidence.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.

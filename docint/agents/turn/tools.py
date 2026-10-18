@@ -625,12 +625,12 @@ class ToolRegistry:
         arguments that are not a JSON object or nest deeper than ``MAX_ARGUMENT_DEPTH``, is
         answered with an error saying what to call instead. A call made before in this turn,
         by tool and arguments compared on one line and case-folded, is answered by the
-        numbers its answer showed or named,
-        and needs no I/O; a read is left to :meth:`finish`, since an earlier call in its
-        round may still grow its passage. Otherwise the tool checks its arguments, reading
-        the evidence where it must: a passage number names an entry as the evidence stood
-        when the round's calls were prepared. An error it finds is the answer, never
-        remembered; else the prepared call carries its work.
+        numbers its answer showed or named, and needs no I/O; a read is left to
+        :meth:`finish`, since an earlier call in its round may still grow its passage.
+        Otherwise the tool checks its arguments, reading the evidence where it must: a
+        passage number names an entry as the evidence stood when the round's calls were
+        prepared. An error it finds is the answer, never remembered; else the prepared call
+        carries its work.
 
         Args:
             call (ToolCall): The call as the model made it.

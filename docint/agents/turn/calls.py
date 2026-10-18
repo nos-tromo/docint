@@ -58,7 +58,7 @@ class PreparedRound(NamedTuple):
 
     Attributes:
         calls (list[PreparedCall]): One per call; a call whose ``prepare`` raised carries the
-            failed-call reply.
+            failed-call reply, and a call past the round's limit the skipped reply.
         failed (int): Calls whose ``prepare`` raised.
     """
 

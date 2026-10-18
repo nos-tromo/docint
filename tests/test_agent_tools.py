@@ -916,6 +916,21 @@ def test_arguments_nested_too_deeply_get_an_error_reply() -> None:
     assert reply.text.startswith("Error: the arguments for read")
 
 
+def _nested_lists(depth: int) -> dict[str, object]:
+    """Build ``{"n": [[...]]}`` holding ``depth`` lists, without recursion or parsing.
+
+    Args:
+        depth (int): How many lists nest inside the object.
+
+    Returns:
+        dict[str, object]: The arguments, ``depth + 1`` containers deep.
+    """
+    value: object = []
+    for _ in range(depth - 1):
+        value = [value]
+    return {"n": value}
+
+
 @pytest.mark.parametrize(
     ("value", "deep"),
     [
@@ -923,9 +938,9 @@ def test_arguments_nested_too_deeply_get_an_error_reply() -> None:
         ({"n": [[[3]]]}, False),
         ({"n": [3] * 5000}, False),
         ({"a": {"b": [1, {"c": 2}]}}, False),
-        (json.loads('{"n": ' + "[" * (MAX_ARGUMENT_DEPTH - 1) + "]" * (MAX_ARGUMENT_DEPTH - 1) + "}"), False),
-        (json.loads('{"n": ' + "[" * MAX_ARGUMENT_DEPTH + "]" * MAX_ARGUMENT_DEPTH + "}"), True),
-        (json.loads('{"n": ' + "[" * 900 + "]" * 900 + "}"), True),
+        (_nested_lists(MAX_ARGUMENT_DEPTH - 1), False),
+        (_nested_lists(MAX_ARGUMENT_DEPTH), True),
+        (_nested_lists(900), True),
     ],
     ids=["flat", "shallow", "wide", "mixed", "at-the-limit", "past-it", "far-past-it"],
 )
