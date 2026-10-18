@@ -2789,24 +2789,29 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 stream_state: dict[str, Any] = {}
 
                 def _make_chat_stream(
-                    question: str | None = None,
+                    retrieval_query: str | None = None,
                     *,
                     replace_turn_idx: int | None = None,
+                    fallback_trail: dict[str, Any] | None = None,
                 ) -> Iterator[Any]:
                     """Build the blocking chat stream off the event loop.
 
                     Session start, history load, and the retrieval/LLM stream
                     are all synchronous and so run on the worker thread driven
-                    by ``_aiter_sync_gen``.
+                    by ``_aiter_sync_gen``. Either pass answers the user's
+                    question.
 
                     Args:
-                        question (str | None): Query to answer. ``None`` (the
-                            first pass) uses the user's question and keeps this
-                            endpoint's internal retrieval rewrite; a value (the
-                            corrective retry) is already a retrieval query, so
-                            rewriting it again would undo the correction.
+                        retrieval_query (str | None): What to retrieve with.
+                            ``None`` (the first pass) keeps this endpoint's
+                            internal retrieval rewrite; a value (the corrective
+                            retry) is already a retrieval query, so rewriting it
+                            again would undo the correction.
                         replace_turn_idx (int | None): Overwrite this persisted
                             turn instead of appending one.
+                        fallback_trail (dict[str, Any] | None): The trail of the
+                            agent turn that handed the first pass to the plain
+                            path, for the retry's row to keep.
 
                     Returns:
                         Iterator[Any]: The sync chat-chunk generator.
@@ -2839,14 +2844,14 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         )
                         stream_state["agent"] = _agent_turn_allowed(payload.retrieval_target)
                     # The retry re-answers a rejected lookup, so any second pass is a plain lookup.
-                    agent: bool = stream_state["agent"] if question is None else False
+                    agent: bool = stream_state["agent"] if retrieval_query is None else False
                     prior_turn = stream_state["prior_turn"]
                     if not agent and prior_turn is not None:
                         prior_turn = prior_turn.evidence_only()
                     return cast(
                         "Iterator[Any]",
                         rag.stream_chat(
-                            payload.question if question is None else question,
+                            payload.question,
                             session_id=stream_state["session_id"],
                             owner=session_owner,
                             metadata_filters=metadata_filters,
@@ -2854,11 +2859,13 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             metadata_filter_rules=payload.metadata_filters,
                             vector_store_kwargs=vector_store_kwargs or None,
                             prior_turn=prior_turn,
-                            skip_query_rewrite=question is not None,
+                            skip_query_rewrite=False,
                             scoped_node_ids=stream_state["scoped_node_ids"],
                             replace_turn_idx=replace_turn_idx,
                             retrieval_target=payload.retrieval_target,
                             agent=agent,
+                            retrieval_query=retrieval_query,
+                            fallback_trail=fallback_trail,
                         ),
                     )
 
@@ -2915,19 +2922,21 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             # gate is deliberately narrow — a mismatched but substantive answer
             # is still worth showing, a scoped turn runs no retrieval for a new
             # query to change, and without a persisted turn there is nothing to
-            # overwrite, which would leave the user asking twice. An assessment
-            # never retries: its research already ran.
+            # overwrite, which would leave the user asking twice. An agent turn
+            # never retries: it wrote its own searches, and a plain pass would
+            # overwrite its row. A turn it handed to the plain path does, and
+            # keeps the trail saying why.
             # Session mode only, and named as such rather than inferred from the
             # absent turn_idx: the retry re-enters ``_make_chat_stream``, which
             # only exists on that branch.
             retry_query: str | None = None
+            first_trail = payload_out.get("agent") if isinstance(payload_out.get("agent"), dict) else None
             if (
                 payload.retrieval_mode != "stateless"
                 and isinstance(turn_idx, int)
                 and validation.get("validation_mismatch") is True
                 and is_weak_answer(answer)
-                and payload_out.get("retrieval_mode") != "scoped"
-                and payload_out.get("answer_mode") != "assessment"
+                and payload_out.get("retrieval_mode") not in ("scoped", "agent")
                 and load_corrective_retry_env().enabled
             ):
                 try:
@@ -2952,7 +2961,9 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     Returns:
                         Iterator[Any]: The sync chat-chunk generator.
                     """
-                    return _make_chat_stream(retry_query, replace_turn_idx=cast(int, turn_idx))
+                    return _make_chat_stream(
+                        retry_query, replace_turn_idx=cast(int, turn_idx), fallback_trail=first_trail
+                    )
 
                 retry_payload: dict[str, Any] | None = None
                 retry_answer = ""

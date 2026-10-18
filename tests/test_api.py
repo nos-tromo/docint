@@ -574,6 +574,8 @@ class DummyRAG:
         replace_turn_idx: int | None = None,
         retrieval_target: str = "all",
         agent: bool = False,
+        retrieval_query: str | None = None,
+        fallback_trail: dict[str, Any] | None = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -591,6 +593,8 @@ class DummyRAG:
             replace_turn_idx (int | None): Turn to overwrite; recorded by the stub.
             retrieval_target (str): Which evidence may answer the turn.
             agent (bool): Whether the turn is answered as an agent turn; recorded by the stub.
+            retrieval_query (str | None): A retry's query to retrieve with; recorded by the stub.
+            fallback_trail (dict[str, Any] | None): A fallback's trail to carry; recorded by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -604,6 +608,8 @@ class DummyRAG:
                 "replace_turn_idx": replace_turn_idx,
                 "prior_turn": prior_turn,
                 "agent": agent,
+                "retrieval_query": retrieval_query,
+                "fallback_trail": fallback_trail,
             }
         )
         self.stream_filters.append(
@@ -1698,10 +1704,9 @@ def test_stream_query_retry_replaces_the_first_turn(monkeypatch: pytest.MonkeyPa
 
     assert calls[0]["replace_turn_idx"] is None
     assert calls[1]["replace_turn_idx"] == 0
-    # The reformulation IS the retrieval query; rewriting it again would undo
-    # the correction.
-    assert calls[1]["skip_query_rewrite"] is True
-    assert calls[1]["question"] == "reformulated query"
+    # The retry retrieves with the reformulation as given, and is graded against the user's
+    # question, so it is asked that question too.
+    assert (calls[1]["question"], calls[1]["retrieval_query"]) == ("What did the UN say?", "reformulated query")
     updates = sessions.validation_updates
     assert len(updates) == 1
     assert updates[0]["retried"] is True
@@ -6197,29 +6202,88 @@ def test_stream_query_streams_agent_frames_and_validates_only_the_evidence_part(
     assert calls[0]["agent"] is True
 
 
-def test_stream_query_never_retries_an_assessment_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
-    """A weak, mismatched assessment keeps its answer; research already ran.
+@pytest.mark.parametrize(
+    ("retrieval_mode", "answer_mode", "agent"),
+    [
+        ("agent", "lookup", LOOKUP_TRAIL),
+        ("agent", "assessment", {**SPLIT_AGENT, "evidence_chars": 22}),
+        ("scoped", "lookup", LOOKUP_TRAIL),
+    ],
+    ids=["lookup", "assessment", "scoped-lookup"],
+)
+def test_an_agent_turn_never_takes_the_corrective_retry(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, retrieval_mode: str, answer_mode: str, agent: dict[str, Any]
+) -> None:
+    """An agent turn ran its own searches: a weak, rejected answer is kept, and its row is never written over.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        retrieval_mode (str): How the turn reports it found its evidence.
+        answer_mode (str): How the agent answered.
+        agent (dict[str, Any]): The turn's trail.
+    """
+    _open_agent_gate(monkeypatch)
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient."])
+    final = _agent_final(
+        response="Evidence insufficient.", retrieval_mode=retrieval_mode, answer_mode=answer_mode, agent=agent
+    )
+    monkeypatch.setattr(api_module.rag, "stream_chat", _scripted_stream(calls, ["Evidence insufficient.", final]))
+
+    frames = _stream_frames(client)
+
+    updates = cast(Any, api_module.rag.sessions).validation_updates
+    assert len(calls) == 1
+    assert not any("retry" in frame for frame in frames)
+    assert frames[-1]["validation_mismatch"] is True
+    assert "retried" not in frames[-1]
+    assert [(update["turn_idx"], update["retried"]) for update in updates] == [(0, None)]
+
+
+def test_the_plain_fallback_still_retries(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A turn handed to the plain path retries as any plain lookup does, and its reason survives the retry.
+
+    The retry retrieves with the reformulation and answers the user's own words, and it is handed
+    the fallback's trail, which the row it writes over then keeps.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-    calls: list[dict[str, Any]] = []
     _open_agent_gate(monkeypatch)
-    monkeypatch.setattr(
-        api_module.rag, "stream_chat", _assessment_stream(calls, agent=SPLIT_AGENT, answer="Fact [1]. x")
-    )
-    monkeypatch.setattr(
-        api_module,
-        "_validation_payload",
-        lambda **_kwargs: {"validation_checked": True, "validation_mismatch": True, "validation_reason": "r"},
-    )
-    monkeypatch.setattr(api_module, "_reformulated_query", lambda *_args: "reformulated")
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient."])
+    question = "Wann beginnt die Musik beim Hafenfest?"
+    retried = "Die Musik beginnt am Mittag auf der Bühne am Kai [1]."
 
-    frames = _sse_frames(_stream_text(client))
+    def _stream(asked: str, **kwargs: Any) -> Iterator[Any]:
+        """Fall back on the first pass, as an endpoint refusing tools makes it; answer the retry with the trail given.
 
-    assert len(calls) == 1
-    assert not any("retry" in frame for frame in frames)
+        Args:
+            asked (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: The answer's text, then its payload.
+        """
+        calls.append({"question": asked, **kwargs})
+        if len(calls) == 1:
+            yield "Evidence insufficient."
+            yield _fallback_final(response="Evidence insufficient.")
+            return
+        yield retried
+        yield _plain_final(response=retried, retrieval_query=kwargs["retrieval_query"], agent=kwargs["fallback_trail"])
+
+    monkeypatch.setattr(api_module.rag, "stream_chat", _stream)
+
+    frames = _stream_frames(client, question=question)
+
+    first, retry = calls
+    assert (first["question"], first["agent"], first["retrieval_query"]) == (question, True, None)
+    assert (retry["question"], retry["retrieval_query"], retry["agent"]) == (question, "reformulated query", False)
+    assert (retry["replace_turn_idx"], retry["fallback_trail"]) == (0, TOOLS_UNAVAILABLE_TRAIL)
+    assert {"retry": {"query": "reformulated query"}} in frames
+    assert (frames[-1]["retried"], frames[-1]["response"]) == (True, retried)
+    assert frames[-1]["agent"] == TOOLS_UNAVAILABLE_TRAIL
 
 
 def test_an_unsplit_assessment_is_not_validated(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:

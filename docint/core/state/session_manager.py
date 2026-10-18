@@ -818,6 +818,8 @@ class SessionManager:
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
         agent: bool = False,
+        retrieval_query: str | None = None,
+        fallback_trail: dict[str, Any] | None = None,
     ) -> Iterator[AgentProgress | str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -855,6 +857,16 @@ class SessionManager:
                 it. See :mod:`docint.core.retrieval.visual`.
             agent (bool): See :meth:`chat`. A turn that falls back binds the
                 source-backed part of ``prior_turn``: its engine is its own.
+            retrieval_query (str | None): A query to retrieve with as given, in
+                place of the rewrite: the corrective retry's reformulation. The
+                answer is still asked ``user_msg``, the query labelled beside it
+                (see :func:`_answer_plain`). ``None`` rewrites, or skips the
+                rewrite as ``skip_query_rewrite`` says.
+            fallback_trail (dict[str, Any] | None): The trail of an agent turn
+                that handed this turn to the plain path, reported and stored
+                with the plain answer: the corrective retry of such a turn
+                passes its first pass's, so a reload still says why. A turn that
+                falls back here reports its own.
 
         Yields:
             AgentProgress | str | dict[str, Any]: Chunks of text, followed by a
@@ -892,7 +904,6 @@ class SessionManager:
         session_id = self.start_session(session_id, owner=owner)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
 
-        fallback_trail: dict[str, Any] | None = None
         if agent:
             started = start_agent_turn(
                 self,
@@ -919,7 +930,9 @@ class SessionManager:
         # See :meth:`chat`: ``skip_query_rewrite`` decouples prior-turn binding
         # from the internal rewrite (``None`` -> skip iff ``prior_turn`` given).
         should_skip_rewrite = prior_turn is not None if skip_query_rewrite is None else skip_query_rewrite
-        if should_skip_rewrite:
+        if retrieval_query is not None:
+            retrieval_query = retrieval_query.strip()
+        elif should_skip_rewrite:
             retrieval_query = user_msg.strip()
         else:
             session_context = self._get_session_context(session_id)

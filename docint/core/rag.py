@@ -8815,6 +8815,8 @@ class RAG:
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
         agent: bool = False,
+        retrieval_query: str | None = None,
+        fallback_trail: dict[str, Any] | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -8846,6 +8848,11 @@ class RAG:
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
             agent (bool): Forwarded to :class:`SessionManager`; see there.
+            retrieval_query (str | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.stream_chat`;
+                the corrective retry's query, retrieved with as given.
+            fallback_trail (dict[str, Any] | None): Forwarded likewise; the
+                trail the retry of a turn the agent handed over carries.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -8864,6 +8871,8 @@ class RAG:
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
             agent=agent,
+            retrieval_query=retrieval_query,
+            fallback_trail=fallback_trail,
         )
 
     def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:

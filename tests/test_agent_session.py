@@ -431,6 +431,72 @@ def test_tools_unavailable_falls_back_to_the_plain_lookup_with_the_reason(
     assert TOOLS_REFUSED not in loguru_caplog_info.text
 
 
+#: What a corrective retry retrieves with: the reformulation the API wrote.
+RETRY_QUERY = "Hafenfest Öffnungszeiten der Stände am Sonntag"
+
+
+def test_a_retry_pass_retrieves_with_its_query_and_answers_the_users_words(session_manager: SessionManager) -> None:
+    """The corrective retry searches with its reformulation, unrewritten, and asks the answer the user's own message.
+
+    The retry is graded against the user's question, so the answer must be asked that question;
+    the reformulation rides beside it as the resolved question, as a rewrite does.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    armed = _arm(session_manager, [])
+    rag = cast(Any, session_manager.rag)
+
+    final = _final(list(session_manager.stream_chat(QUESTION, session_id="s1", retrieval_query=RETRY_QUERY)))
+
+    rag.rewrite_retrieval_query.assert_not_called()
+    rag.expand_query_with_graph_with_debug.assert_called_once_with(RETRY_QUERY)
+    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, RETRY_QUERY))
+    assert (final["response"], final["retrieval_query"]) == (PLAIN_ANSWER, RETRY_QUERY)
+    assert session_manager.get_session_history("s1", owner=None)[0]["content"] == QUESTION
+    assert _rows(session_manager) == [("lookup", RETRY_QUERY)]
+
+
+def test_a_retry_of_a_fallback_keeps_its_trail(session_manager: SessionManager) -> None:
+    """A retry of a turn whose endpoint refused tools writes the fallback's trail over the row: a reload says why.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    _arm(session_manager, [bad_request(TOOLS_REFUSED)])
+    first = _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True)))
+
+    retried = _final(
+        list(
+            session_manager.stream_chat(
+                QUESTION,
+                session_id="s1",
+                retrieval_query=RETRY_QUERY,
+                replace_turn_idx=first["turn_idx"],
+                fallback_trail=first["agent"],
+            )
+        )
+    )
+
+    trail: dict[str, Any] = {"steps": 0, "actions": [], "reason": "tools_unavailable", "answer": "plain"}
+    history = session_manager.get_session_history("s1", owner=None)
+    assert (first["agent"], retried["agent"], retried["turn_idx"]) == (trail, trail, first["turn_idx"])
+    assert [(message["role"], message.get("agent")) for message in history] == [("user", None), ("assistant", trail)]
+    assert _rows(session_manager) == [("lookup", RETRY_QUERY)]
+
+
+def test_the_rag_proxy_hands_a_retry_pass_on() -> None:
+    """``RAG.stream_chat`` passes the retry's query and the fallback's trail on to the session manager."""
+    rag = MagicMock()
+    trail: dict[str, Any] = {"steps": 0, "actions": [], "reason": "tools_unavailable", "answer": "plain"}
+
+    RAG.stream_chat(rag, QUESTION, session_id="s1", retrieval_query=RETRY_QUERY, fallback_trail=trail)
+
+    passed = rag.ensure_session_manager.return_value.stream_chat.call_args
+    assert passed.args == (QUESTION,)
+    assert (passed.kwargs["retrieval_query"], passed.kwargs["fallback_trail"]) == (RETRY_QUERY, trail)
+
+
 #: Fifty pinned posts: too many to show legibly in one 8k round under the agent's own view.
 PINNED = [f"post-{number}" for number in range(1, 51)]
 
