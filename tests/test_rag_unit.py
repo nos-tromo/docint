@@ -99,20 +99,24 @@ class DummyResponse:
 
 
 def test_default_prompts_handle_elaboration_followups() -> None:
-    """Guard against regressions: prompts must declare elaboration semantics.
+    """Guard against regressions in the bundled fallback prompts.
 
-    The rewrite prompt must explicitly handle "elaborate" follow-ups (so the
-    standalone retrieval query inlines prior-turn entities), and the grounded
-    QA / refine prompts must carry the ``{prior_turn_context}`` placeholder
-    that the SessionManager binds via ``PromptTemplate.partial_format``.
+    The rewrite fallback is the English prompt file, word for word: it stands in when the
+    file is missing, so a drifted copy would bring back rules the file has dropped, such as
+    copying names from earlier answers into the query. The grounded QA / refine prompts
+    must carry the ``{prior_turn_context}`` placeholder that the SessionManager binds via
+    ``PromptTemplate.partial_format``.
     """
     from docint.core.rag import (
         DEFAULT_GROUNDED_REFINE_PROMPT,
         DEFAULT_GROUNDED_TEXT_QA_PROMPT,
         DEFAULT_RETRIEVAL_REWRITE_PROMPT,
     )
+    from docint.utils.env_cfg import load_path_env
 
-    assert "elaborate" in DEFAULT_RETRIEVAL_REWRITE_PROMPT.lower()
+    english = (load_path_env().prompts / "en" / "rewrite_retrieval.txt").read_text(encoding="utf-8").strip()
+
+    assert DEFAULT_RETRIEVAL_REWRITE_PROMPT == english
     assert "{prior_turn_context}" in DEFAULT_GROUNDED_TEXT_QA_PROMPT
     assert "{prior_turn_context}" in DEFAULT_GROUNDED_REFINE_PROMPT
 

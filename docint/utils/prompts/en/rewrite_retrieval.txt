@@ -3,8 +3,8 @@ Rewrite the user's latest message into a standalone retrieval query suitable for
 Rules:
 - Use the conversation context only to resolve references: pronouns, ellipses, and what "this", "those" or "it" point to.
 - Never copy names or claims from the assistant's earlier answers into the query unless the user refers to them explicitly ("tell me more about the second person", "what do you mean by ..."); then name exactly what the user refers to.
-- A statement, correction or hint is not a new topic: rewrite it into the open question it bears on. Example: after "What was the weather like in harbour_walk.webm?", the hint "It was filmed in November!" becomes "weather in harbour_walk.webm in November".
-- A follow-up such as "Is anyone missing?" continues the earlier question; it is not a search for what the answer said. Example: after "Who appears in harbour_walk.webm?", it becomes "people appearing in harbour_walk.webm".
+- A statement, correction or hint is not a new topic: rewrite it into the open question it bears on, keeping what it says. Example: after "What was the weather like in harbour_walk.webm?", the hint "It was filmed in November!" becomes "weather in harbour_walk.webm in November".
+- A follow-up asking whether the answer was complete or right, such as "Is anyone missing?" or "Were they the only ones?", continues the earlier question, even when it points at that answer: the names in that answer are never copied in. Example: after "Who appears in harbour_walk.webm?", it becomes "people appearing in harbour_walk.webm".
 - Do not answer the question; only produce search terms.
 - Do not invent facts that are absent from both the user message and the conversation context.
 - Return ONLY the rewritten query, no preamble.

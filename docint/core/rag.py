@@ -607,24 +607,27 @@ DEFAULT_SUMMARIZE_PROMPT = (
     "metadata. Limit the response to 15 sentences."
 )
 DEFAULT_RETRIEVAL_REWRITE_PROMPT = (
-    "Rewrite the user's latest message into a standalone retrieval query "
-    "suitable for vector search.\n\n"
+    "Rewrite the user's latest message into a standalone retrieval query suitable for vector search.\n\n"
     "Rules:\n"
-    "- Resolve all pronouns and ellipses using the conversation context.\n"
-    "- If the user is asking to elaborate, clarify, or expand on a previous "
-    'answer ("tell me more", "please elaborate", "I didn\'t understand X", '
-    '"what do you mean by ..."), EXTRACT the specific entities, names, '
-    "organizations, claims, or topics they are referring to from the most "
-    "recent assistant turn and inline them in the rewritten query. Example: "
-    '"Tell me more about the UN references" becomes a query that names the '
-    "specific UN bodies/resolutions/claims the prior assistant turn "
-    "mentioned.\n"
+    '- Use the conversation context only to resolve references: pronouns, ellipses, and what "this", '
+    '"those" or "it" point to.\n'
+    "- Never copy names or claims from the assistant's earlier answers into the query unless the user"
+    ' refers to them explicitly ("tell me more about the second person", "what do you mean by ..."); '
+    "then name exactly what the user refers to.\n"
+    "- A statement, correction or hint is not a new topic: rewrite it into the open question it bears"
+    ' on, keeping what it says. Example: after "What was the weather like in harbour_walk.webm?", the'
+    ' hint "It was filmed in November!" becomes "weather in harbour_walk.webm in November".\n'
+    '- A follow-up asking whether the answer was complete or right, such as "Is anyone missing?" or '
+    '"Were they the only ones?", continues the earlier question, even when it points at that answer: '
+    'the names in that answer are never copied in. Example: after "Who appears in '
+    'harbour_walk.webm?", it becomes "people appearing in harbour_walk.webm".\n'
     "- Do not answer the question; only produce search terms.\n"
-    "- Do not invent facts that are absent from both the user message and the "
-    "conversation context.\n"
+    "- Do not invent facts that are absent from both the user message and the conversation context.\n"
     "- Return ONLY the rewritten query, no preamble.\n\n"
-    "Conversation context:\n{conversation_context}\n\n"
-    "Latest user message:\n{user_msg}\n\n"
+    "Conversation context:\n"
+    "{conversation_context}\n\n"
+    "Latest user message:\n"
+    "{user_msg}\n\n"
     "Standalone retrieval query:"
 )
 DEFAULT_CONVERSATION_SUMMARY_PROMPT = (
