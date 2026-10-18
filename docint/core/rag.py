@@ -3035,8 +3035,9 @@ def _identity_first(metadata: dict[str, Any], hidden: set[str]) -> dict[str, Any
 
     Only a row carrying a ``reference_metadata`` block is reordered. After a leading citation
     line come a frame's label, the file and the reference block, who and when first in it;
-    the other keys follow in their order. An ``origin`` that repeats the row's file is dropped;
-    one that names another file, or is the only file the row names, is kept.
+    the other keys follow in their order. A row without a file name, as an older table
+    export's, has its ``origin`` in the file's place. An ``origin`` that repeats the row's file
+    is dropped; one that names another file, or is the only file the row names, is kept.
 
     Args:
         metadata (dict[str, Any]): A view's metadata, its visible values trimmed.
@@ -3054,7 +3055,9 @@ def _identity_first(metadata: dict[str, Any], hidden: set[str]) -> dict[str, Any
     rest["reference_metadata"] = {**leading, **{key: value for key, value in reference.items() if key not in leading}}
     visible = [key for key in rest if key not in hidden]
     head = ["citation_index"] if visible[:1] == ["citation_index"] else []
-    order = [*head, *(key for key in _AGENT_LEADING_KEYS if key in rest)]
+    file_key = "filename" if rest.get("filename") else "origin"
+    slots = [file_key if key == "filename" else key for key in _AGENT_LEADING_KEYS]
+    order = [*head, *(key for key in slots if key in rest)]
     return {**{key: rest[key] for key in order}, **{key: value for key, value in rest.items() if key not in order}}
 
 

@@ -58,6 +58,8 @@ RULES = [{"field": "source_type", "operator": "eq", "value": "video_keyframe"}]
 #: The post an invented comment answers, as a social export repeats it on the comment's row.
 ANCHOR = ("Der Hafenverein verschiebt das Hafenfest wegen der Sturmwarnung auf Sonntag. " * 25)[:1500]
 SOCIAL_FILE = "example_profile/dossier.json"
+#: The file an older table export names a row by, in its ``origin`` alone.
+LEGACY_FILE = "example_profile/comments.csv"
 AUTHOR = "Person A"
 TIMESTAMP = "2026-03-14T09:31:00Z"
 #: Invented social texts: a post and a comment of the length a real one can run to, and short ones.
@@ -664,6 +666,47 @@ def test_a_reference_rows_origin_is_dropped_only_where_it_repeats_the_file(
     view = agent_llm_view(TextNode(id_="row-origin", text=SHORT_POST, metadata=metadata))
 
     assert ("origin" in view.metadata) is kept
+
+
+def _legacy_row() -> NodeWithScore:
+    """Build an invented comment row of an older table export, which names its file only in ``origin``, first.
+
+    Returns:
+        NodeWithScore: The row, with no ``filename`` and the 1,500-character post it answers.
+    """
+    reference = {
+        "network": "examplenet",
+        "type": "comment",
+        "uuid": "3f2b8c1e-9d4a-4c6b-8e21-5a7f0c9d2b14",
+        "url": "https://social.invalid/p/9876543214",
+        "timestamp": TIMESTAMP,
+        "author": AUTHOR,
+        "author_id": "1234567890",
+        "vanity": "person_a",
+        "text": SHORT_COMMENT,
+        "text_id": "9876543214",
+        "anchor_text": LONG_POST,
+        "parent_text": None,
+    }
+    metadata = {
+        "origin": {"filename": LEGACY_FILE, "filetype": "text/csv"},
+        "source": "table",
+        "table": {"columns": ["id", "author", "text", "published_at"], "n_rows": 120, "row_index": 4},
+        "reference_metadata": reference,
+    }
+    return NodeWithScore(node=TextNode(id_="legacy-comment-4", text=SHORT_COMMENT, metadata=metadata), score=1.0)
+
+
+def test_a_row_without_a_file_name_keeps_its_origin_in_the_files_place() -> None:
+    """An older export names a row's file only in its ``origin``, which takes the file's place: both show."""
+    reply = _search_reply(agent_llm_view, _legacy_row())
+
+    assert reply.startswith(f"citation_index: 1\norigin: {{'filename': '{LEGACY_FILE}'")
+    assert "characters not shown" in reply.partition("\n\n")[0]
+    assert AUTHOR in reply
+    view = agent_llm_view(TextNode(id_="legacy-comment-4", text=SHORT_COMMENT, metadata=_legacy_row().node.metadata))
+    visible = [key for key in view.metadata if key not in view.excluded_llm_metadata_keys]
+    assert visible == ["origin", "reference_metadata", "table"]
 
 
 def _engine(*found: NodeWithScore) -> MagicMock:
