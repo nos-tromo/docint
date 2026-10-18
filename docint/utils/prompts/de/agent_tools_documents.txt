@@ -1,0 +1,1 @@
+Für diese Frage stehen nur die Texte und Transkripte der Sammlung zur Verfügung: search findet, was in ihnen steht, und read(n) zeigt mehr von einer Passage. Bilder werden diesmal nicht durchsucht: Beantworte eine Frage danach, was zu sehen ist, anhand der Texte und sage, dass keine Bilder durchsucht wurden.

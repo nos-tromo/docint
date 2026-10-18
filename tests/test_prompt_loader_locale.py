@@ -7,12 +7,50 @@ and that the active locale subdir is reflected in the resulting paths.
 
 from __future__ import annotations
 
+import functools
+import re
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from agent_fakes import ScriptedSearch, tool_call, tool_context
+from assessment_fakes import scored_node
+from llama_index.core.schema import NodeWithScore
 
+from docint.agents.assessment.split import SENTINEL
+from docint.agents.turn.history import ANSWER_ASSESSMENT_LABEL, ANSWER_SOURCED_LABEL, NO_HISTORY, labelled_lines
+from docint.agents.turn.passages import SEARCH_HINT, _trailer
+from docint.agents.turn.tools import ReadTool, SearchTool, ToolRegistry
+from docint.agents.turn.toolsets import toolset_for
+from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
+
+#: The prompts an agent turn is built from, each with the placeholders its caller fills.
+AGENT_PROMPTS: dict[str, frozenset[str]] = {
+    "agent_system": frozenset({"tools_guide", "assessment_rule", "conversation_summary"}),
+    "agent_tools_all": frozenset(),
+    "agent_tools_documents": frozenset(),
+    "agent_tools_visual": frozenset(),
+    "agent_assessment_rule": frozenset(),
+    "agent_final": frozenset(),
+    "agent_scope": frozenset(),
+    "agent_image_legend": frozenset({"image_legend"}),
+}
+#: The retrieval targets, each with its own tools guide.
+TARGETS = ("all", "documents", "visual")
+#: Tokens the turn budget plans for the rendered system prompt, at 3.5 characters per token.
+SYSTEM_PROMPT_TOKENS = 900
+CHAR_TOKEN_RATIO = 3.5
+#: The texts the system prompt must describe, each by a phrase it quotes from them.
+DESCRIBED = (
+    "passage header",
+    "cut passage",
+    "shown before",
+    "grown",
+    "did not fit",
+    "repeated call",
+    "earlier assessment",
+)
 
 
 def test_load_localized_prompt_reads_english_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -206,7 +244,7 @@ def test_summary_fold_prompt_placeholders() -> None:
         assert "{summaries_block}" in text, f"missing {{summaries_block}} in {locale}/summary_fold.txt"
 
 
-@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine", "assessment_answer"])
+@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine", "assessment_answer", "agent_system"])
 def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
     """Both locales ask the chat model for Markdown, which the SPA and the report exports render."""
     for locale in ("en", "de"):
@@ -259,6 +297,183 @@ def test_assessment_answer_prompt_carries_the_protocol_tokens(code: str) -> None
 
     assert "[[ASSESSMENT]]" in text
     assert "citation_index" in text
+
+
+def _prompt(name: str, code: str) -> str:
+    """Load a prompt as a caller does, from the given locale.
+
+    Args:
+        name (str): The prompt basename.
+        code (str): The locale.
+
+    Returns:
+        str: The prompt, stripped.
+    """
+    return load_localized_prompt(name, default="", required=True, lang=code)
+
+
+def _placeholders(text: str) -> set[str]:
+    """Collect the ``{name}`` placeholders of a template.
+
+    Args:
+        text (str): The template text.
+
+    Returns:
+        set[str]: The placeholder names.
+    """
+    return set(re.findall(r"\{(\w+)\}", text))
+
+
+def _system_prompt(code: str, target: str) -> str:
+    """Render the system prompt of a turn with no history: the target's guide and the assessment rule filled in.
+
+    Args:
+        code (str): The locale.
+        target (str): The retrieval target.
+
+    Returns:
+        str: The rendered prompt.
+    """
+    return _prompt("agent_system", code).format(
+        tools_guide=_prompt(f"agent_tools_{target}", code),
+        assessment_rule=_prompt("agent_assessment_rule", code),
+        conversation_summary=NO_HISTORY,
+    )
+
+
+def _nothing(_: str) -> list[NodeWithScore]:
+    """Find nothing, for a tool set built only to read its names.
+
+    Args:
+        _ (str): The query, unused.
+
+    Returns:
+        list[NodeWithScore]: No passage.
+    """
+    return []
+
+
+def _offered(target: str) -> frozenset[str]:
+    """Return the names of the tools a target offers.
+
+    Args:
+        target (str): The retrieval target.
+
+    Returns:
+        frozenset[str]: The names.
+    """
+    return toolset_for(target, search=_nothing, search_images=_nothing, list_keyframes=_nothing).names
+
+
+def _named_tools(text: str) -> set[str]:
+    """Find the tools a text names, each as a whole word: ``search`` is not named by ``search_images``.
+
+    Args:
+        text (str): A prompt.
+
+    Returns:
+        set[str]: The names of the tools of any target that it names.
+    """
+    return {name for name in _offered("all") if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text)}
+
+
+def _written() -> dict[str, str]:
+    """Render each text the system prompt describes, by the code that writes it.
+
+    The passage and the repeated call come from real tool calls; every note after a
+    search's passages comes from ``_trailer``, the one function that writes them.
+
+    Returns:
+        dict[str, str]: By kind (see ``DESCRIBED``), the text as the model reads it.
+    """
+    text = " ".join(f"Abschnitt {line}: Der Hafenverein plant Stände und Musik am Kai." for line in range(40))
+    plan = scored_node("plan", text, filename="plan.pdf", page=1)
+    registry = ToolRegistry([SearchTool(ScriptedSearch([plan])), ReadTool()])
+    ctx = tool_context()
+    header, _, body = registry.call(tool_call("search", query="Hafenverein"), ctx).text.partition("\n\n")
+    note = functools.partial(
+        _trailer, shown=True, again=(), grown=(), left_out=0, full=False, hint=SEARCH_HINT, note=""
+    )
+    return {
+        "passage header": header,
+        "cut passage": body,
+        "shown before": note(again=(1,)),
+        "grown": note(grown=(1,)),
+        "did not fit": note(left_out=2),
+        "repeated call": registry.call(tool_call("search", query="Hafenverein"), ctx).text,
+        "earlier assessment": labelled_lines((ANSWER_SOURCED_LABEL, ANSWER_ASSESSMENT_LABEL), ("Teil 1", "Teil 2")),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(AGENT_PROMPTS))
+def test_agent_prompts_match_across_locales(name: str) -> None:
+    """Every agent prompt exists in both locales with exactly the placeholders its caller fills, and formats cleanly.
+
+    Args:
+        name (str): The prompt basename.
+    """
+    for code in ("en", "de"):
+        text = _prompt(name, code)
+        assert text, f"{code}/{name}.txt is empty"
+        assert _placeholders(text) == AGENT_PROMPTS[name], f"{code}/{name}.txt takes {sorted(_placeholders(text))}"
+        text.format(**dict.fromkeys(AGENT_PROMPTS[name], "X"))
+
+
+@pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str) -> None:
+    """The rendered prompt keeps its English protocol tokens, names only its target's tools, and ends in the history.
+
+    Args:
+        code (str): The locale.
+        target (str): The retrieval target.
+    """
+    rendered = _system_prompt(code, target)
+    guide = _prompt(f"agent_tools_{target}", code)
+    offered = _offered(target)
+
+    for token in (SENTINEL, "citation_index", "[n]"):
+        assert token in rendered, f"{code}/{target}: {token!r} missing"
+    assert _named_tools(guide) == offered, f"{code}/agent_tools_{target}.txt names {sorted(_named_tools(guide))}"
+    assert _named_tools(rendered) <= offered, f"{code}/{target}: names a tool the target does not offer"
+    assert ("#n" in guide) == ("keyframes" in offered), f"{code}/agent_tools_{target}.txt and the frame label #n"
+    assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
+
+
+@pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_rendered_agent_system_prompt_fits_its_planned_tokens(code: str, target: str) -> None:
+    """With its guide and the assessment rule, and no history, the system prompt stays within the tokens planned for it.
+
+    Args:
+        code (str): The locale.
+        target (str): The retrieval target.
+    """
+    rendered = _system_prompt(code, target)
+
+    assert estimate_tokens(rendered, CHAR_TOKEN_RATIO) <= SYSTEM_PROMPT_TOKENS, (
+        f"{code}/{target}: {len(rendered)} chars"
+    )
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_the_agent_system_prompt_quotes_what_the_code_writes_verbatim(target: str) -> None:
+    """Every phrase the prompt quotes in backticks is text the code writes, the same English in both locales.
+
+    And each text the prompt must describe, the replies of the tools and the labels of the
+    history, is described by a phrase quoted from it.
+
+    Args:
+        target (str): The retrieval target.
+    """
+    written = _written()
+    quoted = {code: set(re.findall(r"`([^`]+)`", _system_prompt(code, target))) for code in ("en", "de")}
+
+    assert quoted["de"] == quoted["en"]
+    for phrase in quoted["en"]:
+        assert any(phrase in text for text in written.values()), f"{phrase!r} is not what the code writes"
+    for kind in DESCRIBED:
+        assert any(phrase in written[kind] for phrase in quoted["en"]), f"no quoted phrase describes the {kind}"
 
 
 def test_image_rescore_description_prompt_exists_in_both_locales_with_matching_placeholders() -> None:

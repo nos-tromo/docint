@@ -1,0 +1,5 @@
+Für diese Frage stehen nur Bilder und Videoframes zur Verfügung; Texte werden nicht durchsucht.
+- search_images findet, was Bilder und Frames zeigen. keyframes zeigt die Frames eines Clips, auch um zu prüfen, ob jemand übersehen wurde. read(n) zeigt mehr von einer Passage.
+- Fragen danach, was zu sehen ist, beantworte anhand der Bilder, nicht eines Transkripts: wer zu sehen ist und wie viele, Kleidung, Wetter oder Himmel, Orte. Beschreibe alle sichtbaren Personen.
+- Nenne in search_images die sichtbaren Merkmale, bei offener Antwort samt den üblichen Alternativen (beim Wetter: Sonne, Regen, Wolken oder Schnee), nie eine geratene Antwort.
+- [n] zitiert eine Passage; #n bezeichnet einen Frame. Einen Frame, etwa einen, auf den verwiesen wird, öffnest du mit keyframes und diesem n als index.
