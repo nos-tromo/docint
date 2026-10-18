@@ -6,6 +6,15 @@ goes again, and a round that calls none is the answer, streamed as it comes. A r
 provisional (see :func:`~docint.agents.turn.stream.stream_round`); text written before calls
 becomes a ``note`` step, which tells the client to withdraw whatever of it was streamed.
 
+The first round is held whole: none of its text is shown before it ends, and text it wrote
+before calls becomes its note unseen. With a search note, a first reply that calls no tool is
+dropped as if never written, its reasoning too: the note joins the user's message, its cost
+counted against the room, and the first round runs again, once. That is no tool round, but a
+model call under the first round's rules: the limits are checked before it, it waits for a model
+slot as the first round does, and it fails as the first round does, though a refusal of it no
+longer means the endpoint takes no tools. It streams as later rounds do; if it too calls no
+tool, its reply is the answer.
+
 Limits make the model answer in one more round, its last: the same transcript plus the final note
 as a user message (joined to a user message it would follow: strict chat templates refuse two in
 a row), the tools still declared but ``tool_choice="none"``. An endpoint that ignores
@@ -37,7 +46,8 @@ A pinned scope is answered from the pinned passages alone, in one round that off
 :mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`).
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
-anything, a failure goes to the caller, who can still answer another way: no model slot within
+anything, as when a first round held whole breaks off mid-reply, a failure goes to the caller,
+who can still answer another way: no model slot within
 ``MODEL_SLOT_WAIT_S`` raises :class:`~docint.agents.assessment.bounded.NoSlot`, the first call
 refused as sent (HTTP 400 or 422, not an overflow) raises :class:`ToolsUnavailable`, and anything
 else is raised as it came. Once the turn has shown a step or text, it ends with an
@@ -155,7 +165,7 @@ class _Turn:
         started (float): The clock's reading when the turn began.
         images (TurnImages): The pictures shown to the model; none unless the turn has a fetcher.
         transcript (list[ChatMessage]): The rounds so far: assistant messages and tool replies.
-        spent (int): Tokens the transcript costs.
+        spent (int): Tokens the transcript costs, and the search note once it is joined.
         steps (int): Tool rounds whose calls were answered; a withdrawn round is not counted.
         idle (int): Rounds in a row that added no passage.
         model_calls (int): Model calls begun.
@@ -164,6 +174,7 @@ class _Turn:
         shortened (bool): Whether the tool replies were cut after an overflow.
         actions (list[dict[str, Any]]): The trail so far.
         reasoning (list[str]): Each round's reasoning.
+        asked_again (bool): Whether the first round was asked again, the search note joined.
     """
 
     ctx: ToolContext
@@ -181,6 +192,7 @@ class _Turn:
     shortened: bool = False
     actions: list[dict[str, Any]] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
+    asked_again: bool = False
 
     def stop(self, reason: str) -> None:
         """Record why the model must answer now, keeping the first cause.
@@ -340,6 +352,7 @@ class AgentLoop:
         fetch_thumbnails: ThumbnailFetcher | None = None,
         legend_template: str = "",
         max_images: int = 0,
+        search_note: str = "",
     ) -> None:
         """Bind the model, the tools and the limits.
 
@@ -371,6 +384,8 @@ class AgentLoop:
             legend_template (str): Tells the model the pictures are its sources, with an
                 ``{image_legend}`` slot for the lines tying each to its number.
             max_images (int): The most pictures a turn shows; ``0`` shows none.
+            search_note (str): What a first round that called no tool is told when it is asked
+                again: look up what the answer relies on first. Empty, such a reply is the answer.
 
         Raises:
             ValueError: If ``char_token_ratio`` is not positive, or is not the ratio the budget
@@ -397,6 +412,7 @@ class AgentLoop:
         self._fetch_thumbnails = fetch_thumbnails
         self._legend_template = legend_template
         self._max_images = max_images
+        self._search_note = search_note
         self._room = budget.round_room - message_cost(final_note, char_token_ratio)
         #: What the pinned passages may take of the room: the scope note and its envelope come first.
         self._scope_room = self._room - message_cost(scope_note, char_token_ratio)
@@ -476,7 +492,8 @@ class AgentLoop:
             if limit is not None:
                 turn.stop(limit)
                 break
-            streamed = yield from self._round(turn, answer=False)
+            first = not turn.steps and not turn.asked_again
+            streamed = yield from self._round(turn, answer=False, hold=first)
             if streamed is None:
                 if not turn.shown:
                     raise NoSlot
@@ -488,6 +505,8 @@ class AgentLoop:
                 if note is not None:
                     yield note
                 break
+            if first and not streamed.done.calls and self._search_first(turn):
+                continue
             if streamed.done.reasoning:
                 turn.reasoning.append(streamed.done.reasoning)
             if not streamed.done.calls:
@@ -521,7 +540,30 @@ class AgentLoop:
             return "idle"
         return None
 
-    def _round(self, turn: _Turn, *, answer: bool) -> Generator[AgentProgress | str, None, _Streamed | None]:
+    def _search_first(self, turn: _Turn) -> bool:
+        """Ask the first round again when its reply, held whole and unseen, called no tool.
+
+        The reply is dropped: it reaches neither the transcript nor the trail, and its reasoning
+        goes with it. The search note joins the user's message, since strict chat templates
+        refuse two user messages in a row, and its cost counts against the room.
+
+        Args:
+            turn (_Turn): The turn, its first reply ended with no tool call.
+
+        Returns:
+            bool: Whether the first round runs again; never without a search note or a tool offered.
+        """
+        if not self._search_note or not turn.schemas:
+            return False
+        turn.asked_again = True
+        turn.base = _with_note(turn.base, self._search_note)
+        turn.spent += message_cost(self._search_note, self._ratio)
+        logger.info("An agent turn's first round called no tool; it is asked once more, to search first")
+        return True
+
+    def _round(
+        self, turn: _Turn, *, answer: bool, hold: bool = False
+    ) -> Generator[AgentProgress | str, None, _Streamed | None]:
         """Stream a tool round or the forced answer; a round refused with pictures goes once more without them.
 
         A round whose request carries pictures and fails before its first event is taken as
@@ -532,6 +574,7 @@ class AgentLoop:
         Args:
             turn (_Turn): The turn.
             answer (bool): Whether this is the answer round: no tool to choose, the final note joined.
+            hold (bool): Whether the round is held whole, its text released by nothing but its end.
 
         Yields:
             AgentProgress | str: Answer text the round releases; it opens with no step.
@@ -548,6 +591,7 @@ class AgentLoop:
                 _with_note(messages, self._final_note) if answer else messages,
                 tool_choice="none" if answer else "auto",
                 wait=self._slot_wait(turn, answer=answer),
+                hold=hold,
             )
             if streamed is None or streamed.began or not carried or retried:
                 return streamed
@@ -598,6 +642,7 @@ class AgentLoop:
         wait: float,
         opening: Callable[[], AgentProgress] | None = None,
         offer_tools: bool = True,
+        hold: bool = False,
     ) -> Generator[AgentProgress | str, None, _Streamed | None]:
         """Stream one round in a model slot, yielding what it releases with the label swapped in.
 
@@ -613,6 +658,7 @@ class AgentLoop:
                 yielded when its first event arrives: a round that fails before then shows nothing.
             offer_tools (bool): Whether the round declares the turn's tools; without them it sends
                 neither ``tools`` nor ``tool_choice``.
+            hold (bool): Whether the round is held whole, releasing no text while it streams.
 
         Yields:
             AgentProgress | str: The opening step, then the answer text the round releases.
@@ -632,6 +678,7 @@ class AgentLoop:
                     tools=turn.schemas if offer_tools else [],
                     tool_choice=tool_choice,
                     reasoning_open=self._reasoning_open,
+                    hold=hold,
                 ):
                     if not streamed.began:
                         streamed.began = True

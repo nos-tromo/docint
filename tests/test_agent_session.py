@@ -776,7 +776,8 @@ def test_a_turn_closed_after_its_first_text_frees_its_model_slot_while_still_ref
     """A client that stops reading frees the model slot at once, whoever still holds the turn's generators.
 
     The test keeps the outer generator, the agent turn's and its loop's referenced, so reference
-    counting alone would leave the round suspended with its slot taken.
+    counting alone would leave the round suspended with its slot taken. The first round, held
+    whole, searches, so the text comes from a round that streams it.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
@@ -784,7 +785,12 @@ def test_a_turn_closed_after_its_first_text_frees_its_model_slot_while_still_ref
         entry (str): The entry point under test: a session turn, or a stateless one.
     """
     slots = threading.BoundedSemaphore(1)
-    armed = _arm(session_manager, [answer_round(LONG_ANSWER)], model_slots=slots)
+    armed = _arm(
+        session_manager,
+        [call_round(_search("call_a", "Stände")), answer_round(LONG_ANSWER)],
+        model_slots=slots,
+        search=ScriptedSearch([programme_passage()]),
+    )
     rag = cast(Any, session_manager.rag)
     rag.ensure_session_manager.return_value = session_manager
     kept: list[Iterator[Any]] = []
@@ -813,12 +819,12 @@ def test_a_turn_closed_after_its_first_text_frees_its_model_slot_while_still_ref
         else RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug=None),
     )
 
-    first = next(outer)
+    first = next(item for item in outer if isinstance(item, str))
     held = not slots.acquire(blocking=False)
     outer.close()
     freed = slots.acquire(blocking=False)
 
-    assert isinstance(first, str)
+    assert first == LONG_ANSWER[:120]
     assert (held, freed) == (True, True)
     assert (len(kept), len(armed.loops[0].outputs)) == (1, 1)
     assert _rows(session_manager) == []

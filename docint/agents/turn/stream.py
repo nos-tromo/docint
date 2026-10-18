@@ -7,7 +7,9 @@ of each chunk and joins fragments by ``index`` alone, so a chunk carrying two wh
 
 A round's text stays provisional while it may still turn out to be a preface to tool
 calls: it is held until ``HOLD_CHARS`` visible characters have arrived, and text held
-when a tool call starts is never released. Reasoning never counts and is never released:
+when a tool call starts is never released. A caller may hold a round whole instead: nothing
+is released, and the caller sends its text from :class:`RoundDone` or drops it unseen.
+Reasoning never counts and is never released:
 think blocks in the content are read out by :class:`~docint.utils.llm_sanitize.ReasoningStripper`,
 and a reasoning field the endpoint sends apart from the content reaches llama-index's
 ``additional_kwargs["thinking_delta"]``, never ``ChatResponse.delta``. Both are reported on
@@ -275,6 +277,7 @@ def stream_round(
     tools: Sequence[dict[str, Any]],
     tool_choice: str = "auto",
     reasoning_open: bool = False,
+    hold: bool = False,
     **kwargs: Any,
 ) -> Iterator[RoundEvent]:
     """Stream one model round, releasing its text only once it is unlikely to be a preface.
@@ -283,8 +286,8 @@ def stream_round(
     fragment; then the held text goes out as one :class:`Provisional` and every later piece
     as its own. Once a fragment arrives, nothing more is released while the round streams.
     If every call it began is then dropped, the round is an answer: whatever followed the
-    text already released goes out at the end. A round that never passed the hold releases
-    nothing, and its text is in :class:`RoundDone` for the caller to send.
+    text already released goes out at the end. A round that never passed the hold, or was
+    held whole, releases nothing, and its text is in :class:`RoundDone` for the caller to send.
 
     Args:
         llm (LLM): The chat model; its ``stream_chat`` must pass the raw chunks on ``raw``.
@@ -299,6 +302,8 @@ def stream_round(
             then held, uncounted, until a close tag (what came before it is reasoning), a
             separate reasoning field (the endpoint keeps reasoning apart, so the held content is
             text), or the end of the reply (the held content was the answer, for the caller to send).
+        hold (bool): Hold the whole text, past ``HOLD_CHARS`` too: nothing is released while
+            the round streams, so the caller may still drop a reply nobody has seen.
         **kwargs (Any): Further options for ``stream_chat``.
 
     Yields:
@@ -324,7 +329,7 @@ def stream_round(
             separate.append(thinking)
             text += reader.cancel_open_reasoning()
         text += reader.feed(response.delta or "")
-        if not calling and len(text) > released and (released or len(text) >= HOLD_CHARS):
+        if not hold and not calling and len(text) > released and (released or len(text) >= HOLD_CHARS):
             yield Provisional(text[released:])
             released = len(text)
     text += reader.flush()

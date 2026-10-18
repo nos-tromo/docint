@@ -375,6 +375,37 @@ def test_an_answer_whose_calls_are_all_dropped_is_sent_in_full(before: str, afte
     assert "".join(texts) == (done.text if done.provisional_sent else "")
 
 
+@pytest.mark.parametrize(
+    ("chunks", "text", "calls", "finish_reason"),
+    [
+        ([*text_chunks(ANSWER, 30), chunk(finish_reason="stop")], ANSWER, [], "stop"),
+        (
+            [*text_chunks(LONG_PREFACE, 30), chunk(tool_calls=[_whole(SEARCH_CALL, 0)], finish_reason="tool_calls")],
+            LONG_PREFACE,
+            [SEARCH_CALL],
+            "tool_calls",
+        ),
+    ],
+    ids=["answer", "preface-before-calls"],
+)
+def test_a_round_held_whole_releases_nothing_and_ends_with_all_of_its_text(
+    chunks: list[dict[str, Any]], text: str, calls: list[ToolCall], finish_reason: str
+) -> None:
+    """Held whole, a round releases no text even past the hold: its end carries all of it, to send or to drop.
+
+    Args:
+        chunks (list[dict[str, Any]]): The round's chunks, its text longer than the hold.
+        text (str): Its visible text in full.
+        calls (list[ToolCall]): The calls it ends in, if any.
+        finish_reason (str): Why it ended.
+    """
+    texts, done = _scripted(chunks, hold=True)
+
+    assert len(text) > HOLD_CHARS
+    assert texts == []
+    assert done == RoundDone(text=text, calls=calls, finish_reason=finish_reason, provisional_sent=False)
+
+
 @pytest.mark.parametrize("size", [1, 7, 4096])
 def test_reasoning_in_think_tags_never_counts_toward_the_hold(size: int) -> None:
     """146 characters of thinking and a 63-character answer leave the answer held, the thinking gone.

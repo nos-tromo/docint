@@ -36,6 +36,7 @@ AGENT_PROMPTS: dict[str, frozenset[str]] = {
     "agent_assessment_rule": frozenset(),
     "agent_final": frozenset(),
     "agent_scope": frozenset(),
+    "agent_search_first": frozenset(),
     "agent_image_legend": frozenset({"image_legend"}),
 }
 #: The retrieval targets, each with its own tools guide.
@@ -413,6 +414,19 @@ def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str)
     assert _named_tools(rendered) <= offered, f"{code}/{target}: names a tool the target does not offer"
     assert ("#n" in guide) == ("keyframes" in offered), f"{code}/agent_tools_{target}.txt and the frame label #n"
     assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_search_note_names_no_tool_since_every_target_is_sent_it(code: str) -> None:
+    """The note that asks a first round to look things up first goes to every target, so it names none of their tools.
+
+    Args:
+        code (str): The locale.
+    """
+    note = _prompt("agent_search_first", code)
+
+    named = {name for name in _offered("all") if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", note, re.IGNORECASE)}
+    assert named == set()
 
 
 @pytest.mark.parametrize("code", ["en", "de"])

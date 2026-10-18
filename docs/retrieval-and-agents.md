@@ -579,6 +579,25 @@ Each round is one streamed model call, offered the turn's tools with
   in calls, or breaks off, a `note` step tells the client to withdraw what was
   streamed. The note carries that text, cut to 500 characters, and the next
   tokens begin a fresh answer.
+- **The first round is held whole.** None of its text streams before it ends.
+  Text it wrote before its calls becomes its note without ever showing as
+  answer text, and an answer goes out once it is complete. A first round that
+  breaks off has shown nothing, so its failure is handled as one before any
+  output (see [Fallback to the plain path](#fallback-to-the-plain-path)).
+- **A first round that looks nothing up is asked again.** If the first round
+  calls no tool, its reply is dropped unseen, its reasoning with it. The search
+  note (`agent_search_first.txt`) is joined to the user's message, and the
+  round runs once more. The note asks the model to look up what its answer
+  relies on, including any phrase or name the user just gave, and to cite the
+  passages. Its cost counts against the room for tool replies.
+- **The second try runs under the first round's rules.** It is no tool round,
+  but it is a model call. The limits are checked before it, so a turn whose
+  first round used up the time or the room answers at once. It waits for a model
+  slot as the first round does. It fails as the first round does, except that a
+  refusal of it never reads as the endpoint taking no tools. It streams as later
+  rounds do; if it calls no tool either, its reply is the answer. A pinned scope
+  offers no tools and is never asked again. One INFO line, with no text, says
+  the round was asked again.
 - **Reasoning is never streamed as the answer.** Think blocks, and a reasoning
   field the endpoint sends apart from the content, are kept for the response's
   `reasoning` field, every round's in order.
@@ -694,8 +713,11 @@ plain path, which answers as it would without agent turns:
 - a pinned scope cannot be shown legibly in the room;
 - the prompt overflows the context window.
 
-Any other failure of the first call, such as a server error or a timeout, is
-the turn's error, as it would be on a plain lookup.
+Any other failure before anything was shown, such as a server error, a timeout
+or a first round breaking off mid-reply, is the turn's error, as it would be on
+a plain lookup. A refusal of a later call, the first round's second try
+included, is such a failure too: only the turn's first call can show that the
+endpoint takes no tools.
 
 Once a step or text is out, a failed tool call or tool round no longer ends the
 turn: the model answers from what it found, with `research_failed`. What does

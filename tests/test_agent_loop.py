@@ -8,6 +8,7 @@ from __future__ import annotations
 import bisect
 import concurrent.futures
 import json
+import math
 import threading
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
@@ -539,10 +540,11 @@ def _status_error(cls: type[openai.APIStatusError], status: int, message: str) -
 
 @pytest.mark.parametrize("answer", [ANSWER, SHORT_ANSWER], ids=["past-the-hold", "within-the-hold"])
 def test_a_reply_without_calls_is_the_streamed_answer(answer: str) -> None:
-    """A round that calls no tool is the answer: streamed, and returned whole with nothing found.
+    """A round that calls no tool is the answer: sent, and returned whole with nothing found.
 
     Args:
-        answer (str): The model's reply, long enough to stream as it comes or short enough to be held.
+        answer (str): The model's reply, past the hold or within it; the first round sends it
+            whole once it ends.
     """
     llm = streaming_tool_llm([_answer(answer)])
     registry = _documents(QuerySearch({}))
@@ -728,24 +730,30 @@ def test_a_search_back_in_time_is_answered_while_one_that_is_late_is_not(
 
 @pytest.mark.parametrize("preface", [PREFACE, LONG_PREFACE], ids=["held", "sent"])
 def test_text_before_calls_becomes_a_note(preface: str) -> None:
-    """A round's text before its calls is a note step ahead of the calls; text already streamed went out first.
+    """A later round's text before its calls is a note step ahead of the calls; text already streamed went out first.
+
+    The first round is held whole, so only a later one can have streamed its preface.
 
     Args:
-        preface (str): What the round writes before its call: short enough to be held, or long
-            enough to have gone out as provisional answer text.
+        preface (str): What the second round writes before its call: short enough to be held,
+            or long enough to have gone out as provisional answer text.
     """
-    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), text=preface), _answer()])
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_w", "Wetter")), _calls(_search_call("call_a", "Programm"), text=preface), _answer()]
+    )
+    search = QuerySearch({"Wetter": [weather_passage()], "Programm": [programme_passage()]})
 
-    items = list(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
+    items = list(_turn(_loop(llm, _documents(search))))
 
-    note = AgentProgress(step=1, action="note", detail=" ".join(preface.split())[:NOTE_CHARS], found=0)
+    note = AgentProgress(step=2, action="note", detail=" ".join(preface.split())[:NOTE_CHARS], found=0)
     position = items.index(note)
-    assert items[position + 1] == AgentProgress(step=1, action="search", detail="Programm", found=1)
+    assert items[position + 1] == AgentProgress(step=2, action="search", detail="Programm", found=1)
     streamed_first = "".join(item for item in items[:position] if isinstance(item, str))
     assert streamed_first == ("" if preface is PREFACE else preface.rstrip())
     result = items[-1]
     assert isinstance(result, AgentResult)
     assert result.actions == [
+        {"action": "search", "detail": "Wetter", "found": 1},
         {"action": "note", "detail": note.detail, "found": 0},
         {"action": "search", "detail": "Programm", "found": 1},
     ]
@@ -1062,21 +1070,28 @@ def test_a_started_turn_without_a_model_slot_for_its_answer_raises() -> None:
 def test_a_round_holds_its_model_slot_while_it_streams_and_gives_it_back() -> None:
     """The model slot is taken for the round and given back when it ends, or when the caller stops reading."""
     slots = threading.BoundedSemaphore(1)
-    turn = _turn(_loop(streaming_tool_llm([_answer(ANSWER, size=20)]), _documents(QuerySearch({})), model_slots=slots))
 
-    first = next(turn)
+    def _streaming() -> Iterator[AgentProgress | str | AgentResult]:
+        """Run a turn whose second round streams its answer, the first one held whole having searched.
+
+        Returns:
+            Iterator[AgentProgress | str | AgentResult]: The turn's output: the search step, then the answer.
+        """
+        llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), _answer(ANSWER, size=20)])
+        return _turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})), model_slots=slots))
+
+    turn = _streaming()
+    step, first = next(turn), next(turn)
     held_while_streaming = not slots.acquire(blocking=False)
     rest = list(turn)
 
-    assert isinstance(first, str) and held_while_streaming
+    assert isinstance(step, AgentProgress) and isinstance(first, str) and held_while_streaming
     assert isinstance(rest[-1], AgentResult)
     assert slots.acquire(blocking=False)
     slots.release()
 
-    stopped = cast(
-        Generator[Any, None, None],
-        _turn(_loop(streaming_tool_llm([_answer(ANSWER, size=20)]), _documents(QuerySearch({})), model_slots=slots)),
-    )
+    stopped = cast(Generator[Any, None, None], _streaming())
+    next(stopped)
     next(stopped)
     stopped.close()
     assert slots.acquire(blocking=False)
@@ -1507,21 +1522,36 @@ def test_a_second_overflow_raises_naming_the_context_window() -> None:
 
 def test_a_round_that_breaks_off_with_its_text_showing_is_withdrawn_and_answered_anew() -> None:
     """Text a round showed before it broke off was provisional: a note withdraws it, and the model answers again."""
-    llm = streaming_tool_llm([[*text_chunks(ANSWER, 20)[:7], RuntimeError("invented outage")], _answer(SHORT_ANSWER)])
+    broken = [*text_chunks(ANSWER, 20)[:7], RuntimeError("invented outage")]
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), broken, _answer(SHORT_ANSWER)])
 
-    items = list(_turn(_loop(llm, _documents(QuerySearch({})))))
+    items = list(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
 
-    (note,) = [item for item in items if isinstance(item, AgentProgress)]
+    search, note = [item for item in items if isinstance(item, AgentProgress)]
     position = items.index(note)
-    withdrawn = "".join(cast(list[str], items[:position]))
-    assert (note.step, note.action, note.detail) == (1, "note", " ".join(withdrawn.split()))
+    withdrawn = "".join(cast(list[str], items[items.index(search) + 1 : position]))
+    assert (note.step, note.action, note.detail) == (2, "note", " ".join(withdrawn.split()))
     assert len(withdrawn) >= 120
     assert "".join(cast(list[str], items[position + 1 : -1])) == SHORT_ANSWER
-    assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
     result = items[-1]
     assert isinstance(result, AgentResult)
-    assert (result.raw_text, result.reason, result.steps) == (SHORT_ANSWER, "research_failed", 0)
-    assert result.actions == [{"action": "note", "detail": note.detail, "found": 0}]
+    assert (result.raw_text, result.reason, result.steps) == (SHORT_ANSWER, "research_failed", 1)
+    assert result.actions == [
+        {"action": "search", "detail": "Programm", "found": 1},
+        {"action": "note", "detail": note.detail, "found": 0},
+    ]
+
+
+def test_a_first_round_that_breaks_off_mid_reply_has_shown_nothing_and_raises() -> None:
+    """Held whole, a first round that breaks off past the hold has shown nothing: its failure goes to the caller."""
+    outage = RuntimeError("invented outage")
+    llm = streaming_tool_llm([[*text_chunks(ANSWER, 20)[:7], outage], _answer(SHORT_ANSWER)])
+
+    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    assert len(ANSWER[: 7 * 20]) >= 120
+    assert (shown, raised, llm.stream_chat.call_count) == ([], outage, 1)
 
 
 @pytest.mark.parametrize("path", ["first-round-withdrawn", "no-tool-round-allowed"])
@@ -1530,12 +1560,12 @@ def test_the_final_note_joins_a_user_message_it_would_follow(path: str) -> None:
 
     Args:
         path (str): How the answer round comes to follow the user's message directly: the first
-            round broke off and was withdrawn, or no tool round was allowed.
+            round's calls did not fit the room and it was withdrawn, or no tool round was allowed.
     """
     if path == "first-round-withdrawn":
-        broken = [*text_chunks(ANSWER, 20)[:7], RuntimeError("invented outage")]
-        llm = streaming_tool_llm([broken, _answer(SHORT_ANSWER)])
-        loop = _loop(llm, _documents(QuerySearch({})))
+        unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(20)]
+        llm = streaming_tool_llm([_calls(*unoffered), _answer(SHORT_ANSWER)])
+        loop = _loop(llm, _documents(QuerySearch({})), budget=TIGHT)
     else:
         llm = streaming_tool_llm([_answer(SHORT_ANSWER)])
         loop = _loop(llm, _documents(QuerySearch({})), max_rounds=0)
@@ -1577,10 +1607,11 @@ def test_an_answer_round_that_fails_before_any_token_raises_after_the_steps(erro
 
 def test_an_answer_round_that_breaks_off_raises_after_its_text() -> None:
     """An answer the endpoint stops sending partway is not passed off as whole: the turn raises."""
-    broken = [*text_chunks(ANSWER, 20)[:7], RuntimeError("invented outage")]
-    llm = streaming_tool_llm([broken, [*broken[:-1], RuntimeError("invented second outage")]])
+    broken = [*text_chunks(ANSWER, 20)[:7], RuntimeError("invented second outage")]
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), broken])
+    loop = _loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})), max_rounds=1)
 
-    shown, exc = _until_raised(_turn(_loop(llm, _documents(QuerySearch({})))))
+    shown, exc = _until_raised(_turn(loop))
 
     assert (type(exc), str(exc)) == (RuntimeError, "invented second outage")
     assert [type(item) for item in shown if not isinstance(item, str)] == [AgentProgress]
@@ -1745,6 +1776,262 @@ def test_a_resend_without_a_model_slot_raises_after_waiting_as_the_answer_does()
     assert (type(raised), llm.stream_chat.call_count) == (NoSlot, 2)
     assert not any(isinstance(item, (str, AgentResult)) for item in shown)
     assert slots.waits == [MODEL_SLOT_WAIT_S, 120.0, 120.0]
+
+
+# --- The search guard: a first round that looked nothing up is asked again ------------------
+
+#: What a guarded loop tells a first round that answered without a tool call.
+SEARCH_NOTE = "Du hast für diese Frage noch nichts nachgeschlagen: suche zuerst, dann antworte mit Belegen."
+#: A first reply from memory, longer than the hold, so it would stream if the first round were not held whole.
+MEMORY_ANSWER = (
+    "Die Stände öffnen wie jedes Jahr um zehn Uhr, und das Hafenfest findet trotz der Sturmwarnung "
+    "wie geplant am Samstag statt; nachschlagen muss ich das nicht."
+)
+#: The one line a guard that asks round 1 again logs: no text of the turn.
+ASKED_AGAIN = "An agent turn's first round called no tool; it is asked once more, to search first"
+
+
+def _guarded(llm: Any, registry: ToolRegistry, **overrides: Any) -> AgentLoop:
+    """Build a loop whose first round, if it calls no tool, is asked again with the search note.
+
+    Args:
+        llm (Any): The model double.
+        registry (ToolRegistry): The tools offered.
+        **overrides (Any): Constructor arguments to change.
+
+    Returns:
+        AgentLoop: The loop.
+    """
+    return _loop(llm, registry, search_note=SEARCH_NOTE, **overrides)
+
+
+def _until_text(turn: Iterator[AgentProgress | str | AgentResult]) -> list[AgentProgress | str | AgentResult]:
+    """Read a turn up to and including its first answer text.
+
+    Args:
+        turn (Iterator[AgentProgress | str | AgentResult]): The turn's output.
+
+    Returns:
+        list[AgentProgress | str | AgentResult]: What it yielded so far, the first text last.
+    """
+    read: list[AgentProgress | str | AgentResult] = []
+    for item in turn:
+        read.append(item)
+        if isinstance(item, str):
+            break
+    return read
+
+
+def test_a_first_reply_without_a_tool_call_is_dropped_unseen_and_round_one_asked_again() -> None:
+    """A first round that answers from memory shows nothing: round 1 runs again, the search note joined."""
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), _calls(_search_call("call_a", "Programm")), _answer()])
+    registry = _documents(QuerySearch({"Programm": [programme_passage()]}))
+
+    progress, texts, result = _drain(_turn(_guarded(llm, registry)))
+
+    assert ("".join(texts), _steps(progress)) == (ANSWER, [("search", "Programm", 1)])
+    assert (result.raw_text, result.steps, result.reason) == (ANSWER, 1, None)
+    assert result.actions == [{"action": "search", "detail": "Programm", "found": 1}]
+    assert [_wire(message) for message in _sent(llm, 0)] == [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": QUESTION},
+    ]
+    assert [_wire(message) for message in _sent(llm, 1)] == [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"{QUESTION}\n\n{SEARCH_NOTE}"},
+    ]
+    asked_again = llm.stream_chat.call_args_list[1].kwargs
+    assert (asked_again["tools"], asked_again["tool_choice"]) == (registry.schemas(), "auto")
+    assert llm.stream_chat.call_count == 3
+
+
+def test_a_second_reply_without_a_tool_call_is_the_answer_streamed_as_it_comes() -> None:
+    """Round 1 is asked again once: a second reply calling no tool either is the answer, streamed as it comes."""
+    first, second = _answer(MEMORY_ANSWER), _answer(ANSWER, size=20)
+    llm = streaming_tool_llm([first, second])
+    pulled = _pulls(llm)
+    turn = _turn(_guarded(llm, _documents(QuerySearch({}))))
+
+    read = _until_text(turn)
+    begun = len(pulled)
+    progress, texts, result = _drain([*read, *turn])
+
+    assert begun < len(first) + len(second)
+    assert ("".join(texts), progress, llm.stream_chat.call_count) == (ANSWER, [], 2)
+    assert (result.raw_text, result.steps, result.actions, result.reason) == (ANSWER, 0, [], None)
+
+
+def test_a_first_round_that_calls_a_tool_is_never_asked_again() -> None:
+    """A first round that searched is left as it was: no note joins the message, and the next round streams."""
+    first, second = _calls(_search_call("call_a", "Programm"), text=PREFACE), _answer(ANSWER, size=20)
+    llm = streaming_tool_llm([first, second])
+    pulled = _pulls(llm)
+    turn = _turn(_guarded(llm, _documents(QuerySearch({"Programm": [programme_passage()]}))))
+
+    read = _until_text(turn)
+    begun = len(pulled)
+    progress, texts, result = _drain([*read, *turn])
+
+    assert begun < len(first) + len(second)
+    assert _steps(progress) == [("note", PREFACE, 0), ("search", "Programm", 1)]
+    assert ("".join(texts), result.raw_text, llm.stream_chat.call_count) == (ANSWER, ANSWER, 2)
+    assert all(SEARCH_NOTE not in str(message.content) for call in (0, 1) for message in _sent(llm, call))
+
+
+def test_a_pinned_scope_is_never_asked_again() -> None:
+    """A pinned round offers no tool, so its reply is the answer, whatever the search note says."""
+    llm = streaming_tool_llm([_answer(SHORT_ANSWER)])
+
+    _, texts, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({}))), pinned=[programme_passage()]))
+
+    assert ("".join(texts), result.raw_text, llm.stream_chat.call_count) == (SHORT_ANSWER, SHORT_ANSWER, 1)
+    assert SEARCH_NOTE not in str(_sent(llm, 0)[-1].content)
+
+
+def test_a_first_round_offered_no_tool_is_never_asked_again() -> None:
+    """Asking a round to look things up means nothing when it was offered no tool: its reply is the answer."""
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER)])
+
+    _, texts, result = _drain(_turn(_guarded(llm, ToolRegistry([]))))
+
+    assert ("".join(texts), result.raw_text, llm.stream_chat.call_count) == (MEMORY_ANSWER, MEMORY_ANSWER, 1)
+    assert llm.stream_chat.call_args.kwargs == {}
+
+
+def test_without_a_search_note_a_first_reply_without_a_tool_call_is_the_answer() -> None:
+    """An empty search note asks nothing again: the first round's reply is the answer, sent whole once it ends."""
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER)])
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    assert ("".join(texts), result.raw_text, llm.stream_chat.call_count) == (MEMORY_ANSWER, MEMORY_ANSWER, 1)
+
+
+@pytest.mark.parametrize("search_note", ["", SEARCH_NOTE], ids=["unguarded", "guarded"])
+def test_a_first_rounds_preface_is_never_sent_as_answer_text(search_note: str) -> None:
+    """The first round is held whole: a preface past the hold becomes its note without going out as answer text first.
+
+    Args:
+        search_note (str): The loop's search note; none, or the guard's.
+    """
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), text=LONG_PREFACE), _answer()])
+    registry = _documents(QuerySearch({"Programm": [programme_passage()]}))
+
+    items = list(_turn(_loop(llm, registry, search_note=search_note)))
+
+    note = AgentProgress(step=1, action="note", detail=" ".join(LONG_PREFACE.split())[:NOTE_CHARS], found=0)
+    assert len(LONG_PREFACE) > 120
+    assert items[:2] == [note, AgentProgress(step=1, action="search", detail="Programm", found=1)]
+    _, texts, result = _drain(items)
+    assert ("".join(texts), result.raw_text) == (ANSWER, ANSWER)
+
+
+def test_the_dropped_reply_reaches_neither_the_transcript_nor_the_reasoning() -> None:
+    """The reply the guard drops is gone: no later round is sent it, and the turn keeps none of its reasoning."""
+    llm = streaming_tool_llm(
+        [
+            [chunk(reasoning_content="Das weiß ich noch vom letzten Hafenfest."), *_answer(MEMORY_ANSWER)],
+            [chunk(reasoning_content="Erst das Programm suchen."), *_calls(_search_call("call_a", "Programm"))],
+            _answer(),
+        ]
+    )
+
+    _, _, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
+
+    sent = [message for call in (1, 2) for message in _sent(llm, call)]
+    assert not any(MEMORY_ANSWER in str(message.content) for message in sent)
+    assert [message.role for message in _sent(llm, 2)] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert result.reasoning == "Erst das Programm suchen."
+
+
+@pytest.mark.parametrize(("budget", "wait"), [(120.0, MODEL_SLOT_WAIT_S), (2.0, 2.0)])
+def test_no_model_slot_for_round_one_asked_again_raises_before_anything_is_yielded(budget: float, wait: float) -> None:
+    """Round 1 asked again waits for a model slot as round 1 does; without one, nothing shown, the caller falls back.
+
+    Args:
+        budget (float): The turn's time budget in seconds.
+        wait (float): The longest each of the two may wait for a slot.
+    """
+    slots = _Granting(True, False)
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), _answer()])
+    loop = _guarded(llm, _documents(QuerySearch({})), model_slots=slots, time_budget_s=budget, clock=lambda: 0.0)
+
+    shown, raised = _until_raised(_turn(loop))
+
+    assert (shown, type(raised), slots.waits, llm.stream_chat.call_count) == ([], NoSlot, [wait, wait], 1)
+
+
+def test_a_first_round_that_spends_the_time_is_answered_instead_of_asked_again() -> None:
+    """Limits are checked before round 1 runs again, as before any round: with the time spent, the model must answer."""
+    now = [0.0]
+    llm = _advancing(streaming_tool_llm([_answer(MEMORY_ANSWER), _answer()]), now, after=0, to=500.0)
+
+    _, texts, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({})), clock=lambda: now[0])))
+
+    assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
+    assert _wire(_sent(llm, 1)[-1]) == {"role": "user", "content": f"{QUESTION}\n\n{SEARCH_NOTE}\n\n{FINAL_NOTE}"}
+    assert ("".join(texts), result.reason, result.steps, llm.stream_chat.call_count) == (ANSWER, "time_budget", 0, 2)
+
+
+@pytest.mark.parametrize(("spare", "asked_again"), [(0, True), (-1, False)], ids=["fits", "a-token-short"])
+def test_the_search_note_counts_against_the_room(spare: int, asked_again: bool) -> None:
+    """Joined to the message, the note costs room: round 1 runs again only while one more full reply still fits.
+
+    Args:
+        spare (int): Tokens the room holds beyond one full reply once the final and the search note are paid.
+        asked_again (bool): Whether round 1 runs again, rather than the model answering for want of room.
+    """
+    full_reply = math.ceil(turn_budget().result_chars / 3.5) + MESSAGE_OVERHEAD_TOKENS
+    notes = message_cost(FINAL_NOTE, 3.5) + message_cost(SEARCH_NOTE, 3.5)
+    room = notes + full_reply + MESSAGE_OVERHEAD_TOKENS + spare
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), _answer()])
+
+    _, texts, result = _drain(_turn(_guarded(llm, _documents(QuerySearch({})), budget=_budget_with_room(room))))
+
+    assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == ("auto" if asked_again else "none")
+    assert ("".join(texts), result.reason) == (ANSWER, None if asked_again else "context_budget")
+
+
+@pytest.mark.parametrize(
+    ("error", "raised"),
+    [(bad_request(TOOL_CHOICE_REJECTED), openai.BadRequestError), (bad_request(OVERFLOW), ValueError)],
+    ids=["refused", "overflow"],
+)
+def test_round_one_asked_again_fails_as_round_one_does_but_is_not_the_first_call(
+    error: Exception, raised: type[Exception]
+) -> None:
+    """Nothing was shown, so the failure goes to the caller; only the turn's first call can say tools are unavailable.
+
+    Args:
+        error (Exception): What round 1 asked again raises on its first pull.
+        raised (type[Exception]): What the turn raises: the refusal as it came, or the overflow naming the
+            context window.
+    """
+    llm = streaming_tool_llm([_answer(MEMORY_ANSWER), error])
+
+    shown, exc = _until_raised(_turn(_guarded(llm, _documents(QuerySearch({})))))
+
+    assert (shown, type(exc), llm.stream_chat.call_count) == ([], raised, 2)
+    assert (exc if raised is not ValueError else exc.__cause__) is error
+
+
+def test_asking_round_one_again_is_logged_once_without_any_text(loguru_caplog_info: LogCaptureFixture) -> None:
+    """One INFO line says round 1 was asked again; neither the message nor the dropped reply reaches the log.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm([_answer(f"zzsecretzz {MEMORY_ANSWER}"), _answer()])
+
+    _drain(_turn(_guarded(llm, _documents(QuerySearch({})))))
+
+    assert loguru_caplog_info.messages == [ASKED_AGAIN]
+    assert "zzsecretzz" not in loguru_caplog_info.text
 
 
 # --- Context room ---------------------------------------------------------------------------

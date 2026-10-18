@@ -8958,7 +8958,8 @@ class RAG:
         request's context, so :meth:`collection_scope` holds there. The budget is measured on
         the rendered system prompt, the offered schemas (none on a pinned scope, whose round
         offers no tools), the window's messages, each with its envelope, and the message. Only
-        a visual turn shows the model the pictures it finds.
+        a visual turn shows the model the pictures it finds, and only an unscoped turn asks a
+        first round that looked nothing up again, with the search note (``agent_search_first``).
 
         Args:
             engine (Any): The turn's query engine.
@@ -9034,6 +9035,8 @@ class RAG:
             fetch_thumbnails=self._fetch_companion_thumbnails if visual else None,
             legend_template=self._agent_prompt("agent_image_legend") if visual else "",
             max_images=self._visual_answer_max_images() if visual else 0,
+            # A pinned round offers no tools, so its reply is always the answer.
+            search_note="" if scoped else self._agent_prompt("agent_search_first"),
         )
         ledger = EvidenceLedger(cap=max(AGENT_LEDGER_CAP, pinned_count))
         return AgentTurn(loop=loop, ledger=ledger, budget=budget, reasoning=reasoning)

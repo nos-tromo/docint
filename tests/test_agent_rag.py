@@ -1053,7 +1053,26 @@ def test_the_prompts_are_the_locales_with_the_targets_guide_and_the_windows_summ
     assert turn.budget.system_tokens == estimate_tokens(expected, 3.5)
     assert turn.loop._final_note == _prompt("agent_final", code)
     assert turn.loop._scope_note == _prompt("agent_scope", code)
+    assert turn.loop._search_note == _prompt("agent_search_first", code)
     assert turn.loop._llm_view is agent_llm_view
+
+
+@pytest.mark.parametrize("target", RETRIEVAL_TARGETS)
+def test_only_an_unscoped_turn_asks_a_first_round_that_looked_nothing_up_again(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """Every unscoped turn gets the search note; a pinned scope, which offers no tools, gets none.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+    """
+    rag = _rag(monkeypatch)
+
+    scoped = _turn(rag, target=target, scoped=True, pinned_count=2)
+    unscoped = _turn(rag, target=target)
+
+    assert (scoped.loop._search_note, unscoped.loop._search_note) == ("", _prompt("agent_search_first", "en"))
 
 
 def test_the_history_counts_each_recent_message_with_its_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
