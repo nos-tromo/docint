@@ -442,7 +442,7 @@ class AgentLoop:
                 or a later one of a turn that has shown nothing), or the answer round finds none.
             ToolsUnavailable: Before anything is yielded, when the first call is refused as sent.
             ValueError: Naming the context window, when the answer does not fit even after the
-                tool replies were cut.
+                tool replies were cut, or a scoped round overflows once its seed step was shown.
             Exception: The endpoint's error, raised as it came, when it fails before anything is
                 yielded or fails the answer.
         """
@@ -798,8 +798,9 @@ class AgentLoop:
         step goes out with the round's first event, so a round that fails before it has shown
         nothing: an overflow then raises :class:`EvidenceDoesNotFit`, which sends the caller
         down its scoped path, and any other failure is raised as it came, a refusal included,
-        since no tools were offered. Once begun, the round fails as the answer round does. A
-        scope outranks the retrieval target: no picture is attached.
+        since no tools were offered. Once begun, the round fails as the answer round does: an
+        overflow before any text raises ``ValueError`` naming the context window, and any other
+        failure is raised as it came. A scope outranks the retrieval target: no picture is attached.
 
         Args:
             ctx (ToolContext): The turn's evidence, budget and LLM view.
@@ -814,6 +815,8 @@ class AgentLoop:
             EvidenceDoesNotFit: Before anything is yielded, when the passages cannot all be held
                 or shown legibly, or the round overflows the context window.
             NoSlot: When no model slot comes free; nothing was yielded.
+            ValueError: Naming the context window, when the round overflows after its seed step
+                but before any text.
             Exception: The endpoint's error, as it came, when the round fails.
         """
         text, found = scope_message(
@@ -844,9 +847,12 @@ class AgentLoop:
             raise NoSlot
         if streamed.done is None:
             exc = cast(Exception, streamed.error)
-            if not turn.shown and is_context_overflow(exc):
+            if streamed.shown or not is_context_overflow(exc):
+                raise exc
+            if not turn.shown:
                 raise EvidenceDoesNotFit(len(ctx.ledger)) from exc
-            raise exc
+            # The seed went out, so the caller cannot fall back: the overflow is reported as the answer round's.
+            raise ValueError(_OVERFLOW_MESSAGE) from exc
         yield from self._finish(turn, streamed)
 
     def _step(self, turn: _Turn, action: str, detail: str, found: int, *, step: int | None = None) -> AgentProgress:

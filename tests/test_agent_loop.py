@@ -48,6 +48,7 @@ from docint.agents.assessment.bounded import (
 from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger, render_context
 from docint.agents.assessment.runner import AssessmentDoesNotFit
 from docint.agents.assessment.split import SENTINEL, assessment_label
+from docint.agents.turn import loop as turn_loop
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
 from docint.agents.turn.calls import (
     FAILED_REPLY,
@@ -63,6 +64,7 @@ from docint.agents.turn.history import ConversationTurn, ConversationWindow
 from docint.agents.turn.image_tools import SearchImagesTool
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
+from docint.agents.turn.stream import Provisional
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
     ReadTool,
@@ -2423,6 +2425,47 @@ def test_a_pinned_answer_that_breaks_off_raises_after_its_text(error: Exception)
     assert exc is error
     assert shown[0] == AgentProgress(step=0, action="seed", detail="", found=1)
     assert len(shown) > 1 and all(isinstance(item, str) for item in shown[1:])
+
+
+def test_a_pinned_round_that_overflows_after_its_seed_reports_the_context_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the seed is shown the caller cannot fall back: an overflow before any text is the context window's.
+
+    The answer round reports it so too. Endpoints report an overflow before they stream, so the
+    round is faked: its first event is text the splitter holds back, then the overflow.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Replaces the round's stream.
+    """
+    overflow = bad_request(OVERFLOW)
+
+    def _held_then_overflowing(llm: Any, messages: Any, **kwargs: Any) -> Iterator[Provisional]:
+        """Release a fragment that could open the sentinel, then fail as an overflowing request does.
+
+        Args:
+            llm (Any): Unused.
+            messages (Any): Unused.
+            **kwargs (Any): Unused.
+
+        Yields:
+            Provisional: The fragment, which the splitter holds back.
+
+        Raises:
+            openai.BadRequestError: The overflow.
+        """
+        yield Provisional(SENTINEL[:6])
+        raise overflow
+
+    monkeypatch.setattr(turn_loop, "stream_round", _held_then_overflowing)
+
+    shown, raised = _until_raised(
+        _turn(_loop(streaming_tool_llm([]), _documents(QuerySearch({}))), pinned=[programme_passage()])
+    )
+
+    assert shown == [AgentProgress(step=0, action="seed", detail="", found=1)]
+    assert (type(raised), raised.__cause__) == (ValueError, overflow)
+    assert "context window" in str(raised)
 
 
 def test_a_pinned_answer_cut_at_the_length_limit_is_kept_and_flagged() -> None:
