@@ -22,6 +22,7 @@ from llama_index.core.base.llms.types import MessageRole
 
 import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
+from docint.agents.assessment.bounded import NoSlot
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
 from docint.agents.types import AgentProgress, IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
@@ -6304,6 +6305,70 @@ def test_a_scoped_turns_refusal_caches_nothing(
     assert (calls[0]["agent"], calls[0]["scoped_node_ids"]) == (True, ["c1"])
     assert api_module._agent_turn_allowed("all") is True
     assert not any("offering tools" in message for message in loguru_caplog.messages)
+
+
+@pytest.mark.parametrize("mode", ["session", "stateless"])
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (NoSlot(), "generation_failed"),
+        (ValueError("The agent turn's prompt exceeds the model's context window."), "context_overflow"),
+        (RuntimeError("invented outage"), "generation_failed"),
+        (status_error(openai.InternalServerError, 500, "invented outage"), "generation_failed"),
+    ],
+    ids=["no-slot", "overflow", "outage", "5xx"],
+)
+def test_an_error_after_an_agent_frame_gives_one_error_frame_and_saves_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    loguru_caplog: LogCaptureFixture,
+    mode: str,
+    error: Exception,
+    code: str,
+) -> None:
+    """Once a step was shown, a failure is the turn's: one error frame, no envelope, nothing stored.
+
+    The turn could not finish and "try again" is the action whatever stopped it, so only an
+    overflow has a code of its own; the log line names the error's type.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        mode (str): The request's session routing.
+        error (Exception): What breaks the turn after its first step.
+        code (str): The error frame's code.
+    """
+    _open_agent_gate(monkeypatch)
+
+    def _broken(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Show one step, then fail.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Yields:
+            Any: The step.
+
+        Raises:
+            Exception: The parametrized error, once the step is out.
+        """
+        yield AgentProgress(step=1, action="search", detail="Hafenfest Stände", found=2)
+        raise error
+
+    monkeypatch.setattr(api_module.rag, "stream_chat", _broken)
+    monkeypatch.setattr(api_module.rag, "stream_stateless_agent_turn", _broken)
+
+    frames = _stream_frames(client, retrieval_mode=mode)
+
+    assert frames == [
+        {"agent": {"step": 1, "action": "search", "detail": "Hafenfest Stände", "found": 2}},
+        {"error": "Internal server error", "code": code},
+    ]
+    assert cast(Any, api_module.rag.sessions).validation_updates == []
+    # The line itself, not a traceback appended to it.
+    assert any(type(error).__name__ in message.splitlines()[0] for message in loguru_caplog.messages)
 
 
 class _PromptRecorder:

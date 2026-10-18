@@ -50,6 +50,7 @@ from docint.agents import (
     Turn,
     is_weak_answer,
 )
+from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.gate import agent_available, confirm_tools_rejection, tools_rejection_cached
 from docint.agents.assessment.split import cited_sources
 from docint.agents.history import build_prior_turn
@@ -3103,16 +3104,22 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             # stays in the logs where an internal address belongs.
             logger.exception("Dense embedding endpoint unusable during SSE generation")
             yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'embedding_unavailable'})}\n\n"
+        except NoSlot as exc:
+            # A started agent turn found no slot for its answer; as for any failure, the action is "try again".
+            logger.warning(
+                "A chat turn found no model slot after it began ({}); reported as generation_failed", type(exc).__name__
+            )
+            yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
         except ValueError as exc:
             msg = str(exc)
             if "context window" in msg.lower() or "context size" in msg.lower():
-                logger.warning("Context window overflow during SSE generation: {}", msg)
+                logger.warning("Context window overflow during SSE generation ({}): {}", type(exc).__name__, msg)
                 yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'context_overflow'})}\n\n"
             else:
-                logger.exception("Stream error during SSE generation")
+                logger.exception("Stream error during SSE generation ({})", type(exc).__name__)
                 yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
-        except Exception:
-            logger.exception("Stream error during SSE generation")
+        except Exception as exc:
+            logger.exception("Stream error during SSE generation ({})", type(exc).__name__)
             yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
