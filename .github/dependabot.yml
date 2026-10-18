@@ -34,6 +34,12 @@ updates:
       # the new path.
       - dependency-name: "qdrant-client"
         versions: [">= 1.19.0"]
+      # setuptools is a [build-system] requirement only, so Dependabot can
+      # raise that floor but never refreshes the runtime copy in uv.lock
+      # (pulled in by llama-index-core). Once the floor allows the newest
+      # release, every run fails with "No files have changed!". Refresh the
+      # lockfile copy by hand with `uv lock --upgrade-package setuptools`.
+      - dependency-name: "setuptools"
 
   - package-ecosystem: "npm"
     directory: "/frontend"
