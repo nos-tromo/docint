@@ -98,25 +98,37 @@ class DummyResponse:
         self.source_nodes = nodes
 
 
-def test_the_bundled_rewrite_prompt_is_the_english_file() -> None:
-    """Guard against regressions in the bundled fallback prompts.
+@pytest.mark.parametrize(
+    ("constant", "name"),
+    [
+        ("DEFAULT_RETRIEVAL_REWRITE_PROMPT", "rewrite_retrieval"),
+        ("DEFAULT_GROUNDED_TEXT_QA_PROMPT", "grounded_qa"),
+        ("DEFAULT_GROUNDED_REFINE_PROMPT", "grounded_refine"),
+    ],
+)
+def test_a_bundled_fallback_prompt_is_its_english_file(constant: str, name: str) -> None:
+    """Each bundled fallback is its English prompt file, word for word.
 
-    The rewrite fallback is the English prompt file, word for word: it stands in when the
-    file is missing, so a drifted copy would bring back rules the file has dropped, such as
-    copying names from earlier answers into the query. The grounded QA / refine prompts
-    must carry the ``{prior_turn_context}`` placeholder that the SessionManager binds via
-    ``PromptTemplate.partial_format``.
+    A fallback stands in when its file is missing, so a drifted copy would bring back rules
+    the file has dropped, such as copying names from earlier answers into the query, or lack
+    rules it has gained, such as the grounded prompts' labelled inference.
+
+    Args:
+        constant (str): The fallback's name in :mod:`docint.core.rag`.
+        name (str): The prompt file it stands in for.
     """
-    from docint.core.rag import (
-        DEFAULT_GROUNDED_REFINE_PROMPT,
-        DEFAULT_GROUNDED_TEXT_QA_PROMPT,
-        DEFAULT_RETRIEVAL_REWRITE_PROMPT,
-    )
+    import docint.core.rag as rag_module
     from docint.utils.env_cfg import load_path_env
 
-    english = (load_path_env().prompts / "en" / "rewrite_retrieval.txt").read_text(encoding="utf-8").strip()
+    english = (load_path_env().prompts / "en" / f"{name}.txt").read_text(encoding="utf-8").strip()
 
-    assert DEFAULT_RETRIEVAL_REWRITE_PROMPT == english
+    assert getattr(rag_module, constant) == english
+
+
+def test_the_bundled_grounded_prompts_carry_the_prior_turn_slot() -> None:
+    """The SessionManager binds ``{prior_turn_context}`` into both via ``PromptTemplate.partial_format``."""
+    from docint.core.rag import DEFAULT_GROUNDED_REFINE_PROMPT, DEFAULT_GROUNDED_TEXT_QA_PROMPT
+
     assert "{prior_turn_context}" in DEFAULT_GROUNDED_TEXT_QA_PROMPT
     assert "{prior_turn_context}" in DEFAULT_GROUNDED_REFINE_PROMPT
 
