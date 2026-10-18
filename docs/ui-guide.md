@@ -146,11 +146,14 @@ answer** disclosure where the live list stood. Every agent turn with a step
 besides its starting passages gets one, lookups included. A turn whose stream
 failed keeps the steps it showed behind the same disclosure, above the error.
 
-An amber notice says when a turn may rest on less than it could: the model
-could not run its own searches, so the answer rests on a standard search; it
-reached its limit of search rounds or ran out of time; the model's context
-was full; further searches found nothing new; or not every search could be
-completed. Each maps one `agent.reason` token to its own copy.
+A muted note says when a turn stopped searching at one of its limits: the
+round limit, the time for the turn, the room for evidence in the model's
+context, or searches that found nothing new. A limit is how research ends,
+not a failure: at the smallest context window a turn often stops for room,
+above all when pictures fill it. An amber notice is kept for a turn that may
+rest on less than it could: the model could not run its own searches, so the
+answer rests on a standard search, or not every search could be completed.
+Each maps one `agent.reason` token to its own copy.
 
 A question that asks for a judgement — what could be improved, whether a
 method convinces — gets an **assessment**. The answer opens with what the

@@ -153,6 +153,14 @@ const REASON_COPY: Record<AgentReason, keyof Strings> = {
   no_evidence: 'chat.agent_reason.no_evidence'
 }
 
+/** The limits a turn stops at by design, often at the smallest window; every other reason is a failure. */
+const LIMIT_REASONS: ReadonlySet<AgentReason> = new Set<AgentReason>([
+  'round_budget',
+  'time_budget',
+  'context_budget',
+  'idle'
+])
+
 const ANSWER_COPY: Partial<Record<AgentTrail['answer'], keyof Strings>> = {
   unsplit: 'chat.assessment_answer.unsplit',
   empty: 'chat.assessment_answer.empty'
@@ -280,6 +288,33 @@ function carriesLabel(trail: AgentTrail): boolean {
   return trail.answer === 'unsplit' || (trail.answer === 'split' && typeof trail.evidence_chars === 'number')
 }
 
+/** Why research stopped: a limit is a muted note on how it ended, a failure an alert that evidence may be missing. */
+function ReasonNotice({ reason }: { reason: AgentReason }) {
+  const t = useT()
+  if (LIMIT_REASONS.has(reason)) {
+    return (
+      <div
+        className="mt-3 flex items-start gap-2 text-xs text-muted-foreground"
+        data-testid="agent-reason-notice"
+        role="note"
+      >
+        <InfoIcon className="mt-px h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0">{t(REASON_COPY[reason])}</span>
+      </div>
+    )
+  }
+  return (
+    <div
+      className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
+      data-testid="agent-reason-notice"
+      role="alert"
+    >
+      <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
+      {t(REASON_COPY[reason])}
+    </div>
+  )
+}
+
 /** Says the answer carries the model's own judgement. */
 function AssessmentNotice({ trail }: { trail: AgentTrail }) {
   const t = useT()
@@ -335,8 +370,7 @@ export function ChatTurn({
   const failedSteps = turn.done && !turn.meta ? turn.agentSteps : undefined
   const research = researchSteps(trail ? trail.actions : failedSteps)
   // Wire tokens reach `t()` only through the tables above, by own key: "constructor" is not copy.
-  const reasonKey =
-    trail?.reason && Object.hasOwn(REASON_COPY, trail.reason) ? REASON_COPY[trail.reason] : undefined
+  const reason = trail?.reason && Object.hasOwn(REASON_COPY, trail.reason) ? trail.reason : undefined
   const answerKey =
     assessment && trail && Object.hasOwn(ANSWER_COPY, trail.answer) ? ANSWER_COPY[trail.answer] : undefined
   const targetUsed = retrievalTargetUsed(turn.meta)
@@ -380,16 +414,7 @@ export function ChatTurn({
           </div>
         )}
         {assessment && trail && carriesLabel(trail) && <AssessmentNotice trail={trail} />}
-        {reasonKey && (
-          <div
-            className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"
-            data-testid="agent-reason-notice"
-            role="alert"
-          >
-            <WarningIcon className="mr-2 inline h-3.5 w-3.5 align-[-0.15em]" />
-            {t(reasonKey)}
-          </div>
-        )}
+        {reason && <ReasonNotice reason={reason} />}
         {answerKey && (
           <div
             className="mt-3 rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-2 text-xs text-[var(--status-amber-strong)]"

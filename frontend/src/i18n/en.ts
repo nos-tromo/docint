@@ -207,12 +207,10 @@ export const en = {
   'chat.agent_trail_answer': 'Writing the assessment…',
   'chat.agent_reason.tools_unavailable':
     'The model could not run its own searches, so this answer rests on a standard search instead.',
-  'chat.agent_reason.round_budget':
-    'The research reached its limit of search rounds, so the answer rests on what was found by then.',
-  'chat.agent_reason.time_budget': 'The research stopped early because it ran out of time.',
-  'chat.agent_reason.context_budget':
-    'The model’s context window was full, so research stopped early or part of the evidence was left out.',
-  'chat.agent_reason.idle': 'The research stopped because further searches found nothing new.',
+  'chat.agent_reason.round_budget': 'Stopped searching after the round limit.',
+  'chat.agent_reason.time_budget': 'Stopped searching: the time for this turn ran out.',
+  'chat.agent_reason.context_budget': 'Stopped searching: the room for more evidence was used up.',
+  'chat.agent_reason.idle': 'Stopped searching: the last searches found nothing new.',
   'chat.agent_reason.research_failed': 'Some evidence may be missing: not every search could be completed.',
   'chat.agent_reason.no_evidence': 'No passages were found to answer from.',
   'chat.assessment_answer.unsplit':

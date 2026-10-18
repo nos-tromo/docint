@@ -56,6 +56,19 @@ describe('i18n', () => {
     const keys = [...AGENT_REASONS.map((reason) => `chat.agent_reason.${reason}`), ...AGENT_TRAIL_KEYS]
     expect(keys.filter((key) => !Object.hasOwn(copy, key) || copy[key].trim() === '')).toEqual([])
   })
+  it.each([
+    ['en', en],
+    ['de', de]
+  ] as const)('words every limit in %s as how research ended, never as evidence lost', (_lang, catalog) => {
+    const copy: Record<string, string> = catalog
+    const limits = ['round_budget', 'time_budget', 'context_budget', 'idle'].map(
+      (reason) => copy[`chat.agent_reason.${reason}`]
+    )
+    const claims = limits.filter((text) =>
+      /left out|missing|lost|incomplete|ausgelassen|fehlen|verloren|unvollständig/i.test(text)
+    )
+    expect(claims).toEqual([])
+  })
   it('keeps no assessment trail or reason key once they are the agent’s', () => {
     const stale = Object.keys({ ...en, ...de }).filter(
       (key) => key.startsWith('chat.assessment_trail_') || key.startsWith('chat.assessment_reason.')

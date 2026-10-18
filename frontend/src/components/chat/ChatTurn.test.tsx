@@ -420,13 +420,10 @@ describe('ChatTurn', () => {
   })
 
   it.each([
-    ['en', 'The model’s context window was full, so research stopped early or part of the evidence was left out.'],
-    [
-      'de',
-      'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder ein Teil der Belege wurde ausgelassen.'
-    ]
-  ] as const)('says in the %s notice that a full context window can also leave evidence out', (lang, copy) => {
-    // The token covers research the room stopped and evidence left out whole or cut below its minimum.
+    ['en', 'Stopped searching: the room for more evidence was used up.'],
+    ['de', 'Suche beendet: Der Platz für weitere Belege war aufgebraucht.']
+  ] as const)('says in the %s note that the room for evidence was used up', (lang, copy) => {
+    // At the smallest window a turn often stops here by design, pictures above all, so it reads as information.
     renderTurn(
       {
         user: 'q',
@@ -437,7 +434,9 @@ describe('ChatTurn', () => {
       lang
     )
 
-    expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(copy)
+    const note = screen.getByTestId('agent-reason-notice')
+    expect(note).toHaveTextContent(copy)
+    expect(note).toHaveAttribute('role', 'note')
   })
 
   it('says when the model did not separate its judgement', () => {
@@ -867,6 +866,29 @@ describe('ChatTurn', () => {
     const copy: Record<string, string> = en
     expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(copy[`chat.agent_reason.${reason}`])
   })
+
+  it.each(['round_budget', 'time_budget', 'context_budget', 'idle'] as const)(
+    'shows the %s limit as a muted note, not an alert',
+    (reason: AgentReason) => {
+      renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta({ ...LOOKUP_TRAIL, reason }) })
+
+      const note = screen.getByTestId('agent-reason-notice')
+      expect(note).toHaveAttribute('role', 'note')
+      expect(note.className).not.toMatch(/amber/)
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    }
+  )
+
+  it.each(['research_failed', 'tools_unavailable', 'no_evidence'] as const)(
+    'keeps the amber alert for %s',
+    (reason: AgentReason) => {
+      renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta({ ...LOOKUP_TRAIL, reason }) })
+
+      const alert = screen.getByRole('alert')
+      expect(alert).toHaveAttribute('data-testid', 'agent-reason-notice')
+      expect(alert.className).toMatch(/amber/)
+    }
+  )
 
   it.each([
     ['en', 'Some evidence may be missing'],

@@ -219,13 +219,10 @@ export const de: Strings = {
   'chat.agent_trail_answer': 'Einschätzung wird geschrieben…',
   'chat.agent_reason.tools_unavailable':
     'Das Modell konnte keine eigenen Suchen ausführen; diese Antwort beruht daher auf einer Standardsuche.',
-  'chat.agent_reason.round_budget':
-    'Die Recherche hat die Höchstzahl an Suchrunden erreicht; die Antwort beruht auf dem bis dahin Gefundenen.',
-  'chat.agent_reason.time_budget':
-    'Die Recherche endete vorzeitig, weil die Zeit abgelaufen war.',
-  'chat.agent_reason.context_budget':
-    'Das Kontextfenster des Modells war voll; daher endete die Recherche vorzeitig oder ein Teil der Belege wurde ausgelassen.',
-  'chat.agent_reason.idle': 'Die Recherche endete, weil weitere Suchen nichts Neues ergaben.',
+  'chat.agent_reason.round_budget': 'Suche beendet: Die Höchstzahl an Suchrunden war erreicht.',
+  'chat.agent_reason.time_budget': 'Suche beendet: Die Zeit für diese Anfrage war abgelaufen.',
+  'chat.agent_reason.context_budget': 'Suche beendet: Der Platz für weitere Belege war aufgebraucht.',
+  'chat.agent_reason.idle': 'Suche beendet: Die letzten Suchen fanden nichts Neues.',
   'chat.agent_reason.research_failed':
     'Möglicherweise fehlen einige Belege: Nicht jede Suche konnte abgeschlossen werden.',
   'chat.agent_reason.no_evidence': 'Es wurden keine Passagen gefunden, auf die sich die Antwort stützen könnte.',
