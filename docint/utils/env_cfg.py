@@ -2401,10 +2401,12 @@ def load_agent_env(
           loop; off means a plain retrieve-then-answer lookup. When set, it is
           true for ``true``, ``1`` or ``yes`` (any case) and false for any other
           value, without a warning, as for the other docint flags.
-        - max_rounds (int): Upper bound on tool-calling rounds per turn; ``0``
-          allows none. When ``AGENT_MAX_ROUNDS`` is unset or blank it follows
-          ``ASSESSMENT_MAX_STEPS``, the older assessment setting, so a deployment
-          that tuned that keeps its budget; that variable is not read otherwise.
+        - max_rounds (int): Upper bound on tool-calling rounds per turn; at
+          least ``1``, so a turn may always search once. A lower value is raised
+          to ``1`` with a warning naming the variable. When ``AGENT_MAX_ROUNDS``
+          is unset or blank it follows ``ASSESSMENT_MAX_STEPS``, the older
+          assessment setting, so a deployment that tuned that keeps its budget;
+          that variable is not read otherwise.
         - time_budget_s (float): Wall-clock seconds a turn may spend before the
           model is made to answer; positive and finite.
         - max_calls_per_round (int): Most tool calls the model may make in one
@@ -2414,7 +2416,7 @@ def load_agent_env(
     rounds_var = "AGENT_MAX_ROUNDS" if os.getenv("AGENT_MAX_ROUNDS", "").strip() else "ASSESSMENT_MAX_STEPS"
     return AgentConfig(
         enabled=raw_enabled in {"true", "1", "yes"} if raw_enabled else default_enabled,
-        max_rounds=_extract_int(rounds_var, default_max_rounds, minimum=0),
+        max_rounds=_extract_int(rounds_var, default_max_rounds, minimum=1),
         time_budget_s=_parse_agent_time_budget(default=default_time_budget_s),
         max_calls_per_round=_extract_int("AGENT_MAX_CALLS_PER_ROUND", default_max_calls_per_round, minimum=1),
     )

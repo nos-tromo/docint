@@ -806,7 +806,7 @@ with a warning, rather than failing a turn.
 | Variable | Default | Description |
 |---|---|---|
 | `AGENT_TURNS_ENABLED` | `true` | Answer chat turns with the agent loop. Off means every turn is a plain retrieve-then-answer lookup. Needs a chat context window of at least 8192 tokens: `OPENAI_CTX_WINDOW` must say so, and the chat endpoint must actually serve it. Below 8192, agent turns stay off, with one warning per window size. |
-| `AGENT_MAX_ROUNDS` | `6` | Tool-calling rounds a turn may run before the model must answer; `0` allows none. Unset or blank, it follows `ASSESSMENT_MAX_STEPS`. |
+| `AGENT_MAX_ROUNDS` | `6` | Tool-calling rounds a turn may run before the model must answer. At least `1`, so a turn may always search once: a lower value is raised to `1`, with a warning. Unset or blank, it follows `ASSESSMENT_MAX_STEPS`. |
 | `AGENT_TIME_BUDGET_S` | `120` | Seconds a turn may spend before the model must answer. Positive and finite. Checked between rounds: an answer already streaming is never cut. |
 | `AGENT_MAX_CALLS_PER_ROUND` | `4` | Tool calls one round may run at once; further calls are answered without running. At least `1`. |
 | `ASSESSMENT_MAX_STEPS` | *unset* | The older name for `AGENT_MAX_ROUNDS`, read only while that is unset or blank, so a deployment that tuned it keeps its budget. |

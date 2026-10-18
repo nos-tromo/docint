@@ -279,9 +279,9 @@ def test_assessment_max_steps_is_not_read_while_agent_max_rounds_is_set(
 
 
 @pytest.mark.parametrize("var", ["AGENT_MAX_ROUNDS", "ASSESSMENT_MAX_STEPS"])
-@pytest.mark.parametrize(("raw", "expected"), [("3", 3), ("1", 1), ("0", 0), ("-2", 0)])
-def test_max_rounds_is_clamped_at_zero(monkeypatch: pytest.MonkeyPatch, var: str, raw: str, expected: int) -> None:
-    """A negative budget means no tool rounds, never an error; zero stays a valid budget.
+@pytest.mark.parametrize(("raw", "expected"), [("3", 3), ("1", 1), ("0", 1), ("-2", 1)])
+def test_max_rounds_is_at_least_one(monkeypatch: pytest.MonkeyPatch, var: str, raw: str, expected: int) -> None:
+    """A turn may always search once: with no tool round, every turn would answer from no evidence.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -292,6 +292,23 @@ def test_max_rounds_is_clamped_at_zero(monkeypatch: pytest.MonkeyPatch, var: str
     monkeypatch.setenv(var, raw)
 
     assert load_agent_env().max_rounds == expected
+
+
+@pytest.mark.parametrize("var", ["AGENT_MAX_ROUNDS", "ASSESSMENT_MAX_STEPS"])
+def test_a_round_budget_below_one_warns_naming_its_variable(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, var: str
+) -> None:
+    """``0`` once meant "answer from the first search alone"; raised to one round, it says so, naming the variable read.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        var (str): The variable carrying the round budget.
+    """
+    monkeypatch.setenv(var, "0")
+
+    assert load_agent_env().max_rounds == 1
+    assert loguru_caplog.messages == [f"{var} 0 is < 1; clamping."]
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("8", 8), ("1", 1), ("0", 1), ("-3", 1)])
