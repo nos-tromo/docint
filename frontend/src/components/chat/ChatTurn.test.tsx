@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react'
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { DocumentsIcon, ImageIcon } from '@infra/ui'
@@ -906,6 +906,7 @@ describe('ChatTurn', () => {
   it('keeps every call of a round in the live trail as more steps arrive', () => {
     // One round's calls share its step number.
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => errors.mockRestore())
     const round: AgentStep[] = [
       { step: 1, action: 'search', detail: 'Hafen', found: 2 },
       { step: 1, action: 'search', detail: 'Regenjacken', found: 1 }
@@ -925,7 +926,6 @@ describe('ChatTurn', () => {
       'Searched “bedeckter Himmel”: 0 new passages'
     ])
     expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/i)
-    errors.mockRestore()
   })
 
   it('flags an agent turn on the visual target that saw no pictures, as any visual turn', () => {
