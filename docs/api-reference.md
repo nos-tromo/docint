@@ -225,9 +225,10 @@ Request (`QueryIn`):
 
 - `reasoning` — `true`/`false` forces the model's reasoning ("thinking") mode
   on or off for this answer; `null`/absent (the default) defers to
-  `OPENAI_ENABLE_THINKING`. Applies to post-retrieval answer synthesis only —
-  query rewriting stays on the plain model. The SPA's brain toggle sends an
-  explicit boolean every turn.
+  `OPENAI_ENABLE_THINKING`. On a plain turn it applies to post-retrieval answer
+  synthesis only — query rewriting stays on the plain model. On an agent turn it
+  picks the model every round runs on. The SPA's brain toggle sends an explicit
+  boolean every turn.
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
   `RAG.run_query()` directly, or `RAG.stream_stateless_agent_turn()` on an
@@ -276,10 +277,23 @@ target.
 }
 ```
 
-`answer_mode` is `"assessment"` when the turn added a labelled model judgement
-to the cited evidence (see [Assessment turns](retrieval-and-agents.md#assessment-turns));
-`agent` then carries `steps`, `actions`, `reason`, `answer`, `shortened` and
-`evidence_chars`. Both are `null` on a lookup.
+On an agent turn (see [Agent turns](retrieval-and-agents.md#agent-turns)),
+`answer_mode` is `"lookup"`, or `"assessment"` when the answer added a
+labelled model judgement to the cited evidence. `agent` carries the trail:
+
+- `steps`: the tool rounds whose calls were answered;
+- `actions`: one `{action, detail, found}` per step, as the `agent` frames
+  below carry them;
+- `reason`: an `agent.reason` token, or `null`;
+- `answer`: `plain` on a lookup; `split` or `empty` on an assessment, which
+  also carries `evidence_chars`, where its source-backed part ends.
+
+Such a turn reports `retrieval_mode: "agent"` (`"scoped"` on a scoped turn),
+`retrieval_query: null`, and a `graph_debug` skipped with the reason `agent`.
+Both fields are `null` on a plain turn, with one exception: a plain answer an
+agent turn handed over because the endpoint refused tools carries
+`agent: {"steps": 0, "actions": [], "reason": "tools_unavailable", "answer": "plain"}`.
+A turn stored by the earlier assessment pipeline may also carry `shortened`.
 
 ### `POST /stream_query`
 
@@ -287,16 +301,31 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
 
 - `{"token": "..."}` — answer text as it is generated.
 - `{"agent": {"step": 1, "action": "search", "detail": "...", "found": 3}}` —
-  one step of an assessment turn; `action` is `seed`, `search` or `answer`, and
-  `detail` is the model-written query of a search.
+  one step of an agent turn, sent as it happens. `found` counts the passages the
+  step added to the evidence or extended. `action` is one of:
+  - the tool that ran, with its main argument in `detail`: `search` (the
+    model's query), `search_images` (the visual cues it looked for),
+    `keyframes` (the clip's name, ending in ` #n` when one frame was asked for)
+    or `read` (the passage number);
+  - `note`: the text the round wrote before its calls, cut to 500 characters,
+    with `found` 0. It arrives after the `token` frames it withdraws: discard
+    the answer text so far, and treat later tokens as a fresh answer;
+  - `seed`: a scoped turn's pinned passages, with `step` 0 and `found` their
+    count.
+
+  `answer` is found only in trails stored by the earlier assessment pipeline,
+  and never streams.
 - `{"retry": {"query": "..."}}` — a corrective retry is replacing the answer
-  streamed so far.
+  streamed so far. It follows only a plain lookup, a `tools_unavailable`
+  fallback included, never a turn that streamed `agent` frames.
 - `{"error": "Internal server error", "code": "..."}` — the turn failed;
   `code` is `embedding_unavailable`, `context_overflow` or `generation_failed`.
+  It is the last frame: no envelope follows, and an agent turn that fails stores
+  nothing.
 - The final envelope — `/query`'s fields with the text under `response` instead
   of `answer`, plus `reasoning` (and `retried` / `retry_query` after a
-  corrective retry). An assessment adds `answer_mode: "assessment"` and
-  `agent`; a lookup carries neither key.
+  corrective retry). An agent turn adds `answer_mode` and `agent`; a plain turn
+  carries neither key, except the `tools_unavailable` fallback's `agent`.
 
 ### `POST /search`
 
@@ -887,8 +916,9 @@ from `conversations` via `SessionManager.list_sessions()`.
 ### `GET /sessions/{session_id}/history`
 
 Returns `SessionHistoryOut` — `{"messages": [...]}` where each message
-comes from `Turn` / `Citation`. An assessment turn's assistant message also
-carries `answer_mode: "assessment"` and its `agent` trail.
+comes from `Turn` / `Citation`. An agent turn's assistant message also
+carries its `answer_mode` and its `agent` trail, as does a plain turn that kept
+a `tools_unavailable` trail; any other plain turn carries neither.
 
 An assistant message carries `retrieval_target` (`all`, `documents` or
 `visual`) — the evidence the turn answered under, as `POST /query` reports it —
