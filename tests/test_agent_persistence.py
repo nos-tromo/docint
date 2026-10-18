@@ -360,6 +360,40 @@ def test_each_path_stores_the_mode_it_answered_in(
     assert _stored_modes(session_manager) == [stored]
 
 
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+@pytest.mark.parametrize("target", ["all", "documents", "visual"])
+def test_an_agent_turn_stores_the_target_it_answered_under(
+    session_manager: SessionManager, entry: str, target: str
+) -> None:
+    """An agent turn records its evidence target as a plain turn does, so a reloaded chat keeps its chip.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        entry (str): The entry point under test, ``chat`` or ``stream_chat``.
+        target (str): The evidence target the turn is asked under.
+    """
+    engine = MagicMock()
+    rag = cast(Any, session_manager.rag)
+    rag.query_engine = engine
+    rag.build_query_engine.return_value = engine
+    llm = streaming_tool_llm([answer_round(ANSWER)])
+    rag.agent_turn.side_effect = lambda _engine, **kwargs: AgentTurn(
+        loop=scripted_loop(llm, target=kwargs["retrieval_target"]),
+        ledger=EvidenceLedger(cap=AGENT_LEDGER_CAP),
+        budget=turn_budget(),
+        reasoning=False,
+    )
+
+    if entry == "chat":
+        session_manager.chat(QUESTION, session_id="s1", agent=True, retrieval_target=target)
+    else:
+        list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True, retrieval_target=target))
+
+    with session_manager._session_scope() as s:
+        assert [stored for (stored,) in s.query(Turn.retrieval_target).order_by(Turn.idx)] == [target]
+    assert _stored_modes(session_manager) == ["lookup"]
+
+
 def test_get_prior_turn_reads_the_last_exchange_with_its_evidence_boundary(session_manager: SessionManager) -> None:
     """The prior-turn reader needs neither citation rehydration nor full history.
 
