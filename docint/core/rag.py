@@ -134,7 +134,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
 from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
-from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, MIN_ROUND_ROOM, TurnBudget, schema_tokens
+from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, message_cost, schema_tokens
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.collection_overview import summarize_document_types
@@ -9009,9 +9009,7 @@ class RAG:
             system_tokens=estimate_tokens(system_prompt, ratio),
             # A pinned round offers no tools.
             tool_schema_tokens=0 if scoped else schema_tokens(registry.schemas(), ratio),
-            history_tokens=sum(
-                estimate_tokens(sent.content or "", ratio) + MESSAGE_OVERHEAD_TOKENS for sent in window.messages()
-            ),
+            history_tokens=sum(message_cost(sent.content or "", ratio) for sent in window.messages()),
             message_tokens=estimate_tokens(message, ratio),
         )
         if not budget.available:
