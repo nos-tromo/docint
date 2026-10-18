@@ -2588,8 +2588,9 @@ def test_visual_rounds_attach_thumbnails_within_the_allowance(
 
     Args:
         overrides (dict[str, Any]): What limits the pictures: the turn's most, or the room left
-            (1233 tokens once the round's own messages are paid: one picture fits and two would
-            not, though the turn's room allows two and its 1420 before the round would hold two).
+            (1233 tokens once the round's own messages are paid: a message of one picture costs
+            662 as sent and one of two 1268, though the turn's room allows two and its 1420
+            before the round would hold them).
         shown (list[tuple[int, int]]): Per picture shown, the number it is cited by and its frame.
         reason (str | None): Why the turn answered: by choice, or for want of room.
     """
@@ -2775,8 +2776,8 @@ def test_a_pinned_scope_shows_no_picture() -> None:
 def test_a_refusal_gives_the_pictures_room_back() -> None:
     """Pictures taken back no longer count against the room: a later round may still call tools.
 
-    At this room a round needs 938 tokens: one is left 1005 with the picture shown, then 1606
-    after the refusal and another round, which would be 878 with the picture's 728 still counted.
+    At this room a round needs 938 tokens: one is left 1001 with the picture's message (662) shown,
+    then 1536 after the refusal and another round, which would be 874 with that 662 still counted.
     """
     store = ThumbnailStore(0, 1)
     registry = _pictures({"Regenjacken": [frame_passage(0)], "Schirm": [frame_passage(1)]})
@@ -2789,7 +2790,7 @@ def test_a_refusal_gives_the_pictures_room_back() -> None:
         ]
     )
 
-    _, _, result = _drain(_turn(_visual(llm, registry, store, budget=_budget_with_room(1925))))
+    _, _, result = _drain(_turn(_visual(llm, registry, store, budget=_budget_with_room(1855))))
 
     assert [call.kwargs["tool_choice"] for call in llm.stream_chat.call_args_list] == ["auto"] * 4
     assert (result.reason, result.steps, result.images_attached) == (None, 2, 0)

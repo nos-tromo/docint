@@ -14,6 +14,7 @@ from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRol
 from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.turn.budget import message_cost
 from docint.agents.turn.images import TurnImages
 from docint.core.retrieval.visual import (
     VISUAL_IMAGE_TOKEN_ESTIMATE,
@@ -23,6 +24,14 @@ from docint.core.retrieval.visual import (
 )
 
 LEGEND = "Die Bilder unten sind Quellen, als Bilder beigefügt:\n{image_legend}"
+#: An invented legend as long as the shipped ones: its message costs more than the flat allowance.
+LONG_LEGEND = (
+    "Die folgenden Bilder sind Quellen dieser Antwort und als Bilder beigefügt, damit du sie siehst und "
+    "nicht nur ihre Beschreibungen liest. Jede Zeile nennt die Nummer, unter der ein Bild zitiert wird.\n\n"
+    "{image_legend}\n\n"
+    "Beschreibe nur, was die beigefügten Bilder zeigen, und nenne zu jeder Aussage die Nummer des Bildes. "
+    "Weicht ein Bild von seiner Beschreibung ab, folge dem Bild und sage es."
+)
 #: Room enough for every picture the tests offer.
 WIDE = 10_000
 
@@ -38,7 +47,9 @@ def _images(store: ThumbnailStore | None, *, max_images: int = 6, round_room: in
     Returns:
         TurnImages: The turn's pictures, none shown yet.
     """
-    return TurnImages(fetch=store, legend_template=LEGEND, max_images=max_images, round_room=round_room)
+    return TurnImages(
+        char_token_ratio=3.5, fetch=store, legend_template=LEGEND, max_images=max_images, round_room=round_room
+    )
 
 
 def _numbered(*passages: NodeWithScore, first: int = 1) -> list[tuple[int, NodeWithScore]]:
@@ -82,16 +93,32 @@ def _url(index: int) -> str:
     return f"data:{mime};base64,{data}"
 
 
-def _cost(count: int) -> int:
-    """Return what one message of ``count`` pictures costs.
+def _price(*numbers: int) -> int:
+    """Return what one message showing pictures under these numbers costs as it is sent.
 
     Args:
-        count (int): The pictures in it.
+        *numbers (int): The numbers its pictures are cited by.
 
     Returns:
-        int: The legend's allowance and each picture's estimate.
+        int: Its legend with the message's envelope, and each picture's estimate.
     """
-    return VISUAL_LEGEND_TOKEN_ALLOWANCE + count * VISUAL_IMAGE_TOKEN_ESTIMATE
+    legend = render_legend(LEGEND, [(number, "image/jpeg", "") for number in numbers])
+    return message_cost(legend, 3.5) + VISUAL_IMAGE_TOKEN_ESTIMATE * len(numbers)
+
+
+def test_a_picture_that_fits_the_flat_allowance_but_not_its_message_as_sent_is_not_shown() -> None:
+    """A picture message is priced as it is sent: its legend and envelope, and each picture's estimate."""
+    store = ThumbnailStore(0)
+    images = TurnImages(char_token_ratio=3.5, fetch=store, legend_template=LONG_LEGEND, max_images=6, round_room=WIDE)
+    flat = VISUAL_LEGEND_TOKEN_ALLOWANCE + VISUAL_IMAGE_TOKEN_ESTIMATE
+    as_sent = message_cost(render_legend(LONG_LEGEND, [(1, *thumbnail(0))]), 3.5) + VISUAL_IMAGE_TOKEN_ESTIMATE
+
+    refused = images.attach(_numbered(frame_passage(0)), room=flat)
+    shown = images.attach(_numbered(frame_passage(0)), room=as_sent)
+
+    assert flat < as_sent
+    assert (refused, store.fetches) == (None, [["frame-0"]])
+    assert shown is not None and shown[1] == as_sent
 
 
 def test_a_rounds_new_pictures_are_shown_after_a_legend_in_number_order() -> None:
@@ -104,7 +131,7 @@ def test_a_rounds_new_pictures_are_shown_after_a_legend_in_number_order() -> Non
     assert shown is not None
     message, cost = shown
     legend = render_legend(LEGEND, [(2, *thumbnail(0)), (3, *thumbnail(1))])
-    assert (message.role, _parts(message), cost) == (MessageRole.USER, (legend, [_url(0), _url(1)]), _cost(2))
+    assert (message.role, _parts(message), cost) == (MessageRole.USER, (legend, [_url(0), _url(1)]), _price(2, 3))
     assert store.fetches == [["frame-0", "frame-1"]]
     assert images.count == 2
 
@@ -150,9 +177,13 @@ def test_a_turn_shows_no_more_pictures_than_its_cap(max_images: int, round_room:
     assert (len(_parts(first[0])[1]), _parts(second[0])[1], images.count) == (1, [_url(1)], shown)
 
 
-@pytest.mark.parametrize(("room", "shown"), [(_cost(1), 1), (_cost(1) - 1, 0), (_cost(2) - 1, 1), (_cost(2), 2)])
+@pytest.mark.parametrize(
+    ("room", "shown"),
+    [(_price(1), 1), (_price(1) - 1, 0), (_price(1, 2) - 1, 1), (_price(1, 2), 2)],
+    ids=["one-exactly", "one-short", "two-short", "two-exactly"],
+)
 def test_each_picture_must_fit_the_room_left(room: int, shown: int) -> None:
-    """A message pays the legend's allowance once and each picture's estimate; pictures may use the room up.
+    """A message pays its legend as sent, envelope included, and each picture's estimate; pictures may use the room up.
 
     Args:
         room (int): The tokens the transcript may still take.
@@ -165,6 +196,18 @@ def test_each_picture_must_fit_the_room_left(room: int, shown: int) -> None:
 
     assert (0 if attached is None else len(_parts(attached[0])[1]), images.count) == (shown, shown)
     assert store.fetches == ([["frame-0", "frame-1"]] if shown else [])
+
+
+def test_the_fetch_waits_only_for_room_for_the_first_new_picture_alone() -> None:
+    """The cheapest message shows the first new picture alone, whose number is the shortest: room for it is enough."""
+    first = next(number for number in range(1, 1000) if _price(number) < _price(number + 1))
+    store = ThumbnailStore(0, 1)
+    images = _images(store)
+
+    shown = images.attach(_numbered(frame_passage(0), frame_passage(1), first=first), room=_price(first))
+
+    assert shown is not None
+    assert (_parts(shown[0])[1], shown[1], store.fetches) == ([_url(0)], _price(first), [["frame-0", "frame-1"]])
 
 
 def test_a_failed_fetch_shows_nothing_and_names_only_its_type(loguru_caplog: LogCaptureFixture) -> None:
@@ -215,7 +258,7 @@ def test_two_passages_of_one_picture_in_a_round_show_it_once() -> None:
     assert shown is not None
     assert (_parts(shown[0]), shown[1], images.count) == (
         (render_legend(LEGEND, [(1, *thumbnail(0))]), [_url(0)]),
-        _cost(1),
+        _price(1),
         1,
     )
 
@@ -234,7 +277,7 @@ def test_a_drop_takes_every_picture_back_and_shows_no_more() -> None:
 
     kept, freed = images.drop(transcript)
 
-    assert (kept, freed, images.count) == ([transcript[0], reply, reply], _cost(1) * 2, 0)
+    assert (kept, freed, images.count) == ([transcript[0], reply, reply], _price(1) + _price(2), 0)
     assert images.attach(_numbered(frame_passage(2), first=3), room=WIDE) is None
     assert len(store.fetches) == 2
 

@@ -159,6 +159,7 @@ class _Turn:
         base (list[ChatMessage]): The system prompt, the history and the user's message.
         schemas (list[dict[str, Any]]): The tools as every round declares them.
         started (float): The clock's reading when the turn began.
+        images (TurnImages): The pictures shown to the model; none unless the turn has a fetcher.
         transcript (list[ChatMessage]): The rounds so far: assistant messages and tool replies.
         spent (int): Tokens the transcript costs.
         steps (int): Tool rounds whose calls were answered; a withdrawn round is not counted.
@@ -169,13 +170,13 @@ class _Turn:
         shortened (bool): Whether the tool replies were cut after an overflow.
         actions (list[dict[str, Any]]): The trail so far.
         reasoning (list[str]): Each round's reasoning.
-        images (TurnImages): The pictures shown to the model; none unless the turn has a fetcher.
     """
 
     ctx: ToolContext
     base: list[ChatMessage]
     schemas: list[dict[str, Any]]
     started: float
+    images: TurnImages
     transcript: list[ChatMessage] = field(default_factory=list)
     spent: int = 0
     steps: int = 0
@@ -186,7 +187,6 @@ class _Turn:
     shortened: bool = False
     actions: list[dict[str, Any]] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
-    images: TurnImages = field(default_factory=TurnImages)
 
     def stop(self, reason: str) -> None:
         """Record why the model must answer now, keeping the first cause.
@@ -457,6 +457,7 @@ class AgentLoop:
             schemas=self._registry.schemas(),
             started=self._clock(),
             images=TurnImages(
+                char_token_ratio=self._ratio,
                 fetch=self._fetch_thumbnails,
                 legend_template=self._legend_template,
                 max_images=self._max_images,
@@ -829,6 +830,7 @@ class AgentLoop:
             base=[*history, ChatMessage(role=MessageRole.USER, content=text)],
             schemas=[],
             started=self._clock(),
+            images=TurnImages(char_token_ratio=self._ratio),
         )
         logger.info("An agent turn answers from {} pinned passages", len(ctx.ledger))
         streamed = yield from self._stream(

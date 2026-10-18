@@ -9,9 +9,11 @@ the round's tool replies: a legend tying each picture to the number it is cited 
 pictures. A picture is shown once a turn, and a failed fetch shows none of the round's.
 
 Room. A turn shows at most ``min(max_images, round_room // VISUAL_IMAGE_TOKEN_ESTIMATE)``
-pictures, and each must fit the room left: ``VISUAL_IMAGE_TOKEN_ESTIMATE`` a picture and
-``VISUAL_LEGEND_TOKEN_ALLOWANCE`` once a message. Pictures may take the room down to nothing; the
-loop's next check then makes the model answer.
+pictures. A message is priced as it is sent: its rendered legend with the message's envelope
+(:func:`~docint.agents.turn.budget.message_cost`), and ``VISUAL_IMAGE_TOKEN_ESTIMATE`` a picture.
+Pictures are added one at a time while that price fits the room left, down to nothing; the loop's
+next check then makes the model answer. Nothing is fetched when not even the first new picture
+alone would fit.
 
 Stamps. The passages whose pictures were shown are stamped ``VISUAL_IMAGES_ATTACHED_KEY`` on the
 numbered copies the turn's result returns, as :class:`~docint.core.retrieval.visual.VisualImagesMixin`
@@ -33,10 +35,10 @@ from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRol
 from llama_index.core.schema import NodeWithScore
 from loguru import logger
 
+from docint.agents.turn.budget import message_cost
 from docint.core.retrieval.visual import (
     VISUAL_IMAGE_TOKEN_ESTIMATE,
     VISUAL_IMAGES_ATTACHED_KEY,
-    VISUAL_LEGEND_TOKEN_ALLOWANCE,
     ThumbnailFetcher,
     render_legend,
 )
@@ -73,6 +75,7 @@ class TurnImages:
     def __init__(
         self,
         *,
+        char_token_ratio: float,
         fetch: ThumbnailFetcher | None = None,
         legend_template: str = "",
         max_images: int = 0,
@@ -81,6 +84,7 @@ class TurnImages:
         """Bind the thumbnail store and the turn's allowance; with no store, the turn shows no picture.
 
         Args:
+            char_token_ratio (float): Characters per token, the ratio the turn's room was measured with.
             fetch (ThumbnailFetcher | None): Fetches stored thumbnails, ``point_id -> (mime,
                 base64)``; ``None`` for a turn that shows no picture.
             legend_template (str): Tells the model the pictures are its sources, with an
@@ -89,6 +93,7 @@ class TurnImages:
             round_room (int): The turn's room for tool replies (see
                 :attr:`~docint.agents.turn.budget.TurnBudget.round_room`), which caps the pictures too.
         """
+        self._ratio = char_token_ratio
         self._fetch = fetch
         self._template = legend_template
         self._cap = max(0, min(max_images, round_room // VISUAL_IMAGE_TOKEN_ESTIMATE)) if fetch is not None else 0
@@ -106,11 +111,25 @@ class TurnImages:
         """
         return len(self._shown)
 
+    def _price(self, shown: Sequence[tuple[int, str, str]]) -> int:
+        """Price a picture message as it is sent.
+
+        Args:
+            shown (Sequence[tuple[int, str, str]]): ``(number, mime, base64)`` per picture in it;
+                only the numbers reach the legend.
+
+        Returns:
+            int: Its rendered legend with the message's envelope, and each picture's estimate.
+        """
+        legend = render_legend(self._template, shown)
+        return message_cost(legend, self._ratio) + VISUAL_IMAGE_TOKEN_ESTIMATE * len(shown)
+
     def attach(self, entries: Sequence[tuple[int, NodeWithScore]], *, room: int) -> tuple[ChatMessage, int] | None:
         """Show a round's new pictures in one message, within the turn's cap and the room left.
 
-        The pictures not shown before are fetched at once; those with a stored thumbnail are
-        shown in number order while the cap holds and each fits the room left.
+        The pictures not shown before are fetched at once, unless the cheapest message, the first
+        of them alone, would not fit. Those with a stored thumbnail are then added in number
+        order while the cap holds and the message, priced as it is sent, fits the room left.
 
         Args:
             entries (Sequence[tuple[int, NodeWithScore]]): The passages the round admitted, under
@@ -122,11 +141,11 @@ class TurnImages:
             costs; ``None`` when it shows none: the turn shows no picture or no more, none of the
             passages is a new picture, none fits, or the fetch failed.
         """
-        fits = (room - VISUAL_LEGEND_TOKEN_ALLOWANCE) // VISUAL_IMAGE_TOKEN_ESTIMATE
-        free = min(self._cap - self.count, fits)
+        free = self._cap - self.count
         seen = set(self._shown.values())
         new = [(number, scored) for number, scored in entries if _picture(scored) and _picture(scored) not in seen]
-        if self._fetch is None or self._dropped or free <= 0 or not new:
+        # The cheapest message shows the first new picture alone: its legend line is the shortest.
+        if self._fetch is None or self._dropped or free <= 0 or not new or self._price([(new[0][0], "", "")]) > room:
             return None
         try:
             stored = self._fetch([scored.node.node_id for _, scored in new])
@@ -138,16 +157,17 @@ class TurnImages:
             picture, thumbnail = _picture(scored), stored.get(scored.node.node_id)
             if thumbnail is None or picture in seen:
                 continue
+            # A later picture's number is no shorter, so once one does not fit, none does.
+            if len(shown) == free or self._price([*shown, (number, *thumbnail)]) > room:
+                break
             seen.add(picture)
             self._shown[number] = picture
             shown.append((number, *thumbnail))
-            if len(shown) == free:
-                break
         if not shown:
             return None
         blocks: list[Any] = [TextBlock(text=render_legend(self._template, shown))]
         blocks.extend(ImageBlock(url=f"data:{mime};base64,{data}") for _, mime, data in shown)
-        cost = VISUAL_LEGEND_TOKEN_ALLOWANCE + VISUAL_IMAGE_TOKEN_ESTIMATE * len(shown)
+        cost = self._price(shown)
         self._cost += cost
         return ChatMessage(role=MessageRole.USER, blocks=blocks), cost
 
