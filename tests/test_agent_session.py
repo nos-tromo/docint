@@ -6,6 +6,7 @@ collection here is invented.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Generator, Iterator, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
@@ -152,9 +153,10 @@ class _Recorder:
         """
         self._loop = loop
         self.runs: list[dict[str, Any]] = []
+        self.outputs: list[Iterator[Any]] = []
 
     def run(self, **kwargs: Any) -> Iterator[Any]:
-        """Record the run's arguments and run the loop.
+        """Record the run's arguments and run the loop, keeping its output referenced.
 
         Args:
             **kwargs (Any): The run's keyword arguments.
@@ -163,7 +165,9 @@ class _Recorder:
             Iterator[Any]: The loop's output.
         """
         self.runs.append(kwargs)
-        return self._loop.run(**kwargs)
+        output = self._loop.run(**kwargs)
+        self.outputs.append(output)
+        return output
 
 
 def _arm(
@@ -669,6 +673,68 @@ def test_an_error_after_the_first_yield_propagates_and_persists_nothing(
 
     armed.engine.query.assert_not_called()
     cast(Any, session_manager.rag).rewrite_retrieval_query.assert_not_called()
+    assert _rows(session_manager) == []
+
+
+#: An answer past the round's release hold, so its first text goes out while the round holds its model slot.
+LONG_ANSWER = (
+    "Die Stände öffnen am Sonntag um zehn Uhr, die Musik beginnt am Mittag, "
+    "und der Kai bleibt bis zum Abend für Besucher geöffnet [1]. Bei Regen ziehen die Stände in die Halle um [1]."
+)
+
+
+@pytest.mark.parametrize("entry", ["stream_chat", "stateless"])
+def test_a_turn_closed_after_its_first_text_frees_its_model_slot_while_still_referenced(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """A client that stops reading frees the model slot at once, whoever still holds the turn's generators.
+
+    The test keeps the outer generator, the agent turn's and its loop's referenced, so reference
+    counting alone would leave the round suspended with its slot taken.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        entry (str): The entry point under test: a session turn, or a stateless one.
+    """
+    slots = threading.BoundedSemaphore(1)
+    armed = _arm(session_manager, [answer_round(LONG_ANSWER)], model_slots=slots)
+    rag = cast(Any, session_manager.rag)
+    rag.ensure_session_manager.return_value = session_manager
+    kept: list[Iterator[Any]] = []
+    stream_agent_turn = SessionManager.stream_agent_turn
+
+    def _kept(self: SessionManager, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        """Run the agent turn, keeping its generator referenced.
+
+        Args:
+            self (SessionManager): The session manager.
+            *args (Any): Positional arguments, passed on.
+            **kwargs (Any): Keyword arguments, passed on.
+
+        Returns:
+            Iterator[Any]: The turn's output.
+        """
+        stream = stream_agent_turn(self, *args, **kwargs)
+        kept.append(stream)
+        return stream
+
+    monkeypatch.setattr(SessionManager, "stream_agent_turn", _kept)
+    outer = cast(
+        "Generator[Any, None, None]",
+        session_manager.stream_chat(QUESTION, session_id="s1", agent=True)
+        if entry == "stream_chat"
+        else RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug=None),
+    )
+
+    first = next(outer)
+    held = not slots.acquire(blocking=False)
+    outer.close()
+    freed = slots.acquire(blocking=False)
+
+    assert isinstance(first, str)
+    assert (held, freed) == (True, True)
+    assert (len(kept), len(armed.loops[0].outputs)) == (1, 1)
     assert _rows(session_manager) == []
 
 

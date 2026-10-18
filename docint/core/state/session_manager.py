@@ -196,7 +196,8 @@ class AgentTurnStart:
 
     Attributes:
         items (Iterator[AgentProgress | str | dict[str, Any]] | None): The turn's output, its
-            first item included; ``None`` when the plain path answers instead.
+            first item included, which closes the turn when it is closed once begun; ``None``
+            when the plain path answers instead.
         trail (dict[str, Any] | None): On a hand-over, the trail the plain answer reports;
             ``None`` when the client is told nothing.
     """
@@ -229,7 +230,7 @@ def _resumed(
     first: AgentProgress | str | dict[str, Any] | None,
     stream: Iterator[AgentProgress | str | dict[str, Any]],
 ) -> Iterator[AgentProgress | str | dict[str, Any]]:
-    """Yield a turn's first item again, then the rest of the turn.
+    """Yield a turn's first item again, then the rest of the turn, which closes with it.
 
     Args:
         first (AgentProgress | str | dict[str, Any] | None): The item already pulled; ``None``
@@ -239,9 +240,26 @@ def _resumed(
     Yields:
         AgentProgress | str | dict[str, Any]: The turn's output.
     """
-    if first is not None:
-        yield first
-    yield from stream
+    try:
+        if first is not None:
+            yield first
+        yield from stream
+    finally:
+        _close(stream)
+
+
+def _close(items: Iterator[Any]) -> None:
+    """Close a generator now, so it hands back what it holds whoever else still references it.
+
+    A client that stops reading closes the outermost generator; without this, the turn's own
+    generators, and the model slot a suspended round holds, would wait for garbage collection.
+
+    Args:
+        items (Iterator[Any]): The generator; an iterator without ``close`` is left as it is.
+    """
+    close = getattr(items, "close", None)
+    if callable(close):
+        close()
 
 
 def _fallback_trail(reason: str) -> dict[str, Any]:
@@ -1007,7 +1025,8 @@ class SessionManager:
         turn-level graph expansion. A pinned scope is what the scoped engine retrieves,
         answered in one round without tools; an empty one is still a scope. Its reply is an
         assessment when it carries the sentinel, labelled and stored with its boundary;
-        otherwise a lookup, whose trail answers ``plain``.
+        otherwise a lookup, whose trail answers ``plain``. Closing it closes the loop, so a
+        suspended round's model slot comes back at once.
 
         Args:
             user_msg (str): The user's message, verbatim.
@@ -1058,13 +1077,16 @@ class SessionManager:
         if self.rag.graphrag_enabled and not scoped and retrieval_target != "visual":
             self._warm_entity_graph()
         run = turn.loop.run(window=window, message=user_msg, ledger=turn.ledger, pinned=pinned)
-        first = _first_item(run)
         result: AgentResult | None = None
-        for item in itertools.chain(() if first is None else (first,), run):
-            if isinstance(item, AgentResult):
-                result = item
-            else:
-                yield item
+        try:
+            first = _first_item(run)
+            for item in itertools.chain(() if first is None else (first,), run):
+                if isinstance(item, AgentResult):
+                    result = item
+                else:
+                    yield item
+        finally:
+            _close(run)
         if result is None:
             raise RuntimeError("The agent turn ended without a result.")
         yield self._finish_agent_turn(
