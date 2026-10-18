@@ -20,6 +20,7 @@ from agent_fakes import (
     ThumbnailStore,
     answer_round,
     call_round,
+    chunk,
     frame_passage,
     programme_passage,
     scripted_loop,
@@ -1244,6 +1245,26 @@ def test_a_failed_search_is_a_reason_notice_on_a_complete_answer(session_manager
 
     assert (final["agent"]["reason"], final["response"]) == ("research_failed", LOOKUP)
     assert session_manager.get_session_history("s1", owner=None)[1]["agent"]["reason"] == "research_failed"
+
+
+def test_an_answer_cut_at_the_length_limit_is_reported_stored_and_logged_as_cut(
+    session_manager: SessionManager, loguru_caplog_info: LogCaptureFixture
+) -> None:
+    """``answer_cut`` reaches the final frame, the stored trail and the turn's log line; the cut text is kept.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    cut = [*answer_round(LOOKUP)[:-1], chunk(finish_reason="length")]
+    _arm(session_manager, [call_round(_search("call_a", "Stände")), cut], search=ScriptedSearch([programme_passage()]))
+
+    final = _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True)))
+
+    assert (final["agent"]["reason"], final["response"]) == ("answer_cut", LOOKUP)
+    assert session_manager.get_session_history("s1", owner=None)[1]["agent"]["reason"] == "answer_cut"
+    line = next(message for message in loguru_caplog_info.messages if "Turn complete" in message)
+    assert "reason=answer_cut" in line
 
 
 def test_an_agent_turn_logs_its_mode_answer_steps_and_reason_but_never_its_text(

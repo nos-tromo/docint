@@ -854,7 +854,8 @@ describe('ChatTurn', () => {
     'context_budget',
     'idle',
     'research_failed',
-    'no_evidence'
+    'no_evidence',
+    'answer_cut'
   ] as const)('explains the %s reason on an agent lookup', (reason: AgentReason) => {
     renderTurn({
       user: 'q',
@@ -879,7 +880,7 @@ describe('ChatTurn', () => {
     }
   )
 
-  it.each(['research_failed', 'tools_unavailable', 'no_evidence'] as const)(
+  it.each(['research_failed', 'tools_unavailable', 'no_evidence', 'answer_cut'] as const)(
     'keeps the amber alert for %s',
     (reason: AgentReason) => {
       renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta({ ...LOOKUP_TRAIL, reason }) })
@@ -889,6 +890,25 @@ describe('ChatTurn', () => {
       expect(alert.className).toMatch(/amber/)
     }
   )
+
+  it.each([
+    ['en', 'length limit'],
+    ['de', 'Längengrenze']
+  ] as const)('says in %s that an answer cut at the length limit may be incomplete', (lang, limit) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: 'Person A steht am Hafen [1], und',
+        done: true,
+        meta: lookupMeta({ ...LOOKUP_TRAIL, reason: 'answer_cut' })
+      },
+      lang
+    )
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(limit)
+    expect(alert).toHaveTextContent(/incomplete|unvollständig/)
+  })
 
   it.each([
     ['en', 'Some evidence may be missing'],

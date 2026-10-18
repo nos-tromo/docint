@@ -79,7 +79,10 @@ export interface AgentStep {
   found: number
 }
 
-/** Why an agent turn's research stopped short or fell back. Protocol tokens, never prose. */
+/**
+ * Why an agent turn's research stopped short or fell back, or `answer_cut` when the endpoint cut
+ * the answer at its length limit. Protocol tokens, never prose.
+ */
 export type AgentReason =
   | 'tools_unavailable'
   | 'round_budget'
@@ -88,6 +91,7 @@ export type AgentReason =
   | 'idle'
   | 'research_failed'
   | 'no_evidence'
+  | 'answer_cut'
 
 /** What an agent turn did, as the final envelope and session history report it. */
 export interface AgentTrail {

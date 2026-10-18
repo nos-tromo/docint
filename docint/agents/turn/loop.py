@@ -24,8 +24,9 @@ first cause: the rounds spent (``round_budget``), the time spent (``time_budget`
 for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
 row that added no passage (``idle``). Limits are checked between rounds, and the time also
 bounds every call's I/O; a round is never cut off while it streams, so an answer already streaming
-is never abandoned. An answer the endpoint cut at its length limit is kept, as shown, and flagged
-``context_budget``.
+is never abandoned. An answer the endpoint cut at its length limit is kept, as written, and flagged
+``answer_cut``, the one reason that replaces the first cause: a cut answer matters more than a
+limit or a failure before it.
 
 Calls and room. Every call id gets a reply, answered by
 :class:`~docint.agents.turn.calls.RoundCalls`: concurrently on the search slots, numbered in call
@@ -138,7 +139,8 @@ class AgentResult:
             per call its tool answered, in order; a scoped turn's is its ``seed`` alone.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
             limit, a failed round, a call that could not be prepared, a failed search or missing
-            search slot, or an answer cut at the length limit; ``None`` when there was none.
+            search slot; ``answer_cut``, replacing any of these, when the endpoint cut the answer
+            at its length limit; ``None`` when there was none.
         images_attached (int): Pictures the model was shown: those in the transcript when the
             turn ended, none once a refusal took them back.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
@@ -170,7 +172,8 @@ class _Turn:
         idle (int): Rounds in a row that added no passage.
         model_calls (int): Model calls begun.
         shown (bool): Whether anything has been yielded.
-        reason (str | None): The first cause that cut the turn short or left evidence out.
+        reason (str | None): The first cause that cut the turn short or left evidence out, until
+            an answer cut at the length limit replaces it with ``answer_cut``.
         shortened (bool): Whether the tool replies were cut after an overflow.
         actions (list[dict[str, Any]]): The trail so far.
         reasoning (list[str]): Each round's reasoning.
@@ -701,8 +704,9 @@ class AgentLoop:
     def _answer(self, turn: _Turn, streamed: _Streamed) -> Iterator[str | AgentResult]:
         """End the turn with the answer a round wrote: send its rest, then the result.
 
-        An answer the endpoint cut at its length limit is kept, since it was shown, and flagged
-        ``context_budget`` unless an earlier cause stands.
+        An answer the endpoint cut at its length limit is kept, as written, and flagged
+        ``answer_cut``, which replaces any earlier cause: a cut answer matters more than a limit
+        or a failure before it.
 
         Args:
             turn (_Turn): The turn.
@@ -713,8 +717,10 @@ class AgentLoop:
         """
         done = cast(RoundDone, streamed.done)
         if done.finish_reason == "length":
-            turn.stop("context_budget")
-            logger.warning("An agent turn's answer was cut at the length limit ({})", turn.reason)
+            logger.warning(
+                "An agent turn's answer was cut at the length limit (earlier reason: {})", turn.reason or "none"
+            )
+            turn.reason = "answer_cut"
         yield from self._answer_tail(turn, streamed)
         yield self._result(turn, done.text)
 

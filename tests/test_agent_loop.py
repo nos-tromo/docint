@@ -874,16 +874,16 @@ def test_two_idle_rounds_force_the_answer() -> None:
 
 
 @pytest.mark.parametrize(
-    ("max_rounds", "reason"), [(6, "context_budget"), (0, "round_budget")], ids=["by-choice", "made-to-answer"]
+    ("max_rounds", "before"), [(6, "none"), (0, "round_budget")], ids=["by-choice", "made-to-answer"]
 )
 def test_an_answer_cut_at_the_length_limit_is_kept_and_flagged(
-    max_rounds: int, reason: str, loguru_caplog: LogCaptureFixture
+    max_rounds: int, before: str, loguru_caplog: LogCaptureFixture
 ) -> None:
-    """An answer the endpoint cut at its length limit stays as shown, but the turn says evidence was cut short.
+    """An answer the endpoint cut at its length limit stays as written, and the turn says it was cut: ``answer_cut``.
 
     Args:
         max_rounds (int): Tool rounds allowed; with none, the answer round is forced and has a reason already.
-        reason (str): The reason the turn reports: ``context_budget``, unless an earlier one stands.
+        before (str): The reason that stood before the cut, which ``answer_cut`` replaces, as the log names it.
         loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
     """
     cut = ANSWER[:90]
@@ -891,8 +891,34 @@ def test_an_answer_cut_at_the_length_limit_is_kept_and_flagged(
 
     _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})), max_rounds=max_rounds)))
 
-    assert ("".join(texts), result.raw_text, result.reason) == (cut, cut, reason)
-    assert loguru_caplog.messages == [f"An agent turn's answer was cut at the length limit ({reason})"]
+    assert ("".join(texts), result.raw_text, result.reason) == (cut, cut, "answer_cut")
+    assert loguru_caplog.messages == [f"An agent turn's answer was cut at the length limit (earlier reason: {before})"]
+
+
+@pytest.mark.parametrize("cause", ["research_failed", "round_budget"])
+def test_a_cut_answer_replaces_whatever_reason_stood_before_it(cause: str) -> None:
+    """A cut answer matters more than a limit or a failure before it, even on the round resent without tools.
+
+    Args:
+        cause (str): What stood first: a failed search before a cut answer by choice, or the rounds
+            spent before a forced answer that only called tools and was resent, then cut.
+    """
+    cut = [*text_chunks(ANSWER[:90], 30), chunk(finish_reason="length")]
+    if cause == "research_failed":
+        llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm")), cut])
+        loop = _loop(llm, _documents(_failing_on("Programm", {})))
+    else:
+        llm = streaming_tool_llm(
+            [_calls(_search_call("call_a", "Programm")), _calls(_search_call("call_b", "Wetter")), cut]
+        )
+        loop = _made_to_answer(llm)
+
+    _, texts, result = _drain(_turn(loop))
+
+    assert ("".join(texts), result.raw_text, result.reason) == (ANSWER[:90], ANSWER[:90], "answer_cut")
+    # The cut round: the second, answering by choice, or the resend, which declares no tools.
+    calls = llm.stream_chat.call_args_list
+    assert (len(calls), calls[-1].kwargs) == ((2, calls[1].kwargs) if cause == "research_failed" else (3, {}))
 
 
 def test_the_sentinel_is_swapped_for_the_label() -> None:
@@ -2919,13 +2945,13 @@ def test_a_pinned_round_that_overflows_after_its_seed_reports_the_context_window
 
 
 def test_a_pinned_answer_cut_at_the_length_limit_is_kept_and_flagged() -> None:
-    """The pinned round is an answer round: an answer cut at the length limit stays, flagged ``context_budget``."""
+    """The pinned round is an answer round: an answer cut at the length limit stays, flagged ``answer_cut``."""
     cut = ANSWER[:90]
     llm = streaming_tool_llm([[*text_chunks(cut, 30), chunk(finish_reason="length")]])
 
     _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({}))), pinned=[programme_passage()]))
 
-    assert ("".join(texts), result.raw_text, result.reason) == (cut, cut, "context_budget")
+    assert ("".join(texts), result.raw_text, result.reason) == (cut, cut, "answer_cut")
 
 
 def test_an_empty_scope_is_still_answered_without_tools() -> None:

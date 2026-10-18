@@ -11,7 +11,8 @@ const AGENT_REASONS = [
   'context_budget',
   'idle',
   'research_failed',
-  'no_evidence'
+  'no_evidence',
+  'answer_cut'
 ] as const
 
 /** One label per trail step kind, singular and plural where a step counts what it found. */

@@ -686,14 +686,17 @@ error.
 ### Limits and reasons
 
 `agent.reason` names the first cause that cut a turn short or left evidence out.
+The one exception is `answer_cut`: a cut answer matters more than a limit or a
+failure before it, so it replaces whatever reason stood.
 
 | `agent.reason` | When |
 |---|---|
 | `round_budget` | The turn ran `AGENT_MAX_ROUNDS` tool rounds (default 6). |
 | `time_budget` | `AGENT_TIME_BUDGET_S` ran out (default 120 s). Limits are checked between rounds, so an answer already streaming is never cut, and a search that outlives the time left gets a "no reply in time" reply. |
-| `context_budget` | No room is left for one more full reply. A round whose own calls do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved, and when the endpoint cut the answer at its length limit (the answer is kept). |
+| `context_budget` | No room is left for one more full reply. A round whose own calls do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
 | `idle` | Two rounds in a row added no passage. |
 | `research_failed` | Evidence may be missing; the answer is still written. A call could not be prepared, a search failed or found no search slot, or a later round failed or found no model slot. |
+| `answer_cut` | The endpoint cut the answer at its length limit (`finish_reason: "length"`), so it may be incomplete. The answer is kept as written. This covers every round whose text is the answer: one answering by choice, the forced answer and its resend without tools, and a pinned round. |
 | `tools_unavailable` | The endpoint refused tools, and the plain path answered (see below). |
 | `no_evidence` | Found only on turns stored by the earlier assessment pipeline. |
 

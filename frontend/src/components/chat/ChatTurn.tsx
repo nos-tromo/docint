@@ -150,7 +150,8 @@ const REASON_COPY: Record<AgentReason, keyof Strings> = {
   context_budget: 'chat.agent_reason.context_budget',
   idle: 'chat.agent_reason.idle',
   research_failed: 'chat.agent_reason.research_failed',
-  no_evidence: 'chat.agent_reason.no_evidence'
+  no_evidence: 'chat.agent_reason.no_evidence',
+  answer_cut: 'chat.agent_reason.answer_cut'
 }
 
 /** The limits a turn stops at by design, often at the smallest window; every other reason is a failure. */
@@ -288,7 +289,10 @@ function carriesLabel(trail: AgentTrail): boolean {
   return trail.answer === 'unsplit' || (trail.answer === 'split' && typeof trail.evidence_chars === 'number')
 }
 
-/** Why research stopped: a limit is a muted note on how it ended, a failure an alert that evidence may be missing. */
+/**
+ * Why research stopped: a limit is a muted note on how it ended, a failure an alert that evidence may be
+ * missing or, for a cut answer, that the answer may be incomplete.
+ */
 function ReasonNotice({ reason }: { reason: AgentReason }) {
   const t = useT()
   if (LIMIT_REASONS.has(reason)) {

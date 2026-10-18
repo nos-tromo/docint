@@ -284,7 +284,10 @@ labelled model judgement to the cited evidence. `agent` carries the trail:
 - `steps`: the tool rounds whose calls were answered;
 - `actions`: one `{action, detail, found}` per step, as the `agent` frames
   below carry them;
-- `reason`: an `agent.reason` token, or `null`;
+- `reason`: an `agent.reason` token, or `null` (see
+  [Limits and reasons](retrieval-and-agents.md#limits-and-reasons)).
+  `answer_cut` means the endpoint cut the answer at its length limit, so the
+  answer may be incomplete; it replaces any earlier reason;
 - `answer`: `plain` on a lookup; `split` or `empty` on an assessment, which
   also carries `evidence_chars`, where its source-backed part ends.
 

@@ -214,6 +214,7 @@ export const en = {
   'chat.agent_reason.idle': 'Stopped searching: the last searches found nothing new.',
   'chat.agent_reason.research_failed': 'Some evidence may be missing: not every search could be completed.',
   'chat.agent_reason.no_evidence': 'No passages were found to answer from.',
+  'chat.agent_reason.answer_cut': 'The answer reached the model’s length limit and was cut off; it may be incomplete.',
   'chat.assessment_answer.unsplit':
     'The model did not separate what the sources say from its own judgement, so the whole answer is marked as its assessment.',
   'chat.assessment_answer.empty': 'The model returned no assessment.',

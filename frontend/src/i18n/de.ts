@@ -227,6 +227,8 @@ export const de: Strings = {
   'chat.agent_reason.research_failed':
     'Möglicherweise fehlen einige Belege: Nicht jede Suche konnte abgeschlossen werden.',
   'chat.agent_reason.no_evidence': 'Es wurden keine Passagen gefunden, auf die sich die Antwort stützen könnte.',
+  'chat.agent_reason.answer_cut':
+    'Die Antwort hat die Längengrenze des Modells erreicht und wurde abgeschnitten; sie ist möglicherweise unvollständig.',
   'chat.assessment_answer.unsplit':
     'Das Modell hat nicht getrennt, was die Quellen sagen und was es selbst urteilt; die ganze Antwort ist daher als seine Einschätzung markiert.',
   'chat.assessment_answer.empty': 'Das Modell hat keine Einschätzung geliefert.',
