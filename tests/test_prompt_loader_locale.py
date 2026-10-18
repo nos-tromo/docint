@@ -416,6 +416,25 @@ def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str)
     assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
 
 
+@pytest.mark.parametrize(("code", "evaluation"), [("en", "evaluation"), ("de", "Bewertung")])
+def test_the_final_note_keeps_an_evaluations_judgement_but_leaves_the_sentinel_to_the_rules(
+    code: str, evaluation: str
+) -> None:
+    """A forced answer to an evaluation still ends in the model's judgement, where the rules ask for one.
+
+    The note goes to every forced answer, assessments switched off too, so it never writes the
+    sentinel itself: only a prompt carrying the assessment rule asks for it.
+
+    Args:
+        code (str): The locale.
+        evaluation (str): How the locale names an evaluation question.
+    """
+    note = _prompt("agent_final", code)
+
+    assert evaluation in note
+    assert SENTINEL not in note
+
+
 @pytest.mark.parametrize("code", ["en", "de"])
 def test_the_search_note_names_no_tool_since_every_target_is_sent_it(code: str) -> None:
     """The note that asks a first round to look things up first goes to every target, so it names none of their tools.
