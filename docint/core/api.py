@@ -2491,7 +2491,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
 
                 data = {}
                 if _classify_turn(payload.question, None, payload.retrieval_target) == "assessment":
-                    for item in rag.stream_stateless_assessment(
+                    for item in rag.stream_stateless_agent_turn(
                         payload.question,
                         expanded_query=retrieval_query,
                         graph_debug=graph_debug,
@@ -2534,12 +2534,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     if rag.sessions is not None
                     else None
                 )
-                answer_mode = _classify_turn(payload.question, prior_turn, payload.retrieval_target)
-                # Only an assessment binds the prior turn here; lookups keep their
-                # behaviour, which binds none on this endpoint.
-                assessment_kwargs: dict[str, Any] = (
-                    {"prior_turn": prior_turn, "skip_query_rewrite": False} if answer_mode == "assessment" else {}
-                )
+                # An agent turn reads its own history, and its fallback binds none on this endpoint.
+                agent = _classify_turn(payload.question, prior_turn, payload.retrieval_target) == "assessment"
                 data = rag.chat(
                     payload.question,
                     session_id=session_id,
@@ -2550,8 +2546,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     vector_store_kwargs=vector_store_kwargs or None,
                     scoped_node_ids=scoped_node_ids or None,
                     retrieval_target=payload.retrieval_target,
-                    answer_mode=answer_mode,
-                    **assessment_kwargs,
+                    agent=agent,
                 )
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
@@ -2717,15 +2712,15 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 answer_mode = await to_thread.run_sync(_classify_turn, payload.question, None, payload.retrieval_target)
                 if answer_mode == "assessment":
 
-                    def _make_stateless_assessment() -> Iterator[Any]:
-                        """Build the stateless assessment stream off the event loop.
+                    def _make_stateless_agent_turn() -> Iterator[Any]:
+                        """Build the stateless agent turn's stream off the event loop.
 
                         Returns:
-                            Iterator[Any]: Research steps, answer text, then the final payload.
+                            Iterator[Any]: Steps, answer text, then the final payload.
                         """
                         return cast(
                             "Iterator[Any]",
-                            rag.stream_stateless_assessment(
+                            rag.stream_stateless_agent_turn(
                                 payload.question,
                                 expanded_query=retrieval_query,
                                 graph_debug=graph_debug,
@@ -2737,7 +2732,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             ),
                         )
 
-                    async for chunk in _aiter_sync_gen(_make_stateless_assessment, request):
+                    async for chunk in _aiter_sync_gen(_make_stateless_agent_turn, request):
                         if isinstance(chunk, str):
                             full_answer += chunk
                             yield f"data: {json.dumps({'token': chunk})}\n\n"
@@ -2829,14 +2824,14 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             )
                             or None
                         )
-                        stream_state["answer_mode"] = _classify_turn(
-                            payload.question, stream_state["prior_turn"], payload.retrieval_target
+                        stream_state["agent"] = (
+                            _classify_turn(payload.question, stream_state["prior_turn"], payload.retrieval_target)
+                            == "assessment"
                         )
-                    # The retry re-answers a rejected lookup; an assessment never
-                    # retries, so any second pass is a lookup.
-                    answer_mode: AnswerMode = stream_state["answer_mode"] if question is None else "lookup"
+                    # The retry re-answers a rejected lookup, so any second pass is a plain lookup.
+                    agent: bool = stream_state["agent"] if question is None else False
                     prior_turn = stream_state["prior_turn"]
-                    if answer_mode == "lookup" and prior_turn is not None:
+                    if not agent and prior_turn is not None:
                         prior_turn = prior_turn.evidence_only()
                     return cast(
                         "Iterator[Any]",
@@ -2853,7 +2848,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             scoped_node_ids=stream_state["scoped_node_ids"],
                             replace_turn_idx=replace_turn_idx,
                             retrieval_target=payload.retrieval_target,
-                            answer_mode=answer_mode,
+                            agent=agent,
                         ),
                     )
 

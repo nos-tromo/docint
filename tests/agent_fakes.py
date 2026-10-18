@@ -18,8 +18,10 @@ from llama_index.core.schema import BaseNode, NodeWithScore
 
 from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger
 from docint.agents.turn.budget import TurnBudget
+from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import ToolContext, ToolRegistry, ToolReply
+from docint.agents.turn.tools import SearchFn, ToolContext, ToolRegistry, ToolReply
+from docint.agents.turn.toolsets import toolset_for
 
 ScriptedRound = Sequence[dict[str, Any] | Exception] | Exception
 """One scripted model call: the raw chunks it streams, or the error its first pull raises.
@@ -374,3 +376,114 @@ class ThumbnailStore:
         if self._failure is not None:
             raise self._failure
         return {point_id: self._stored[point_id] for point_id in point_ids if point_id in self._stored}
+
+
+#: What a scripted loop tells its model; nothing reads them back.
+LOOP_SYSTEM_PROMPT = "Beantworte Fragen zur Sammlung mit den Werkzeugen und belege jede Aussage mit [n]."
+LOOP_FINAL_NOTE = "Antworte jetzt aus den Passagen oben; rufe keine Werkzeuge mehr auf."
+LOOP_SCOPE_NOTE = "Der Nutzer hat diese Passagen ausgewählt; antworte nur aus ihnen."
+LOOP_LEGEND = "Die Bilder unten sind die Quellen:\n{image_legend}"
+
+
+def answer_round(text: str, *, reasoning: str | None = None) -> list[dict[str, Any]]:
+    """Script a round that answers: its reasoning first, if any, then the text in pieces.
+
+    Args:
+        text (str): The answer.
+        reasoning (str | None): Reasoning sent in the separate field a reasoning parser fills.
+
+    Returns:
+        list[dict[str, Any]]: The round's chunks, the last one ending it.
+    """
+    head = [chunk(reasoning_content=reasoning)] if reasoning else []
+    return [*head, *text_chunks(text, 40), chunk(finish_reason="stop")]
+
+
+def call_round(*calls: tuple[str, str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Script a round that ends in tool calls, every call whole in one chunk.
+
+    Args:
+        *calls (tuple[str, str, dict[str, Any]]): Per call its id, the tool's name and its arguments.
+
+    Returns:
+        list[dict[str, Any]]: The round's one chunk.
+    """
+    deltas = [
+        tool_call_delta(index=index, call_id=call_id, name=name, arguments=json.dumps(arguments, ensure_ascii=False))
+        for index, (call_id, name, arguments) in enumerate(calls)
+    ]
+    return [chunk(tool_calls=deltas, finish_reason="tool_calls")]
+
+
+class GrantedSlots:
+    """A model-slot double: the first ``grants`` acquisitions succeed at once, every later one fails at once."""
+
+    def __init__(self, grants: int) -> None:
+        """Hold the slots to grant.
+
+        Args:
+            grants (int): How many acquisitions succeed.
+        """
+        self.grants = grants
+
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        """Grant a slot while any is left, without waiting.
+
+        Args:
+            blocking (bool): Unused.
+            timeout (float | None): Unused.
+
+        Returns:
+            bool: Whether a slot was granted.
+        """
+        if self.grants <= 0:
+            return False
+        self.grants -= 1
+        return True
+
+    def release(self) -> None:
+        """Take a slot back; it is never granted again."""
+
+
+def scripted_loop(
+    llm: Any,
+    *,
+    target: str = "all",
+    search: SearchFn | None = None,
+    search_images: SearchFn | None = None,
+    view: Callable[[BaseNode], BaseNode] = llm_view,
+    **overrides: Any,
+) -> AgentLoop:
+    """Build an agent loop at an 8k window over the target's tools, its model a scripted double.
+
+    Args:
+        llm (Any): The model double, as :func:`streaming_tool_llm` builds it.
+        target (str): The retrieval target whose tools the loop offers.
+        search (SearchFn | None): The text search; by default one that fails if it runs.
+        search_images (SearchFn | None): The image search; by default one that fails if it runs.
+        view (Callable[[BaseNode], BaseNode]): The LLM view; the whitelist double by default.
+        **overrides (Any): Further loop arguments, such as limits, model slots or a thumbnail fetcher.
+
+    Returns:
+        AgentLoop: The loop.
+    """
+    registry = toolset_for(
+        target,
+        search=search or ScriptedSearch(),
+        search_images=search_images or ScriptedSearch(),
+        list_keyframes=ScriptedSearch(),
+    )
+    kwargs: dict[str, Any] = {
+        "budget": turn_budget(),
+        "system_prompt": LOOP_SYSTEM_PROMPT,
+        "final_note": LOOP_FINAL_NOTE,
+        "max_rounds": 4,
+        "time_budget_s": 120.0,
+        "max_calls_per_round": 4,
+        "char_token_ratio": 3.5,
+        "llm_view": view,
+        "scope_note": LOOP_SCOPE_NOTE,
+        "legend_template": LOOP_LEGEND,
+    }
+    kwargs.update(overrides)
+    return AgentLoop(llm=llm, registry=registry, **kwargs)

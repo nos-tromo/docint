@@ -350,13 +350,13 @@ class DummyRAG:
         self.seen_collections: list[str] = []
         self.stateless_queries: list[str] = []
         self.stateless_query_filters: list[dict[str, Any]] = []
-        self.stateless_assessments: list[dict[str, Any]] = []
+        self.stateless_agent_turns: list[dict[str, Any]] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
         # One entry per stream_chat call, so the corrective-retry tests can
         # assert what the second pass was asked for.
         self.stream_calls: list[dict[str, Any]] = []
-        self.chat_modes: list[str] = []
+        self.chat_agents: list[bool] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
@@ -490,7 +490,7 @@ class DummyRAG:
         retrieval_target: str = "all",
         prior_turn: Any = None,
         skip_query_rewrite: Any = None,
-        answer_mode: str = "lookup",
+        agent: bool = False,
     ) -> dict[str, Any]:
         """Chat with the RAG system.
 
@@ -504,15 +504,15 @@ class DummyRAG:
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
             scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
             retrieval_target (str): Which evidence may answer the turn.
-            prior_turn (Any): The prior exchange an assessment turn builds on (ignored by the stub).
+            prior_turn (Any): The prior exchange (ignored by the stub).
             skip_query_rewrite (Any): Accepted for parity with RAG.chat; ignored by the stub.
-            answer_mode (str): How the turn is answered; recorded by the stub.
+            agent (bool): Whether the turn is answered as an agent turn; recorded by the stub.
 
         Returns:
             dict[str, Any]: The response from the RAG system.
         """
         _ = session_id, owner, prior_turn, skip_query_rewrite
-        self.chat_modes.append(answer_mode)
+        self.chat_agents.append(agent)
         self.seen_collections.append(self.qdrant_collection)
         self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
         self.chats.append(question)
@@ -569,7 +569,7 @@ class DummyRAG:
         scoped_node_ids: Any = None,
         replace_turn_idx: int | None = None,
         retrieval_target: str = "all",
-        answer_mode: str = "lookup",
+        agent: bool = False,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -586,7 +586,7 @@ class DummyRAG:
             scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
             replace_turn_idx (int | None): Turn to overwrite; recorded by the stub.
             retrieval_target (str): Which evidence may answer the turn.
-            answer_mode (str): How the turn is answered; recorded by the stub.
+            agent (bool): Whether the turn is answered as an agent turn; recorded by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -599,7 +599,7 @@ class DummyRAG:
                 "skip_query_rewrite": skip_query_rewrite,
                 "replace_turn_idx": replace_turn_idx,
                 "prior_turn": prior_turn,
-                "answer_mode": answer_mode,
+                "agent": agent,
             }
         )
         self.stream_filters.append(
@@ -705,22 +705,20 @@ class DummyRAG:
             scoped_node_ids=scoped_node_ids,
         )
 
-    def stream_stateless_assessment(self, question: str, **kwargs: Any) -> Generator[Any, None, None]:
-        """Stream a canned stateless assessment and record the call.
+    def stream_stateless_agent_turn(self, question: str, **kwargs: Any) -> Generator[Any, None, None]:
+        """Stream a canned stateless agent turn that answers as an assessment, and record the call.
 
-        Like the real entry point, it reports a missing expansion payload as skipped, with a reason.
+        Like the real entry point, it reports the turn-level expansion as skipped for the agent.
 
         Args:
             question (str): The user's question.
             **kwargs (Any): The forwarded request settings.
 
         Yields:
-            Any: One research step, one token, then the final payload.
+            Any: One step, one token, then the final payload.
         """
-        self.stateless_assessments.append({"question": question, **kwargs})
-        graph_debug = kwargs["graph_debug"]
-        if graph_debug is None:
-            graph_debug = {"applied": False, "reason": "scoped" if kwargs.get("scoped_node_ids") else "unavailable"}
+        self.stateless_agent_turns.append({"question": question, **kwargs})
+        graph_debug = {"applied": False, "reason": "agent"}
         yield AgentProgress(step=0, action="seed", detail="", found=1)
         yield "Fact [1]."
         yield {
@@ -5660,7 +5658,7 @@ def test_stream_query_streams_agent_frames_and_validates_only_the_evidence_part(
     assert seen["answer"] == "Fact [2]."
     assert seen["intent"] == "assessment"
     assert [source["id"] for source in seen["sources"]] == ["b"]
-    assert calls[0]["answer_mode"] == "assessment"
+    assert calls[0]["agent"] is True
 
 
 def test_stream_query_never_retries_an_assessment_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -5729,7 +5727,7 @@ def test_stream_query_gives_lookups_only_the_evidence_part_of_an_assessment(
     _stream_text(client)
 
     call = cast(Any, api_module.rag).stream_calls[0]
-    assert call["answer_mode"] == "lookup"
+    assert call["agent"] is False
     assert call["prior_turn"] == PriorTurn(user_text="What could be improved?", assistant_text="Fact [1].")
 
 
@@ -5749,7 +5747,7 @@ def test_stream_query_hands_an_assessment_turn_the_full_prior_turn(
     _stream_text(client)
 
     call = cast(Any, api_module.rag).stream_calls[0]
-    assert call["answer_mode"] == "assessment"
+    assert call["agent"] is True
     assert call["prior_turn"] == prior
 
 
@@ -5776,7 +5774,7 @@ def test_the_retry_pass_is_always_a_lookup(monkeypatch: pytest.MonkeyPatch, clie
 
     _stream_text(client)
 
-    assert [call["answer_mode"] for call in calls] == ["lookup", "lookup"]
+    assert [call["agent"] for call in calls] == [False, False]
 
 
 def test_classify_turn_is_gated_before_any_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5877,7 +5875,7 @@ def test_a_turn_is_classified_once_and_its_retry_is_a_lookup(
 
     _stream_text(client)
 
-    assert [call["answer_mode"] for call in calls] == ["assessment", "lookup"]
+    assert [call["agent"] for call in calls] == [True, False]
     assert len(classified) == 1
 
 
@@ -5966,8 +5964,10 @@ def test_a_split_assessment_with_no_judgement_part_is_validated_whole(monkeypatc
     assert [source["id"] for source in seen["sources"]] == ["a"]
 
 
-def test_query_binds_the_prior_turn_only_for_an_assessment(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
-    """``/query`` always passes the mode down; only an assessment also binds the prior turn.
+def test_query_passes_the_agent_flag_and_binds_no_prior_turn(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """``/query`` always passes the flag down and binds no prior turn: an agent turn reads its own history.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -5994,13 +5994,11 @@ def test_query_binds_the_prior_turn_only_for_an_assessment(monkeypatch: pytest.M
     for _ in range(2):
         assert client.post("/query", json={"question": "And what could be improved?"}).status_code == 200
 
-    lookup, assessment = calls
     assert classified == [("And what could be improved?", prior, "all")] * 2
-    assert cast(Any, api_module.rag).chat_modes == ["lookup", "assessment"]
-    assert "prior_turn" not in lookup
-    assert "skip_query_rewrite" not in lookup
-    assert assessment["prior_turn"] == prior
-    assert assessment["skip_query_rewrite"] is False
+    assert cast(Any, api_module.rag).chat_agents == [False, True]
+    for passed in calls:
+        assert "prior_turn" not in passed
+        assert "skip_query_rewrite" not in passed
 
 
 @pytest.mark.parametrize(("broken", "error"), [("gate", ValueError), ("model", RuntimeError), ("classifier", KeyError)])
@@ -6057,7 +6055,7 @@ def test_stateless_stream_query_answers_an_assessment(monkeypatch: pytest.Monkey
     assert frames[-1]["answer_mode"] == "assessment"
     assert frames[-1]["session_id"] is None
     assert rag.stateless_queries == []
-    assert rag.stateless_assessments[0]["expanded_query"].startswith("What could be improved?")
+    assert rag.stateless_agent_turns[0]["expanded_query"].startswith("What could be improved?")
 
 
 def test_a_stateless_stream_query_assessment_is_validated_as_one_and_never_retried(
@@ -6123,7 +6121,7 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
 ) -> None:
     """Stateless has no session to supply them, and a dropped scope would let research widen a pinned set.
 
-    Expansion is skipped under a scope, so the panel is told why instead of receiving an empty payload.
+    The API skips expansion under a scope, and the agent turn tells the panel why it ran none of its own.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -6144,7 +6142,7 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
         },
     )
 
-    call = cast(Any, api_module.rag).stateless_assessments[0]
+    call = cast(Any, api_module.rag).stateless_agent_turns[0]
     final = response.json() if path == "/query" else _sse_frames(response.text)[-1]
     assert response.status_code == 200
     assert classified == [("What could be improved?", None, "documents")]
@@ -6155,4 +6153,4 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
     assert "qdrant_filters" in call["vector_store_kwargs"]
     assert call["graph_debug"] is None
     assert isinstance(final["graph_debug"], dict)
-    assert final["graph_debug"]["reason"] == "scoped"
+    assert final["graph_debug"]["reason"] == "agent"

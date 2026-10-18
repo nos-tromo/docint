@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Generator, Iterator
+from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from agent_fakes import answer_round, scripted_loop, streaming_tool_llm, turn_budget
+from assessment_fakes import bad_request
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentResult
+from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.types import AnswerMode
+from docint.core.rag import AGENT_LEDGER_CAP, AgentTurn
 from docint.core.state.base import Base
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.turn import Turn
@@ -93,6 +96,9 @@ def session_manager() -> Generator[SessionManager, None, None]:
     rag_mock._infer_collection_profile.return_value = {"coverage_unit": "documents"}
     rag_mock._normalize_response_data.side_effect = _normalize
     cast(Any, rag_mock.get_source_by_node_id).return_value = None
+    rag_mock.reasoning_requested = False
+    rag_mock.agent_char_token_ratio = 3.5
+    rag_mock.graphrag_enabled = False
     sm = SessionManager(rag=rag_mock)
     sm._SessionMaker = sessionmaker(bind=engine)
     yield sm
@@ -307,50 +313,27 @@ def test_the_export_names_every_turn_by_the_same_rule_as_history(
     assert assistant.get("answer_mode") == (expected if trail is not None else None)
 
 
-class _Runner:
-    """An assessment runner double: it finishes at once with a split answer, or refuses the turn."""
-
-    def __init__(self, *, fits: bool) -> None:
-        """Choose whether the evidence fits.
-
-        Args:
-            fits (bool): ``False`` makes the runner refuse before it yields anything.
-        """
-        self.fits = fits
-
-    def run(self, **_: Any) -> Iterator[AssessmentResult]:
-        """Yield the finished assessment, or raise as the real runner does when nothing fits.
-
-        Args:
-            **_ (Any): The runner's keyword arguments, ignored.
-
-        Yields:
-            AssessmentResult: The finished turn.
-
-        Raises:
-            AssessmentDoesNotFit: When this double was built to refuse.
-        """
-        if not self.fits:
-            raise AssessmentDoesNotFit(11)
-        yield AssessmentResult(raw_text=f"{ANSWER}\n{SENTINEL}\nA second count would help.", nodes=[], steps=1)
-
-
 @pytest.mark.parametrize("entry", ["chat", "stream_chat"])
 @pytest.mark.parametrize(
-    ("requested", "fits", "stored"),
-    [("lookup", True, "lookup"), ("assessment", True, "assessment"), ("assessment", False, "lookup")],
-    ids=["a plain lookup", "an assessment", "an assessment that does not fit"],
+    ("agent", "script", "stored"),
+    [
+        (False, [], "lookup"),
+        (True, [answer_round(ANSWER)], "lookup"),
+        (True, [answer_round(f"{ANSWER}\n{SENTINEL}\nA second count would help.")], "assessment"),
+        (True, [bad_request("The invented endpoint refuses tools.")], "lookup"),
+    ],
+    ids=["a plain lookup", "an agent lookup", "an agent assessment", "an agent turn that falls back"],
 )
 def test_each_path_stores_the_mode_it_answered_in(
-    session_manager: SessionManager, entry: str, requested: AnswerMode, fits: bool, stored: str
+    session_manager: SessionManager, entry: str, agent: bool, script: list[Any], stored: str
 ) -> None:
-    """The plain paths store ``lookup`` and the assessment path ``assessment``, whatever was asked for.
+    """Each path stores the mode it answered in: a turn that falls back is a lookup, whatever was asked for.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
         entry (str): The entry point under test, ``chat`` or ``stream_chat``.
-        requested (AnswerMode): The mode the caller asked for.
-        fits (bool): Whether the assessment's evidence fits; if not, the turn is answered as a lookup.
+        agent (bool): Whether the caller asked for an agent turn.
+        script (list[Any]): The agent's model rounds.
         stored (str): The mode that must end up on the row.
     """
     engine = MagicMock()
@@ -361,11 +344,17 @@ def test_each_path_stores_the_mode_it_answered_in(
     rag = cast(Any, session_manager.rag)
     rag.query_engine = engine
     rag.build_query_engine.return_value = engine
-    rag.assessment_runner.return_value = _Runner(fits=fits)
+    llm = streaming_tool_llm(script)
+    rag.agent_turn.side_effect = lambda _engine, **kwargs: AgentTurn(
+        loop=scripted_loop(llm, target=kwargs["retrieval_target"]),
+        ledger=EvidenceLedger(cap=AGENT_LEDGER_CAP),
+        budget=turn_budget(),
+        reasoning=False,
+    )
 
     if entry == "chat":
-        session_manager.chat(QUESTION, session_id="s1", answer_mode=requested)
+        session_manager.chat(QUESTION, session_id="s1", agent=agent)
     else:
-        list(session_manager.stream_chat(QUESTION, session_id="s1", answer_mode=requested))
+        list(session_manager.stream_chat(QUESTION, session_id="s1", agent=agent))
 
     assert _stored_modes(session_manager) == [stored]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import threading
 import time
@@ -16,24 +17,25 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 from llama_index.core import Response
-from llama_index.core.schema import BaseNode
+from llama_index.core.schema import BaseNode, QueryBundle
 from llama_index.core.vector_stores.types import MetadataFilters
 from loguru import logger
 from sqlalchemy.orm import Session
 
-from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentResult
+from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.split import LabelledAnswer, compose_labelled_answer
 from docint.agents.context import TurnContext as AgentTurnContext
-from docint.agents.turn.history import ConversationTurn
+from docint.agents.turn.budget import history_allowance_tokens
+from docint.agents.turn.history import ConversationTurn, ConversationWindow, build_window
+from docint.agents.turn.loop import AgentResult, ToolsUnavailable
+from docint.agents.turn.scope import EvidenceDoesNotFit
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
-from docint.core.retrieval.evidence import EveryChildQuery
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
 from docint.core.state.turn import Turn
 from docint.core.summary.units import source_file_hash
-from docint.utils.llm_sanitize import strip_reasoning
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -166,6 +168,99 @@ def _answer_mode_of(turn: Turn) -> str:
         str: ``assessment`` or ``lookup``.
     """
     return turn.answer_mode or ("assessment" if turn.agent_trail else "lookup")
+
+
+class AgentTurnFallback(Exception):
+    """An agent turn handed its message to the plain path before it showed anything.
+
+    Raised by :meth:`SessionManager.stream_agent_turn` on its first ``next()``.
+
+    Attributes:
+        trail (dict[str, Any] | None): What the plain answer reports and stores as its
+            ``agent`` trail; ``None`` when the client is told nothing.
+    """
+
+    def __init__(self, trail: dict[str, Any] | None = None) -> None:
+        """Record the trail the plain answer reports.
+
+        Args:
+            trail (dict[str, Any] | None): The trail, or ``None``.
+        """
+        super().__init__("The agent turn falls back to the plain path.")
+        self.trail = trail
+
+
+def _fallback_trail(reason: str) -> dict[str, Any]:
+    """Build the trail a plain answer reports when an agent turn handed it the message.
+
+    Args:
+        reason (str): The ``agent.reason`` token saying why.
+
+    Returns:
+        dict[str, Any]: A trail of no steps, answered as a lookup.
+    """
+    return {"steps": 0, "actions": [], "reason": reason, "answer": "plain"}
+
+
+def _agent_answer(raw_text: str) -> tuple[AnswerMode, LabelledAnswer | None]:
+    """Name how an agent turn answered: an assessment exactly when its reply carries the sentinel.
+
+    Args:
+        raw_text (str): The reply as the model wrote it, reasoning left out.
+
+    Returns:
+        tuple[AnswerMode, LabelledAnswer | None]: ``assessment`` with the labelled answer, or
+        ``lookup`` with ``None`` for a reply without the sentinel, an empty one included.
+    """
+    labelled = compose_labelled_answer(raw_text)
+    # A reply without the sentinel comes back labelled whole ("unsplit"), an empty one "empty".
+    if labelled.outcome == "unsplit" or not raw_text.strip():
+        return "lookup", None
+    return "assessment", labelled
+
+
+def _first_item(
+    run: Iterator[AgentProgress | str | AgentResult],
+) -> AgentProgress | str | AgentResult | None:
+    """Pull an agent loop's first item; a failure that leaves the plain path open becomes a fallback.
+
+    Nothing has been shown before the first item, so the plain path can still answer the
+    turn. Logs say why in counts and tokens alone, never the endpoint's own words.
+
+    Args:
+        run (Iterator[AgentProgress | str | AgentResult]): The loop's output.
+
+    Returns:
+        AgentProgress | str | AgentResult | None: The first item; ``None`` when there is none.
+
+    Raises:
+        AgentTurnFallback: When the endpoint refused tools (the trail says
+            ``tools_unavailable``), the pinned evidence does not fit, no model slot came
+            free, or the prompt overflowed the context window.
+        Exception: Any other failure, as it came.
+    """
+    try:
+        return next(run, None)
+    except ToolsUnavailable as exc:
+        logger.warning(
+            "The chat endpoint refused a request offering tools (HTTP {}); agent turns need it to accept "
+            "tools with tool_choice=auto. Answering as a lookup.",
+            getattr(exc.__cause__, "status_code", None),
+        )
+        raise AgentTurnFallback(_fallback_trail("tools_unavailable")) from exc
+    except EvidenceDoesNotFit as exc:
+        logger.warning("Pinned evidence does not fit an agent turn ({} passages); answering as a lookup", exc.passages)
+        raise AgentTurnFallback from exc
+    except NoSlot as exc:
+        logger.warning("No model slot came free for an agent turn; answering as a lookup")
+        raise AgentTurnFallback from exc
+    except ValueError as exc:
+        if "context window" not in str(exc).lower():
+            raise
+        logger.warning(
+            "An agent turn overflowed the model's context window before it showed anything; answering as a lookup"
+        )
+        raise AgentTurnFallback from exc
 
 
 class SessionCollectionMismatchError(Exception):
@@ -415,7 +510,7 @@ class SessionManager:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
-        answer_mode: AnswerMode = "lookup",
+        agent: bool = False,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -458,11 +553,12 @@ class SessionManager:
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn: ``all``, ``documents`` or ``visual``. A scope outranks
                 it. See :mod:`docint.core.retrieval.visual`.
-            answer_mode (AnswerMode): How to answer: ``lookup`` (default) runs
-                the grounded pipeline unchanged; ``assessment`` researches and
-                writes a labelled two-part answer (see
-                :meth:`stream_assessment`), or answers as a lookup when its
-                evidence is too large to show legibly.
+            agent (bool): Answer as an agent turn (see
+                :meth:`stream_agent_turn`). It runs ahead of the history
+                rewrite and the graph expansion, which only a turn that falls
+                back to the grounded pipeline pays for; that fallback binds no
+                prior turn, since the engine may be the shared one. ``False``
+                (default) runs the grounded pipeline unchanged.
 
         Returns:
             dict[str, Any]: The response data, including ``turn_idx`` — the
@@ -508,6 +604,37 @@ class SessionManager:
         # (ensures the row, enforces the collection pin) and returns the id we
         # persist under -- no shared instance field is read.
         session_id = self.start_session(session_id, owner=owner)
+        coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
+
+        fallback_trail: dict[str, Any] | None = None
+        if agent:
+            stream = self.stream_agent_turn(
+                user_msg,
+                engine=engine,
+                scoped_node_ids=scoped_node_ids,
+                coverage_unit=coverage_unit,
+                metadata_filters_active=metadata_filters_active,
+                metadata_filter_rules=metadata_filter_rules,
+                vector_store_kwargs=vector_store_kwargs,
+                retrieval_target=retrieval_target,
+                session_id=session_id,
+                owner=owner,
+                replace_turn_idx=replace_turn_idx,
+                turn_started_at=turn_started_at,
+                persist=True,
+            )
+            try:
+                first = next(stream, None)
+            except AgentTurnFallback as fallback:
+                fallback_trail = fallback.trail
+                # Bind none, like any /query lookup: the cached engine is shared and would keep it.
+                prior_turn = None
+            else:
+                final: dict[str, Any] = {}
+                for item in itertools.chain((first,), stream):
+                    if isinstance(item, dict):
+                        final = item
+                return final
 
         # ``skip_query_rewrite`` decouples "bind the prior turn for generation"
         # from "skip the internal retrieval rewrite". Default (``None``) skips
@@ -539,42 +666,7 @@ class SessionManager:
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
         else:
             expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
-        coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
-
-        if answer_mode == "assessment":
-            final: dict[str, Any] = {}
-            try:
-                for item in self.stream_assessment(
-                    user_msg,
-                    engine=engine,
-                    expanded_query=expanded_query,
-                    retrieval_query=retrieval_query,
-                    resolved_question=retrieval_query,
-                    prior_turn=prior_turn,
-                    scoped_node_ids=scoped_node_ids,
-                    graph_debug=graph_debug,
-                    coverage_unit=coverage_unit,
-                    metadata_filters_active=metadata_filters_active,
-                    metadata_filter_rules=metadata_filter_rules,
-                    retrieval_target=retrieval_target,
-                    session_id=session_id,
-                    owner=owner,
-                    replace_turn_idx=replace_turn_idx,
-                    turn_started_at=turn_started_at,
-                    persist=True,
-                ):
-                    if isinstance(item, dict):
-                        final = item
-            except AssessmentDoesNotFit as exc:
-                logger.warning(
-                    "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
-                    exc.passages,
-                )
-                # Bind none, like any /query lookup: the cached engine is shared and would keep it.
-                prior_turn = None
-            else:
-                return final
 
         self._bind_prior_turn_context(engine, prior_turn)
         resp = engine.query(expanded_query)
@@ -595,8 +687,17 @@ class SessionManager:
             response["visual"] = {"images_attached": 0}
         if scoped_node_ids:
             response["scoped_chunk_count"] = len(list(scoped_node_ids))
+        if fallback_trail is not None:
+            response["agent"] = fallback_trail
         response["turn_idx"] = self._persist_turn(
-            session_id, user_msg, resp, response, owner=owner, replace_idx=replace_turn_idx, answer_mode="lookup"
+            session_id,
+            user_msg,
+            resp,
+            response,
+            owner=owner,
+            replace_idx=replace_turn_idx,
+            agent_trail=fallback_trail,
+            answer_mode="lookup",
         )
         if replace_turn_idx is None:
             self._maybe_update_summary(session_id)
@@ -624,7 +725,7 @@ class SessionManager:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
-        answer_mode: AnswerMode = "lookup",
+        agent: bool = False,
     ) -> Iterator[AgentProgress | str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -658,12 +759,13 @@ class SessionManager:
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn: ``all``, ``documents`` or ``visual``. A scope outranks
                 it. See :mod:`docint.core.retrieval.visual`.
-            answer_mode (AnswerMode): See :meth:`chat`.
+            agent (bool): See :meth:`chat`. A turn that falls back binds the
+                source-backed part of ``prior_turn``: its engine is its own.
 
         Yields:
             AgentProgress | str | dict[str, Any]: Chunks of text, followed by a
-            dict with metadata. An assessment turn also yields
-            :class:`AgentProgress` steps ahead of its text.
+            dict with metadata. An agent turn also yields
+            :class:`AgentProgress` steps as its tools answer.
 
         Raises:
             ValueError: If the user message is empty.
@@ -694,6 +796,36 @@ class SessionManager:
         # Resolve the session per request (see :meth:`chat`): pure/idempotent,
         # enforces the collection pin, returns the id we persist under.
         session_id = self.start_session(session_id, owner=owner)
+        coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
+
+        fallback_trail: dict[str, Any] | None = None
+        if agent:
+            stream = self.stream_agent_turn(
+                user_msg,
+                engine=streaming_engine,
+                scoped_node_ids=scoped_node_ids,
+                coverage_unit=coverage_unit,
+                metadata_filters_active=metadata_filters_active,
+                metadata_filter_rules=metadata_filter_rules,
+                vector_store_kwargs=vector_store_kwargs,
+                retrieval_target=retrieval_target,
+                session_id=session_id,
+                owner=owner,
+                replace_turn_idx=replace_turn_idx,
+                turn_started_at=turn_started_at,
+                persist=True,
+            )
+            try:
+                first = next(stream, None)
+            except AgentTurnFallback as fallback:
+                fallback_trail = fallback.trail
+                prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
+            else:
+                if first is None:
+                    return
+                yield first
+                yield from stream
+                return
 
         # See :meth:`chat`: ``skip_query_rewrite`` decouples prior-turn binding
         # from the internal rewrite (``None`` -> skip iff ``prior_turn`` given).
@@ -720,44 +852,7 @@ class SessionManager:
             graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
         else:
             expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
-        coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
-
-        if answer_mode == "assessment":
-            stream = self.stream_assessment(
-                user_msg,
-                engine=streaming_engine,
-                expanded_query=expanded_query,
-                retrieval_query=retrieval_query,
-                resolved_question=retrieval_query,
-                prior_turn=prior_turn,
-                scoped_node_ids=scoped_node_ids,
-                graph_debug=graph_debug,
-                coverage_unit=coverage_unit,
-                metadata_filters_active=metadata_filters_active,
-                metadata_filter_rules=metadata_filter_rules,
-                retrieval_target=retrieval_target,
-                session_id=session_id,
-                owner=owner,
-                replace_turn_idx=replace_turn_idx,
-                turn_started_at=turn_started_at,
-                persist=True,
-            )
-            # The runner refuses before its first yield, so nothing has streamed yet.
-            try:
-                first = next(stream, None)
-            except AssessmentDoesNotFit as exc:
-                logger.warning(
-                    "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
-                    exc.passages,
-                )
-                prior_turn = prior_turn.evidence_only() if prior_turn is not None else None
-            else:
-                if first is None:
-                    return
-                yield first
-                yield from stream
-                return
 
         self._bind_prior_turn_context(streaming_engine, prior_turn)
         response = streaming_engine.query(expanded_query)
@@ -802,6 +897,7 @@ class SessionManager:
             normalized,
             owner=owner,
             replace_idx=replace_turn_idx,
+            agent_trail=fallback_trail,
             answer_mode="lookup",
         )
         if replace_turn_idx is None:
@@ -826,6 +922,8 @@ class SessionManager:
         }
         if scoped_node_ids:
             final["scoped_chunk_count"] = len(list(scoped_node_ids))
+        if fallback_trail is not None:
+            final["agent"] = fallback_trail
         # Logged before the yield: a client that disconnects mid-stream must
         # not be able to erase the record of a turn the backend fully paid for.
         _log_turn_summary(
@@ -837,17 +935,157 @@ class SessionManager:
         )
         yield final
 
-    def stream_assessment(
+    def stream_agent_turn(
         self,
         user_msg: str,
         *,
         engine: Any,
-        expanded_query: str,
-        retrieval_query: str,
-        resolved_question: str | None,
-        prior_turn: PriorTurn | None,
         scoped_node_ids: Sequence[str] | None,
-        graph_debug: dict[str, Any],
+        coverage_unit: str,
+        metadata_filters_active: bool,
+        metadata_filter_rules: Sequence[Any] | None,
+        vector_store_kwargs: dict[str, Any] | None,
+        retrieval_target: RetrievalTarget,
+        session_id: str | None,
+        owner: str | None,
+        replace_turn_idx: int | None,
+        turn_started_at: float,
+        persist: bool,
+    ) -> Iterator[AgentProgress | str | dict[str, Any]]:
+        """Answer one turn as an agent turn: the model reads the conversation, calls tools, and answers.
+
+        The model reads the user's message verbatim after the session's window, read before
+        this turn is stored and built for the request's reasoning, as the turn's budget is;
+        a stateless turn has none. It writes its own searches, so there is no rewrite and no
+        turn-level graph expansion. A pinned scope is what the scoped engine retrieves,
+        answered in one round without tools; an empty one is still a scope. Its reply is an
+        assessment when it carries the sentinel, labelled and stored with its boundary;
+        otherwise a lookup, whose trail answers ``plain``.
+
+        Args:
+            user_msg (str): The user's message, verbatim.
+            engine (Any): The turn's query engine, built with its filters, target and scope.
+            scoped_node_ids (Sequence[str] | None): A pinned scope, if any.
+            coverage_unit (str): The collection's coverage unit.
+            metadata_filters_active (bool): Whether request filters are active.
+            metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
+            vector_store_kwargs (dict[str, Any] | None): Native query kwargs, the compiled
+                filter in them.
+            retrieval_target (RetrievalTarget): The turn's target.
+            session_id (str | None): The conversation; ``None`` when stateless.
+            owner (str | None): The owning principal.
+            replace_turn_idx (int | None): Turn to overwrite instead of appending; it is left
+                out of the window with every turn after it.
+            turn_started_at (float): ``time.monotonic()`` at turn start.
+            persist (bool): Whether to write the turn (``False`` when stateless).
+
+        Yields:
+            AgentProgress | str | dict[str, Any]: Steps and answer text as they come, then the
+            final payload (``turn_idx`` included, ``None`` if not persisted).
+
+        Raises:
+            AgentTurnFallback: On the first ``next()``, before anything is yielded, when the
+                plain path answers instead: no room for tool replies, or a failure
+                :func:`_first_item` lets fall back. After the first item every failure
+                propagates and nothing is stored.
+            RuntimeError: If the loop ends without a result.
+        """
+        scoped = bool(scoped_node_ids)
+        window = self._agent_window(session_id, owner, replace_turn_idx)
+        # A scoped engine fetches exactly the pinned chunks, numbered, whatever the query.
+        pinned = list(engine.retrieve(QueryBundle(user_msg))) if scoped else None
+        turn = self.rag.agent_turn(
+            engine,
+            retrieval_target=retrieval_target,
+            scoped=scoped,
+            pinned_count=len({scored.node.node_id for scored in pinned or []}),
+            window=window,
+            message=user_msg,
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            vector_store_kwargs=vector_store_kwargs,
+        )
+        if turn is None:
+            # The factory has logged the numbers.
+            raise AgentTurnFallback
+        if self.rag.graphrag_enabled and not scoped and retrieval_target != "visual":
+            self._warm_entity_graph()
+        run = turn.loop.run(window=window, message=user_msg, ledger=turn.ledger, pinned=pinned)
+        first = _first_item(run)
+        result: AgentResult | None = None
+        for item in itertools.chain(() if first is None else (first,), run):
+            if isinstance(item, AgentResult):
+                result = item
+            else:
+                yield item
+        if result is None:
+            raise RuntimeError("The agent turn ended without a result.")
+        yield self._finish_agent_turn(
+            user_msg,
+            result,
+            scoped_node_ids=scoped_node_ids,
+            coverage_unit=coverage_unit,
+            metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
+            retrieval_target=retrieval_target,
+            session_id=session_id,
+            owner=owner,
+            replace_turn_idx=replace_turn_idx,
+            turn_started_at=turn_started_at,
+            persist=persist,
+        )
+
+    def _agent_window(
+        self, session_id: str | None, owner: str | None, replace_turn_idx: int | None
+    ) -> ConversationWindow:
+        """Build the conversation an agent turn reads before its message.
+
+        Built at the history allowance for the request's reasoning and at the turn's ratio,
+        as the turn's budget is measured: a window built for the plain allowance would leave
+        a thinking model's turn no room.
+
+        Args:
+            session_id (str | None): The conversation; ``None`` when stateless.
+            owner (str | None): The owning principal.
+            replace_turn_idx (int | None): A turn being written over: it and every later
+                turn stay out.
+
+        Returns:
+            ConversationWindow: The window; empty without a session.
+        """
+        if session_id is None:
+            return ConversationWindow()
+        turns, summary = self.get_conversation(session_id, owner)
+        if replace_turn_idx is not None:
+            turns = turns[:replace_turn_idx]
+        return build_window(
+            turns,
+            summary,
+            allowance_tokens=history_allowance_tokens(self.rag.reasoning_requested),
+            char_token_ratio=self.rag.agent_char_token_ratio,
+        )
+
+    def _warm_entity_graph(self) -> None:
+        """Build the collection's entity aggregate once, before an agent turn's searches expand against it.
+
+        Each search expands its own query, so on a cold cache every concurrent search of a
+        round would build the aggregate itself, in the search slots and the turn's time.
+        Expansion is best effort: a failure is logged by its type alone and the turn goes on.
+        """
+        try:
+            self.rag._get_collection_ner_aggregate(refresh=False)
+        except Exception as exc:
+            logger.warning(
+                "Warming the entity graph for an agent turn failed ({}); its searches expand without it",
+                type(exc).__name__,
+            )
+
+    def _finish_agent_turn(
+        self,
+        user_msg: str,
+        result: AgentResult,
+        *,
+        scoped_node_ids: Sequence[str] | None,
         coverage_unit: str,
         metadata_filters_active: bool,
         metadata_filter_rules: Sequence[Any] | None,
@@ -857,30 +1095,18 @@ class SessionManager:
         replace_turn_idx: int | None,
         turn_started_at: float,
         persist: bool,
-    ) -> Iterator[AgentProgress | str | dict[str, Any]]:
-        """Answer one turn as an assessment.
+    ) -> dict[str, Any]:
+        """Normalize, store and log a finished agent turn, and build its final payload.
 
-        The seed is a lookup's evidence (the turn's own engine, filters, rerank
-        and parent context), except that each section keeps every child the
-        reranker returned under it (see
-        :class:`~docint.core.retrieval.evidence.EveryChildQuery`); the runner
-        may research further, then streams the two-part answer. The sentinel
-        becomes a localized label in the persisted text, so history,
-        transcripts and report exports show the boundary without knowing the
-        protocol.
+        An assessment's sentinel becomes the localized label in the stored text, so history,
+        transcripts and report exports show the boundary without knowing the protocol. The
+        sources are the turn's evidence in number order. A scoped turn reports
+        ``retrieval_mode="scoped"``, as the client checks; any other agent turn ``agent``.
 
         Args:
             user_msg (str): The user's message, verbatim.
-            engine (Any): The turn's query engine; its ``retrieve`` seeds and
-                searches.
-            expanded_query (str): The rewritten, graph-expanded query to seed with.
-            retrieval_query (str): The rewritten query, recorded on the turn.
-            resolved_question (str | None): The history-resolved rewrite a lookup
-                answers from, which research and the answer read on a labelled
-                line beside the message; ``None`` without history (stateless).
-            prior_turn (PriorTurn | None): The previous exchange, in full.
-            scoped_node_ids (Sequence[str] | None): A pinned scope; forbids research.
-            graph_debug (dict[str, Any]): The expansion's debug payload.
+            result (AgentResult): What the loop produced.
+            scoped_node_ids (Sequence[str] | None): A pinned scope, if any.
             coverage_unit (str): The collection's coverage unit.
             metadata_filters_active (bool): Whether request filters are active.
             metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
@@ -889,58 +1115,39 @@ class SessionManager:
             owner (str | None): The owning principal.
             replace_turn_idx (int | None): Turn to overwrite instead of appending.
             turn_started_at (float): ``time.monotonic()`` at turn start.
-            persist (bool): Whether to write the turn (``False`` when stateless).
+            persist (bool): Whether to write the turn.
 
-        Yields:
-            AgentProgress | str | dict[str, Any]: Research steps, answer text,
-            then the final payload (``turn_idx`` included, ``None`` if not persisted).
-
-        Raises:
-            RuntimeError: If the runner ends without a result.
+        Returns:
+            dict[str, Any]: The final payload, ``turn_idx`` included (``None`` if not persisted).
         """
-        seed = list(engine.retrieve(EveryChildQuery(expanded_query)))
-        runner = self.rag.assessment_runner(engine, scoped=bool(scoped_node_ids))
-        result: AssessmentResult | None = None
-        for item in runner.run(
-            question=user_msg, prior_turn=prior_turn, seed=seed, resolved_question=resolved_question
-        ):
-            if isinstance(item, AssessmentResult):
-                result = item
-            else:
-                yield item
-        if result is None:
-            raise RuntimeError("Assessment runner ended without a result.")
-
-        visible, _ = strip_reasoning(result.raw_text)
-        labelled = (
-            compose_labelled_answer(visible)
-            if visible.strip()
-            else LabelledAnswer(text="", evidence_chars=None, outcome="empty")
-        )
-        # A reply of nothing but the sentinel is no answer; the normalizer would show the token as text.
-        reply = "" if labelled.outcome == "empty" and visible.strip() else result.raw_text
+        mode, labelled = _agent_answer(result.raw_text)
+        trail: dict[str, Any] = {"steps": result.steps, "actions": result.actions, "reason": result.reason}
+        if labelled is None:
+            trail["answer"] = "plain"
+            reply = result.raw_text
+        else:
+            trail.update(answer=labelled.outcome, evidence_chars=labelled.evidence_chars)
+            # A reply of nothing but the sentinel is no answer; the normalizer would show the token as text.
+            reply = "" if labelled.outcome == "empty" else result.raw_text
         final_response = Response(response=reply, source_nodes=result.nodes)
         normalized = self.rag._normalize_response_data(
             user_msg,
             final_response,
+            reason=result.reasoning,
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
-            retrieval_query=retrieval_query,
+            retrieval_query=None,
             coverage_unit=coverage_unit,
             retrieval_mode="scoped" if scoped_node_ids else "agent",
         )
-        if labelled.outcome != "empty":
+        if labelled is not None and labelled.outcome != "empty":
             normalized["response"] = labelled.text
-        trail: dict[str, Any] = {
-            "steps": result.steps,
-            "actions": result.actions,
-            "reason": result.reason,
-            "answer": labelled.outcome,
-            "shortened": result.shortened,
-            "evidence_chars": labelled.evidence_chars,
-        }
+        graph_debug = self.rag.graph_debug_skipped(user_msg, "agent")
         normalized["graph_debug"] = graph_debug
         normalized["retrieval_target"] = retrieval_target
+        if retrieval_target == "visual" and not scoped_node_ids:
+            # Zero is a visual answer that saw no pixels; absent is a turn that never targeted imagery.
+            normalized["visual"] = {"images_attached": result.images_attached}
 
         turn_idx: int | None = None
         if persist and session_id is not None:
@@ -952,7 +1159,7 @@ class SessionManager:
                 owner=owner,
                 replace_idx=replace_turn_idx,
                 agent_trail=trail,
-                answer_mode="assessment",
+                answer_mode=mode,
             )
             if replace_turn_idx is None:
                 self._maybe_update_summary(session_id)
@@ -969,7 +1176,7 @@ class SessionManager:
             "rerank": normalized.get("rerank"),
             "retrieval_target": retrieval_target,
             "visual": normalized.get("visual"),
-            "answer_mode": "assessment",
+            "answer_mode": mode,
             "agent": trail,
             "turn_idx": turn_idx,
         }
@@ -982,7 +1189,7 @@ class SessionManager:
             response=final,
             elapsed_s=time.monotonic() - turn_started_at,
         )
-        yield final
+        return final
 
     def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:
         """Export the chat session to a directory.

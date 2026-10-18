@@ -31,7 +31,7 @@ from typing_extensions import override
 
 if TYPE_CHECKING:
     from docint.agents.turn.history import ConversationWindow
-    from docint.agents.types import AnswerMode, PriorTurn
+    from docint.agents.types import PriorTurn
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -133,7 +133,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.research import ResearchLoop
-from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
+from docint.agents.assessment.runner import AssessmentRunner
 from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, message_cost, schema_tokens
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.toolsets import toolset_for
@@ -213,7 +213,7 @@ from docint.core.search.index import (
 )
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
-from docint.core.state.session_manager import SessionManager
+from docint.core.state.session_manager import AgentTurnFallback, SessionManager
 from docint.core.storage.artifact_gc import (
     collection_artifacts,
     recorded_sources,
@@ -8732,7 +8732,7 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
-        answer_mode: AnswerMode = "lookup",
+        agent: bool = False,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -8763,7 +8763,7 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
-            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
+            agent (bool): Forwarded to :class:`SessionManager`; see there.
 
         Returns:
             dict[str, Any]: The chat response data, including ``turn_idx``.
@@ -8781,7 +8781,7 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
-            answer_mode=answer_mode,
+            agent=agent,
         )
 
     def stream_chat(
@@ -8799,7 +8799,7 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
-        answer_mode: AnswerMode = "lookup",
+        agent: bool = False,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -8830,7 +8830,7 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
-            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
+            agent (bool): Forwarded to :class:`SessionManager`; see there.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -8848,7 +8848,7 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
-            answer_mode=answer_mode,
+            agent=agent,
         )
 
     def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:
@@ -9043,7 +9043,7 @@ class RAG:
         ledger = EvidenceLedger(cap=max(AGENT_LEDGER_CAP, pinned_count))
         return AgentTurn(loop=loop, ledger=ledger, budget=budget, reasoning=reasoning)
 
-    def stream_stateless_assessment(
+    def stream_stateless_agent_turn(
         self,
         question: str,
         *,
@@ -9055,19 +9055,20 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> Iterator[Any]:
-        """Answer one stateless turn as an assessment.
+        """Answer one stateless turn as an agent turn.
 
-        A stateless turn has no session: no prior turn and nothing persisted.
-        Otherwise it is the session path exactly, with the same runner and frames.
-        Evidence too large to show legibly is answered as a lookup through
-        :meth:`run_query` instead, as the session path does.
+        A stateless turn has no session: an empty window and nothing persisted.
+        Otherwise it is the session path exactly, with the same loop and frames.
+        A turn the plain path answers instead (see
+        :meth:`~docint.core.state.session_manager.SessionManager.stream_agent_turn`)
+        is answered through :meth:`run_query`, its expansion reported as the
+        plain stateless path reports it.
 
         Args:
             question (str): The user's message, verbatim.
-            expanded_query (str): The graph-expanded query to seed with.
-            graph_debug (dict[str, Any] | None): The expansion's debug payload;
-                ``None`` when expansion did not run, which is reported as skipped
-                (``scoped`` under a pinned scope, otherwise ``unavailable``).
+            expanded_query (str): The graph-expanded query a fallback answers from.
+            graph_debug (dict[str, Any] | None): That expansion's debug payload;
+                ``None`` when expansion did not run.
             metadata_filters (MetadataFilters | None): Compiled request filters.
             metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
             vector_store_kwargs (dict[str, Any] | None): Native vector-store kwargs.
@@ -9075,12 +9076,10 @@ class RAG:
             retrieval_target (RetrievalTarget): Which evidence may answer.
 
         Yields:
-            Any: Research steps, answer text, then the final payload.
+            Any: Steps, answer text, then the final payload.
         """
         turn_started_at = time.monotonic()
         metadata_filters_active = metadata_filters is not None or bool(vector_store_kwargs)
-        if graph_debug is None:
-            graph_debug = self.graph_debug_skipped(expanded_query, "scoped" if scoped_node_ids else "unavailable")
         engine = self.build_query_engine(
             metadata_filters=metadata_filters,
             streaming=True,
@@ -9090,19 +9089,14 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             retrieval_target=retrieval_target,
         )
-        stream = self.ensure_session_manager().stream_assessment(
+        stream = self.ensure_session_manager().stream_agent_turn(
             question,
             engine=engine,
-            expanded_query=expanded_query,
-            retrieval_query=expanded_query,
-            # No history to resolve, and the expanded query carries graph terms.
-            resolved_question=None,
-            prior_turn=None,
             scoped_node_ids=scoped_node_ids,
-            graph_debug=graph_debug,
             coverage_unit=str(self._infer_collection_profile().get("coverage_unit") or "documents"),
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
+            vector_store_kwargs=vector_store_kwargs,
             retrieval_target=retrieval_target,
             session_id=None,
             owner=None,
@@ -9110,14 +9104,9 @@ class RAG:
             turn_started_at=turn_started_at,
             persist=False,
         )
-        # The runner refuses before its first yield, so nothing has streamed yet.
         try:
             first = next(stream, None)
-        except AssessmentDoesNotFit as exc:
-            logger.warning(
-                "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
-                exc.passages,
-            )
+        except AgentTurnFallback as fallback:
             data = self.run_query(
                 expanded_query,
                 metadata_filters=metadata_filters,
@@ -9126,6 +9115,10 @@ class RAG:
                 scoped_node_ids=scoped_node_ids,
                 retrieval_target=retrieval_target,
             )
+            if graph_debug is not None:
+                data["graph_debug"] = graph_debug
+            if fallback.trail is not None:
+                data["agent"] = fallback.trail
             yield str(data.get("response") or "")
             yield data
             return
