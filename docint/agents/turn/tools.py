@@ -38,7 +38,7 @@ from loguru import logger
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import TurnBudget
-from docint.agents.turn.passages import SEARCH_HINT, answer_passages, refs, render_entry
+from docint.agents.turn.passages import answer_passages, refs, render_entry
 from docint.agents.turn.stream import ToolCall
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -239,7 +239,7 @@ def passage_reply(
     *,
     action: str,
     detail: str,
-    hint: str = SEARCH_HINT,
+    hint: str | None = None,
     note: str = "",
 ) -> PassageReply:
     """Answer a call with what its search found (see :func:`~docint.agents.turn.passages.answer_passages`).
@@ -249,7 +249,8 @@ def passage_reply(
         ctx (ToolContext): The turn's evidence, budget and LLM view.
         action (str): The calling tool's name, for the trail.
         detail (str): The call's main argument, for the trail.
-        hint (str): What the reply suggests for matching passages it had no room for.
+        hint (str | None): What the reply suggests for matching passages it had no room for;
+            ``None`` to call the same tool again (see :func:`~docint.agents.turn.passages.search_hint`).
         note (str): A note of the calling tool's own, after the others; empty for none.
 
     Returns:

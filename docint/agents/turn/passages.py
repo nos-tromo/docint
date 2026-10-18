@@ -30,8 +30,6 @@ if TYPE_CHECKING:
 HEADER_CHARS = 500
 #: What a search reply says when it found nothing the turn had not shown.
 NO_NEW_PASSAGES = "No new passages."
-#: What a search reply suggests for the matching passages it had no room for.
-SEARCH_HINT = "search with narrower words to see them"
 #: How a reply joins its passages, and its passages to the notes after them; ``render_context`` reserves it.
 _JOIN = "\n\n"
 
@@ -60,6 +58,21 @@ def refs(numbers: Iterable[int]) -> str:
         str: ``[1], [4]`` in ascending order.
     """
     return ", ".join(f"[{number}]" for number in sorted(numbers))
+
+
+def search_hint(tool: str) -> str:
+    """Say what a search reply suggests for the matching passages it had no room for: the same search, narrower.
+
+    The hint names the tool that searched, so a reply never points at a tool its turn does
+    not offer: a visual turn has ``search_images`` and no ``search``.
+
+    Args:
+        tool (str): The searching tool's name.
+
+    Returns:
+        str: The hint, the end of the reply's "did not fit in this reply" note.
+    """
+    return f"call {tool} again with narrower words to see them"
 
 
 def _numbered(entry: NodeWithScore, number: int) -> NodeWithScore:
@@ -292,7 +305,7 @@ def _trailer(
 
 
 def answer_passages(
-    found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str, hint: str = SEARCH_HINT, note: str = ""
+    found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str, hint: str | None = None, note: str = ""
 ) -> RenderedPassages:
     """Admit what a search found into the turn's evidence and render it as one reply.
 
@@ -309,14 +322,16 @@ def answer_passages(
     Args:
         found (Iterable[NodeWithScore]): The search's passages, best first.
         ctx (ToolContext): The turn's evidence, budget and LLM view.
-        action (str): The calling tool's name, for the log line.
-        hint (str): What the reply suggests for matching passages it had no room for,
-            the end of its "did not fit in this reply" note.
+        action (str): The calling tool's name, for the log line and the default hint.
+        hint (str | None): What the reply suggests for matching passages it had no room for,
+            the end of its "did not fit in this reply" note; ``None`` for the calling tool's
+            :func:`search_hint`.
         note (str): A note of the calling tool's own, after the others; empty for none.
 
     Returns:
         RenderedPassages: The reply, what it admitted or extended, and the numbers it showed or named.
     """
+    hint = search_hint(action) if hint is None else hint
     ledger = ctx.ledger
     sections = _sections(found)
     held = [number for windows in sections if (number := ledger.number_of(windows[0].node.node_id)) is not None]

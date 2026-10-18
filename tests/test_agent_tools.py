@@ -168,7 +168,7 @@ def test_a_result_never_numbers_what_it_did_not_show() -> None:
     assert reply.found == admitted
     assert reply.text.endswith(
         f"\n\n{len(found) - admitted} more matching passages did not fit in this reply; "
-        "search with narrower words to see them."
+        "call search again with narrower words to see them."
     )
     assert len(reply.text) <= ctx.budget.result_chars
     # Every passage shown is legible: it keeps at least the floor a cut passage must keep.

@@ -550,6 +550,23 @@ def test_search_images_needs_a_description(arguments: str) -> None:
     assert search.queries == []
 
 
+def test_an_image_search_that_leaves_pictures_out_says_to_call_itself_again() -> None:
+    """The note on pictures a reply had no room for names search_images, never a search tool a visual turn lacks."""
+    ctx = _context(reasoning=True)
+    long_caption = " ".join(f"Szene {line}: {CAPTIONS[line % len(CAPTIONS)]}." for line in range(14))
+    search = ScriptedSearch([_frame(index, caption=long_caption) for index in range(8)])
+
+    reply = _registry(search_images=search).call(tool_call("search_images", description=DESCRIPTION), ctx)
+
+    left_out = 8 - len(shown_numbers(reply.text))
+    assert left_out > 1
+    assert reply.text.endswith(
+        f"\n\n{left_out} more matching passages did not fit in this reply; "
+        "call search_images again with narrower words to see them."
+    )
+    assert not re.search(r"(?<!\w)search(?!\w)", reply.text)
+
+
 def test_a_repeated_image_search_is_answered_not_rerun() -> None:
     """The same description again is answered from memory by the numbers it showed."""
     ctx = _context()

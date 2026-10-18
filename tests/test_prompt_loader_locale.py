@@ -20,7 +20,7 @@ from llama_index.core.schema import NodeWithScore
 from docint.agents.assessment.ledger import MAX_LEDGER_ENTRIES, EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.history import ANSWER_ASSESSMENT_LABEL, ANSWER_SOURCED_LABEL, NO_HISTORY, labelled_lines
-from docint.agents.turn.passages import SEARCH_HINT, _trailer
+from docint.agents.turn.passages import _trailer, search_hint
 from docint.agents.turn.scope import scope_message
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
@@ -400,7 +400,7 @@ def _written() -> dict[str, str]:
     ctx = tool_context()
     header, _, body = registry.call(tool_call("search", query="Hafenverein"), ctx).text.partition("\n\n")
     note = functools.partial(
-        _trailer, shown=True, again=(), grown=(), left_out=0, full=False, hint=SEARCH_HINT, note=""
+        _trailer, shown=True, again=(), grown=(), left_out=0, full=False, hint=search_hint("search"), note=""
     )
     return {
         "passage header": header,
