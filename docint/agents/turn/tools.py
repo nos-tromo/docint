@@ -51,6 +51,8 @@ DETAIL_CHARS = 200
 MAX_QUERY_CHARS = 300
 #: Longest tool name an error reply repeats back.
 NAME_CHARS = 64
+#: Deepest nesting of objects and lists a call's arguments may have, the object itself counted.
+MAX_ARGUMENT_DEPTH = 32
 #: A passage number as a model may write it: ``3``, or ``[3]`` as it is cited.
 _NUMBER_RE = re.compile(r"\s*\[?\s*(\d{1,6})\s*\]?\s*")
 #: First number no passage can have; a reply never repeats a number this long back.
@@ -429,6 +431,29 @@ def _arguments(raw: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def nested_too_deeply(value: Any) -> bool:
+    """Return whether parsed arguments nest objects and lists deeper than ``MAX_ARGUMENT_DEPTH``.
+
+    Measured with a stack, not recursion, so it is safe at any depth JSON can parse. The
+    registry refuses such arguments and a turn echoes them back as an empty object: one rule,
+    so the two verdicts agree.
+
+    Args:
+        value (Any): The parsed arguments.
+
+    Returns:
+        bool: ``True`` when an object or a list sits deeper than ``MAX_ARGUMENT_DEPTH``.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (dict, list)):
+            if depth > MAX_ARGUMENT_DEPTH:
+                return True
+            stack.extend((child, depth + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return False
+
+
 def _normalized(value: Any) -> Any:
     """Normalize arguments for comparison: text on one line and case-folded, nested values alike.
 
@@ -597,9 +622,10 @@ class ToolRegistry:
         """Check one call, and answer it at once or return the work it still needs.
 
         Runs on the loop thread, in call order. A call naming no offered tool, or sending
-        arguments that are not a JSON object or nest too deeply to compare, is answered with
-        an error saying what to call instead. A call made before in this turn, by tool and arguments compared on
-        one line and case-folded, is answered by the numbers its answer showed or named,
+        arguments that are not a JSON object or nest deeper than ``MAX_ARGUMENT_DEPTH``, is
+        answered with an error saying what to call instead. A call made before in this turn,
+        by tool and arguments compared on one line and case-folded, is answered by the
+        numbers its answer showed or named,
         and needs no I/O; a read is left to :meth:`finish`, since an earlier call in its
         round may still grow its passage. Otherwise the tool checks its arguments, reading
         the evidence where it must: a passage number names an entry as the evidence stood
@@ -629,10 +655,7 @@ class ToolRegistry:
                 f"the arguments for {tool.name} must be a JSON object, such as {_example(tool.parameters)}.",
             )
             return PreparedCall(action=tool.name, detail="", reply=reply)
-        try:
-            key = (tool.name, json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False))
-        except RecursionError:
-            # JSON can parse deeper than it can be compared; such arguments are the model's mistake.
+        if nested_too_deeply(arguments):
             logger.warning("A model sent arguments for the '{}' tool nested too deeply to read", tool.name)
             reply = error_reply(
                 tool.name,
@@ -640,6 +663,7 @@ class ToolRegistry:
                 f"such as {_example(tool.parameters)}.",
             )
             return PreparedCall(action=tool.name, detail="", reply=reply)
+        key = (tool.name, json.dumps(_normalized(arguments), sort_keys=True, ensure_ascii=False))
         remembered = _recall(key, ctx, final=False)
         if remembered is not None:
             return PreparedCall(action=tool.name, detail=remembered.detail, reply=remembered, key=key)

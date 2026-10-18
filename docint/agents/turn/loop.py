@@ -69,7 +69,7 @@ from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_tokens
 from docint.agents.turn.calls import RoundCalls
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
-from docint.agents.turn.tools import ToolContext, ToolRegistry
+from docint.agents.turn.tools import ToolContext, ToolRegistry, nested_too_deeply
 from docint.agents.types import AgentAction, AgentProgress
 from docint.utils.text_budget import fit_with_marker
 
@@ -213,20 +213,21 @@ def _echoed(arguments: str) -> str:
     """Return a call's arguments as the transcript echoes them back.
 
     Chat templates parse the arguments of an earlier call as JSON, so arguments that are not a
-    JSON object would fail the next round; they are echoed as an empty object, and the call's
-    error reply says what was wrong.
+    JSON object would fail the next round. They are echoed as an empty object, and so are
+    arguments the registry refuses as nested too deeply (the same rule decides both), so no
+    endpoint ever re-parses them; the call's error reply says what was wrong.
 
     Args:
         arguments (str): The arguments as the model sent them.
 
     Returns:
-        str: The arguments when they are a JSON object, else ``{}``.
+        str: The arguments when they are a JSON object the registry reads, else ``{}``.
     """
     try:
         value = json.loads(arguments)
     except (ValueError, RecursionError):
         return "{}"
-    return arguments if isinstance(value, dict) else "{}"
+    return arguments if isinstance(value, dict) and not nested_too_deeply(value) else "{}"
 
 
 def _with_note(messages: Sequence[ChatMessage], note: str) -> list[ChatMessage]:
@@ -268,7 +269,7 @@ def _shortened(transcript: Sequence[ChatMessage]) -> list[ChatMessage] | None:
     cut = False
     kept: list[ChatMessage] = []
     for message in transcript:
-        text = str(message.content or "")
+        text = message.content or ""
         if message.role == MessageRole.TOOL:
             shorter, trimmed = fit_with_marker(text, int(len(text) * OVERFLOW_REPLY_SHARE))
             if trimmed and len(shorter) < len(text):

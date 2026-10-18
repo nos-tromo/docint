@@ -35,7 +35,16 @@ from docint.agents.assessment.ledger import (
 )
 from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
 from docint.agents.turn.stream import ToolCall
-from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, ToolReply, error_reply
+from docint.agents.turn.tools import (
+    MAX_ARGUMENT_DEPTH,
+    PassageReply,
+    ReadTool,
+    SearchTool,
+    ToolRegistry,
+    ToolReply,
+    error_reply,
+    nested_too_deeply,
+)
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -905,6 +914,29 @@ def test_arguments_nested_too_deeply_get_an_error_reply() -> None:
 
     assert reply.error
     assert reply.text.startswith("Error: the arguments for read")
+
+
+@pytest.mark.parametrize(
+    ("value", "deep"),
+    [
+        ({"query": "Hafenfest"}, False),
+        ({"n": [[[3]]]}, False),
+        ({"n": [3] * 5000}, False),
+        ({"a": {"b": [1, {"c": 2}]}}, False),
+        (json.loads('{"n": ' + "[" * (MAX_ARGUMENT_DEPTH - 1) + "]" * (MAX_ARGUMENT_DEPTH - 1) + "}"), False),
+        (json.loads('{"n": ' + "[" * MAX_ARGUMENT_DEPTH + "]" * MAX_ARGUMENT_DEPTH + "}"), True),
+        (json.loads('{"n": ' + "[" * 900 + "]" * 900 + "}"), True),
+    ],
+    ids=["flat", "shallow", "wide", "mixed", "at-the-limit", "past-it", "far-past-it"],
+)
+def test_nesting_is_measured_by_objects_and_lists_without_recursion(value: object, deep: bool) -> None:
+    """Depth counts the object and every list or object inside it, measured at any depth JSON can parse.
+
+    Args:
+        value (object): Parsed arguments.
+        deep (bool): Whether they nest past ``MAX_ARGUMENT_DEPTH``.
+    """
+    assert nested_too_deeply(value) is deep
 
 
 def test_read_of_a_number_beyond_the_evidence_names_the_range() -> None:

@@ -56,6 +56,7 @@ from docint.agents.turn.calls import (
 from docint.agents.turn.history import ConversationTurn, ConversationWindow
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
 from docint.agents.turn.tools import (
+    MAX_ARGUMENT_DEPTH,
     ReadTool,
     SearchFn,
     SearchTool,
@@ -1901,6 +1902,37 @@ def test_a_call_whose_prepare_raises_gets_its_reply_and_the_turn_answers(loguru_
     assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
     assert (result.reason, "".join(texts)) == ("research_failed", ANSWER)
     assert loguru_caplog.messages == ["An agent tool call could not be prepared: RuntimeError"]
+
+
+def test_arguments_the_registry_refuses_as_too_deep_are_echoed_as_an_empty_object() -> None:
+    """Arguments refused as nested too deeply are echoed back as ``{}``, so no endpoint re-parses them."""
+    nested = '{"n": ' + "[" * 600 + "]" * 600 + "}"
+    llm = streaming_tool_llm([_calls(("call_a", "read", nested)), _answer()])
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    (block,) = [block for block in _sent(llm, 1)[2].blocks if isinstance(block, ToolCallBlock)]
+    assert block.tool_kwargs == "{}"
+    assert _tool_replies(llm, 1)["call_a"].startswith("Error: the arguments for read are nested too deeply")
+
+
+@pytest.mark.parametrize("depth", [MAX_ARGUMENT_DEPTH, MAX_ARGUMENT_DEPTH + 1], ids=["at-the-limit", "past-it"])
+def test_the_echo_and_the_registry_agree_where_nesting_becomes_too_deep(depth: int) -> None:
+    """The echo and the registry share one limit: the registry refuses exactly the arguments echoed as ``{}``.
+
+    Args:
+        depth (int): How deeply the arguments nest, the object itself counted.
+    """
+    arguments = '{"n": ' + "[" * (depth - 1) + "3" + "]" * (depth - 1) + "}"
+    llm = streaming_tool_llm([_calls(("call_a", "read", arguments)), _answer()])
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    refused = depth > MAX_ARGUMENT_DEPTH
+    (block,) = [block for block in _sent(llm, 1)[2].blocks if isinstance(block, ToolCallBlock)]
+    reply = _tool_replies(llm, 1)["call_a"]
+    assert block.tool_kwargs == ("{}" if refused else arguments)
+    assert reply.startswith("Error: the arguments for read are nested too deeply") is refused
 
 
 def test_a_call_past_the_rounds_limit_is_never_prepared(loguru_caplog: LogCaptureFixture) -> None:
