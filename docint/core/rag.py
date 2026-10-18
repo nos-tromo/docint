@@ -2973,8 +2973,24 @@ AGENT_LEDGER_CAP = 64
 AGENT_METADATA_VALUE_CHARS = 200
 #: What a reference row's header leads with after its citation line: a frame's label, then its file and reference block.
 _AGENT_LEADING_KEYS = ("keyframe", "filename", "reference_metadata")
-#: Who wrote a reference row and when, in the order its reference block leads with them.
-_AGENT_IDENTITY_KEYS = ("type", "author", "author_id", "vanity", "timestamp", "network", "text_id", "uuid", "url")
+#: Who wrote a reference row and when, in the order its reference block leads with them: the row's own
+#: identity, then that of the post a frame, an image or a transcript segment inherits.
+_AGENT_IDENTITY_KEYS = (
+    "type",
+    "author",
+    "author_id",
+    "vanity",
+    "timestamp",
+    "network",
+    "text_id",
+    "uuid",
+    "url",
+    "posting_author",
+    "posting_author_id",
+    "posting_vanity",
+    "posting_timestamp",
+    "posting_network",
+)
 
 
 @dataclass(frozen=True)

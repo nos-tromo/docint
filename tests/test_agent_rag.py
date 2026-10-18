@@ -398,7 +398,7 @@ def _social_frame(rag: RAG) -> NodeWithScore:
 
 
 def test_a_social_frames_header_keeps_its_label_then_its_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The frame's label still leads, and the clip it came from follows it, ahead of its post's long block.
+    """The frame's label still leads, the clip it came from follows, and its compacted header names who posted it, when.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -406,6 +406,133 @@ def test_a_social_frames_header_keeps_its_label_then_its_file(monkeypatch: pytes
     reply = _search_reply(agent_llm_view, _social_frame(_rag(monkeypatch)))
 
     assert reply.startswith(f"citation_index: 1\nkeyframe: #3 @ 00:12\nfilename: {CLIP}\n")
+    assert "characters not shown" in reply.partition("\n\n")[0]
+    assert AUTHOR in reply
+    assert TIMESTAMP in reply
+
+
+def _social_segment() -> NodeWithScore:
+    """Build a transcript segment of an invented social clip as the transcript reader writes it.
+
+    Its reference block holds the segment's own identity, then its text, then the post the
+    clip hangs off, merged in the reader's order.
+
+    Returns:
+        NodeWithScore: The segment, the clip's fourth, spoken twelve seconds in.
+    """
+    link = {
+        "posting_uuid": "3f2b8c1e-9d4a-4c6b-8e21-5a7f0c9d2b14",
+        "posting_id": "1234567890123456",
+        "media_id": "9876543210987654",
+    }
+    posting = {
+        "posting_network": "examplenet",
+        "posting_author": AUTHOR,
+        "posting_author_id": "1234567890",
+        "posting_vanity": "person_a",
+        "posting_timestamp": TIMESTAMP,
+        "posting_url": "https://social.invalid/p/1234567890123456",
+        "posting_text": LONG_POST,
+    }
+    text = "Wir stehen hier am Hafen, und gleich fängt es an zu regnen."
+    reference = {
+        "type": "transcript_segment",
+        "network": "nextext",
+        "author": "SPEAKER_01",
+        "text": text,
+        "text_id": f"{CLIP}:3",
+        "timestamp": "00:00:12",
+        "language": "de",
+        "source_file": CLIP,
+        "speaker": "SPEAKER_01",
+        **link,
+        **posting,
+    }
+    metadata = {
+        "file_path": f"example_profile/{CLIP}",
+        "file_name": CLIP,
+        "filename": CLIP,
+        "file_type": "application/json",
+        "mimetype": "application/json",
+        "source": "transcript",
+        "origin": {"filename": f"{CLIP}.nextext.jsonl", "mimetype": "application/json"},
+        **link,
+        "source_file": CLIP,
+        "media_file_hash": "c" * 64,
+        **posting,
+        "file_hash": "d" * 64,
+        "sentence_index": 3,
+        "docint_doc_kind": "transcript_segment",
+        "start_seconds": 12.0,
+        "end_seconds": 15.5,
+        "start_ts": "00:00:12",
+        "end_ts": "00:00:15",
+        "speaker": "SPEAKER_01",
+        "reference_metadata": reference,
+    }
+    return NodeWithScore(node=TextNode(id_="segment-3", text=text, metadata=metadata), score=1.0)
+
+
+def test_a_social_clips_segment_names_who_posted_the_clip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A segment's compacted header keeps its own start, then the post's author, ahead of the post's long text.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    reply = _search_reply(agent_llm_view, _social_segment())
+
+    assert reply.startswith(f"citation_index: 1\nfilename: {CLIP}\n")
+    assert "characters not shown" in reply.partition("\n\n")[0]
+    assert "00:00:12" in reply
+    assert AUTHOR in reply
+
+
+@pytest.mark.parametrize("passage", ["frame", "segment"])
+def test_a_reference_block_leads_with_its_own_identity_then_its_posts(
+    monkeypatch: pytest.MonkeyPatch, passage: str
+) -> None:
+    """A row's own identity comes first, then the post it hangs off, then the rest in the order it was written.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        passage (str): A social clip's ``frame`` or transcript ``segment``.
+    """
+    node = _social_frame(_rag(monkeypatch)) if passage == "frame" else _social_segment()
+    posts = ["posting_author", "posting_author_id", "posting_vanity", "posting_timestamp", "posting_network"]
+    expected = {
+        "frame": [
+            "type",
+            *posts,
+            "posting_uuid",
+            "posting_id",
+            "media_id",
+            "source_file",
+            "media_file_hash",
+            "posting_url",
+            "posting_text",
+        ],
+        "segment": [
+            "type",
+            "author",
+            "timestamp",
+            "network",
+            "text_id",
+            *posts,
+            "text",
+            "language",
+            "source_file",
+            "speaker",
+            "posting_uuid",
+            "posting_id",
+            "media_id",
+            "posting_url",
+            "posting_text",
+        ],
+    }[passage]
+
+    view = agent_llm_view(node.node)
+
+    assert list(view.metadata["reference_metadata"]) == expected
 
 
 def _pdf_chunk() -> NodeWithScore:
