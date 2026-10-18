@@ -79,8 +79,9 @@ hate-speech-only, custom field/operator/value rules) via
 mismatches, and an optional `GraphDebugPanel`. Cancellation uses an
 `AbortController`.
 
-The answer is Markdown: `grounded_qa.txt` asks the model for lists, bold, tables
-and topic headings where structure helps, and for plain paragraphs otherwise.
+The answer is Markdown: `grounded_qa.txt`, and `assessment_answer.txt` on an
+assessment turn, ask the model for lists, bold, tables and topic headings where
+structure helps, and for plain paragraphs otherwise.
 `components/common/MarkdownProse.tsx` renders it, shared with the Analysis
 summary. A table scrolls inside its own box, citation markers such as `[3]` stay
 plain text, and raw HTML in an answer is shown as text, never parsed.
@@ -124,6 +125,20 @@ and the chat's transcript download writes the same line after that answer. The
 chip is drawn from the target stored with the turn, so it survives a reload.
 Everything shows no chip, nor does a turn answered from a hand-picked scope
 (the scope outranks the target) or one saved before the target was recorded.
+
+A question that asks for a judgement — what could be improved, whether a
+method convinces — gets an **assessment**. While it is researched, the turn
+lists each search the model makes. The answer then opens with what the sources
+say, cited as usual, and continues under a **Model assessment** label with the
+model's own judgement, which may draw on general knowledge and is not checked
+against the sources. A note under the answer says so and, behind a disclosure
+caret, lists the searches; the validation banner speaks of the source-backed
+part only. A turn whose research failed, stopped early or found nothing, whose
+evidence was partly left out for lack of room, or whose model did not separate
+the two parts, says so in an amber notice. An assessment cut off before it
+finished, by an error or a dropped connection, opens with a note that it may
+be incomplete and may contain the model's own judgement without its label. A
+turn that failed cannot be added to a report.
 
 A **Search in** picker under the query field chooses what the keywords
 match: Text (the chunk body, the default), Author, Network or UUID. The

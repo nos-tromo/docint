@@ -5,7 +5,7 @@ import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
 import { clearScope, setScope } from '@/api/scope'
-import type { ChatFinalEvent } from '@/api/types'
+import type { AgentStep, ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
 import { useStickToBottom } from '@/hooks/useStickToBottom'
@@ -35,8 +35,9 @@ type Action =
   | { type: 'start'; user: string; scopeRequested?: number; unsavedId?: string }
   | { type: 'token'; token: string }
   | { type: 'retry'; query: string }
+  | { type: 'agent'; step: AgentStep }
   | { type: 'finalize'; meta: ChatFinalEvent }
-  | { type: 'fail'; error?: string }
+  | { type: 'fail'; error?: string; note?: string }
 
 function reducer(s: State, a: Action): State {
   switch (a.type) {
@@ -80,6 +81,14 @@ function reducer(s: State, a: Action): State {
       const updated = { ...last, assistant: '', retryQuery: a.query }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
+    // A research step of an assessment turn. The turn stays open: only the
+    // final envelope finishes it.
+    case 'agent': {
+      const last = s.turns[s.turns.length - 1]
+      if (!last) return s
+      const updated = { ...last, agentSteps: [...(last.agentSteps ?? []), a.step] }
+      return { ...s, turns: [...s.turns.slice(0, -1), updated] }
+    }
     case 'finalize': {
       const last = s.turns[s.turns.length - 1]
       if (!last) return { ...s, inflight: false }
@@ -91,10 +100,14 @@ function reducer(s: State, a: Action): State {
       const updated = { ...last, assistant: finalText, done: true, meta: a.meta }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
+    // An assessment's judgement is labelled once its answer is complete, so one
+    // cut off before that carries the caveat in its text, wherever the text goes.
     case 'fail': {
       const last = s.turns[s.turns.length - 1]
       if (!last) return { ...s, inflight: false }
-      const updated = { ...last, done: true, error: a.error ?? null }
+      const cutOff = !!a.note && !last.done && !!last.agentSteps?.length && last.assistant.trim() !== ''
+      const assistant = cutOff ? `*${a.note}*\n\n${last.assistant}` : last.assistant
+      const updated = { ...last, assistant, done: true, error: a.error ?? null }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
   }
@@ -234,6 +247,8 @@ export function Chat() {
                 validation_reason: m.validation_reason,
                 retried: m.retried,
                 retry_query: m.retry_query,
+                answer_mode: m.answer_mode,
+                agent: m.agent,
                 retrieval_target: m.retrieval_target
               } as ChatFinalEvent)
             : null
@@ -264,6 +279,10 @@ export function Chat() {
 
     const ac = new AbortController()
     abortRef.current = ac
+    // Passed with every failure; the reducer puts it only on a cut-off assessment.
+    const note = t('chat.assessment_interrupted')
+    // Set once the turn has ended either way, so nothing arriving later can fail it.
+    let settled = false
     try {
       for await (const ev of streamQuery(
         {
@@ -312,6 +331,18 @@ export function Chat() {
           if (typeof retryQuery === 'string') dispatch({ type: 'retry', query: retryQuery })
           continue
         }
+        // Must be caught before the finalize fallthrough below: an unhandled
+        // step frame would finish the turn and re-enable Send mid-research.
+        // The final envelope also carries `agent` (the trail), with a session id.
+        if (
+          typeof data.agent === 'object' &&
+          data.agent !== null &&
+          !('session_id' in data) &&
+          !('response' in data)
+        ) {
+          dispatch({ type: 'agent', step: data.agent as AgentStep })
+          continue
+        }
         if (typeof data.error === 'string') {
           // Post-D2 the backend sends a static protocol flag here, not
           // prose — never render the field itself. The validated `code`
@@ -320,10 +351,12 @@ export function Chat() {
           // stream-ended one: an error frame means the backend answered
           // and named its failure. Only the transport path below, which
           // carries no code at all, may claim the stream ended.
-          dispatch({ type: 'fail', error: streamErrorText(t, data.code, 'chat.error_backend_failed') })
+          settled = true
+          dispatch({ type: 'fail', error: streamErrorText(t, data.code, 'chat.error_backend_failed'), note })
           continue
         }
         const final = data as unknown as ChatFinalEvent
+        settled = true
         dispatch({ type: 'finalize', meta: final })
         if (!currentSessionId && final.session_id) {
           setCurrentSessionId(final.session_id)
@@ -354,7 +387,16 @@ export function Chat() {
         }
         qc.invalidateQueries({ queryKey: sessionsKey })
       }
+      // Closed with neither its envelope nor an error frame, as a backend shut down mid-answer does.
+      if (!settled && !ac.signal.aborted) {
+        settled = true
+        dispatch({ type: 'fail', error: t('chat.error_stream_ended'), note })
+      }
     } catch (e) {
+      // A finished turn stays finished. An aborted request's turn is gone: the
+      // session switch that aborted it reset the transcript, and the last turn
+      // now belongs to someone else.
+      if (settled || ac.signal.aborted) return
       // A pinned session resumed against the wrong collection (409) or a send
       // with no active collection (400) reaches here as a typed ApiError. Give
       // each an actionable message. Anything else is a transport failure — a
@@ -379,7 +421,7 @@ export function Chat() {
         // to report; the actionable message is that the stream ended.
         error = t('chat.error_stream_ended')
       }
-      dispatch({ type: 'fail', error })
+      dispatch({ type: 'fail', error, note })
     } finally {
       abortRef.current = null
     }

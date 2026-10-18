@@ -226,6 +226,7 @@ def test_idempotent_column_migration_adds_missing_columns_on_legacy_db() -> None
         # Corrective-retry provenance rides the same idempotent migration.
         "retried",
         "retry_query",
+        "agent_trail",
         # So does the evidence target a turn answered under.
         "retrieval_target",
     } <= (post_columns)

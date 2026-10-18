@@ -5,16 +5,17 @@ import contextlib
 import io
 import json
 import types
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 from typing import Any, cast, get_args
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from conftest import run_ingest
 from fastapi.testclient import TestClient
 
 import docint.core.api as api_module
-from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
+from docint.agents.types import AgentProgress, IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
 from docint.core.entities.resolution import ResolutionSummary
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
@@ -30,6 +31,7 @@ class DummySessionManager:
         """Start with no scope pinned, per instance."""
         self.scope: list[str] = []
         self.validation_updates: list[dict[str, Any]] = []
+        self.prior_turn: PriorTurn | None = None
 
     def init_session_store_if_needed(self) -> None:
         """Satisfy the lifespan's eager store init without touching a DB."""
@@ -134,6 +136,19 @@ class DummySessionManager:
             list[dict[str, Any]]: A list of message dictionaries.
         """
         return [{"role": "user", "content": "hi"}]
+
+    def get_prior_turn(self, session_id: str, owner: str | None = None) -> PriorTurn | None:
+        """Return the seeded prior exchange.
+
+        Args:
+            session_id (str): The ID of the session (ignored by the stub).
+            owner (str | None): The owning principal (ignored by the stub).
+
+        Returns:
+            PriorTurn | None: Whatever the test seeded on ``prior_turn``.
+        """
+        _ = session_id, owner
+        return self.prior_turn
 
     def get_session_collection(self, session_id: str, owner: str | None = None) -> str | None:
         """Return the collection a session is pinned to (stub: unpinned).
@@ -335,11 +350,13 @@ class DummyRAG:
         self.seen_collections: list[str] = []
         self.stateless_queries: list[str] = []
         self.stateless_query_filters: list[dict[str, Any]] = []
+        self.stateless_assessments: list[dict[str, Any]] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
         # One entry per stream_chat call, so the corrective-retry tests can
         # assert what the second pass was asked for.
         self.stream_calls: list[dict[str, Any]] = []
+        self.chat_modes: list[str] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
@@ -471,6 +488,9 @@ class DummyRAG:
         vector_store_kwargs: Any = None,
         scoped_node_ids: Any = None,
         retrieval_target: str = "all",
+        prior_turn: Any = None,
+        skip_query_rewrite: Any = None,
+        answer_mode: str = "lookup",
     ) -> dict[str, Any]:
         """Chat with the RAG system.
 
@@ -484,11 +504,15 @@ class DummyRAG:
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
             scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
             retrieval_target (str): Which evidence may answer the turn.
+            prior_turn (Any): The prior exchange an assessment turn builds on (ignored by the stub).
+            skip_query_rewrite (Any): Accepted for parity with RAG.chat; ignored by the stub.
+            answer_mode (str): How the turn is answered; recorded by the stub.
 
         Returns:
             dict[str, Any]: The response from the RAG system.
         """
-        _ = session_id, owner
+        _ = session_id, owner, prior_turn, skip_query_rewrite
+        self.chat_modes.append(answer_mode)
         self.seen_collections.append(self.qdrant_collection)
         self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
         self.chats.append(question)
@@ -545,6 +569,7 @@ class DummyRAG:
         scoped_node_ids: Any = None,
         replace_turn_idx: int | None = None,
         retrieval_target: str = "all",
+        answer_mode: str = "lookup",
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -561,6 +586,7 @@ class DummyRAG:
             scoped_node_ids (Any): Hand-picked chunk ids to answer from; recorded by the stub.
             replace_turn_idx (int | None): Turn to overwrite; recorded by the stub.
             retrieval_target (str): Which evidence may answer the turn.
+            answer_mode (str): How the turn is answered; recorded by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -573,6 +599,7 @@ class DummyRAG:
                 "skip_query_rewrite": skip_query_rewrite,
                 "replace_turn_idx": replace_turn_idx,
                 "prior_turn": prior_turn,
+                "answer_mode": answer_mode,
             }
         )
         self.stream_filters.append(
@@ -677,6 +704,35 @@ class DummyRAG:
             vector_store_kwargs=vector_store_kwargs,
             scoped_node_ids=scoped_node_ids,
         )
+
+    def stream_stateless_assessment(self, question: str, **kwargs: Any) -> Generator[Any, None, None]:
+        """Stream a canned stateless assessment and record the call.
+
+        Like the real entry point, it reports a missing expansion payload as skipped, with a reason.
+
+        Args:
+            question (str): The user's question.
+            **kwargs (Any): The forwarded request settings.
+
+        Yields:
+            Any: One research step, one token, then the final payload.
+        """
+        self.stateless_assessments.append({"question": question, **kwargs})
+        graph_debug = kwargs["graph_debug"]
+        if graph_debug is None:
+            graph_debug = {"applied": False, "reason": "scoped" if kwargs.get("scoped_node_ids") else "unavailable"}
+        yield AgentProgress(step=0, action="seed", detail="", found=1)
+        yield "Fact [1]."
+        yield {
+            "response": "Fact [1].",
+            "sources": [{"id": "a", "citation_index": 1}],
+            "session_id": None,
+            "turn_idx": None,
+            "retrieval_mode": "agent",
+            "answer_mode": "assessment",
+            "graph_debug": graph_debug,
+            "agent": {**SPLIT_AGENT, "steps": 0},
+        }
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
         """Return deterministic GraphRAG expansion metadata for tests.
@@ -2008,14 +2064,10 @@ def test_stream_query_session_mode_feeds_prior_turn(monkeypatch: pytest.MonkeyPa
         client (TestClient): The TestClient instance.
     """
     monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
-    seeded_history = [
-        {"role": "user", "content": "Was ist im Bild sichtbar?"},
-        {"role": "assistant", "content": "Ein grüner Baum auf einer Wiese."},
-    ]
     monkeypatch.setattr(
         api_module.rag.sessions,
-        "get_session_history",
-        lambda session_id, owner=None: seeded_history,
+        "prior_turn",
+        PriorTurn(user_text="Was ist im Bild sichtbar?", assistant_text="Ein grüner Baum auf einer Wiese."),
     )
 
     seen: dict[str, Any] = {}
@@ -5528,3 +5580,579 @@ def test_stream_query_final_frame_carries_the_retrieval_target(
     assert response.status_code == 200
     frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
     assert frames[-1]["retrieval_target"] == "visual"
+
+
+def _assessment_stream(
+    calls: list[dict[str, Any]], *, agent: dict[str, Any], answer: str
+) -> Callable[..., Generator[Any, None, None]]:
+    """Build a ``stream_chat`` double for an assessment turn.
+
+    Args:
+        calls (list[dict[str, Any]]): Receives each call's kwargs.
+        agent (dict[str, Any]): The trail the final frame carries.
+        answer (str): The labelled answer text.
+
+    Returns:
+        Callable[..., Generator[Any, None, None]]: The double.
+    """
+
+    def _stream(question: str, **kwargs: Any) -> Generator[Any, None, None]:
+        calls.append({"question": question, **kwargs})
+        yield AgentProgress(step=0, action="seed", detail="", found=2)
+        yield AgentProgress(step=1, action="search", detail="evaluation datasets", found=1)
+        yield answer
+        yield {
+            "response": answer,
+            "sources": [{"id": "a", "citation_index": 1}, {"id": "b", "citation_index": 2}],
+            "session_id": "generated-session",
+            "turn_idx": 0,
+            "retrieval_query": question,
+            "retrieval_mode": "agent",
+            "answer_mode": "assessment",
+            "agent": agent,
+        }
+
+    return _stream
+
+
+SPLIT_AGENT: dict[str, Any] = {
+    "steps": 1,
+    "actions": [{"action": "search", "detail": "evaluation datasets", "found": 1}],
+    "reason": None,
+    "answer": "split",
+    "shortened": 0,
+    "evidence_chars": 9,
+}
+
+
+def test_stream_query_streams_agent_frames_and_validates_only_the_evidence_part(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Research steps stream as agent frames; the validator sees part 1 and its citations.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls: list[dict[str, Any]] = []
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    monkeypatch.setattr(
+        api_module.rag,
+        "stream_chat",
+        _assessment_stream(calls, agent=SPLIT_AGENT, answer="Fact [2]. **Model assessment** View."),
+    )
+
+    def _fake_validation(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"validation_checked": True, "validation_mismatch": False, "validation_reason": None}
+
+    monkeypatch.setattr(api_module, "_validation_payload", _fake_validation)
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert frames[0] == {"agent": {"step": 0, "action": "seed", "detail": "", "found": 2}}
+    assert frames[1] == {"agent": {"step": 1, "action": "search", "detail": "evaluation datasets", "found": 1}}
+    final = frames[-1]
+    assert final["answer_mode"] == "assessment"
+    assert final["agent"] == SPLIT_AGENT
+    assert "turn_idx" not in final
+    assert seen["answer"] == "Fact [2]."
+    assert seen["intent"] == "assessment"
+    assert [source["id"] for source in seen["sources"]] == ["b"]
+    assert calls[0]["answer_mode"] == "assessment"
+
+
+def test_stream_query_never_retries_an_assessment_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A weak, mismatched assessment keeps its answer; research already ran.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    monkeypatch.setattr(
+        api_module.rag, "stream_chat", _assessment_stream(calls, agent=SPLIT_AGENT, answer="Fact [1]. x")
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_validation_payload",
+        lambda **_kwargs: {"validation_checked": True, "validation_mismatch": True, "validation_reason": "r"},
+    )
+    monkeypatch.setattr(api_module, "_reformulated_query", lambda *_args: "reformulated")
+
+    frames = _sse_frames(_stream_text(client))
+
+    assert len(calls) == 1
+    assert not any("retry" in frame for frame in frames)
+
+
+def test_an_unsplit_assessment_is_not_validated(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Without a separate source-backed part there is nothing a validator could check.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls: list[dict[str, Any]] = []
+    unsplit = {**SPLIT_AGENT, "answer": "unsplit", "evidence_chars": 0}
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    monkeypatch.setattr(api_module.rag, "stream_chat", _assessment_stream(calls, agent=unsplit, answer="View."))
+
+    def _must_not_validate(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("validation ran on an unsplit assessment")
+
+    monkeypatch.setattr(api_module, "_validation_payload", _must_not_validate)
+
+    final = _sse_frames(_stream_text(client))[-1]
+
+    assert final["validation_checked"] is False
+    assert final["validation_reason"] == api_module.ASSESSMENT_NOT_VALIDATED_REASON
+
+
+def test_stream_query_gives_lookups_only_the_evidence_part_of_an_assessment(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A follow-up lookup must not restate the model's judgement as sourced fact.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    cast(Any, api_module.rag.sessions).prior_turn = PriorTurn(
+        user_text="What could be improved?",
+        assistant_text="Fact [1].\n\n---\n\n**Model assessment**\n\nView.",
+        evidence_chars=9,
+    )
+
+    _stream_text(client)
+
+    call = cast(Any, api_module.rag).stream_calls[0]
+    assert call["answer_mode"] == "lookup"
+    assert call["prior_turn"] == PriorTurn(user_text="What could be improved?", assistant_text="Fact [1].")
+
+
+def test_stream_query_hands_an_assessment_turn_the_full_prior_turn(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """An assessment may build on its own earlier judgement.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    prior = PriorTurn(user_text="Q", assistant_text="Fact [1]. View.", evidence_chars=9)
+    cast(Any, api_module.rag.sessions).prior_turn = prior
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+
+    _stream_text(client)
+
+    call = cast(Any, api_module.rag).stream_calls[0]
+    assert call["answer_mode"] == "assessment"
+    assert call["prior_turn"] == prior
+
+
+def test_a_lookup_final_frame_carries_no_assessment_keys(client: TestClient) -> None:
+    """Lookup frames are unchanged by this feature.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    final = _sse_frames(_stream_text(client))[-1]
+
+    assert "answer_mode" not in final
+    assert "agent" not in final
+
+
+def test_the_retry_pass_is_always_a_lookup(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A reformulated retry query must never be reclassified into an assessment.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient.", "A grounded answer of length."])
+
+    _stream_text(client)
+
+    assert [call["answer_mode"] for call in calls] == ["lookup", "lookup"]
+
+
+def test_classify_turn_is_gated_before_any_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Visual turns, model-less stubs and small windows never reach the classifier.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    called: list[str] = []
+    models: list[Any] = []
+
+    def _classify(llm: Any, *, question: str, prior_turn: Any) -> str:
+        """Record the call and classify it as an assessment.
+
+        Args:
+            llm (Any): The model the classifier was given.
+            question (str): The question.
+            prior_turn (Any): The prior turn, unused.
+
+        Returns:
+            str: Always ``assessment``.
+        """
+        called.append(question)
+        models.append(llm)
+        return "assessment"
+
+    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
+    monkeypatch.setattr(api_module, "classify_turn", _classify)
+    rag = cast(Any, api_module.rag)
+
+    assert api_module._classify_turn("Q", None, "all") == "lookup"  # the stub has no text_model_id
+    rag.text_model_id = "m"
+    rag.text_model = object()
+    rag.bounded_text_model = object()
+    rag.openai_ctx_window = 4096
+    assert api_module._classify_turn("Q", None, "all") == "lookup"
+    rag.openai_ctx_window = 8192
+    assert api_module._classify_turn("Q", None, "visual") == "lookup"
+    assert called == []
+    assert api_module._classify_turn("Q", None, "all") == "assessment"
+    assert called == ["Q"]
+    # The classifier's 15 s bound is for one attempt, so it never gets the retrying model.
+    assert models == [rag.bounded_text_model]
+    assert models[0] is not rag.text_model
+
+
+def test_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """``/query`` carries the mode and trail, and validates only the evidence part.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+    monkeypatch.setattr(
+        api_module.rag,
+        "chat",
+        lambda question, **kwargs: {
+            "response": "Fact [1]. View.",
+            "sources": [{"id": "a", "citation_index": 1}],
+            "retrieval_mode": "agent",
+            "answer_mode": "assessment",
+            "agent": SPLIT_AGENT,
+        },
+    )
+
+    def _fake_validation(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"validation_checked": True, "validation_mismatch": False, "validation_reason": None}
+
+    monkeypatch.setattr(api_module, "_validation_payload", _fake_validation)
+
+    body = client.post("/query", json={"question": "What could be improved?"}).json()
+
+    assert body["answer_mode"] == "assessment"
+    assert body["agent"] == SPLIT_AGENT
+    assert seen["answer"] == "Fact [1]."
+
+
+def test_a_turn_is_classified_once_and_its_retry_is_a_lookup(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The retry pass never inherits an assessment mode, and never reclassifies.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    classified: list[tuple[Any, ...]] = []
+
+    def _classify(*args: Any) -> str:
+        classified.append(args)
+        return "assessment"
+
+    monkeypatch.setattr(api_module, "_classify_turn", _classify)
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient.", "A grounded answer of length."])
+
+    _stream_text(client)
+
+    assert [call["answer_mode"] for call in calls] == ["assessment", "lookup"]
+    assert len(classified) == 1
+
+
+def test_stream_query_classifies_against_the_full_prior_turn(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The classifier resolves a follow-up against the whole earlier answer, judgement included.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    prior = PriorTurn(user_text="Q", assistant_text="Fact [1]. View.", evidence_chars=9)
+    cast(Any, api_module.rag.sessions).prior_turn = prior
+    classified: list[tuple[Any, ...]] = []
+
+    def _classify(*args: Any) -> str:
+        classified.append(args)
+        return "lookup"
+
+    monkeypatch.setattr(api_module, "_classify_turn", _classify)
+
+    _stream_text(client, "And what could be improved?")
+
+    assert classified == [("And what could be improved?", prior, "all")]
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [
+        {"answer": "unsplit", "evidence_chars": 0},
+        {"answer": "unsplit", "evidence_chars": None},
+        {"answer": "split", "evidence_chars": 0},
+        {"answer": "empty", "evidence_chars": None},
+        None,
+    ],
+)
+def test_an_assessment_without_a_source_backed_part_is_never_validated(
+    monkeypatch: pytest.MonkeyPatch, agent: dict[str, Any] | None
+) -> None:
+    """Only a split answer with text ahead of its label has anything a validator could check.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        agent (dict[str, Any] | None): The trail the turn reported.
+    """
+
+    def _must_not_validate(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("validation ran without a source-backed part")
+
+    monkeypatch.setattr(api_module, "_validation_payload", _must_not_validate)
+
+    result = api_module._assessment_validation(
+        question="Q", answer="View.", sources=[{"id": "a", "citation_index": 1}], agent=agent
+    )
+
+    assert result == {
+        "validation_checked": False,
+        "validation_mismatch": None,
+        "validation_reason": api_module.ASSESSMENT_NOT_VALIDATED_REASON,
+    }
+
+
+def test_a_split_assessment_with_no_judgement_part_is_validated_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the model wrote nothing after its label, the whole text is source-backed.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    seen: dict[str, Any] = {}
+
+    def _fake_validation(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"validation_checked": True, "validation_mismatch": False, "validation_reason": None}
+
+    monkeypatch.setattr(api_module, "_validation_payload", _fake_validation)
+
+    api_module._assessment_validation(
+        question="Q",
+        answer="Fact [1].",
+        sources=[{"id": "a", "citation_index": 1}, {"id": "b", "citation_index": 2}],
+        agent={"answer": "split", "evidence_chars": None},
+    )
+
+    assert seen["answer"] == "Fact [1]."
+    assert [source["id"] for source in seen["sources"]] == ["a"]
+
+
+def test_query_binds_the_prior_turn_only_for_an_assessment(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """``/query`` always passes the mode down; only an assessment also binds the prior turn.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    prior = PriorTurn(user_text="Q", assistant_text="Fact [1]. View.", evidence_chars=9)
+    cast(Any, api_module.rag.sessions).prior_turn = prior
+    modes = iter(["lookup", "assessment"])
+    classified: list[tuple[Any, ...]] = []
+    calls: list[dict[str, Any]] = []
+    real_chat = api_module.rag.chat
+
+    def _classify(*args: Any) -> str:
+        classified.append(args)
+        return next(modes)
+
+    def _chat(question: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return real_chat(question, **kwargs)
+
+    monkeypatch.setattr(api_module, "_classify_turn", _classify)
+    monkeypatch.setattr(api_module.rag, "chat", _chat)
+
+    for _ in range(2):
+        assert client.post("/query", json={"question": "And what could be improved?"}).status_code == 200
+
+    lookup, assessment = calls
+    assert classified == [("And what could be improved?", prior, "all")] * 2
+    assert cast(Any, api_module.rag).chat_modes == ["lookup", "assessment"]
+    assert "prior_turn" not in lookup
+    assert "skip_query_rewrite" not in lookup
+    assert assessment["prior_turn"] == prior
+    assert assessment["skip_query_rewrite"] is False
+
+
+@pytest.mark.parametrize(("broken", "error"), [("gate", ValueError), ("model", RuntimeError), ("classifier", KeyError)])
+def test_classify_turn_answers_as_a_lookup_when_a_step_fails(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, broken: str, error: type[Exception]
+) -> None:
+    """A misconfigured assessment setting or a dead model must never break a lookup turn.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+        broken (str): The step that fails: the gate, the model property or the classifier.
+        error (type[Exception]): What it raises; any class must degrade the same way.
+    """
+    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
+    rag = cast(Any, api_module.rag)
+    rag.text_model_id = "m"
+    rag.openai_ctx_window = 8192
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise error("bad config")
+
+    if broken == "gate":
+        monkeypatch.setattr(api_module, "assessment_available", _fail)
+    elif broken == "model":
+        monkeypatch.setattr(type(rag), "bounded_text_model", property(_fail), raising=False)
+    else:
+        rag.bounded_text_model = object()
+        monkeypatch.setattr(api_module, "classify_turn", _fail)
+
+    assert api_module._classify_turn("Q", None, "all") == "lookup"
+
+    warnings = [message for message in loguru_caplog.messages if "Assessment classification unavailable" in message]
+    assert warnings == [f"Assessment classification unavailable ({error.__name__}); answering as a lookup"]
+    assert "bad config" not in loguru_caplog.text
+
+
+def test_stateless_stream_query_answers_an_assessment(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """The stateless toggle streams the same agent frames and never touches run_query.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+
+    with client.stream(
+        "POST", "/stream_query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}
+    ) as resp:
+        frames = _sse_frames("".join(chunk.decode() for chunk in resp.iter_raw()))
+
+    rag = cast(Any, api_module.rag)
+    assert frames[0] == {"agent": {"step": 0, "action": "seed", "detail": "", "found": 1}}
+    assert frames[-1]["answer_mode"] == "assessment"
+    assert frames[-1]["session_id"] is None
+    assert rag.stateless_queries == []
+    assert rag.stateless_assessments[0]["expanded_query"].startswith("What could be improved?")
+
+
+def test_a_stateless_stream_query_assessment_is_validated_as_one_and_never_retried(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The stateless final frame goes through the assessment validator, carries no turn index, and never retries.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    calls = _arm_corrective_retry(monkeypatch, answers=["Evidence insufficient."])
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+
+    def _fake_validation(**kwargs: Any) -> dict[str, Any]:
+        """Record the validator's inputs and reject the answer, as would invite a retry.
+
+        Args:
+            **kwargs (Any): Validation inputs.
+
+        Returns:
+            dict[str, Any]: A mismatch verdict.
+        """
+        seen.update(kwargs)
+        return {"validation_checked": True, "validation_mismatch": True, "validation_reason": "r"}
+
+    monkeypatch.setattr(api_module, "_validation_payload", _fake_validation)
+
+    with client.stream(
+        "POST", "/stream_query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}
+    ) as resp:
+        frames = _sse_frames("".join(chunk.decode() for chunk in resp.iter_raw()))
+
+    final = frames[-1]
+    assert seen["intent"] == "assessment"
+    assert seen["answer"] == "Fact [1]."
+    assert "turn_idx" not in final
+    assert final["validation_mismatch"] is True
+    assert not any("retry" in frame for frame in frames)
+    assert calls == []
+
+
+def test_stateless_query_returns_the_assessment_fields(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """``/query`` in stateless mode drains the same stream to its final payload.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *_args: "assessment")
+
+    body = client.post("/query", json={"question": "What could be improved?", "retrieval_mode": "stateless"}).json()
+
+    assert body["answer_mode"] == "assessment"
+    assert body["answer"] == "Fact [1]."
+    assert cast(Any, api_module.rag).stateless_queries == []
+
+
+@pytest.mark.parametrize("path", ["/query", "/stream_query"])
+def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_request(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """Stateless has no session to supply them, and a dropped scope would let research widen a pinned set.
+
+    Expansion is skipped under a scope, so the panel is told why instead of receiving an empty payload.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    classified: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(api_module, "_classify_turn", lambda *args: classified.append(args) or "assessment")
+
+    response = client.post(
+        path,
+        json={
+            "question": "What could be improved?",
+            "retrieval_mode": "stateless",
+            "retrieval_target": "documents",
+            "scope_chunk_ids": ["c1"],
+            "metadata_filters": [{"field": "mimetype", "operator": "mime_match", "value": "image/*"}],
+        },
+    )
+
+    call = cast(Any, api_module.rag).stateless_assessments[0]
+    final = response.json() if path == "/query" else _sse_frames(response.text)[-1]
+    assert response.status_code == 200
+    assert classified == [("What could be improved?", None, "documents")]
+    assert (call["scoped_node_ids"], call["retrieval_target"]) == (["c1"], "documents")
+    assert call["expanded_query"] == "What could be improved?"
+    assert [rule.field for rule in call["metadata_filter_rules"]] == ["mimetype"]
+    assert call["metadata_filters"] is not None
+    assert "qdrant_filters" in call["vector_store_kwargs"]
+    assert call["graph_debug"] is None
+    assert isinstance(final["graph_debug"], dict)
+    assert final["graph_debug"]["reason"] == "scoped"

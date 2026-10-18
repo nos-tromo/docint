@@ -58,6 +58,10 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_media_id": "Media ID",
         "report_label_machine_translation": "Machine translation",
         "report_label_image_evidence": "Image evidence",
+        "assessment_heading": "Model assessment",
+        "assessment_disclaimer": (
+            "The model's own judgement. It may draw on general knowledge and is not checked against the sources."
+        ),
         "report_label_video_keyframe": "Video keyframe",
         "extract_title": "Appendix",
         "extract_heading_documents": "Documents",
@@ -153,6 +157,11 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_media_id": "Medien-ID",
         "report_label_machine_translation": "Maschinelle Übersetzung",
         "report_label_image_evidence": "Bild",
+        "assessment_heading": "Einschätzung des Modells",
+        "assessment_disclaimer": (
+            "Eigene Bewertung des Sprachmodells. Sie kann auf Allgemeinwissen beruhen "
+            "und wird nicht gegen die Quellen geprüft."
+        ),
         "report_label_video_keyframe": "Video-Frame",
         "extract_title": "Anlage",
         "extract_heading_documents": "Dokumente",

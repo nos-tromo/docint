@@ -230,8 +230,9 @@ Request (`QueryIn`):
   explicit boolean every turn.
 - `retrieval_mode` — `session` (default) or `stateless`. `session` walks
   through `SessionManager.chat()` and persists a `Turn`; `stateless` calls
-  `RAG.run_query()` directly and persists nothing, so its `session_id` is
-  `null` unless the request carried one.
+  `RAG.run_query()` directly, or `RAG.stream_stateless_assessment()` on an
+  assessment turn, and persists nothing, so its `session_id` is `null` unless
+  the request carried one.
 - `retrieval_target` — which evidence may answer the turn: `all` (default,
   documents and imagery fused), `documents` (no image lane), or `visual` (the
   `{collection}_images` companion alone, the one path that sends the stored
@@ -267,18 +268,35 @@ target.
   "retrieval_mode": "session",
   "retrieval_target": "all",
   "visual": null,
+  "answer_mode": null,
+  "agent": null,
   "validation_checked": true,
   "validation_mismatch": false,
   "validation_reason": null
 }
 ```
 
+`answer_mode` is `"assessment"` when the turn added a labelled model judgement
+to the cited evidence (see [Assessment turns](retrieval-and-agents.md#assessment-turns));
+`agent` then carries `steps`, `actions`, `reason`, `answer`, `shortened` and
+`evidence_chars`. Both are `null` on a lookup.
+
 ### `POST /stream_query`
 
-Same inputs as `/query`, streamed as SSE events with token-level output.
-The first event carries the `session_id`, subsequent events carry
-`{"type": "token", "value": "..."}`, and a final event carries the
-complete payload.
+Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
+
+- `{"token": "..."}` — answer text as it is generated.
+- `{"agent": {"step": 1, "action": "search", "detail": "...", "found": 3}}` —
+  one step of an assessment turn; `action` is `seed`, `search` or `answer`, and
+  `detail` is the model-written query of a search.
+- `{"retry": {"query": "..."}}` — a corrective retry is replacing the answer
+  streamed so far.
+- `{"error": "Internal server error", "code": "..."}` — the turn failed;
+  `code` is `embedding_unavailable`, `context_overflow` or `generation_failed`.
+- The final envelope — `/query`'s fields with the text under `response` instead
+  of `answer`, plus `reasoning` (and `retried` / `retry_query` after a
+  corrective retry). An assessment adds `answer_mode: "assessment"` and
+  `agent`; a lookup carries neither key.
 
 ### `POST /search`
 
@@ -869,7 +887,8 @@ from `conversations` via `SessionManager.list_sessions()`.
 ### `GET /sessions/{session_id}/history`
 
 Returns `SessionHistoryOut` — `{"messages": [...]}` where each message
-comes from `Turn` / `Citation`.
+comes from `Turn` / `Citation`. An assessment turn's assistant message also
+carries `answer_mode: "assessment"` and its `agent` trail.
 
 An assistant message carries `retrieval_target` (`all`, `documents` or
 `visual`) — the evidence the turn answered under, as `POST /query` reports it —
@@ -1213,11 +1232,13 @@ tokens are produced differs by path:
   runs the non-streaming handler, splits the finished answer into tokens
   and yields each with a fixed delay
   (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`, `0.03` s). This is used on one
-  path only: `POST /stream_query` with `retrieval_mode="stateless"`.
+  path only: a lookup turn on `POST /stream_query` with
+  `retrieval_mode="stateless"`.
 - **Live** — every session path (`POST /stream_query` in the default mode
   and `POST /agent/chat/stream`) yields from `RAG.stream_chat()` through
   `_aiter_sync_gen()` (`docint/core/api.py:673`), so tokens arrive as the
-  model produces them and no artificial delay applies.
+  model produces them and no artificial delay applies. A stateless
+  assessment streams the same way, through `RAG.stream_stateless_assessment()`.
 
 The ingestion endpoints use a different pattern: they carry **progress
 events** rather than generated tokens. `POST /ingest/upload` streams the

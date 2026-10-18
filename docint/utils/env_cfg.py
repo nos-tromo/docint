@@ -2305,6 +2305,36 @@ def load_corrective_retry_env(default_enabled: bool = True) -> CorrectiveRetryCo
 
 
 @dataclass(frozen=True)
+class AssessmentConfig:
+    """Dataclass for assessment-turn configuration."""
+
+    enabled: bool
+    max_steps: int
+
+
+def load_assessment_env(default_enabled: bool = True, default_max_steps: int = 6) -> AssessmentConfig:
+    """Load assessment-turn configuration from environment variables.
+
+    Args:
+        default_enabled (bool): Whether assessment turns are enabled by default.
+        default_max_steps (int): Research rounds an assessment turn may run by default.
+
+    Returns:
+        AssessmentConfig: Parsed assessment settings.
+        - enabled (bool): Whether chat turns are classified and evaluative ones
+          answered with a researched, labelled model assessment. Off means
+          every turn is a lookup and no classifier call is made.
+        - max_steps (int): Upper bound on tool-calling research rounds per
+          assessment turn; ``0`` answers from the first search alone. A blank
+          value counts as unset.
+    """
+    return AssessmentConfig(
+        enabled=str(os.getenv("ASSESSMENT_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
+        max_steps=max(0, int(os.getenv("ASSESSMENT_MAX_STEPS") or default_max_steps)),
+    )
+
+
+@dataclass(frozen=True)
 class RetrievalConfig:
     """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
 

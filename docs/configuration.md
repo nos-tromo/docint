@@ -31,7 +31,7 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 | `OPENAI_API_KEY` | `sk-no-key-required` | Bearer token. Required for the `openai` provider. |
 | `OPENAI_CTX_WINDOW` | `4096` (8192 min when provider is `vllm`) | Context window for the text model. Falls back to `CHAT_MAX_MODEL_LEN` when `vllm`. |
 | `OPENAI_DIMENSIONS` | *unset* | Optional override for embedding dimension. |
-| `OPENAI_MAX_RETRIES` | `2` | Retry count for OpenAI HTTP calls. |
+| `OPENAI_MAX_RETRIES` | `2` | Retry count for OpenAI HTTP calls. The assessment classifier and research calls ignore it and make one attempt each. |
 | `OPENAI_NUM_OUTPUT` | `256` | Max tokens reserved for the model response by the LlamaIndex prompt helper. |
 | `OPENAI_REUSE_CLIENT` | `false` | Reuse the OpenAI client across calls. |
 | `OPENAI_SEED` | `42` | Sampling seed. |
@@ -792,6 +792,25 @@ Loaded by `load_corrective_retry_env()`.
 | Variable | Default | Description |
 |---|---|---|
 | `CORRECTIVE_RETRY_ENABLED` | `true` | Re-answer once with a reformulated query when validation flags a mismatch *and* the answer is weak. Depends on response validation being on — without a mismatch verdict there is nothing to retry. A triggered retry costs up to three extra LLM round-trips (reformulate, regenerate, re-validate) inside the same request, so a turn that fires it is noticeably slower; untriggered turns are unaffected. |
+
+## Assessment turns — `AssessmentConfig`
+
+Loaded by `load_assessment_env()`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ASSESSMENT_ENABLED` | `true` | Classify each chat turn and answer evaluative questions with a researched, labelled model assessment. Off means every turn is a lookup and no classifier call is made. Needs a chat context window of at least 8192 tokens: `OPENAI_CTX_WINDOW` must say so, and the chat endpoint must actually serve it. With `OPENAI_CTX_WINDOW` below 8192 the feature stays off and logs one warning. |
+| `ASSESSMENT_MAX_STEPS` | `6` | Research rounds per assessment turn. Each round is one tool-calling request on the plain chat model plus one search; `0` answers from the first search alone. |
+
+The research step calls tools with `tool_choice="required"`, so the chat
+endpoint must support OpenAI-style tool calling with a required tool choice.
+Each later research round sends the model's own tool calls back with their
+results, so the chat template must render both; a template that cannot fails
+that round, and the turn answers from what research found so far, flagged as
+`research_failed`. When the endpoint rejects tool calls, or answers without one,
+the turn still answers — from the first search's passages — and says so. The
+quality of a judgement follows the chat model: a ~2B model keeps the format, but
+its assessments are shallow.
 
 ## Offline mode
 

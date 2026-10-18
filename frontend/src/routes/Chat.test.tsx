@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Chat, chatReducer } from './Chat'
 import type { ChatFinalEvent } from '@/api/types'
+import { chatTranscriptToText } from '@/lib/exports'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
@@ -183,6 +184,52 @@ describe('Chat SSE handling', () => {
     })
     // The raw transport error is never rendered — only static, generic copy.
     expect(screen.queryByText(/network error/)).not.toBeInTheDocument()
+  })
+
+  it('finishes a turn whose stream ends with neither an answer nor an error', async () => {
+    // A backend shut down gracefully mid-answer closes the stream cleanly, so
+    // nothing above fires; the turn must not stay open with Send held busy.
+    const frames = 'data: {"token":"The council met"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+    expect(screen.getByText(/The council met/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
+    // A lookup carries no judgement, so it gets no assessment caveat.
+    expect(screen.queryByText(/did not finish/i)).not.toBeInTheDocument()
+  })
+
+  it('keeps a finished answer when the connection drops after its final envelope', async () => {
+    const enc = new TextEncoder()
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stream = controller
+      }
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, body }))
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    stream.enqueue(enc.encode('data: {"response":"Delivered.","sources":[],"session_id":"sess-1"}\n\n'))
+    expect(await screen.findByText('Delivered.')).toBeInTheDocument()
+
+    await act(async () => {
+      stream.error(new TypeError('network error'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+
+    expect(screen.queryByText(/stream ended unexpectedly/i)).not.toBeInTheDocument()
   })
 
   it('Enter submits, Shift+Enter inserts a newline', async () => {
@@ -409,6 +456,36 @@ describe('Chat session-history validation restoration', () => {
       expect(screen.getByText(/response not validated/i)).toBeInTheDocument()
     })
     expect(screen.queryByText(/response validation passed/i)).toBeNull()
+  })
+
+  it('restores the assessment notice from session history', async () => {
+    mockHistoryFetch([
+      { role: 'user', content: 'What could be improved?' },
+      {
+        role: 'assistant',
+        content: 'Fact [1].',
+        sources: [],
+        validation_checked: true,
+        validation_mismatch: false,
+        validation_reason: null,
+        answer_mode: 'assessment',
+        agent: {
+          steps: 0,
+          actions: [{ action: 'seed', detail: '', found: 2 }],
+          reason: null,
+          answer: 'split',
+          shortened: 0,
+          evidence_chars: 9
+        }
+      }
+    ])
+
+    renderChatWithSession('sess-restored')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/validation passed for the source-backed part/i)).toBeInTheDocument()
   })
 
   it('reloaded turns keep their target chip', async () => {
@@ -988,6 +1065,53 @@ describe('Chat session switching', () => {
     expect(useUiStore.getState().currentSessionId).toBeNull()
   })
 
+  it('leaves the next turn alone when an abandoned stream breaks afterwards', async () => {
+    // Switching sessions aborts the request in flight. Its stream failing later
+    // belongs to a turn that is gone, never to whatever turn is last by then.
+    const enc = new TextEncoder()
+    let abandoned!: ReadableStreamDefaultController<Uint8Array>
+    const first = new ReadableStream<Uint8Array>({
+      start(controller) {
+        abandoned = controller
+      }
+    })
+    const second =
+      'data: {"token":"Second answer"}\n\n' +
+      'data: {"response":"Second answer","sources":[],"session_id":"sess-2"}\n\n'
+    let streams = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((req: RequestInfo | URL) => {
+        const isStream = String(req).includes('/stream_query')
+        if (isStream) streams += 1
+        const body = isStream && streams === 1 ? first : bodyFromString(isStream ? second : '')
+        return Promise.resolve({ ok: true, status: 200, body })
+      })
+    )
+
+    renderChatAt('/chat/sess-old')
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'first')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    abandoned.enqueue(enc.encode('data: {"token":"First partial"}\n\n'))
+    expect(await screen.findByText('First partial')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'go' }))
+    await waitFor(() => {
+      expect(screen.queryByText('First partial')).not.toBeInTheDocument()
+    })
+    await userEvent.type(screen.getByPlaceholderText(/ask something/i), 'second')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Second answer')).toBeInTheDocument()
+
+    await act(async () => {
+      abandoned.error(new TypeError('network error'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+
+    expect(screen.queryByText(/stream ended unexpectedly/i)).not.toBeInTheDocument()
+  })
+
   it('ignores stream frames that arrive with no open turn', () => {
     // The session reset empties the transcript, so a frame from the stream
     // being torn down has no turn to fold into. Folding into `undefined`
@@ -997,9 +1121,12 @@ describe('Chat session switching', () => {
     expect(chatReducer(empty, { type: 'token', token: 'x' })).toEqual(empty)
     expect(chatReducer(empty, { type: 'retry', query: 'q' })).toEqual(empty)
     expect(
+      chatReducer(empty, { type: 'agent', step: { step: 1, action: 'search', detail: 'q', found: 1 } })
+    ).toEqual(empty)
+    expect(
       chatReducer(empty, { type: 'finalize', meta: { session_id: 's' } as ChatFinalEvent })
     ).toEqual({ turns: [], inflight: false })
-    expect(chatReducer(empty, { type: 'fail', error: 'boom' })).toEqual({
+    expect(chatReducer(empty, { type: 'fail', error: 'boom', note: 'Cut off.' })).toEqual({
       turns: [],
       inflight: false
     })
@@ -1078,6 +1205,189 @@ describe('Chat session switching', () => {
     await waitFor(() => {
       expect(screen.getByText(/Evidence insufficient/)).toBeInTheDocument()
     })
+  })
+
+  it('folds research steps into the open turn without finishing it', () => {
+    const open = { turns: [{ user: 'q', assistant: '', done: false, meta: null }], inflight: true }
+    const step = { step: 1, action: 'search' as const, detail: 'evaluation datasets', found: 1 }
+
+    const next = chatReducer(open, { type: 'agent', step })
+
+    expect(next.inflight).toBe(true)
+    expect(next.turns[0].done).toBe(false)
+    expect(next.turns[0].agentSteps).toEqual([step])
+  })
+
+  it('keeps successive research steps on the open turn in arrival order', () => {
+    const open = { turns: [{ user: 'q', assistant: '', done: false, meta: null }], inflight: true }
+    const first = { step: 0, action: 'seed' as const, detail: '', found: 2 }
+    const second = { step: 1, action: 'search' as const, detail: 'evaluation datasets', found: 1 }
+
+    const next = chatReducer(chatReducer(open, { type: 'agent', step: first }), { type: 'agent', step: second })
+
+    expect(next.turns[0].agentSteps).toEqual([first, second])
+    expect(next.turns[0].done).toBe(false)
+    expect(next.inflight).toBe(true)
+  })
+
+  it('heads the partial text of an assessment that fails with the interrupted note', () => {
+    // The label that marks the judgement arrives with the finished answer, so a
+    // cut-off answer carries the caveat in its text: the transcript and every
+    // other place the text goes keep it.
+    const seed = { step: 0, action: 'seed' as const, detail: '', found: 2 }
+    const open = {
+      turns: [{ user: 'q', assistant: 'A second dataset would help.', done: false, meta: null, agentSteps: [seed] }],
+      inflight: true
+    }
+
+    const next = chatReducer(open, { type: 'fail', error: 'boom', note: 'Cut off.' })
+
+    expect(next.turns[0].assistant).toBe('*Cut off.*\n\nA second dataset would help.')
+    expect(next.turns[0]).toMatchObject({ done: true, error: 'boom' })
+    expect(next.inflight).toBe(false)
+    expect(chatTranscriptToText(next.turns)).toContain('*Cut off.*')
+  })
+
+  it('adds no interrupted note to a lookup, to an assessment with no text yet, or twice', () => {
+    const seed = { step: 0, action: 'seed' as const, detail: '', found: 2 }
+    const turn = (assistant: string, agentSteps?: (typeof seed)[]) => ({
+      turns: [{ user: 'q', assistant, done: false, meta: null, agentSteps }],
+      inflight: true
+    })
+    const fail = { type: 'fail' as const, error: 'boom', note: 'Cut off.' }
+
+    expect(chatReducer(turn('Partial'), fail).turns[0].assistant).toBe('Partial')
+    expect(chatReducer(turn('  ', [seed]), fail).turns[0].assistant).toBe('  ')
+    expect(chatReducer(chatReducer(turn('Partial', [seed]), fail), fail).turns[0].assistant).toBe(
+      '*Cut off.*\n\nPartial'
+    )
+  })
+
+  it('marks an assessment that an error frame cuts off mid-answer', async () => {
+    const frames =
+      'data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n' +
+      'data: {"agent":{"step":1,"action":"answer","detail":"","found":2}}\n\n' +
+      'data: {"token":"A second dataset would help."}\n\n' +
+      'data: {"error":"Internal server error"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'What could be improved?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/did not finish/i)).toBeInTheDocument()
+    expect(screen.getByText(/A second dataset would help/)).toBeInTheDocument()
+    expect(screen.getByText(/answer could not be generated/i)).toBeInTheDocument()
+  })
+
+  it('marks an assessment whose stream breaks off mid-answer', async () => {
+    const enc = new TextEncoder()
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stream = controller
+      }
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, body }))
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'What could be improved?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    stream.enqueue(enc.encode('data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n'))
+    stream.enqueue(enc.encode('data: {"token":"A second dataset would help."}\n\n'))
+    expect(await screen.findByText(/A second dataset would help/)).toBeInTheDocument()
+
+    stream.error(new TypeError('network error'))
+
+    expect(await screen.findByText(/did not finish/i)).toBeInTheDocument()
+    expect(screen.getByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+  })
+
+  it('marks an assessment whose stream ends before its final envelope', async () => {
+    const frames =
+      'data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n' +
+      'data: {"token":"A second dataset would help."}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'What could be improved?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/did not finish/i)).toBeInTheDocument()
+    expect(screen.getByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
+  })
+
+  it('streams an assessment turn through its research steps to the final notice', async () => {
+    const trail =
+      '{"steps":1,"actions":[{"action":"seed","detail":"","found":2},' +
+      '{"action":"search","detail":"evaluation datasets","found":1}],' +
+      '"reason":null,"answer":"split","shortened":0,"evidence_chars":9}'
+    const frames =
+      'data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n' +
+      'data: {"agent":{"step":1,"action":"search","detail":"evaluation datasets","found":1}}\n\n' +
+      'data: {"token":"Fact [1]."}\n\n' +
+      `data: {"response":"Fact [1].","sources":[],"session_id":"sess-1","answer_mode":"assessment","agent":${trail}}\n\n`
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'What could be improved?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/Fact \[1\]\./)).toBeInTheDocument()
+    expect(useUiStore.getState().currentSessionId).toBe('sess-1')
+  })
+
+  it('keeps the turn open while research steps stream, until the final envelope', async () => {
+    // A step frame taken for the final envelope would finish the turn and
+    // re-enable Send mid-research, yet leave the same end state behind.
+    const enc = new TextEncoder()
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stream = controller
+      }
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, body }))
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'What could be improved?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    stream.enqueue(enc.encode('data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n'))
+
+    expect(await screen.findByTestId('agent-trail-live')).toHaveTextContent('Initial search: 2 passages')
+    expect(screen.getByRole('button', { name: /send/i })).toHaveAttribute('aria-busy', 'true')
+
+    stream.enqueue(
+      enc.encode(
+        'data: {"response":"Fact [1].","sources":[],"session_id":"sess-1","answer_mode":"assessment",' +
+          '"agent":{"steps":0,"actions":[{"action":"seed","detail":"","found":2}],"reason":null,' +
+          '"answer":"split","shortened":0,"evidence_chars":9}}\n\n'
+      )
+    )
+    stream.close()
+
+    expect(await screen.findByTestId('assessment-notice')).toBeInTheDocument()
+    expect(screen.queryByTestId('agent-trail-live')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
   })
 
   it('sends the retrieval target with the question it applies to', async () => {

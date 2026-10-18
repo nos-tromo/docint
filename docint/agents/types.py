@@ -1,7 +1,34 @@
 """Shared types for agent orchestration."""
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+AnswerMode = Literal["lookup", "assessment"]
+"""How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
+
+AgentAction = Literal["seed", "search", "answer"]
+"""What one step of an assessment turn did."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentProgress:
+    """One step of an assessment turn, streamed to the client as an ``{"agent": ...}`` frame.
+
+    A dataclass rather than a dict on purpose: the API treats the one dict a
+    chat stream yields as its final payload, and ``None`` as its end.
+
+    Attributes:
+        step (int): ``0`` for the first search, then one per research round.
+        action (AgentAction): What the step did.
+        detail (str): The model-written search query; empty otherwise. Shown to
+            the user, never logged.
+        found (int): Passages the step added to the evidence.
+    """
+
+    step: int
+    action: AgentAction
+    detail: str
+    found: int
 
 
 @dataclass
@@ -47,6 +74,28 @@ class PriorTurn:
 
     user_text: str
     assistant_text: str
+    evidence_chars: int | None = None
+    """Length of the source-backed part when the answer was an assessment.
+
+    ``None`` means the whole answer is source-backed, as on an ordinary lookup.
+    """
+
+    def evidence_only(self) -> "PriorTurn | None":
+        """Return this exchange without the model's own assessment.
+
+        A lookup turn may restate its prior answer, so it must never be handed
+        the general-knowledge part of an assessment as if it were sourced.
+
+        Returns:
+            PriorTurn | None: The exchange cut to its source-backed part, or
+            ``None`` when nothing source-backed remains.
+        """
+        if self.evidence_chars is None:
+            return self
+        evidence = self.assistant_text[: self.evidence_chars].strip()
+        if not evidence:
+            return None
+        return PriorTurn(user_text=self.user_text, assistant_text=evidence)
 
 
 @dataclass

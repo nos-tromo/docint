@@ -1,0 +1,14 @@
+Entscheide, ob die letzte Nachricht der Nutzerin oder des Nutzers ein Urteil oder eine Information verlangt.
+
+- "lookup": gewünscht ist eine Information, die das Material selbst enthält – Fakten, Zusammenfassungen, Erklärungen, Aufzählungen, Zitate, wo etwas erwähnt wird –, auch wenn das Thema wertend ist, etwa „Was sagt das Paper über seine Grenzen?“.
+- "assessment": gewünscht ist eine Bewertung, Kritik, Meinung oder Empfehlung zum Material – etwa was sich verbessern ließe, welche Stärken oder Schwächen es hat, ob etwas überzeugend, plausibel, richtig oder gut gemacht ist, welche Option besser ist oder was fehlt.
+
+Im Zweifel antworte mit lookup.
+
+Vorheriger Austausch:
+{prior_turn}
+
+Letzte Nachricht:
+{question}
+
+Antworte nur mit JSON: {{"mode": "lookup"}} oder {{"mode": "assessment"}}
