@@ -158,10 +158,10 @@ sources say, cited as usual, and continues under a **Model assessment** label
 with the model's own judgement, which may draw on general knowledge and is not
 checked against the sources. A note under the answer says so, and the
 validation banner speaks of the source-backed part only. An assessment the
-model left empty says so in an amber notice. An agent turn cut off after its
-text began, by an error or a dropped connection, opens with a note that it may
-be incomplete and may contain the model's own judgement without its label. A
-turn that failed cannot be added to a report.
+model left empty says so in an amber notice. An agent turn cut off after it
+showed a step and its text began, by an error or a dropped connection, opens
+with a note that it may be incomplete and may contain the model's own judgement
+without its label. A turn that failed cannot be added to a report.
 
 A **Search in** picker under the query field chooses what the keywords
 match: Text (the chunk body, the default), Author, Network or UUID. The

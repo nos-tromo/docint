@@ -290,10 +290,10 @@ labelled model judgement to the cited evidence. `agent` carries the trail:
 
 Such a turn reports `retrieval_mode: "agent"` (`"scoped"` on a scoped turn),
 `retrieval_query: null`, and a `graph_debug` skipped with the reason `agent`.
-Both fields are `null` on a plain turn, with one exception: a plain answer an
-agent turn handed over because the endpoint refused tools carries
+`answer_mode` and `agent` are `null` on a plain turn, with one exception: a
+plain answer an agent turn handed over because the endpoint refused tools
+carries
 `agent: {"steps": 0, "actions": [], "reason": "tools_unavailable", "answer": "plain"}`.
-A turn stored by the earlier assessment pipeline may also carry `shortened`.
 
 ### `POST /stream_query`
 
@@ -918,7 +918,8 @@ from `conversations` via `SessionManager.list_sessions()`.
 Returns `SessionHistoryOut` — `{"messages": [...]}` where each message
 comes from `Turn` / `Citation`. An agent turn's assistant message also
 carries its `answer_mode` and its `agent` trail, as does a plain turn that kept
-a `tools_unavailable` trail; any other plain turn carries neither.
+a `tools_unavailable` trail; any other plain turn carries neither. A trail
+stored by the earlier assessment pipeline may also carry `shortened`.
 
 An assistant message carries `retrieval_target` (`all`, `documents` or
 `visual`) — the evidence the turn answered under, as `POST /query` reports it —

@@ -9,8 +9,9 @@ engine, and the postprocessing stages that shape the final result.
 All agent code lives under `docint/agents/`. The entry point is
 `AgentOrchestrator` (`docint/agents/orchestrator.py:70`), which wires up
 four optional agents behind a single `handle_turn()` method. It serves the
-`/agent/chat*` endpoints; chat turns on `/query` and `/stream_query` run as
-[agent turns](#agent-turns) instead (`docint/agents/turn/`).
+`/agent/chat*` endpoints. Chat turns on `/query` and `/stream_query` run as
+[agent turns](#agent-turns) (`docint/agents/turn/`) when agent turns are on and
+available, and as plain lookups otherwise.
 
 ### Stages
 

@@ -128,8 +128,10 @@ deployment allows it (see
    turn's engine (`docint/agents/turn/tools.py`, `image_tools.py`), what they
    find enters the evidence ledger, and each step goes out as an `agent`
    frame.
-4. **Fallback** — a failure before anything was shown hands the message to
-   the plain path, which `chat()` and `stream_chat()` then run as above.
+4. **Fallback** — a listed failure before anything was shown (see
+   [retrieval-and-agents.md](retrieval-and-agents.md#fallback-to-the-plain-path))
+   hands the message to the plain path, which `chat()` and `stream_chat()` then
+   run as above. Any other failure before then is the turn's error.
 5. **Finish** — an answer carrying the assessment sentinel is labelled, the
    turn is stored with its answer mode and trail, and the API validates it by
    its mode.
