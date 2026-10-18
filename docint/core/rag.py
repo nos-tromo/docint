@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, cast
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from docint.agents.types import PriorTurn
+    from docint.agents.types import AnswerMode, PriorTurn
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -49,6 +49,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SparseClientConfig,
     SummaryConfig,
+    load_assessment_env,
     load_embed_client_env,
     load_embedding_env,
     load_graphrag_env,
@@ -127,6 +128,8 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from docint.agents.assessment.research import ResearchLoop
+from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
     ResolutionSummary,
@@ -162,6 +165,7 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.retrieval.evidence import EveryChildQuery
 from docint.core.retrieval.visual import (
     BLOB_PAYLOAD_KEYS,
     DEFAULT_RETRIEVAL_TARGET,
@@ -242,6 +246,7 @@ from docint.utils.retry import (
     is_transient_qdrant_error,
     retry_with_backoff,
 )
+from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -507,7 +512,9 @@ def _quantization_matches(
 # ``llm_description`` / ``llm_tags`` (image caption / tagging output —
 # bulky), pipeline artefacts, and our own
 # ``parent_context_windowed`` / ``parent_full_chars`` / ``window_chars``
-# debug markers. Any new metadata key added by a future reader defaults
+# debug markers and ``docint_match_spans`` (where the retrieved child sits
+# in an emitted parent; read by assessment packing, never by the prompt).
+# Any new metadata key added by a future reader defaults
 # to excluded — safer than accidentally reintroducing the overflow.
 LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
     {
@@ -1285,14 +1292,14 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             return None
 
     @staticmethod
-    def _find_match_offset(parent_text: str, sub_text: str) -> int:
-        r"""Return the offset of *sub_text* inside *parent_text*, or ``-1``.
+    def _find_match_span(parent_text: str, sub_text: str) -> tuple[int, int]:
+        r"""Return where *sub_text* sits inside *parent_text*, or ``(-1, -1)``.
 
         First tries an exact substring search. On miss, whitespace-
         normalizes both strings (``\\s+`` → single space, stripped) while
         tracking each normalized character's original parent offset, so a
         normalized hit can be mapped back to the original parent for
-        accurate slicing. Returns ``-1`` if even the normalized search
+        accurate slicing. Returns ``(-1, -1)`` if even the normalized search
         misses — callers treat that as a signal to fall back to the
         sub-node rather than guessing.
 
@@ -1302,19 +1309,20 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 *parent_text* anchors the window.
 
         Returns:
-            The character offset in *parent_text* where *sub_text* (or
-            its normalized equivalent) begins, or ``-1`` when the
+            The ``(start, end)`` offsets in *parent_text* of *sub_text*, or of
+            its normalized equivalent, whose end then comes from the original
+            text rather than from the sub-node's length; ``(-1, -1)`` when the
             sub-node cannot be located.
         """
         if not sub_text or not parent_text:
-            return -1
+            return -1, -1
         offset = parent_text.find(sub_text)
         if offset >= 0:
-            return offset
+            return offset, offset + len(sub_text)
 
         norm_sub = re.sub(r"\s+", " ", sub_text).strip()
         if not norm_sub:
-            return -1
+            return -1, -1
 
         # Build a parallel normalized parent + index map back to the
         # original offsets so we return an accurate slice boundary.
@@ -1338,8 +1346,21 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
         norm_offset = norm_parent.find(norm_sub)
         if norm_offset < 0:
-            return -1
-        return idx_map[norm_offset]
+            return -1, -1
+        return idx_map[norm_offset], idx_map[norm_offset + len(norm_sub) - 1] + 1
+
+    @staticmethod
+    def _find_match_offset(parent_text: str, sub_text: str) -> int:
+        """Return the offset of *sub_text* inside *parent_text*, or ``-1``.
+
+        Args:
+            parent_text: The full parent text loaded from the docstore.
+            sub_text: The matched sub-node text.
+
+        Returns:
+            Where the match found by :meth:`_find_match_span` begins.
+        """
+        return ParentContextPostprocessor._find_match_span(parent_text, sub_text)[0]
 
     @staticmethod
     def _snap_to_whitespace(text: str, start: int, end: int, scan: int = 80) -> tuple[int, int]:
@@ -1373,6 +1394,56 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     break
         return start, end
 
+    def _window_bounds(self, parent_text: str, offset: int, sub_len: int, budget_chars: int) -> tuple[int, int]:
+        """Return the bounds of a ~``budget_chars`` window centred on a located sub-node.
+
+        Args:
+            parent_text: The full parent text.
+            offset: Where the sub-node begins in *parent_text*.
+            sub_len: The sub-node text's length, which the window is centred on.
+            budget_chars: The character ceiling for the window.
+
+        Returns:
+            The window's ``(start, end)`` in *parent_text*, snapped to whitespace.
+        """
+        sub_end = offset + sub_len
+        half = max(0, (budget_chars - sub_len) // 2)
+        start = max(0, offset - half)
+        end = min(len(parent_text), sub_end + half)
+        return self._snap_to_whitespace(parent_text, start, end)
+
+    def _window_with_match(
+        self, parent_text: str, sub_text: str, budget_chars: int
+    ) -> tuple[str, list[list[int]], tuple[int, int] | None] | None:
+        """Return the window of :meth:`_window_parent_text`, where its match sits in it, and where it sits.
+
+        The sub-node is located once; its span in the parent is clipped to the
+        window's bounds, so the window text is never searched again.
+
+        Args:
+            parent_text: The full parent text.
+            sub_text: The matched sub-node text.
+            budget_chars: The character ceiling for the returned window.
+
+        Returns:
+            The windowed text; its window-relative match spans, which are empty
+            when the window is cut from the sub-node itself; and the window's
+            ``(start, end)`` in *parent_text*, ``None`` for such a cut. ``None``
+            on a location miss.
+        """
+        if budget_chars <= 0 or not parent_text or not sub_text:
+            return None
+        if len(sub_text) >= budget_chars:
+            return sub_text[:budget_chars], [], None
+
+        match_start, match_end = self._find_match_span(parent_text, sub_text)
+        if match_start < 0:
+            return None
+
+        start, end = self._window_bounds(parent_text, match_start, len(sub_text), budget_chars)
+        shown = (max(match_start, start) - start, min(match_end, end) - start)
+        return parent_text[start:end], [list(shown)] if shown[1] > shown[0] else [], (start, end)
+
     def _window_parent_text(self, parent_text: str, sub_text: str, budget_chars: int) -> str | None:
         """Return a ~``budget_chars``-sized window of *parent_text* around *sub_text*.
 
@@ -1392,24 +1463,15 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         Returns:
             The windowed parent slice, or ``None`` on location miss.
         """
-        if budget_chars <= 0 or not parent_text or not sub_text:
-            return None
-        if len(sub_text) >= budget_chars:
-            return sub_text[:budget_chars]
-
-        offset = self._find_match_offset(parent_text, sub_text)
-        if offset < 0:
-            return None
-
-        sub_end = offset + len(sub_text)
-        half = max(0, (budget_chars - len(sub_text)) // 2)
-        start = max(0, offset - half)
-        end = min(len(parent_text), sub_end + half)
-        start, end = self._snap_to_whitespace(parent_text, start, end)
-        return parent_text[start:end]
+        window = self._window_with_match(parent_text, sub_text, budget_chars)
+        return None if window is None else window[0]
 
     @staticmethod
-    def _emit_with_llm_exclusion(source: BaseNode, ner_fallback: BaseNode | None = None) -> TextNode:
+    def _emit_with_llm_exclusion(
+        source: BaseNode,
+        ner_fallback: BaseNode | None = None,
+        match_spans: Sequence[Sequence[int]] | None = None,
+    ) -> TextNode:
         r"""Clone *source* into a ``TextNode`` whose LLM view hides noisy metadata.
 
         The synthesiser splices each emitted node into the chat prompt
@@ -1440,6 +1502,10 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 answer's sources. A parent that has its own NER metadata
                 (fresh ingests mirror the full children union) always
                 wins over the single matched child's slice.
+            match_spans: Where the retrieved child sits in *source*'s text,
+                as ``[start, end]`` spans. Written under
+                ``MATCH_SPANS_KEY`` before the exclusion list is built, so
+                the prompt never sees it; only assessment packing reads it.
 
         Returns:
             A fresh ``TextNode`` preserving the original ``node_id`` and
@@ -1451,6 +1517,8 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         # cached parent node, and mutating its nested dicts in place would
         # leak policy into every future query that touches the same parent.
         metadata = copy.deepcopy(dict(source.metadata or {}))
+        if match_spans:
+            metadata[MATCH_SPANS_KEY] = [[int(start), int(end)] for start, end in match_spans]
 
         if ner_fallback is not None:
             fallback_meta = ner_fallback.metadata or {}
@@ -1495,6 +1563,61 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         )
         return clone
 
+    def _fold_children(
+        self,
+        base: BaseNode,
+        parent_text: str,
+        bounds: tuple[int, int] | None,
+        group: Sequence[NodeWithScore],
+    ) -> tuple[TextNode, list[list[int]]]:
+        """Fold every retrieved child of a section into the one node emitted for it.
+
+        A child located in the section whose whole span lies inside the emitted
+        text is stamped where it sits there; the first child counts as held when
+        the emission is that child, or a cut of it. Any other child, one that
+        cannot be located or that the emitted text shows only in part or not at
+        all, is appended after a ``WINDOW_JOIN`` as its own text and stamped
+        whole, so a partial view of it is never stamped as well.
+
+        Args:
+            base: The node about to be emitted: the section, a window of it, or
+                the first child.
+            parent_text: The section's full text, in which each child is located.
+            bounds: Where *base*'s text sits in *parent_text*; ``None`` when it is
+                the first child or a cut of it.
+            group: The section's retrieved children in rank order, the one being
+                emitted first.
+
+        Returns:
+            A node carrying *base*'s id, metadata and text with the appended
+            children, ``window_chars`` following that text when *base* has the
+            key, and each child's span in it, in rank order.
+        """
+        main = base.get_content(metadata_mode=MetadataMode.NONE)
+        text = main
+        spans: list[list[int]] = []
+        for rank, child in enumerate(group):
+            if rank == 0 and bounds is None:
+                spans.append([0, len(main)])
+                continue
+            child_text = child.node.get_content(metadata_mode=MetadataMode.NONE)
+            start, end = self._find_match_span(parent_text, child_text)
+            if bounds is not None and start >= 0 and bounds[0] <= start and end <= bounds[1]:
+                spans.append([start - bounds[0], end - bounds[0]])
+            elif child_text:
+                text = f"{text}{WINDOW_JOIN}{child_text}"
+                spans.append([len(text) - len(child_text), len(text)])
+        metadata = dict(base.metadata or {})
+        if "window_chars" in metadata:
+            metadata["window_chars"] = len(text)
+        folded = TextNode(
+            id_=base.node_id,
+            text=text,
+            metadata=metadata,
+            excluded_embed_metadata_keys=list(getattr(base, "excluded_embed_metadata_keys", []) or []),
+        )
+        return folded, spans
+
     @override
     def _postprocess_nodes(
         self,
@@ -1503,19 +1626,27 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
     ) -> list[NodeWithScore]:
         """Expand reranked hits to their parents with a budget-aware packer.
 
+        A section is emitted once, for its first hit, and its later hits are
+        skipped. Under an :class:`EveryChildQuery` those later hits are folded
+        into that one emission instead (see :meth:`_fold_children`), so the
+        node list stays exactly the lookup's while every retrieved child
+        reaches the evidence; budget debits and logs are computed on the
+        emission before anything is folded in.
+
         Args:
             nodes: Retrieved hits in score order after reranking.
-            query_bundle: Unused; required by the postprocessor contract.
+            query_bundle: An :class:`EveryChildQuery` asks for every child to be
+                kept; any other bundle, or none, emits exactly what a lookup does.
 
         Returns:
             A list of ``NodeWithScore`` whose combined ``node.text``
             token count never exceeds ``self.usable_tokens`` when that
-            bound is set. Hits without a parent link, with a missing
-            parent, or whose sub-node text cannot be located in the
-            loaded parent pass through unchanged so retrieval always
-            returns something citable.
+            bound is set, folded children aside. Hits without a parent
+            link, with a missing parent, or whose sub-node text cannot be
+            located in the loaded parent pass through unchanged so
+            retrieval always returns something citable.
         """
-        _ = query_bundle
+        every_child = isinstance(query_bundle, EveryChildQuery)
         expanded: list[NodeWithScore] = []
         seen_parent_ids: set[str] = set()
         remaining_tokens = int(self.usable_tokens)
@@ -1528,6 +1659,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             base_node: BaseNode,
             score: float | None,
             ner_fallback: BaseNode | None = None,
+            match_spans: Sequence[Sequence[int]] | None = None,
         ) -> NodeWithScore:
             """Wrap *base_node* in a ``NodeWithScore`` with LLM-view exclusions applied.
 
@@ -1543,15 +1675,56 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 ner_fallback: The retrieved sub-node backfilling
                     ``entities`` / ``relations`` when *base_node* carries
                     none (see :meth:`_emit_with_llm_exclusion`).
+                match_spans: Where the retrieved child sits in
+                    *base_node*'s text, when it was located there.
 
             Returns:
                 A ``NodeWithScore`` whose underlying node hides noisy
                 metadata from ``get_content(MetadataMode.LLM)``.
             """
             return NodeWithScore(
-                node=self._emit_with_llm_exclusion(base_node, ner_fallback=ner_fallback),
+                node=self._emit_with_llm_exclusion(base_node, ner_fallback=ner_fallback, match_spans=match_spans),
                 score=score,
             )
+
+        def _parent_match(parent_text: str, sub_node: BaseNode) -> list[list[int]]:
+            """Locate the retrieved child inside a parent emitted whole.
+
+            Args:
+                parent_text: The parent's full text.
+                sub_node: The retrieved child.
+
+            Returns:
+                The child's span in *parent_text*, or none when it cannot be located.
+            """
+            start, end = self._find_match_span(parent_text, getattr(sub_node, "text", "") or "")
+            return [[start, end]] if start >= 0 else []
+
+        def _fold(
+            base_node: BaseNode,
+            score: float | None,
+            parent_text: str,
+            bounds: tuple[int, int] | None,
+            group: Sequence[NodeWithScore],
+            ner_fallback: BaseNode | None = None,
+        ) -> NodeWithScore:
+            """Emit a section's one node with every child of *group* folded in.
+
+            Args:
+                base_node: The node a lookup emits for the section.
+                score: The emitting hit's score.
+                parent_text: The section's full text.
+                bounds: Where *base_node*'s text sits in *parent_text*;
+                    ``None`` when it is the first child or a cut of it.
+                group: The section's hits from the emitting one on, in rank order.
+                ner_fallback: As for :func:`_emit`.
+
+            Returns:
+                The lookup's node, its id, score and metadata kept, with every
+                child of *group* in its text and stamp (see :meth:`_fold_children`).
+            """
+            folded, spans = self._fold_children(base_node, parent_text, bounds, group)
+            return _emit(folded, score, ner_fallback=ner_fallback, match_spans=spans)
 
         def _llm_tokens(base_node: BaseNode) -> int:
             """Estimate the token cost of *base_node*'s rendered LLM payload.
@@ -1573,7 +1746,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             llm_payload = clone.get_content(metadata_mode=MetadataMode.LLM)
             return estimate_tokens(llm_payload, self.char_token_ratio)
 
-        for node in nodes:
+        for position, node in enumerate(nodes):
             parent_id = self._parent_id(node)
             if not parent_id:
                 expanded.append(_emit(node.node, node.score))
@@ -1589,10 +1762,23 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             seen_parent_ids.add(parent_id)
             parent_hits += 1
             parent_text = parent_node.get_content()
+            # An assessment folds this section's later hits into its one emission; a lookup skips them.
+            group: list[NodeWithScore] = (
+                [hit for hit in nodes[position:] if self._parent_id(hit) == parent_id] if every_child else []
+            )
 
             # Legacy / unbounded path.
             if not budget_enforced:
-                expanded.append(_emit(parent_node, node.score, ner_fallback=node.node))
+                expanded.append(
+                    _fold(parent_node, node.score, parent_text, (0, len(parent_text)), group, ner_fallback=node.node)
+                    if group
+                    else _emit(
+                        parent_node,
+                        node.score,
+                        ner_fallback=node.node,
+                        match_spans=_parent_match(parent_text, node.node),
+                    )
+                )
                 continue
 
             # Budget exhausted by earlier hits — emit the sub-node so the hit
@@ -1602,12 +1788,23 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             # ``per_hit_floor * remaining_hits`` tokens.
             if remaining_tokens <= 0:
                 budget_exhausted_hits += 1
-                expanded.append(_emit(node.node, node.score))
+                expanded.append(
+                    _fold(node.node, node.score, parent_text, None, group) if group else _emit(node.node, node.score)
+                )
                 continue
 
             parent_tokens = _llm_tokens(parent_node)
             if parent_tokens <= remaining_tokens:
-                expanded.append(_emit(parent_node, node.score, ner_fallback=node.node))
+                expanded.append(
+                    _fold(parent_node, node.score, parent_text, (0, len(parent_text)), group, ner_fallback=node.node)
+                    if group
+                    else _emit(
+                        parent_node,
+                        node.score,
+                        ner_fallback=node.node,
+                        match_spans=_parent_match(parent_text, node.node),
+                    )
+                )
                 remaining_tokens -= parent_tokens
                 continue
 
@@ -1620,9 +1817,9 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             budget_tokens = max(self.per_hit_floor, remaining_tokens)
             budget_chars = max(1, int(budget_tokens * self.char_token_ratio))
             sub_text = getattr(getattr(node, "node", None), "text", "") or getattr(node, "text", "") or ""
-            windowed_text = self._window_parent_text(parent_text, sub_text, budget_chars)
+            window = self._window_with_match(parent_text, sub_text, budget_chars)
 
-            if windowed_text is None:
+            if window is None:
                 logger.debug(
                     "parent_context_fallback_subnode: parent_id={} sub_node_id={} sub_chars={} parent_chars={}",
                     parent_id,
@@ -1630,9 +1827,12 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     len(sub_text),
                     len(parent_text),
                 )
-                expanded.append(_emit(node.node, node.score))
+                expanded.append(
+                    _fold(node.node, node.score, parent_text, None, group) if group else _emit(node.node, node.score)
+                )
                 continue
 
+            windowed_text, window_spans, bounds = window
             windowed_node = TextNode(
                 id_=parent_node.node_id,
                 text=windowed_text,
@@ -1643,7 +1843,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     "window_chars": len(windowed_text),
                 },
             )
-            windowed_emit = _emit(windowed_node, node.score, ner_fallback=node.node)
+            windowed_emit = _emit(windowed_node, node.score, ner_fallback=node.node, match_spans=window_spans)
             # Render once — the LLM payload is what both the log line and
             # the budget debit need, so compute it here and reuse.
             windowed_llm_payload = windowed_emit.node.get_content(metadata_mode=MetadataMode.LLM)
@@ -1664,7 +1864,11 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 0,
                 remaining_tokens - estimate_tokens(windowed_llm_payload, self.char_token_ratio),
             )
-            expanded.append(windowed_emit)
+            expanded.append(
+                _fold(windowed_node, node.score, parent_text, bounds, group, ner_fallback=node.node)
+                if group
+                else windowed_emit
+            )
 
         if budget_enforced and parent_hits > 0 and (windowed_hits > 0 or budget_exhausted_hits > 0):
             logger.info(
@@ -2798,6 +3002,7 @@ class RAG:
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
+    _bounded_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
     sparse_client_config: SparseClientConfig | None = field(default=None, init=False, repr=False)
     embed_client_config: EmbedClientConfig | None = field(default=None, init=False, repr=False)
@@ -3342,12 +3547,14 @@ class RAG:
             )
         return self._reranker
 
-    def _create_text_model(self, *, enable_reasoning: bool = False) -> OpenAI:
+    def _create_text_model(self, *, enable_reasoning: bool = False, max_retries: int | None = None) -> OpenAI:
         """Helper to create an OpenAI (or compatible) model instance.
 
         Args:
             enable_reasoning (bool): Whether this model instance should request the
                 provider reasoning/thinking mode.
+            max_retries (int | None): Retries after a failed call, in the SDK and in
+                llama-index alike; ``None`` uses ``OPENAI_MAX_RETRIES``.
 
         Returns:
             OpenAI: The initialized model.
@@ -3386,7 +3593,7 @@ class RAG:
             api_base=self.openai_api_base,
             api_key=self.openai_api_key,
             context_window=self.openai_ctx_window,
-            max_retries=self.openai_max_retries,
+            max_retries=self.openai_max_retries if max_retries is None else max_retries,
             model=self.text_model_id,
             num_output=self.openai_num_output,
             reuse_client=self.openai_reuse_client,
@@ -3438,6 +3645,25 @@ class RAG:
         if self._post_retrieval_text_model is None:
             self._post_retrieval_text_model = self._create_text_model(enable_reasoning=True)
         return self._post_retrieval_text_model
+
+    @property
+    def bounded_text_model(self) -> OpenAI:
+        """Return the plain chat model with retries off, for calls that promise a time bound.
+
+        The SDK retries a failed call and llama-index retries it again, so with
+        ``OPENAI_MAX_RETRIES`` set one call can outlast its own ``timeout`` several
+        times over. The turn classifier and the research step use this instance
+        instead: a failure ends the call and each degrades on its own. Both abandon
+        a call at their deadline, but an abandoned call holds its slot until it
+        ends, so a single attempt still bounds how long it holds it. Lookups and
+        the answer keep ``OPENAI_MAX_RETRIES``.
+
+        Returns:
+            OpenAI: The non-reasoning model, making a single attempt per call.
+        """
+        if self._bounded_text_model is None:
+            self._bounded_text_model = self._create_text_model(max_retries=0)
+        return self._bounded_text_model
 
     @property
     def qdrant_client(self) -> QdrantClient:
@@ -7992,6 +8218,7 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+        answer_mode: AnswerMode = "lookup",
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -8022,6 +8249,7 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
+            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
 
         Returns:
             dict[str, Any]: The chat response data, including ``turn_idx``.
@@ -8039,6 +8267,7 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
+            answer_mode=answer_mode,
         )
 
     def stream_chat(
@@ -8056,6 +8285,7 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+        answer_mode: AnswerMode = "lookup",
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -8086,6 +8316,7 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
+            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -8103,7 +8334,143 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
+            answer_mode=answer_mode,
         )
+
+    def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:
+        """Build the runner for one assessment turn over this turn's engine.
+
+        Research runs on the plain (non-reasoning) chat model, which picks the
+        queries, with retries off so a call research abandons at its time budget
+        frees its slot at its own timeout; the answer is written by whichever
+        model the request's reasoning toggle selects.
+
+        Args:
+            engine (Any): The turn's query engine; research searches through its
+                ``retrieve``, so filters, rerank and parent context apply as on a
+                lookup without building a second engine, every child the reranker
+                returns kept (see :class:`EveryChildQuery`).
+            scoped (bool): Whether the turn answers from a pinned scope, which
+                forbids searching beyond it.
+
+        Returns:
+            AssessmentRunner: A runner bound to this request's models and limits.
+        """
+        research_llm = self.bounded_text_model
+        answer_llm = self.post_retrieval_text_model
+        ratio = float(self.embed_char_token_ratio or 3.5)
+        counter = self._embed_token_counter
+        researcher = (
+            None
+            if scoped
+            else ResearchLoop(
+                llm=research_llm,
+                search=lambda query: list(engine.retrieve(EveryChildQuery(query))),
+                max_steps=load_assessment_env().max_steps,
+                ctx_window=int(self.openai_ctx_window),
+                char_token_ratio=ratio,
+            )
+        )
+        return AssessmentRunner(
+            answer_llm=answer_llm,
+            llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
+            ctx_window=int(self.openai_ctx_window),
+            char_token_ratio=ratio,
+            reasoning=answer_llm is not self.text_model,
+            researcher=researcher,
+            count_tokens=(lambda text: len(counter(text))) if counter is not None else None,
+        )
+
+    def stream_stateless_assessment(
+        self,
+        question: str,
+        *,
+        expanded_query: str,
+        graph_debug: dict[str, Any] | None,
+        metadata_filters: MetadataFilters | None = None,
+        metadata_filter_rules: Sequence[Any] | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+        scoped_node_ids: Sequence[str] | None = None,
+        retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
+    ) -> Iterator[Any]:
+        """Answer one stateless turn as an assessment.
+
+        A stateless turn has no session: no prior turn and nothing persisted.
+        Otherwise it is the session path exactly, with the same runner and frames.
+        Evidence too large to show legibly is answered as a lookup through
+        :meth:`run_query` instead, as the session path does.
+
+        Args:
+            question (str): The user's message, verbatim.
+            expanded_query (str): The graph-expanded query to seed with.
+            graph_debug (dict[str, Any] | None): The expansion's debug payload;
+                ``None`` when expansion did not run, which is reported as skipped
+                (``scoped`` under a pinned scope, otherwise ``unavailable``).
+            metadata_filters (MetadataFilters | None): Compiled request filters.
+            metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
+            vector_store_kwargs (dict[str, Any] | None): Native vector-store kwargs.
+            scoped_node_ids (Sequence[str] | None): Hand-picked chunk ids, if any.
+            retrieval_target (RetrievalTarget): Which evidence may answer.
+
+        Yields:
+            Any: Research steps, answer text, then the final payload.
+        """
+        turn_started_at = time.monotonic()
+        metadata_filters_active = metadata_filters is not None or bool(vector_store_kwargs)
+        if graph_debug is None:
+            graph_debug = self.graph_debug_skipped(expanded_query, "scoped" if scoped_node_ids else "unavailable")
+        engine = self.build_query_engine(
+            metadata_filters=metadata_filters,
+            streaming=True,
+            vector_store_kwargs=vector_store_kwargs,
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            scoped_node_ids=scoped_node_ids,
+            retrieval_target=retrieval_target,
+        )
+        stream = self.ensure_session_manager().stream_assessment(
+            question,
+            engine=engine,
+            expanded_query=expanded_query,
+            retrieval_query=expanded_query,
+            # No history to resolve, and the expanded query carries graph terms.
+            resolved_question=None,
+            prior_turn=None,
+            scoped_node_ids=scoped_node_ids,
+            graph_debug=graph_debug,
+            coverage_unit=str(self._infer_collection_profile().get("coverage_unit") or "documents"),
+            metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
+            retrieval_target=retrieval_target,
+            session_id=None,
+            owner=None,
+            replace_turn_idx=None,
+            turn_started_at=turn_started_at,
+            persist=False,
+        )
+        # The runner refuses before its first yield, so nothing has streamed yet.
+        try:
+            first = next(stream, None)
+        except AssessmentDoesNotFit as exc:
+            logger.warning(
+                "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
+                exc.passages,
+            )
+            data = self.run_query(
+                expanded_query,
+                metadata_filters=metadata_filters,
+                metadata_filter_rules=metadata_filter_rules,
+                vector_store_kwargs=vector_store_kwargs,
+                scoped_node_ids=scoped_node_ids,
+                retrieval_target=retrieval_target,
+            )
+            yield str(data.get("response") or "")
+            yield data
+            return
+        if first is None:
+            return
+        yield first
+        yield from stream
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:
         """Build the not-yet-applied GraphRAG debug payload for a query.
@@ -10378,7 +10745,7 @@ class RAG:
         """Unload models to free up memory.
 
         Releases the lazily-loaded embed / text / post-retrieval-text /
-        reranker / image-ingestion services, invalidates the NER cache,
+        bounded-text / reranker / image-ingestion services, invalidates the NER cache,
         and drops the captured ``dir_reader`` handle so Python's
         ref-count collector can reclaim it immediately instead of
         waiting for a later cycle. Pure null-and-``gc.collect``
@@ -10387,6 +10754,7 @@ class RAG:
         self._embed_model = None
         self._text_model = None
         self._post_retrieval_text_model = None
+        self._bounded_text_model = None
         self._reranker = None
         self._image_ingestion_service = None
         self._invalidate_ner_cache()

@@ -50,7 +50,11 @@ from docint.agents import (
     Turn,
     is_weak_answer,
 )
+from docint.agents.assessment.classify import classify_turn
+from docint.agents.assessment.gate import assessment_available
+from docint.agents.assessment.split import cited_sources
 from docint.agents.history import build_prior_turn
+from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
@@ -949,6 +953,80 @@ def _reformulated_query(question: str, failed_query: str | None, reason: str | N
     )
 
 
+#: Recorded when an assessment turn has no separate source-backed part to check.
+ASSESSMENT_NOT_VALIDATED_REASON = "Assessment without a separate source-backed part."
+
+
+def _classify_turn(question: str, prior_turn: PriorTurn | None, retrieval_target: str) -> AnswerMode:
+    """Decide whether this turn is answered as an assessment.
+
+    Gated before any model call: the visual target answers from imagery alone,
+    and below the minimum context window there is no room for a judgement.
+    Fail-soft: a misconfigured assessment setting or an unavailable model
+    answers the turn as a lookup, so lookup chat never breaks on this feature.
+    The classifier abandons its call at its deadline however the reply arrives;
+    the model makes a single attempt, so an abandoned call ends at its own timeout.
+
+    Args:
+        question (str): The user's message, verbatim.
+        prior_turn (PriorTurn | None): The previous exchange, for follow-ups.
+        retrieval_target (str): The turn's retrieval target.
+
+    Returns:
+        AnswerMode: ``"assessment"`` or ``"lookup"``.
+    """
+    if retrieval_target == "visual" or not getattr(rag, "text_model_id", None):
+        return "lookup"
+    try:
+        if not assessment_available(int(getattr(rag, "openai_ctx_window", 0) or 0)):
+            return "lookup"
+        return classify_turn(rag.bounded_text_model, question=question, prior_turn=prior_turn)
+    except Exception as exc:
+        logger.warning("Assessment classification unavailable ({}); answering as a lookup", type(exc).__name__)
+        return "lookup"
+
+
+def _assessment_validation(
+    *, question: str, answer: str, sources: list[dict[str, Any]], agent: Any
+) -> dict[str, bool | str | None]:
+    """Validate only the source-backed part of an assessment turn.
+
+    Args:
+        question (str): The user's question.
+        answer (str): The labelled answer text.
+        sources (list[dict[str, Any]]): The turn's numbered sources.
+        agent (Any): The turn's ``agent`` trail.
+
+    Returns:
+        dict[str, bool | str | None]: Validation metadata; unchecked when the
+        answer has no separate source-backed part.
+    """
+    trail = agent if isinstance(agent, dict) else {}
+    evidence_chars = trail.get("evidence_chars")
+    evidence = (answer[:evidence_chars] if isinstance(evidence_chars, int) else answer).strip()
+    if trail.get("answer") != "split" or not evidence:
+        return {
+            "validation_checked": False,
+            "validation_mismatch": None,
+            "validation_reason": ASSESSMENT_NOT_VALIDATED_REASON,
+        }
+    return _validation_payload(
+        question=question, answer=evidence, sources=cited_sources(evidence, sources), intent="assessment"
+    )
+
+
+def _sse_agent_frame(progress: AgentProgress) -> str:
+    """Render one step of an assessment turn as an SSE frame.
+
+    Args:
+        progress (AgentProgress): The step.
+
+    Returns:
+        str: The ``data: {"agent": ...}`` frame.
+    """
+    return f"data: {json.dumps({'agent': asdict(progress)})}\n\n"
+
+
 def _iter_text_tokens(text: str) -> list[str]:
     """Split text into whitespace-preserving token chunks for SSE streaming.
 
@@ -1276,6 +1354,12 @@ class QueryOut(BaseModel):
     #: visual turn that must not pass as a normal one. ``None`` on any other
     #: target.
     visual: dict[str, Any] | None = None
+    #: ``"assessment"`` when the turn added a labelled model judgement to the
+    #: cited evidence; ``None`` on an ordinary lookup.
+    answer_mode: str | None = None
+    #: The assessment's trail: ``steps``, ``actions``, ``reason``, ``answer``,
+    #: ``shortened`` and ``evidence_chars``. ``None`` on a lookup.
+    agent: dict[str, Any] | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -2382,6 +2466,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     rag.create_index()
                 rag.create_query_engine()
 
+            data: dict[str, Any]
             if payload.retrieval_mode == "stateless":
                 # Stateless mode has no session to pin a scope to, so the
                 # request is the only place one can come from.
@@ -2404,14 +2489,29 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                             exc,
                         )
 
-                data = rag.run_query(
-                    retrieval_query,
-                    metadata_filters=metadata_filters,
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                    scoped_node_ids=stateless_scope or None,
-                    retrieval_target=payload.retrieval_target,
-                )
+                data = {}
+                if _classify_turn(payload.question, None, payload.retrieval_target) == "assessment":
+                    for item in rag.stream_stateless_assessment(
+                        payload.question,
+                        expanded_query=retrieval_query,
+                        graph_debug=graph_debug,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                        scoped_node_ids=stateless_scope or None,
+                        retrieval_target=payload.retrieval_target,
+                    ):
+                        if isinstance(item, dict):
+                            data = item
+                else:
+                    data = rag.run_query(
+                        retrieval_query,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                        scoped_node_ids=stateless_scope or None,
+                        retrieval_target=payload.retrieval_target,
+                    )
                 if graph_debug is not None:
                     data["graph_debug"] = graph_debug
                 session_id = payload.session_id
@@ -2429,6 +2529,17 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     principal.effective_owner,
                     payload.scope_chunk_ids,
                 )
+                prior_turn = (
+                    rag.sessions.get_prior_turn(session_id, owner=principal.effective_owner)
+                    if rag.sessions is not None
+                    else None
+                )
+                answer_mode = _classify_turn(payload.question, prior_turn, payload.retrieval_target)
+                # Only an assessment binds the prior turn here; lookups keep their
+                # behaviour, which binds none on this endpoint.
+                assessment_kwargs: dict[str, Any] = (
+                    {"prior_turn": prior_turn, "skip_query_rewrite": False} if answer_mode == "assessment" else {}
+                )
                 data = rag.chat(
                     payload.question,
                     session_id=session_id,
@@ -2439,6 +2550,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     vector_store_kwargs=vector_store_kwargs or None,
                     scoped_node_ids=scoped_node_ids or None,
                     retrieval_target=payload.retrieval_target,
+                    answer_mode=answer_mode,
+                    **assessment_kwargs,
                 )
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
@@ -2470,13 +2583,18 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
         # ("session"/"stateless"), not the retrieval tool, so it is not
         # forwarded as `tool_used`. The orchestrator path populates
         # `tool_used` directly on the RetrievalResult instead.
-        validation = _validation_payload(
-            question=payload.question,
-            answer=answer,
-            sources=sources,
-            summary_diagnostics=summary_diagnostics_query,
-            retrieval_query=retrieval_query_value,
-        )
+        if isinstance(data, dict) and data.get("answer_mode") == "assessment":
+            validation = _assessment_validation(
+                question=payload.question, answer=answer, sources=sources, agent=data.get("agent")
+            )
+        else:
+            validation = _validation_payload(
+                question=payload.question,
+                answer=answer,
+                sources=sources,
+                summary_diagnostics=summary_diagnostics_query,
+                retrieval_query=retrieval_query_value,
+            )
         return {
             "answer": answer,
             "sources": sources,
@@ -2495,6 +2613,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 else payload.retrieval_target
             ),
             "visual": data.get("visual") if isinstance(data, dict) else None,
+            "answer_mode": data.get("answer_mode") if isinstance(data, dict) else None,
+            "agent": data.get("agent") if isinstance(data, dict) else None,
             **validation,
         }
     except HTTPException:
@@ -2594,33 +2714,65 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             exc,
                         )
 
-                stateless_data = await rag.run_query_async(
-                    retrieval_query,
-                    metadata_filters=metadata_filters,
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                    scoped_node_ids=stateless_scope or None,
-                    retrieval_target=payload.retrieval_target,
-                )
-                if graph_debug is not None:
-                    stateless_data["graph_debug"] = graph_debug
+                answer_mode = await to_thread.run_sync(_classify_turn, payload.question, None, payload.retrieval_target)
+                if answer_mode == "assessment":
 
-                answer_text = str(stateless_data.get("response") or stateless_data.get("answer") or "")
-                async for event in _stream_simulated_text(answer_text):
-                    event_payload = json.loads(event[6:].strip())
-                    token = str(event_payload.get("token") or "")
-                    full_answer += token
-                    yield event
+                    def _make_stateless_assessment() -> Iterator[Any]:
+                        """Build the stateless assessment stream off the event loop.
 
-                final_payload = {
-                    "response": answer_text,
-                    "sources": stateless_data.get("sources") or [],
-                    "session_id": payload.session_id,
-                    "reasoning": stateless_data.get("reasoning"),
-                    "graph_debug": stateless_data.get("graph_debug"),
-                    "retrieval_target": stateless_data.get("retrieval_target") or payload.retrieval_target,
-                    "visual": stateless_data.get("visual"),
-                }
+                        Returns:
+                            Iterator[Any]: Research steps, answer text, then the final payload.
+                        """
+                        return cast(
+                            "Iterator[Any]",
+                            rag.stream_stateless_assessment(
+                                payload.question,
+                                expanded_query=retrieval_query,
+                                graph_debug=graph_debug,
+                                metadata_filters=metadata_filters,
+                                metadata_filter_rules=payload.metadata_filters,
+                                vector_store_kwargs=vector_store_kwargs or None,
+                                scoped_node_ids=stateless_scope or None,
+                                retrieval_target=payload.retrieval_target,
+                            ),
+                        )
+
+                    async for chunk in _aiter_sync_gen(_make_stateless_assessment, request):
+                        if isinstance(chunk, str):
+                            full_answer += chunk
+                            yield f"data: {json.dumps({'token': chunk})}\n\n"
+                        elif isinstance(chunk, AgentProgress):
+                            yield _sse_agent_frame(chunk)
+                        elif isinstance(chunk, dict):
+                            final_payload = {**chunk, "session_id": payload.session_id}
+                else:
+                    stateless_data = await rag.run_query_async(
+                        retrieval_query,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                        scoped_node_ids=stateless_scope or None,
+                        retrieval_target=payload.retrieval_target,
+                    )
+                    if graph_debug is not None:
+                        stateless_data["graph_debug"] = graph_debug
+
+                    answer_text = str(stateless_data.get("response") or stateless_data.get("answer") or "")
+                    async for event in _stream_simulated_text(answer_text):
+                        event_payload = json.loads(event[6:].strip())
+                        token = str(event_payload.get("token") or "")
+                        full_answer += token
+                        yield event
+
+                    final_payload = {
+                        "response": answer_text,
+                        "sources": stateless_data.get("sources") or [],
+                        "session_id": payload.session_id,
+                        "reasoning": stateless_data.get("reasoning"),
+                        "graph_debug": stateless_data.get("graph_debug"),
+                        "retrieval_target": stateless_data.get("retrieval_target") or payload.retrieval_target,
+                        "visual": stateless_data.get("visual"),
+                    }
             else:
                 # Resolved once, on the first pass, and reused by the corrective
                 # retry. The prior turn especially: recomputing it after the
@@ -2660,7 +2812,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         resolved_id = rag.start_session(payload.session_id, owner=session_owner)
                         stream_state["session_id"] = resolved_id
                         stream_state["prior_turn"] = (
-                            build_prior_turn(rag.sessions.get_session_history(resolved_id, owner=session_owner))
+                            rag.sessions.get_prior_turn(resolved_id, owner=session_owner)
                             if rag.sessions is not None
                             else None
                         )
@@ -2677,6 +2829,15 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             )
                             or None
                         )
+                        stream_state["answer_mode"] = _classify_turn(
+                            payload.question, stream_state["prior_turn"], payload.retrieval_target
+                        )
+                    # The retry re-answers a rejected lookup; an assessment never
+                    # retries, so any second pass is a lookup.
+                    answer_mode: AnswerMode = stream_state["answer_mode"] if question is None else "lookup"
+                    prior_turn = stream_state["prior_turn"]
+                    if answer_mode == "lookup" and prior_turn is not None:
+                        prior_turn = prior_turn.evidence_only()
                     return cast(
                         "Iterator[Any]",
                         rag.stream_chat(
@@ -2687,11 +2848,12 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                             metadata_filter_rules=payload.metadata_filters,
                             vector_store_kwargs=vector_store_kwargs or None,
-                            prior_turn=stream_state["prior_turn"],
+                            prior_turn=prior_turn,
                             skip_query_rewrite=question is not None,
                             scoped_node_ids=stream_state["scoped_node_ids"],
                             replace_turn_idx=replace_turn_idx,
                             retrieval_target=payload.retrieval_target,
+                            answer_mode=answer_mode,
                         ),
                     )
 
@@ -2699,6 +2861,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     if isinstance(chunk, str):
                         full_answer += chunk
                         yield f"data: {json.dumps({'token': chunk})}\n\n"
+                    elif isinstance(chunk, AgentProgress):
+                        yield _sse_agent_frame(chunk)
                     elif isinstance(chunk, dict):
                         final_payload = chunk
 
@@ -2719,13 +2883,18 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             )
             # `retrieval_mode` here is the session-routing mode, not the
             # retrieval tool, so it is not forwarded as `tool_used`.
-            validation = _validation_payload(
-                question=payload.question,
-                answer=answer,
-                sources=sources,
-                summary_diagnostics=stream_summary_diagnostics,
-                retrieval_query=stream_retrieval_query,
-            )
+            if payload_out.get("answer_mode") == "assessment":
+                validation = _assessment_validation(
+                    question=payload.question, answer=answer, sources=sources, agent=payload_out.get("agent")
+                )
+            else:
+                validation = _validation_payload(
+                    question=payload.question,
+                    answer=answer,
+                    sources=sources,
+                    summary_diagnostics=stream_summary_diagnostics,
+                    retrieval_query=stream_retrieval_query,
+                )
             payload_out.update(validation)
             # Persist validation onto the row stream_chat already wrote so
             # restored sessions see the same banner state as fresh turns.
@@ -2739,7 +2908,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             # gate is deliberately narrow — a mismatched but substantive answer
             # is still worth showing, a scoped turn runs no retrieval for a new
             # query to change, and without a persisted turn there is nothing to
-            # overwrite, which would leave the user asking twice.
+            # overwrite, which would leave the user asking twice. An assessment
+            # never retries: its research already ran.
             # Session mode only, and named as such rather than inferred from the
             # absent turn_idx: the retry re-enters ``_make_chat_stream``, which
             # only exists on that branch.
@@ -2750,6 +2920,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 and validation.get("validation_mismatch") is True
                 and is_weak_answer(answer)
                 and payload_out.get("retrieval_mode") != "scoped"
+                and payload_out.get("answer_mode") != "assessment"
                 and load_corrective_retry_env().enabled
             ):
                 try:

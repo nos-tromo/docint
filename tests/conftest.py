@@ -132,6 +132,25 @@ def _hermetic_retention_env() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_assessment_env() -> Iterator[None]:
+    """Keep assessment turns off unless a test opts in.
+
+    Some tests drive ``/query`` through a real ``RAG``; a developer ``.env``
+    raising ``OPENAI_CTX_WINDOW`` would open the assessment gate there and
+    send a real classifier call. Tests that exercise assessments set
+    ``ASSESSMENT_ENABLED`` themselves. A private ``MonkeyPatch`` for the
+    reason :func:`_hermetic_hybrid_env` gives.
+
+    Yields:
+        None.
+    """
+    mp = pytest.MonkeyPatch()
+    mp.setenv("ASSESSMENT_ENABLED", "false")
+    yield
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_preprocess() -> Iterator[None]:
     """Keep the preprocessing pool from doing real work behind a test.
 

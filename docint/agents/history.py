@@ -1,9 +1,12 @@
 """Conversation-history helpers shared across agent code paths."""
 
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 from docint.agents.types import PriorTurn
 
 
-def build_prior_turn(history: list[dict[str, str]]) -> PriorTurn | None:
+def build_prior_turn(history: Sequence[Mapping[str, Any]]) -> PriorTurn | None:
     """Extract the immediately preceding user/assistant exchange from history.
 
     Scans the history tail for the most recent assistant message and the
@@ -34,4 +37,10 @@ def build_prior_turn(history: list[dict[str, str]]) -> PriorTurn | None:
         if history[idx].get("role") == "user":
             user_text = (history[idx].get("content") or "").strip()
             break
-    return PriorTurn(user_text=user_text, assistant_text=assistant_text)
+    agent = history[last_assistant_idx].get("agent")
+    evidence_chars = agent.get("evidence_chars") if isinstance(agent, Mapping) else None
+    return PriorTurn(
+        user_text=user_text,
+        assistant_text=assistant_text,
+        evidence_chars=evidence_chars if isinstance(evidence_chars, int) else None,
+    )

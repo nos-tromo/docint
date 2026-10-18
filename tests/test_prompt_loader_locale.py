@@ -206,9 +206,56 @@ def test_summary_fold_prompt_placeholders() -> None:
         assert "{summaries_block}" in text, f"missing {{summaries_block}} in {locale}/summary_fold.txt"
 
 
-@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine"])
+@pytest.mark.parametrize("name", ["grounded_qa", "grounded_refine", "assessment_answer"])
 def test_chat_answer_prompts_ask_for_markdown(name: str) -> None:
     """Both locales ask the chat model for Markdown, which the SPA and the report exports render."""
     for locale in ("en", "de"):
         text = Path(f"docint/utils/prompts/{locale}/{name}.txt").read_text(encoding="utf-8")
         assert "Markdown" in text, f"{locale}/{name}.txt no longer asks for Markdown"
+
+
+@pytest.mark.parametrize(
+    "name", ["assessment_classify", "assessment_answer", "assessment_research", "response_validator_assessment"]
+)
+def test_assessment_prompts_match_across_locales(name: str) -> None:
+    """German and English assessment prompts take the same placeholders and format cleanly.
+
+    Args:
+        name (str): The prompt basename.
+    """
+    import re
+
+    from docint.utils.env_cfg import load_path_env
+
+    root = load_path_env().prompts
+    texts = {code: (root / code / f"{name}.txt").read_text(encoding="utf-8") for code in ("en", "de")}
+
+    def placeholders(text: str) -> set[str]:
+        """Collect the ``{name}`` placeholders of a template.
+
+        Args:
+            text (str): The template text.
+
+        Returns:
+            set[str]: The placeholder names.
+        """
+        return set(re.findall(r"\{(\w+)\}", text))
+
+    assert placeholders(texts["de"]) == placeholders(texts["en"])
+    for text in texts.values():
+        text.format(**dict.fromkeys(placeholders(text), "X"))
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_assessment_answer_prompt_carries_the_protocol_tokens(code: str) -> None:
+    """Both locales name the sentinel and the citation key verbatim; they are protocol.
+
+    Args:
+        code (str): The locale.
+    """
+    from docint.utils.env_cfg import load_path_env
+
+    text = (load_path_env().prompts / code / "assessment_answer.txt").read_text(encoding="utf-8")
+
+    assert "[[ASSESSMENT]]" in text
+    assert "citation_index" in text

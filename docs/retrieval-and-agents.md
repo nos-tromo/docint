@@ -254,7 +254,7 @@ sent as `retrieval_target` on `/query` and `/stream_query` and echoed back on
 the response and the final SSE frame. It is a separate field from
 `retrieval_mode`, which is session routing on the request (`session` /
 `stateless`) and a different vocabulary on the response (`scoped`,
-`rewrite_*`).
+`agent`, `rewrite_*`).
 
 | Target | Retrieves | Chain |
 |---|---|---|
@@ -394,7 +394,8 @@ Both chat paths run it:
 The gate is deliberately narrow. A mismatched but substantive answer is kept —
 discarding it to chase a better one trades a real answer for a coin flip. A
 scoped turn is skipped entirely, since it runs no retrieval for a new query to
-change. And the second attempt overwrites the first attempt's turn
+change, and so is an assessment turn (see [Assessment turns](#assessment-turns)).
+And the second attempt overwrites the first attempt's turn
 (`replace_turn_idx`) instead of appending, so one user message stays one turn.
 
 Failures degrade rather than escalate: no reformulation available, or a second
@@ -404,6 +405,132 @@ a retry never turns a delivered answer into an error.
 The cost is up to three extra LLM round-trips (reformulate, regenerate,
 re-validate) inside the one request, so a turn that triggers a retry is
 noticeably slower than one that does not.
+
+## Assessment turns
+
+A question that asks for a judgement — "what could be improved in this
+paper?", "is the method convincing?", "which option is better?" — is not a
+lookup. Its answer is written nowhere in the collection, and the passages that
+best match its wording are rarely the ones a judgement rests on: asked what
+could be improved, plain retrieval returns the paper's own "improvements over
+prior work". Such turns are answered differently, and say so.
+
+**Classification.** `/stream_query` and `/query` classify every turn once,
+before retrieval, with one short call on the plain chat model
+(`agents/assessment/classify.py`, prompt `prompts/{en,de}/assessment_classify.txt`).
+Any failure — no model, no JSON, a transport error — classifies as a lookup,
+which is the behaviour without this feature. No classifier call is made when
+`ASSESSMENT_ENABLED=false`, when the resolved context window is below 8192
+tokens (`agents/assessment/gate.py` logs one warning naming
+`OPENAI_CTX_WINDOW`), on the `visual` target, or on a corrective retry.
+Classification and research make a single attempt per call, whatever
+`OPENAI_MAX_RETRIES` says, and their 15-second and two-minute deadlines hold
+however a reply arrives: one that trickles in, each piece within the client's
+timeout, is abandoned at the deadline all the same. Lookups and the answer keep
+the retries.
+
+**Evidence.** An assessment seeds its evidence with the passages a lookup
+would have used — the turn's own engine, filters, rerank and parent-context
+chain — then lets the plain model search further through a
+`search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
+prompt `assessment_research.txt`, `tool_choice="required"`). The seed and every
+search keep every child the reranker returned. A section still yields one
+passage: the whole section, a window of it, a cut of its first child when that
+child outgrows the window, or the first child itself once the parent-context
+budget is spent or the child cannot be located. That passage carries every child
+retrieved under the section, each appended after a `…` line when the passage
+does not show it whole. Lookups are unchanged. Research stops at
+`ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
+on a repeated query, when the evidence ledger is full, when the model replies
+without calling a tool, or after two searches in a row that add nothing new.
+The research budget covers the model calls as well as the searches, and model
+calls run like searches: each on its own thread, abandoned when the budget runs
+out, and the turn reports `time_budget`; a reply that lands after the budget,
+even a `finish`, is not acted on. Research searches and research model calls
+each share a per-process bound of eight: an abandoned call holds its slot until
+it ends, and when no slot frees within five seconds (or the time left, if less)
+research stops with `research_failed`; a slot that frees only as the time runs
+out ends research with `time_budget`, the call never started. The classifier
+has eight slots of its own, so research never uses up what every turn needs:
+with more than eight classifications in flight in one process, a further turn
+waits up to a second for a slot and is answered as a lookup.
+Research admits a passage only while every passage stays legible in the answer,
+headers included; a result that would crowd the others is refused, and the
+ledger counts as full once not even a bare 300-character passage would fit.
+Every match an entry holds keeps room in the answer: each costs 250 characters
+(200 of text and a cut marker) in its window, each further window 55, and an
+extension whose matches would no longer fit is refused. Matches that touch or
+overlap are counted apart, each keeping its own region.
+A new window of a section the ledger already holds is not dropped. Text the entry
+lacks extends it after a `…` line, a window that repeats it adds only a match
+whose kept text the entry lacks, and the entry keeps its number; a window with a
+located match never merges with one without, so whichever comes second adds
+nothing. When the answer has to shorten such an entry, the cut is
+shared across its windows rather than taken from the end. Shortening keeps the
+text around each passage's retrieved match, so a section promoted from a matched
+chunk is cut around that chunk rather than to its opening. A match longer than
+200 characters, typically a whole retrieved child chunk, keeps only its first
+200 when it has to be cut. The research model's digest of a passage shows only
+text the answer is sure to keep: the first 200 characters of each match,
+top-ranked first, up to 400 in all, or the passage's opening when it has no
+match.
+Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
+never widened: a scoped assessment answers from its chunks with no research.
+Evidence too large to show legibly in one answer — typically a large pinned
+scope — is answered as a lookup instead.
+
+**Answer.** One streamed call on the answer model (the reasoning toggle
+applies) writes two parts separated by a `[[ASSESSMENT]]` line
+(`assessment_answer.txt`): what the sources say, every claim cited, then the
+model's own assessment, which may draw on general knowledge and must say so.
+The backend replaces the sentinel with a localized label (`ui_strings`
+`assessment_heading` / `assessment_disclaimer`) in the stream and in the
+persisted text, so the boundary survives into history, transcripts and report
+exports without any of them knowing the protocol. Sources are the evidence
+ledger, numbered 1..N in the order it was found; an entry is shortened to fit
+the context rather than dropped, because replay numbers citations by position.
+If the final estimate still does not fit, the latest research additions are
+left out, never the seed, so the numbering stays contiguous, and the turn
+reports `context_budget`; it does the same when what remains, a dense seed
+included, can only be sent cut below its legible minimum. If the prompt
+still overflows the model's context, it is rebuilt once with less evidence and
+compacted metadata headers, each passage's citation line kept whole (a rebuild
+that cuts passages below their minimum is reported the same way); a second
+overflow, or compact headers that alone fill the room, ends the turn with
+`context_overflow` on `/stream_query` (`/query` answers HTTP 500, as for a lookup).
+
+**Validation.** Only the source-backed part is validated, against the sources it
+cites (at most six; the first six when it cites none), with a note
+(`response_validator_assessment.txt`) that puts the
+judgement out of scope. An answer that did not separate the two parts is
+labelled as a whole and not validated. Assessments never take the corrective
+retry: their evidence was gathered on purpose, not by one query that a
+reformulation could improve.
+
+**Degraded turns** say why. `agent.reason` is `tools_unavailable` (the endpoint
+rejected tool calls or answered without one; the answer rests on the seed
+passages), `research_failed`, `context_budget` (the context window ended
+research early or never let it start, the last search lost a passage to the
+room, passages were left out at a fit, or the evidence was sent below its
+legible minimum; a refusal that a later search follows is not reported, and an
+earlier reason is kept), `time_budget` or `no_evidence`;
+`agent.answer` is `unsplit` or `empty`. These are protocol tokens; the SPA maps
+each to catalog copy.
+
+**Follow-ups.** A lookup asked after an assessment receives only the
+source-backed part of that answer as its prior turn, so the model's judgement is
+never restated as sourced fact. The cut is made where the prior turn is bound to
+the generation prompt, so the legacy `/agent/*` endpoints, which build theirs
+from stored history, get it too. The prior turn is read by
+`SessionManager.get_prior_turn`, without rehydrating any citation. An assessment
+asked after one sees both parts of it, each labelled: the source-backed part,
+whose `[n]` refer to the previous turn's sources, and the model's own
+assessment. They share the 4,000-character prior-answer budget shortest-first,
+so a long source-backed part cannot push the judgement out. Research and the
+answer also see the rewrite a lookup answers from, on a labelled line under the
+user's own words, with reasoning and citation numbers dropped and cut at 1,000
+characters. The line is left out when the rewrite adds no words, and on
+stateless turns, which have no history. It is a reading aid, never a source.
 
 ## Citation numbering
 

@@ -36,6 +36,9 @@ class Turn(Base):
     # able to say so, or the retry would read as the original answer.
     retried: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     retry_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Assessment provenance as JSON: what the research did and where the
+    # source-backed part ends. Present only on assessment turns.
+    agent_trail: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Callable, like every other model here: a bare ``datetime.now(UTC)`` is
     # evaluated once at import, stamping every turn the process ever writes
     # with the moment it booted.

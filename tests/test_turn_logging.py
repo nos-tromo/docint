@@ -215,3 +215,32 @@ def test_redaction_survives_an_unexpected_error_shape(error: Any) -> None:
         error (Any): An entry pydantic might hand over.
     """
     assert len(redact_validation_errors([error])) == 1
+
+
+def test_an_assessment_turn_logs_its_shape_but_never_its_queries(loguru_caplog_info: LogCaptureFixture) -> None:
+    """Steps, outcome and reason are counts and tokens; the agent's queries are user text.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    agent = {
+        "steps": 3,
+        "answer": "split",
+        "reason": "time_budget",
+        "actions": [{"action": "search", "detail": "zzsecretquestionzz method", "found": 2}],
+    }
+
+    _log_turn_summary(
+        collection="u000000000000__field-notes",
+        session_id="s-1",
+        turn_idx=2,
+        response=_response(answer_mode="assessment", agent=agent),
+        elapsed_s=1.0,
+    )
+
+    line = next(message for message in loguru_caplog_info.messages if "Turn complete" in message)
+    assert "answer=assessment" in line
+    assert "steps=3" in line
+    assert "outcome=split" in line
+    assert "reason=time_budget" in line
+    assert "zzsecretquestionzz" not in "\n".join(loguru_caplog_info.messages)
