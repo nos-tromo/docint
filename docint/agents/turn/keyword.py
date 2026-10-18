@@ -25,7 +25,7 @@ from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import kept_ranges
 from docint.agents.turn.tools import ToolContext, ToolReply, ToolWork, error_reply, passage_reply, trail_detail
-from docint.core.search.fields import search_field_spec
+from docint.core.search.fields import SEARCH_FIELDS, search_field_spec
 from docint.core.search.fulltext import INDEX_WORD_CLASS, index_pieces, index_tokens, parse_keywords
 from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
 from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS, WINDOW_JOIN
@@ -94,11 +94,13 @@ class KeywordMatcher:
     """The keyword match an agent turn offers its model, bound to its collection, filters and target.
 
     Attributes:
-        fields (tuple[str, ...]): The fields whose indexes are ready, each a key of
-            :data:`~docint.core.search.fields.SEARCH_FIELDS`, ``text`` first when it is.
+        fields (tuple[str, ...]): The fields whose indexes are ready: the text, always first,
+            then any others, each a key of :data:`~docint.core.search.fields.SEARCH_FIELDS`.
         check (Callable[[str, str], str | None]): Why ``(words, field)`` cannot
             run, :data:`NO_USABLE_WORD`, :data:`ONE_VALUE_ONLY`,
-            :data:`UNINDEXABLE_WORD` or :data:`LONG_WORD`, or ``None``; it does no I/O.
+            :data:`UNINDEXABLE_WORD` or :data:`LONG_WORD`, or ``None``. It must stay free of
+            I/O and side effects: one call runs it up to twice, once to key the call and once
+            to check it.
         run (Callable[[str, str], KeywordResult]): Counts and retrieves the
             matches of ``(words, field)``; the turn runs it on a search slot.
     """
@@ -106,6 +108,19 @@ class KeywordMatcher:
     fields: tuple[str, ...]
     check: Callable[[str, str], str | None]
     run: Callable[[str, str], KeywordResult]
+
+    def __post_init__(self) -> None:
+        """Check the contract the tool's schema and repeat keys rely on.
+
+        Raises:
+            ValueError: When ``fields`` is empty or does not start with the text, or names a
+                field the search does not know.
+        """
+        if not self.fields or self.fields[0] != DEFAULT_KEYWORD_FIELD:
+            raise ValueError(f"A keyword matcher offers the {DEFAULT_KEYWORD_FIELD} first; got {self.fields!r}.")
+        unknown = ", ".join(repr(name) for name in self.fields if name not in SEARCH_FIELDS)
+        if unknown:
+            raise ValueError(f"A keyword matcher offers only fields the search knows; unknown: {unknown}.")
 
 
 def check_key(words: str, field: str) -> tuple[str, frozenset[str], frozenset[Any]]:
@@ -296,7 +311,8 @@ def _keyword_parameters(fields: Sequence[str]) -> dict[str, Any]:
     collection does not hold would only invite calls that fail.
 
     Args:
-        fields (Sequence[str]): The fields whose indexes are ready.
+        fields (Sequence[str]): The fields whose indexes are ready, the text first
+            (see :class:`KeywordMatcher`).
 
     Returns:
         dict[str, Any]: The schema of one object: ``words``, and ``field`` when anything
@@ -369,20 +385,24 @@ class KeywordTool:
 
         Asked before the arguments are checked, so it takes any arguments and never raises on
         them. A call the tool refuses has no key of its own: the index drops a lone ``D`` from
-        ``vitamin D``, which would otherwise be answered as a repeat of ``vitamin``.
+        ``vitamin D``, which would otherwise be answered as a repeat of ``vitamin``. A call whose
+        value the search layer cannot read has none either.
 
         Args:
             arguments (Mapping[str, Any]): The call's arguments.
 
         Returns:
             str | None: The field, the index tokens of the words and their exact values, each
-            sorted (see :func:`check_key`); ``None`` for a call this tool refuses, which is left
-            to the default key.
+            sorted (see :func:`check_key`); ``None`` for a call this tool refuses or whose key
+            the search layer cannot make, which is left to the default key.
         """
         words, field = _request(arguments)
         if self._refusal(words, field) is not None:
             return None
-        key_field, tokens, values = check_key(words, field)
+        try:
+            key_field, tokens, values = check_key(words, field)
+        except ValueError:
+            return None
         return json.dumps([key_field, sorted(tokens), sorted(str(value) for value in values)], ensure_ascii=False)
 
     def _refusal(self, words: str, field: str) -> str | None:

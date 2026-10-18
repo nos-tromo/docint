@@ -12,6 +12,7 @@ from assessment_fakes import llm_view, scored_node
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger, passage_costs, passage_parts, render_context, text_floor
+from docint.agents.turn import keyword as keyword_module
 from docint.agents.turn.keyword import (
     KEYWORD_DESCRIPTION,
     KEYWORD_FIELD_NOTES,
@@ -39,7 +40,7 @@ from docint.agents.turn.tools import (
     passage_reply,
     trail_detail,
 )
-from docint.core.search.fields import SEARCH_FIELDS
+from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError
 from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
 from docint.utils.text_budget import MATCH_SPANS_KEY, MIN_REGION_CHARS, WINDOW_JOIN
 
@@ -336,7 +337,10 @@ def test_a_malformed_stored_span_is_kept_as_stored_while_a_valid_one_beside_it_m
 
 @pytest.mark.parametrize("per_window", [True, False], ids=["span-per-window", "one-span-across-the-join"])
 def test_an_anchored_span_starts_in_the_window_holding_its_term(per_window: bool) -> None:
-    """A region never begins inside the seam between two windows, or in the window before the one with the term.
+    """With a span per window, as RAG stamps them, an anchored span starts in the window holding its term.
+
+    That is after the seam between two windows, never inside it. One span across the join, a shape RAG does not
+    stamp, does the same while its term lies further past the seam than the left context reaches.
 
     Args:
         per_window (bool): Whether each window carries its own span, as a folded section's do, or one span
@@ -679,6 +683,66 @@ def test_every_field_the_search_knows_has_a_note() -> None:
     assert set(SEARCH_FIELDS) <= set(KEYWORD_FIELD_NOTES)
 
 
+def _accepts(words: str, field: str) -> str | None:
+    """Accept every call.
+
+    Args:
+        words (str): The words.
+        field (str): The field.
+
+    Returns:
+        str | None: No reason to refuse.
+    """
+    return None
+
+
+def _finds_nothing(words: str, field: str) -> KeywordResult:
+    """Count nothing.
+
+    Args:
+        words (str): The words.
+        field (str): The field.
+
+    Returns:
+        KeywordResult: A count of zero.
+    """
+    return _result(matches=0)
+
+
+@pytest.mark.parametrize("fields", [("text",), ("text", "author"), ALL_FIELDS], ids=["text", "two", "all"])
+def test_a_matcher_offering_the_text_first_and_fields_the_search_knows_is_accepted(fields: tuple[str, ...]) -> None:
+    """The text leads, as the schema's default and the tool's refusals assume; the rest are the search's own names.
+
+    Args:
+        fields (tuple[str, ...]): The fields offered.
+    """
+    assert KeywordMatcher(fields=fields, check=_accepts, run=_finds_nothing).fields == fields
+
+
+@pytest.mark.parametrize(
+    ("fields", "complaint"),
+    [
+        ((), "text first"),
+        (("author",), "text first"),
+        (("author", "text"), "text first"),
+        (("text", "gibtsnicht"), "unknown: 'gibtsnicht'"),
+        (("text", "author", "gibtsnicht", "nirgends"), "unknown: 'gibtsnicht', 'nirgends'"),
+    ],
+    ids=["no-fields", "text-missing", "text-not-first", "unknown-field", "unknown-fields"],
+)
+def test_a_matcher_must_offer_the_text_first_and_only_fields_the_search_knows(
+    fields: tuple[str, ...], complaint: str
+) -> None:
+    """A matcher that breaks the contract is refused when it is built, not when a model's call reaches the tool.
+
+    Args:
+        fields (tuple[str, ...]): The fields offered.
+        complaint (str): What the error says is wrong.
+    """
+    with pytest.raises(ValueError, match=complaint):
+        KeywordMatcher(fields=fields, check=_accepts, run=_finds_nothing)
+
+
 #: Calls the tool refuses: the arguments, the reason the match's check gives, the message, and the checks asked.
 REFUSALS = [
     pytest.param({}, None, "call keyword with the words to match.", [], id="no-words"),
@@ -809,14 +873,49 @@ def test_words_of_exactly_the_longest_length_are_accepted() -> None:
     assert isinstance(work, ToolWork)
 
 
-def test_the_repeat_key_lists_the_tokens_and_the_values_in_order_whatever_order_the_words_come_in() -> None:
-    """The key does not depend on the order a set happens to iterate in: tokens and values are sorted."""
+def test_the_repeat_key_is_the_field_the_sorted_tokens_and_the_sorted_values_as_json() -> None:
+    """A key is one JSON list, whatever the words' order: the field, the tokens, then the exact values."""
     tool = _Matcher(fields=("text", "uuid")).tool
 
     words = tool.recall_key({"words": "zebra Mango apfel Kirsche birne Dattel"})
     uuid = tool.recall_key({"words": "0123456789abcdef0123456789abcdef", "field": "uuid"})
 
     assert words == '["text", ["apfel", "birne", "dattel", "kirsche", "mango", "zebra"], []]'
+    assert uuid == '["uuid", [], ["01234567-89ab-cdef-0123-456789abcdef", "0123456789abcdef0123456789abcdef"]]'
+
+
+def _backwards(words: str, field: str) -> tuple[str, tuple[str, ...], tuple[Any, ...]]:
+    """Make a check's key as the search layer does, but list its tokens and values in reverse order.
+
+    Equal sets can iterate in different orders. This stands in for the worst one, so only a key that sorts
+    what it lists comes out the same.
+
+    Args:
+        words (str): The words of the check.
+        field (str): A field the check may use.
+
+    Returns:
+        tuple[str, tuple[str, ...], tuple[Any, ...]]: The field, then the tokens and the values, each reversed.
+    """
+    name, tokens, values = check_key(words, field)
+    return name, tuple(sorted(tokens, reverse=True)), tuple(sorted(values, key=str, reverse=True))
+
+
+def test_the_repeat_key_sorts_the_tokens_and_the_values_whatever_order_they_are_listed_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calls that match the same thing are one call, so the key cannot depend on how a set happens to iterate.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Makes the check list its tokens and values in reverse order.
+    """
+    monkeypatch.setattr(keyword_module, "check_key", _backwards)
+    tool = _Matcher(fields=("text", "uuid")).tool
+
+    words = tool.recall_key({"words": "zebra mango apfel"})
+    uuid = tool.recall_key({"words": "0123456789abcdef0123456789abcdef", "field": "uuid"})
+
+    assert words == '["text", ["apfel", "mango", "zebra"], []]'
     assert uuid == '["uuid", [], ["01234567-89ab-cdef-0123-456789abcdef", "0123456789abcdef0123456789abcdef"]]'
 
 
@@ -1060,7 +1159,74 @@ ODD_ARGUMENTS = [
     pytest.param({"words": "Hafenfest", "field": {"text": 1}}, False, id="object-field"),
     pytest.param({"field": "author"}, False, id="field-without-words"),
     pytest.param({"words": "w" * (MAX_KEYWORD_CHARS + 1)}, False, id="over-long-words"),
+    pytest.param(
+        {"words": "\N{SUPERSCRIPT TWO}\N{SUPERSCRIPT TWO}", "field": "author"}, True, id="digits-that-are-no-decimals"
+    ),
 ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ValueError("invented value problem"), UnknownSearchFieldError("invented")],
+    ids=["value-error", "unknown-field"],
+)
+def test_a_key_the_search_layer_refuses_to_make_is_no_key_rather_than_an_error(
+    monkeypatch: pytest.MonkeyPatch, failure: ValueError
+) -> None:
+    """Asked before the arguments are checked, a repeat key the search layer cannot make is left to the default key.
+
+    The call itself still runs: only the way it is remembered changes.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Makes the check's key fail.
+        failure (ValueError): What it fails with.
+    """
+
+    def _fails(words: str, field: str) -> Any:
+        """Fail as the search layer does for a value it cannot read.
+
+        Args:
+            words (str): The words of the check.
+            field (str): The field.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise failure
+
+    monkeypatch.setattr(keyword_module, "check_key", _fails)
+    tool = _Matcher(fields=("text", "author")).tool
+
+    prepared = ToolRegistry([tool]).prepare(tool_call("keyword", words="Hafenfest"), tool_context())
+
+    assert tool.recall_key({"words": "Hafenfest"}) is None
+    assert prepared.key == ("keyword", '{"words": "hafenfest"}')
+    assert prepared.work is not None
+
+
+def test_a_failure_of_the_key_that_is_no_value_problem_is_not_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a value the search layer cannot read is forgiven; any other fault in the key surfaces as a failed call.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Makes the check's key fail.
+    """
+
+    def _fails(words: str, field: str) -> Any:
+        """Fail as a bug would.
+
+        Args:
+            words (str): The words of the check.
+            field (str): The field.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("invented bug")
+
+    monkeypatch.setattr(keyword_module, "check_key", _fails)
+
+    with pytest.raises(RuntimeError, match="invented bug"):
+        _Matcher().tool.recall_key({"words": "Hafenfest"})
 
 
 @pytest.mark.parametrize(("arguments", "keyed"), ODD_ARGUMENTS)

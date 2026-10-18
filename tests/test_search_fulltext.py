@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from qdrant_client import models
 
 from docint.core.retrieval_filters import build_qdrant_filter
@@ -249,6 +250,12 @@ def test_multi_key_filter_still_excludes_coarse_parents_and_keeps_base_filter() 
 
 # ---------- value_match_forms ----------
 
+#: Digits ``str.isdigit`` accepts and ``int`` rejects: SUPERSCRIPT TWO and CIRCLED DIGIT ONE.
+NOT_DECIMAL_DIGITS = ["\N{SUPERSCRIPT TWO}\N{SUPERSCRIPT TWO}", "\N{CIRCLED DIGIT ONE}", "1\N{SUPERSCRIPT TWO}"]
+#: Decimal digits of another script, which ``int`` reads: ARABIC-INDIC DIGIT ONE, TWO and THREE.
+ARABIC_THREE = "\N{ARABIC-INDIC DIGIT THREE}"
+ARABIC_ONE_TWO_THREE = "\N{ARABIC-INDIC DIGIT ONE}\N{ARABIC-INDIC DIGIT TWO}\N{ARABIC-INDIC DIGIT THREE}"
+
 
 def test_value_match_forms_offers_the_numeric_and_string_reading() -> None:
     """A digit-only query could be stored either way."""
@@ -258,6 +265,23 @@ def test_value_match_forms_offers_the_numeric_and_string_reading() -> None:
 def test_value_match_forms_keeps_a_non_numeric_handle_as_a_string() -> None:
     """Not every network numbers its accounts."""
     assert value_match_forms("krieger.advokat") == ["krieger.advokat"]
+
+
+@pytest.mark.parametrize("raw", NOT_DECIMAL_DIGITS, ids=["superscripts", "circled-digit", "digit-then-superscript"])
+def test_value_match_forms_keeps_a_digit_that_is_no_decimal_as_a_string(raw: str) -> None:
+    """``isdigit`` is true of superscripts and circled digits, which ``int`` rejects: they are a handle, not a number.
+
+    Args:
+        raw (str): A query of characters that count as digits but are not decimals.
+    """
+    assert value_match_forms(raw) == [raw]
+
+
+def test_value_match_forms_reads_decimals_of_another_script_as_the_numbers_they_are() -> None:
+    """``int`` reads any script's decimal digits, so such an id keeps its numeric reading too."""
+    assert value_match_forms(ARABIC_THREE) == [ARABIC_THREE, 3]
+    assert value_match_forms(ARABIC_ONE_TWO_THREE) == [ARABIC_ONE_TWO_THREE, 123]
+    assert value_match_forms("1" + ARABIC_THREE) == ["1" + ARABIC_THREE, 13]
 
 
 def test_value_match_forms_rejects_anything_with_a_space() -> None:

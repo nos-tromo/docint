@@ -167,14 +167,15 @@ def value_match_forms(raw: str) -> list[Any]:
 
     Returns:
         list[Any]: The string form first, plus the integer form when the
-            query is all digits; empty when the query is blank or is a
-            multi-word phrase.
+            query is all decimal digits (``str.isdigit`` also accepts
+            superscripts and circled digits, which ``int`` rejects); empty
+            when the query is blank or is a multi-word phrase.
     """
     text = " ".join(str(raw or "").split())
     if not text or " " in text:
         return []
     forms: list[Any] = [text]
-    if text.isdigit():
+    if text.isdecimal():
         forms.append(int(text))
     return forms
 
