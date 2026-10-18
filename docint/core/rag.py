@@ -2971,6 +2971,10 @@ _RETRIEVAL_HANDLE_CACHE_MAX = 32
 AGENT_LEDGER_CAP = 64
 #: Longest LLM-visible metadata string an agent turn's passage header shows; a longer one is cut with an ellipsis.
 AGENT_METADATA_VALUE_CHARS = 200
+#: What a reference row's header leads with after its citation line: a frame's label, then its file and reference block.
+_AGENT_LEADING_KEYS = ("keyframe", "filename", "reference_metadata")
+#: Who wrote a reference row and when, in the order its reference block leads with them.
+_AGENT_IDENTITY_KEYS = ("type", "author", "author_id", "vanity", "timestamp", "network", "text_id", "uuid", "url")
 
 
 @dataclass(frozen=True)
@@ -2991,44 +2995,93 @@ class AgentTurn:
     reasoning: bool
 
 
-def _cut_strings(value: Any) -> Any:
-    """Cut every string in a metadata value to ``AGENT_METADATA_VALUE_CHARS``, an ellipsis last.
+def _trimmed(value: Any) -> Any:
+    """Cut every string in a metadata value to ``AGENT_METADATA_VALUE_CHARS``, and drop its ``None`` leaves.
 
     Args:
         value (Any): A metadata value: a string, or a dict or list that may hold some.
 
     Returns:
-        Any: The value with each longer string cut; containers rebuilt, other leaves as given.
+        Any: The value with each longer string cut, an ellipsis last, and each ``None`` dropped
+        from its dicts and lists; containers rebuilt, other leaves as given.
     """
     if isinstance(value, str):
         return value if len(value) <= AGENT_METADATA_VALUE_CHARS else value[: AGENT_METADATA_VALUE_CHARS - 1] + "…"
     if isinstance(value, dict):
-        return {key: _cut_strings(item) for key, item in value.items()}
+        return {key: _trimmed(item) for key, item in value.items() if item is not None}
     if isinstance(value, (list, tuple)):
-        return [_cut_strings(item) for item in value]
+        return [_trimmed(item) for item in value if item is not None]
     return value
 
 
-def agent_llm_view(node: BaseNode) -> BaseNode:
-    """Render a passage as an agent turn's model reads it: the chat prompt's view, its long strings cut.
+def _identity_first(metadata: dict[str, Any], hidden: set[str]) -> dict[str, Any]:
+    """Lead a reference row's metadata with its identity, so a compacted header still names it.
 
-    A social row carries long text in its header, such as the post a comment answers,
-    which pushes the header past what a reply shows whole: it is compacted, and loses who
-    wrote the passage and where it came from. Every LLM-visible string is cut to
-    ``AGENT_METADATA_VALUE_CHARS``; hidden keys and the passage's text stay as the chat view
-    has them. The view is a clone, so the stored node is never written to.
+    Only a row carrying a ``reference_metadata`` block is reordered. After a leading citation
+    line come a frame's label, the file and the reference block, who and when first in it;
+    the other keys follow in their order. An ``origin`` that repeats the row's file is dropped;
+    one that names another file, or is the only file the row names, is kept.
+
+    Args:
+        metadata (dict[str, Any]): A view's metadata, its visible values trimmed.
+        hidden (set[str]): The keys the model is not shown.
+
+    Returns:
+        dict[str, Any]: The metadata reordered; the same dict for a row without a reference block.
+    """
+    reference = metadata.get("reference_metadata")
+    if not isinstance(reference, dict):
+        return metadata
+    leading = {key: reference[key] for key in _AGENT_IDENTITY_KEYS if key in reference}
+    dropped = "origin" if _repeats_file(metadata) else None
+    rest = {key: value for key, value in metadata.items() if key != dropped}
+    rest["reference_metadata"] = {**leading, **{key: value for key, value in reference.items() if key not in leading}}
+    visible = [key for key in rest if key not in hidden]
+    head = ["citation_index"] if visible[:1] == ["citation_index"] else []
+    order = [*head, *(key for key in _AGENT_LEADING_KEYS if key in rest)]
+    return {**{key: rest[key] for key in order}, **{key: value for key, value in rest.items() if key not in order}}
+
+
+def _repeats_file(metadata: dict[str, Any]) -> bool:
+    """Tell whether a row's ``origin`` names the same file as its ``filename``.
+
+    Args:
+        metadata (dict[str, Any]): The row's metadata.
+
+    Returns:
+        bool: ``True`` when the row has a file name and its ``origin`` names that file.
+    """
+    origin, filename = metadata.get("origin"), metadata.get("filename")
+    return bool(filename) and isinstance(origin, dict) and origin.get("filename") == filename
+
+
+def agent_llm_view(node: BaseNode) -> BaseNode:
+    """Render a passage as an agent turn's model reads it: the chat prompt's view, trimmed, its identity first.
+
+    A social row carries long text in its header, such as the post a comment answers, and
+    its file, origin, table and reference block already run past what a reply shows whole:
+    the header is compacted to its start, which loses who wrote the passage. Every LLM-visible
+    string is cut to ``AGENT_METADATA_VALUE_CHARS`` and every visible ``None`` dropped; a row
+    carrying a reference block then leads with its identity (see :func:`_identity_first`).
+    Hidden keys and the passage's text stay as the chat view has them, and a passage without
+    a reference block keeps its order. The view is a clone, so the stored node is never
+    written to.
 
     Args:
         node (BaseNode): A passage of the turn's evidence.
 
     Returns:
         BaseNode: The clone :meth:`ParentContextPostprocessor._emit_with_llm_exclusion` makes,
-        its LLM-visible strings cut.
+        its visible metadata trimmed and, for a reference row, its identity first.
     """
     view = ParentContextPostprocessor._emit_with_llm_exclusion(node)
     hidden = set(view.excluded_llm_metadata_keys)
-    metadata = {key: value if key in hidden else _cut_strings(value) for key, value in view.metadata.items()}
-    return view.model_copy(update={"metadata": metadata})
+    metadata = {
+        key: value if key in hidden else _trimmed(value)
+        for key, value in view.metadata.items()
+        if key in hidden or value is not None
+    }
+    return view.model_copy(update={"metadata": _identity_first(metadata, hidden)})
 
 
 # ``slots=True`` is intentionally NOT used here. ``qdrant_collection`` is a

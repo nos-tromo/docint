@@ -27,7 +27,7 @@ from assessment_fakes import scored_node
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
 
-from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.assessment.ledger import EvidenceLedger, render_context, stamp
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, schema_tokens
 from docint.agents.turn.calls import SEARCH_THREAD_NAME
@@ -59,6 +59,12 @@ RULES = [{"field": "source_type", "operator": "eq", "value": "video_keyframe"}]
 ANCHOR = ("Der Hafenverein verschiebt das Hafenfest wegen der Sturmwarnung auf Sonntag. " * 25)[:1500]
 SOCIAL_FILE = "example_profile/dossier.json"
 AUTHOR = "Person A"
+TIMESTAMP = "2026-03-14T09:31:00Z"
+#: Invented social texts: a post and a comment of the length a real one can run to, and short ones.
+LONG_POST = ("Der Hafenverein lädt zum Hafenfest am Sonntag ein, mit Ständen, Musik und einer Regatta. " * 20)[:1500]
+LONG_COMMENT = ("Weiß jemand, ob die Regatta trotzdem stattfindet oder ob sie wegen des Winds ausfällt? " * 20)[:1500]
+SHORT_POST = "Das Hafenfest beginnt am Sonntag um zehn Uhr am Kai."
+SHORT_COMMENT = "Danke für die Info, wir kommen dann am Sonntag mit den Kindern vorbei."
 
 
 def _rag(
@@ -225,16 +231,18 @@ def _comment_row() -> NodeWithScore:
     return NodeWithScore(node=TextNode(id_="comment-4", text=text, metadata=metadata), score=1.0)
 
 
-def _search_reply(view: Callable[[BaseNode], BaseNode]) -> str:
-    """Show the comment row as an agent turn's search reply does, through a view of its passages.
+def _search_reply(view: Callable[[BaseNode], BaseNode], row: NodeWithScore | None = None) -> str:
+    """Show a passage as an agent turn's search reply does, through a view of its passages.
 
     Args:
         view (Callable[[BaseNode], BaseNode]): The LLM view the turn renders passages through.
+        row (NodeWithScore | None): The passage the search finds; the comment row by default.
 
     Returns:
         str: The reply the model reads.
     """
-    registry = ToolRegistry([SearchTool(lambda _query: [_comment_row()]), ReadTool()])
+    found = _comment_row() if row is None else row
+    registry = ToolRegistry([SearchTool(lambda _query: [found]), ReadTool()])
     ctx = ToolContext(ledger=EvidenceLedger(cap=8), budget=turn_budget(), llm_view=view)
     return registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx).text
 
@@ -285,6 +293,250 @@ def test_the_agent_view_keeps_a_string_at_the_limit_and_cuts_one_in_a_list() -> 
     assert view.metadata["filename"] == at_limit
     assert reference["author"] == "b" * (AGENT_METADATA_VALUE_CHARS - 1) + "…"
     assert reference["tags"] == ["c" * (AGENT_METADATA_VALUE_CHARS - 1) + "…", "Hafen"]
+
+
+def _dossier_row(kind: str, text: str, *, anchor: str | None = None, parent: str | None = None) -> NodeWithScore:
+    """Build an invented social row as the dossier linker writes it: every reference key, ``None`` included.
+
+    Args:
+        kind (str): ``posting`` or ``comment``.
+        text (str): The row's own text.
+        anchor (str | None): The post a comment answers.
+        parent (str | None): The comment a reply answers.
+
+    Returns:
+        NodeWithScore: The row.
+    """
+    reference = {
+        "network": "examplenet",
+        "type": kind,
+        "uuid": "3f2b8c1e-9d4a-4c6b-8e21-5a7f0c9d2b14",
+        "url": "https://social.invalid/p/9876543214",
+        "timestamp": TIMESTAMP,
+        "author": AUTHOR,
+        "author_id": "1234567890",
+        "vanity": "person_a",
+        "text": text,
+        "text_id": "9876543214",
+        "anchor_text": anchor,
+        "parent_text": parent,
+    }
+    metadata = {
+        "file_path": f"uploads/{SOCIAL_FILE}",
+        "file_name": SOCIAL_FILE,
+        "filename": SOCIAL_FILE,
+        "file_hash": "f" * 64,
+        "origin": {"filename": SOCIAL_FILE, "filetype": "application/json"},
+        "source": "table",
+        "table": {"style": f"{kind}s", "row_index": 4, "n_rows": 120},
+        "reference_metadata": reference,
+    }
+    return NodeWithScore(node=TextNode(id_=f"{kind}-4", text=text, metadata=metadata), score=1.0)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _dossier_row("posting", SHORT_POST),
+        _dossier_row("posting", LONG_POST),
+        _dossier_row("comment", SHORT_COMMENT, anchor=LONG_POST),
+        _dossier_row("comment", SHORT_COMMENT, anchor=LONG_POST, parent=LONG_COMMENT),
+    ],
+    ids=["short-posting", "long-posting", "comment", "reply"],
+)
+def test_a_social_rows_header_names_who_wrote_it_when_and_where(row: NodeWithScore) -> None:
+    """Whether its header shows whole or is compacted, a social row opens with its file and its author's identity.
+
+    Args:
+        row (NodeWithScore): An invented dossier row.
+    """
+    reply = _search_reply(agent_llm_view, row)
+
+    assert reply.startswith(f"citation_index: 1\nfilename: {SOCIAL_FILE}\n")
+    assert AUTHOR in reply
+    assert TIMESTAMP in reply
+
+
+def _social_frame(rag: RAG) -> NodeWithScore:
+    """Build a frame of an invented social clip as the image companion returns it, its post's long text included.
+
+    Args:
+        rag (RAG): The engine whose caption-node builder makes the frame.
+
+    Returns:
+        NodeWithScore: The frame, labelled ``#3 @ 00:12``.
+    """
+    link = {
+        "posting_uuid": "3f2b8c1e-9d4a-4c6b-8e21-5a7f0c9d2b14",
+        "posting_id": "1234567890123456",
+        "media_id": "9876543210987654",
+    }
+    media = {"source_file": CLIP, "media_file_hash": "c" * 64}
+    posting = {
+        "posting_network": "examplenet",
+        "posting_author": AUTHOR,
+        "posting_author_id": "1234567890",
+        "posting_vanity": "person_a",
+        "posting_timestamp": TIMESTAMP,
+        "posting_url": "https://social.invalid/p/1234567890123456",
+        "posting_text": LONG_POST,
+    }
+    payload = {
+        "image_id": f"{CLIP}-image-2",
+        **link,
+        "source_type": "social_media",
+        **media,
+        "source_path": f"example_profile/{CLIP}",
+        **posting,
+        "reference_metadata": {"type": "keyframe", **link, **media, **posting},
+        "keyframe_index": 2,
+        "keyframe_time_sec": 12.0,
+        "llm_description": "Zwei Personen in Regenjacken am Hafen, bedeckter Himmel",
+        "node_id": "social-frame-3",
+    }
+    return rag._image_caption_node(payload, RAG._image_caption_text(payload))
+
+
+def test_a_social_frames_header_keeps_its_label_then_its_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frame's label still leads, and the clip it came from follows it, ahead of its post's long block.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    reply = _search_reply(agent_llm_view, _social_frame(_rag(monkeypatch)))
+
+    assert reply.startswith(f"citation_index: 1\nkeyframe: #3 @ 00:12\nfilename: {CLIP}\n")
+
+
+def _pdf_chunk() -> NodeWithScore:
+    """Build an invented chunk of a PDF with the metadata the document reader stores.
+
+    Returns:
+        NodeWithScore: The chunk; its ``origin`` repeats its file name, as a real chunk's does.
+    """
+    name = "hafenfest_programm.pdf"
+    metadata: dict[str, Any] = {
+        "chunk_id": "programm-chunk-3",
+        "point_id": "5d0c1f5e-2b8e-5c47-9a0e-3f1d2c4b6a71",
+        "doc_id": "e" * 64,
+        "file_hash": "e" * 64,
+        "file_path": f"uploads/{name}",
+        "file_name": name,
+        "filename": name,
+        "file_type": "application/pdf",
+        "mimetype": "application/pdf",
+        "source": "document",
+        "origin": {"filename": name, "mimetype": "application/pdf", "file_hash": "e" * 64, "page_number": 2},
+        "pipeline_name": "core_pipeline",
+        "pipeline_version": "1",
+        "page_range": [2],
+        "block_ids": ["block-7"],
+        "section_path": ["Programm"],
+        "table_ids": [],
+        "image_ids": [],
+        "source_mix": "text",
+        "bbox_refs": [],
+        "page": 2,
+        "page_number": 2,
+    }
+    text = "Die Stände öffnen am Sonntag um zehn Uhr, die Musik beginnt am Mittag."
+    return NodeWithScore(node=TextNode(id_="programm-chunk-3", text=text, metadata=metadata), score=1.0)
+
+
+def test_a_plain_pdf_chunk_renders_as_the_chat_prompt_renders_it() -> None:
+    """A chunk with no reference block is shown exactly as before, in a search reply and in a pinned scope."""
+    chunk = _pdf_chunk()
+    chat = ParentContextPostprocessor._emit_with_llm_exclusion
+
+    assert _search_reply(agent_llm_view, chunk) == _search_reply(chat, chunk)
+    scoped = [
+        render_context([stamp(chunk, 1)], llm_view=view, budget_tokens=10_000, char_token_ratio=1.0).context
+        for view in (agent_llm_view, chat)
+    ]
+    assert scoped[0] == scoped[1]
+
+
+@pytest.mark.parametrize("placement", ["first", "behind-hidden-keys", "last"])
+def test_a_reference_row_leads_with_its_file_then_its_identity(placement: str) -> None:
+    """The citation line keeps its place; the file and the reference block lead the rest, who and when first in it.
+
+    Args:
+        placement (str): Where the citation line sits: first, as a search reply numbers a passage; first of
+            the shown keys behind hidden ones; or last, as the ledger stamps a pinned passage.
+    """
+    metadata = dict(_dossier_row("comment", SHORT_COMMENT, anchor=LONG_POST).node.metadata)
+    stamped = {
+        "first": {"citation_index": 1, **metadata},
+        "behind-hidden-keys": {"file_hash": "f" * 64, "citation_index": 1, **metadata},
+        "last": {**metadata, "citation_index": 1},
+    }[placement]
+
+    view = agent_llm_view(TextNode(id_="comment-4", text=SHORT_COMMENT, metadata=stamped))
+
+    visible = [key for key in view.metadata if key not in view.excluded_llm_metadata_keys]
+    rest = ["filename", "reference_metadata", "table"]
+    assert visible == ([*rest, "citation_index"] if placement == "last" else ["citation_index", *rest])
+    assert list(view.metadata["reference_metadata"]) == [
+        "type",
+        "author",
+        "author_id",
+        "vanity",
+        "timestamp",
+        "network",
+        "text_id",
+        "uuid",
+        "url",
+        "text",
+        "anchor_text",
+    ]
+
+
+def test_the_agent_view_drops_visible_none_leaves_and_leaves_the_rest_in_order() -> None:
+    """``None`` says nothing, so a visible one is dropped at any depth; hidden values and the order stay."""
+    metadata = {
+        "file_path": None,
+        "filename": "hafenfest_programm.pdf",
+        "page": None,
+        "table": {"columns": ["Stand", None, "Zeit"], "row_index": None, "n_rows": 12},
+    }
+
+    view = agent_llm_view(TextNode(id_="row-none", text="Die Stände öffnen um zehn Uhr.", metadata=metadata))
+
+    assert list(view.metadata) == ["file_path", "filename", "table"]
+    assert view.metadata["file_path"] is None
+    assert view.metadata["table"] == {"columns": ["Stand", "Zeit"], "n_rows": 12}
+
+
+@pytest.mark.parametrize(
+    ("origin_file", "filename", "kept"),
+    [
+        (SOCIAL_FILE, SOCIAL_FILE, False),
+        ("other_profile/dossier.json", SOCIAL_FILE, True),
+        (SOCIAL_FILE, None, True),
+        (None, None, True),
+    ],
+    ids=["repeats-the-file", "names-another-file", "only-file-locator", "no-file-at-all"],
+)
+def test_a_reference_rows_origin_is_dropped_only_where_it_repeats_the_file(
+    origin_file: str | None, filename: str | None, kept: bool
+) -> None:
+    """An ``origin`` that repeats the row's file goes; one that names another, or the only file the row names, stays.
+
+    Args:
+        origin_file (str | None): The file the row's ``origin`` names; ``None`` for one that names none.
+        filename (str | None): The row's own ``filename``; ``None`` for a row without one.
+        kept (bool): Whether the view keeps the ``origin``.
+    """
+    metadata: dict[str, Any] = {
+        "origin": {"filename": origin_file, "filetype": "application/json"},
+        "reference_metadata": {"type": "posting", "author": AUTHOR},
+    }
+    if filename is not None:
+        metadata["filename"] = filename
+
+    view = agent_llm_view(TextNode(id_="row-origin", text=SHORT_POST, metadata=metadata))
+
+    assert ("origin" in view.metadata) is kept
 
 
 def _engine(*found: NodeWithScore) -> MagicMock:
