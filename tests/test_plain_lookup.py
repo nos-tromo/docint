@@ -286,6 +286,7 @@ def test_graph_terms_never_reach_the_synthesis_prompt(session_manager: SessionMa
     final = _answer(session_manager, entry)
 
     assert retriever.asked == [f"{REWRITE}\n\n{TERMS}"]
+    assert ASKED in final["response"]
     assert TERMS not in final["response"]
     assert final["graph_debug"]["applied"] is True
     assert final["retrieval_query"] == REWRITE
@@ -550,6 +551,7 @@ def test_graph_terms_never_reach_the_stateless_synthesis_prompt(
     result = _ask(stateless_rag, entry, expanded_query=EXPANDED)
 
     assert retriever.asked == [EXPANDED]
+    assert f"Q<<{QUESTION}>>" in result["response"]
     assert TERMS not in result["response"]
 
 
