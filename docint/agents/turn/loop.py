@@ -125,15 +125,18 @@ class AgentResult:
             left out; empty only when the answer round wrote nothing. A result always comes from
             an answer round that ran.
         nodes (list[NodeWithScore]): The turn's evidence numbered in ledger order: every passage
-            a tool reply showed, stamped with its ``citation_index``.
+            a tool reply showed, or a scoped turn's pinned passages, stamped with its
+            ``citation_index``; one whose picture the model was shown also carries
+            ``VISUAL_IMAGES_ATTACHED_KEY``.
         steps (int): Tool rounds whose calls were answered; a round withdrawn for want of room
             is not counted.
         actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
-            per call its tool answered, in order.
+            per call its tool answered, in order; a scoped turn's is its ``seed`` alone.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
             limit, a failed round, a call that could not be prepared, a failed search or missing
             search slot, or an answer cut at the length limit; ``None`` when there was none.
-        images_attached (int): Pictures sent to the model with the evidence.
+        images_attached (int): Pictures the model was shown: those in the transcript when the
+            turn ended, none once a refusal took them back.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.
     """

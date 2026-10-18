@@ -135,11 +135,11 @@ class TurnImages:
             return None
         shown: list[tuple[int, str, str]] = []
         for number, scored in new:
-            thumbnail = stored.get(scored.node.node_id)
-            if thumbnail is None or _picture(scored) in seen:
+            picture, thumbnail = _picture(scored), stored.get(scored.node.node_id)
+            if thumbnail is None or picture in seen:
                 continue
-            seen.add(_picture(scored))
-            self._shown[number] = _picture(scored)
+            seen.add(picture)
+            self._shown[number] = picture
             shown.append((number, *thumbnail))
             if len(shown) == free:
                 break
