@@ -313,7 +313,7 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
   - `note`: the text the round wrote before its calls, cut to 500 characters,
     with `found` 0. It arrives after the `token` frames it withdraws: discard
     the answer text so far, and treat later tokens as a fresh answer. The first
-    round's text never streams, so its note withdraws nothing;
+    round's first try never streams, so its note withdraws nothing;
   - `seed`: a scoped turn's pinned passages, with `step` 0 and `found` their
     count.
 

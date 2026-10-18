@@ -5,17 +5,17 @@ not from llama-index's streaming merge. That merge reads only the first tool-cal
 of each chunk and joins fragments by ``index`` alone, so a chunk carrying two whole calls
 (Ollama) loses one, and a call sent without ``index`` merges into the call before it.
 
-A round's text stays provisional while it may still turn out to be a preface to tool
-calls: it is held until ``HOLD_CHARS`` visible characters have arrived, and text held
-when a tool call starts is never released. A caller may hold a round whole instead: nothing
-is released, and the caller sends its text from :class:`RoundDone` or drops it unseen. Such a
-round says :class:`Begun` at its first chunk, so a reply that breaks off is told from a request
-refused as sent.
-Reasoning never counts and is never released:
-think blocks in the content are read out by :class:`~docint.utils.llm_sanitize.ReasoningStripper`,
-and a reasoning field the endpoint sends apart from the content reaches llama-index's
-``additional_kwargs["thinking_delta"]``, never ``ChatResponse.delta``. Both are reported on
-:class:`RoundDone`.
+A round's text stays provisional while it may still turn out to be a preface to tool calls:
+it is held until ``HOLD_CHARS`` visible characters have arrived, and text held when a tool
+call starts is never released. A caller may hold a round whole instead: nothing is released,
+and the caller sends its text from :class:`RoundDone` or drops it unseen. Such a round says
+:class:`Begun` at its first chunk, so a reply that breaks off is told from a request refused
+as sent.
+
+Reasoning never counts and is never released: think blocks in the content are read out by
+:class:`~docint.utils.llm_sanitize.ReasoningStripper`, and a reasoning field the endpoint
+sends apart from the content reaches llama-index's ``additional_kwargs["thinking_delta"]``,
+never ``ChatResponse.delta``. Both are reported on :class:`RoundDone`.
 """
 
 from __future__ import annotations

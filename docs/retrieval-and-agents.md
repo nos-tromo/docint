@@ -527,8 +527,10 @@ Every chat turn on `/query` and `/stream_query`, session or stateless, is
 answered by an agent loop when the deployment can run one
 (`docint/agents/turn/`). The model reads the conversation and the message,
 calls tools to search the collection, reads every reply, and goes again until
-it answers. Its last reply, the one that calls no tool, is the answer, streamed
-as it is written. The plain path described above answers instead when agent
+it answers. Its last reply, the one that calls no tool, is the answer. A later
+round's answer streams as it is written. The first round's goes out once it is
+complete, and is asked again first if it looked nothing up (see
+[The loop](#the-loop)). The plain path described above answers instead when agent
 turns are off or cannot run, and a turn falls back to it as long as nothing has
 been shown (see [Fallback to the plain path](#fallback-to-the-plain-path)). The
 legacy `/agent/chat*` endpoints keep the orchestrator's plain path.
