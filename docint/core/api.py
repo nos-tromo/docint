@@ -1087,7 +1087,7 @@ def _turn_validation(
 
 
 def _sse_agent_frame(progress: AgentProgress) -> str:
-    """Render one step of an assessment turn as an SSE frame.
+    """Render one step of an agent turn, a note included, as an SSE frame.
 
     Args:
         progress (AgentProgress): The step.
@@ -2623,8 +2623,9 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     retrieval_target=payload.retrieval_target,
                     agent=agent,
                 )
+            # Within the request's reasoning scope, so a probe asks the agent client the turn used.
+            _confirm_tools_rejection(data)
 
-        _confirm_tools_rejection(data)
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
         graph_debug = (

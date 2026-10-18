@@ -6266,6 +6266,66 @@ def test_the_probe_carries_none_of_the_turns_content(
     assert api_module._agent_turn_allowed("all") is False
 
 
+@pytest.mark.parametrize("path", ["/stream_query", "/query"])
+def test_the_probe_asks_the_model_client_the_turn_ran_on(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """The probe runs within the request's reasoning toggle, so it asks the agent client the turn used.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    bound: list[bool | None] = [None]
+    asked_with: list[bool | None] = []
+    probe = streaming_tool_llm([bad_request(TOOLS_REFUSED)])
+
+    @contextlib.contextmanager
+    def _reasoning_scope(enabled: bool | None) -> Iterator[None]:
+        """Bind the request's toggle while the block runs.
+
+        Args:
+            enabled (bool | None): The request's toggle.
+
+        Yields:
+            None: Control, with the toggle bound.
+        """
+        bound.append(enabled)
+        try:
+            yield
+        finally:
+            bound.pop()
+
+    def _agent_model(_self: Any) -> Any:
+        """Hand out the probe's model, recording the toggle bound when it is asked for.
+
+        Args:
+            _self (Any): The RAG double.
+
+        Returns:
+            Any: The probe's model double.
+        """
+        asked_with.append(bound[-1])
+        return probe
+
+    monkeypatch.setattr(rag, "reasoning_scope", _reasoning_scope)
+    monkeypatch.setattr(DummyRAG, "agent_text_model", property(_agent_model), raising=False)
+    monkeypatch.setattr(rag, "stream_chat", lambda question, **kwargs: iter([AGENT_ANSWER, _fallback_final()]))
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: _fallback_final())
+    request = {"question": "Wann beginnt die Musik?", "reasoning": True}
+
+    if path == "/query":
+        assert client.post(path, json=request).status_code == 200
+    else:
+        _stream_frames(client, **request)
+
+    assert asked_with == [True]
+    assert api_module._agent_turn_allowed("all") is False
+
+
 def test_a_scoped_turns_refusal_caches_nothing(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, loguru_caplog: LogCaptureFixture
 ) -> None:

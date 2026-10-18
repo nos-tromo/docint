@@ -94,9 +94,13 @@ def test_the_probe_asks_with_nothing_of_any_turn() -> None:
 
 
 def test_the_probe_reads_only_the_reply_s_first_event_and_closes_it() -> None:
-    """Acceptance is the reply beginning: the probe stops reading there and closes it."""
+    """Acceptance is the reply beginning: the probe stops reading there and closes it.
+
+    The reply stays referenced here, so only the probe's own close, not garbage collection, can end it.
+    """
     read: list[str] = []
     closed: list[bool] = []
+    kept: list[Iterator[Any]] = []
 
     def _reply(messages: Any, **kwargs: Any) -> Iterator[Any]:
         """Stream two pieces, recording each one read and the close.
@@ -115,11 +119,25 @@ def test_the_probe_reads_only_the_reply_s_first_event_and_closes_it() -> None:
         finally:
             closed.append(True)
 
+    def _kept_reply(messages: Any, **kwargs: Any) -> Iterator[Any]:
+        """Start the reply and keep a reference to it.
+
+        Args:
+            messages (Any): The probe's messages.
+            **kwargs (Any): The call's options.
+
+        Returns:
+            Iterator[Any]: The reply.
+        """
+        reply = _reply(messages, **kwargs)
+        kept.append(reply)
+        return reply
+
     llm = MagicMock()
-    llm.stream_chat.side_effect = _reply
+    llm.stream_chat.side_effect = _kept_reply
 
     assert probe_tools(llm) == "accepted"
-    assert (read, closed) == (["po"], [True])
+    assert (read, closed, len(kept)) == (["po"], [True], 1)
 
 
 @pytest.mark.parametrize(
