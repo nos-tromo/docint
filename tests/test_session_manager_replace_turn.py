@@ -101,6 +101,7 @@ def _turns(sm: SessionManager, session_id: str) -> list[dict[str, Any]]:
                 "user_text": t.user_text,
                 "rewritten_query": t.rewritten_query,
                 "model_response": t.model_response,
+                "retrieval_target": t.retrieval_target,
                 "citation_node_ids": [c.node_id for c in t.citations],
             }
             for t in rows
@@ -286,3 +287,33 @@ def test_chat_replacing_a_turn_skips_the_rolling_summary(
 
     assert calls == ["sess-summary"]
     assert len(_turns(session_manager, "sess-summary")) == 1
+
+
+def test_a_retry_keeps_the_target_on_the_replaced_turn(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The replaced row names the target of the attempt whose answer it holds.
+
+    A retry normally runs under the same target as the attempt it replaces,
+    which would hide a replace branch that forgot to write it. The first
+    attempt here ran under a different one, so the assertion can only hold if
+    the row was rewritten rather than left as the discarded attempt had it.
+
+    Args:
+        session_manager: The session manager fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    _wire_chat_engine(session_manager)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args, **kwargs: None)
+
+    first = session_manager.chat("hello", session_id="sess-retry-target", retrieval_target="all")
+    session_manager.chat(
+        "reformulated",
+        session_id="sess-retry-target",
+        replace_turn_idx=first["turn_idx"],
+        retrieval_target="documents",
+    )
+
+    turns = _turns(session_manager, "sess-retry-target")
+    assert len(turns) == 1
+    assert turns[0]["retrieval_target"] == "documents"

@@ -133,6 +133,8 @@ export const de: Strings = {
   'chat.retrieval_target.all': 'Allem',
   'chat.retrieval_target.documents': 'Dokumenten',
   'chat.retrieval_target.visual': 'Bildern',
+  'chat.retrieval_target_used.documents': 'Nur aus Dokumenten beantwortet',
+  'chat.retrieval_target_used.visual': 'Nur aus Bildern beantwortet',
   'chat.visual_source_type': 'Art des Bildes',
   'chat.visual_source.any': 'Beliebig',
   'chat.visual_source.video': 'Video-Keyframes',

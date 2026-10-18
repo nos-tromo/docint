@@ -1,6 +1,8 @@
+import type { ReactElement } from 'react'
 import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { DocumentsIcon, ImageIcon } from '@infra/ui'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatTurn, type ChatTurnData } from './ChatTurn'
@@ -11,6 +13,14 @@ import { useUiStore } from '@/stores/ui'
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
 })
+
+/** The markup inside an icon's `<svg>`, so two drawings can be compared. */
+function innerMarkup(icon: ReactElement): string | undefined {
+  const { container, unmount } = render(icon)
+  const markup = container.querySelector('svg')?.innerHTML
+  unmount()
+  return markup
+}
 
 function renderTurn(
   turn: ChatTurnData,
@@ -169,6 +179,67 @@ describe('ChatTurn', () => {
     renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta })
 
     expect(screen.queryByTestId('visual-pixels-missing')).not.toBeInTheDocument()
+  })
+
+  it('shows the target chip on documents and visual turns only', () => {
+    // A turn narrowed to one kind of evidence must say so: it is the only way
+    // to tell a text-only answer from one that simply found no pictures. The
+    // default says nothing, and a turn with no recorded target says nothing
+    // either, rather than being read as `all`.
+    const cases = [
+      ['documents', 'Answered from documents only', DocumentsIcon],
+      ['visual', 'Answered from images only', ImageIcon],
+      ['all', null, null],
+      [undefined, null, null]
+    ] as const
+
+    for (const [target, text, Icon] of cases) {
+      const meta = { session_id: 's', sources: [], retrieval_target: target } as unknown as ChatFinalEvent
+      const { unmount } = renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta })
+
+      if (text && Icon) {
+        const chip = screen.getByTestId('retrieval-target-used')
+        expect(chip).toHaveTextContent(text)
+        // The drawing the picker shows for the same target.
+        expect(chip.querySelector('svg')?.innerHTML).toBe(innerMarkup(<Icon />))
+        // A narrow chat column truncates the text rather than wrapping the
+        // chip onto two lines, so the tooltip carries the whole sentence.
+        expect(chip).toHaveAttribute('title', text)
+        expect(chip.querySelector('.truncate')).toHaveTextContent(text)
+      } else {
+        expect(screen.queryByTestId('retrieval-target-used')).not.toBeInTheDocument()
+      }
+      unmount()
+    }
+  })
+
+  it('sits in the assistant header row, between its label and the answer', () => {
+    const meta = { session_id: 's', sources: [], retrieval_target: 'documents' } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta })
+
+    const label = screen.getByText('Assistant')
+    const chip = screen.getByTestId('retrieval-target-used')
+    const answer = screen.getByText('Alice.')
+    expect(label.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(chip.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('no target chip on a scoped turn', () => {
+    // The final frame still reports the requested target, but a pinned
+    // selection outranks it: the answer came from the hand-picked chunks, and
+    // "documents only" would describe a restriction that never applied.
+    const meta = {
+      session_id: 's',
+      sources: [],
+      retrieval_mode: 'scoped',
+      scoped_chunk_count: 2,
+      retrieval_target: 'documents'
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta, scopeRequested: 2 })
+
+    expect(screen.queryByTestId('retrieval-target-used')).not.toBeInTheDocument()
   })
 
   it('stays quiet when the sources were re-ranked, or no reranker was in the loop', () => {

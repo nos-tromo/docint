@@ -1,5 +1,5 @@
 import { useId, useState } from 'react'
-import { DisclosureButton, InfoIcon, SearchIcon, WarningIcon } from '@infra/ui'
+import { DisclosureButton, DocumentsIcon, ImageIcon, InfoIcon, SearchIcon, WarningIcon } from '@infra/ui'
 import type { AgentReason, AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
 import type { Strings } from '@/i18n'
 import { SourcePills } from './SourcePills'
@@ -9,6 +9,7 @@ import { GraphDebugPanel } from './GraphDebugPanel'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { MarkdownProse } from '@/components/common/MarkdownProse'
 import { chatAnswerSnapshot } from '@/lib/reportSnapshots'
+import { retrievalTargetUsed, type NamedTarget } from '@/lib/retrievalTargetUsed'
 import { useT } from '@/i18n/LanguageContext'
 
 export interface ChatTurnData {
@@ -83,6 +84,28 @@ function scopeWasDropped(turn: ChatTurnData): boolean {
 function visualPixelsMissing(turn: ChatTurnData): boolean {
   if (!turn.done || !turn.meta) return false
   return turn.meta.retrieval_target === 'visual' && turn.meta.visual?.images_attached === 0
+}
+
+const TARGET_USED_ICON: Record<NamedTarget, typeof DocumentsIcon> = {
+  documents: DocumentsIcon,
+  visual: ImageIcon
+}
+
+/** What a narrowed turn answered from, as a quiet chip beside the "Assistant" label. */
+function TargetUsedChip({ target }: { target: NamedTarget }) {
+  const t = useT()
+  const Icon = TARGET_USED_ICON[target]
+  const label = t(`chat.retrieval_target_used.${target}`)
+  return (
+    <span
+      data-testid="retrieval-target-used"
+      title={label}
+      className="inline-flex min-w-0 max-w-full items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]"
+    >
+      <Icon className="h-3 w-3 shrink-0" />
+      <span className="truncate">{label}</span>
+    </span>
+  )
 }
 
 function dedupeSources(sources: Source[]): Source[] {
@@ -249,6 +272,7 @@ export function ChatTurn({
   const reasonKey =
     trail?.reason && Object.hasOwn(REASON_COPY, trail.reason) ? REASON_COPY[trail.reason] : undefined
   const answerKey = trail && Object.hasOwn(ANSWER_COPY, trail.answer) ? ANSWER_COPY[trail.answer] : undefined
+  const targetUsed = retrievalTargetUsed(turn.meta)
   return (
     <article className="space-y-3">
       <div className="rounded-md bg-muted px-4 py-2 self-end max-w-2xl ml-auto">
@@ -257,7 +281,10 @@ export function ChatTurn({
       </div>
       <div className="rounded-md bg-muted border border-border px-4 py-3">
         <div className="flex items-center justify-between gap-2 mb-1">
-          <div className="text-xs text-muted-foreground">{t('chat.assistant')}</div>
+          <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+            <span className="shrink-0">{t('chat.assistant')}</span>
+            {targetUsed && <TargetUsedChip target={targetUsed} />}
+          </div>
           {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
         </div>
         {turn.assistant ? (

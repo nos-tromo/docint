@@ -259,8 +259,9 @@ write dense-only points into a hybrid collection and corrupt it.
 
 Loaded by `load_rerank_client_env()`. Reranking is always a remote call:
 `VLLMRerankPostprocessor` POSTs to `{RERANK_API_BASE}/rerank` in the Jina shape
-on every provider. Transport failure degrades to the original retrieval order
-rather than failing the query — there is no local fallback model.
+on every provider. Transport failure degrades to the retrieval order (with the
+image lane running, text and image hits fused by rank) rather than failing the
+query — there is no local fallback model.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -454,7 +455,10 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 | `IMAGE_FAIL_ON_EMBED_ERROR` | `false` | Treat embedding failures as fatal. |
 | `IMAGE_FAIL_ON_TAG_ERROR` | `false` | Treat tagging failures as fatal. |
 | `IMAGE_RETRIEVE_TOP_K` | `5` | CLIP candidates the image lane contributes to each query's ranking. |
-| `IMAGE_RERANK_MIN_SCORE` | `0.05` | Minimum reranker relevance score for a retrieved image to surface as a source. |
+| `IMAGE_RERANK_MIN_SCORE` | `0.05` | Minimum reranker relevance score for a retrieved image to surface as a source. A sub-floor image that would land inside the top-n still gets the re-score below before it is dropped. |
+| `IMAGE_RESCORE_ENABLED` | `true` | Give such a sub-floor image one second look: its caption is reranked against a one-line list of the visible cues the query needs, with their alternatives rather than a guessed answer, which costs one chat call and one rerank call on a turn that has such an image. `false` drops sub-floor images unasked. |
+| `IMAGE_RESCORE_MIN_SCORE` | `0.02` | Description score that keeps a re-scored image, at the position and with the score it already had. |
+| `IMAGE_RESCORE_TIMEOUT` | `10` | Seconds the description call may take, in one attempt with no retries: it runs before the answer's first token. A value that is not a positive number keeps the default and logs a warning. |
 | `IMAGE_TAGGING_MAX_IMAGE_DIM` | `1024` | Max dimension for images sent to the vision tagging endpoint. |
 | `IMAGE_OCR_ENABLED` | on when `OCR_MODEL` is set | Read the text *inside* an image (a screenshot, a photographed letter, a slide) and store it as `ocr_text`. |
 | `KEYFRAME_OCR_ENABLED` | `false` | Read video keyframes too. Off by default: a clip contributes many frames and only slides tend to carry text. |
@@ -506,11 +510,27 @@ collection, to have them read).
 The floor is applied to the **reranker** score, not to CLIP similarity, because raw
 CLIP cosine is not comparable across queries — measured on a live collection, an
 unrelated query and a genuinely matching one both land in a ~0.20–0.30 band, so no
-absolute CLIP threshold separates them. Reranker scores do separate: "a relevant
-image exists" measured 0.12–0.90 while "nothing relevant exists" measured 0.0037 and
-below. Raise the floor to make the image lane stricter; set it to `0` to surface every
-CLIP candidate (the pre-gate behavior). If the rerank endpoint is unreachable the lane
-degrades to ungated CLIP matches rather than going silent.
+absolute CLIP threshold separates them. Reranker scores separate them for a query the
+caption answers outright: "a relevant image exists" measured 0.12–0.90 while "nothing
+relevant exists" measured 0.0037 and below. They do not for a question *about* the
+imagery, because a reranker asks whether a caption answers the question: there a
+relevant image measured 0.0044–0.0065, under the 0.05 floor, which on its own drops it.
+Raise the floor to make the image lane stricter; set it to `0` to surface every CLIP
+candidate (the pre-gate behavior). If the rerank endpoint is unreachable the floor
+stands down: images are neither gated nor re-scored, and they keep their place beside
+the text hits (retrieval order, cut to the top-n) rather than the lane going silent.
+
+The re-score targets those question-phrased misses. A sub-floor image that
+would land inside the top-n is reranked once more, this time against a description
+of the query that the chat model (`TEXT_MODEL`) writes in `RESPONSE_LANGUAGE`: one
+line listing the visible cues the question needs, with their alternatives rather than
+a guessed answer. An image reaching `IMAGE_RESCORE_MIN_SCORE` is kept at its position
+with its score. Any failure — no description, a failed rerank, a timeout — drops the
+images as the floor alone would, and the `visual` target, which applies no floor, never
+re-scores. The default `0.02` comes from a local measurement in which kept matches scored
+0.039–0.86 and the strongest non-match 0.0072; some true matches score lower and are
+not rescued. The measurements and the mechanics are in
+[retrieval-and-agents.md](retrieval-and-agents.md#image-retrieval-lane).
 
 Because the deployed CLIP checkpoint (`openai/clip-vit-base-patch32`) has an
 English-only text tower, queries are translated to English before embedding whenever

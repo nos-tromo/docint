@@ -11,6 +11,7 @@ import {
   referenceMetadataItems,
   referenceMetadataValue
 } from './referenceMetadata'
+import { retrievalTargetUsed } from './retrievalTargetUsed'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
@@ -133,8 +134,11 @@ export function chatTranscriptToText(turns: ChatTurnData[], t: Translate = defau
   const out: string[] = []
   for (const turn of turns) {
     out.push(`${t('export.user_prefix')}${turn.user}`, '')
-    out.push(`${t('export.assistant_prefix')}${turn.assistant}`, '')
+    out.push(`${t('export.assistant_prefix')}${turn.assistant}`)
     const meta: ChatFinalEvent | null = turn.meta
+    const targetUsed = retrievalTargetUsed(meta)
+    if (targetUsed) out.push(t(`chat.retrieval_target_used.${targetUsed}`))
+    out.push('')
     if (meta) {
       if (meta.validation_checked !== undefined || meta.validation_reason) {
         const parts = [

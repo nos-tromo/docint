@@ -259,3 +259,52 @@ def test_assessment_answer_prompt_carries_the_protocol_tokens(code: str) -> None
 
     assert "[[ASSESSMENT]]" in text
     assert "citation_index" in text
+
+
+def test_image_rescore_description_prompt_exists_in_both_locales_with_matching_placeholders() -> None:
+    """The image re-score prompt ships in every locale, alike in placeholders, each in its own language.
+
+    The description is reranked against stored captions, which are written in
+    the response language, so each locale's prompt must ask for its own.
+    """
+    import re
+
+    texts = {
+        locale: Path(f"docint/utils/prompts/{locale}/image_rescore_description.txt").read_text(encoding="utf-8")
+        for locale in ("en", "de")
+    }
+
+    assert all(text.strip() for text in texts.values())
+    assert set(re.findall(r"\{(\w+)\}", texts["de"])) == set(re.findall(r"\{(\w+)\}", texts["en"]))
+    assert "English" in texts["en"]
+    assert "Deutsch" in texts["de"]
+
+
+@pytest.mark.parametrize(
+    ("locale", "required", "framing"),
+    [
+        ("en", ("alternatives", "never decide the answer"), "caption"),
+        ("de", ("Möglichkeiten", "entscheide nie die Antwort"), "Bildunterschrift"),
+    ],
+    ids=["en", "de"],
+)
+def test_image_rescore_description_prompt_asks_for_cues_with_alternatives_not_a_caption(
+    locale: str, required: tuple[str, ...], framing: str
+) -> None:
+    """The prompt has the model name the cues a question needs, never a caption that answers it.
+
+    Asked for the caption of a picture that would answer the query, the chat
+    model guessed a scene (a sunny sky for a weather question) that contradicted
+    the right image, which then scored under the re-score floor. Naming the cues
+    with their usual alternatives leaves the answer undecided.
+
+    Args:
+        locale: The prompt's locale.
+        required: Phrases that keep the answer undecided.
+        framing: The word of the caption framing that invited the guess.
+    """
+    text = Path(f"docint/utils/prompts/{locale}/image_rescore_description.txt").read_text(encoding="utf-8")
+
+    for phrase in required:
+        assert phrase in text, f"{locale}/image_rescore_description.txt no longer says {phrase!r}"
+    assert framing.lower() not in text.lower(), f"{locale}/image_rescore_description.txt asks for a {framing} again"

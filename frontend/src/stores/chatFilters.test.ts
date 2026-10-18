@@ -106,11 +106,33 @@ describe('useChatFiltersStore', () => {
     expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
   })
 
-  it('persists the retrieval target', () => {
+  it('does not persist the retrieval target', () => {
     useChatFiltersStore.getState().setRetrievalTarget('visual')
 
     const persisted = JSON.parse(localStorage.getItem('docint-chat-filters') ?? '{}')
-    expect(persisted.state.retrievalTarget).toBe('visual')
+    expect(persisted.state).toBeDefined()
+    expect(persisted.state.retrievalTarget).toBeUndefined()
+  })
+
+  it('a stored v2 target hydrates as all', () => {
+    localStorage.setItem(
+      'docint-chat-filters',
+      JSON.stringify({
+        state: {
+          retrievalMode: 'stateless',
+          retrievalTarget: 'documents',
+          visualSourceType: 'video'
+        },
+        version: 2
+      })
+    )
+
+    useChatFiltersStore.persist.rehydrate()
+
+    expect(useChatFiltersStore.getState().retrievalTarget).toBe('all')
+    // Only the target is dropped; the rest of a stored state still hydrates.
+    expect(useChatFiltersStore.getState().retrievalMode).toBe('stateless')
+    expect(useChatFiltersStore.getState().visualSourceType).toBe('video')
   })
 
   it('keeps the visual presets out of a document turn, where they match nothing', () => {

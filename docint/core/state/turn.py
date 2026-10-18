@@ -39,6 +39,9 @@ class Turn(Base):
     # Assessment provenance as JSON: what the research did and where the
     # source-backed part ends. Present only on assessment turns.
     agent_trail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Evidence target the turn answered under (``all``/``documents``/``visual``).
+    # NULL: a scoped turn, where the scope outranks it, or one from before this column.
+    retrieval_target: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Callable, like every other model here: a bare ``datetime.now(UTC)`` is
     # evaluated once at import, stamping every turn the process ever writes
     # with the moment it booted.

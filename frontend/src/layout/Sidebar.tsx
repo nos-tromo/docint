@@ -7,6 +7,7 @@ import { useCollections, useDeleteCollection, useSelectCollection } from '@/hook
 import { useCollectionsRetention } from '@/hooks/useRetention'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
+import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useIngestJobsStore, selectHasRunningJob } from '@/stores/ingestJobs'
 import { cn } from '@/lib/cn'
@@ -54,6 +55,7 @@ export function Sidebar() {
   const setSelected = useUiStore((s) => s.setSelectedCollection)
   const currentSessionId = useUiStore((s) => s.currentSessionId)
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
+  const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
   const sessions = sessionsData?.sessions ?? []
   const entries = collections ? buildCollectionEntries(collections) : []
   const selectedEntry = entries.find((e) => entryMatches(e, selected, selectedOwner)) ?? null
@@ -136,6 +138,9 @@ export function Sidebar() {
 
   const onNewChat = () => {
     setCurrentSessionId(null)
+    // A blank or stateless chat has no session to lose, so the Chat route's
+    // reset never fires there; the next chat starts at everything regardless.
+    setRetrievalTarget('all')
     navigate('/chat')
   }
 

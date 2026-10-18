@@ -171,6 +171,27 @@ def _hermetic_preprocess() -> Iterator[None]:
     mp.undo()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_image_description() -> Iterator[None]:
+    """Keep the image floor's description re-score from reaching a chat endpoint.
+
+    The ``all`` chain gives a sub-floor image inside the cut a second look,
+    reranked against a caption-style description of the query — a chat call.
+    With no description the floor drops such images exactly as it did before
+    the re-score existed. Tests of the re-score patch the helper themselves;
+    ``tests/test_image_description.py`` overrides this fixture by name to drive
+    the real one. A private ``MonkeyPatch`` for the reason
+    :func:`_hermetic_hybrid_env` gives.
+
+    Yields:
+        None.
+    """
+    mp = pytest.MonkeyPatch()
+    mp.setattr("docint.utils.image_description.describe_for_image_match", lambda query: None)
+    yield
+    mp.undo()
+
+
 @pytest.fixture
 def recording_pool() -> Any:
     """A preprocessing pool double that runs every task inline and records the keys.

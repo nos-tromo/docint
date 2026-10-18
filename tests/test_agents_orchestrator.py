@@ -17,7 +17,9 @@ from docint.agents import (
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
     Turn,
+    is_weak_answer,
 )
+from docint.agents.orchestrator import WEAK_ANSWER_MIN_CHARS
 from docint.agents.types import ResponseAgent, RetrievalAgent
 from docint.agents.types import Turn as TurnType
 
@@ -542,6 +544,39 @@ def test_orchestrator_does_not_retry_a_strong_mismatched_answer(turn: Turn) -> N
     assert result.retrieval.retried is None
 
 
+_CITED_CAVEAT_EN = (
+    "The ferry left the north quay at nine [1] and reached the island before noon [2]. "
+    "The log does not mention the captain's name."
+)
+_UNCITED_CAVEAT_DE = (
+    "Wie zuvor beschrieben, fuhr die Fähre von Mai bis September täglich. "
+    "Sie beförderte auf jeder Überfahrt Passagiere und Fracht. "
+    "Zum Fahrpreis finden sich keine Angaben."
+)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(_CITED_CAVEAT_EN, id="en-cited"),
+        pytest.param(_UNCITED_CAVEAT_DE, id="de-uncited"),
+    ],
+)
+def test_orchestrator_keeps_an_answer_that_flags_a_missing_detail(turn: Turn, answer: str) -> None:
+    """A substantive answer naming one missing detail is neither retried nor replaced."""
+    retriever = _CountingWeakRetriever(answers=[answer])
+    reformulator = _StubReformulator()
+
+    result = _retry_orchestrator(retriever, reformulator).handle_turn(turn)
+
+    assert len(retriever.requests) == 1
+    assert reformulator.calls == []
+    assert result.clarification is None
+    assert result.retrieval is not None
+    assert result.retrieval.answer == answer
+    assert result.retrieval.retried is None
+
+
 def test_orchestrator_without_a_reformulator_never_retries(turn: Turn) -> None:
     """The retry is opt-in: no reformulator wired, no second retrieval."""
     retriever = _CountingWeakRetriever()
@@ -573,3 +608,176 @@ def test_orchestrator_forwards_history_into_retrieval_request(turn: Turn) -> Non
 
     assert retriever.called_with is not None
     assert retriever.called_with.history == history
+
+
+# ---------------------------------------------------------------------------
+# Predicate: is_weak_answer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(
+            "Aus den bereitgestellten Notizen geht nicht hervor, welches Schiff zuerst anlegte.",
+            id="de-geht-nicht-hervor",
+        ),
+        pytest.param(
+            "Zu der Frage nach dem Fahrplan finden sich in den Unterlagen keine Angaben dazu.",
+            id="de-keine-angaben",
+        ),
+        pytest.param(
+            "Welcher Kapitän das Boot am Morgen führte, ist dem Protokoll nicht zu entnehmen.",
+            id="de-nicht-zu-entnehmen",
+        ),
+        pytest.param(
+            "Die Zahl der Passagiere auf der Fähre wird im Bericht des Hafenamts nicht erwähnt.",
+            id="de-nicht-erwaehnt",
+        ),
+        pytest.param(
+            "The harbour survey is detailed, but the excerpt does not mention the channel depth.",
+            id="en-does-not-mention",
+        ),
+        pytest.param(
+            "The two reports describe the storm, yet the wind speed is not mentioned in either.",
+            id="en-not-mentioned",
+        ),
+        pytest.param(
+            "Although the logbook lists every departure, it does not say which crew was aboard.",
+            id="en-does-not-say",
+        ),
+        pytest.param(
+            "The excerpts cover the festival week, but there are no details about the catering budget.",
+            id="en-no-details",
+        ),
+        pytest.param(
+            "From the two invented accounts, the cause of the delay cannot be determined with certainty.",
+            id="en-cannot-be-determined",
+        ),
+    ],
+)
+def test_is_weak_answer_flags_refusal_phrasings(answer: str) -> None:
+    """A refusal naming a missing detail is weak, in German or English."""
+    assert len(answer.strip()) > WEAK_ANSWER_MIN_CHARS
+    assert is_weak_answer(answer) is True
+
+
+def test_is_weak_answer_keeps_a_substantive_answer() -> None:
+    """A grounded answer that matches no refusal phrase is not weak."""
+    answer = "Laut dem Bericht öffnete das Hafenbecken im Frühjahr und bediente zunächst zwei Fähren am Tag."
+    assert is_weak_answer(answer) is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(_CITED_CAVEAT_EN, id="en-cited-caveat-sentence"),
+        pytest.param(
+            "Die Fähre legte um neun Uhr am Nordkai ab [1] und erreichte die Insel vor Mittag [2]. "
+            "Der Name des Kapitäns wird im Protokoll nicht erwähnt.",
+            id="de-cited-caveat-sentence",
+        ),
+        pytest.param(
+            "The ferry left the north quay at nine and reached the island before noon [1], "
+            "although the log does not mention the captain's name.",
+            id="en-cited-caveat-clause",
+        ),
+        pytest.param(
+            "Die Fähre legte um neun Uhr am Nordkai ab und erreichte die Insel vor Mittag [1]; "
+            "der Name des Kapitäns ist dem Protokoll nicht zu entnehmen.",
+            id="de-cited-caveat-clause",
+        ),
+        pytest.param(
+            "No, the harbour report does not mention a strike; it covers only the ferry wages [1].",
+            id="en-cited-negative-answer",
+        ),
+        pytest.param(
+            "As noted before, the ferry ran daily from May to September. "
+            "It carried passengers and freight on every crossing. The fare is not mentioned.",
+            id="en-uncited-elaboration",
+        ),
+        pytest.param(_UNCITED_CAVEAT_DE, id="de-uncited-elaboration"),
+        pytest.param("Both ferries ran daily [1, 2]. The fare is not mentioned.", id="citation-list"),
+        pytest.param("Both ferries ran daily [1][2]. The fare is not mentioned.", id="citation-adjacent"),
+        pytest.param("Both ferries ran daily [1-3]. The fare is not mentioned.", id="citation-range"),
+        pytest.param("Both ferries ran daily [1, S. 4]. The fare is not mentioned.", id="citation-with-page"),
+        pytest.param(
+            "Das Protokoll hält fest: „Die Fähre legte um acht Uhr am Nordkai an.“ "
+            "Wer sie steuerte, wird nicht erwähnt.",
+            id="de-quoted-sentence",
+        ),
+        pytest.param(
+            'The log records: "The ferry docked at the north quay at eight." Who steered it is not mentioned.',
+            id="en-quoted-sentence",
+        ),
+        pytest.param(
+            "The log records: **The ferry docked at the north quay at eight.** Who steered it is not mentioned.",
+            id="en-bold-sentence",
+        ),
+        pytest.param(
+            "| Fähre | Kapitän |\n|---|---|\n"
+            "| Möwe, ab Nordkai 08:00 | nicht erwähnt |\n"
+            "| Kormoran, ab Südkai 09:30 | nicht erwähnt |",
+            id="de-table-with-missing-cells",
+        ),
+        pytest.param(
+            "Die im Bericht nicht erwähnten Fähren fuhren ebenfalls täglich zwischen beiden Häfen.",
+            id="de-inflected-adjective",
+        ),
+        pytest.param(
+            "There is no information about the captain, but the log records three departures [1][2] "
+            "and two arrivals [3].",
+            id="en-no-information-caveat",
+        ),
+    ],
+)
+def test_is_weak_answer_keeps_answers_with_missing_detail_caveats(answer: str) -> None:
+    """An answer that flags a missing detail beside cited or substantive content is not weak."""
+    assert is_weak_answer(answer) is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param("The notes cover only the harbour. The ferry schedule is not mentioned.", id="en-lead-in"),
+        pytest.param("Die Notizen behandeln nur den Hafen. Zum Fahrplan gibt es keine Angaben.", id="de-lead-in"),
+        pytest.param(
+            "### Antwort\nAus den Notizen geht nicht hervor, welches Schiff zuerst anlegte.",
+            id="de-heading",
+        ),
+        pytest.param(
+            "Aus den Notizen geht nicht hervor, welches Schiff am 3. Mai zuerst anlegte.",
+            id="de-date-abbreviation",
+        ),
+        pytest.param(
+            "- Abfahrt: nicht erwähnt\n- Kapitän: nicht erwähnt\n- Ziel: nicht erwähnt",
+            id="de-bulleted",
+        ),
+        pytest.param(
+            "There is no information in the provided notes about who captained the ferry.",
+            id="en-no-information",
+        ),
+    ],
+)
+def test_is_weak_answer_flags_bare_refusals(answer: str) -> None:
+    """An uncited answer that is nothing but missing-detail statements is weak."""
+    assert len(answer.strip()) > WEAK_ANSWER_MIN_CHARS
+    assert is_weak_answer(answer) is True
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(
+            "The ferry docked at the north quay at eight [1]. Evidence is insufficient to say who steered it.",
+            id="en",
+        ),
+        pytest.param(
+            "Die Fähre legte um acht Uhr am Nordkai an [1]. Die Belege sind unzureichend, um den Kapitän zu nennen.",
+            id="de",
+        ),
+    ],
+)
+def test_is_weak_answer_flags_evidence_phrases_anywhere(answer: str) -> None:
+    """A statement that the evidence is insufficient marks even a cited answer weak."""
+    assert is_weak_answer(answer) is True

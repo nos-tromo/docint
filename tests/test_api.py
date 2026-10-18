@@ -1741,6 +1741,29 @@ def test_stream_query_does_not_retry_a_strong_mismatched_answer(
     assert "retried" not in frames[-1]
 
 
+def test_stream_query_does_not_retry_an_answer_that_flags_a_missing_detail(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A cited answer naming one missing detail is delivered, not re-streamed.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    answer = (
+        "The ferry left the north quay at nine [1] and reached the island before noon [2]. "
+        "The log does not mention the captain's name."
+    )
+    calls = _arm_corrective_retry(monkeypatch, answers=[answer])
+
+    frames = _sse_frames(_stream_text(client, question="Who captained the ferry?"))
+
+    assert len(calls) == 1
+    assert not any("retry" in frame for frame in frames)
+    assert frames[-1]["response"] == answer
+    assert "retried" not in frames[-1]
+
+
 def test_stream_query_does_not_retry_a_scoped_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """A hand-picked scope runs no retrieval for a new query to change.
 

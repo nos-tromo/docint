@@ -140,6 +140,7 @@ export function Chat() {
   const activeReportId = useReportStore((s) => s.activeReportId)
   const reportDedupeKeys = useReportDedupeKeys(activeReportId)
   const filters = useChatFiltersStore()
+  const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
   const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false })
@@ -212,10 +213,15 @@ export function Chat() {
     abortRef.current?.abort()
     abortRef.current = null
     dispatch({ type: 'reset' })
-  }, [sessionIdParam, currentSessionId])
+    // "Answer from" belongs to one chat: the next one starts from everything.
+    setRetrievalTarget('all')
+  }, [sessionIdParam, currentSessionId, setRetrievalTarget])
 
   const onNewChat = () => {
     setCurrentSessionId(null)
+    // The effect above only sees a session going away; a chat with no turns, or
+    // a stateless one, never had one to lose.
+    setRetrievalTarget('all')
     // Required even when the id lived only in the store: from a pinned
     // `/chat/:sessionId` the param effect would otherwise put it straight back.
     navigate('/chat')
@@ -242,7 +248,8 @@ export function Chat() {
                 retried: m.retried,
                 retry_query: m.retry_query,
                 answer_mode: m.answer_mode,
-                agent: m.agent
+                agent: m.agent,
+                retrieval_target: m.retrieval_target
               } as ChatFinalEvent)
             : null
         })

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from openai.resources.chat.completions import Completions
 
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.openai_cfg import (
@@ -282,6 +284,256 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
     pipeline.call_chat("hello")
 
     assert "reasoning_effort" not in captured
+
+
+class _OptionsClient:
+    """Chat client stand-in logging each ``with_options`` copy and which client served a call."""
+
+    def __init__(self, log: list[tuple[str, dict[str, Any]]], name: str = "shared") -> None:
+        """Share one log across the client and its copies.
+
+        Args:
+            log: Entries ``(event, options)`` in call order.
+            name: Which client this is, as logged when it serves a call.
+        """
+        self.log = log
+        self.name = name
+        self.requests: list[dict[str, Any]] = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def with_options(self, **options: Any) -> _OptionsClient:
+        """Log the options and return a per-call copy.
+
+        Args:
+            **options: The client options for the copy.
+
+        Returns:
+            _OptionsClient: The copy.
+        """
+        self.log.append(("with_options", options))
+        return _OptionsClient(self.log, name="per-call")
+
+    def _create(self, **kwargs: Any) -> Any:
+        """Log which client served the call, keep the request and answer it.
+
+        Args:
+            **kwargs: The completion request.
+
+        Returns:
+            Any: A fake chat completion response.
+        """
+        self.log.append((self.name, {}))
+        self.requests.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+
+
+def _chat_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client: _OptionsClient,
+    *,
+    provider: str = "ollama",
+    thinking_enabled: bool = False,
+) -> OpenAIPipeline:
+    """Build an ``OpenAIPipeline`` whose clients are ``client``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        client: The chat client stand-in.
+        provider: ``INFERENCE_PROVIDER`` to emulate.
+        thinking_enabled: The ``OPENAI_ENABLE_THINKING`` default.
+
+    Returns:
+        OpenAIPipeline: The pipeline.
+    """
+    monkeypatch.setattr(
+        "docint.utils.openai_cfg.load_model_env",
+        lambda: SimpleNamespace(text_model="stub-chat-model", vision_model="stub-vision-model"),
+    )
+    monkeypatch.setattr(
+        "docint.utils.openai_cfg.load_openai_env",
+        lambda: OpenAIConfig(
+            api_base="http://localhost:11434/v1",
+            api_key="sk-test",
+            ctx_window=4096,
+            dimensions=None,
+            max_retries=2,
+            num_output=256,
+            inference_provider=provider,
+            reuse_client=False,
+            seed=42,
+            temperature=0.0,
+            thinking_effort="medium",
+            thinking_enabled=thinking_enabled,
+            timeout=300.0,
+            top_p=0.1,
+        ),
+    )
+    monkeypatch.setattr("docint.utils.openai_cfg.load_path_env", lambda: SimpleNamespace(prompts=tmp_path))
+    monkeypatch.setattr("docint.utils.openai_cfg.OpenAI", lambda **_: client)
+    return OpenAIPipeline()
+
+
+@pytest.mark.parametrize(
+    ("timeout", "max_retries", "options"),
+    [
+        (10.0, 0, {"timeout": 10.0, "max_retries": 0}),
+        (10.0, None, {"timeout": 10.0}),
+        (None, 0, {"max_retries": 0}),
+    ],
+    ids=["both", "timeout-only", "retries-only"],
+)
+def test_call_chat_applies_per_call_options_to_that_call_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    timeout: float | None,
+    max_retries: int | None,
+    options: dict[str, Any],
+) -> None:
+    """A per-call deadline reaches that one request and never the shared client.
+
+    Only the options given are passed on: ``with_options(timeout=None)`` would
+    lift the client's own deadline altogether.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        timeout: The per-call deadline, if any.
+        max_retries: The per-call retry budget, if any.
+        options: The options the per-call copy must be made with.
+    """
+    log: list[tuple[str, dict[str, Any]]] = []
+    pipeline = _chat_pipeline(monkeypatch, tmp_path, _OptionsClient(log))
+
+    assert pipeline.call_chat("hello", timeout=timeout, max_retries=max_retries) == "ok"
+    pipeline.call_chat("hello again")
+
+    assert log == [("with_options", options), ("per-call", {}), ("shared", {})]
+
+
+def test_call_chat_without_options_uses_the_shared_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Callers that pass no options (translation among them) keep the configured client.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+    """
+    log: list[tuple[str, dict[str, Any]]] = []
+    pipeline = _chat_pipeline(monkeypatch, tmp_path, _OptionsClient(log))
+
+    pipeline.call_chat("hello", system_prompt="sys", model="override-model")
+
+    assert log == [("shared", {})]
+
+
+def _chat_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    provider: str,
+    thinking_enabled: bool,
+    **call_options: Any,
+) -> dict[str, Any]:
+    """Make one ``call_chat`` and return the completion request it sent.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: ``INFERENCE_PROVIDER`` to emulate.
+        thinking_enabled: The ``OPENAI_ENABLE_THINKING`` default.
+        **call_options: Keyword options passed to ``call_chat``.
+
+    Returns:
+        dict[str, Any]: The keyword arguments the completion was created with.
+    """
+    client = _OptionsClient([])
+    pipeline = _chat_pipeline(monkeypatch, tmp_path, client, provider=provider, thinking_enabled=thinking_enabled)
+
+    pipeline.call_chat("hello", **call_options)
+
+    return client.requests[0]
+
+
+def test_call_chat_without_reasoning_switches_thinking_off_on_vllm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A call that must not think says so in vLLM's own dialect, whatever the stack defaults to.
+
+    ``reasoning_effort`` is OpenAI's knob; a Qwen3/Gemma-style template on vLLM
+    reads ``chat_template_kwargs.enable_thinking`` instead, so a stack whose
+    ``.env`` defaults thinking on would otherwise think a short call out of its
+    deadline. The switch rides in ``extra_body``, a real parameter of the SDK's
+    ``create`` (the SDK rejects an unknown top-level key before any request).
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+    """
+    request = _chat_request(monkeypatch, tmp_path, provider="vllm", thinking_enabled=True, reasoning=False)
+
+    assert "reasoning_effort" not in request
+    assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert set(request) <= set(inspect.signature(Completions.create).parameters)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+def test_call_chat_without_reasoning_sends_no_template_kwarg_off_vllm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str
+) -> None:
+    """Off vLLM the effort is simply left off; OpenAI proper rejects unknown body fields.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: A provider with no ``enable_thinking`` switch.
+    """
+    request = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=True, reasoning=False)
+
+    assert "reasoning_effort" not in request
+    assert "extra_body" not in request
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "vllm"])
+@pytest.mark.parametrize("call_options", [{}, {"reasoning": None}], ids=["omitted", "none"])
+def test_call_chat_keeps_the_process_default_without_the_option(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str, call_options: dict[str, Any]
+) -> None:
+    """Callers that do not choose (translation among them) are untouched: the default decides.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: The emulated provider.
+        call_options: No ``reasoning`` option, or an explicit ``None``.
+    """
+    thinking = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=True, **call_options)
+    plain = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=False, **call_options)
+
+    assert thinking["reasoning_effort"] == "medium"
+    assert "reasoning_effort" not in plain
+    assert "extra_body" not in thinking
+    assert "extra_body" not in plain
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "vllm"])
+def test_call_chat_with_reasoning_asks_for_it_whatever_the_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str
+) -> None:
+    """``reasoning=True`` mirrors ``RAG._create_text_model(enable_reasoning=True)``, on vLLM too.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+        provider: The emulated provider.
+    """
+    request = _chat_request(monkeypatch, tmp_path, provider=provider, thinking_enabled=False, reasoning=True)
+
+    assert request["reasoning_effort"] == "medium"
+    if provider == "vllm":
+        assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+    else:
+        assert "extra_body" not in request
 
 
 def _install_vision_pipeline(

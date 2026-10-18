@@ -288,6 +288,11 @@ export interface SessionMessage extends Partial<ValidationFields> {
   answer_mode?: AnswerMode
   /** The assessment's trail. */
   agent?: AgentTrail | null
+  /**
+   * The evidence the turn answered under. Absent — not `all` — for a scoped
+   * turn and for one recorded before the target was stored.
+   */
+  retrieval_target?: RetrievalTarget
 }
 
 export interface DocumentRecord {

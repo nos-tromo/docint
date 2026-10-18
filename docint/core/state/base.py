@@ -93,6 +93,8 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
             ("retry_query", "TEXT"),
             # Assessment provenance; NULL marks a lookup turn.
             ("agent_trail", "TEXT"),
+            # The evidence target a turn answered under, so a reloaded session can say what drew its answers.
+            ("retrieval_target", "TEXT"),
         ]
         with engine.begin() as conn:
             for name, sql_type in pending:

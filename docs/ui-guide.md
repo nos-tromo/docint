@@ -114,6 +114,18 @@ match nothing and silently empty the answer. A visual turn that could not
 load its pictures says so above the sources, the same way a skipped rerank
 does.
 
+The choice belongs to one chat. It is not remembered across reloads. New chat
+returns it to Everything, even from a chat with no turns or a stateless one, as
+does a collection switch away from a started chat and opening Chat with no
+session; opening a saved session leaves the current choice as it is. A turn
+answered from Documents or Images alone says so with a quiet chip beside
+"Assistant" ("Answered from documents only" / "Answered from images only";
+"Nur aus Dokumenten beantwortet" / "Nur aus Bildern beantwortet" in German),
+and the chat's transcript download writes the same line after that answer. The
+chip is drawn from the target stored with the turn, so it survives a reload.
+Everything shows no chip, nor does a turn answered from a hand-picked scope
+(the scope outranks the target) or one saved before the target was recorded.
+
 A question that asks for a judgement — what could be improved, whether a
 method convinces — gets an **assessment**. While it is researched, the turn
 lists each search the model makes. The answer then opens with what the sources
@@ -380,10 +392,12 @@ locale) is not yet supported.
   Persisted to `localStorage`: the active collection + owner, current
   session id, and the graph node-count override.
 - **`src/stores/chatFilters.ts`** (`useChatFiltersStore`) — query mode,
-  retrieval mode, the reasoning toggle (off by default; sent as `reasoning`
+  retrieval mode, the retrieval target ("Answer from") with its visual-target
+  presets, the reasoning toggle (off by default; sent as `reasoning`
   on every chat request), and the metadata-filter builder state;
   `buildPayload()` serialises the filters for requests. Persisted to
-  `localStorage`.
+  `localStorage`, except the retrieval target, which belongs to one chat and
+  starts each new one at `all`.
 - Server state (collections, documents, NER, sessions) is owned by
   TanStack Query hooks under `src/hooks/` (`useCollections`, `useNer`,
   `useSessions`, `useDocuments`).

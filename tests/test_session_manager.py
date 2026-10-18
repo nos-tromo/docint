@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from docint.core.retrieval.visual import RETRIEVAL_TARGETS
 from docint.core.state.base import Base, _make_session_maker
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.turn import Turn
@@ -682,3 +683,156 @@ def test_a_scoped_visual_turn_is_not_reported_as_degraded(
 
     assert response["retrieval_target"] == "visual"
     assert "visual" not in response
+
+
+def _wire_a_real_turn(session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub retrieval and generation so ``chat`` / ``stream_chat`` persist for real.
+
+    Everything from the engine down is a stand-in; the session store is the
+    in-memory one under test. ``_normalize_response_data`` echoes the
+    ``retrieval_mode`` it is handed, as the real one does, so a scoped turn is
+    recognisable to the persistence layer.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+
+    def _answer(_query: str) -> MagicMock:
+        # A fresh response per call: a streaming one is consumed once.
+        response = MagicMock()
+        response.metadata = cast(dict[str, Any], {})
+        response.source_nodes = cast(list[Any], [])
+        response.response_gen = iter(["Two people in rain jackets by the harbour."])
+        return response
+
+    engine = MagicMock()
+    engine.query.side_effect = _answer
+    rag = cast(Any, session_manager.rag)
+    rag.query_engine = engine
+    rag.build_query_engine.return_value = engine
+    rag.index = object()
+    rag.expand_query_with_graph_with_debug.return_value = ("expanded", cast(dict[str, Any], {}))
+    rag.graph_debug_skipped.return_value = {"applied": False}
+    rag._normalize_response_data.side_effect = lambda _query, _result, *, retrieval_mode=None, **_kw: {
+        "response": "Hi",
+        "sources": cast(list[Any], []),
+        "retrieval_mode": retrieval_mode,
+    }
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args, **kwargs: None)
+
+
+def _ask(session_manager: SessionManager, entry: str, **kwargs: Any) -> dict[str, Any]:
+    """Run one turn through ``chat`` or ``stream_chat``.
+
+    Args:
+        session_manager (SessionManager): The session manager under test.
+        entry (str): ``"chat"`` or ``"stream_chat"``.
+        **kwargs (Any): Passed through to the entry point.
+
+    Returns:
+        dict[str, Any]: The response data (``chat``) or the final streamed frame.
+    """
+    if entry == "chat":
+        return session_manager.chat("hello", **kwargs)
+    return cast(dict[str, Any], list(session_manager.stream_chat("hello", **kwargs))[-1])
+
+
+def _stored_targets(session_manager: SessionManager, session_id: str) -> list[str | None]:
+    """Read the target each persisted turn recorded, in turn order.
+
+    Args:
+        session_manager (SessionManager): The session manager under test.
+        session_id (str): Conversation id to read.
+
+    Returns:
+        list[str | None]: One entry per turn; ``None`` where nothing is stored.
+    """
+    with session_manager._session_scope() as session:
+        rows = session.query(Turn).filter_by(conversation_id=session_id).order_by(Turn.idx).all()
+        return [row.retrieval_target for row in rows]
+
+
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+@pytest.mark.parametrize("target", RETRIEVAL_TARGETS)
+def test_a_turn_records_the_target_it_answered_under(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch, entry: str, target: str
+) -> None:
+    """The row says which evidence could answer the turn, however the turn ran.
+
+    A whole session answered text-only because its target sat on ``documents``,
+    and nothing stored it, so the cause could not be read back from the saved
+    conversation. ``all`` is recorded too: it is an answer, whereas NULL means a
+    turn that predates the column.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+        entry (str): The entry point the turn ran through.
+        target (str): The retrieval target the turn was asked under.
+    """
+    _wire_a_real_turn(session_manager, monkeypatch)
+
+    _ask(session_manager, entry, session_id="sess-target", retrieval_target=target)
+
+    assert _stored_targets(session_manager, "sess-target") == [target]
+
+
+def test_history_reports_the_target_per_turn(session_manager: SessionManager) -> None:
+    """A reloaded conversation names the target each of its answers was drawn under.
+
+    The target is a per-turn fact: one click changes it between two questions
+    of the same session. A turn with nothing recorded carries no key at all, so
+    a client never reads an unrecorded turn as a recorded one.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    session_id = "sess-history-target"
+    resp = MagicMock()
+    resp.metadata = cast(dict[str, Any], {})
+    resp.source_nodes = cast(list[Any], [])
+    for question, data in (
+        ("q1", {"response": "a1", "retrieval_target": "documents"}),
+        ("q2", {"response": "a2", "retrieval_target": "visual"}),
+        ("q3", {"response": "a3", "retrieval_target": "all"}),
+        ("q4", {"response": "a4"}),
+    ):
+        session_manager._persist_turn(session_id, question, resp, data)
+
+    history = session_manager.get_session_history(session_id, owner=None)
+
+    assistants = [m for m in history if m["role"] == "assistant"]
+    assert [m.get("retrieval_target") for m in assistants] == ["documents", "visual", "all", None]
+    assert "retrieval_target" not in assistants[3]
+    assert all("retrieval_target" not in m for m in history if m["role"] == "user")
+
+
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+def test_a_scoped_turn_records_no_target(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """A pinned scope outranks the target, so a scoped turn has none to record.
+
+    The scope answers from exactly the chosen chunks, and the target selects
+    among retrieval lanes that never ran. Storing ``visual`` here would label a
+    hand-picked answer as drawn from images only.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+        entry (str): The entry point the turn ran through.
+    """
+    _wire_a_real_turn(session_manager, monkeypatch)
+
+    _ask(
+        session_manager,
+        entry,
+        session_id="sess-scoped-target",
+        scoped_node_ids=["c1", "c2"],
+        retrieval_target="visual",
+    )
+
+    assert _stored_targets(session_manager, "sess-scoped-target") == [None]
+    assistant = session_manager.get_session_history("sess-scoped-target", owner=None)[1]
+    assert "retrieval_target" not in assistant
