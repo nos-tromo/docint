@@ -445,10 +445,14 @@ carries the LLM's explanation. The frontend surfaces this as a warning banner.
 
 ## Corrective retry
 
-A rejected answer that is *also* weak — empty, under 40 characters, or
-carrying a known refusal phrase (`is_weak_answer` in
-`agents/orchestrator.py`) — gets one automatic second attempt when
-`CORRECTIVE_RETRY_ENABLED=true`. `QueryReformulationAgent`
+A rejected answer that is *also* weak — empty, under 40 characters, or a
+refusal (`is_weak_answer` in `agents/orchestrator.py`) — gets one automatic
+second attempt when `CORRECTIVE_RETRY_ENABLED=true`. A statement about the
+evidence itself ("evidence is insufficient", "keine Belege") makes an answer a
+refusal wherever it appears. A missing-detail statement ("does not mention",
+"geht nicht hervor", "keine Angaben") does so only when the answer is nothing
+but such statements: it cites no source, and setting those sentences aside
+leaves under 40 characters. `QueryReformulationAgent`
 (`agents/reformulation.py`, prompt `prompts/{en,de}/reformulate_retrieval.txt`)
 turns the original question, the failed retrieval query, and the validator's
 reason into a fresh retrieval query; the turn is re-retrieved, re-generated,
@@ -469,7 +473,9 @@ Both chat paths run it:
   persisted on the turn so a reloaded session still names the retry.
 
 The gate is deliberately narrow. A mismatched but substantive answer is kept —
-discarding it to chase a better one trades a real answer for a coin flip. A
+discarding it to chase a better one trades a real answer for a coin flip. That
+includes an answer that flags the one detail it lacks ("the log does not
+mention the captain's name"). A
 scoped turn is skipped entirely, since it runs no retrieval for a new query to
 change. And the second attempt overwrites the first attempt's turn
 (`replace_turn_idx`) instead of appending, so one user message stays one turn.

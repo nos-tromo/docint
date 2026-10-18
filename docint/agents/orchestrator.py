@@ -1,6 +1,7 @@
 """Agent orchestrator that routes understanding, clarification, and retrieval."""
 
 import dataclasses
+import re
 
 from docint.agents.context import TurnContext
 from docint.agents.policies import ClarificationPolicy
@@ -19,32 +20,41 @@ from docint.agents.types import (
 )
 
 WEAK_ANSWER_MIN_CHARS = 40
+# Statements about the evidence itself. The QA prompt reserves these for a
+# refusal, so they mark an answer weak wherever they appear.
 WEAK_ANSWER_PHRASES: tuple[str, ...] = (
     "evidence insufficient",
     "evidence is insufficient",
     "i couldn't generate",
     "cannot answer based on the provided",
     "the retrieved context does not",
+    # German, for RESPONSE_LANGUAGE=de deployments.
+    "keine belege",
+    "unzureichende belege",
+    "belege sind unzureichend",
+    "kann auf grundlage der bereitgestellten",
+    "konnte keine antwort",
+)
+# Statements that a detail is missing. A substantive answer flags a gap the
+# same way, so these count only in an answer that is nothing but the refusal.
+MISSING_DETAIL_PHRASES: tuple[str, ...] = (
     "no information",
     "does not mention",
     "not mentioned",
     "does not say",
     "no details",
     "cannot be determined",
-    # German refusals, for RESPONSE_LANGUAGE=de deployments. The phrase list
-    # can only ever cover the wordings we have seen; the length check below is
-    # the locale-agnostic half of the signal and does the heavier lifting.
     "keine informationen",
-    "keine belege",
-    "unzureichende belege",
-    "belege sind unzureichend",
-    "kann auf grundlage der bereitgestellten",
-    "konnte keine antwort",
     "geht nicht hervor",
     "keine angaben",
     "nicht zu entnehmen",
     "nicht erwähnt",
 )
+_MISSING_DETAIL_RE = re.compile(r"\b(?:" + "|".join(map(re.escape, MISSING_DETAIL_PHRASES)) + r")\b")
+# Loose on purpose: any bracketed marker holding a digit ([3], [1, 2], [1, S. 4]).
+_CITATION_RE = re.compile(r"\[[^\]\n]{0,40}\d[^\]\n]{0,40}\]")
+# Sentence ends (with any closing quote or emphasis after them), lines and table cells.
+_ANSWER_UNIT_BREAK_RE = re.compile(r"[.!?]\S*\s+|\n+|\|")
 WEAK_ANSWER_FALLBACK_MESSAGE = (
     "I couldn't find enough specific evidence to elaborate. Could you tell me "
     "which part of my previous answer you'd like me to expand on — for example, "
@@ -52,24 +62,59 @@ WEAK_ANSWER_FALLBACK_MESSAGE = (
 )
 
 
+def _is_missing_detail_refusal(lowered: str) -> bool:
+    """Return True when an answer holds nothing but missing-detail statements.
+
+    The answer is cut into sentences, lines and table cells. The units naming
+    a missing detail are set aside, and what remains must be too short to be
+    an answer of its own. A cited answer has delivered evidence, so it is
+    never such a refusal. Both checks err towards keeping the answer:
+    splitting too often or matching a citation too loosely can only keep one.
+
+    Args:
+        lowered: The lowercased answer text.
+
+    Returns:
+        True when the answer cites nothing and, without its missing-detail
+        units, is shorter than ``WEAK_ANSWER_MIN_CHARS``.
+    """
+    if _CITATION_RE.search(lowered):
+        return False
+    units = [unit.strip() for unit in _ANSWER_UNIT_BREAK_RE.split(lowered)]
+    refusals = [bool(_MISSING_DETAIL_RE.search(unit)) for unit in units]
+    if not any(refusals):
+        return False
+    rest = sum(len(unit) for unit, refusal in zip(units, refusals, strict=True) if not refusal)
+    return rest < WEAK_ANSWER_MIN_CHARS
+
+
 def is_weak_answer(answer: str | None) -> bool:
-    """Return True when an answer is short or matches a known refusal phrase.
+    """Return True when an answer is short or a refusal.
 
     Multi-signal so that we avoid both over-triggering (validation mismatch
     can fire on perfectly grounded answers when the retrieval drifted from
     the user's intent) and under-triggering (the LLM invents new refusal
     phrasings the validator already caught).
 
+    A statement about the evidence itself ("evidence is insufficient") is a
+    refusal wherever it appears. A missing-detail statement ("does not
+    mention", "geht nicht hervor") is how a refusal names its gap, but also
+    how a substantive answer flags the one detail it lacks, so it counts only
+    when the answer is nothing but such statements. Both callers discard a
+    weak answer, so a doubtful case is kept.
+
     Args:
         answer: The generated answer text, or ``None``.
 
     Returns:
-        True when the answer is empty/very short or contains a refusal phrase.
+        True when the answer is empty/very short or a refusal.
     """
     if not answer or len(answer.strip()) < WEAK_ANSWER_MIN_CHARS:
         return True
     lowered = answer.lower()
-    return any(phrase in lowered for phrase in WEAK_ANSWER_PHRASES)
+    if any(phrase in lowered for phrase in WEAK_ANSWER_PHRASES):
+        return True
+    return _is_missing_detail_refusal(lowered)
 
 
 # Retained for callers that predate the public name.
