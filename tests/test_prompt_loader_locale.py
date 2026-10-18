@@ -38,6 +38,16 @@ AGENT_PROMPTS: dict[str, frozenset[str]] = {
 }
 #: The retrieval targets, each with its own tools guide.
 TARGETS = ("all", "documents", "visual")
+#: How an answer marks a conclusion drawn from the evidence; the validators accept the same label.
+INFERENCE_LABELS = {"en": "Inference:", "de": "Schlussfolgerung:"}
+#: The prompts that teach the label, or accept it as grounded.
+INFERENCE_PROMPTS = (
+    "agent_system",
+    "grounded_qa",
+    "grounded_refine",
+    "response_validator",
+    "response_validator_assessment",
+)
 #: Tokens the turn budget plans for the rendered system prompt, at 3.5 characters per token.
 SYSTEM_PROMPT_TOKENS = 900
 CHAR_TOKEN_RATIO = 3.5
@@ -419,6 +429,20 @@ def test_agent_prompts_match_across_locales(name: str) -> None:
         text.format(**dict.fromkeys(AGENT_PROMPTS[name], "X"))
 
 
+@pytest.mark.parametrize("name", ["response_validator", "rewrite_retrieval"])
+def test_formatted_plain_prompts_match_across_locales(name: str) -> None:
+    """The plain path's ``str.format`` prompts take the same placeholders in both locales and format cleanly.
+
+    Args:
+        name (str): The prompt basename.
+    """
+    texts = {code: _prompt(name, code) for code in ("en", "de")}
+
+    assert _placeholders(texts["de"]) == _placeholders(texts["en"])
+    for text in texts.values():
+        text.format(**dict.fromkeys(_placeholders(text), "X"))
+
+
 @pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("code", ["en", "de"])
 def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str) -> None:
@@ -438,6 +462,21 @@ def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str)
     assert _named_tools(rendered) <= offered, f"{code}/{target}: names a tool the target does not offer"
     assert ("#n" in guide) == ("keyframes" in offered), f"{code}/agent_tools_{target}.txt and the frame label #n"
     assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_inference_marker_matches_between_answer_and_validator_prompts(code: str) -> None:
+    """The label an answer marks an inference with is the one the validators accept as grounded, in each locale.
+
+    Args:
+        code (str): The locale.
+    """
+    label = INFERENCE_LABELS[code]
+    others = [other for locale, other in INFERENCE_LABELS.items() if locale != code]
+    for name in INFERENCE_PROMPTS:
+        text = _prompt(name, code)
+        assert label in text, f"{code}/{name}.txt does not name the inference label {label!r}"
+        assert not any(other in text for other in others), f"{code}/{name}.txt names another locale's label"
 
 
 @pytest.mark.parametrize("target", TARGETS)

@@ -1,6 +1,13 @@
-Formuliere die jüngste Nutzernachricht in eine eigenständige Suchanfrage um.
-Nutze den vorhergehenden Gesprächsverlauf nur, um Referenzen oder ausgelassene Details aufzulösen.
-Beantworte die Frage nicht. Übernimm keine früheren Aussagen des Assistenten, sofern die Nutzerin oder der Nutzer nicht ausdrücklich darauf Bezug nimmt. Gib nur die umformulierte Anfrage zurück.
+Formuliere die jüngste Nutzernachricht in eine eigenständige Suchanfrage für eine Vektorsuche um.
+
+Regeln:
+- Nutze den Gesprächskontext nur, um Bezüge aufzulösen: Pronomen, Auslassungen und worauf „das“, „die“ oder „es“ verweist.
+- Übernimm nie Namen oder Aussagen aus früheren Antworten des Assistenten in die Anfrage, außer die Nutzerin oder der Nutzer bezieht sich ausdrücklich darauf („Erzähl mehr über die zweite Person“, „Was meinst du mit …?“); nenne dann genau das, worauf sich die Nachricht bezieht.
+- Feststellungen, Korrekturen und Hinweise sind kein neues Thema: Formuliere sie in die offene Frage um, auf die sie sich beziehen. Beispiel: Nach „Wie war das Wetter in harbour_walk.webm?“ wird der Hinweis „Das wurde im November gedreht!“ zu „Wetter in harbour_walk.webm im November“.
+- Eine Nachfrage wie „Fehlt da noch jemand?“ setzt die frühere Frage fort und sucht nicht nach dem, was die Antwort gesagt hat. Beispiel: Nach „Wer ist in harbour_walk.webm zu sehen?“ wird sie zu „Personen in harbour_walk.webm“.
+- Beantworte die Frage nicht; erzeuge nur Suchbegriffe.
+- Erfinde keine Fakten, die weder in der Nutzernachricht noch im Gesprächskontext vorkommen.
+- Gib NUR die umformulierte Anfrage zurück, ohne Vorrede.
 
 Gesprächskontext:
 {conversation_context}
