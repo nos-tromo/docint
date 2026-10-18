@@ -17,16 +17,19 @@ import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
+    ThumbnailStore,
     chunk,
+    frame_passage,
     programme_passage,
     shown_numbers,
     streaming_tool_llm,
     text_chunks,
+    thumbnail,
     tool_call_delta,
     turn_budget,
 )
 from assessment_fakes import bad_request, join_threads, llm_view, scored_node
-from llama_index.core.base.llms.types import ChatMessage, MessageRole, TextBlock, ToolCallBlock
+from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRole, TextBlock, ToolCallBlock
 from llama_index.core.schema import NodeWithScore
 from llama_index.llms.openai.utils import to_openai_message_dicts
 from typing_extensions import override
@@ -55,6 +58,7 @@ from docint.agents.turn.calls import (
     RoundCalls,
 )
 from docint.agents.turn.history import ConversationTurn, ConversationWindow
+from docint.agents.turn.image_tools import SearchImagesTool
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
 from docint.agents.turn.tools import (
@@ -69,6 +73,7 @@ from docint.agents.turn.tools import (
     error_reply,
 )
 from docint.agents.types import AgentProgress
+from docint.core.retrieval.visual import VISUAL_IMAGES_ATTACHED_KEY, render_legend
 from docint.utils.text_budget import fit_with_marker
 
 QUESTION = "zzsecretzz Wann öffnen die Stände beim Hafenfest?"
@@ -2378,3 +2383,361 @@ def test_an_empty_scope_is_still_answered_without_tools() -> None:
 def test_the_assessment_runners_error_is_the_agents_evidence_does_not_fit() -> None:
     """The callers of #648's runner still catch the old name, which now names the agent's error."""
     assert AssessmentDoesNotFit is EvidenceDoesNotFit
+
+
+# --- Pictures for the visual target ------------------------------------------------------------
+
+LEGEND = "Die Bilder unten sind die Quellen, als Bilder beigefügt:\n{image_legend}"
+#: How an endpoint that caps the pictures in one prompt refuses a request carrying more.
+REFUSED_PICTURES = "At most 1 image(s) may be provided in one prompt; zzsecretzz"
+
+
+def _pictures(results: Mapping[str, list[NodeWithScore]]) -> ToolRegistry:
+    """Offer an image search and a read, as a visual turn offers them.
+
+    Args:
+        results (Mapping[str, list[NodeWithScore]]): The frames each description finds.
+
+    Returns:
+        ToolRegistry: ``search_images`` and ``read``.
+    """
+    return ToolRegistry([SearchImagesTool(QuerySearch(results)), ReadTool()])
+
+
+def _image_call(call_id: str, description: str) -> tuple[str, str, Any]:
+    """Name one ``search_images`` call.
+
+    Args:
+        call_id (str): The call's id.
+        description (str): What the picture should show.
+
+    Returns:
+        tuple[str, str, Any]: The call, as :func:`_calls` takes it.
+    """
+    return (call_id, "search_images", {"description": description})
+
+
+def _visual(llm: Any, registry: ToolRegistry, store: ThumbnailStore, **overrides: Any) -> AgentLoop:
+    """Build an agent loop that shows the model the pictures its rounds find.
+
+    Args:
+        llm (Any): The model double.
+        registry (ToolRegistry): The tools offered.
+        store (ThumbnailStore): The thumbnail fetcher.
+        **overrides (Any): Constructor arguments to change; six pictures at most by default.
+
+    Returns:
+        AgentLoop: The loop.
+    """
+    return _loop(llm, registry, fetch_thumbnails=store, legend_template=LEGEND, **{"max_images": 6, **overrides})
+
+
+def _url(index: int) -> str:
+    """Return the data URL a frame's thumbnail is shown by.
+
+    Args:
+        index (int): The frame's place in the clip.
+
+    Returns:
+        str: The URL.
+    """
+    mime, data = thumbnail(index)
+    return f"data:{mime};base64,{data}"
+
+
+def _picture_messages(llm: Any, call: int) -> list[ChatMessage]:
+    """Return the messages of one model call that carry pictures.
+
+    Args:
+        llm (Any): The model double.
+        call (int): The call's position, from zero.
+
+    Returns:
+        list[ChatMessage]: The picture messages, in order.
+    """
+    return [message for message in _sent(llm, call) if any(isinstance(b, ImageBlock) for b in message.blocks)]
+
+
+def _wire(message: ChatMessage) -> dict[str, Any]:
+    """Serialise one message as the OpenAI client sends it.
+
+    Args:
+        message (ChatMessage): The message.
+
+    Returns:
+        dict[str, Any]: Its wire form.
+    """
+    wire = to_openai_message_dicts([message])
+    assert isinstance(wire, list)
+    return cast(dict[str, Any], wire[0])
+
+
+def _picture_wire(legend: list[tuple[int, int]], *, note: str = "") -> dict[str, Any]:
+    """Build the wire form of a picture message: the legend, each picture, and a joined note, if any.
+
+    Args:
+        legend (list[tuple[int, int]]): Per picture, the number it is cited by and its frame.
+        note (str): The final note joined to the message; none when empty.
+
+    Returns:
+        dict[str, Any]: The message as the OpenAI client sends it.
+    """
+    text = render_legend(LEGEND, [(number, *thumbnail(frame)) for number, frame in legend])
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    parts.extend({"type": "image_url", "image_url": {"url": _url(frame)}} for _, frame in legend)
+    if note:
+        parts.append({"type": "text", "text": note})
+    return {"role": "user", "content": parts}
+
+
+def _stamped(result: AgentResult) -> list[int]:
+    """Return the numbers of the passages the result marks as shown to the model as pictures.
+
+    Args:
+        result (AgentResult): The turn's result.
+
+    Returns:
+        list[int]: The stamped passages' numbers.
+    """
+    return [
+        scored.node.metadata["citation_index"]
+        for scored in result.nodes
+        if scored.node.metadata.get(VISUAL_IMAGES_ATTACHED_KEY)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "shown", "reason"),
+    [
+        ({"max_images": 2}, [(1, 0), (2, 1)], None),
+        ({"budget": _budget_with_room(1250)}, [(1, 0)], "context_budget"),
+    ],
+    ids=["by-max-images", "by-the-room-left"],
+)
+def test_visual_rounds_attach_thumbnails_within_the_allowance(
+    overrides: dict[str, Any], shown: list[tuple[int, int]], reason: str | None
+) -> None:
+    """A round's new pictures are shown after its tool replies, as many as the allowance and the room hold.
+
+    Pictures may use the room up: the next round is then the forced answer, its note joined to them.
+
+    Args:
+        overrides (dict[str, Any]): What limits the pictures: the turn's most, or the room left
+            (1003 tokens: one picture fits, two would not, though the turn's room allows two).
+        shown (list[tuple[int, int]]): Per picture shown, the number it is cited by and its frame.
+        reason (str | None): Why the turn answered: by choice, or for want of room.
+    """
+    next_choice = "auto" if reason is None else "none"
+    frames = [frame_passage(0), frame_passage(1), frame_passage(2)]
+    store = ThumbnailStore(0, 1, 2)
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), _answer()])
+
+    _, texts, result = _drain(
+        _turn(_visual(llm, _pictures({"Regenjacken": frames}), store, **overrides), ledger=EvidenceLedger(cap=10))
+    )
+
+    assert store.fetches == [["frame-0", "frame-1", "frame-2"]]
+    sent = _sent(llm, 1)
+    roles = [MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL, MessageRole.USER]
+    assert [message.role for message in sent] == roles
+    note = FINAL_NOTE if next_choice == "none" else ""
+    assert _wire(sent[-1]) == _picture_wire(shown, note=note)
+    assert (llm.stream_chat.call_args_list[1].kwargs["tool_choice"], result.reason) == (next_choice, reason)
+    assert (result.images_attached, _stamped(result), "".join(texts)) == (len(shown), [n for n, _ in shown], ANSWER)
+    assert all(VISUAL_IMAGES_ATTACHED_KEY not in frame.node.metadata for frame in frames)
+
+
+def test_a_forced_answer_after_a_picture_round_joins_its_note_to_the_picture_message() -> None:
+    """No two user messages in a row: the final note joins the picture message, after its pictures."""
+    store = ThumbnailStore(0)
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), _answer()])
+
+    _, _, result = _drain(_turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store, max_rounds=1)))
+
+    sent = _sent(llm, 1)
+    assert [message.role for message in sent][-2:] == [MessageRole.TOOL, MessageRole.USER]
+    assert _wire(sent[-1]) == _picture_wire([(1, 0)], note=FINAL_NOTE)
+    assert (result.reason, result.images_attached) == ("round_budget", 1)
+
+
+@pytest.mark.parametrize(("max_rounds", "choice"), [(6, "auto"), (1, "none")], ids=["tool-round", "answer-round"])
+def test_a_refused_image_message_is_dropped_and_the_round_retried_once(
+    max_rounds: int, choice: str, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A request with pictures refused before its first event is sent once more without any; the answer follows.
+
+    Args:
+        max_rounds (int): Tool rounds allowed: the refused round is a tool round, or the forced answer.
+        choice (str): The refused round's ``tool_choice``, which its retry keeps.
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    store = ThumbnailStore(0, 1)
+    registry = _pictures({"Regenjacken": [frame_passage(0), frame_passage(1)]})
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), bad_request(REFUSED_PICTURES), _answer()])
+
+    _, texts, result = _drain(_turn(_visual(llm, registry, store, max_rounds=max_rounds)))
+
+    refused, retried = _sent(llm, 1), _sent(llm, 2)
+    assert (len(_picture_messages(llm, 1)), _picture_messages(llm, 2)) == (1, [])
+    # The same round without its picture message: the final note then stands alone.
+    assert retried[:4] == refused[:4]
+    note: list[tuple[MessageRole, str]] = [] if choice == "auto" else [(MessageRole.USER, FINAL_NOTE)]
+    assert [(message.role, message.content) for message in retried[4:]] == note
+    assert [call.kwargs["tool_choice"] for call in llm.stream_chat.call_args_list[1:]] == [choice, choice]
+    assert (llm.stream_chat.call_count, "".join(texts)) == (3, ANSWER)
+    assert (result.images_attached, _stamped(result)) == (0, [])
+    assert loguru_caplog.messages == [
+        "An agent round carrying 2 pictures failed before its first event (BadRequestError); "
+        "it is sent again without them"
+    ]
+    assert "zzsecretzz" not in loguru_caplog.text
+
+
+def test_a_turn_whose_pictures_were_refused_shows_no_more() -> None:
+    """Once a refusal has taken the pictures back, later rounds' pictures are neither fetched nor shown."""
+    store = ThumbnailStore(0, 1, 2)
+    registry = _pictures({"Regenjacken": [frame_passage(0), frame_passage(1)], "Schirm": [frame_passage(2)]})
+    llm = streaming_tool_llm(
+        [
+            _calls(_image_call("call_a", "Regenjacken")),
+            bad_request(REFUSED_PICTURES),
+            _calls(_image_call("call_b", "Schirm")),
+            _answer(),
+        ]
+    )
+
+    _, _, result = _drain(_turn(_visual(llm, registry, store)))
+
+    assert store.fetches == [["frame-0", "frame-1"]]
+    assert _picture_messages(llm, 3) == []
+    assert (result.images_attached, [scored.node.node_id for scored in result.nodes]) == (
+        0,
+        ["frame-0", "frame-1", "frame-2"],
+    )
+
+
+def test_a_failed_thumbnail_fetch_shows_no_picture_and_the_turn_goes_on(loguru_caplog: LogCaptureFixture) -> None:
+    """A store outage leaves the pictures out; the model answers from their captions, and nothing else changes.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    store = ThumbnailStore(0, failure=RuntimeError("zzsecretzz invented store outage"))
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), _answer()])
+
+    _, texts, result = _drain(_turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store)))
+
+    assert (_picture_messages(llm, 1), llm.stream_chat.call_args_list[1].kwargs["tool_choice"]) == ([], "auto")
+    assert (result.images_attached, result.reason, "".join(texts)) == (0, None, ANSWER)
+    assert loguru_caplog.messages == ["An agent round's thumbnails could not be fetched (RuntimeError); none is shown"]
+
+
+def test_a_picture_shown_before_is_not_attached_again() -> None:
+    """A later round that names or reads a picture shown before adds only the pictures new to the turn."""
+    store = ThumbnailStore(0, 1)
+    registry = _pictures({"Regenjacken": [frame_passage(0)], "Schirm": [frame_passage(0), frame_passage(1)]})
+    llm = streaming_tool_llm(
+        [
+            _calls(_image_call("call_a", "Regenjacken")),
+            _calls(_image_call("call_b", "Schirm"), ("call_c", "read", {"n": 1})),
+            _answer(),
+        ]
+    )
+
+    _, _, result = _drain(_turn(_visual(llm, registry, store)))
+
+    assert store.fetches == [["frame-0"], ["frame-1"]]
+    assert [_wire(message) for message in _picture_messages(llm, 2)] == [
+        _picture_wire([(1, 0)]),
+        _picture_wire([(2, 1)]),
+    ]
+    assert (result.images_attached, _stamped(result)) == (2, [1, 2])
+
+
+@pytest.mark.parametrize(("max_rounds", "calls"), [(6, 4), (1, 3)], ids=["tool-round", "answer-round"])
+def test_a_retried_round_that_fails_too_follows_the_failure_policy(max_rounds: int, calls: int) -> None:
+    """The retry without pictures is the round's one: if it fails too, the round fails as any round does.
+
+    A tool round then makes the model answer from what was found (``research_failed``); the
+    answer round raises its error as it came.
+
+    Args:
+        max_rounds (int): Tool rounds allowed: the refused round is a tool round, or the forced answer.
+        calls (int): The model calls the turn makes.
+    """
+    outage = RuntimeError("invented outage")
+    store = ThumbnailStore(0)
+    llm = streaming_tool_llm(
+        [_calls(_image_call("call_a", "Regenjacken")), bad_request(REFUSED_PICTURES), outage, _answer()]
+    )
+    turn = _turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store, max_rounds=max_rounds))
+
+    if max_rounds == 1:
+        shown, raised = _until_raised(turn)
+        assert raised is outage
+        assert not any(isinstance(item, (str, AgentResult)) for item in shown)
+    else:
+        _, texts, result = _drain(turn)
+        assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "none"
+        assert _picture_messages(llm, 3) == []
+        assert (result.reason, result.images_attached, "".join(texts)) == ("research_failed", 0, ANSWER)
+    assert llm.stream_chat.call_count == calls
+
+
+def test_a_round_that_fails_after_its_first_event_keeps_its_pictures() -> None:
+    """Only a failure before the first event refuses the pictures: a round that broke off mid-text is withdrawn."""
+    store = ThumbnailStore(0)
+    broken = [*text_chunks(ANSWER, 20)[:7], RuntimeError("invented outage")]
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), broken, _answer(SHORT_ANSWER)])
+
+    progress, _, result = _drain(_turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store)))
+
+    assert [step.action for step in progress] == ["search_images", "note"]
+    assert _wire(_sent(llm, 2)[-1]) == _picture_wire([(1, 0)], note=FINAL_NOTE)
+    assert (result.reason, result.images_attached, result.raw_text) == ("research_failed", 1, SHORT_ANSWER)
+
+
+def test_a_pinned_scope_shows_no_picture() -> None:
+    """A scope outranks the retrieval target: pinned pictures are answered from their captions, none fetched."""
+    store = ThumbnailStore(0, 1)
+    llm = streaming_tool_llm([_answer()])
+
+    _, _, result = _drain(_turn(_visual(llm, _pictures({}), store), pinned=[frame_passage(0), frame_passage(1)]))
+
+    assert (store.fetches, _picture_messages(llm, 0)) == ([], [])
+    assert (result.images_attached, _stamped(result)) == (0, [])
+
+
+def test_a_refusal_gives_the_pictures_room_back() -> None:
+    """Pictures taken back no longer count against the room: a later round may still call tools.
+
+    At this room a round needs 938 tokens: one is left 1005 with the picture shown, then 1606
+    after the refusal and another round, which would be 878 with the picture's 728 still counted.
+    """
+    store = ThumbnailStore(0, 1)
+    registry = _pictures({"Regenjacken": [frame_passage(0)], "Schirm": [frame_passage(1)]})
+    llm = streaming_tool_llm(
+        [
+            _calls(_image_call("call_a", "Regenjacken")),
+            bad_request(REFUSED_PICTURES),
+            _calls(_image_call("call_b", "Schirm")),
+            _answer(),
+        ]
+    )
+
+    _, _, result = _drain(_turn(_visual(llm, registry, store, budget=_budget_with_room(1925))))
+
+    assert [call.kwargs["tool_choice"] for call in llm.stream_chat.call_args_list] == ["auto"] * 4
+    assert (result.reason, result.steps, result.images_attached) == (None, 2, 0)
+
+
+def test_an_overflow_with_pictures_is_taken_as_their_refusal_first() -> None:
+    """A round with pictures that overflows is sent again without them before any tool reply is cut."""
+    store = ThumbnailStore(0)
+    llm = streaming_tool_llm([_calls(_image_call("call_a", "Regenjacken")), bad_request(OVERFLOW), _answer()])
+
+    _, texts, result = _drain(_turn(_visual(llm, _pictures({"Regenjacken": [frame_passage(0)]}), store)))
+
+    assert _tool_replies(llm, 2) == _tool_replies(llm, 1)
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
+    assert (result.reason, result.images_attached, "".join(texts)) == (None, 0, ANSWER)

@@ -27,6 +27,14 @@ not do or for a call that did not run or failed, reaches the model alone. A call
 be prepared, whose search failed or found no slot, or whose answer raised, marks the turn
 ``research_failed`` without ending it: evidence may be missing.
 
+Pictures. With a thumbnail fetcher (the visual target), the model sees the pictures its rounds
+find, not only their captions: after a round's calls are answered, the pictures it admitted are
+shown in one user message after its tool replies, at most ``min(max_images, round_room //
+VISUAL_IMAGE_TOKEN_ESTIMATE)`` in the turn, and paid for from the room like a reply (see
+:mod:`~docint.agents.turn.images`). A round whose request carries pictures and fails before its
+first event is taken as refusing them: every picture is taken back, none is shown again, and the
+round is sent once more without; should that fail too, the failure policy below applies.
+
 A pinned scope. A turn the user scoped to passages they picked searches nothing: the passages
 enter the ledger and are rendered into one user message, between the scope note and the user's
 message, and one round that offers no tools answers from them. Its ``seed`` step goes out with
@@ -76,6 +84,7 @@ from docint.agents.assessment.ledger import EvidenceLedger, is_context_overflow
 from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
 from docint.agents.turn.calls import RoundCalls
+from docint.agents.turn.images import TurnImages
 from docint.agents.turn.scope import EvidenceDoesNotFit, scope_message
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
 from docint.agents.turn.tools import ToolContext, ToolRegistry, nested_too_deeply
@@ -86,6 +95,7 @@ if TYPE_CHECKING:
     from llama_index.core.llms import LLM
 
     from docint.agents.turn.history import ConversationWindow
+    from docint.core.retrieval.visual import ThumbnailFetcher
 
 #: Longest note, in characters, that a round's text before its calls leaves in the trail and the transcript.
 NOTE_CHARS = 500
@@ -156,6 +166,7 @@ class _Turn:
         shortened (bool): Whether the tool replies were cut after an overflow.
         actions (list[dict[str, Any]]): The trail so far.
         reasoning (list[str]): Each round's reasoning.
+        images (TurnImages): The pictures shown to the model; none unless the turn has a fetcher.
     """
 
     ctx: ToolContext
@@ -172,6 +183,7 @@ class _Turn:
     shortened: bool = False
     actions: list[dict[str, Any]] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
+    images: TurnImages = field(default_factory=TurnImages)
 
     def stop(self, reason: str) -> None:
         """Record why the model must answer now, keeping the first cause.
@@ -315,6 +327,9 @@ class AgentLoop:
         search_slots: threading.Semaphore = SEARCH_SLOT_POOL,
         reasoning_open: bool = False,
         scope_note: str = "",
+        fetch_thumbnails: ThumbnailFetcher | None = None,
+        legend_template: str = "",
+        max_images: int = 0,
     ) -> None:
         """Bind the model, the tools and the limits.
 
@@ -340,6 +355,12 @@ class AgentLoop:
                 the chat template began; pass it only when the request enables thinking.
             scope_note (str): What a scoped turn's message tells the model ahead of the pinned
                 passages: answer from them alone; left out when empty.
+            fetch_thumbnails (ThumbnailFetcher | None): Fetches the stored thumbnails of the
+                pictures a round admits, so the model sees them (see
+                :mod:`~docint.agents.turn.images`); ``None`` shows no picture.
+            legend_template (str): Tells the model the pictures are its sources, with an
+                ``{image_legend}`` slot for the lines tying each to its number.
+            max_images (int): The most pictures a turn shows; ``0`` shows none.
 
         Raises:
             ValueError: If ``char_token_ratio`` is not positive, or is not the ratio the budget
@@ -363,6 +384,9 @@ class AgentLoop:
         self._model_slots = model_slots
         self._reasoning_open = reasoning_open
         self._scope_note = scope_note
+        self._fetch_thumbnails = fetch_thumbnails
+        self._legend_template = legend_template
+        self._max_images = max_images
         self._room = budget.round_room - message_cost(final_note, char_token_ratio)
         #: What the pinned passages may take of the room: the scope note and its envelope come first.
         self._scope_room = self._room - message_cost(scope_note, char_token_ratio)
@@ -429,14 +453,19 @@ class AgentLoop:
             base=[system, *window.messages(), ChatMessage(role=MessageRole.USER, content=message)],
             schemas=self._registry.schemas(),
             started=self._clock(),
+            images=TurnImages(
+                fetch=self._fetch_thumbnails,
+                legend_template=self._legend_template,
+                max_images=self._max_images,
+                round_room=self._budget.round_room,
+            ),
         )
         while True:
             limit = self._limit(turn)
             if limit is not None:
                 turn.stop(limit)
                 break
-            wait = min(MODEL_SLOT_WAIT_S, max(0.0, self._time_left(turn)))
-            streamed = yield from self._stream(turn, [*turn.base, *turn.transcript], tool_choice="auto", wait=wait)
+            streamed = yield from self._round(turn, answer=False)
             if streamed is None:
                 if not turn.shown:
                     raise NoSlot
@@ -453,9 +482,11 @@ class AgentLoop:
             if not streamed.done.calls:
                 yield from self._answer(turn, streamed)
                 return
+            held = len(turn.ctx.ledger)
             withdrawn = yield from self._tool_round(turn, streamed.done)
             if withdrawn:
                 break
+            self._show_pictures(turn, held)
         yield from self._final_round(turn)
 
     def _limit(self, turn: _Turn) -> str | None:
@@ -478,6 +509,60 @@ class AgentLoop:
         if turn.idle >= IDLE_ROUNDS:
             return "idle"
         return None
+
+    def _round(self, turn: _Turn, *, answer: bool) -> Generator[AgentProgress | str, None, _Streamed | None]:
+        """Stream a tool round or the forced answer; a round refused with pictures goes once more without them.
+
+        A round whose request carries pictures and fails before its first event is taken as
+        refusing them, as ``VisualImagesMixin`` takes it: every picture is taken back (see
+        :meth:`~docint.agents.turn.images.TurnImages.drop`) and the round is sent again without
+        any. Should that fail too, it fails as any round does; a dead endpoint does.
+
+        Args:
+            turn (_Turn): The turn.
+            answer (bool): Whether this is the answer round: no tool to choose, the final note joined.
+
+        Yields:
+            AgentProgress | str: Answer text the round releases; it opens with no step.
+
+        Returns:
+            _Streamed | None: How the round went; ``None`` when no model slot came free.
+        """
+        while True:
+            carried = turn.images.count
+            time_left = max(0.0, self._time_left(turn))
+            # A started turn owes its answer: it waits the time left, and at least the usual wait.
+            wait = max(MODEL_SLOT_WAIT_S, time_left) if answer and turn.shown else min(MODEL_SLOT_WAIT_S, time_left)
+            messages = [*turn.base, *turn.transcript]
+            streamed = yield from self._stream(
+                turn,
+                _with_note(messages, self._final_note) if answer else messages,
+                tool_choice="none" if answer else "auto",
+                wait=wait,
+            )
+            if streamed is None or streamed.began or not carried:
+                return streamed
+            logger.warning(
+                "An agent round carrying {} pictures failed before its first event ({}); it is sent again without them",
+                carried,
+                type(streamed.error).__name__,
+            )
+            turn.transcript, freed = turn.images.drop(turn.transcript)
+            turn.spent -= freed
+
+    def _show_pictures(self, turn: _Turn, held: int) -> None:
+        """Show the model the pictures a round admitted, in one message after its tool replies.
+
+        Args:
+            turn (_Turn): The turn, the round's tool replies in its transcript.
+            held (int): How many passages the ledger held before the round's calls.
+        """
+        admitted = list(enumerate(turn.ctx.ledger.entries()[held:], start=held + 1))
+        shown = turn.images.attach(admitted, room=self._room - turn.spent)
+        if shown is not None:
+            message, cost = shown
+            turn.transcript.append(message)
+            turn.spent += cost
 
     def _stream(
         self,
@@ -589,10 +674,11 @@ class AgentLoop:
         """
         return AgentResult(
             raw_text=text,
-            nodes=turn.ctx.ledger.numbered(),
+            nodes=turn.images.stamp(turn.ctx.ledger.numbered()),
             steps=turn.steps,
             actions=list(turn.actions),
             reason=turn.reason,
+            images_attached=turn.images.count,
             reasoning="\n\n".join(turn.reasoning) or None,
         )
 
@@ -663,11 +749,7 @@ class AgentLoop:
         """
         logger.info("An agent turn answers after {} tool rounds ({})", turn.steps, turn.reason)
         while True:
-            time_left = max(0.0, self._time_left(turn))
-            # A started turn owes its answer: it waits the time left, and at least the usual wait.
-            wait = max(MODEL_SLOT_WAIT_S, time_left) if turn.shown else min(MODEL_SLOT_WAIT_S, time_left)
-            messages = _with_note([*turn.base, *turn.transcript], self._final_note)
-            streamed = yield from self._stream(turn, messages, tool_choice="none", wait=wait)
+            streamed = yield from self._round(turn, answer=True)
             if streamed is None:
                 # No answer can be written: a started turn fails as any failed answer round does.
                 if turn.shown:

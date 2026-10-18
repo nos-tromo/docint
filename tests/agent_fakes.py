@@ -5,6 +5,7 @@ Every message, query, passage and tool call here is invented.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections.abc import Callable, Iterator, Sequence
@@ -284,3 +285,79 @@ def two_phase_round(registry: ToolRegistry, calls: Sequence[ToolCall], ctx: Tool
     prepared = [registry.prepare(call, ctx) for call in calls]
     fetched = [None if ready.fetch is None else ready.fetch() for ready in prepared]
     return [registry.finish(ready, result, ctx) for ready, result in zip(prepared, fetched, strict=True)]
+
+
+#: The invented clip the frame passages come from.
+CLIP = "harbour_walk.webm"
+#: What the invented clip's frames show, one caption per frame in turn.
+FRAME_CAPTIONS = (
+    "Zwei Personen in Regenjacken am Hafen, bedeckter Himmel",
+    "Person A hält einen Schirm vor dem Hafenamt",
+    "Ein Fischkutter legt am Kai an, Möwen über dem Wasser",
+    "Person A und Person B gehen an den Ständen vorbei",
+    "Regen auf dem Kopfsteinpflaster vor der Hafenkneipe",
+    "Möwen auf dem Geländer am Anleger, Nebel über dem Wasser",
+)
+
+
+def frame_passage(index: int) -> NodeWithScore:
+    """Build one frame of the invented clip as the image tools return it: its caption, carrying its ``image_id``.
+
+    Args:
+        index (int): The frame's place in the clip, from zero; it picks the caption.
+
+    Returns:
+        NodeWithScore: The frame; its node id is the companion point id its thumbnail is fetched by.
+    """
+    return scored_node(
+        f"frame-{index}",
+        FRAME_CAPTIONS[index % len(FRAME_CAPTIONS)],
+        filename=CLIP,
+        image_id=f"harbour-walk-image-{index}",
+        source_file=CLIP,
+        keyframe_index=index,
+    )
+
+
+def thumbnail(index: int) -> tuple[str, str]:
+    """Return a frame's invented stored thumbnail.
+
+    Args:
+        index (int): The frame's place in the clip.
+
+    Returns:
+        tuple[str, str]: Its mime type and its bytes in base64.
+    """
+    return "image/jpeg", base64.b64encode(f"invented thumbnail of frame {index}".encode()).decode()
+
+
+class ThumbnailStore:
+    """A thumbnail fetcher double: answers by point id with the frames it stores, records every fetch, and can fail."""
+
+    def __init__(self, *indexes: int, failure: Exception | None = None) -> None:
+        """Store the thumbnails of the frames given.
+
+        Args:
+            *indexes (int): The frames whose thumbnails are stored.
+            failure (Exception | None): What every fetch raises, as a store outage would; ``None`` to answer.
+        """
+        self._stored = {f"frame-{index}": thumbnail(index) for index in indexes}
+        self._failure = failure
+        self.fetches: list[list[str]] = []
+
+    def __call__(self, point_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
+        """Fetch the stored thumbnails of the points asked for.
+
+        Args:
+            point_ids (Sequence[str]): The points, by id.
+
+        Returns:
+            dict[str, tuple[str, str]]: ``point_id -> (mime, base64)`` for each point with a stored thumbnail.
+
+        Raises:
+            Exception: The scripted failure, when there is one.
+        """
+        self.fetches.append(list(point_ids))
+        if self._failure is not None:
+            raise self._failure
+        return {point_id: self._stored[point_id] for point_id in point_ids if point_id in self._stored}
