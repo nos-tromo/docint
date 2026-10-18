@@ -4795,6 +4795,40 @@ class RAG:
 
         return _lane
 
+    @staticmethod
+    def _companion_filter(
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        vector_store_kwargs: dict[str, Any] | None,
+    ) -> Any | None:
+        """Compile a request's filter for the image companion: the compiled one it carries, else its rules.
+
+        The visual retriever and an agent turn's image tools both search the companion
+        under it, so both compile it here.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): Raw request filters.
+            metadata_filters_active (bool): Whether filters are in play.
+            vector_store_kwargs (dict[str, Any] | None): Native query kwargs,
+                carrying the request's compiled filter when it has one.
+
+        Returns:
+            Any | None: The native filter; ``None`` when the request has none.
+
+        Raises:
+            ValueError: When the request declared filters that reached the
+                runtime as neither raw rules nor a compiled filter: unfiltered
+                imagery would answer a filtered question.
+        """
+        qdrant_filter = (vector_store_kwargs or {}).get("qdrant_filters")
+        if qdrant_filter is None and metadata_filter_rules:
+            qdrant_filter = build_qdrant_filter(metadata_filter_rules)
+        if metadata_filters_active and not metadata_filter_rules and qdrant_filter is None:
+            logger.error("ValueError: Visual retrieval asked for filters that reached neither lane.")
+            raise ValueError("Metadata filters are active but none reached the visual retriever.")
+        return qdrant_filter
+
     def _build_visual_retriever(
         self,
         *,
@@ -4821,13 +4855,11 @@ class RAG:
                 unfiltered imagery is exactly the silent wrong answer this
                 target exists to avoid, so it is loud instead.
         """
-        qdrant_filter = (vector_store_kwargs or {}).get("qdrant_filters")
-        if qdrant_filter is None and metadata_filter_rules:
-            qdrant_filter = build_qdrant_filter(metadata_filter_rules)
-        if metadata_filters_active and not metadata_filter_rules and qdrant_filter is None:
-            logger.error("ValueError: Visual retrieval asked for filters that reached neither lane.")
-            raise ValueError("Metadata filters are active but none reached the visual retriever.")
-
+        qdrant_filter = self._companion_filter(
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            vector_store_kwargs=vector_store_kwargs,
+        )
         self._ensure_visual_indexes_once(self.qdrant_collection)
         top_k = max(1, int(self._image_config_value("visual_retrieve_top_k", DEFAULT_VISUAL_RETRIEVE_TOP_K)))
         return VisualRetriever(
