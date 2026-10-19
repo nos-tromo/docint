@@ -135,6 +135,7 @@ from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, message_cost, schema_tokens
 from docint.agents.turn.history import question_block
 from docint.agents.turn.keyword import (
+    DEFAULT_KEYWORD_FIELD,
     LONG_WORD,
     NO_USABLE_WORD,
     ONE_VALUE_ONLY,
@@ -9263,11 +9264,12 @@ class RAG:
         the request's context, so :meth:`collection_scope` holds there. The budget is measured
         on the rendered system prompt, the offered schemas (none on a pinned scope, whose round
         offers no tools), the window's messages, each with its envelope, and the message. When
-        keyword leaves the turn less room for tool replies than it needs, the turn is built
-        again without it, its tools, prompt and budget alike, and an INFO line gives the
-        numbers. Only a visual turn shows the model the pictures it finds, and only an unscoped
-        turn asks a first round that looked nothing up again, with the search note
-        (``agent_search_first``).
+        keyword with every field it can offer leaves the turn less room for tool replies than it
+        needs, the turn is built again with keyword on the text alone, and when even that does
+        not fit, without keyword; each rebuild changes the tools, prompt and budget alike, and
+        its INFO line gives the numbers. Only a visual turn shows the model the pictures it
+        finds, and only an unscoped turn asks a first round that looked nothing up again, with
+        the search note (``agent_search_first``).
 
         Args:
             engine (Any): The turn's query engine.
@@ -9345,6 +9347,16 @@ class RAG:
             return registry, system_prompt, budget
 
         registry, system_prompt, budget = _offer(matcher)
+        if matcher is not None and len(matcher.fields) > 1 and "keyword" in registry.names and not budget.available:
+            logger.info(
+                "The keyword tool was offered on the text alone in an agent turn: {} tokens of room with its {} "
+                "fields, under the {} one needs",
+                budget.round_room,
+                len(matcher.fields),
+                MIN_ROUND_ROOM,
+            )
+            matcher = KeywordMatcher(fields=(DEFAULT_KEYWORD_FIELD,), check=matcher.check, run=matcher.run)
+            registry, system_prompt, budget = _offer(matcher)
         if "keyword" in registry.names and not budget.available:
             logger.info(
                 "The keyword tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",

@@ -479,17 +479,19 @@ def test_a_plain_model_keeps_room_for_three_full_results_with_all_four_keyword_f
 def test_a_thinking_model_has_no_room_left_for_keyword_with_all_four_fields_in_the_smallest_window() -> None:
     """With all four fields, keyword leaves a thinking model at 8k under the room a turn needs; on purpose.
 
-    Thinking is off by default, so the default 8k deployment is not here. A thinking model there, on a
-    collection whose every index is ready, is the case ``RAG.agent_turn`` handles by withholding keyword
-    from a turn whose budget leaves no room with it. The fields' notes and the tool's limits stay in the
-    schema for routing quality rather than being cut to fit.
+    This measures the planned worst case: the system prompt planned for a thinking model, with keyword's
+    lines in the locale where they cost most. Thinking is off by default, so the default 8k deployment is
+    not here. A thinking model there, on a collection whose every index is ready, is the case
+    ``RAG.agent_turn`` handles by offering keyword on the text alone, which still fits (see the text-only
+    test above); only a turn that has no room even for that is built without keyword. The fields' notes
+    and the tool's limits stay in the schema for routing quality rather than being cut to fit.
     """
     budget = _budget_with_keyword(reasoning=True, fields=KEYWORD_FIELDS)
 
     assert not budget.available, (
         f"Keyword with all four fields leaves a thinking model {budget.round_room} tokens for tool results at "
-        f"{MIN_CTX_WINDOW}, enough for the {MIN_ROUND_ROOM} a turn needs; it no longer has to be withheld there, so "
-        f"pin that it fits instead."
+        f"{MIN_CTX_WINDOW}, enough for the {MIN_ROUND_ROOM} a turn needs; it no longer has to fall back to the "
+        f"text there, so pin that it fits instead."
     )
 
 

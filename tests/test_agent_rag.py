@@ -1402,6 +1402,8 @@ NO_ROOM_FOR_KEYWORD = "The keyword tool was withheld from an agent turn: "
 #: The words that tell that line from the others: the DEBUG line naming a readiness reason shares its prefix, and
 #: the warning that no turn fits shares these words but not the prefix.
 NO_ROOM_MARK = "tokens of room"
+#: The line that says a turn was offered keyword on the text alone for want of room, up to its numbers.
+TEXT_ALONE_FOR_ROOM = "The keyword tool was offered on the text alone in an agent turn: "
 
 
 def _withheld_for_room(messages: Sequence[str]) -> list[str]:
@@ -1577,36 +1579,78 @@ def test_a_visual_or_scoped_turn_is_never_offered_keyword(
     assert turn.loop._system_prompt == _system_prompt("en", target, rule=False, summary=NO_HISTORY)
 
 
-def test_a_turn_with_room_only_without_keyword_is_built_without_it(
-    monkeypatch: pytest.MonkeyPatch, loguru_caplog_info: Any
+def _keyword_budgets(monkeypatch: pytest.MonkeyPatch) -> dict[str, TurnBudget]:
+    """Measure an ``all`` turn's budget with keyword on every field, on the text alone, and without keyword.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        dict[str, TurnBudget]: The budgets by ``every``, ``text`` and ``none``, at the default window.
+    """
+    every = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, every, fields=KEYWORD_FIELDS)
+    text = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, text)
+    return {"every": _turn(every).budget, "text": _turn(text).budget, "none": _turn(_rag(monkeypatch)).budget}
+
+
+@pytest.mark.parametrize(
+    ("boundary", "offset", "offered"),
+    [
+        ("every", 0, KEYWORD_FIELDS),
+        ("every", -1, ("text",)),
+        ("text", 0, ("text",)),
+        ("text", -1, ()),
+    ],
+    ids=["every-field-fits", "every-field-one-short", "text-fits", "nothing-fits"],
+)
+def test_keyword_gives_up_its_other_fields_before_the_tool_when_room_is_short(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog_info: Any, boundary: str, offset: int, offered: tuple[str, ...]
 ) -> None:
-    """Keyword would leave the turn under the room it needs, so the turn runs without it and says so, by numbers alone.
+    """At each window boundary a turn offers what fits: every field, the text alone, or no keyword at all.
+
+    Its tools, prompt and budget agree on what is offered, and each step back logs its numbers alone.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         loguru_caplog_info (Any): Bridged INFO capture.
+        boundary (str): The offer whose smallest window with room the turn is built at, or one token short of.
+        offset (int): Tokens of window added to that smallest window.
+        offered (tuple[str, ...]): The fields keyword is offered with; none when it is withheld.
     """
-    roomy = _rag(monkeypatch)
-    _keyword_ready(monkeypatch, roomy, fields=KEYWORD_FIELDS)
-    with_keyword = _turn(roomy).budget
-    without_keyword = _turn(_rag(monkeypatch)).budget
-    cost = without_keyword.round_room - with_keyword.round_room
-    assert cost > 0
-    window = _window_with_room(without_keyword, MIN_ROUND_ROOM + cost // 2)
+    budgets = _keyword_budgets(monkeypatch)
+    window = _window_with_room(budgets[boundary], MIN_ROUND_ROOM) + offset
+    loguru_caplog_info.clear()
     rag = _rag(monkeypatch, ctx_window=window)
     _keyword_ready(monkeypatch, rag, fields=KEYWORD_FIELDS)
 
     turn = _turn(rag)
 
-    assert "keyword" not in turn.loop._registry.names
-    assert turn.loop._system_prompt == _system_prompt("en", "all", rule=False, summary=NO_HISTORY)
-    assert turn.budget == replace(without_keyword, ctx_window=window)
+    tools = {schema["function"]["name"]: schema["function"]["parameters"] for schema in turn.loop._registry.schemas()}
+    field = tools["keyword"]["properties"].get("field") if "keyword" in tools else None
+    assert ("keyword" in tools) is bool(offered)
+    assert (field or {}).get("enum") == (list(offered) if len(offered) > 1 else None)
+    assert turn.loop._system_prompt == rag._agent_system_prompt("all", ConversationWindow(), keyword_fields=offered)
+    kinds: dict[tuple[str, ...], str] = {KEYWORD_FIELDS: "every", ("text",): "text", (): "none"}
+    assert turn.budget == replace(budgets[kinds[offered]], ctx_window=window)
     assert turn.budget.available
-    room_with_keyword = turn.budget.round_room - cost
-    assert room_with_keyword < MIN_ROUND_ROOM
-    assert _withheld_for_room(loguru_caplog_info.messages) == [
-        f"{NO_ROOM_FOR_KEYWORD}{room_with_keyword} tokens of room with it, under the {MIN_ROUND_ROOM} one needs"
-    ]
+    every_room = replace(budgets["every"], ctx_window=window).round_room
+    text_room = replace(budgets["text"], ctx_window=window).round_room
+    messages = loguru_caplog_info.messages
+    assert [line for line in messages if line.startswith(TEXT_ALONE_FOR_ROOM)] == (
+        []
+        if offered == KEYWORD_FIELDS
+        else [
+            f"{TEXT_ALONE_FOR_ROOM}{every_room} tokens of room with its {len(KEYWORD_FIELDS)} fields, "
+            f"under the {MIN_ROUND_ROOM} one needs"
+        ]
+    )
+    assert _withheld_for_room(messages) == (
+        [f"{NO_ROOM_FOR_KEYWORD}{text_room} tokens of room with it, under the {MIN_ROUND_ROOM} one needs"]
+        if not offered
+        else []
+    )
     assert MESSAGE not in loguru_caplog_info.text
 
 
