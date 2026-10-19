@@ -1028,6 +1028,72 @@ def test_a_repeated_keyframes_call_is_answered_not_rerun() -> None:
     assert lister.keys == [CLIP]
 
 
+def test_a_clip_named_in_another_case_is_listed_not_answered_from_memory() -> None:
+    """The listing matches a file name exactly, so ``Clip.webm`` after ``clip.webm`` is another clip, never a repeat."""
+    upper, lower = "Hafen.webm", "hafen.webm"
+    ctx = _context()
+    lister = _Lister(
+        {
+            upper: [_frame(0, clip=upper, media_hash="e" * 64)],
+            lower: [_frame(0, clip=lower, media_hash="f" * 64)],
+        }
+    )
+    registry = _registry(list_keyframes=lister)
+    registry.call(tool_call("keyframes", file=upper), ctx)
+
+    again = registry.call(tool_call("keyframes", file=lower), ctx)
+
+    assert lister.keys == [upper, lower]
+    assert not again.text.startswith("Already called")
+    assert shown_numbers(again.text) == [2]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "same"),
+    [
+        ({"file": "Hafen.webm"}, {"file": "hafen.webm"}, False),
+        ({"file": " Hafen.webm "}, {"file": "Hafen.webm"}, True),
+        ({"file": "Hafen  Rundgang.webm"}, {"file": "Hafen Rundgang.webm"}, False),
+        ({"file": "Hafen.webm", "index": 2}, {"file": "Hafen.webm", "index": "#2"}, True),
+        ({"file": "Hafen.webm", "index": 2}, {"file": "Hafen.webm", "index": 3}, False),
+        ({"file": "Hafen.webm"}, {"file": "Hafen.webm", "index": 1}, False),
+        ({"file": 3}, {"file": "[3]"}, True),
+        ({"file": 3}, {"file": 4}, False),
+    ],
+    ids=["case", "outer-spaces", "inner-spaces", "index-forms", "index", "with-index", "number-forms", "numbers"],
+)
+def test_a_keyframes_call_is_keyed_as_the_listing_matches_it(
+    first: dict[str, Any], second: dict[str, Any], same: bool
+) -> None:
+    """Two calls are one when they name one clip and frame exactly as the listing would read them.
+
+    Args:
+        first (dict[str, Any]): One call's arguments.
+        second (dict[str, Any]): Another's.
+        same (bool): Whether they are the same call.
+    """
+    tool = KeyframesTool(_Lister({}))
+
+    one, other = tool.recall_key(first), tool.recall_key(second)
+
+    assert one is not None and other is not None
+    assert (one == other) is same
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"file": ""}, {"file": "   "}, {"file": ["Hafen.webm"]}, {"file": "Hafen.webm", "index": "x"}, {"file": None}],
+    ids=["no-file", "empty", "blank", "list", "bad-index", "null"],
+)
+def test_a_keyframes_call_the_tool_refuses_has_no_key_of_its_own(arguments: dict[str, Any]) -> None:
+    """A call ``prepare`` refuses is left to the default key, and naming it never raises.
+
+    Args:
+        arguments (dict[str, Any]): Arguments the tool refuses.
+    """
+    assert KeyframesTool(_Lister({})).recall_key(arguments) is None
+
+
 def test_frames_shown_before_are_named_by_number() -> None:
     """A frame a search showed keeps its number when its clip is listed; the clip's other frames are new."""
     ctx = _context()

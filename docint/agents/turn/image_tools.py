@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import json
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -353,6 +354,37 @@ class KeyframesTool:
             fetch=functools.partial(self._list_keyframes, clip.key),
             answer=functools.partial(self._answer, clip, index, detail),
         )
+
+    def recall_key(self, arguments: Mapping[str, Any]) -> str | None:
+        """Name a call by the clip and frame it asks for, as the listing matches them: exactly.
+
+        The registry's own key folds case and spaces, but the listing matches a file name as
+        written, so ``Clip.webm`` and ``clip.webm`` are two clips. A passage number names one
+        clip for the whole turn, since a number never changes. Asked before the arguments are
+        checked, so it takes any arguments and never raises on them.
+
+        Args:
+            arguments (Mapping[str, Any]): The call's arguments.
+
+        Returns:
+            str | None: The clip, by its passage number or its name without outer spaces, and
+            the frame asked for; ``None`` for a call this tool refuses, which is left to the
+            default key.
+        """
+        raw = arguments.get("file")
+        number = passage_number(raw)
+        if number is not None:
+            clip: list[Any] = ["n", number]
+        elif isinstance(raw, str) and raw.strip():
+            clip = ["file", raw.strip()]
+        else:
+            return None
+        index: int | None = None
+        if arguments.get("index") is not None:
+            index = _asked_frame(arguments.get("index"))
+            if index is None:
+                return None
+        return json.dumps([*clip, index], ensure_ascii=False)
 
     def _clip(self, raw: Any, ctx: ToolContext) -> _Clip | ToolReply:
         """Read which clip a call names: by its file name, or by a passage of the turn's evidence.
