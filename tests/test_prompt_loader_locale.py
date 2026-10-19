@@ -685,6 +685,20 @@ def test_the_inference_marker_matches_between_answer_and_validator_prompts(code:
         assert not missing, f"{code}/{name}.txt does not accept {missing}"
 
 
+@pytest.mark.parametrize("name", VALIDATOR_PROMPTS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_validators_take_a_count_from_a_listed_keyword_check_as_grounded(code: str, name: str) -> None:
+    """An answer states a count without citing a passage, so each validator has one line accepting it on a check.
+
+    Args:
+        code (str): The locale.
+        name (str): The validator prompt.
+    """
+    lines = [line for line in _prompt(name, code).splitlines() if "keyword check" in line.casefold()]
+
+    assert len(lines) == 1, f"{code}/{name}.txt names the keyword checks on {len(lines)} lines"
+
+
 @pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("code", ["en", "de"])
 def test_the_rendered_agent_system_prompt_fits_its_planned_tokens(code: str, target: str) -> None:

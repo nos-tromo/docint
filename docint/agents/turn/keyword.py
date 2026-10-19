@@ -6,8 +6,9 @@ cannot promise. The count is exact over what the keyword index covers, so a
 zero is an answer rather than a miss. The match itself runs in RAG, which owns
 the index, the filters and the retrieval chain; this module holds what the turn
 does with a match (it anchors each hit on its words, writes the count note and
-keys a check so the same one asked again is known) and the :class:`KeywordTool`
-the model calls it by. It imports nothing from :mod:`docint.core.rag` or
+keys a check so the same one asked again is known), the :class:`KeywordTool`
+the model calls it by, and the checks block the turn's validator reads its
+counts from. It imports nothing from :mod:`docint.core.rag` or
 :mod:`docint.core.state`.
 """
 
@@ -24,6 +25,7 @@ import regex
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import kept_ranges
+from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
 from docint.agents.turn.tools import ToolContext, ToolReply, ToolWork, error_reply, passage_reply, trail_detail
 from docint.core.search.fields import SEARCH_FIELDS, search_field_spec
 from docint.core.search.fulltext import INDEX_WORD_CLASS, index_pieces, index_tokens, parse_keywords
@@ -36,6 +38,8 @@ DEFAULT_KEYWORD_FIELD = "text"
 MAX_KEYWORD_CHARS = 100
 #: Characters before an anchored term that its region keeps, so a negation in front of it stays visible.
 TERM_CONTEXT_CHARS = 80
+#: Characters the keyword checks may take in the validator's prompt; whole lines only.
+KEYWORD_CHECKS_CHARS = 800
 
 #: Why a keyword call cannot run: none of its words is long enough for the index.
 NO_USABLE_WORD = "no_usable_word"
@@ -301,6 +305,52 @@ def keyword_note(*, matches: int | None, unchecked: int) -> str:
         lines.append("1 chunk is not in the keyword index yet, so it was not checked.")
     elif unchecked > 1:
         lines.append(f"{unchecked} chunks are not in the keyword index yet, so they were not checked.")
+    return "\n".join(lines)
+
+
+def _check_words(detail: Any) -> str:
+    """Defuse the model-written words of a check before the validator reads them.
+
+    Args:
+        detail (Any): The words as the turn's trail recorded them.
+
+    Returns:
+        str: The words on one line, without citation numbers, sentinels or
+        double quotes, at most ``MAX_KEYWORD_CHARS`` long.
+    """
+    text = CITATION_NUMBERS_RE.sub("", str(detail or "").replace('"', "'"))
+    return " ".join(neutralize_sentinel(text).split())[:MAX_KEYWORD_CHARS]
+
+
+def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: int) -> str:
+    """Render a turn's keyword checks for its validator, which reads the counts as facts beside the sources.
+
+    Only keyword steps whose count is known are listed: a failed count says nothing
+    about the collection. Lines are kept whole, in trail order, while they fit.
+
+    Args:
+        actions (Sequence[Mapping[str, Any]]): The turn's trail (``agent.actions``), in order.
+        max_chars (int): Characters the block may take.
+
+    Returns:
+        str: One ``- "words" (field): count`` line per check, with ``; N chunks not checked``
+        when the index does not cover every chunk; empty when there is none.
+    """
+    lines: list[str] = []
+    used = 0
+    for action in actions:
+        matches = action.get("matches")
+        if action.get("action") != "keyword" or type(matches) is not int:
+            continue
+        line = f'- "{_check_words(action.get("detail"))}" ({action.get("field") or DEFAULT_KEYWORD_FIELD}): {matches}'
+        unchecked = action.get("unchecked")
+        if type(unchecked) is int and unchecked > 0:
+            line += f"; {unchecked} chunk not checked" if unchecked == 1 else f"; {unchecked} chunks not checked"
+        cost = len(line) + (1 if lines else 0)
+        if used + cost > max_chars:
+            break
+        lines.append(line)
+        used += cost
     return "\n".join(lines)
 
 

@@ -9,7 +9,7 @@ import os
 import threading
 import time
 import zipfile
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -54,6 +54,7 @@ from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.gate import agent_available, confirm_tools_rejection, tools_rejection_cached
 from docint.agents.assessment.split import cited_sources
 from docint.agents.history import build_prior_turn
+from docint.agents.turn.keyword import KEYWORD_CHECKS_CHARS, render_keyword_checks
 from docint.agents.turn.probe import probe_tools
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
@@ -877,6 +878,7 @@ def _validation_payload(
     intent: str | None = None,
     tool_used: str | None = None,
     previous_user_input: str | None = None,
+    keyword_checks: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate a response against retrieved sources and return metadata.
 
@@ -891,6 +893,9 @@ def _validation_payload(
         tool_used (str | None): Retrieval tool that produced the sources, if any.
         previous_user_input (str | None): The user's message before this one, shown to the
             validator ahead of the question; ``None`` shows none.
+        keyword_checks (str | None): An agent turn's keyword checks with a known count, one line
+            each (see :func:`_trail_keyword_checks`), which the validator reads as facts; ``None``
+            or empty for none.
 
     Returns:
         dict[str, bool | str | None]: Validation metadata dictionary suitable for API responses.
@@ -915,6 +920,7 @@ def _validation_payload(
         rewritten_query=rewritten_query,
         intent=intent,
         tool_used=tool_used,
+        keyword_checks=keyword_checks,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question, previous_user_input=previous_user_input))
     return {
@@ -1024,10 +1030,27 @@ def _confirm_tools_rejection() -> None:
     confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model), reasoning=reasoning)
 
 
+def _trail_keyword_checks(agent: Any) -> str:
+    """Render the keyword checks an agent turn's trail holds, for its validator.
+
+    Args:
+        agent (Any): The turn's ``agent`` trail.
+
+    Returns:
+        str: One line per keyword step with a known count, within ``KEYWORD_CHECKS_CHARS``
+        (see :func:`~docint.agents.turn.keyword.render_keyword_checks`); empty when there is none.
+    """
+    actions = agent.get("actions") if isinstance(agent, dict) else None
+    if not isinstance(actions, list):
+        return ""
+    steps = [step for step in actions if isinstance(step, Mapping)]
+    return render_keyword_checks(steps, max_chars=KEYWORD_CHECKS_CHARS)
+
+
 def _assessment_validation(
     *, question: str, answer: str, sources: list[dict[str, Any]], agent: Any
 ) -> dict[str, bool | str | None]:
-    """Validate only the source-backed part of an assessment turn.
+    """Validate only the source-backed part of an assessment turn, beside the turn's keyword checks.
 
     Args:
         question (str): The user's question.
@@ -1049,7 +1072,11 @@ def _assessment_validation(
             "validation_reason": ASSESSMENT_NOT_VALIDATED_REASON,
         }
     return _validation_payload(
-        question=question, answer=evidence, sources=cited_sources(evidence, sources), intent="assessment"
+        question=question,
+        answer=evidence,
+        sources=cited_sources(evidence, sources),
+        intent="assessment",
+        keyword_checks=_trail_keyword_checks(trail),
     )
 
 
@@ -1068,8 +1095,9 @@ def _turn_validation(
     An assessment is checked on its source-backed part alone (:func:`_assessment_validation`).
     An agent lookup is checked against the sources it cites, since its evidence holds every
     passage its tools showed, with the previous user message ahead of the question: the agent
-    read the conversation, so a follow-up is only judged right against what it follows. A plain
-    lookup is checked as it always was.
+    read the conversation, so a follow-up is only judged right against what it follows. Either
+    agent mode also hands the validator the turn's keyword checks with a known count, as facts
+    an answer may state without citing a passage. A plain lookup is checked as it always was.
 
     Args:
         data (dict[str, Any]): The turn's payload; ``answer_mode`` names an agent turn's mode.
@@ -1092,6 +1120,7 @@ def _turn_validation(
             answer=answer,
             sources=cited_sources(answer, sources),
             previous_user_input=previous_user_input,
+            keyword_checks=_trail_keyword_checks(data.get("agent")),
         )
     return _validation_payload(
         question=question,

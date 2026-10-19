@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
-from docint.agents.assessment.split import ASSESSMENT_RULE, neutralize_sentinel
+from docint.agents.assessment.split import ASSESSMENT_RULE, CITATION_NUMBERS_RE, neutralize_sentinel
 from docint.agents.turn.budget import HISTORY_ALLOWANCE_TOKENS, MESSAGE_OVERHEAD_TOKENS
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.llm_sanitize import strip_reasoning
@@ -55,10 +55,8 @@ RESOLVED_QUESTION_LABEL = (
     "Resolved from earlier turns by a search rewrite (may repeat earlier answers, the model's own assessments "
     "included; not a source, never cite it)"
 )
-#: A bracketed citation number, list or range (hyphen or en dash), as an earlier answer cites its sources.
-_CITATION_NUMBERS_RE = re.compile(r"\[\s*\d+(?:\s*[,;\u2013-]\s*\d+)*\s*\]")
-#: The same, with the blanks before it, so removing it leaves no gap ahead of the punctuation that follows.
-_CITATION_MARKER_RE = re.compile(rf"[ \t]*{_CITATION_NUMBERS_RE.pattern}")
+#: A citation with the blanks before it, so removing it leaves no gap ahead of the punctuation that follows.
+_CITATION_MARKER_RE = re.compile(rf"[ \t]*{CITATION_NUMBERS_RE.pattern}")
 
 
 @dataclass(frozen=True)
@@ -182,8 +180,8 @@ def question_block(question: str, resolved: str | None) -> str:
     if resolved is None:
         return asked
     visible, _ = strip_reasoning(resolved)
-    plain = neutralize_sentinel(" ".join(_CITATION_NUMBERS_RE.sub("", visible).split()))
-    if not plain or _words(plain) == _words(_CITATION_NUMBERS_RE.sub("", asked)):
+    plain = neutralize_sentinel(" ".join(CITATION_NUMBERS_RE.sub("", visible).split()))
+    if not plain or _words(plain) == _words(CITATION_NUMBERS_RE.sub("", asked)):
         return asked
     sanitized, _ = fit_with_marker(plain, RESOLVED_QUESTION_CHARS)
     return f"{asked}\n{RESOLVED_QUESTION_LABEL}: {sanitized}"

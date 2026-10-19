@@ -6881,6 +6881,100 @@ def test_a_plain_lookup_is_validated_as_before(monkeypatch: pytest.MonkeyPatch, 
     ]
 
 
+#: A keyword check that found nothing, as an agent turn's trail stores it, and the line its validator reads.
+ZERO_CHECK: dict[str, Any] = {"action": "keyword", "detail": "Feuerwerk", "found": 0, "field": "text", "matches": 0}
+ZERO_CHECK_LINE = '- "Feuerwerk" (text): 0'
+#: The validator's verdict that the answer is grounded and its evidence relevant.
+PASSING_VERDICT = '{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}'
+
+
+@pytest.mark.parametrize("path", ["/stream_query", "/query"])
+def test_an_agent_lookup_resting_on_a_zero_count_is_validated_against_the_check(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """A count cites no passage; the validator is asked about it, with the check, instead of rejecting it unasked.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    rag.text_model = validator
+    answer = "Keine Passage enthält das Wort Feuerwerk."
+    final = _agent_final(response=answer, sources=[], agent={**LOOKUP_TRAIL, "actions": [ZERO_CHECK]})
+    monkeypatch.setattr(rag, "stream_chat", _scripted_stream([], [answer, final]))
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    if path == "/query":
+        body = client.post(path, json={"question": "Gibt es ein Feuerwerk?"}).json()
+    else:
+        body = _stream_frames(client, question="Gibt es ein Feuerwerk?")[-1]
+
+    [prompt] = validator.prompts
+    assert f"\n{ZERO_CHECK_LINE}\n" in prompt
+    assert (body["validation_checked"], body["validation_mismatch"]) == (True, False)
+
+
+def test_an_agent_lookup_is_validated_against_its_cited_passages_and_its_checks(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A mixed answer's validator reads the passage it cites and the count it states, side by side.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    rag.text_model = validator
+    sources = [
+        {"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."},
+        {"id": "b", "citation_index": 2, "text": "Die Stände öffnen um zehn Uhr."},
+    ]
+    trail = {**LOOKUP_TRAIL, "actions": [{"action": "search", "detail": "Hafenfest", "found": 2}, ZERO_CHECK]}
+    answer = "Das Fest ist im Mai [1]; ein Feuerwerk nennt keine Passage."
+    final = _agent_final(response=answer, sources=sources, agent=trail)
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    body = client.post("/query", json={"question": "Was ist beim Hafenfest geplant?"}).json()
+
+    [prompt] = validator.prompts
+    assert "plant das Fest im Mai" in prompt
+    assert "Stände öffnen" not in prompt
+    assert f"\n{ZERO_CHECK_LINE}\n" in prompt
+    assert (body["validation_checked"], body["validation_mismatch"]) == (True, False)
+
+
+def test_an_assessment_hands_its_keyword_checks_to_the_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The source-backed part may state a count too, so its validator reads the turn's checks beside the note.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+
+    result = api_module._assessment_validation(
+        question="Wie gut ist das Hafenfest geplant?",
+        answer="Keine Passage enthält das Wort Feuerwerk.",
+        sources=[],
+        agent={"answer": "split", "evidence_chars": None, "actions": [ZERO_CHECK]},
+    )
+
+    [prompt] = validator.prompts
+    assert f"\n{ZERO_CHECK_LINE}\n" in prompt
+    assert "intent=assessment" in prompt
+    assert (result["validation_checked"], result["validation_mismatch"]) == (True, False)
+
+
 def _assessment_stream(
     calls: list[dict[str, Any]], *, agent: dict[str, Any], answer: str
 ) -> Callable[..., Generator[Any, None, None]]:

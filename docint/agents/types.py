@@ -153,6 +153,12 @@ class RetrievalResult:
     rewritten_query: str | None = None
     retried: bool | None = None
     retry_query: str | None = None
+    keyword_checks: str | None = None
+    """An agent turn's keyword checks with a known count, one line each.
+
+    Facts about the collection the validator reads beside the sources, so an
+    answer may state a count no passage shows. ``None`` or empty for none.
+    """
     turn_idx: int | None = None
     """Index of the persisted conversation turn; an internal join key.
 

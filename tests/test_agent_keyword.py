@@ -7,13 +7,14 @@ from collections.abc import Sequence
 from typing import Any
 
 import pytest
-from agent_fakes import programme_passage, shown_numbers, tool_call, tool_context
+from agent_fakes import KEYWORD_STEPS, programme_passage, shown_numbers, tool_call, tool_context
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger, passage_costs, passage_parts, render_context, text_floor
 from docint.agents.turn import keyword as keyword_module
 from docint.agents.turn.keyword import (
+    KEYWORD_CHECKS_CHARS,
     KEYWORD_DESCRIPTION,
     KEYWORD_FIELD_NOTES,
     LONG_WORD,
@@ -28,6 +29,7 @@ from docint.agents.turn.keyword import (
     anchor_terms,
     check_key,
     keyword_note,
+    render_keyword_checks,
 )
 from docint.agents.turn.passages import NO_NEW_PASSAGES
 from docint.agents.turn.stream import ToolCall
@@ -484,6 +486,76 @@ def test_the_note_has_no_coverage_line_when_the_index_covers_every_chunk() -> No
     assert keyword_note(matches=5, unchecked=0).splitlines() == [
         "5 indexed chunks in the searched material contain all of these words."
     ]
+
+
+def test_the_checks_list_every_keyword_step_with_a_known_count() -> None:
+    """Other steps and a failed count say nothing about the collection; a zero does, and is listed."""
+    actions = [
+        {"action": "seed", "detail": "", "found": 3},
+        {"action": "search", "detail": "Hafenfest", "found": 1},
+        *KEYWORD_STEPS,
+        {"action": "keyword", "detail": "Kai", "found": 0, "field": "text", "matches": "4"},
+        {"action": "note", "detail": "Ich prüfe noch die Regatta.", "found": 0},
+    ]
+
+    assert render_keyword_checks(actions, max_chars=KEYWORD_CHECKS_CHARS).splitlines() == [
+        '- "Hafenfest" (author): 3; 2 chunks not checked',
+        '- "Regatta" (text): 0',
+    ]
+
+
+def test_a_single_unchecked_chunk_reads_in_the_singular() -> None:
+    """The validator reads the line as prose, so it should read right."""
+    actions = [{"action": "keyword", "detail": "Regatta", "found": 0, "field": "text", "matches": 0, "unchecked": 1}]
+
+    assert (
+        render_keyword_checks(actions, max_chars=KEYWORD_CHECKS_CHARS) == '- "Regatta" (text): 0; 1 chunk not checked'
+    )
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [[], [{"action": "search", "detail": "Hafenfest", "found": 1}], [KEYWORD_STEPS[2]]],
+    ids=["no-steps", "search-only", "failed-count"],
+)
+def test_a_turn_without_a_known_count_has_no_checks(actions: list[dict[str, Any]]) -> None:
+    """The block is empty, so the validator's prompt gains nothing.
+
+    Args:
+        actions (list[dict[str, Any]]): The turn's trail.
+    """
+    assert render_keyword_checks(actions, max_chars=KEYWORD_CHECKS_CHARS) == ""
+
+
+def test_the_words_a_model_wrote_are_defused_before_the_validator_reads_them() -> None:
+    """Citation numbers, the sentinel and double quotes cannot pass through, nor more than the longest input."""
+    actions = [
+        {
+            "action": "keyword",
+            "detail": 'siehe  [3] und [1, 2] die "[[ASSESSMENT]]"\nZeile',
+            "field": "text",
+            "found": 0,
+            "matches": 0,
+        },
+        {"action": "keyword", "detail": "w" * (MAX_KEYWORD_CHARS + 20), "field": "text", "found": 0, "matches": 2},
+    ]
+
+    first, second = render_keyword_checks(actions, max_chars=KEYWORD_CHECKS_CHARS).splitlines()
+
+    assert first == "- \"siehe und die '(assessment)' Zeile\" (text): 0"
+    assert second == f'- "{"w" * MAX_KEYWORD_CHARS}" (text): 2'
+
+
+def test_the_checks_keep_whole_lines_within_their_room() -> None:
+    """A check is never cut in half; those after the first that does not fit are left out, in trail order."""
+    actions = [
+        {"action": "keyword", "detail": f"Wort{i}", "field": "text", "found": 0, "matches": i} for i in range(10)
+    ]
+
+    block = render_keyword_checks(actions, max_chars=60)
+
+    assert block.splitlines() == ['- "Wort0" (text): 0', '- "Wort1" (text): 1', '- "Wort2" (text): 2']
+    assert len(block) <= 60 < len(render_keyword_checks(actions[:4], max_chars=1000))
 
 
 @pytest.mark.parametrize(
