@@ -693,7 +693,9 @@ A call made before is answered from memory and never run again; a `read` only
 while its passage is unchanged. A call is the same call when it names the same
 tool and its arguments are equal, compared on one line and case-folded. A tool
 may key its own repeats instead (`recall_key`): `keyword` keys a call by its
-field and the index tokens or exact values of its words. A reply answered from
+field and the index tokens or exact values of its words, and `keyframes` by its
+clip as the listing matches it, the file name exactly (case and inner spaces
+kept) or the passage number, together with the frame asked for. A reply answered from
 memory names the passages the first call showed and admits none. It is never
 informative (see [Limits and reasons](#limits-and-reasons)). A call to a tool
 the turn does not offer, or with arguments that will not do, gets an error reply
@@ -874,8 +876,9 @@ These are protocol tokens; the SPA maps each to its own copy.
 
 A round is idle when none of its replies admitted a passage or was informative.
 A reply is informative when it told the model something about the collection
-without admitting a passage, as a keyword count does, a 0 included. A reply
-answered from memory is never informative.
+without admitting a passage, as a keyword count does, a 0 included, and as a
+`read` does, which shows a passage's text. A reply answered from memory is never
+informative, so reading an unchanged passage again still counts toward `idle`.
 
 ### Fallback to the plain path
 
@@ -990,8 +993,9 @@ part only, against the sources that part cites, with a note
 answer without a separate source-backed part is labelled but not validated. An
 agent lookup is validated against the sources it cites, with the user's
 previous message shown ahead of the question. Either way the validator sees at
-most six sources, the first six when the answer cites none. Agent turns never
-take the corrective retry.
+most six sources: the first six when the answer cites none, or none when the
+turn holds keyword checks with a known count, since such an answer rests on the
+checks. Agent turns never take the corrective retry.
 
 In both modes the validator is also given the turn's keyword checks with a
 known count, as facts about the collection rather than sources: one line per
@@ -999,8 +1003,9 @@ check, with its words, its field, its count and any chunks not checked, under
 their own heading after any summary diagnostics. A failed count is left out.
 Both validator prompts accept a statement of how many indexed chunks hold some
 words, a 0 included, when a listed check gives that count. An answer that rests
-on checks alone, citing no passage, is therefore validated by the model, its
-relevance judged by the checks, rather than mismatched for having no sources.
+on checks alone, citing no passage, is therefore validated by the model against
+the checks, its relevance judged by them, rather than mismatched for having no
+sources or judged against passages the search happened to find.
 
 An agent turn is stored with its `answer_mode` and its trail. It reports
 `retrieval_mode: "agent"` (or `"scoped"`), `retrieval_query: null` and a
