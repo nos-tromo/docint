@@ -1399,6 +1399,21 @@ def test_a_search_runs_on_a_search_thread_inside_the_requests_collection(monkeyp
 KEYWORD_FIELDS = ("text", "author", "network", "uuid")
 #: The line that says a turn was built without keyword for want of room, up to its numbers.
 NO_ROOM_FOR_KEYWORD = "The keyword tool was withheld from an agent turn: "
+#: The words that tell that line from the others: the DEBUG line naming a readiness reason shares its prefix, and
+#: the warning that no turn fits shares these words but not the prefix.
+NO_ROOM_MARK = "tokens of room"
+
+
+def _withheld_for_room(messages: Sequence[str]) -> list[str]:
+    """Pick out the lines that say a turn was built without keyword for want of room.
+
+    Args:
+        messages (Sequence[str]): The captured log messages.
+
+    Returns:
+        list[str]: The matching lines, in order.
+    """
+    return [line for line in messages if line.startswith(NO_ROOM_FOR_KEYWORD) and NO_ROOM_MARK in line]
 
 
 def _keyword_ready(
@@ -1589,7 +1604,7 @@ def test_a_turn_with_room_only_without_keyword_is_built_without_it(
     assert turn.budget.available
     room_with_keyword = turn.budget.round_room - cost
     assert room_with_keyword < MIN_ROUND_ROOM
-    assert [line for line in loguru_caplog_info.messages if line.startswith(NO_ROOM_FOR_KEYWORD)] == [
+    assert _withheld_for_room(loguru_caplog_info.messages) == [
         f"{NO_ROOM_FOR_KEYWORD}{room_with_keyword} tokens of room with it, under the {MIN_ROUND_ROOM} one needs"
     ]
     assert MESSAGE not in loguru_caplog_info.text
@@ -1621,7 +1636,7 @@ def test_a_turn_without_room_even_without_keyword_builds_none(
 
     assert turn is None
     messages = loguru_caplog_info.messages
-    assert [line for line in messages if line.startswith(NO_ROOM_FOR_KEYWORD)] != []
+    assert _withheld_for_room(messages) != []
     assert [line for line in messages if line.startswith("An agent turn would have ")] != []
     assert MESSAGE not in loguru_caplog_info.text
 

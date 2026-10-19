@@ -8828,7 +8828,42 @@ def test_a_withheld_matcher_says_why_in_one_debug_line(monkeypatch: pytest.Monke
         _loguru_logger.remove(sink)
 
     assert matcher is None
-    assert [message for message in messages if message.startswith(WITHHELD)] == [f"{WITHHELD}{reason}"]
+    logged = "fault (RuntimeError)" if reason == "fault" else reason
+    assert [message for message in messages if message.startswith(WITHHELD)] == [f"{WITHHELD}{logged}"]
+
+
+def test_a_readiness_fault_is_logged_by_its_type_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The line says which kind of fault withheld the tool, and never what the fault said.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    def _down(client: Any, collection: str, **kwargs: Any) -> dict[str, Any]:
+        """Fail as an unreachable Qdrant does, in words that must not be logged.
+
+        Args:
+            client (Any): The client.
+            collection (str): The collection.
+            **kwargs (Any): The status options.
+
+        Raises:
+            ConnectionError: Always.
+        """
+        raise ConnectionError("zzsecretzz refused the connection")
+
+    monkeypatch.setattr(rag_module, "search_index_status", _down)
+    messages: list[str] = []
+    sink = _loguru_logger.add(lambda message: messages.append(message.record["message"]), level="DEBUG")
+    try:
+        matcher = _keyword_matcher_for(rag)
+    finally:
+        _loguru_logger.remove(sink)
+
+    assert matcher is None
+    assert [message for message in messages if message.startswith(WITHHELD)] == [f"{WITHHELD}fault (ConnectionError)"]
+    assert "zzsecretzz" not in "\n".join(messages)
 
 
 def test_a_keyword_check_counts_within_the_request_filters(monkeypatch: pytest.MonkeyPatch) -> None:

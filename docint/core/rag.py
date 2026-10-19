@@ -25,7 +25,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from typing_extensions import override
 
@@ -3024,6 +3024,10 @@ _AGENT_IDENTITY_KEYS = (
     "posting_timestamp",
     "posting_network",
 )
+
+#: Why a collection cannot offer an agent turn a keyword match: the request's filters do not compile for Qdrant, a
+#: lane in scope was not counted, or the text, which a call matches by default, has no index to match.
+KeywordUnavailable = Literal["filters", "coverage", "text_not_ready"]
 
 
 @dataclass(frozen=True)
@@ -9005,9 +9009,10 @@ class RAG:
 
         Deciding only reads (see :meth:`_keyword_matcher`): it creates no index and never
         profiles the collection. A visual turn is never offered one, and is not even looked at.
-        A withheld match is logged once at DEBUG by its reason alone: ``visual``, ``filters``,
+        A withheld match is logged once at DEBUG by its reason: ``visual``, ``filters``,
         ``coverage``, ``text_not_ready``, or ``fault`` for anything that raised, a failed lookup
-        of the image companion included; the turn then keeps its other tools.
+        of the image companion included, with the exception's type and never its message; the
+        turn then keeps its other tools.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
@@ -9019,6 +9024,7 @@ class RAG:
             KeywordMatcher | None: The match, bound to this collection, the request's filters and
             the target; ``None`` when it is withheld.
         """
+        reason: KeywordUnavailable | Literal["visual"]
         if retrieval_target == "visual":
             reason = "visual"
         else:
@@ -9028,8 +9034,9 @@ class RAG:
                     metadata_filters_active=metadata_filters_active,
                     retrieval_target=retrieval_target,
                 )
-            except Exception:
-                built = "fault"
+            except Exception as exc:
+                logger.debug("The keyword tool was withheld from an agent turn: fault ({})", type(exc).__name__)
+                return None
             if isinstance(built, KeywordMatcher):
                 return built
             reason = built
@@ -9042,7 +9049,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None,
         metadata_filters_active: bool,
         retrieval_target: RetrievalTarget,
-    ) -> KeywordMatcher | str:
+    ) -> KeywordMatcher | KeywordUnavailable:
         """Build the keyword match of a text turn, or say why its collection cannot offer one.
 
         It reads the keyword index's coverage per lane, whether the image companion exists,
@@ -9061,8 +9068,8 @@ class RAG:
             retrieval_target (RetrievalTarget): ``all`` or ``documents``.
 
         Returns:
-            KeywordMatcher | str: The match; otherwise why there is none: ``filters`` when the
-            filters cannot be compiled for Qdrant (a count would cover the wrong material),
+            KeywordMatcher | KeywordUnavailable: The match; otherwise why there is none: ``filters``
+            when the filters cannot be compiled for Qdrant (a count would cover the wrong material),
             ``coverage`` when a lane in scope was not counted, ``text_not_ready``.
 
         Raises:
