@@ -103,8 +103,8 @@ class KeywordMatcher:
         check (Callable[[str, str], str | None]): Why ``(words, field)`` cannot
             run, :data:`NO_USABLE_WORD`, :data:`ONE_VALUE_ONLY`,
             :data:`UNINDEXABLE_WORD` or :data:`LONG_WORD`, or ``None``. It must stay free of
-            I/O and side effects: one call runs it up to twice, once to key the call and once
-            to check it.
+            I/O and of side effects beyond a log line: one call runs it up to twice, once to key
+            the call and once to check it.
         run (Callable[[str, str], KeywordResult]): Counts and retrieves the
             matches of ``(words, field)``; the turn runs it on a search slot.
     """

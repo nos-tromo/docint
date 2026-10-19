@@ -9059,7 +9059,9 @@ class RAG:
         that carry it. The image companion is in scope on the ``all`` target when it exists,
         and joins a field's match only where it carries the same indexes; otherwise its chunks
         are reported unchecked, never counted as misses, as are the chunks either lane holds
-        without the text. A ``documents`` turn never looks at the companion.
+        without the text. A ``documents`` turn leaves the companion out: the coverage read still
+        counts it, since it reports every lane, but the turn discards that lane, reads no
+        companion schema, and neither counts its points nor reports them unchecked.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
@@ -9139,7 +9141,8 @@ class RAG:
             would count a broader query than the one it names: ``vitamin D`` would count every
             ``vitamin``. Exact-value fields are matched whole and never split. It runs while a
             call is keyed and prepared, where a raise would fail the call, so anything that
-            keeps the match from compiling is answered ``ONE_VALUE_ONLY``.
+            keeps the match from compiling is answered ``ONE_VALUE_ONLY``, with one DEBUG line
+            naming the exception's type.
 
             Args:
                 words (str): The words.
@@ -9163,7 +9166,8 @@ class RAG:
                     if any(len(piece) > SEARCH_MAX_TOKEN_LEN for piece in pieces):
                         return LONG_WORD
                 compiled = _filter(words, field, None)
-            except Exception:
+            except Exception as exc:
+                logger.debug("A keyword call was refused: its match could not be compiled ({})", type(exc).__name__)
                 return ONE_VALUE_ONLY
             return ONE_VALUE_ONLY if compiled is None else None
 
@@ -9180,7 +9184,14 @@ class RAG:
 
             Returns:
                 KeywordResult: The matches, their count and what the index leaves unchecked.
+
+            Raises:
+                RuntimeError: When the active collection is not the one the match was built for,
+                    before anything is read: the count reads that one and the retrieval the active
+                    one, which must never be two collections. The call is answered as failed.
             """
+            if self.qdrant_collection != collection:
+                raise RuntimeError("A keyword match ran outside the collection it was built for.")
             keywords = tuple(parse_keywords(words))
             conditions = _filter(words, field, request_filter)
             if conditions is None:

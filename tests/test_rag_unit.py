@@ -9163,3 +9163,63 @@ def test_the_check_refuses_a_field_the_search_does_not_know(monkeypatch: pytest.
     rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
 
     assert _matcher(rag).check("Kontrollgruppe", "no_such_field") == ONE_VALUE_ONLY
+
+
+def test_a_check_that_cannot_compile_its_match_says_so_by_the_faults_type_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is no longer silent: one DEBUG line names the exception's type, never its message or the words.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+    matcher = _matcher(rag)
+
+    def _broken(*args: Any, **kwargs: Any) -> Any:
+        """Fail as a match that cannot compile does, in words that must not be logged.
+
+        Args:
+            *args (Any): Ignored.
+            **kwargs (Any): Ignored.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("zzsecretzz cannot compile")
+
+    monkeypatch.setattr(rag_module, "build_search_filter", _broken)
+    records: list[dict[str, Any]] = []
+    sink = _loguru_logger.add(lambda message: records.append(dict(message.record)), level="DEBUG")
+    try:
+        problem = matcher.check("Kontrollgruppe", "text")
+    finally:
+        _loguru_logger.remove(sink)
+
+    assert problem == ONE_VALUE_ONLY
+    [record] = [record for record in records if "ValueError" in record["message"]]
+    assert record["level"].name == "DEBUG"
+    assert record["exception"] is None
+    logged = "\n".join(str(record["message"]) for record in records)
+    assert "zzsecretzz" not in logged
+    assert "Kontrollgruppe" not in logged
+
+
+def test_a_keyword_match_run_outside_its_collection_raises_before_reading_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counts and passages must come from one collection, so a match run in another one fails as a call.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, client, built, _, _ = _keyword_rag(monkeypatch, {"test": TEXT_READY}, counts={"test": 4, "other": 9})
+    matcher = _matcher(rag)
+
+    with rag.collection_scope("other"), pytest.raises(RuntimeError, match="collection it was built for"):
+        matcher.run("Kontrollgruppe", "text")
+
+    assert (client.counted, built) == ([], [])
+    assert matcher.run("Kontrollgruppe", "text").matches == 4
