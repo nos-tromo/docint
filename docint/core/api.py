@@ -1071,12 +1071,13 @@ def _assessment_validation(
             "validation_mismatch": None,
             "validation_reason": ASSESSMENT_NOT_VALIDATED_REASON,
         }
+    checks = _trail_keyword_checks(trail)
     return _validation_payload(
         question=question,
         answer=evidence,
-        sources=cited_sources(evidence, sources),
+        sources=cited_sources(evidence, sources, fallback=not checks),
         intent="assessment",
-        keyword_checks=_trail_keyword_checks(trail),
+        keyword_checks=checks,
     )
 
 
@@ -1097,7 +1098,9 @@ def _turn_validation(
     passage its tools showed, with the previous user message ahead of the question: the agent
     read the conversation, so a follow-up is only judged right against what it follows. Either
     agent mode also hands the validator the turn's keyword checks with a known count, as facts
-    an answer may state without citing a passage. A plain lookup is checked as it always was.
+    an answer may state without citing a passage; an answer that cites none beside such checks
+    is judged against the checks alone, never against passages it does not rely on. A plain
+    lookup is checked as it always was.
 
     Args:
         data (dict[str, Any]): The turn's payload; ``answer_mode`` names an agent turn's mode.
@@ -1115,12 +1118,13 @@ def _turn_validation(
     if mode == "assessment":
         return _assessment_validation(question=question, answer=answer, sources=sources, agent=data.get("agent"))
     if mode == "lookup":
+        checks = _trail_keyword_checks(data.get("agent"))
         return _validation_payload(
             question=question,
             answer=answer,
-            sources=cited_sources(answer, sources),
+            sources=cited_sources(answer, sources, fallback=not checks),
             previous_user_input=previous_user_input,
-            keyword_checks=_trail_keyword_checks(data.get("agent")),
+            keyword_checks=checks,
         )
     return _validation_payload(
         question=question,

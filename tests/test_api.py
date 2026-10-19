@@ -37,6 +37,7 @@ import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
 from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.generation import NO_SOURCES_BESIDE_CHECKS
 from docint.agents.turn.keyword import KeywordMatcher
 from docint.agents.turn.loop import _OVERFLOW_MESSAGE
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
@@ -6949,6 +6950,91 @@ def test_an_agent_lookup_is_validated_against_its_cited_passages_and_its_checks(
     assert "Stände öffnen" not in prompt
     assert f"\n{ZERO_CHECK_LINE}\n" in prompt
     assert (body["validation_checked"], body["validation_mismatch"]) == (True, False)
+
+
+def test_an_agent_lookup_citing_nothing_is_validated_against_its_checks_alone(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A search found unrelated passages, a check found no match, and the answer cites none: it rests on the check.
+
+    Without its checks, such an answer would be judged against the first passages the search
+    happened to find, none of which it relies on.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    rag.text_model = validator
+    sources = [
+        {"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."},
+        {"id": "b", "citation_index": 2, "text": "Die Stände öffnen um zehn Uhr."},
+    ]
+    trail = {**LOOKUP_TRAIL, "actions": [{"action": "search", "detail": "Feuerwerk", "found": 2}, ZERO_CHECK]}
+    answer = "Keine Passage enthält das Wort Feuerwerk."
+    final = _agent_final(response=answer, sources=sources, agent=trail)
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    body = client.post("/query", json={"question": "Gibt es ein Feuerwerk?"}).json()
+
+    [prompt] = validator.prompts
+    assert f"\n{ZERO_CHECK_LINE}\n" in prompt
+    assert NO_SOURCES_BESIDE_CHECKS in prompt
+    assert "plant das Fest" not in prompt
+    assert "Stände öffnen" not in prompt
+    assert (body["validation_checked"], body["validation_mismatch"]) == (True, False)
+
+
+def test_an_agent_lookup_citing_nothing_without_checks_is_validated_as_before(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """With no keyword check to rest on, an answer that cites nothing is still judged against the first passages.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    rag.text_model = validator
+    sources = [{"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."}]
+    trail = {**LOOKUP_TRAIL, "actions": [{"action": "search", "detail": "Hafenfest", "found": 1}]}
+    final = _agent_final(response="Das Fest ist im Mai.", sources=sources, agent=trail)
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    client.post("/query", json={"question": "Wann ist das Hafenfest?"})
+
+    [prompt] = validator.prompts
+    assert "plant das Fest im Mai" in prompt
+    assert NO_SOURCES_BESIDE_CHECKS not in prompt
+
+
+def test_an_assessment_citing_nothing_rests_on_its_keyword_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An assessment's source-backed part that cites nothing beside a check is judged against the check alone.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+
+    api_module._assessment_validation(
+        question="Wie gut ist das Hafenfest geplant?",
+        answer="Keine Passage enthält das Wort Feuerwerk.",
+        sources=[{"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."}],
+        agent={"answer": "split", "evidence_chars": None, "actions": [ZERO_CHECK]},
+    )
+
+    [prompt] = validator.prompts
+    assert NO_SOURCES_BESIDE_CHECKS in prompt
+    assert "plant das Fest" not in prompt
 
 
 def test_an_assessment_hands_its_keyword_checks_to_the_validator(monkeypatch: pytest.MonkeyPatch) -> None:
