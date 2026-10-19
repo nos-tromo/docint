@@ -317,7 +317,7 @@ def programme_passage() -> NodeWithScore:
     return scored_node("programme", PROGRAMME, filename="hafenfest_programm.pdf", page=1)
 
 
-#: One round of keyword calls; the second names no field, so it matches the text.
+#: One round of keyword calls; the first names the author, and the other two name no field, so they match the text.
 KEYWORD_CALLS = (
     ("call_a", "keyword", {"words": "Hafenfest", "field": "author"}),
     ("call_b", "keyword", {"words": "Regatta"}),
