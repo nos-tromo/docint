@@ -2,7 +2,8 @@ version: 2
 # Every update waits 7 days after its upstream release before Dependabot
 # proposes it, so a compromised or broken release is usually caught upstream
 # first. Security updates are exempt and still open immediately. Our own
-# nos-tromo/* workflows skip the wait, so a hub release is not held back.
+# nos-tromo/* workflows skip the wait, so a hub release is not held back. The
+# base images skip it too; the docker entry says why.
 # Dependabot can only date Docker Hub images: refreshes of images from other
 # registries (ghcr.io, ...) are proposed without the wait, which is where the
 # shared CI's signed-provenance check carries the weight.
@@ -70,6 +71,14 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+      # The base images skip the wait. A fix for their OS packages arrives
+      # only as a digest refresh, and CI's image scan fails on a fixable
+      # critical until it lands. Dependabot holds such a refresh until the
+      # tag has gone 7 days without a push, which can take weeks for a tag
+      # rebuilt every few days.
+      exclude:
+        - "library/*"
+        - "nginxinc/nginx-unprivileged"
     # The backend base image's interpreter line is fixed by requires-python
     # (">=3.11,<3.12"), uv.lock and the CI matrix, and the builder runs uv with
     # UV_PYTHON_DOWNLOADS=0, so any other python:* tag fails `uv sync` by
