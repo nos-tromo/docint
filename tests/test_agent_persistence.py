@@ -10,7 +10,16 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from agent_fakes import answer_round, scripted_loop, streaming_tool_llm, turn_budget
+from agent_fakes import (
+    KEYWORD_CALLS,
+    KEYWORD_STEPS,
+    answer_round,
+    call_round,
+    keyword_match,
+    scripted_loop,
+    streaming_tool_llm,
+    turn_budget,
+)
 from assessment_fakes import bad_request
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -393,6 +402,45 @@ def test_an_agent_turn_stores_the_target_it_answered_under(
     with session_manager._session_scope() as s:
         assert [stored for (stored,) in s.query(Turn.retrieval_target).order_by(Turn.idx)] == [target]
     assert _stored_modes(session_manager) == ["lookup"]
+
+
+@pytest.mark.parametrize("entry", ["chat", "stream_chat"])
+def test_an_agent_turn_stores_and_replays_its_keyword_steps_fields(session_manager: SessionManager, entry: str) -> None:
+    """A keyword step is stored and replayed with its field, its count and what the index left unchecked.
+
+    A count that failed keeps ``matches: null``, which a zero is not; a step the index covered whole has no
+    ``unchecked`` key at all. The turn's own payload, the stored row and the replayed history agree.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        entry (str): The entry point under test, ``chat`` or ``stream_chat``.
+    """
+    engine = MagicMock()
+    rag = cast(Any, session_manager.rag)
+    rag.query_engine = engine
+    rag.build_query_engine.return_value = engine
+    keyword = keyword_match()
+    llm = streaming_tool_llm([call_round(*KEYWORD_CALLS), answer_round(ANSWER)])
+    rag.agent_turn.side_effect = lambda _engine, **kwargs: AgentTurn(
+        loop=scripted_loop(llm, target=kwargs["retrieval_target"], keyword=keyword),
+        ledger=EvidenceLedger(cap=AGENT_LEDGER_CAP),
+        budget=turn_budget(),
+        reasoning=False,
+    )
+
+    final: dict[str, Any]
+    if entry == "chat":
+        final = session_manager.chat(QUESTION, session_id="s1", agent=True)
+    else:
+        final = cast(dict[str, Any], list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True))[-1])
+
+    with session_manager._session_scope() as s:
+        (stored,) = s.query(Turn.agent_trail).one()
+    replayed = session_manager.get_session_history("s1", owner=None)[1]
+    assert stored is not None
+    assert final["agent"]["actions"] == KEYWORD_STEPS
+    assert json.loads(stored)["actions"] == KEYWORD_STEPS
+    assert replayed["agent"]["actions"] == KEYWORD_STEPS
 
 
 def test_get_prior_turn_reads_the_last_exchange_with_its_evidence_boundary(session_manager: SessionManager) -> None:

@@ -22,6 +22,7 @@ from llama_index.core.schema import BaseNode, NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import TurnBudget
+from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import SearchFn, ToolContext, ToolRegistry, ToolReply
@@ -316,6 +317,59 @@ def programme_passage() -> NodeWithScore:
     return scored_node("programme", PROGRAMME, filename="hafenfest_programm.pdf", page=1)
 
 
+#: One round of keyword calls; the second names no field, so it matches the text.
+KEYWORD_CALLS = (
+    ("call_a", "keyword", {"words": "Hafenfest", "field": "author"}),
+    ("call_b", "keyword", {"words": "Regatta"}),
+    ("call_c", "keyword", {"words": "Feuerwerk"}),
+)
+#: The steps those calls leave in a turn's trail: a count the index only partly covers, a zero, and a failed count.
+KEYWORD_STEPS: list[dict[str, Any]] = [
+    {"action": "keyword", "detail": "Hafenfest", "found": 1, "field": "author", "matches": 3, "unchecked": 2},
+    {"action": "keyword", "detail": "Regatta", "found": 0, "field": "text", "matches": 0},
+    {"action": "keyword", "detail": "Feuerwerk", "found": 0, "field": "text", "matches": None},
+]
+
+
+def keyword_match() -> KeywordMatcher:
+    """Script the match :data:`KEYWORD_CALLS` reach, so that they leave :data:`KEYWORD_STEPS`.
+
+    Returns:
+        KeywordMatcher: A match offering the text and the author, that accepts every call and answers it by its words.
+    """
+    results = {
+        "Hafenfest": KeywordResult(nodes=[programme_passage()], matches=3, unchecked=2, keywords=("hafenfest",)),
+        "Regatta": KeywordResult(nodes=[], matches=0, unchecked=0, keywords=("regatta",)),
+        "Feuerwerk": KeywordResult(nodes=[], matches=None, unchecked=0, keywords=("feuerwerk",)),
+    }
+
+    def _check(words: str, field: str) -> str | None:
+        """Accept the call.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            str | None: No reason to refuse.
+        """
+        return None
+
+    def _run(words: str, field: str) -> KeywordResult:
+        """Answer one run by its words, whatever order the round's calls run in.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Returns:
+            KeywordResult: The scripted result.
+        """
+        return results[words]
+
+    return KeywordMatcher(fields=("text", "author"), check=_check, run=_run)
+
+
 def two_phase_round(registry: ToolRegistry, calls: Sequence[ToolCall], ctx: ToolContext) -> list[ToolReply]:
     """Answer calls as a turn with parallel calls does: all prepared in order, all fetched, then all finished in order.
 
@@ -494,6 +548,7 @@ def scripted_loop(
     target: str = "all",
     search: SearchFn | None = None,
     search_images: SearchFn | None = None,
+    keyword: KeywordMatcher | None = None,
     view: Callable[[BaseNode], BaseNode] = llm_view,
     **overrides: Any,
 ) -> AgentLoop:
@@ -504,6 +559,7 @@ def scripted_loop(
         target (str): The retrieval target whose tools the loop offers.
         search (SearchFn | None): The text search; by default one that fails if it runs.
         search_images (SearchFn | None): The image search; by default one that fails if it runs.
+        keyword (KeywordMatcher | None): The keyword match to offer; by default none, so no keyword tool.
         view (Callable[[BaseNode], BaseNode]): The LLM view; the whitelist double by default.
         **overrides (Any): Further loop arguments, such as limits, model slots or a thumbnail fetcher.
 
@@ -515,6 +571,7 @@ def scripted_loop(
         search=search or ScriptedSearch(),
         search_images=search_images or ScriptedSearch(),
         list_keyframes=ScriptedSearch(),
+        keyword=keyword,
     )
     kwargs: dict[str, Any] = {
         "budget": turn_budget(),

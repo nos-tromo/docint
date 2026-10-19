@@ -15,7 +15,19 @@ from unittest.mock import MagicMock
 import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
-from agent_fakes import answer_round, status_error, streaming_tool_llm, timed_out, unreachable
+from agent_fakes import (
+    KEYWORD_CALLS,
+    KEYWORD_STEPS,
+    answer_round,
+    call_round,
+    keyword_match,
+    scripted_loop,
+    status_error,
+    streaming_tool_llm,
+    timed_out,
+    turn_budget,
+    unreachable,
+)
 from assessment_fakes import bad_request
 from conftest import run_ingest
 from fastapi.testclient import TestClient
@@ -24,12 +36,16 @@ from llama_index.core.base.llms.types import MessageRole
 import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
 from docint.agents.assessment.bounded import NoSlot
+from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.turn.keyword import KeywordMatcher
 from docint.agents.turn.loop import _OVERFLOW_MESSAGE
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
 from docint.agents.types import AgentProgress, IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
 from docint.core.entities.resolution import ResolutionSummary
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
+from docint.core.rag import AGENT_LEDGER_CAP, RAG, AgentTurn
+from docint.core.state.session_manager import SessionManager
 from docint.utils.csv_stream import SEARCH_EXPORT_COLUMNS
 
 
@@ -6122,6 +6138,140 @@ def test_query_drains_an_agent_turn(monkeypatch: pytest.MonkeyPatch, client: Tes
     assert (body["retrieval_mode"], body["answer_mode"], body["agent"]) == ("agent", "lookup", LOOKUP_TRAIL)
     assert body["graph_debug"] == {"applied": False, "reason": "agent"}
     assert rag.stateless_queries == []
+
+
+def _normalized(query: str, result: Any, **kwargs: Any) -> dict[str, Any]:
+    """Mirror the normalizer's shape closely enough for an agent turn's final payload.
+
+    Args:
+        query (str): The user's message.
+        result (Any): The response object built from the turn's result.
+        **kwargs (Any): The normalizer's keyword arguments.
+
+    Returns:
+        dict[str, Any]: A normalized payload.
+    """
+    return {
+        "response": result.response or "No answer.",
+        "sources": [
+            {"id": scored.node.node_id, "citation_index": scored.node.metadata.get("citation_index")}
+            for scored in result.source_nodes
+        ],
+        "reasoning": kwargs.get("reason"),
+        "retrieval_query": kwargs["retrieval_query"],
+        "coverage_unit": kwargs["coverage_unit"],
+        "retrieval_mode": kwargs["retrieval_mode"],
+        "rerank": None,
+        "visual": None,
+    }
+
+
+def _real_stateless_turn(monkeypatch: pytest.MonkeyPatch, llm: Any, keyword: KeywordMatcher) -> list[str]:
+    """Answer the API's stateless agent turns with the real stateless entry point and session layer.
+
+    The loop is real over a scripted model and keyword match; only the RAG under them is a double. The session
+    store is closed to the turn: an attempt to open it fails, and is recorded.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        llm (Any): The scripted model (see ``streaming_tool_llm``).
+        keyword (KeywordMatcher): The keyword match the turn is offered.
+
+    Returns:
+        list[str]: Receives one entry for each attempt to open the session store.
+    """
+    rag = MagicMock()
+    rag.reasoning_requested = False
+    rag.agent_char_token_ratio = 3.5
+    rag.graphrag_enabled = False
+    rag.qdrant_collection = "alpha"
+    rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
+    rag._normalize_response_data.side_effect = _normalized
+    rag.graph_debug_skipped.side_effect = lambda query, reason: {"applied": False, "reason": reason}
+    rag.agent_turn.side_effect = lambda _engine, **kwargs: AgentTurn(
+        loop=scripted_loop(llm, target=kwargs["retrieval_target"], keyword=keyword),
+        ledger=EvidenceLedger(cap=AGENT_LEDGER_CAP),
+        budget=turn_budget(),
+        reasoning=False,
+    )
+    rag.ensure_session_manager.return_value = SessionManager(rag=rag)
+    opened: list[str] = []
+
+    def _closed(self: SessionManager, db_url: str | None = None) -> None:
+        """Refuse to open the session store, and note the attempt.
+
+        Args:
+            self (SessionManager): The session layer.
+            db_url (str | None): Unused.
+
+        Raises:
+            AssertionError: Always.
+        """
+        opened.append("opened")
+        raise AssertionError("A stateless turn must not open the session store.")
+
+    def _stateless(question: str, **kwargs: Any) -> Iterator[Any]:
+        """Run the real stateless entry point on the double.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The call's keywords.
+
+        Returns:
+            Iterator[Any]: The turn's output.
+        """
+        return cast("Iterator[Any]", RAG.stream_stateless_agent_turn(cast(Any, rag), question, **kwargs))
+
+    monkeypatch.setattr(SessionManager, "init_session_store", _closed)
+    monkeypatch.setattr(api_module.rag, "stream_stateless_agent_turn", _stateless)
+    return opened
+
+
+#: The frames those steps stream as: a failed count's ``matches`` is left out, a zero is not.
+KEYWORD_FRAMES: list[dict[str, Any]] = [
+    {
+        "step": 1,
+        "action": "keyword",
+        "detail": "Hafenfest",
+        "found": 1,
+        "field": "author",
+        "matches": 3,
+        "unchecked": 2,
+    },
+    {"step": 1, "action": "keyword", "detail": "Regatta", "found": 0, "field": "text", "matches": 0},
+    {"step": 1, "action": "keyword", "detail": "Feuerwerk", "found": 0, "field": "text"},
+]
+
+
+@pytest.mark.parametrize("path", ["/stream_query", "/query"])
+def test_a_stateless_agent_turn_reports_its_keyword_steps_fields_and_stores_nothing(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """A stateless turn reports its keyword steps as a stored one does, and never opens the session store.
+
+    The streamed steps leave a failed count's ``matches`` out; the trail that closes the turn keeps it as ``null``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    _open_agent_gate(monkeypatch)
+    keyword = keyword_match()
+    llm = streaming_tool_llm([call_round(*KEYWORD_CALLS), answer_round(AGENT_ANSWER)])
+    opened = _real_stateless_turn(monkeypatch, llm, keyword)
+    request = {"question": "Wann beginnt das Hafenfest?", "retrieval_mode": "stateless"}
+    steps: list[dict[str, Any]] = []
+
+    if path == "/query":
+        body = client.post(path, json=request).json()
+    else:
+        frames = _stream_frames(client, **request)
+        body, steps = frames[-1], [frame["agent"] for frame in frames[:-1] if "agent" in frame]
+
+    assert body["agent"]["actions"] == KEYWORD_STEPS
+    assert opened == []
+    assert steps == ([] if path == "/query" else KEYWORD_FRAMES)
 
 
 #: How an endpoint without tool support refuses a request offering tools, the probe's included.
