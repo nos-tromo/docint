@@ -8453,3 +8453,100 @@ def test_ingest_stats_tolerates_a_reader_without_the_counters() -> None:
     )
 
     assert stats.files_skipped == 0
+
+
+# ---------------------------------------------------------------------------
+# the text postprocessor chain, shared by a lookup and a keyword match
+# ---------------------------------------------------------------------------
+
+
+def _lookup_rag(monkeypatch: pytest.MonkeyPatch, *, social: bool, parent: bool) -> tuple[RAG, dict[str, Any]]:
+    """Build a RAG whose lookup engine is captured rather than run, its collection profiled from invented payloads.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        social (bool): Whether the collection profiles as a social export.
+        parent (bool): Whether its chunks carry the hierarchy parent-context expansion needs.
+
+    Returns:
+        tuple[RAG, dict[str, Any]]: The RAG, and the arguments its engine is built from once built.
+    """
+    monkeypatch.delenv("IMAGE_RESCORE_ENABLED", raising=False)
+    monkeypatch.delenv("IMAGE_RESCORE_MIN_SCORE", raising=False)
+    rag = RAG(qdrant_collection="test")
+    rag._text_model = cast(Any, object())
+    # Synthesis picks the post-retrieval (reasoning) model, so the env default opts in.
+    rag.openai_config = replace(rag.openai_config, thinking_enabled=True)
+    rag._reranker = cast(Any, object())
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(docstore=object(), as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs}),
+    )
+    payload: dict[str, Any] = {}
+    if social:
+        payload.update({"source": "table", "reference_metadata": {"type": "posting", "text_id": "p1"}})
+    if parent:
+        payload.update({"docint_hier_type": "fine", "hier.parent_id": "p0"})
+    documents: list[dict[str, Any]] = [{"filename": "beitraege.csv", "max_rows": 10}] if social else []
+    monkeypatch.setattr(RAG, "list_documents", lambda self: documents)
+    monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [payload] if payload else [])
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+    return rag, captured
+
+
+@pytest.mark.parametrize("social", [False, True], ids=["documents", "social"])
+@pytest.mark.parametrize("parent", [False, True], ids=["flat", "hierarchical"])
+def test_a_lookups_postprocessors_are_the_shared_text_chain_in_their_order(
+    monkeypatch: pytest.MonkeyPatch, social: bool, parent: bool
+) -> None:
+    """A lookup ranks, floors images, expands, keeps social posts apart and numbers, as before the chain was shared.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        social (bool): Whether the collection profiles as a social export.
+        parent (bool): Whether its chunks carry the hierarchy parent-context expansion needs.
+    """
+    rag, captured = _lookup_rag(monkeypatch, social=social, parent=parent)
+
+    rag.build_query_engine()
+
+    chain = captured["node_postprocessors"]
+    expected: list[type[Any]] = [
+        rag_module.LazyRerankerPostprocessor,
+        rag_module.ImageRelevanceFloorPostprocessor,
+        *([rag_module.ParentContextPostprocessor] if parent else []),
+        *([rag_module.SocialSourceDiversityPostprocessor, rag_module.LinkFollowingPostprocessor] if social else []),
+        rag_module.CitationNumberingPostprocessor,
+    ]
+    assert [type(processor) for processor in chain] == expected
+    shared = rag._text_postprocessors(profile={"is_social_table": social})
+    assert [type(processor) for processor in shared] == expected
+    reranker, floor = chain[0], chain[1]
+    assert isinstance(reranker, rag_module.LazyRerankerPostprocessor)
+    assert reranker.keep_all is True
+    assert isinstance(floor, rag_module.ImageRelevanceFloorPostprocessor)
+    assert (floor.min_score, floor.top_n) == (rag._image_relevance_floor(), rag.rerank_top_n)
+    assert floor.rescore == rag._rescore_images_by_description
+    assert floor.rescore_min_score == rag._image_rescore_floor()
+
+
+def test_the_text_chain_leaves_the_social_steps_out_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A keyword match keeps the rank, the image floor with its re-score, parent context and numbering, and no more."""
+    rag, _ = _lookup_rag(monkeypatch, social=True, parent=True)
+
+    chain = rag._text_postprocessors(profile={"is_social_table": True}, social_links=False)
+
+    assert [type(processor) for processor in chain] == [
+        rag_module.LazyRerankerPostprocessor,
+        rag_module.ImageRelevanceFloorPostprocessor,
+        rag_module.ParentContextPostprocessor,
+        rag_module.CitationNumberingPostprocessor,
+    ]
+    floor = chain[1]
+    assert isinstance(floor, rag_module.ImageRelevanceFloorPostprocessor)
+    assert floor.rescore == rag._rescore_images_by_description

@@ -6848,6 +6848,50 @@ class RAG:
                 ),
             )
 
+        node_postprocessors = self._text_postprocessors(profile=profile, retrieval_options=retrieval_options)
+        return RetrieverQueryEngine.from_args(
+            retriever=self._build_retriever(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+                retrieval_options=retrieval_options,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
+                include_images=retrieval_target != "documents",
+            ),
+            llm=self.post_retrieval_text_model,
+            node_postprocessors=node_postprocessors,
+            response_synthesizer=self._build_response_synthesizer(
+                streaming=streaming,
+                social_table=bool(profile.get("is_social_table")),
+            ),
+        )
+
+    def _text_postprocessors(
+        self,
+        *,
+        profile: dict[str, Any],
+        retrieval_options: dict[str, Any] | None = None,
+        social_links: bool = True,
+    ) -> list[BaseNodePostprocessor]:
+        """Build the postprocessor chain of the ``all`` and ``documents`` targets.
+
+        A lookup's engine runs it, and so does an agent turn's keyword match, which
+        leaves the social steps out.
+
+        Args:
+            profile (dict[str, Any]): The collection profile; ``is_social_table`` sizes
+                parent context and decides whether the social steps can join.
+            retrieval_options (dict[str, Any] | None): Runtime overrides for
+                parent-context expansion.
+            social_links (bool): Whether a social collection's diversity cap and
+                link-following join the chain. A keyword match leaves them out: its
+                passages must be matches, and the cap would thin an author's postings.
+
+        Returns:
+            list[BaseNodePostprocessor]: Rerank, the image floor with its description
+            re-score, parent context when enabled, the social steps when asked, then
+            citation numbering.
+        """
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
@@ -6884,7 +6928,7 @@ class RAG:
                     budget_enforced=True,
                 )
             )
-        if bool(profile.get("is_social_table")):
+        if social_links and bool(profile.get("is_social_table")):
             # Configurable via SOCIAL_SOURCE_DIVERSITY_LIMIT (RetrievalConfig)
             # — this knob used to be sourced from the (now-deleted) sampling
             # summarizer's social config, but this call site is on the
@@ -6894,23 +6938,7 @@ class RAG:
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.
         node_postprocessors.append(CitationNumberingPostprocessor())
-
-        return RetrieverQueryEngine.from_args(
-            retriever=self._build_retriever(
-                metadata_filters=metadata_filters,
-                vector_store_kwargs=vector_store_kwargs,
-                retrieval_options=retrieval_options,
-                metadata_filter_rules=metadata_filter_rules,
-                metadata_filters_active=metadata_filters_active,
-                include_images=retrieval_target != "documents",
-            ),
-            llm=self.post_retrieval_text_model,
-            node_postprocessors=node_postprocessors,
-            response_synthesizer=self._build_response_synthesizer(
-                streaming=streaming,
-                social_table=bool(profile.get("is_social_table")),
-            ),
-        )
+        return node_postprocessors
 
     def _build_response_synthesizer(
         self,
