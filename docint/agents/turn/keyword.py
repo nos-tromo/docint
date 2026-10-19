@@ -56,8 +56,8 @@ KEYWORD_DESCRIPTION = (
     "at all: a count of 0 is exact."
 )
 KEYWORD_WORDS_DESCRIPTION = (
-    "One to three words every match must contain, in any order; not a single letter or digit, a word split by "
-    f"dots or signs (2.5, U.S.), nor one over {SEARCH_MAX_TOKEN_LEN} characters."
+    "One to three words every match must contain; no single letter or digit, alone or where dots or signs split "
+    f"a word (2.5, U.S.), nor words over {SEARCH_MAX_TOKEN_LEN} characters."
 )
 #: What each field matches, for the schema of a tool that offers more than the text.
 KEYWORD_FIELD_NOTES = {
@@ -479,8 +479,9 @@ class KeywordTool:
             return f"{field} matches one exact value; give a single one."
         if problem == UNINDEXABLE_WORD:
             return (
-                "the index cannot match a single letter or digit, such as the D in vitamin D, nor a word it splits "
-                "on dots and signs, such as 2.5, U.S. or p<0.05; check the other words only, or use search."
+                "the index cannot match a single letter or digit, alone, such as the D in vitamin D, or where dots "
+                "or signs split a word, such as 2.5, U.S. or p<0.05, nor a word with no letter or digit at all; "
+                "check the other words only, or use search."
             )
         if problem == LONG_WORD:
             return (

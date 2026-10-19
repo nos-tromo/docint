@@ -718,8 +718,8 @@ def test_a_tool_offering_only_the_text_takes_words_and_nothing_else() -> None:
             "words": {
                 "type": "string",
                 "description": (
-                    "One to three words every match must contain, in any order; not a single letter or digit, "
-                    f"a word split by dots or signs (2.5, U.S.), nor one over {SEARCH_MAX_TOKEN_LEN} characters."
+                    "One to three words every match must contain; no single letter or digit, alone or where dots "
+                    f"or signs split a word (2.5, U.S.), nor words over {SEARCH_MAX_TOKEN_LEN} characters."
                 ),
             }
         },
@@ -852,8 +852,9 @@ REFUSALS = [
     pytest.param(
         {"words": "vitamin D"},
         UNINDEXABLE_WORD,
-        "the index cannot match a single letter or digit, such as the D in vitamin D, nor a word it splits on dots "
-        "and signs, such as 2.5, U.S. or p<0.05; check the other words only, or use search.",
+        "the index cannot match a single letter or digit, alone, such as the D in vitamin D, or where dots or signs "
+        "split a word, such as 2.5, U.S. or p<0.05, nor a word with no letter or digit at all; check the other words "
+        "only, or use search.",
         [("vitamin D", "text")],
         id="unindexable-word",
     ),
