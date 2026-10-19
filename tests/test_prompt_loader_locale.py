@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,11 +20,19 @@ from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
-from docint.agents.turn.history import ANSWER_ASSESSMENT_LABEL, ANSWER_SOURCED_LABEL, NO_HISTORY, labelled_lines
+from docint.agents.turn.history import (
+    ANSWER_ASSESSMENT_LABEL,
+    ANSWER_SOURCED_LABEL,
+    NO_HISTORY,
+    ConversationWindow,
+    labelled_lines,
+)
+from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.passages import _trailer, search_hint
 from docint.agents.turn.scope import scope_message
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
+from docint.core.rag import RAG
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
 
@@ -33,6 +42,8 @@ AGENT_PROMPTS: dict[str, frozenset[str]] = {
     "agent_tools_all": frozenset(),
     "agent_tools_documents": frozenset(),
     "agent_tools_visual": frozenset(),
+    "agent_tools_keyword": frozenset(),
+    "agent_tools_keyword_fields": frozenset({"fields"}),
     "agent_assessment_rule": frozenset(),
     "agent_final": frozenset(),
     "agent_scope": frozenset(),
@@ -41,6 +52,12 @@ AGENT_PROMPTS: dict[str, frozenset[str]] = {
 }
 #: The retrieval targets, each with its own tools guide.
 TARGETS = ("all", "documents", "visual")
+#: The targets that offer keyword: it matches words in text, so a visual turn never has it.
+KEYWORD_TARGETS = ("all", "documents")
+#: The fields of a keyword tool on a collection whose every index is ready.
+KEYWORD_FIELDS = ("text", "author", "network", "uuid")
+#: What each locale's keyword guide has the model report for a count of 0.
+ZERO_PHRASES = {"en": "no passage contains these words", "de": "keine Passage enthält diese Wörter"}
 #: How an answer marks a conclusion drawn from the evidence, by the locale of its prompt.
 INFERENCE_LABELS = {"en": "Inference:", "de": "Schlussfolgerung:"}
 #: The prompts that teach an answer to mark an inference, each with its own locale's label.
@@ -286,18 +303,26 @@ def _placeholders(text: str) -> set[str]:
     return set(re.findall(r"\{(\w+)\}", text))
 
 
-def _system_prompt(code: str, target: str) -> str:
+def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None = None) -> str:
     """Render the system prompt of a turn with no history: the target's guide and the assessment rule filled in.
 
     Args:
         code (str): The locale.
         target (str): The retrieval target.
+        keyword_fields (Sequence[str] | None): The fields the turn's keyword tool offers; none when it
+            offers no keyword. The guide then gains the keyword line, and a line listing the fields
+            when there is more than the text.
 
     Returns:
         str: The rendered prompt.
     """
+    guide = _prompt(f"agent_tools_{target}", code)
+    if keyword_fields:
+        guide += "\n" + _prompt("agent_tools_keyword", code)
+        if len(keyword_fields) > 1:
+            guide += "\n" + _prompt("agent_tools_keyword_fields", code).format(fields=", ".join(keyword_fields))
     return _prompt("agent_system", code).format(
-        tools_guide=_prompt(f"agent_tools_{target}", code),
+        tools_guide=guide,
         assessment_rule=_prompt("agent_assessment_rule", code),
         conversation_summary=NO_HISTORY,
     )
@@ -315,16 +340,42 @@ def _nothing(_: str) -> list[NodeWithScore]:
     return []
 
 
-def _offered(target: str) -> frozenset[str]:
+def _matcher(*fields: str) -> KeywordMatcher:
+    """Build a keyword match for a tool set built only to read its names: it accepts every call and runs none.
+
+    Args:
+        *fields (str): The fields it offers; the text alone when none is given.
+
+    Returns:
+        KeywordMatcher: The match.
+    """
+
+    def _run(words: str, field: str) -> KeywordResult:
+        """Fail: a tool set built to read its names never matches anything.
+
+        Args:
+            words (str): The words.
+            field (str): The field.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("The keyword match ran, which the test did not expect.")
+
+    return KeywordMatcher(fields=fields or ("text",), check=lambda words, field: None, run=_run)
+
+
+def _offered(target: str, keyword: KeywordMatcher | None = None) -> frozenset[str]:
     """Return the names of the tools a target offers.
 
     Args:
         target (str): The retrieval target.
+        keyword (KeywordMatcher | None): The keyword match the turn offers; none when not given.
 
     Returns:
         frozenset[str]: The names.
     """
-    return toolset_for(target, search=_nothing, search_images=_nothing, list_keyframes=_nothing).names
+    return toolset_for(target, search=_nothing, search_images=_nothing, list_keyframes=_nothing, keyword=keyword).names
 
 
 def _named_tools(text: str) -> set[str]:
@@ -334,9 +385,9 @@ def _named_tools(text: str) -> set[str]:
         text (str): A prompt.
 
     Returns:
-        set[str]: The names of the tools of any target that it names.
+        set[str]: The names of the tools of any target that it names, keyword included.
     """
-    return {name for name in _offered("all") if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text)}
+    return {name for name in _offered("all", _matcher()) if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text)}
 
 
 def _written() -> dict[str, str]:
@@ -414,6 +465,140 @@ def test_agent_system_prompt_carries_the_protocol_tokens(code: str, target: str)
     assert _named_tools(rendered) <= offered, f"{code}/{target}: names a tool the target does not offer"
     assert ("#n" in guide) == ("keyframes" in offered), f"{code}/agent_tools_{target}.txt and the frame label #n"
     assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
+
+
+@pytest.mark.parametrize("name", ["agent_tools_keyword", "agent_tools_keyword_fields"])
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_a_keyword_line_is_one_line_naming_only_keyword_and_quoting_nothing(code: str, name: str) -> None:
+    """Each keyword line is a single line that names the tool alone, with no backticks.
+
+    A backtick-quoted phrase must be text the code writes, so the verbatim test would hold a quoted
+    keyword line to that; the line is prose, and the tool's mechanics are in its schema.
+
+    Args:
+        code (str): The locale.
+        name (str): The keyword prompt's basename.
+    """
+    text = _prompt(name, code)
+
+    assert "\n" not in text, f"{code}/{name}.txt is more than one line"
+    assert "`" not in text, f"{code}/{name}.txt quotes in backticks"
+    assert _named_tools(text) == {"keyword"}, f"{code}/{name}.txt names {sorted(_named_tools(text))}"
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_keyword_guide_makes_a_count_a_fact_not_a_source(code: str) -> None:
+    """The guide keeps a count out of the citations and a zero out of any claim of absence, in the locale's words.
+
+    Args:
+        code (str): The locale.
+    """
+    guide = _prompt("agent_tools_keyword", code)
+
+    assert "[n]" in guide, f"{code}/agent_tools_keyword.txt does not tie the count to [n]"
+    assert ZERO_PHRASES[code] in guide, f"{code}/agent_tools_keyword.txt lacks {ZERO_PHRASES[code]!r}"
+
+
+@pytest.mark.parametrize("target", KEYWORD_TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_agent_system_prompt_with_keyword_keeps_the_protocol_tokens_and_names_exactly_the_offered_tools(
+    code: str, target: str
+) -> None:
+    """With the keyword lines and every field, the prompt keeps its protocol tokens and names the tools offered.
+
+    Args:
+        code (str): The locale.
+        target (str): The retrieval target, one that offers keyword.
+    """
+    rendered = _system_prompt(code, target, KEYWORD_FIELDS)
+    offered = _offered(target, _matcher(*KEYWORD_FIELDS))
+
+    for token in (SENTINEL, "citation_index", "[n]"):
+        assert token in rendered, f"{code}/{target}: {token!r} missing"
+    assert "keyword" in offered
+    assert _named_tools(rendered) == offered, f"{code}/{target}: names {sorted(_named_tools(rendered))}"
+    assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
+
+
+def _engine(monkeypatch: pytest.MonkeyPatch, code: str) -> RAG:
+    """Build an engine whose agent prompts load from one locale, the assessment rule switched on.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pins the locale and the rule before the engine reads them.
+        code (str): The locale.
+
+    Returns:
+        RAG: The engine.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", code)
+    monkeypatch.setenv("ASSESSMENT_ENABLED", "true")
+    return RAG(qdrant_collection="hafen")
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_a_keyword_offering_only_the_text_adds_no_fields_line(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
+    """The fields line is for a keyword that offers a choice: with only the text, the model is told nothing of fields.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pins the locale and the assessment rule.
+        code (str): The locale.
+    """
+    rag = _engine(monkeypatch, code)
+    line = _prompt("agent_tools_keyword_fields", code)
+
+    text_only = rag._agent_system_prompt("all", ConversationWindow(), keyword_fields=("text",))
+    every_field = rag._agent_system_prompt("all", ConversationWindow(), keyword_fields=KEYWORD_FIELDS)
+
+    assert _prompt("agent_tools_keyword", code) in text_only
+    assert line.split("{fields}")[0] not in text_only
+    assert line.format(fields=", ".join(KEYWORD_FIELDS)) in every_field
+
+
+@pytest.mark.parametrize("fields", [None, ()], ids=["none", "empty"])
+@pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_without_keyword_the_engine_renders_the_system_prompt_it_always_did(
+    monkeypatch: pytest.MonkeyPatch, code: str, target: str, fields: tuple[str, ...] | None
+) -> None:
+    """A turn that offers no keyword is sent the target's guide as it stands, byte for byte.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pins the locale and the assessment rule.
+        code (str): The locale.
+        target (str): The retrieval target.
+        fields (tuple[str, ...] | None): No keyword fields: left out, or none offered.
+    """
+    rag = _engine(monkeypatch, code)
+
+    rendered = rag._agent_system_prompt(target, ConversationWindow(), keyword_fields=fields)
+
+    assert rendered == _system_prompt(code, target)
+    assert rendered == rag._agent_system_prompt(target, ConversationWindow())
+
+
+@pytest.mark.parametrize("fields", [("text",), ("text", "uuid"), KEYWORD_FIELDS], ids=["text", "two", "four"])
+@pytest.mark.parametrize("target", KEYWORD_TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_with_keyword_the_engine_follows_the_targets_guide_with_the_keyword_lines(
+    monkeypatch: pytest.MonkeyPatch, code: str, target: str, fields: tuple[str, ...]
+) -> None:
+    """The guide becomes the target's, then the keyword line, then a line naming the fields when there is a choice.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pins the locale and the assessment rule.
+        code (str): The locale.
+        target (str): The retrieval target, one that offers keyword.
+        fields (tuple[str, ...]): The fields the keyword tool offers, the text first.
+    """
+    rag = _engine(monkeypatch, code)
+    lines = [_prompt(f"agent_tools_{target}", code), _prompt("agent_tools_keyword", code)]
+    if len(fields) > 1:
+        lines.append(_prompt("agent_tools_keyword_fields", code).format(fields=", ".join(fields)))
+
+    rendered = rag._agent_system_prompt(target, ConversationWindow(), keyword_fields=fields)
+
+    assert "\n".join(lines) + "\n\n" in rendered
+    assert rendered == _system_prompt(code, target, fields)
 
 
 @pytest.mark.parametrize(("code", "evaluation"), [("en", "evaluation"), ("de", "Bewertung")])

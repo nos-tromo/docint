@@ -8916,21 +8916,37 @@ class RAG:
         path = None if self.prompt_dir is None else self.prompt_dir / f"{name}.txt"
         return self._load_prompt_text(path, default="", required=True)
 
-    def _agent_system_prompt(self, retrieval_target: str, window: ConversationWindow) -> str:
+    def _agent_system_prompt(
+        self,
+        retrieval_target: str,
+        window: ConversationWindow,
+        keyword_fields: Sequence[str] | None = None,
+    ) -> str:
         """Render an agent turn's system prompt.
 
         Args:
             retrieval_target (str): The turn's retrieval target, which picks the tools guide.
             window (ConversationWindow): The conversation before the message; its summary block
                 ends the prompt.
+            keyword_fields (Sequence[str] | None): The fields the turn's keyword tool offers, the
+                text first; ``None`` (or empty) when the turn offers no keyword tool.
 
         Returns:
             str: ``agent_system`` with the target's tools guide, the assessment rule while
-            ``ASSESSMENT_ENABLED`` is on, and the window's summary block.
+            ``ASSESSMENT_ENABLED`` is on, and the window's summary block. When ``keyword_fields``
+            is given, the guide is followed by the keyword line (``agent_tools_keyword``) and,
+            when more than the text is offered, by a line naming the fields
+            (``agent_tools_keyword_fields``); without it the prompt is the target's alone.
         """
         rule = self._agent_prompt("agent_assessment_rule") if load_assessment_env().enabled else ""
+        guide = self._agent_prompt(f"agent_tools_{retrieval_target}")
+        if keyword_fields:
+            guide = f"{guide}\n{self._agent_prompt('agent_tools_keyword')}"
+            if len(keyword_fields) > 1:
+                fields_line = self._agent_prompt("agent_tools_keyword_fields").format(fields=", ".join(keyword_fields))
+                guide = f"{guide}\n{fields_line}"
         return self._agent_prompt("agent_system").format(
-            tools_guide=self._agent_prompt(f"agent_tools_{retrieval_target}"),
+            tools_guide=guide,
             assessment_rule=rule,
             conversation_summary=window.summary_block(),
         )

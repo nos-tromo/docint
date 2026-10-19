@@ -14,6 +14,8 @@ from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.tools import SearchFn, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS
+from docint.utils.embed_chunking import estimate_tokens
+from docint.utils.prompt_loader import load_localized_prompt
 
 CLIP = "harbour_walk.webm"
 #: Most words a description may take; every round of every turn is sent all of them.
@@ -25,6 +27,10 @@ PLAIN_SYSTEM_TOKENS = 900
 THINKING_SYSTEM_TOKENS = 1200
 MESSAGE_TOKENS = 300
 REMEDY = "shorten a tool description or raise the context window"
+#: The fields of a keyword tool on a collection whose every index is ready.
+KEYWORD_FIELDS = ("text", "author", "network", "uuid")
+#: Most keyword may cost a turn at the tightest budget: its schema with all four fields plus its longest guide.
+KEYWORD_TOKENS = 330
 
 
 def _no_frames(key: str) -> list[NodeWithScore]:
@@ -315,13 +321,15 @@ def test_a_description_stays_short() -> None:
     assert {name: count for name, count in words.items() if count > MAX_DESCRIPTION_WORDS} == {}
 
 
-def _budget_for(target: str, *, reasoning: bool, system: int) -> TurnBudget:
+def _budget_for(target: str, *, reasoning: bool, system: int, keyword: KeywordMatcher | None = None) -> TurnBudget:
     """Build the budget of a turn in the smallest window agent turns run in, with a target's real schemas measured.
 
     Args:
         target (str): The turn's retrieval target; the schemas of the tools it offers are measured.
         reasoning (bool): Whether the model thinks before it answers.
         system (int): Tokens of the system prompt.
+        keyword (KeywordMatcher | None): The keyword match the turn offers, its schema measured with the
+            rest; none when not given.
 
     Returns:
         TurnBudget: The budget, its history at the allowance for ``reasoning``.
@@ -331,9 +339,74 @@ def _budget_for(target: str, *, reasoning: bool, system: int) -> TurnBudget:
         reasoning=reasoning,
         char_token_ratio=RATIO,
         system_tokens=system,
-        tool_schema_tokens=schema_tokens(_toolset(target).schemas(), RATIO),
+        tool_schema_tokens=schema_tokens(_toolset(target, keyword=keyword).schemas(), RATIO),
         history_tokens=history_allowance_tokens(reasoning),
         message_tokens=MESSAGE_TOKENS,
+    )
+
+
+def _keyword_lines(code: str, fields: tuple[str, ...]) -> str:
+    """Write what a turn's system prompt gains when it offers keyword with these fields.
+
+    Args:
+        code (str): The locale.
+        fields (tuple[str, ...]): The fields it offers, the text first; the fields line is there only when
+            that is more than the text.
+
+    Returns:
+        str: The keyword line, then the fields line, each after a line break.
+    """
+    lines = [load_localized_prompt("agent_tools_keyword", default="", required=True, lang=code)]
+    if len(fields) > 1:
+        fields_line = load_localized_prompt("agent_tools_keyword_fields", default="", required=True, lang=code)
+        lines.append(fields_line.format(fields=", ".join(fields)))
+    return "".join(f"\n{line}" for line in lines)
+
+
+def _keyword_guide_tokens(fields: tuple[str, ...]) -> int:
+    """Estimate what keyword's lines add to the system prompt, in the locale where they cost most.
+
+    Args:
+        fields (tuple[str, ...]): The fields keyword offers, the text first.
+
+    Returns:
+        int: Estimated tokens.
+    """
+    return max(estimate_tokens(_keyword_lines(code, fields), RATIO) for code in ("en", "de"))
+
+
+def _keyword_schema_tokens(fields: tuple[str, ...]) -> int:
+    """Estimate what the keyword tool's schema costs in the prompt when it offers these fields.
+
+    Args:
+        fields (tuple[str, ...]): The fields keyword offers, the text first.
+
+    Returns:
+        int: Estimated tokens.
+    """
+    registry = _toolset("all", keyword=_keyword_matcher(*fields))
+    return schema_tokens([item for item in registry.schemas() if item["function"]["name"] == "keyword"], RATIO)
+
+
+def _budget_with_keyword(*, reasoning: bool, fields: tuple[str, ...]) -> TurnBudget:
+    """Build the budget of an ``all`` turn that offers keyword, in the smallest window.
+
+    The system prompt is the one planned for the model (see ``PLAIN_SYSTEM_TOKENS`` and
+    ``THINKING_SYSTEM_TOKENS``) with keyword's lines added.
+
+    Args:
+        reasoning (bool): Whether the model thinks before it answers.
+        fields (tuple[str, ...]): The fields keyword offers, the text first.
+
+    Returns:
+        TurnBudget: The budget.
+    """
+    planned = THINKING_SYSTEM_TOKENS if reasoning else PLAIN_SYSTEM_TOKENS
+    return _budget_for(
+        "all",
+        reasoning=reasoning,
+        system=planned + _keyword_guide_tokens(fields),
+        keyword=_keyword_matcher(*fields),
     )
 
 
@@ -367,6 +440,56 @@ def test_a_plain_model_keeps_room_for_three_full_results_in_the_smallest_window(
         f"The {target} tools cost {budget.tool_schema_tokens} schema tokens and leave a plain model "
         f"{budget.round_room} tokens for tool results at {MIN_CTX_WINDOW}, under the {three_results:.0f} that three "
         f"full results take; {REMEDY}."
+    )
+
+
+def test_keyword_costs_a_turn_no_more_than_its_planned_tokens() -> None:
+    """With all four fields, keyword's schema and its lines in the system prompt stay within the tokens planned."""
+    schema, guide = _keyword_schema_tokens(KEYWORD_FIELDS), _keyword_guide_tokens(KEYWORD_FIELDS)
+
+    assert schema + guide <= KEYWORD_TOKENS, (
+        f"keyword costs {schema} schema tokens and {guide} prompt tokens, over the {KEYWORD_TOKENS} planned; "
+        f"shorten the keyword lines or its schema, or plan for more."
+    )
+
+
+def test_a_thinking_model_keeps_room_for_a_text_only_keyword_in_the_smallest_window() -> None:
+    """Keyword on the text alone (its line, no fields line) leaves a thinking model room to run a turn at 8k."""
+    budget = _budget_with_keyword(reasoning=True, fields=("text",))
+
+    assert budget.available, (
+        f"A text-only keyword costs {_keyword_schema_tokens(('text',))} schema tokens and leaves a thinking model "
+        f"{budget.round_room} tokens for tool results at {MIN_CTX_WINDOW}, under the {MIN_ROUND_ROOM} a turn needs; "
+        f"{REMEDY}."
+    )
+
+
+def test_a_plain_model_keeps_room_for_three_full_results_with_all_four_keyword_fields_in_the_smallest_window() -> None:
+    """With all four fields, keyword still leaves a plain model, the default, room for three full tool results at 8k."""
+    budget = _budget_with_keyword(reasoning=False, fields=KEYWORD_FIELDS)
+    three_results = 3 * budget.result_chars / budget.char_token_ratio
+
+    assert budget.round_room >= three_results, (
+        f"Keyword with all four fields costs {_keyword_schema_tokens(KEYWORD_FIELDS)} schema tokens and leaves a "
+        f"plain model {budget.round_room} tokens for tool results at {MIN_CTX_WINDOW}, under the "
+        f"{three_results:.0f} that three full results take; {REMEDY}."
+    )
+
+
+def test_a_thinking_model_has_no_room_left_for_keyword_with_all_four_fields_in_the_smallest_window() -> None:
+    """With all four fields, keyword leaves a thinking model at 8k under the room a turn needs; on purpose.
+
+    Thinking is off by default, so the default 8k deployment is not here. A thinking model there, on a
+    collection whose every index is ready, is the case ``RAG.agent_turn`` handles by withholding keyword
+    from a turn whose budget leaves no room with it. The fields' notes and the tool's limits stay in the
+    schema for routing quality rather than being cut to fit.
+    """
+    budget = _budget_with_keyword(reasoning=True, fields=KEYWORD_FIELDS)
+
+    assert not budget.available, (
+        f"Keyword with all four fields leaves a thinking model {budget.round_room} tokens for tool results at "
+        f"{MIN_CTX_WINDOW}, enough for the {MIN_ROUND_ROOM} a turn needs; it no longer has to be withheld there, so "
+        f"pin that it fits instead."
     )
 
 
