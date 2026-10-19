@@ -283,6 +283,7 @@ def passage_reply(
     detail: str,
     hint: str | None = None,
     note: str = "",
+    note_first: bool = False,
 ) -> PassageReply:
     """Answer a call with what its search found (see :func:`~docint.agents.turn.passages.answer_passages`).
 
@@ -293,13 +294,15 @@ def passage_reply(
         detail (str): The call's main argument, for the trail.
         hint (str | None): What the reply suggests for matching passages it had no room for;
             ``None`` to call the same tool again (see :func:`~docint.agents.turn.passages.search_hint`).
-        note (str): A note of the calling tool's own, after the others; empty for none.
+        note (str): A note of the calling tool's own, after the others unless ``note_first``;
+            empty for none.
+        note_first (bool): Whether the note leads the reply instead, ahead of the passages.
 
     Returns:
         PassageReply: The passages new to the turn under their numbers, the ones shown
         before named by number, and the notes; ``found`` counts what was admitted or extended.
     """
-    rendered = answer_passages(found, ctx, action=action, hint=hint, note=note)
+    rendered = answer_passages(found, ctx, action=action, hint=hint, note=note, note_first=note_first)
     return PassageReply(
         text=rendered.text, found=rendered.found, action=action, detail=detail, numbers=rendered.numbers
     )

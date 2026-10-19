@@ -6,7 +6,8 @@ by number, with their own note when they grew past what the reply could show. Si
 characters: the reply keeps within ``result_chars``, room for its notes reserved first, and
 the text of each passage within ``passage_chars``; a header shows whole up to ``HEADER_CHARS``.
 A calling tool may say what to do about the passages it had no room for, and add a note of
-its own; both are among the notes.
+its own; both are among the notes, its own note last, or ahead of the passages when the tool
+asks for it first.
 
 Everything here reads or writes the turn's ledger, so it runs on the loop thread.
 """
@@ -38,7 +39,8 @@ class RenderedPassages(NamedTuple):
     """A search's passages, admitted into the turn's evidence and rendered as one reply.
 
     Attributes:
-        text (str): The reply: the passages shown, then the notes.
+        text (str): The reply: the passages shown, then the notes; a calling tool's own note
+            leads instead when it asked for it first.
         found (int): Passages admitted into the evidence or extended there.
         numbers (tuple[int, ...]): The ledger numbers the reply showed or named, ascending.
     """
@@ -305,7 +307,13 @@ def _trailer(
 
 
 def answer_passages(
-    found: Iterable[NodeWithScore], ctx: ToolContext, *, action: str, hint: str | None = None, note: str = ""
+    found: Iterable[NodeWithScore],
+    ctx: ToolContext,
+    *,
+    action: str,
+    hint: str | None = None,
+    note: str = "",
+    note_first: bool = False,
 ) -> RenderedPassages:
     """Admit what a search found into the turn's evidence and render it as one reply.
 
@@ -326,21 +334,26 @@ def answer_passages(
         hint (str | None): What the reply suggests for matching passages it had no room for,
             the end of its "did not fit in this reply" note; ``None`` for the calling tool's
             :func:`search_hint`.
-        note (str): A note of the calling tool's own, after the others; empty for none.
+        note (str): A note of the calling tool's own, after the others unless ``note_first``;
+            empty for none.
+        note_first (bool): Whether that note leads the reply, a paragraph ahead of the
+            passages, rather than ending it. Its room is reserved first either way; the
+            overflow retry keeps a reply's head, so a note that must survive it leads.
 
     Returns:
         RenderedPassages: The reply, what it admitted or extended, and the numbers it showed or named.
     """
     hint = search_hint(action) if hint is None else hint
+    lead, tail = (note, "") if note_first else ("", note)
     ledger = ctx.ledger
     sections = _sections(found)
     held = [number for windows in sections if (number := ledger.number_of(windows[0].node.node_id)) is not None]
     fresh = len(sections) - len(held)
     notes = max(
-        len(_trailer(shown=False, again=held, grown=held, left_out=fresh, full=full, hint=hint, note=note))
+        len(_trailer(shown=False, again=held, grown=held, left_out=fresh, full=full, hint=hint, note=tail))
         for full in (False, True)
     )
-    room = ctx.budget.result_chars - notes - len(_JOIN)
+    room = ctx.budget.result_chars - (len(lead) + len(_JOIN) if lead else 0) - notes - len(_JOIN)
     shown: list[_Planned] = []
     again: list[int] = []
     grown: list[int] = []
@@ -366,7 +379,7 @@ def answer_passages(
                 shown.append(planned)
             else:
                 left_out += 1
-    trailer = _trailer(shown=bool(shown), again=again, grown=grown, left_out=left_out, full=full, hint=hint, note=note)
+    trailer = _trailer(shown=bool(shown), again=again, grown=grown, left_out=left_out, full=full, hint=hint, note=tail)
     logger.debug(
         "The '{}' tool showed {} passages, named {} shown before and {} grown, and left {} out",
         action,
@@ -376,7 +389,7 @@ def answer_passages(
         left_out,
     )
     return RenderedPassages(
-        text=_JOIN.join(part for part in (_render(shown, room, ctx), trailer) if part),
+        text=_JOIN.join(part for part in (lead, _render(shown, room, ctx), trailer) if part),
         found=added,
         numbers=tuple(sorted({passage.number for passage in shown} | set(again) | set(grown))),
     )

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from agent_fakes import KEYWORD_STEPS, programme_passage, shown_numbers, tool_call, tool_context
 from assessment_fakes import llm_view, scored_node
+from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import EvidenceLedger, passage_costs, passage_parts, render_context, text_floor
@@ -31,6 +32,7 @@ from docint.agents.turn.keyword import (
     keyword_note,
     render_keyword_checks,
 )
+from docint.agents.turn.loop import _shortened
 from docint.agents.turn.passages import NO_NEW_PASSAGES
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import (
@@ -1013,24 +1015,66 @@ def test_only_the_text_hits_are_anchored_on_the_words(field: str, anchored: bool
     assert (start > 0) is anchored
 
 
-def test_the_count_note_follows_the_passages_it_counts() -> None:
-    """The note is the reply's last paragraph, so a long passage can never push it out of a reply."""
+def test_the_count_note_leads_the_passages_it_counts() -> None:
+    """The note is the reply's first paragraph, so the overflow retry, which keeps each reply's head, keeps it."""
     double = _Matcher(_result([programme_passage()], matches=3, unchecked=2))
     note = keyword_note(matches=3, unchecked=2)
 
     reply = _ask(double.tool, tool_context(), words="Hafenfest")
 
     assert shown_numbers(reply.text) == [1]
-    assert reply.text.endswith(f"\n\n{note}")
-    assert reply.text.index("citation_index: 1") < reply.text.index(note)
+    assert reply.text.startswith(f"{note}\n\ncitation_index: 1\n")
 
 
-def test_a_count_that_shows_no_new_passage_says_so_before_the_count() -> None:
+def test_a_count_that_shows_no_new_passage_says_so_after_the_count() -> None:
     """A zero is an answer, and so is a count of passages the turn holds: the reply names no passage and says why."""
     reply = _ask(_Matcher(_result(matches=0)).tool, tool_context(), words="Hafenfest")
 
-    assert reply.text == f"{NO_NEW_PASSAGES}\n{keyword_note(matches=0, unchecked=0)}"
+    assert reply.text == f"{keyword_note(matches=0, unchecked=0)}\n\n{NO_NEW_PASSAGES}"
     assert (reply.found, reply.error) == (0, False)
+
+
+@pytest.mark.parametrize("reasoning", [False, True], ids=["plain", "reasoning"])
+def test_a_count_leading_a_full_reply_keeps_it_within_result_chars(reasoning: bool) -> None:
+    """The note's room is reserved before any passage takes it, so a full reply never outgrows its cap.
+
+    Args:
+        reasoning (bool): Whether the model thinks, which shortens replies.
+    """
+    found = [scored_node(f"lang-{number}", DEEP_TEXT, filename=f"studie_{number}.pdf") for number in range(1, 9)]
+    double = _Matcher(_result(found, matches=40, unchecked=12))
+    ctx = tool_context(reasoning=reasoning)
+
+    reply = _ask(double.tool, ctx, words="Kontrollgruppe")
+
+    assert reply.text.startswith(keyword_note(matches=40, unchecked=12))
+    assert "did not fit in this reply" in reply.text
+    assert len(reply.text) <= ctx.budget.result_chars
+
+
+def test_the_overflow_retry_keeps_the_count_of_a_long_keyword_reply() -> None:
+    """Cut to its head on an overflow, a reply still says how many chunks matched; at its tail the count was lost."""
+    found = [scored_node(f"lang-{number}", DEEP_TEXT, filename=f"studie_{number}.pdf") for number in range(1, 4)]
+    note = keyword_note(matches=17, unchecked=2)
+    reply = _ask(_Matcher(_result(found, matches=17, unchecked=2)).tool, tool_context(), words="Kontrollgruppe")
+    trailing = passage_reply(found, tool_context(), action="keyword", detail="Kontrollgruppe", note=note)
+
+    def _cut(text: str) -> str:
+        """Cut one tool reply as the overflow retry does.
+
+        Args:
+            text (str): The reply.
+
+        Returns:
+            str: What the retry keeps of it.
+        """
+        shortened = _shortened([ChatMessage(role=MessageRole.TOOL, content=text)])
+        assert shortened is not None
+        return shortened[0].content or ""
+
+    assert len(reply.text) > 2 * len(note)
+    assert note in _cut(reply.text)
+    assert note not in _cut(trailing.text)
 
 
 def test_found_counts_the_passages_admitted_not_the_chunks_matched() -> None:
@@ -1095,12 +1139,12 @@ def test_a_failed_count_is_a_plain_reply_that_is_no_news() -> None:
     reply = _ask(_Matcher(_result(passages, matches=None, unchecked=1)).tool, tool_context(), words="Hafenfest")
 
     note = keyword_note(matches=None, unchecked=1)
-    shown = passage_reply(passages, tool_context(), action="keyword", detail="Hafenfest", note=note)
+    shown = passage_reply(passages, tool_context(), action="keyword", detail="Hafenfest", note=note, note_first=True)
     assert type(reply) is ToolReply
     assert (reply.text, reply.found, reply.action, reply.detail) == (shown.text, shown.found, "keyword", "Hafenfest")
     assert (reply.informative, reply.error) == (False, False)
     assert reply.trail == {"field": "text", "matches": None, "unchecked": 1}
-    assert reply.text.endswith(note)
+    assert reply.text.startswith(note)
 
 
 def test_reordered_or_recased_words_on_the_text_are_answered_from_memory() -> None:

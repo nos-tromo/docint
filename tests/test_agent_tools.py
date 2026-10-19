@@ -571,6 +571,21 @@ def test_a_reply_with_notes_never_outgrows_result_chars(
     assert len(reply.text) <= ctx.budget.result_chars
 
 
+def test_a_tools_own_note_goes_last_unless_the_tool_puts_it_first() -> None:
+    """Putting the note first only moves it: a tool that does not ask keeps its note after the passages."""
+    note = "Eine eigene Notiz des Werkzeugs."
+    tail = f"\n\n{note}"
+
+    last = passage_reply([programme_passage()], tool_context(), action="search", detail="Hafenfest", note=note)
+    first = passage_reply(
+        [programme_passage()], tool_context(), action="search", detail="Hafenfest", note=note, note_first=True
+    )
+
+    assert last.text.endswith(tail)
+    assert first.text == f"{note}\n\n{last.text.removesuffix(tail)}"
+    assert (first.found, first.numbers) == (last.found, last.numbers)
+
+
 def test_a_long_query_is_cut_for_the_search_and_the_trail() -> None:
     """A run-on query reaches the search on one line within its limit, and the trail shows less of it."""
     ctx = tool_context()

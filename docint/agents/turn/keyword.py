@@ -280,11 +280,12 @@ def _anchor_unstamped(scored: NodeWithScore, text: str, pattern: regex.Pattern[s
 
 
 def keyword_note(*, matches: int | None, unchecked: int) -> str:
-    """Write the note that ends a keyword reply: the exact count, then what the index does not cover.
+    """Write the note that leads a keyword reply: the exact count, then what the index does not cover.
 
-    The passages, or ``No new passages.``, are rendered by
+    The passages, or ``No new passages.``, follow it, rendered by
     :func:`~docint.agents.turn.passages.answer_passages`; this note only says what the
-    match counted and what it could not check.
+    match counted and what it could not check. Leading, it survives the overflow retry,
+    which keeps the head of every tool reply.
 
     Args:
         matches (int | None): The exact count, or ``None`` when it failed.
@@ -490,7 +491,7 @@ class KeywordTool:
         return None
 
     def _answer(self, field: str, detail: str, fetched: KeywordResult, ctx: ToolContext) -> ToolReply:
-        """Show the best new matches under the exact count.
+        """Show the best new matches after the exact count.
 
         Args:
             field (str): The field the call matched.
@@ -499,7 +500,7 @@ class KeywordTool:
             ctx (ToolContext): The turn's evidence, budget and LLM view.
 
         Returns:
-            ToolReply: The passages and the count note as a :class:`PassageReply` that is news even
+            ToolReply: The count note, then the passages, as a :class:`PassageReply` that is news even
             when it admits nothing, so the same call can be answered by number. A plain reply when
             the count failed, which is never remembered, so a retry runs again.
         """
@@ -507,7 +508,7 @@ class KeywordTool:
         if field == DEFAULT_KEYWORD_FIELD:
             nodes = [anchor_terms(scored, fetched.keywords) for scored in nodes]
         note = keyword_note(matches=fetched.matches, unchecked=fetched.unchecked)
-        shown = passage_reply(nodes, ctx, action=self.name, detail=detail, note=note)
+        shown = passage_reply(nodes, ctx, action=self.name, detail=detail, note=note, note_first=True)
         trail: dict[str, Any] = {"field": field, "matches": fetched.matches}
         if fetched.unchecked > 0:
             trail["unchecked"] = fetched.unchecked
