@@ -124,17 +124,18 @@ deployment allows it (see
    and the budget. A stateless turn goes through
    `RAG.stream_stateless_agent_turn()` with an empty window.
 3. **Loop** — `AgentLoop.run()` (`docint/agents/turn/loop.py`) streams
-   rounds on the agent model. Tool calls run on the search slots through the
-   turn's engine (`docint/agents/turn/tools.py`, `image_tools.py`), what they
-   find enters the evidence ledger, and each step goes out as an `agent`
-   frame.
+   rounds on the agent model. Tool calls run on the search slots
+   (`docint/agents/turn/tools.py`, `image_tools.py`, `keyword.py`): `search`
+   retrieves through the turn's engine, while `keyword` counts its matches and
+   retrieves through its own retriever, narrowed to them. What they find enters
+   the evidence ledger, and each step goes out as an `agent` frame.
 4. **Fallback** — a listed failure before anything was shown (see
    [retrieval-and-agents.md](retrieval-and-agents.md#fallback-to-the-plain-path))
    hands the message to the plain path, which `chat()` and `stream_chat()` then
    run as above. Any other failure before then is the turn's error.
 5. **Finish** — an answer carrying the assessment sentinel is labelled, the
    turn is stored with its answer mode and trail, and the API validates it by
-   its mode.
+   its mode, handing the validator the turn's keyword counts as facts.
 
 ## Request flow: ingesting documents
 

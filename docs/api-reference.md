@@ -285,7 +285,7 @@ labelled model judgement to the cited evidence. `agent` carries the trail:
 - `actions`: one `{action, detail, found}` per step, as the `agent` frames
   below carry them. A `keyword` step adds `field`, `matches` and, when the
   keyword index leaves chunks out, `unchecked`. A count that failed is stored as
-  `matches: null`, which a count of 0 is not; the frames leave that key out;
+  `matches: null`, never as 0; the frames leave that key out;
 - `reason`: an `agent.reason` token, or `null` (see
   [Limits and reasons](retrieval-and-agents.md#limits-and-reasons)).
   `answer_cut` means the endpoint cut the answer at its length limit, so the

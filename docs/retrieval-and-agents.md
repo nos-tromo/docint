@@ -440,10 +440,10 @@ stateless path so the UI can visualise what was added.
 ## Response validation
 
 When `RESPONSE_VALIDATION_ENABLED=true`, the orchestrator attaches a
-`ResultValidationResponseAgent`. If no sources were retrieved, validation
-short-circuits with `validation_mismatch=true` and a reason of "Answer
-produced without retrieved sources." Otherwise, it asks the text LLM two
-questions:
+`ResultValidationResponseAgent`. If no sources were retrieved, and the turn
+made no keyword check with a known count, validation short-circuits with
+`validation_mismatch=true` and a reason of "Answer produced without retrieved
+sources." Otherwise, it asks the text LLM two questions:
 
 1. Does the answer match the retrieved sources?
 2. Do the sources actually contain the answer?
@@ -554,11 +554,13 @@ plain lookup.
 
 `RAG.agent_turn` then builds the turn. It measures four parts:
 
-- the system prompt: `agent_system.txt`, filled with the target's tools guide
-  (`agent_tools_{all,documents,visual}.txt`) and, where `keyword` is offered,
-  its lines (`agent_tools_keyword.txt`, and `agent_tools_keyword_fields.txt`
-  when it offers more than the text), the assessment rule while
-  `ASSESSMENT_ENABLED` is on, and the conversation's summary block;
+- the system prompt: `agent_system.txt`, filled with
+  - the target's tools guide (`agent_tools_{all,documents,visual}.txt`);
+  - where `keyword` is offered, its line (`agent_tools_keyword.txt`), and the
+    fields line (`agent_tools_keyword_fields.txt`) when it offers more than
+    the text;
+  - the assessment rule while `ASSESSMENT_ENABLED` is on;
+  - the conversation's summary block;
 - the offered tool schemas;
 - the recent exchanges;
 - the message.
@@ -567,8 +569,8 @@ The room for tool replies is what these leave of the window, less a 5% margin
 and the answer's reserve: 1024 tokens, or 3072 when reasoning is on. With less
 than 1500 tokens of room no turn is built, and the plain path answers. One
 warning gives the numbers. If `keyword` is offered and the room is under 1500,
-the turn is first built again without it (see
-[Keyword checks](#keyword-checks)).
+the turn is first built again with `keyword` on the text alone, then without
+it (see [Keyword checks](#keyword-checks)).
 
 ### The loop
 
@@ -673,8 +675,8 @@ calls, says the round was sent again.
   opens one frame. A file name that two clips share is answered with a way to
   name each, never with a merged list.
 - **`keyword(words[, field])`** counts the indexed chunks that contain every
-  word, and shows the best new ones. It is for exact names, numbers and ids, and
-  for whether something is mentioned at all: a count of 0 is exact.
+  word, exactly over what was checked, and shows the best new ones (see
+  [Keyword checks](#keyword-checks)).
 - **`read(n)`** shows passage `[n]` again, as much of it as one reply holds.
 
 A reply numbers only what it shows:
@@ -725,13 +727,18 @@ tool is withheld, and the turn keeps its other tools, when:
 - the text is not ready: it has no keyword index, or no chunk carries its
   indexed copy yet;
 - anything else fails while deciding, such as the lookup of the companion;
-- the context window leaves no room for it. If the room for tool replies is
-  under 1500 tokens with `keyword` offered, the turn is built again without the
-  tool, its lines and its schema.
+- the context window leaves no room for it, even on the text alone. If the room
+  for tool replies is under 1500 tokens with `keyword` offered on more than the
+  text, the turn is first built again with `keyword` on the text alone: its
+  schema takes no `field` and the system prompt names no fields. Only if that
+  is still under 1500 is the turn built without the tool, its lines and its
+  schema. A thinking model at the 8192-token minimum therefore keeps `keyword`
+  on the text alone where a collection has every field's index ready.
 
-A log line with no text says why: at DEBUG, once, the reason (`filters`,
-`coverage`, `text_not_ready`, or `fault` with the exception's type); at INFO,
-the room the turn had with the tool.
+A log line says why, carrying no document text or query: at DEBUG, once, the
+reason (`filters`, `coverage`, `text_not_ready`, or `fault` with the exception's
+type); at INFO, the room the turn had with every field when `keyword` fell back
+to the text alone, and the room it had with the tool when it was withheld.
 
 **Fields.** `field` is one of the Search panel's **Search in** options, which
 search the same payload keys (see [`POST /search`](api-reference.md#post-search)):
@@ -757,6 +764,9 @@ when more than the text is offered.
   metadata filters, with coarse parent chunks left out. Where the companion
   joins, it also counts the companion's points, whose indexed text is an
   image's caption, tags and OCR text.
+- One known excess: on `all`, a standalone image is counted twice, once in the
+  main collection, which holds its caption and printed words as a document, and
+  once in its companion.
 - A count that fails is reported unavailable, never as 0. That call is not
   remembered, so asking again runs it again.
 - Chunks the keyword index does not cover are reported as not checked: text not
@@ -789,6 +799,8 @@ saying why, and no trail step. It is refused when:
 - no word has two or more characters, or a word is a single letter or digit,
   such as the `D` of `vitamin D`, which the index drops, so the count would
   answer for every `vitamin`;
+- a word holds no letter or digit at all, such as `...`, which the index does
+  not read, so it is refused as unindexable;
 - the index splits a word on dots or signs into pieces and one is a single
   letter or digit: `2.5`, `U.S.`, `p<0.05`. A word whose pieces all have two or
   more characters, such as `placebo-controlled` or `COVID-19`, is not refused;
@@ -797,13 +809,16 @@ saying why, and no trail step. It is refused when:
 - `field` is not an offered field, or `uuid` is given more than one word.
 
 `uuid` matches one exact value and is never split, so a dashed id is one word.
+Any other match that cannot be compiled is refused as if it gave `uuid`
+several words, and one DEBUG line names the exception's type, never the words.
 
 **Repeats and idle rounds.** A check is a repeat when it names the same field
 and the same index tokens, the words as the index reads them:
 `placebo-controlled`, `Placebo controlled` and `controlled placebo` are one
-check. A field that matches an exact value (`uuid`, and `author` for an id)
-compares that value as written, so one id in two cases is two checks, while a
-uuid pasted with or without its dashes is one. A repeat is answered from memory:
+check. Exact values are compared as written: always on `uuid`, and on
+`author` for any single word, which may be an id. One id in two cases is
+therefore two checks, and so are `Alice` and `alice` on `author`, while a uuid
+pasted with or without its dashes is one. A repeat is answered from memory:
 the reply names the passages the first check showed, and its trail step shows
 the first check's `field`, `matches` and `unchecked` again.
 
@@ -814,10 +829,13 @@ neither is a count that failed: either can make an idle round.
 **The count in the answer.** A count is a fact about the collection, not a
 source. The keyword line of the system prompt tells the model to state it
 without `[n]`, and to report a 0 only as "no passage contains these words",
-never as the idea being absent. The reply ends with the count
+never as the idea being absent. The reply opens with the count
 (`3 indexed chunks in the searched material contain all of these words.`) and,
 over a partial index, a line for the chunks not checked
-(`2 chunks are not in the keyword index yet, so they were not checked.`).
+(`2 chunks are not in the keyword index yet, so they were not checked and may still contain these words.`),
+then the passages. Leading, the count survives the overflow retry, which keeps
+the head of each tool reply. The validator is given the same counts (see
+[Answer, validation and storage](#answer-validation-and-storage)).
 
 ### Evidence and sources
 
@@ -852,12 +870,12 @@ failure before it, so it replaces whatever reason stood.
 | `tools_unavailable` | The endpoint refused tools, and the plain path answered (see below). |
 | `no_evidence` | Found only on turns stored by the earlier assessment pipeline. |
 
+These are protocol tokens; the SPA maps each to its own copy.
+
 A round is idle when none of its replies admitted a passage or was informative.
 A reply is informative when it told the model something about the collection
 without admitting a passage, as a keyword count does, a 0 included. A reply
 answered from memory is never informative.
-
-These are protocol tokens; the SPA maps each to its own copy.
 
 ### Fallback to the plain path
 
@@ -974,6 +992,15 @@ agent lookup is validated against the sources it cites, with the user's
 previous message shown ahead of the question. Either way the validator sees at
 most six sources, the first six when the answer cites none. Agent turns never
 take the corrective retry.
+
+In both modes the validator is also given the turn's keyword checks with a
+known count, as facts about the collection rather than sources: one line per
+check, with its words, its field, its count and any chunks not checked, under
+their own heading after any summary diagnostics. A failed count is left out.
+Both validator prompts accept a statement of how many indexed chunks hold some
+words, a 0 included, when a listed check gives that count. An answer that rests
+on checks alone, citing no passage, is therefore validated by the model, its
+relevance judged by the checks, rather than mismatched for having no sources.
 
 An agent turn is stored with its `answer_mode` and its trail. It reports
 `retrieval_mode: "agent"` (or `"scoped"`), `retrieval_query: null` and a
