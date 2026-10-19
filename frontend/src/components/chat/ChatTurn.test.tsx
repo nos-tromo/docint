@@ -2,7 +2,7 @@ import type { ReactElement } from 'react'
 import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { DocumentsIcon, ImageIcon } from '@infra/ui'
+import { DocumentsIcon, ImageIcon, SearchIcon } from '@infra/ui'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatTurn, type ChatTurnData } from './ChatTurn'
@@ -704,7 +704,8 @@ describe('ChatTurn', () => {
     { step: 2, action: 'search_images', detail: 'Person A am Hafen', found: 1 },
     { step: 2, action: 'keyframes', detail: 'harbour_walk.webm', found: 4 },
     { step: 3, action: 'keyframes', detail: 'harbour_walk.webm #3', found: 1 },
-    { step: 3, action: 'read', detail: '2', found: 0 }
+    { step: 3, action: 'read', detail: '2', found: 0 },
+    { step: 4, action: 'keyword', detail: 'Regenjacke', found: 1, field: 'text', matches: 3, unchecked: 2 }
   ]
 
   it('a researched lookup shows its steps but no assessment notice', async () => {
@@ -740,7 +741,7 @@ describe('ChatTurn', () => {
     expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
   })
 
-  it('image-search, keyframe, read and note steps have labels', () => {
+  it('image-search, keyframe, read, keyword and note steps have labels', () => {
     renderTurn({ user: 'Was zeigt der Clip?', assistant: '', done: false, meta: null, agentSteps: NEW_STEPS })
 
     expect(trailRows('agent-trail-live')).toEqual([
@@ -749,7 +750,8 @@ describe('ChatTurn', () => {
       'Searched the images for “Person A am Hafen”: 1 new image',
       'Viewed the keyframes of “harbour_walk.webm”: 4 new keyframes',
       'Viewed keyframe #3 of “harbour_walk.webm”',
-      'Read passage [2]'
+      'Read passage [2]',
+      'Keyword check “Regenjacke”: 3 matches (2 chunks not checked), 1 new'
     ])
   })
 
@@ -762,7 +764,8 @@ describe('ChatTurn', () => {
       'Bilder durchsucht nach „Person A am Hafen“: 1 neues Bild',
       'Keyframes von „harbour_walk.webm“ angesehen: 4 neue Keyframes',
       'Keyframe #3 von „harbour_walk.webm“ angesehen',
-      'Passage [2] gelesen'
+      'Passage [2] gelesen',
+      'Wortprüfung „Regenjacke“: 3 Treffer (2 Abschnitte nicht geprüft), 1 neu'
     ])
   })
 
@@ -777,6 +780,227 @@ describe('ChatTurn', () => {
     })
 
     expect(trailRows('agent-trail-live')).toEqual(['Read passage [2]'])
+  })
+
+  it.each([
+    [
+      'en',
+      [
+        'Keyword check “Kontrollgruppe”: 0 matches, 0 new',
+        'Keyword check “Alice Weber” in Author: 1 match, 2 new',
+        'Keyword check “Studie”: 14 matches, 3 new'
+      ]
+    ],
+    [
+      'de',
+      [
+        'Wortprüfung „Kontrollgruppe“: 0 Treffer, 0 neu',
+        'Wortprüfung „Alice Weber“ im Feld Autor: 1 Treffer, 2 neu',
+        'Wortprüfung „Studie“: 14 Treffer, 3 neu'
+      ]
+    ]
+  ] as const)('labels a keyword check by its count and the field it matched in %s', (lang, labels) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [
+          { step: 1, action: 'keyword', detail: 'Kontrollgruppe', found: 0, field: 'text', matches: 0 },
+          { step: 1, action: 'keyword', detail: 'Alice Weber', found: 2, field: 'author', matches: 1 },
+          { step: 2, action: 'keyword', detail: 'Studie', found: 3, field: 'text', matches: 14 }
+        ]
+      },
+      lang
+    )
+
+    expect(trailRows('agent-trail-live')).toEqual(labels)
+  })
+
+  it.each([
+    ['en', 'author', 'Alice Weber', 'Keyword check “Alice Weber” in Author: 1 match, 1 new'],
+    ['en', 'network', 'Forum A', 'Keyword check “Forum A” in Network: 1 match, 1 new'],
+    ['en', 'uuid', 'a1b2c3', 'Keyword check “a1b2c3” in UUID: 1 match, 1 new'],
+    ['de', 'author', 'Alice Weber', 'Wortprüfung „Alice Weber“ im Feld Autor: 1 Treffer, 1 neu'],
+    ['de', 'network', 'Forum A', 'Wortprüfung „Forum A“ im Feld Netzwerk: 1 Treffer, 1 neu'],
+    ['de', 'uuid', 'a1b2c3', 'Wortprüfung „a1b2c3“ im Feld UUID: 1 Treffer, 1 neu']
+  ] as const)('names the %s keyword field %s by the Search panel’s label', (lang, field, detail, label) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [{ step: 1, action: 'keyword', detail, found: 1, field, matches: 1 }]
+      },
+      lang
+    )
+
+    expect(trailRows('agent-trail-live')).toEqual([label])
+  })
+
+  it.each(['constructor', 'brand_new_field', undefined])(
+    'names no field for a keyword check on the field %j',
+    (field) => {
+      // The text needs no name, and a token this build does not know is not copy: it must not crash or print.
+      renderTurn({
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [{ step: 1, action: 'keyword', detail: 'Studie', found: 1, field, matches: 2 }]
+      })
+
+      expect(trailRows('agent-trail-live')).toEqual(['Keyword check “Studie”: 2 matches, 1 new'])
+    }
+  )
+
+  it.each([
+    [
+      'en',
+      [
+        'Keyword check “Kontrollgruppe”: 0 matches (12 chunks not checked), 0 new',
+        'Keyword check “Studie”: 1 match (1 chunk not checked), 1 new'
+      ]
+    ],
+    [
+      'de',
+      [
+        'Wortprüfung „Kontrollgruppe“: 0 Treffer (12 Abschnitte nicht geprüft), 0 neu',
+        'Wortprüfung „Studie“: 1 Treffer (1 Abschnitt nicht geprüft), 1 neu'
+      ]
+    ]
+  ] as const)('names the chunks a keyword check could not reach in %s', (lang, labels) => {
+    // A zero over a partly indexed collection is no proof of absence, so the count says what it left out.
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [
+          { step: 1, action: 'keyword', detail: 'Kontrollgruppe', found: 0, field: 'text', matches: 0, unchecked: 12 },
+          { step: 2, action: 'keyword', detail: 'Studie', found: 1, field: 'text', matches: 1, unchecked: 1 }
+        ]
+      },
+      lang
+    )
+
+    expect(trailRows('agent-trail-live')).toEqual(labels)
+  })
+
+  it('keeps the note on unchecked chunks once the turn is done, and adds none when nothing was missed', async () => {
+    const { update } = renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 1, action: 'keyword', detail: 'Kontrollgruppe', found: 0, field: 'text', matches: 0, unchecked: 12 }
+      ]
+    })
+    expect(trailRows('agent-trail-live')).toEqual([
+      'Keyword check “Kontrollgruppe”: 0 matches (12 chunks not checked), 0 new'
+    ])
+
+    update({
+      user: 'q',
+      assistant: 'Person A [1].',
+      done: true,
+      meta: lookupMeta({
+        ...LOOKUP_TRAIL,
+        actions: [
+          { action: 'keyword', detail: 'Kontrollgruppe', found: 0, field: 'text', matches: 0, unchecked: 12 },
+          { action: 'keyword', detail: 'Studie', found: 1, field: 'text', matches: 2, unchecked: 0 }
+        ]
+      })
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+
+    expect(trailRows('agent-trail')).toEqual([
+      'Keyword check “Kontrollgruppe”: 0 matches (12 chunks not checked), 0 new',
+      'Keyword check “Studie”: 2 matches, 1 new'
+    ])
+  })
+
+  it.each([
+    ['en', 'Keyword check “Nachtschicht”: count unavailable, 1 new'],
+    ['de', 'Wortprüfung „Nachtschicht“: Anzahl nicht verfügbar, 1 neu']
+  ] as const)('words a failed keyword count as unavailable in %s, with no note on unchecked chunks', (lang, label) => {
+    // A failed count is no zero, and it leaves no number for the note on unchecked chunks to qualify.
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [{ step: 1, action: 'keyword', detail: 'Nachtschicht', found: 1, field: 'text', unchecked: 4 }]
+      },
+      lang
+    )
+
+    expect(trailRows('agent-trail-live')).toEqual([label])
+  })
+
+  it('words a failed keyword count alike whether the frame omits it or the stored trail keeps null', async () => {
+    const live = renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [{ step: 1, action: 'keyword', detail: 'Nachtschicht', found: 1, field: 'text', unchecked: 4 }]
+    })
+    const streamed = trailRows('agent-trail-live')
+    live.unmount()
+
+    renderTurn({
+      user: 'q',
+      assistant: 'Person A [1].',
+      done: true,
+      meta: lookupMeta({
+        ...LOOKUP_TRAIL,
+        actions: [{ action: 'keyword', detail: 'Nachtschicht', found: 1, field: 'text', matches: null, unchecked: 4 }]
+      })
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+
+    expect(streamed).toEqual(['Keyword check “Nachtschicht”: count unavailable, 1 new'])
+    expect(trailRows('agent-trail')).toEqual(streamed)
+  })
+
+  /** A stored trail whose own research was only keyword checks: one count known, one failed. */
+  const KEYWORD_ONLY_ACTIONS: AgentTrail['actions'] = [
+    { action: 'seed', detail: '', found: 2 },
+    { action: 'keyword', detail: 'Kontrollgruppe', found: 0, field: 'text', matches: 0 },
+    { action: 'keyword', detail: 'Nachtschicht', found: 1, field: 'text', matches: null }
+  ]
+
+  it.each([
+    ['a lookup', () => lookupMeta({ ...LOOKUP_TRAIL, actions: KEYWORD_ONLY_ACTIONS })],
+    ['an assessment', () => assessmentMeta({ ...TRAIL, actions: KEYWORD_ONLY_ACTIONS })]
+  ] as const)('lists the keyword checks of %s behind the disclosure', async (_name, meta) => {
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: meta() })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+
+    expect(trailRows('agent-trail')).toEqual([
+      'Keyword check “Kontrollgruppe”: 0 matches, 0 new',
+      'Keyword check “Nachtschicht”: count unavailable, 1 new'
+    ])
+  })
+
+  it('draws a keyword check as a search, with the magnifier', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [{ step: 1, action: 'keyword', detail: 'Studie', found: 1, field: 'text', matches: 2 }]
+    })
+
+    const row = within(screen.getByTestId('agent-trail-live')).getByRole('listitem')
+    expect(row.querySelector('svg')?.innerHTML).toBe(innerMarkup(<SearchIcon />))
   })
 
   it('renders a step this build does not know by its detail, without crashing', () => {
@@ -811,7 +1035,7 @@ describe('ChatTurn', () => {
     renderTurn({ user: 'Was zeigt der Clip?', assistant: '', done: false, meta: null, agentSteps: NEW_STEPS })
 
     const rows = within(screen.getByTestId('agent-trail-live')).getAllByRole('listitem')
-    expect(rows.map((row) => row.querySelector('svg') !== null)).toEqual([false, true, true, true, true, true])
+    expect(rows.map((row) => row.querySelector('svg') !== null)).toEqual([false, true, true, true, true, true, true])
     expect(rows[0].firstElementChild).toHaveAttribute('aria-hidden', 'true')
   })
 

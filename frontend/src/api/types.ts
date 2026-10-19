@@ -64,19 +64,25 @@ export type AnswerMode = 'lookup' | 'assessment'
  * text it wrote before calling tools. `seed` is a scoped turn's pinned passages;
  * `answer` exists only in trails of the assessment turns that came before.
  */
-export type AgentAction = 'seed' | 'search' | 'answer' | 'note' | 'search_images' | 'keyframes' | 'read'
+export type AgentAction = 'seed' | 'search' | 'answer' | 'note' | 'search_images' | 'keyframes' | 'read' | 'keyword'
 
 /** One step of an agent turn, streamed as an `{agent}` frame. */
 export interface AgentStep {
   step: number
   action: AgentAction
   /**
-   * The search's words or the image search's cues; the clip, with ` #n` when one
-   * frame was asked for; the passage number read; or the note's text. Empty for
-   * `seed` and `answer`.
+   * The search's words, the image search's cues or the keyword check's words; the
+   * clip, with ` #n` when one frame was asked for; the passage number read; or the
+   * note's text. Empty for `seed` and `answer`.
    */
   detail: string
   found: number
+  /** The field a keyword check matched (`text`, `author`, `network` or `uuid`). */
+  field?: string
+  /** The chunks a keyword check counted: absent from a live frame when the count failed, `null` in a stored trail. */
+  matches?: number | null
+  /** The chunks a keyword check could not reach, outside the keyword index; absent when it reached them all. */
+  unchecked?: number
 }
 
 /**
@@ -96,7 +102,7 @@ export type AgentReason =
 /** What an agent turn did, as the final envelope and session history report it. */
 export interface AgentTrail {
   steps: number
-  actions: { action: AgentAction; detail: string; found: number }[]
+  actions: Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches' | 'unchecked'>[]
   reason: AgentReason | null
   /**
    * `plain`: a lookup. An assessment: `split`, separated cleanly; `unsplit`, the

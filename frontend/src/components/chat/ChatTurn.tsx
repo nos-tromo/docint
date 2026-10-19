@@ -167,10 +167,41 @@ const ANSWER_COPY: Partial<Record<AgentTrail['answer'], keyof Strings>> = {
   empty: 'chat.assessment_answer.empty'
 }
 
-type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found'>
+type TrailStep = Pick<AgentStep, 'action' | 'detail' | 'found' | 'field' | 'matches' | 'unchecked'>
 
 /** A keyframes step's detail: the clip, then ` #n` when the model opened one frame. */
 const ONE_FRAME = /^(.*) #(\d+)$/s
+
+/** The Search panel's labels for the fields a keyword check can match besides the text. */
+const KEYWORD_FIELD_LABEL: Partial<Record<string, keyof Strings>> = {
+  author: 'search.field.author',
+  network: 'search.field.network',
+  uuid: 'search.field.uuid'
+}
+
+/** A keyword check: its words, its field unless that is the text, its exact count and what it could not reach. */
+function keywordLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
+  // Wire tokens reach `t()` only through the table, by own key: "constructor" is not copy.
+  const key = step.field ?? ''
+  const field = Object.hasOwn(KEYWORD_FIELD_LABEL, key) ? KEYWORD_FIELD_LABEL[key] : undefined
+  const unchecked = step.unchecked ?? 0
+  const vars = {
+    query: step.detail,
+    where: field ? t('chat.agent_trail_keyword_field', { field: t(field) }) : '',
+    matches: step.matches ?? 0,
+    count: step.found,
+    // A count over a partly indexed collection says what it left out.
+    unchecked:
+      unchecked > 0
+        ? t(unchecked === 1 ? 'chat.agent_trail_keyword_unchecked_one' : 'chat.agent_trail_keyword_unchecked_other', {
+            count: unchecked
+          })
+        : ''
+  }
+  // A failed count is unknown, never a zero, and its label has no number for the unchecked note to qualify.
+  if (typeof step.matches !== 'number') return t('chat.agent_trail_keyword_unknown', vars)
+  return t(step.matches === 1 ? 'chat.agent_trail_keyword_one' : 'chat.agent_trail_keyword_other', vars)
+}
 
 function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
   const single = step.found === 1
@@ -184,6 +215,8 @@ function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
     case 'read':
       // The model may write the number as it cites it, `[2]`.
       return t('chat.agent_trail_read', { n: /\d+/.exec(step.detail)?.[0] ?? step.detail })
+    case 'keyword':
+      return keywordLabel(step, t)
     case 'search_images':
       return t(single ? 'chat.agent_trail_search_images_one' : 'chat.agent_trail_search_images_other', {
         query: step.detail,
@@ -217,6 +250,8 @@ function StepMarker({ action }: { action: AgentAction }) {
     case 'seed':
     case 'read':
       return <DocumentsIcon className={className} />
+    case 'keyword':
+      return <SearchIcon className={className} />
     default:
       return <SearchIcon className={className} />
   }
