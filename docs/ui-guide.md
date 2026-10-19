@@ -134,6 +134,11 @@ While it works, the turn lists each step as it happens:
 - an image search, with the visual cues it looked for and how many new images
   it found;
 - the keyframes of a clip, or one of them ("Viewed keyframe #3 of …");
+- a keyword check, with its words, the field when that is not the text, the
+  exact number of chunks that contain them, how many chunks the keyword index
+  could not check, and how many new passages it found ("Keyword check “…” in
+  Author: 3 matches (2 chunks not checked), 1 new"). When the count failed, the
+  step says "count unavailable" in place of the number;
 - a passage read again ("Read passage [2]");
 - a note ("Note: …"): text the model wrote before it decided to search
   again. Whatever of that text had already streamed into the answer moves into

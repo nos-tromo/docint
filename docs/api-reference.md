@@ -283,7 +283,9 @@ labelled model judgement to the cited evidence. `agent` carries the trail:
 
 - `steps`: the tool rounds whose calls were answered;
 - `actions`: one `{action, detail, found}` per step, as the `agent` frames
-  below carry them;
+  below carry them. A `keyword` step adds `field`, `matches` and, when the
+  keyword index leaves chunks out, `unchecked`. A count that failed is stored as
+  `matches: null`, which a count of 0 is not; the frames leave that key out;
 - `reason`: an `agent.reason` token, or `null` (see
   [Limits and reasons](retrieval-and-agents.md#limits-and-reasons)).
   `answer_cut` means the endpoint cut the answer at its length limit, so the
@@ -308,14 +310,29 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
   step added to the evidence or extended. `action` is one of:
   - the tool that ran, with its main argument in `detail`: `search` (the
     model's query), `search_images` (the visual cues it looked for),
-    `keyframes` (the clip's name, ending in ` #n` when one frame was asked for)
-    or `read` (the passage number);
+    `keyframes` (the clip's name, ending in ` #n` when one frame was asked for),
+    `keyword` (the words it matched) or `read` (the passage number);
   - `note`: the text the round wrote before its calls, cut to 500 characters,
     with `found` 0. It arrives after the `token` frames it withdraws: discard
     the answer text so far, and treat later tokens as a fresh answer. The first
     round's first try never streams, so its note withdraws nothing;
   - `seed`: a scoped turn's pinned passages, with `step` 0 and `found` their
     count.
+
+  A `keyword` step adds three keys. A frame leaves out a key that is unset, and
+  keeps a `matches` of `0`:
+
+  - `field`: the field it matched, `text`, `author`, `network` or `uuid`;
+  - `matches`: the exact number of indexed chunks that contain every word;
+    absent when the count failed;
+  - `unchecked`: the chunks the keyword index does not cover, so `matches` may
+    be that much too low; absent when it covers all.
+
+  ```json
+  {"agent": {"step": 2, "action": "keyword", "detail": "Kontrollgruppe", "found": 1, "field": "text", "matches": 3, "unchecked": 2}}
+  ```
+
+  No other step carries these keys.
 
   `answer` is found only in trails stored by the earlier assessment pipeline,
   and never streams.

@@ -555,7 +555,9 @@ plain lookup.
 `RAG.agent_turn` then builds the turn. It measures four parts:
 
 - the system prompt: `agent_system.txt`, filled with the target's tools guide
-  (`agent_tools_{all,documents,visual}.txt`), the assessment rule while
+  (`agent_tools_{all,documents,visual}.txt`) and, where `keyword` is offered,
+  its lines (`agent_tools_keyword.txt`, and `agent_tools_keyword_fields.txt`
+  when it offers more than the text), the assessment rule while
   `ASSESSMENT_ENABLED` is on, and the conversation's summary block;
 - the offered tool schemas;
 - the recent exchanges;
@@ -564,7 +566,9 @@ plain lookup.
 The room for tool replies is what these leave of the window, less a 5% margin
 and the answer's reserve: 1024 tokens, or 3072 when reasoning is on. With less
 than 1500 tokens of room no turn is built, and the plain path answers. One
-warning gives the numbers.
+warning gives the numbers. If `keyword` is offered and the room is under 1500,
+the turn is first built again without it (see
+[Keyword checks](#keyword-checks)).
 
 ### The loop
 
@@ -645,9 +649,12 @@ calls, says the round was sent again.
 
 | Target | Tools |
 |---|---|
-| `documents` | `search`, `read` |
+| `documents` | `search`, `keyword`, `read` |
 | `visual` | `search_images`, `keyframes`, `read` |
-| `all` | `search`, `search_images`, `keyframes`, `read` |
+| `all` | `search`, `search_images`, `keyframes`, `keyword`, `read` |
+
+`keyword` is offered only where the collection's indexes allow it (see
+[Keyword checks](#keyword-checks)).
 
 - **`search(query)`** retrieves through the turn's own engine, so the request's
   filters, rerank and parent-context expansion apply as on a lookup. Every
@@ -665,6 +672,9 @@ calls, says the round was sent again.
   the clip's file name or the number of a passage from the clip, and `index`
   opens one frame. A file name that two clips share is answered with a way to
   name each, never with a merged list.
+- **`keyword(words[, field])`** counts the indexed chunks that contain every
+  word, and shows the best new ones. It is for exact names, numbers and ids, and
+  for whether something is mentioned at all: a count of 0 is exact.
 - **`read(n)`** shows passage `[n]` again, as much of it as one reply holds.
 
 A reply numbers only what it shows:
@@ -678,15 +688,136 @@ A reply numbers only what it shows:
   with narrower words.
 
 A call made before is answered from memory and never run again; a `read` only
-while its passage is unchanged. A call to a tool the turn does not offer, or
-with arguments that will not do, gets an error reply saying what to send
-instead.
+while its passage is unchanged. A call is the same call when it names the same
+tool and its arguments are equal, compared on one line and case-folded. A tool
+may key its own repeats instead (`recall_key`): `keyword` keys a call by its
+field and the index tokens or exact values of its words. A reply answered from
+memory names the passages the first call showed and admits none. It is never
+informative (see [Limits and reasons](#limits-and-reasons)). A call to a tool
+the turn does not offer, or with arguments that will not do, gets an error reply
+saying what to send instead.
 
 A reply holds at most 3000 characters, and each passage's text at most 900;
 with reasoning on, 2000 and 700. A header shows whole up to 500 characters;
 past that it keeps its citation line and 240 characters of the rest. The model
 reads passages through an agent view. That view cuts metadata strings to 200
 characters, and leads a social row's header with its file and who wrote it.
+
+### Keyword checks
+
+`keyword(words[, field])` counts the indexed chunks that contain every word, in
+any order, and shows the best new ones (`agents/turn/keyword.py`). It is for
+exact names, numbers and ids, and for whether something is mentioned at all.
+A ranked search cannot promise that: a count of 0 here is exact over what was
+checked. The tool asks the model for one to three words.
+
+**Where it is offered.** `keyword` is offered on the `all` and `documents`
+targets, never on a `visual` turn or a scoped one, which offers no tools.
+`RAG.agent_turn` decides it from the collection's indexes. Deciding only reads:
+the keyword index's coverage, whether the `_images` companion exists, and the
+payload schemas. It creates no index and does not profile the collection. The
+tool is withheld, and the turn keeps its other tools, when:
+
+- the request's filters cannot be compiled for Qdrant, since a count would then
+  cover other material than the turn searches;
+- the keyword index's coverage cannot be read, for the collection or for the
+  `_images` companion in scope on `all`;
+- the text is not ready: it has no keyword index, or no chunk carries its
+  indexed copy yet;
+- anything else fails while deciding, such as the lookup of the companion;
+- the context window leaves no room for it. If the room for tool replies is
+  under 1500 tokens with `keyword` offered, the turn is built again without the
+  tool, its lines and its schema.
+
+A log line with no text says why: at DEBUG, once, the reason (`filters`,
+`coverage`, `text_not_ready`, or `fault` with the exception's type); at INFO,
+the room the turn had with the tool.
+
+**Fields.** `field` is one of the Search panel's **Search in** options, which
+search the same payload keys (see [`POST /search`](api-reference.md#post-search)):
+`text`, the default, `author`, `network` and `uuid`. The text must be ready for
+the tool to be offered. Another field is offered when every payload key it
+searches carries the index its match needs, whatever kind of collection it is.
+The schema has a `field` argument, and the system prompt names the fields, only
+when more than the text is offered.
+
+- On a collection of documents alone, `author`, `network` and `uuid` match
+  nothing and count 0, as its chunks carry none of them. A transcript segment
+  carries the network `nextext` and the speaker as its author.
+- On `all`, the `_images` companion joins a field only when its points carry it
+  (`text`, `author` and `uuid`, not `network`) and it has the same indexes.
+
+**The match and the count.**
+
+- Every word must occur in the same chunk, in any order. A word is matched as in
+  the Search panel: case-insensitive and at the start of a word, so `measure`
+  matches `measurement`. Unlike the panel, a check does not require several
+  words to stand together as a phrase.
+- The count is exact: a Qdrant `count`, not an estimate, within the turn's
+  metadata filters, with coarse parent chunks left out. Where the companion
+  joins, it also counts the companion's points, whose indexed text is an
+  image's caption, tags and OCR text.
+- A count that fails is reported unavailable, never as 0. That call is not
+  remembered, so asking again runs it again.
+- Chunks the keyword index does not cover are reported as not checked: text not
+  yet backfilled (`make search-index`) and, on `all`, a companion without the
+  field's index. The number counts the whole collection, whatever the filters,
+  so it can overstate what the filtered count missed.
+
+**Passages.** The passages are retrieved as a search retrieves them, narrowed to
+the matches by the filter that counts them: the same rerank, image floor and
+parent context, every retrieved child kept. The social diversity cap and
+link-following are left out, so every passage a check adds is a match. They are
+numbered, and named when shown before, as a search's are.
+
+- On a check of the text, a hit's matches are moved to just before the word,
+  with up to 80 characters of left context, so the answer shows the word and not
+  the chunk's opening. A match whose opening already shows the word stays where
+  it is. The word is found as the count reads it: its pieces in order, each at
+  the start of a word, whatever separates them. `placebo-controlled` finds
+  `placebo controlled`, and the `19` of `COVID-19` never anchors alone. The
+  hits of the other fields are shown as retrieved.
+- A passage the turn already holds from an earlier search, with no match of its
+  own, merges with its anchored copy. Its opening then counts as matches, so the
+  entry keeps what either showed.
+
+**Refused calls.** A call the index cannot answer exactly gets an error reply
+saying why, and no trail step. It is refused when:
+
+- the words are empty or run over 100 characters (never cut: a cut last word
+  would widen the match);
+- no word has two or more characters, or a word is a single letter or digit,
+  such as the `D` of `vitamin D`, which the index drops, so the count would
+  answer for every `vitamin`;
+- the index splits a word on dots or signs into pieces and one is a single
+  letter or digit: `2.5`, `U.S.`, `p<0.05`. A word whose pieces all have two or
+  more characters, such as `placebo-controlled` or `COVID-19`, is not refused;
+- a word holds more than 30 letters or digits in a row, the most the index
+  reads;
+- `field` is not an offered field, or `uuid` is given more than one word.
+
+`uuid` matches one exact value and is never split, so a dashed id is one word.
+
+**Repeats and idle rounds.** A check is a repeat when it names the same field
+and the same index tokens, the words as the index reads them:
+`placebo-controlled`, `Placebo controlled` and `controlled placebo` are one
+check. A field that matches an exact value (`uuid`, and `author` for an id)
+compares that value as written, so one id in two cases is two checks, while a
+uuid pasted with or without its dashes is one. A repeat is answered from memory:
+the reply names the passages the first check showed, and its trail step shows
+the first check's `field`, `matches` and `unchecked` again.
+
+A check with a known count is informative, a 0 included, so a round holding one
+is not idle although it admits no passage. A repeat is never informative, and
+neither is a count that failed: either can make an idle round.
+
+**The count in the answer.** A count is a fact about the collection, not a
+source. The keyword line of the system prompt tells the model to state it
+without `[n]`, and to report a 0 only as "no passage contains these words",
+never as the idea being absent. The reply ends with the count
+(`3 indexed chunks in the searched material contain all of these words.`) and,
+over a partial index, a line for the chunks not checked
+(`2 chunks are not in the keyword index yet, so they were not checked.`).
 
 ### Evidence and sources
 
@@ -697,9 +828,12 @@ larger pinned scope holds. The answer's sources are this evidence in number
 order, so the model's `[n]` is the number on the source card.
 
 The trail (`agent.actions`) holds one `{action, detail, found}` per note, and
-one per call its tool answered. A call that was not answered gets its reply but
-no step: one skipped, refused for room or time, failed, or carrying an argument
-error.
+one per call its tool answered. A keyword step adds `field`, `matches` and,
+where the keyword index leaves chunks out, `unchecked`. The `agent` frames in
+[api-reference.md](api-reference.md#post-stream_query) say when each is absent,
+and [ui-guide.md](ui-guide.md#chat-srcrouteschattsx) shows how the SPA reads
+them. A call that was not answered gets its reply but no step: one skipped,
+refused for room or time, failed, or carrying an argument error.
 
 ### Limits and reasons
 
@@ -712,11 +846,16 @@ failure before it, so it replaces whatever reason stood.
 | `round_budget` | The turn ran `AGENT_MAX_ROUNDS` tool rounds (default 6). |
 | `time_budget` | `AGENT_TIME_BUDGET_S` ran out (default 120 s). Limits are checked between rounds, so an answer already streaming is never cut, and a search that outlives the time left gets a "no reply in time" reply. |
 | `context_budget` | No room is left for one more full reply. A round whose own calls do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
-| `idle` | Two rounds in a row added no passage. |
+| `idle` | Two rounds in a row added no passage and told the model nothing new (see below). |
 | `research_failed` | Evidence may be missing; the answer is still written. A call could not be prepared, a search failed or found no search slot, or a later round failed or found no model slot. |
 | `answer_cut` | The endpoint cut the answer at its length limit (`finish_reason: "length"`), so it may be incomplete. The answer is kept as written. This covers every round whose text is the answer: one answering by choice, the forced answer and its resend without tools, and a pinned round. |
 | `tools_unavailable` | The endpoint refused tools, and the plain path answered (see below). |
 | `no_evidence` | Found only on turns stored by the earlier assessment pipeline. |
+
+A round is idle when none of its replies admitted a passage or was informative.
+A reply is informative when it told the model something about the collection
+without admitting a passage, as a keyword count does, a 0 included. A reply
+answered from memory is never informative.
 
 These are protocol tokens; the SPA maps each to its own copy.
 
