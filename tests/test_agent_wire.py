@@ -8,7 +8,7 @@ from typing import Any, cast
 import httpx
 import openai
 import pytest
-from agent_fakes import tool_call
+from agent_fakes import KeywordClient, tool_call
 from assessment_fakes import FixedRetriever, RecordingPostprocessor, scored_node
 from llama_index.core.llms import MockLLM
 from llama_index.core.query_engine import RetrieverQueryEngine
@@ -29,7 +29,7 @@ def _rag(*, max_retries: int = 0) -> RAG:
         max_retries (int): ``OPENAI_MAX_RETRIES``; two is the production default.
 
     Returns:
-        RAG: The engine, with only the OpenAI knobs set.
+        RAG: The engine, with only the OpenAI knobs set, over an empty store.
     """
     rag = RAG(qdrant_collection="test")
     rag.text_model_id = "test-model"
@@ -61,6 +61,8 @@ def _rag(*, max_retries: int = 0) -> RAG:
         "top_p",
     ):
         setattr(rag, f"openai_{key}", getattr(rag.openai_config, key))
+    # A store holding no collection, so a turn reads no live Qdrant to decide on keyword.
+    rag._qdrant_client = cast(Any, KeywordClient({}))
     return rag
 
 

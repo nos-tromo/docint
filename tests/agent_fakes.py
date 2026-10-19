@@ -1,4 +1,4 @@
-"""Test doubles for agent turns: model rounds, and the tools' searches and context.
+"""Test doubles for agent turns: model rounds, the tools' searches and context, and the store a keyword match reads.
 
 Every message, query, passage and tool call here is invented.
 """
@@ -8,12 +8,14 @@ from __future__ import annotations
 import base64
 import json
 import re
+import types
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
 import openai
+import pytest
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.schema import BaseNode, NodeWithScore
@@ -24,6 +26,7 @@ from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import SearchFn, ToolContext, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
+from docint.core.search.fields import SEARCH_FIELDS
 
 ScriptedRound = Sequence[dict[str, Any] | Exception] | Exception
 """One scripted model call: the raw chunks it streams, or the error its first pull raises.
@@ -527,3 +530,89 @@ def scripted_loop(
     }
     kwargs.update(overrides)
     return AgentLoop(llm=llm, registry=registry, **kwargs)
+
+
+def ready_schema(*fields: str) -> dict[str, str]:
+    """Return a payload schema in which every key of these keyword fields carries the index its matcher needs.
+
+    Args:
+        *fields (str): Keys of :data:`~docint.core.search.fields.SEARCH_FIELDS`.
+
+    Returns:
+        dict[str, str]: Index kind per payload key, as :class:`KeywordClient` serves a schema.
+    """
+    return {key: kind for name in fields for key, kind in SEARCH_FIELDS[name].indexed_keys()}
+
+
+class KeywordClient:
+    """A Qdrant double for keyword matches: payload schemas, counts, and what was counted."""
+
+    def __init__(self, schemas: dict[str, dict[str, str]], counts: dict[str, int | Exception] | None = None) -> None:
+        """Serve these schemas and counts.
+
+        Args:
+            schemas (dict[str, dict[str, str]]): Index kind per payload key, per existing collection.
+            counts (dict[str, int | Exception] | None): The count, or the error, per collection; 0 otherwise.
+        """
+        self.schemas = schemas
+        self.counts = dict(counts or {})
+        self.counted: list[tuple[str, Any]] = []
+
+    def get_collection(self, collection_name: str) -> Any:
+        """Return a collection's payload schema.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: An info object carrying ``payload_schema``.
+        """
+        schema = self.schemas.get(collection_name, {})
+        return types.SimpleNamespace(
+            payload_schema={key: types.SimpleNamespace(data_type=kind, params=None) for key, kind in schema.items()}
+        )
+
+    def collection_exists(self, collection_name: str) -> bool:
+        """Report whether a collection exists.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            bool: Whether a schema was given for it.
+        """
+        return collection_name in self.schemas
+
+    def count(self, collection_name: str, count_filter: Any = None, exact: bool = True) -> Any:
+        """Count, recording the filter, or fail as scripted.
+
+        Args:
+            collection_name (str): The collection.
+            count_filter (Any): The filter.
+            exact (bool): Whether the count is exact.
+
+        Returns:
+            Any: An object carrying ``count``.
+
+        Raises:
+            Exception: The scripted error.
+        """
+        self.counted.append((collection_name, count_filter))
+        value = self.counts.get(collection_name, 0)
+        if isinstance(value, Exception):
+            raise value
+        return types.SimpleNamespace(count=value)
+
+
+def keyword_coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int, int]]) -> None:
+    """Report the keyword index's coverage per lane, as RAG reads it, as ``(total, with_search_text)``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        lanes (dict[str, tuple[int, int]]): The lanes counted in full; a lane left out was not counted.
+    """
+    status = {
+        "indexed": True,
+        "lanes": {name: {"total": total, "with_search_text": covered} for name, (total, covered) in lanes.items()},
+    }
+    monkeypatch.setattr("docint.core.rag.search_index_status", lambda client, collection, **kwargs: status)

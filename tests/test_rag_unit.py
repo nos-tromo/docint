@@ -24,6 +24,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from _pytest.logging import LogCaptureFixture
+from agent_fakes import KeywordClient, keyword_coverage, ready_schema
+from assessment_fakes import RecordingPostprocessor
 from llama_index.core import Document
 from llama_index.core.base.response.schema import Response
 from llama_index.core.schema import MetadataMode, NodeWithScore, QueryBundle, TextNode
@@ -35,9 +37,10 @@ from loguru import logger as _loguru_logger
 from qdrant_client import models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
+from docint.agents.turn.keyword import LONG_WORD, NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD, KeywordMatcher
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, CollectionCleanupError, LazyRerankerPostprocessor
-from docint.core.retrieval.evidence import EveryChildQuery
+from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -8550,3 +8553,578 @@ def test_the_text_chain_leaves_the_social_steps_out_when_asked(monkeypatch: pyte
     floor = chain[1]
     assert isinstance(floor, rag_module.ImageRelevanceFloorPostprocessor)
     assert floor.rescore == rag._rescore_images_by_description
+
+
+# ---------------------------------------------------------------------------
+# the keyword matcher an agent turn is offered
+# ---------------------------------------------------------------------------
+
+
+TEXT_READY = ready_schema("text")
+AUTHOR_READY = ready_schema("author")
+NETWORK_READY = ready_schema("network")
+UUID_READY = ready_schema("uuid")
+#: The prefix of the line that says why a turn was offered no keyword tool.
+WITHHELD = "The keyword tool was withheld from an agent turn: "
+
+
+def _keyword_rag(
+    monkeypatch: pytest.MonkeyPatch,
+    schemas: dict[str, dict[str, str]],
+    counts: dict[str, int | Exception] | None = None,
+    nodes: list[NodeWithScore] | None = None,
+) -> tuple[RAG, KeywordClient, list[dict[str, Any]], list[QueryBundle], list[dict[str, Any]]]:
+    """Build a RAG whose keyword matches count on a double and retrieve canned passages.
+
+    Profiling the collection fails, so any test proves the matcher never scans it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        schemas (dict[str, dict[str, str]]): Payload schemas per collection.
+        counts (dict[str, int | Exception] | None): Counts per collection.
+        nodes (list[NodeWithScore] | None): What a keyword retrieval returns.
+
+    Returns:
+        tuple: The RAG, its client, the retriever builds, the bundles retrieved and the chains built.
+    """
+    rag = RAG(qdrant_collection="test")
+    client = KeywordClient(schemas, counts)
+    rag._qdrant_client = cast(Any, client)
+    built: list[dict[str, Any]] = []
+    bundles: list[QueryBundle] = []
+    chains: list[dict[str, Any]] = []
+
+    class _Retriever:
+        """Return the canned passages, recording the bundle."""
+
+        def retrieve(self, bundle: QueryBundle) -> list[NodeWithScore]:
+            """Record ``bundle`` and return the passages.
+
+            Args:
+                bundle (QueryBundle): The query bundle.
+
+            Returns:
+                list[NodeWithScore]: The canned passages.
+            """
+            bundles.append(bundle)
+            return list(nodes or [])
+
+    def _build(**kwargs: Any) -> _Retriever:
+        """Record a retriever build.
+
+        Args:
+            **kwargs (Any): The build arguments.
+
+        Returns:
+            _Retriever: The double.
+        """
+        built.append(kwargs)
+        return _Retriever()
+
+    def _chain(**kwargs: Any) -> list[Any]:
+        """Record a chain build and return an empty chain.
+
+        Args:
+            **kwargs (Any): The build arguments.
+
+        Returns:
+            list[Any]: No postprocessors.
+        """
+        chains.append(kwargs)
+        return []
+
+    def _no_scan() -> dict[str, Any]:
+        """Fail: deciding on a keyword matcher never profiles the collection.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("the keyword matcher must not profile the collection")
+
+    monkeypatch.setattr(rag, "_build_retriever", _build)
+    monkeypatch.setattr(rag, "_text_postprocessors", _chain)
+    monkeypatch.setattr(rag, "_infer_collection_profile", _no_scan)
+    return rag, client, built, bundles, chains
+
+
+def _keyword_matcher_for(
+    rag: RAG, target: str = "documents", rules: Any = None, active: bool = False
+) -> KeywordMatcher | None:
+    """Build a turn's keyword matcher.
+
+    Args:
+        rag (RAG): The engine.
+        target (str): The retrieval target.
+        rules (Any): The raw request filter rules.
+        active (bool): Whether request filters are active.
+
+    Returns:
+        KeywordMatcher | None: The matcher, or ``None`` when it is withheld.
+    """
+    return rag._agent_keyword_matcher(
+        metadata_filter_rules=rules,
+        metadata_filters_active=active,
+        retrieval_target=cast(Any, target),
+    )
+
+
+def _matcher(rag: RAG, target: str = "documents", rules: Any = None, active: bool = False) -> KeywordMatcher:
+    """Build a turn's keyword matcher, failing the test when it is withheld.
+
+    Args:
+        rag (RAG): The engine.
+        target (str): The retrieval target.
+        rules (Any): The raw request filter rules.
+        active (bool): Whether request filters are active.
+
+    Returns:
+        KeywordMatcher: The matcher.
+    """
+    matcher = _keyword_matcher_for(rag, target=target, rules=rules, active=active)
+    assert matcher is not None
+    return matcher
+
+
+def test_the_keyword_matcher_offers_exactly_the_fields_whose_indexes_are_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A field is offered only when every key it searches carries its own index kind."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY}})
+
+    assert _matcher(rag).fields == ("text", "author")
+
+
+def test_the_keyword_matcher_needs_the_text_index_whatever_else_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text is the field a call means by default, so without it no matcher is offered at all."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**AUTHOR_READY, **NETWORK_READY, **UUID_READY}})
+
+    assert _keyword_matcher_for(rag) is None
+
+
+def test_every_collection_is_offered_each_field_whose_indexes_are_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Author, network and uuid are offered wherever their indexes are ready, social export or not.
+
+    The collection is never profiled (``_keyword_rag`` fails if it is), so no social flag decides.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY, **NETWORK_READY, **UUID_READY}})
+
+    assert _matcher(rag).fields == ("text", "author", "network", "uuid")
+
+
+def test_a_collection_without_field_indexes_is_offered_the_text_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With only the text index ready, the text is the one field."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _matcher(rag).fields == ("text",)
+
+
+def test_a_field_ready_only_in_the_image_companion_is_not_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The main collection's indexes decide what is offered; the companion only decides whether it joins."""
+    keyword_coverage(monkeypatch, {"test": (10, 10), "test_images": (4, 4)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY, "test_images": {**TEXT_READY, **AUTHOR_READY}})
+
+    assert _matcher(rag, target="all").fields == ("text",)
+
+
+def test_no_ready_field_withholds_the_keyword_matcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An index no chunk carries text for answers nothing, so the turn is not offered it."""
+    keyword_coverage(monkeypatch, {"test": (10, 0)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _keyword_matcher_for(rag) is None
+
+
+def test_filters_that_cannot_reach_qdrant_withhold_the_keyword_matcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A count outside the turn's filters would count the wrong material."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _keyword_matcher_for(rag, rules=None, active=True) is None
+
+
+def test_a_readiness_fault_withholds_the_keyword_matcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The turn loses one tool, never the turn."""
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    def _down(client: Any, collection: str, **kwargs: Any) -> dict[str, Any]:
+        """Fail as an unreachable Qdrant does.
+
+        Args:
+            client (Any): The client.
+            collection (str): The collection.
+            **kwargs (Any): The status options.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("qdrant unreachable")
+
+    monkeypatch.setattr(rag_module, "search_index_status", _down)
+
+    assert _keyword_matcher_for(rag) is None
+
+
+def test_a_visual_turn_is_never_offered_a_keyword_matcher_and_nothing_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A visual turn answers from pictures: the index is not even asked."""
+    rag, client, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+    read: list[str] = []
+
+    def _status(client: Any, collection: str, **kwargs: Any) -> dict[str, Any]:
+        """Record a coverage read.
+
+        Args:
+            client (Any): The client.
+            collection (str): The collection.
+            **kwargs (Any): The status options.
+
+        Returns:
+            dict[str, Any]: Full coverage.
+        """
+        read.append(collection)
+        return {"lanes": {collection: {"total": 10, "with_search_text": 10}}}
+
+    monkeypatch.setattr(rag_module, "search_index_status", _status)
+
+    assert _keyword_matcher_for(rag, target="visual") is None
+    assert (read, client.counted) == ([], [])
+
+
+@pytest.mark.parametrize("reason", ["visual", "filters", "coverage", "text_not_ready", "fault"])
+def test_a_withheld_matcher_says_why_in_one_debug_line(monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    """Each withheld case logs its reason alone, once.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        reason (str): The case, named by the reason it logs.
+    """
+    lanes = {"visual": (10, 10), "filters": (10, 10), "text_not_ready": (10, 0), "fault": (10, 10)}
+    keyword_coverage(monkeypatch, {"test": lanes[reason]} if reason in lanes else {})
+    rag, client, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+    if reason == "fault":
+
+        def _down(collection_name: str) -> bool:
+            """Fail as an unreachable Qdrant does.
+
+            Args:
+                collection_name (str): The collection.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("qdrant unreachable")
+
+        monkeypatch.setattr(client, "collection_exists", _down)
+    messages: list[str] = []
+    sink = _loguru_logger.add(lambda message: messages.append(message.record["message"]), level="DEBUG")
+    try:
+        matcher = _keyword_matcher_for(
+            rag,
+            target={"visual": "visual", "fault": "all"}.get(reason, "documents"),
+            active=reason == "filters",
+        )
+    finally:
+        _loguru_logger.remove(sink)
+
+    assert matcher is None
+    assert [message for message in messages if message.startswith(WITHHELD)] == [f"{WITHHELD}{reason}"]
+
+
+def test_a_keyword_check_counts_within_the_request_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The count and the retrieval use one filter: the words, the request's rules, and no coarse parents."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    hit = NodeWithScore(node=TextNode(id_="n1", text="Kontrollgruppe fehlt."), score=1.0)
+    rag, client, built, _, _ = _keyword_rag(monkeypatch, {"test": TEXT_READY}, counts={"test": 4}, nodes=[hit])
+    rules = [{"field": "mimetype", "operator": "eq", "value": "text/plain"}]
+
+    result = _matcher(rag, rules=rules, active=True).run("Kontrollgruppe", "text")
+
+    assert (result.matches, result.unchecked, result.keywords) == (4, 0, ("Kontrollgruppe",))
+    assert [scored.node.node_id for scored in result.nodes] == ["n1"]
+    compiled = repr(client.counted[0][1])
+    assert "search_text" in compiled and "mimetype" in compiled and "docint_hier_type" in compiled
+    assert built[0]["vector_store_kwargs"] == {"qdrant_filters": client.counted[0][1]}
+    assert (built[0]["metadata_filter_rules"], built[0]["metadata_filters_active"]) == (rules, True)
+
+
+def test_a_failed_count_is_unknown_and_never_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retrieval still runs; only the count is lost."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    hit = NodeWithScore(node=TextNode(id_="n1", text="Kontrollgruppe fehlt."), score=1.0)
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY}, counts={"test": RuntimeError("down")}, nodes=[hit])
+
+    result = _matcher(rag).run("Kontrollgruppe", "text")
+
+    assert result.matches is None
+    assert [scored.node.node_id for scored in result.nodes] == ["n1"]
+
+
+def test_a_zero_count_skips_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing contains the words, so there is nothing to rank."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, _, built, _, _ = _keyword_rag(monkeypatch, {"test": TEXT_READY}, counts={"test": 0})
+
+    result = _matcher(rag).run("Kontrollgruppe", "text")
+
+    assert (result.matches, result.nodes, built) == (0, [], [])
+
+
+def test_an_all_turn_counts_and_searches_the_image_companion_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A figure's caption or printed words can hold the words as well as a passage can."""
+    keyword_coverage(monkeypatch, {"test": (10, 10), "test_images": (4, 4)})
+    rag, client, built, _, _ = _keyword_rag(
+        monkeypatch,
+        {"test": TEXT_READY, "test_images": TEXT_READY},
+        counts={"test": 3, "test_images": 2},
+        nodes=[NodeWithScore(node=TextNode(id_="n1", text="x"), score=1.0)],
+    )
+
+    result = _matcher(rag, target="all").run("Kontrollgruppe", "text")
+
+    assert result.matches == 5
+    assert [name for name, _ in client.counted] == ["test", "test_images"]
+    assert built[0]["include_images"] is True
+
+
+def test_a_documents_turn_never_counts_the_image_companion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Imagery the turn excluded is neither counted nor unchecked."""
+    keyword_coverage(monkeypatch, {"test": (10, 10), "test_images": (4, 0)})
+    rag, client, built, _, _ = _keyword_rag(
+        monkeypatch,
+        {"test": TEXT_READY, "test_images": TEXT_READY},
+        counts={"test": 3, "test_images": 2},
+        nodes=[NodeWithScore(node=TextNode(id_="n1", text="x"), score=1.0)],
+    )
+
+    result = _matcher(rag, target="documents").run("Kontrollgruppe", "text")
+
+    assert (result.matches, result.unchecked) == (3, 0)
+    assert [name for name, _ in client.counted] == ["test"]
+    assert built[0]["include_images"] is False
+
+
+def test_an_unready_companion_is_left_out_and_reported_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without its own index the companion cannot be matched reliably, so its chunks count as unchecked."""
+    keyword_coverage(monkeypatch, {"test": (10, 9), "test_images": (4, 4)})
+    rag, client, built, _, _ = _keyword_rag(
+        monkeypatch,
+        {"test": TEXT_READY, "test_images": {}},
+        counts={"test": 3},
+        nodes=[NodeWithScore(node=TextNode(id_="n1", text="x"), score=1.0)],
+    )
+
+    result = _matcher(rag, target="all").run("Kontrollgruppe", "text")
+
+    assert (result.matches, result.unchecked) == (3, 1 + 4)
+    assert [name for name, _ in client.counted] == ["test"]
+    assert built[0]["include_images"] is False
+
+
+def test_the_companion_joins_each_fields_match_only_where_its_own_indexes_allow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per field: the text joins and counts what it misses there, author is reported unchecked, network never joins.
+
+    The companion carries the text index alone, and no network at all.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10), "test_images": (4, 3)})
+    rag, client, built, _, _ = _keyword_rag(
+        monkeypatch,
+        {"test": {**TEXT_READY, **AUTHOR_READY, **NETWORK_READY}, "test_images": TEXT_READY},
+        counts={"test": 3, "test_images": 2},
+        nodes=[NodeWithScore(node=TextNode(id_="n1", text="x"), score=1.0)],
+    )
+    matcher = _matcher(rag, target="all")
+
+    text = matcher.run("Hafenfest", "text")
+    author = matcher.run("Person", "author")
+    network = matcher.run("Netzwerk", "network")
+
+    assert matcher.fields == ("text", "author", "network")
+    assert (text.matches, text.unchecked) == (5, 1)
+    assert (author.matches, author.unchecked) == (3, 4)
+    assert (network.matches, network.unchecked) == (3, 0)
+    assert [name for name, _ in client.counted] == ["test", "test_images", "test", "test"]
+    assert [build["include_images"] for build in built] == [True, False, False]
+
+
+def test_a_companion_of_unknown_coverage_withholds_the_matcher_from_an_all_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An uncounted companion could hide matches the count would then deny."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY, "test_images": TEXT_READY})
+
+    assert _keyword_matcher_for(rag, target="all") is None
+    assert _keyword_matcher_for(rag, target="documents") is not None
+
+
+def test_a_companion_lookup_that_fails_withholds_the_matcher_from_an_all_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An outage must not read as "no companion": its imagery would then be neither counted nor unchecked."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, client, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    def _down(collection_name: str) -> bool:
+        """Fail as an unreachable Qdrant does.
+
+        Args:
+            collection_name (str): The collection.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("qdrant unreachable")
+
+    monkeypatch.setattr(client, "collection_exists", _down)
+
+    assert _keyword_matcher_for(rag, target="all") is None
+    assert _keyword_matcher_for(rag, target="documents") is not None
+
+
+def test_keyword_retrieval_keeps_every_child_and_leaves_the_social_links_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A match shows matches: every retrieved child stays, and no non-matching sibling joins them.
+
+    The bundle is an agent's own search, so the image floor gives no sub-floor image a description re-score.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, _, _, bundles, chains = _keyword_rag(
+        monkeypatch,
+        {"test": TEXT_READY},
+        counts={"test": 1},
+        nodes=[NodeWithScore(node=TextNode(id_="n1", text="x"), score=1.0)],
+    )
+
+    _matcher(rag).run("Kontrollgruppe", "text")
+
+    assert isinstance(bundles[0], AgentSearchQuery)
+    assert isinstance(bundles[0], EveryChildQuery)
+    assert bundles[0].query_str == "Kontrollgruppe"
+    assert [chain["social_links"] for chain in chains] == [False]
+
+
+def test_the_keyword_chain_sees_the_bundle_the_match_retrieved_with(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every postprocessor is handed the agent's own search bundle, which is what turns the image re-score off."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, _, _, bundles, _ = _keyword_rag(
+        monkeypatch,
+        {"test": TEXT_READY},
+        counts={"test": 1},
+        nodes=[NodeWithScore(node=TextNode(id_="n1", text="x"), score=1.0)],
+    )
+    recorder = RecordingPostprocessor()
+    monkeypatch.setattr(rag, "_text_postprocessors", lambda **kwargs: [recorder])
+
+    result = _matcher(rag).run("Kontrollgruppe", "text")
+
+    assert recorder.bundles == bundles
+    assert [scored.node.node_id for scored in result.nodes] == ["n1"]
+
+
+def test_the_check_names_what_keeps_a_call_from_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Too-short words and several ids are refused before any search runs."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **UUID_READY}})
+
+    matcher = _matcher(rag)
+
+    assert matcher.check("a b", "text") == NO_USABLE_WORD
+    assert matcher.check("id1 id2", "uuid") == ONE_VALUE_ONLY
+    assert matcher.check("Kontrollgruppe", "text") is None
+
+
+@pytest.mark.parametrize(
+    "words", ["2.5", "U.S.", "p<0.05", "5%", "e.g. Kontrollgruppe", "...", "vitamin D", "Artikel 5"]
+)
+def test_the_check_refuses_words_the_index_cannot_match_as_given(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
+    """A word the index skips, alone or as a piece of a longer one, would count nothing, or too much.
+
+    ``vitamin D`` would count every chunk with ``vitamin`` in it: the index skips
+    a single letter, so the check would answer for a broader query than it names.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        words (str): The words of the check.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _matcher(rag).check(words, "text") == UNINDEXABLE_WORD
+
+
+def test_the_check_refuses_an_initial_on_a_name_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name is matched word by word as the text is, so an initial would be skipped there too."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY}})
+
+    assert _matcher(rag).check("J Smith", "author") == UNINDEXABLE_WORD
+
+
+@pytest.mark.parametrize("words", ["x" * 31, "Donaudampfschifffahrtsgesellschaftskapitän"])
+def test_the_check_refuses_words_longer_than_the_index_reads(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
+    """The index reads a word only up to its first 30 characters, so a longer one would match more than it names.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        words (str): The words of the check.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _matcher(rag).check(words, "text") == LONG_WORD
+
+
+def test_the_check_lets_words_through_whose_pieces_the_index_keeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hyphenated term is matched by its parts, each long enough to count; exact ids are never split.
+
+    A lone sign is no word at all, so it narrows nothing by being left out, and
+    a word of exactly the index's longest length is read whole.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY, **UUID_READY}})
+
+    matcher = _matcher(rag)
+
+    assert matcher.check("COVID-19", "text") is None
+    assert matcher.check("a1-b2", "uuid") is None
+    assert matcher.check("Müller & Söhne", "text") is None
+    assert matcher.check("x" * 30, "text") is None
+    assert matcher.check("1234567890", "author") is None
+    assert matcher.check("0123456789abcdef0123456789abcdef", "uuid") is None
+
+
+def test_the_check_refuses_rather_than_raises_when_the_match_cannot_compile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check runs while a call is keyed and prepared, where a raise would fail the call; it refuses instead.
+
+    What it decides before compiling the match stays as it was.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": {**TEXT_READY, **AUTHOR_READY}})
+    matcher = _matcher(rag)
+
+    def _broken(*args: Any, **kwargs: Any) -> Any:
+        """Fail as a match that cannot compile does.
+
+        Args:
+            *args (Any): Ignored.
+            **kwargs (Any): Ignored.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("invented compile failure")
+
+    monkeypatch.setattr(rag_module, "build_search_filter", _broken)
+
+    assert matcher.check("Kontrollgruppe", "text") == ONE_VALUE_ONLY
+    assert matcher.check("Person", "author") == ONE_VALUE_ONLY
+    assert matcher.check("a b", "text") == NO_USABLE_WORD
+    assert matcher.check("vitamin D", "text") == UNINDEXABLE_WORD
+
+
+def test_the_check_refuses_a_field_the_search_does_not_know(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tool names its fields before it asks, but the check stands on its own and never raises."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+
+    assert _matcher(rag).check("Kontrollgruppe", "no_such_field") == ONE_VALUE_ONLY

@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -16,8 +17,11 @@ import openai
 import pytest
 from agent_fakes import (
     CLIP,
+    KeywordClient,
     chunk,
+    keyword_coverage,
     programme_passage,
+    ready_schema,
     streaming_tool_llm,
     text_chunks,
     tool_call,
@@ -26,13 +30,14 @@ from agent_fakes import (
 )
 from assessment_fakes import scored_node
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
-from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
+from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, QueryBundle, TextNode
 
 from docint.agents.assessment.ledger import EvidenceLedger, render_context, stamp
 from docint.agents.assessment.split import SENTINEL
-from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, schema_tokens
+from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, MIN_ROUND_ROOM, TurnBudget, schema_tokens
 from docint.agents.turn.calls import SEARCH_THREAD_NAME
 from docint.agents.turn.history import NO_HISTORY, ConversationTurn, ConversationWindow
+from docint.agents.turn.keyword import KeywordMatcher
 from docint.agents.turn.loop import AgentResult
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TOOL, probe_tools
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
@@ -91,7 +96,7 @@ def _rag(
         max_retries (int): ``OPENAI_MAX_RETRIES``; two is the production default.
 
     Returns:
-        RAG: The engine, with only the OpenAI knobs, the ratio and the locale set.
+        RAG: The engine, with only the OpenAI knobs, the ratio and the locale set, over an empty store.
     """
     monkeypatch.setenv("RESPONSE_LANGUAGE", code)
     rag = RAG(qdrant_collection="hafen")
@@ -126,6 +131,8 @@ def _rag(
     ):
         setattr(rag, f"openai_{key}", getattr(rag.openai_config, key))
     rag.embed_char_token_ratio = 3.5
+    # A store holding no collection, so no turn is offered keyword unless a test readies one.
+    rag._qdrant_client = cast(Any, KeywordClient({}))
     return rag
 
 
@@ -1382,6 +1389,350 @@ def test_a_search_runs_on_a_search_thread_inside_the_requests_collection(monkeyp
 
     assert expanded_in == [PHYSICAL]
     assert searched_in == [(PHYSICAL, SEARCH_THREAD_NAME)]
+    result = items[-1]
+    assert isinstance(result, AgentResult)
+    assert [scored.node.node_id for scored in result.nodes] == ["programme"]
+    assert result.steps == 1
+
+
+#: Every keyword field, as a collection whose indexes are all ready offers them.
+KEYWORD_FIELDS = ("text", "author", "network", "uuid")
+#: The line that says a turn was built without keyword for want of room, up to its numbers.
+NO_ROOM_FOR_KEYWORD = "The keyword tool was withheld from an agent turn: "
+
+
+def _keyword_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    rag: RAG,
+    *,
+    fields: tuple[str, ...] = ("text",),
+    collection: str = "hafen",
+    matches: int = 2,
+    found: Sequence[NodeWithScore] = (),
+) -> tuple[KeywordClient, list[dict[str, Any]]]:
+    """Ready a collection for keyword: its indexes built, its matches counted by a store double, retrieved by another.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        rag (RAG): The engine, before the turn is built.
+        fields (tuple[str, ...]): The fields whose indexes are ready, the text first.
+        collection (str): The physical collection the turn runs in.
+        matches (int): What every count returns.
+        found (Sequence[NodeWithScore]): What every keyword retrieval returns.
+
+    Returns:
+        tuple[KeywordClient, list[dict[str, Any]]]: The store double, and each retriever build's arguments
+        with the collection (``collection``) and thread (``thread``) it ran in.
+    """
+    client = KeywordClient({collection: ready_schema(*fields)}, counts={collection: matches})
+    rag._qdrant_client = cast(Any, client)
+    keyword_coverage(monkeypatch, {collection: (10, 10)})
+    built: list[dict[str, Any]] = []
+
+    class _Retriever:
+        """Return the passages given."""
+
+        def retrieve(self, bundle: QueryBundle) -> list[NodeWithScore]:
+            """Return the passages.
+
+            Args:
+                bundle (QueryBundle): The query bundle.
+
+            Returns:
+                list[NodeWithScore]: The passages given.
+            """
+            return list(found)
+
+    def _build(**kwargs: Any) -> _Retriever:
+        """Record a retriever build, where and on which thread it ran.
+
+        Args:
+            **kwargs (Any): The build arguments.
+
+        Returns:
+            _Retriever: The double.
+        """
+        built.append({**kwargs, "collection": rag.qdrant_collection, "thread": threading.current_thread().name})
+        return _Retriever()
+
+    monkeypatch.setattr(rag, "_build_retriever", _build)
+    monkeypatch.setattr(rag, "_text_postprocessors", lambda **kwargs: [])
+    return client, built
+
+
+def _window_with_room(budget: TurnBudget, room: int) -> int:
+    """Find the smallest context window that leaves a turn shaped like ``budget`` at least ``room`` tokens.
+
+    Args:
+        budget (TurnBudget): A turn's budget, whose own window leaves at least ``room``.
+        room (int): The room for tool replies wanted.
+
+    Returns:
+        int: The window.
+    """
+    assert budget.round_room >= room
+    window = budget.ctx_window
+    while replace(budget, ctx_window=window - 1).round_room >= room:
+        window -= 1
+    return window
+
+
+@pytest.mark.parametrize("target", ["all", "documents"])
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_a_turn_over_text_is_offered_keyword_where_its_collection_is_ready(
+    monkeypatch: pytest.MonkeyPatch, code: str, target: str
+) -> None:
+    """The tool is offered and its schema paid for, and the prompt carries its line and the fields it takes.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+        target (str): The retrieval target.
+    """
+    rag = _rag(monkeypatch, code=code)
+    _keyword_ready(monkeypatch, rag, fields=KEYWORD_FIELDS)
+
+    turn = _turn(rag, target=target)
+
+    registry = turn.loop._registry
+    prompt = turn.loop._system_prompt
+    assert "keyword" in registry.names
+    assert prompt == rag._agent_system_prompt(target, ConversationWindow(), keyword_fields=KEYWORD_FIELDS)
+    assert _prompt("agent_tools_keyword", code) in prompt
+    assert _prompt("agent_tools_keyword_fields", code).format(fields=", ".join(KEYWORD_FIELDS)) in prompt
+    assert turn.budget.tool_schema_tokens == schema_tokens(registry.schemas(), 3.5)
+    assert turn.budget.system_tokens == estimate_tokens(prompt, 3.5)
+
+
+def test_a_turn_offered_the_text_alone_names_no_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With only the text ready the prompt carries the keyword line and no fields line.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, rag)
+
+    turn = _turn(rag, target="documents")
+
+    assert "keyword" in turn.loop._registry.names
+    expected = rag._agent_system_prompt("documents", ConversationWindow(), keyword_fields=("text",))
+    assert turn.loop._system_prompt == expected
+    assert _prompt("agent_tools_keyword", "en") in turn.loop._system_prompt
+    assert "keyword also takes field" not in turn.loop._system_prompt
+
+
+@pytest.mark.parametrize(("target", "scoped"), [("visual", False), ("all", True), ("documents", True)])
+def test_a_visual_or_scoped_turn_is_never_offered_keyword(
+    monkeypatch: pytest.MonkeyPatch, target: str, scoped: bool
+) -> None:
+    """No matcher is even asked for, so neither gets the tool or its lines, though the collection is ready.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+        scoped (bool): Whether the turn answers a pinned scope.
+    """
+    rag = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, rag, fields=KEYWORD_FIELDS)
+    ready = rag._agent_keyword_matcher(
+        metadata_filter_rules=None, metadata_filters_active=False, retrieval_target="all"
+    )
+    assert ready is not None
+    asked: list[dict[str, Any]] = []
+
+    def _matcher(**kwargs: Any) -> KeywordMatcher:
+        """Record that a matcher was asked for, and hand over the ready one.
+
+        Args:
+            **kwargs (Any): The request it was asked for.
+
+        Returns:
+            KeywordMatcher: The matcher of the ready collection.
+        """
+        asked.append(kwargs)
+        return ready
+
+    monkeypatch.setattr(rag, "_agent_keyword_matcher", _matcher)
+
+    turn = _turn(rag, target=target, scoped=scoped, pinned_count=2 if scoped else 0)
+
+    assert asked == []
+    assert "keyword" not in turn.loop._registry.names
+    assert turn.loop._system_prompt == _system_prompt("en", target, rule=False, summary=NO_HISTORY)
+
+
+def test_a_turn_with_room_only_without_keyword_is_built_without_it(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog_info: Any
+) -> None:
+    """Keyword would leave the turn under the room it needs, so the turn runs without it and says so, by numbers alone.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog_info (Any): Bridged INFO capture.
+    """
+    roomy = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, roomy, fields=KEYWORD_FIELDS)
+    with_keyword = _turn(roomy).budget
+    without_keyword = _turn(_rag(monkeypatch)).budget
+    cost = without_keyword.round_room - with_keyword.round_room
+    assert cost > 0
+    window = _window_with_room(without_keyword, MIN_ROUND_ROOM + cost // 2)
+    rag = _rag(monkeypatch, ctx_window=window)
+    _keyword_ready(monkeypatch, rag, fields=KEYWORD_FIELDS)
+
+    turn = _turn(rag)
+
+    assert "keyword" not in turn.loop._registry.names
+    assert turn.loop._system_prompt == _system_prompt("en", "all", rule=False, summary=NO_HISTORY)
+    assert turn.budget == replace(without_keyword, ctx_window=window)
+    assert turn.budget.available
+    room_with_keyword = turn.budget.round_room - cost
+    assert room_with_keyword < MIN_ROUND_ROOM
+    assert [line for line in loguru_caplog_info.messages if line.startswith(NO_ROOM_FOR_KEYWORD)] == [
+        f"{NO_ROOM_FOR_KEYWORD}{room_with_keyword} tokens of room with it, under the {MIN_ROUND_ROOM} one needs"
+    ]
+    assert MESSAGE not in loguru_caplog_info.text
+
+
+def test_a_turn_without_room_even_without_keyword_builds_none(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog_info: Any
+) -> None:
+    """Withholding keyword is tried first; when the room is short without it too, no turn is built.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog_info (Any): Bridged INFO capture.
+    """
+    rag = _rag(monkeypatch, ctx_window=4096)
+    _keyword_ready(monkeypatch, rag, fields=KEYWORD_FIELDS)
+
+    turn = rag.agent_turn(
+        _engine(),
+        retrieval_target="all",
+        scoped=False,
+        pinned_count=0,
+        window=ConversationWindow(),
+        message=MESSAGE,
+        metadata_filter_rules=None,
+        metadata_filters_active=False,
+        vector_store_kwargs=None,
+    )
+
+    assert turn is None
+    messages = loguru_caplog_info.messages
+    assert [line for line in messages if line.startswith(NO_ROOM_FOR_KEYWORD)] != []
+    assert [line for line in messages if line.startswith("An agent turn would have ")] != []
+    assert MESSAGE not in loguru_caplog_info.text
+
+
+@pytest.mark.parametrize("with_compiled", [True, False], ids=["compiled", "rules-only"])
+def test_a_keyword_check_counts_and_retrieves_under_the_requests_filter(
+    monkeypatch: pytest.MonkeyPatch, with_compiled: bool
+) -> None:
+    """The request's rules, compiled for the match, narrow the count and the retrieval alike.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        with_compiled (bool): Whether the request also carries its compiled filter.
+    """
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, found=[programme_passage()])
+    compiled = build_qdrant_filter(RULES)
+    assert compiled is not None
+    turn = _turn(
+        rag,
+        target="documents",
+        metadata_filter_rules=RULES,
+        metadata_filters_active=True,
+        vector_store_kwargs={"qdrant_filters": compiled} if with_compiled else None,
+    )
+
+    reply = turn.loop._registry.call(tool_call("keyword", words="Hafenfest"), _ctx(turn))
+
+    ((counted_in, counted_filter),) = client.counted
+    assert counted_in == "hafen"
+    assert cast(list[Any], compiled.must)[0] in cast(list[Any], counted_filter.must)
+    assert "search_text" in repr(counted_filter)
+    assert built[0]["vector_store_kwargs"] == {"qdrant_filters": counted_filter}
+    assert (built[0]["metadata_filter_rules"], built[0]["metadata_filters_active"]) == (RULES, True)
+    assert reply.found == 1
+
+
+def test_a_turn_whose_filter_arrived_compiled_alone_is_offered_no_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keyword narrows its count by the request's rules; without them it could count outside the filter.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, rag)
+
+    turn = _turn(
+        rag,
+        target="documents",
+        metadata_filters_active=True,
+        vector_store_kwargs={"qdrant_filters": build_qdrant_filter(RULES)},
+    )
+
+    assert "keyword" not in turn.loop._registry.names
+
+
+def test_a_keyword_check_runs_on_a_search_thread_inside_the_requests_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop runs a keyword check's count and retrieval on a search thread, in a copy of the request's context.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("AGENT_MAX_ROUNDS", "6")
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, found=[programme_passage()])
+    counted_on: list[str] = []
+    count = client.count
+
+    def _count(collection_name: str, count_filter: Any = None, exact: bool = True) -> Any:
+        """Record the thread a count ran on, then count.
+
+        Args:
+            collection_name (str): The collection.
+            count_filter (Any): The filter.
+            exact (bool): Whether the count is exact.
+
+        Returns:
+            Any: The count.
+        """
+        counted_on.append(threading.current_thread().name)
+        return count(collection_name, count_filter=count_filter, exact=exact)
+
+    monkeypatch.setattr(client, "count", _count)
+    rag._bounded_text_model = cast(
+        Any,
+        streaming_tool_llm(
+            [
+                [
+                    chunk(
+                        tool_calls=[
+                            tool_call_delta(
+                                index=0, call_id="call_1", name="keyword", arguments='{"words": "Hafenfest"}'
+                            )
+                        ],
+                        finish_reason="tool_calls",
+                    )
+                ],
+                [*text_chunks("Die Stände öffnen am Sonntag um zehn Uhr [1].", 12), chunk(finish_reason="stop")],
+            ]
+        ),
+    )
+
+    with rag.collection_scope(PHYSICAL):
+        turn = _turn(rag, target="documents")
+        items = list(turn.loop.run(window=ConversationWindow(), message=MESSAGE, ledger=turn.ledger))
+
+    assert [name for name, _ in client.counted] == [PHYSICAL]
+    assert counted_on == [SEARCH_THREAD_NAME]
+    assert [(build["collection"], build["thread"]) for build in built] == [(PHYSICAL, SEARCH_THREAD_NAME)]
     result = items[-1]
     assert isinstance(result, AgentResult)
     assert [scored.node.node_id for scored in result.nodes] == ["programme"]

@@ -134,7 +134,16 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, message_cost, schema_tokens
 from docint.agents.turn.history import question_block
+from docint.agents.turn.keyword import (
+    LONG_WORD,
+    NO_USABLE_WORD,
+    ONE_VALUE_ONLY,
+    UNINDEXABLE_WORD,
+    KeywordMatcher,
+    KeywordResult,
+)
 from docint.agents.turn.loop import AgentLoop
+from docint.agents.turn.tools import ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -188,22 +197,28 @@ from docint.core.retrieval.visual import (
 )
 from docint.core.retrieval_filters import build_qdrant_filter, matches_metadata_filters, merge_qdrant_filters
 from docint.core.search.fields import (
+    DEFAULT_SEARCH_FIELD,
     IMAGE_LANE_FIELDS,
     SEARCH_FIELDS,
     UnknownSearchFieldError,
     ensure_field_indexes,
     field_indexes_ready,
+    field_ready_in_schema,
+    read_payload_schema,
     search_field_spec,
 )
 from docint.core.search.fulltext import (
     build_any_keyword_filter,
     build_scan_filter,
     build_search_filter,
+    index_tokens,
     matches_any_phrase,
     not_coarse_condition,
     parse_keywords,
 )
 from docint.core.search.index import (
+    SEARCH_MAX_TOKEN_LEN,
+    SEARCH_MIN_TOKEN_LEN,
     SEARCH_TEXT_FIELD,
     ensure_search_index,
     image_companion_name,
@@ -8979,6 +8994,231 @@ class RAG:
             conversation_summary=window.summary_block(),
         )
 
+    def _agent_keyword_matcher(
+        self,
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        retrieval_target: RetrievalTarget,
+    ) -> KeywordMatcher | None:
+        """Offer an agent turn an exact word match over its collection, where the collection's indexes allow one.
+
+        Deciding only reads (see :meth:`_keyword_matcher`): it creates no index and never
+        profiles the collection. A visual turn is never offered one, and is not even looked at.
+        A withheld match is logged once at DEBUG by its reason alone: ``visual``, ``filters``,
+        ``coverage``, ``text_not_ready``, or ``fault`` for anything that raised, a failed lookup
+        of the image companion included; the turn then keeps its other tools.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+            retrieval_target (RetrievalTarget): Which evidence the turn may answer from; a match
+                counts and retrieves the same.
+
+        Returns:
+            KeywordMatcher | None: The match, bound to this collection, the request's filters and
+            the target; ``None`` when it is withheld.
+        """
+        if retrieval_target == "visual":
+            reason = "visual"
+        else:
+            try:
+                built = self._keyword_matcher(
+                    metadata_filter_rules=metadata_filter_rules,
+                    metadata_filters_active=metadata_filters_active,
+                    retrieval_target=retrieval_target,
+                )
+            except Exception:
+                built = "fault"
+            if isinstance(built, KeywordMatcher):
+                return built
+            reason = built
+        logger.debug("The keyword tool was withheld from an agent turn: {}", reason)
+        return None
+
+    def _keyword_matcher(
+        self,
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        retrieval_target: RetrievalTarget,
+    ) -> KeywordMatcher | str:
+        """Build the keyword match of a text turn, or say why its collection cannot offer one.
+
+        It reads the keyword index's coverage per lane, whether the image companion exists,
+        and one payload schema per collection. A field is offered when every key it searches
+        carries its own index kind in the main collection's schema, social export or not; the
+        text, which a call matches by default, comes first and is required, and needs chunks
+        that carry it. The image companion is in scope on the ``all`` target when it exists,
+        and joins a field's match only where it carries the same indexes; otherwise its chunks
+        are reported unchecked, never counted as misses, as are the chunks either lane holds
+        without the text. A ``documents`` turn never looks at the companion.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
+                match compiles as the API compiles them.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+            retrieval_target (RetrievalTarget): ``all`` or ``documents``.
+
+        Returns:
+            KeywordMatcher | str: The match; otherwise why there is none: ``filters`` when the
+            filters cannot be compiled for Qdrant (a count would cover the wrong material),
+            ``coverage`` when a lane in scope was not counted, ``text_not_ready``.
+
+        Raises:
+            Exception: Whatever reading the store raises, a failed companion lookup included,
+                so an outage never reads as "no companion".
+        """
+        request_filter = build_qdrant_filter(metadata_filter_rules)
+        if metadata_filters_active and request_filter is None:
+            return "filters"
+        collection = self.qdrant_collection
+        companion = image_companion_name(collection)
+        client = self.qdrant_client
+        lanes = search_index_status(client, collection, by_lane=True).get("lanes") or {}
+        main = lanes.get(collection)
+        images = lanes.get(companion)
+        in_scope = retrieval_target != "documents" and (
+            images is not None or bool(client.collection_exists(collection_name=companion))
+        )
+        if main is None or (in_scope and images is None):
+            return "coverage"
+        main_schema = read_payload_schema(client, collection)
+        image_schema: dict[str, Any] = read_payload_schema(client, companion) if in_scope else {}
+        image_total = int(images["total"]) if in_scope and images is not None else 0
+        image_missing = image_total - int(images["with_search_text"]) if in_scope and images is not None else 0
+        main_missing = int(main["total"]) - int(main["with_search_text"])
+        joins: dict[str, bool] = {}
+        unchecked: dict[str, int] = {}
+        for name in SEARCH_FIELDS:
+            if not field_ready_in_schema(main_schema, name):
+                continue
+            if name == DEFAULT_SEARCH_FIELD and int(main["with_search_text"]) == 0:
+                continue
+            reaches_images = in_scope and name in IMAGE_LANE_FIELDS
+            joins[name] = reaches_images and field_ready_in_schema(image_schema, name)
+            left_out = image_total if reaches_images and not joins[name] else 0
+            covered = image_missing if joins[name] else 0
+            unchecked[name] = left_out + (main_missing + covered if name == DEFAULT_SEARCH_FIELD else 0)
+        if DEFAULT_SEARCH_FIELD not in joins:
+            return "text_not_ready"
+
+        def _filter(words: str, field: str, base: qdrant_models.Filter | None) -> qdrant_models.Filter | None:
+            """Compile a match as the Search panel compiles a field search.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+                base (qdrant_models.Filter | None): The request filter to AND in.
+
+            Returns:
+                qdrant_models.Filter | None: The filter; ``None`` when nothing compiles.
+            """
+            spec = search_field_spec(field)
+            return build_search_filter(
+                parse_keywords(words),
+                text_keys=spec.text_keys,
+                value_keys=spec.value_keys,
+                value_forms=spec.value_forms(words),
+                base_filter=base,
+            )
+
+        def _check(words: str, field: str) -> str | None:
+            """Say why a call cannot run, without touching Qdrant; never raise.
+
+            Every typed word is read as the index reads it, before :func:`parse_keywords`
+            drops the short ones. The index skips a piece under ``SEARCH_MIN_TOKEN_LEN``
+            characters and cuts one over ``SEARCH_MAX_TOKEN_LEN``, so a match holding either
+            would count a broader query than the one it names: ``vitamin D`` would count every
+            ``vitamin``. Exact-value fields are matched whole and never split. It runs while a
+            call is keyed and prepared, where a raise would fail the call, so anything that
+            keeps the match from compiling is answered ``ONE_VALUE_ONLY``.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+
+            Returns:
+                str | None: ``NO_USABLE_WORD``, ``UNINDEXABLE_WORD``, ``LONG_WORD``,
+                ``ONE_VALUE_ONLY`` or ``None``.
+            """
+            try:
+                keywords = parse_keywords(words)
+                if not keywords:
+                    return NO_USABLE_WORD
+                if search_field_spec(field).text_keys:
+                    pieces = [piece for word in words.split() for piece in index_tokens(word)]
+                    # A keyword with no letter or digit at all (``...``) would compile to a match on nothing.
+                    if not all(map(index_tokens, keywords)) or any(
+                        len(piece) < SEARCH_MIN_TOKEN_LEN for piece in pieces
+                    ):
+                        return UNINDEXABLE_WORD
+                    if any(len(piece) > SEARCH_MAX_TOKEN_LEN for piece in pieces):
+                        return LONG_WORD
+                compiled = _filter(words, field, None)
+            except Exception:
+                return ONE_VALUE_ONLY
+            return ONE_VALUE_ONLY if compiled is None else None
+
+        def _run(words: str, field: str) -> KeywordResult:
+            """Count the matches exactly, then retrieve the best of them as a search does.
+
+            The search is an agent's own (:class:`AgentSearchQuery`), so every child is kept and
+            no sub-floor image is re-scored by description; the social steps are left out. Runs
+            on a search thread, inside the request's collection scope.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+
+            Returns:
+                KeywordResult: The matches, their count and what the index leaves unchecked.
+            """
+            keywords = tuple(parse_keywords(words))
+            conditions = _filter(words, field, request_filter)
+            if conditions is None:
+                return KeywordResult(nodes=[], matches=None, unchecked=unchecked[field], keywords=keywords)
+            matches = self._keyword_count(collection, conditions)
+            if matches is not None and joins[field]:
+                in_images = self._keyword_count(companion, conditions)
+                matches = None if in_images is None else matches + in_images
+            nodes: list[NodeWithScore] = []
+            if matches != 0:
+                bundle = AgentSearchQuery(words)
+                retriever = self._build_retriever(
+                    vector_store_kwargs={"qdrant_filters": conditions},
+                    metadata_filter_rules=metadata_filter_rules,
+                    metadata_filters_active=metadata_filters_active,
+                    include_images=joins[field],
+                )
+                nodes = list(retriever.retrieve(bundle))
+                # No profile: without the social steps it would only size parent context's prompt allowance.
+                for postprocessor in self._text_postprocessors(profile={}, social_links=False):
+                    nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
+            return KeywordResult(nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords)
+
+        fields = (DEFAULT_SEARCH_FIELD, *(name for name in joins if name != DEFAULT_SEARCH_FIELD))
+        return KeywordMatcher(fields=fields, check=_check, run=_run)
+
+    def _keyword_count(self, collection: str, conditions: qdrant_models.Filter) -> int | None:
+        """Count exactly how many chunks of one collection a keyword match holds, coarse parents excluded.
+
+        Unlike :meth:`_search_total`, a failed count is ``None``: a keyword reply states its
+        count as a fact, and a failure must never read as zero.
+
+        Args:
+            collection (str): The collection to count.
+            conditions (qdrant_models.Filter): The compiled match, the request's filter in it.
+
+        Returns:
+            int | None: The count, or ``None`` when it failed.
+        """
+        try:
+            return int(self.qdrant_client.count(collection_name=collection, count_filter=conditions, exact=True).count)
+        except Exception as exc:
+            logger.warning("An agent's keyword count in '{}' failed: {}", collection, type(exc).__name__)
+            return None
+
     def agent_turn(
         self,
         engine: Any,
@@ -8999,12 +9239,17 @@ class RAG:
         with graph neighbours for retrieval alone and retrieves through ``engine``, so the
         request's filters, rerank and target apply, every child kept (:class:`EveryChildQuery`).
         The image tools search the image companion under the request's filter, compiled as the
-        visual retriever compiles it. A tool's I/O runs on a search thread in a copy of the
-        request's context, so :meth:`collection_scope` holds there. The budget is measured on
-        the rendered system prompt, the offered schemas (none on a pinned scope, whose round
-        offers no tools), the window's messages, each with its envelope, and the message. Only
-        a visual turn shows the model the pictures it finds, and only an unscoped turn asks a
-        first round that looked nothing up again, with the search note (``agent_search_first``).
+        visual retriever compiles it. An unscoped ``all`` or ``documents`` turn is also offered
+        ``keyword`` where the collection's indexes allow it (:meth:`_agent_keyword_matcher`),
+        with its lines in the system prompt. A tool's I/O runs on a search thread in a copy of
+        the request's context, so :meth:`collection_scope` holds there. The budget is measured
+        on the rendered system prompt, the offered schemas (none on a pinned scope, whose round
+        offers no tools), the window's messages, each with its envelope, and the message. When
+        keyword leaves the turn less room for tool replies than it needs, the turn is built
+        again without it, its tools, prompt and budget alike, and an INFO line gives the
+        numbers. Only a visual turn shows the model the pictures it finds, and only an unscoped
+        turn asks a first round that looked nothing up again, with the search note
+        (``agent_search_first``).
 
         Args:
             engine (Any): The turn's query engine.
@@ -9022,7 +9267,7 @@ class RAG:
 
         Returns:
             AgentTurn | None: The turn, its ledger empty; ``None`` when the budget leaves less
-            room for tool replies than a turn needs.
+            room for tool replies than a turn needs, even without keyword.
 
         Raises:
             ValueError: For a target without a tool set, or filters that reached the turn as
@@ -9037,23 +9282,58 @@ class RAG:
             metadata_filters_active=metadata_filters_active,
             vector_store_kwargs=vector_store_kwargs,
         )
-        registry = toolset_for(
-            retrieval_target,
-            search=lambda query: list(engine.retrieve(AgentSearchQuery(self.expand_query_with_graph(query)))),
-            search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
-            list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
+        matcher = (
+            None
+            if scoped or retrieval_target == "visual"
+            else self._agent_keyword_matcher(
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
+                retrieval_target=retrieval_target,
+            )
         )
-        system_prompt = self._agent_system_prompt(retrieval_target, window)
-        budget = TurnBudget(
-            ctx_window=int(self.openai_ctx_window),
-            reasoning=reasoning,
-            char_token_ratio=ratio,
-            system_tokens=estimate_tokens(system_prompt, ratio),
-            # A pinned round offers no tools.
-            tool_schema_tokens=0 if scoped else schema_tokens(registry.schemas(), ratio),
-            history_tokens=sum(message_cost(sent.content or "", ratio) for sent in window.messages()),
-            message_tokens=estimate_tokens(message, ratio),
-        )
+        history_tokens = sum(message_cost(sent.content or "", ratio) for sent in window.messages())
+        message_tokens = estimate_tokens(message, ratio)
+
+        def _offer(keyword: KeywordMatcher | None) -> tuple[ToolRegistry, str, TurnBudget]:
+            """Build the turn's tools, its system prompt and the budget measured on both.
+
+            Args:
+                keyword (KeywordMatcher | None): The keyword match to offer; ``None`` for none.
+
+            Returns:
+                tuple[ToolRegistry, str, TurnBudget]: The tools, the rendered system prompt and
+                the budget.
+            """
+            registry = toolset_for(
+                retrieval_target,
+                search=lambda query: list(engine.retrieve(AgentSearchQuery(self.expand_query_with_graph(query)))),
+                search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
+                list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
+                keyword=keyword,
+            )
+            # The keyword lines only where the tools really offer keyword.
+            fields = keyword.fields if keyword is not None and "keyword" in registry.names else None
+            system_prompt = self._agent_system_prompt(retrieval_target, window, keyword_fields=fields)
+            budget = TurnBudget(
+                ctx_window=int(self.openai_ctx_window),
+                reasoning=reasoning,
+                char_token_ratio=ratio,
+                system_tokens=estimate_tokens(system_prompt, ratio),
+                # A pinned round offers no tools.
+                tool_schema_tokens=0 if scoped else schema_tokens(registry.schemas(), ratio),
+                history_tokens=history_tokens,
+                message_tokens=message_tokens,
+            )
+            return registry, system_prompt, budget
+
+        registry, system_prompt, budget = _offer(matcher)
+        if "keyword" in registry.names and not budget.available:
+            logger.info(
+                "The keyword tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
+                budget.round_room,
+                MIN_ROUND_ROOM,
+            )
+            registry, system_prompt, budget = _offer(None)
         if not budget.available:
             logger.warning(
                 "An agent turn would have {} tokens of room for tool replies, under the {} one needs; none is built",
