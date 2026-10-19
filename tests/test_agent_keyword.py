@@ -448,14 +448,14 @@ def test_the_note_names_unknown_zero_one_and_many_counts_apart(matches: int | No
 @pytest.mark.parametrize(
     ("unchecked", "line"),
     [
-        (1, "1 chunk is not in the keyword index yet, so it was not checked."),
-        (2, "2 chunks are not in the keyword index yet, so they were not checked."),
-        (12, "12 chunks are not in the keyword index yet, so they were not checked."),
+        (1, "1 chunk is not in the keyword index yet, so it was not checked and may still contain these words."),
+        (2, "2 chunks are not in the keyword index yet, so they were not checked and may still contain these words."),
+        (12, "12 chunks are not in the keyword index yet, so they were not checked and may still contain these words."),
     ],
     ids=["one", "two", "many"],
 )
 def test_the_note_says_what_the_index_does_not_cover(unchecked: int, line: str) -> None:
-    """On a partial index a zero is only as good as what was checked, so the count line is followed by the coverage.
+    """On a partial index a zero rules out only what was checked: the coverage line says the rest may hold the words.
 
     Args:
         unchecked (int): Chunks the keyword index does not cover.
@@ -471,7 +471,7 @@ def test_the_note_joins_its_count_line_and_its_coverage_line_with_a_newline() ->
     """The lines of one note are a count and a coverage line; a carriage return in the joiner would pass splitlines."""
     assert keyword_note(matches=0, unchecked=2) == (
         "No indexed chunk in the searched material contains all of these words.\n"
-        "2 chunks are not in the keyword index yet, so they were not checked."
+        "2 chunks are not in the keyword index yet, so they were not checked and may still contain these words."
     )
 
 
@@ -479,7 +479,7 @@ def test_the_note_has_a_coverage_line_even_when_the_count_failed() -> None:
     """An unknown count does not hide that part of the collection was never checked."""
     assert keyword_note(matches=None, unchecked=3).splitlines() == [
         "The number of matching chunks is unavailable.",
-        "3 chunks are not in the keyword index yet, so they were not checked.",
+        "3 chunks are not in the keyword index yet, so they were not checked and may still contain these words.",
     ]
 
 

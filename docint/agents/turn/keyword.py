@@ -285,7 +285,8 @@ def keyword_note(*, matches: int | None, unchecked: int) -> str:
     The passages, or ``No new passages.``, follow it, rendered by
     :func:`~docint.agents.turn.passages.answer_passages`; this note only says what the
     match counted and what it could not check. Leading, it survives the overflow retry,
-    which keeps the head of every tool reply.
+    which keeps the head of every tool reply. The chunks it could not check may still
+    contain the words, and the coverage line says so: a zero rules out only what was checked.
 
     Args:
         matches (int | None): The exact count, or ``None`` when it failed.
@@ -303,9 +304,14 @@ def keyword_note(*, matches: int | None, unchecked: int) -> str:
     else:
         lines = [f"{matches} indexed chunks in the searched material contain all of these words."]
     if unchecked == 1:
-        lines.append("1 chunk is not in the keyword index yet, so it was not checked.")
+        lines.append(
+            "1 chunk is not in the keyword index yet, so it was not checked and may still contain these words."
+        )
     elif unchecked > 1:
-        lines.append(f"{unchecked} chunks are not in the keyword index yet, so they were not checked.")
+        lines.append(
+            f"{unchecked} chunks are not in the keyword index yet, so they were not checked and may still contain "
+            "these words."
+        )
     return "\n".join(lines)
 
 
