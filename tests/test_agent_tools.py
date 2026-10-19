@@ -736,6 +736,20 @@ def test_a_remembered_read_waits_for_finish_when_its_round_may_grow_the_passage(
     assert f"{OPENING}{WINDOW_JOIN}{CLOSING}" in phased.text
 
 
+def test_a_read_is_news_and_its_repeat_is_not() -> None:
+    """A read shows a passage's text, so it is informative; the same read answered from memory is not."""
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([_window(OPENING)]))
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+
+    first = registry.call(tool_call("read", n=1), ctx)
+    again = registry.call(tool_call("read", n=1), ctx)
+
+    assert (first.informative, first.found) == (True, 0)
+    assert again.text == "Already called read with these arguments; see [1]."
+    assert (again.informative, again.found) == (False, 0)
+
+
 def test_an_unchanged_remembered_read_is_answered_from_memory_at_finish() -> None:
     """A remembered read needs no I/O; memory answers it at finish, while its passage is unchanged."""
     ctx = tool_context()

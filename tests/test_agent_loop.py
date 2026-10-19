@@ -2469,6 +2469,71 @@ def test_rounds_whose_replies_tell_the_model_nothing_new_are_still_idle() -> Non
     assert (result.reason, result.steps) == ("idle", 2)
 
 
+def _read_call(call_id: str, number: int) -> tuple[str, str, Any]:
+    """Name one ``read`` call.
+
+    Args:
+        call_id (str): The call's id.
+        number (int): The passage it reads.
+
+    Returns:
+        tuple[str, str, Any]: The call, as :func:`_calls` takes it.
+    """
+    return (call_id, "read", {"n": number})
+
+
+def _three_notes() -> list[NodeWithScore]:
+    """Build three invented passages one search finds together.
+
+    Returns:
+        list[NodeWithScore]: The passages, each its own page.
+    """
+    return [
+        scored_node(f"note-{number}", f"Notiz {number} zum Hafenfest: {text}", filename="notizen.pdf", page=number)
+        for number, text in enumerate(("Die Regatta beginnt um zehn.", "Der Kai ist gesperrt.", "Es regnet."), 1)
+    ]
+
+
+def test_reading_passage_after_passage_is_not_idle() -> None:
+    """A read shows a passage's text, so reading three passages in a row never stops the turn as idle."""
+    search = QuerySearch({"Hafenfest": _three_notes()})
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenfest")),
+            _calls(_read_call("call_b", 1)),
+            _calls(_read_call("call_c", 2)),
+            _calls(_read_call("call_d", 3)),
+            _answer(),
+        ]
+    )
+
+    progress, texts, result = _drain(_turn(_loop(llm, _documents(search))))
+
+    assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "auto"
+    assert _steps(progress) == [("search", "Hafenfest", 3), ("read", "1", 0), ("read", "2", 0), ("read", "3", 0)]
+    assert (result.reason, result.steps, "".join(texts)) == (None, 4, ANSWER)
+
+
+def test_reading_an_unchanged_passage_again_is_still_idle() -> None:
+    """A read answered from memory shows nothing new, so two of them in a row make the model answer."""
+    search = QuerySearch({"Wetter": [weather_passage()]})
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Wetter")),
+            _calls(_read_call("call_b", 1)),
+            _calls(_read_call("call_c", 1)),
+            _calls(_read_call("call_d", 1)),
+            _answer(),
+        ]
+    )
+
+    progress, _, result = _drain(_turn(_loop(llm, _documents(search))))
+
+    assert llm.stream_chat.call_args_list[4].kwargs["tool_choice"] == "none"
+    assert _steps(progress) == [("search", "Wetter", 1), ("read", "1", 0), ("read", "1", 0), ("read", "1", 0)]
+    assert (result.reason, result.steps) == ("idle", 4)
+
+
 @pytest.mark.parametrize("count_first", [True, False], ids=["count-first", "count-last"])
 def test_one_informative_reply_keeps_its_round_from_being_idle(count_first: bool) -> None:
     """A round is idle only when none of its replies is news: a count beside a search that finds nothing resets it.

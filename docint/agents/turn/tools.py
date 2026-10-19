@@ -445,14 +445,22 @@ class ReadTool:
 
         Returns:
             ToolReply: The passage with its header, its text cut around its matches only
-            past ``result_chars``; an error reply when no passage has that number.
+            past ``result_chars``; an error reply when no passage has that number. It is
+            informative: it shows text a reply may have cut, so a round of reads is not idle.
+            The same read answered from memory is not (see :func:`_recall`).
         """
         held = len(ctx.ledger)
         if not 1 <= number <= held:
             return error_reply(self.name, f"there is no passage [{number}]; {passage_range(held)}.", detail=detail)
         text = render_entry(ctx.ledger.entries()[number - 1], number, ctx)
         return PassageReply(
-            text=text, found=0, action=self.name, detail=detail, numbers=(number,), depends_on=(number,)
+            text=text,
+            found=0,
+            action=self.name,
+            detail=detail,
+            informative=True,
+            numbers=(number,),
+            depends_on=(number,),
         )
 
 
