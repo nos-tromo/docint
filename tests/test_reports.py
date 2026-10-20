@@ -885,3 +885,11 @@ def test_a_write_refuses_a_report_from_another_collection(
 
     assert not write(report_manager, rid, iid)
     assert report_manager.get_report(rid, "alice") == before
+
+
+def test_a_report_is_read_only_in_its_own_collection(report_manager: ReportManager) -> None:
+    """Named a collection, the read checks it on the same row it returns."""
+    rid = report_manager.create_report(title="Alice's case", owner="alice", collection_name="docs")["id"]
+
+    assert report_manager.get_report(rid, "alice", collection="other") is None
+    assert _ok(report_manager.get_report(rid, "alice", collection="docs"))["title"] == "Alice's case"

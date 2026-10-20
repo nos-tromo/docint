@@ -3569,20 +3569,26 @@ def _report_stem(report: dict[str, Any]) -> str:
     return f"report-{report.get('id')}-{report.get('title') or 'report'}"
 
 
-def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
-    """Fetch a report owned by ``principal`` or raise 404.
+def _get_owned_report(report_id: int, principal: str, collection: str) -> dict[str, Any]:
+    """Fetch a report owned by ``principal`` in the request's collection, or raise 404.
+
+    The route gate checked the collection in its own transaction; checking it
+    again on the row read here keeps a report whose id passed to another of the
+    caller's collections in between from being served.
 
     Args:
         report_id (int): The report id.
         principal (str): The resolved request principal name.
+        collection (str): The caller's active collection.
 
     Returns:
         dict[str, Any]: The report, including its ordered items.
 
     Raises:
-        HTTPException: 404 when the report is missing or owned by another principal.
+        HTTPException: 404 when the report is missing, owned by another
+            principal, or in another collection.
     """
-    report = rag.ensure_report_manager().get_report(report_id, principal)
+    report = rag.ensure_report_manager().get_report(report_id, principal, collection=collection)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     if report.get("collection_name"):
@@ -4322,11 +4328,16 @@ def assign_report_collection(
 
 
 @app.get("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
-def get_report(report_id: int, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
+def get_report(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
     """Return a report (with items) owned by the calling principal.
 
     Args:
         report_id (int): The report id.
+        collection (str): The caller's active collection, re-checked on the read.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4335,7 +4346,7 @@ def get_report(report_id: int, principal: Principal = Depends(resolve_principal)
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    return _get_owned_report(report_id, principal.effective_owner)
+    return _get_owned_report(report_id, principal.effective_owner, collection)
 
 
 @app.patch("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
@@ -4377,34 +4388,40 @@ def update_report(
 @app.post("/reports/{report_id}/collection-overview/refresh", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def refresh_report_collection_overview(
     report_id: int,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Recapture a report's document-overview snapshot from its collection.
 
     Point-in-time refresh: rebuilds the frozen manifest from the collection's
-    *current* documents.
+    *current* documents. The request's collection is used throughout, never the
+    one a fresh read of the report names: between the gate and this handler the
+    report's id may have passed to the caller's report in another collection,
+    and the locked write then finds no match.
 
     Args:
         report_id (int): The report id.
+        collection (str): The caller's active collection.
         principal (Principal): The resolved request principal (owner).
 
     Returns:
         dict[str, Any]: The report with its refreshed ``collection_overview`` snapshot.
 
     Raises:
-        HTTPException: 404 when the report is missing or owned by another
-            principal (or its collection is no longer owned); 502 when the
-            manifest build fails.
+        HTTPException: 404 when the report is missing, owned by another
+            principal, or no longer in ``collection`` (or the collection is no
+            longer owned); 502 when the manifest build fails.
     """
-    report = _get_owned_report(report_id, principal.effective_owner)
     try:
-        updated = _capture_collection_overview(report_id, str(report["collection_name"]), principal)
+        updated = _capture_collection_overview(report_id, collection, principal)
     except HTTPException:
         raise
     except Exception as e:
         logger.error("Collection-overview refresh failed for report {}: {}", report_id, e)
         raise HTTPException(status_code=502, detail="Failed to build the document overview.") from e
-    return updated if updated is not None else report
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return updated
 
 
 @app.delete("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
@@ -4454,7 +4471,7 @@ def add_report_item(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
     item = rag.ensure_report_manager().add_item(
         report_id,
@@ -4502,7 +4519,7 @@ def add_report_items(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     # Enrichment edits the snapshots in place, so the manager stores what the
     # one companion scroll stamped.
     _enrich_snapshots_thumbnails([(item.snapshot, item.artifact_type) for item in payload.items], report, principal)
@@ -4622,11 +4639,15 @@ def reorder_report_items(
 
 
 @app.get("/reports/{report_id}/export.md", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
-def export_report_markdown(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+def export_report_markdown(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a single Markdown document (attachment download)."""
     from docint.core.state.report_render import render_markdown
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=render_markdown(report),
         media_type="text/markdown; charset=utf-8",
@@ -4635,11 +4656,15 @@ def export_report_markdown(report_id: int, principal: Principal = Depends(resolv
 
 
 @app.get("/reports/{report_id}/export.html", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
-def export_report_html(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+def export_report_html(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a self-contained HTML document (served inline)."""
     from docint.core.state.report_render import render_html
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=render_html(report),
         media_type="text/html; charset=utf-8",
@@ -4648,11 +4673,15 @@ def export_report_html(report_id: int, principal: Principal = Depends(resolve_pr
 
 
 @app.get("/reports/{report_id}/export.json", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
-def export_report_json(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+def export_report_json(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export the full report (with snapshots) as JSON (attachment download)."""
     from docint.core.state.report_render import render_json
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=render_json(report),
         media_type="application/json",
@@ -4661,11 +4690,15 @@ def export_report_json(report_id: int, principal: Principal = Depends(resolve_pr
 
 
 @app.get("/reports/{report_id}/export.zip", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
-def export_report_zip(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+def export_report_zip(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a ZIP bundle of per-type CSVs (attachment download)."""
     from docint.core.state.report_render import report_csv_bundle
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=report_csv_bundle(report),
         media_type="application/zip",
@@ -4674,7 +4707,11 @@ def export_report_zip(report_id: int, principal: Principal = Depends(resolve_pri
 
 
 @app.get("/reports/{report_id}/export.pdf", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
-def export_report_pdf(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+def export_report_pdf(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a real paginated PDF rendered by WeasyPrint.
 
     Returns 503 if the PDF engine (WeasyPrint + native libs) is unavailable,
@@ -4682,7 +4719,7 @@ def export_report_pdf(report_id: int, principal: Principal = Depends(resolve_pri
     """
     from docint.core.state.report_render import PdfEngineUnavailableError, render_pdf
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     try:
         pdf_bytes = render_pdf(report)
     except PdfEngineUnavailableError as e:

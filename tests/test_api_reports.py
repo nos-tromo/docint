@@ -1230,6 +1230,55 @@ def test_every_report_write_rechecks_the_collection_with_the_write(
     assert seen == ["docs"]
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/reports/{rid}", None),
+        ("GET", "/reports/{rid}/export.md", None),
+        ("GET", "/reports/{rid}/export.html", None),
+        ("GET", "/reports/{rid}/export.json", None),
+        ("GET", "/reports/{rid}/export.zip", None),
+        ("GET", "/reports/{rid}/export.pdf", None),
+        ("POST", "/reports/{rid}/items", _entity_payload("c2")),
+        ("POST", "/reports/{rid}/items/batch", {"items": [_entity_payload("c2")]}),
+        ("POST", "/reports/{rid}/collection-overview/refresh", None),
+    ],
+)
+def test_a_report_moved_to_another_collection_after_the_gate_is_neither_served_nor_refreshed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """A handler acts only on a report in the request's collection, whatever the gate saw.
+
+    The gate checks the collection in its own transaction. Between it and the
+    handler the report can be deleted and its id, which SQLite reuses, taken by
+    the same owner's report in another collection. Here the gate is made to see
+    the report in ``docs`` while it is stored in ``other``, as it would after
+    that swap: the handler must answer 404 and leave that report alone.
+    """
+    _own_collection("docs")
+    _own_collection("other")
+    rid = _create(client, collection="other")["id"]
+    client.post(f"/reports/{rid}/items", json=_entity_payload("c1"), params={"collection": "other"})
+    manager = api_module.rag.ensure_report_manager()
+    before = manager.get_report(rid, "test-operator")
+    _stub_documents(monkeypatch, _ONE_DOCUMENT)
+    real_meta = ReportManager.get_report_meta
+
+    def gate_sees_docs(self: ReportManager, report_id: int, owner: str | None) -> dict[str, Any] | None:
+        meta = real_meta(self, report_id, owner)
+        return {**meta, "collection_name": "docs"} if meta else meta
+
+    monkeypatch.setattr(ReportManager, "get_report_meta", gate_sees_docs)
+    resp = client.request(method, path.format(rid=rid), json=body)
+
+    assert resp.status_code == 404
+    assert manager.get_report(rid, "test-operator") == before
+
+
 def test_listing_reports_names_a_collection(client: TestClient) -> None:
     """A list without a collection is refused, never answered with every collection's reports."""
     _create(client)

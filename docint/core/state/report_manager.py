@@ -299,20 +299,22 @@ class ReportManager:
             s.commit()
             return assigned
 
-    def get_report(self, report_id: int, owner: str | None) -> dict[str, Any] | None:
+    def get_report(self, report_id: int, owner: str | None, *, collection: str | None = None) -> dict[str, Any] | None:
         """Return a report the caller owns, including its ordered items.
 
         Args:
             report_id (int): The report id.
             owner (str | None): The principal requesting the report.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
-            dict[str, Any] | None: The report, or ``None`` when missing or
-                not owned by ``owner``.
+            dict[str, Any] | None: The report, or ``None`` when missing, not
+                owned by ``owner``, or in another collection.
         """
         with self._session_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             return self._serialize_report(s, report)
 
