@@ -305,7 +305,11 @@ and hate-speech finding. Switching the active collection releases the active
 report, so a report and its evidence always describe the same collection; every
 report request names the active collection and the server refuses any other, so
 a report kept active from elsewhere (another tab, an earlier session) answers
-404 and is dropped by `useReport` rather than written into.
+404 and is dropped by `useReport` rather than written into. Reports created
+before every report named its collection are listed apart, under **Reports
+without a collection** (`UnassignedReports`), each with a **Move to …**
+action that places it in the active collection and opens it;
+with no collection selected they are listed without one.
 
 The PDF is the one export that is not a plain link. A large report renders for
 longer than the gateway waits on a single request, so choosing **PDF** queues a
@@ -404,7 +408,10 @@ locale) is not yet supported.
   starts each new one at `all`.
 - Server state (collections, documents, NER, sessions) is owned by
   TanStack Query hooks under `src/hooks/` (`useCollections`, `useNer`,
-  `useSessions`, `useDocuments`).
+  `useSessions`, `useDocuments`). A collection-scoped key carries the owner
+  as well as the collection name (`useActiveCollection`): two owners can name
+  a collection the same, and an admin switching between them changes only the
+  owner.
 
 ## API layer
 

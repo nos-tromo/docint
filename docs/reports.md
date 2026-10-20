@@ -215,9 +215,11 @@ A report is deleted together with the collection it was built from — by
 ([retention.md](retention.md)) alike — so nothing derived from a deleted
 collection stays behind in docint. Export the report first if it has to
 survive: an exported file carries its evidence inline and keeps working after
-the collection is gone. Every report is created in a collection. Reports
-started without one before this rule stay in the database, but no collection
-can reach them.
+the collection is gone. Every report is created in a collection. A report
+started without one before this rule is listed in the Report tab under
+**Reports without a collection**. **Move to …** places it in the active
+collection, once; from then on it is reached and deleted with that collection
+like any other.
 
 ## Further reading
 

@@ -60,6 +60,8 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `DELETE` | `/sessions/{session_id}/scope` | `Sessions` | Return the session to normal retrieval. |
 | `POST` | `/reports` | `Reports` | Create an empty report owned by the caller. |
 | `GET`  | `/reports` | `Reports` | List the caller's reports in one collection. |
+| `GET`  | `/reports/unassigned` | `Reports` | List the caller's reports that belong to no collection. |
+| `POST` | `/reports/unassigned/{report_id}/assign` | `Reports` | Place a report without a collection into one of the caller's collections, once. |
 | `GET`  | `/reports/{report_id}` | `Reports` | Return one owned report with its ordered items. |
 | `PATCH` | `/reports/{report_id}` | `Reports` | Update title, case metadata, or the contents toggle. |
 | `DELETE` | `/reports/{report_id}` | `Reports` | Delete a report and its items. |
@@ -772,6 +774,21 @@ hiccup leaves the snapshot null rather than failing creation.
 Lists the caller's reports in one collection (`ReportListOut` —
 `{"reports": [...]}`). The `collection` query parameter is required; there is
 no listing across collections.
+
+### `GET /reports/unassigned`
+
+Lists the caller's reports that belong to no collection (`ReportListOut`).
+These are reports created before every report had to name its collection, and
+no collection reaches them. Takes no `collection`.
+
+### `POST /reports/unassigned/{report_id}/assign`
+
+Places such a report in the collection named by the required `collection`
+query parameter, which must be one of the caller's own (`404` otherwise). Only
+a report without a collection is assigned, so this never moves a report between
+collections: one that already has a collection, another owner's, or a missing
+one answers `404`. The document overview is captured as at create, and just as
+fail-soft. Returns the report.
 
 ### `GET /reports/{report_id}`
 
