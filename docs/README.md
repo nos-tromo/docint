@@ -15,7 +15,7 @@ it, and what it can do) with topic-by-topic deep dives.
 | [api-reference.md](api-reference.md) | Every FastAPI route, method, tag, request/response shape, and streaming semantics |
 | [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `search-index`, `search-index-all`, `retention-report`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
 | [ingestion.md](ingestion.md) | Document ingestion pipeline: triage, layout, OCR, extraction, chunking, embedding |
-| [retrieval-and-agents.md](retrieval-and-agents.md) | Agent orchestration, hybrid retrieval, reranking, parent-context expansion, Graph-RAG |
+| [retrieval-and-agents.md](retrieval-and-agents.md) | Agent turns, agent orchestration, hybrid retrieval, reranking, parent-context expansion, Graph-RAG |
 | [ui-guide.md](ui-guide.md) | React SPA pages — Dashboard, Chat, Ingest, Analysis, Inspector, Report — plus localization |
 | [reports.md](reports.md) | Report Builder: curating findings into a case file, frozen image evidence, the five export formats |
 | [extracts.md](extracts.md) | Data extracts: full transcripts, keyframe descriptions and document text as downloadable files |

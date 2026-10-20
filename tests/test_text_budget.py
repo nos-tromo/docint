@@ -15,6 +15,7 @@ from docint.utils.text_budget import (
     allocate_with_floors,
     distinct_spans,
     excerpt,
+    fit_tail_with_marker,
     fit_with_marker,
     place,
 )
@@ -413,3 +414,78 @@ def test_allocate_with_floors_keeps_every_floor_and_shares_the_whole_budget() ->
             min(length, floor) <= share <= length for length, floor, share in zip(lengths, floors, shares, strict=True)
         )
         assert sum(shares) == min(budget, sum(lengths))
+
+
+def test_fit_tail_keeps_a_text_that_fits_whole() -> None:
+    """A text within its allowance is returned as it is, unmarked."""
+    assert fit_tail_with_marker("alpha\nbeta", 10) == ("alpha\nbeta", False)
+    assert fit_tail_with_marker("", 0) == ("", False)
+
+
+def test_fit_tail_keeps_the_newest_whole_lines_and_marks_the_gap() -> None:
+    """The end is what is kept, in whole lines, and the marker names exactly what the start lost."""
+    text = "alpha line\nbeta line\ngamma line"
+
+    shown, trimmed = fit_tail_with_marker(text, 21)
+
+    assert trimmed
+    hidden = len("alpha line\n")
+    assert shown == f"[... {hidden} of {len(text)} characters not shown ...]\nbeta line\ngamma line"
+
+
+def test_fit_tail_prefers_a_line_start_to_a_longer_cut_at_a_word() -> None:
+    """A word cut could show 4 more characters, but the lines kept are the ones that were written whole."""
+    text = "alpha line\nbeta line\ngamma line"
+
+    shown, _ = fit_tail_with_marker(text, 25)
+
+    assert shown.partition("\n")[2] == "beta line\ngamma line"
+
+
+def test_fit_tail_cuts_a_last_line_longer_than_the_allowance_at_a_word() -> None:
+    """With no whole line to keep, the end of the last line is shown from the first full word in it."""
+    text = "short line\n" + "word " * 40
+
+    shown, trimmed = fit_tail_with_marker(text, 37)
+
+    assert trimmed
+    marker, _, tail = shown.partition("\n")
+    assert _MARKER.fullmatch(marker)
+    assert tail == "word " * (len(tail) // 5)
+    assert 0 < len(tail) <= 37
+
+
+def test_fit_tail_shows_a_single_word_longer_than_the_allowance_from_its_end() -> None:
+    """There is no boundary to move to, so the allowance is taken from the end as it stands."""
+    shown, trimmed = fit_tail_with_marker("x" * 100, 30)
+
+    assert trimmed
+    assert shown.partition("\n")[2] == "x" * 30
+
+
+def test_fit_tail_shows_only_the_marker_when_nothing_may_be_shown() -> None:
+    """A zero allowance still says how much was withheld."""
+    shown, trimmed = fit_tail_with_marker("some text", 0)
+
+    assert trimmed
+    assert shown == "[... 9 of 9 characters not shown ...]"
+
+
+def test_fit_tail_never_renders_past_its_allowance_and_one_marker() -> None:
+    """The marker and its line break come on top of the allowance, as the head cut's marker does."""
+    rng = random.Random(5)
+    words = ["pier", "harbour", "count", "a", "survey", "ferry"]
+    for _ in range(2000):
+        text = "".join(rng.choice(words) + rng.choice([" ", " ", "\n", ".\n"]) for _ in range(rng.randrange(1, 80)))
+        allowance = rng.randrange(0, len(text) + 10)
+
+        shown, trimmed = fit_tail_with_marker(text, allowance)
+
+        if not trimmed:
+            assert shown == text
+            continue
+        assert len(shown) <= allowance + MARKER_RESERVE_CHARS + 1
+        marker, _, tail = shown.partition("\n")
+        assert _MARKER.fullmatch(marker)
+        assert text.endswith(tail)
+        assert int(_MARKER.fullmatch(marker).group(1)) == len(text) - len(tail)  # type: ignore[union-attr]

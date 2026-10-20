@@ -1,0 +1,1 @@
+- keyword(words): Eine Anzahl, die es liefert, ist eine Tatsache über die Sammlung, keine Quelle: Nenne sie ohne [n] und melde eine 0 nur als „keine Passage enthält diese Wörter“, nie als Hinweis, dass der Gedanke selbst fehlt.

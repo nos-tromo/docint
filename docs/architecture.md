@@ -40,6 +40,11 @@ the React SPA down to Qdrant and back.
 The same RAG engine is used for both ingestion (write path) and retrieval
 (read path).
 
+The orchestrator serves `/agent/chat*`. The SPA's chat turns take a shorter
+path: `/query` and `/stream_query` hand them to the `SessionManager`, which
+runs them as agent turns (`docint/agents/turn/`) over the same RAG engine, or
+as plain lookups (see [Request flow: an agent turn](#request-flow-an-agent-turn)).
+
 ## Key directories
 
 | Path | Purpose |
@@ -52,6 +57,7 @@ The same RAG engine is used for both ingestion (write path) and retrieval
 | `docint/core/state/` | Conversation sessions and citation tracking (SQLAlchemy) |
 | `docint/core/ner.py` | Named-entity extraction and graph building |
 | `docint/agents/` | Agent orchestrator, understanding, clarification, retrieval, generation |
+| `docint/agents/turn/` | Agent turns: the tool-calling loop, its tools, budget and conversation window |
 | `docint/cli/` | CLI entry points (`serve`, `ingest`, `query`, `eval`, `resolve`, `search_index`, `verify`) |
 | `frontend/` | React SPA (Vite + TypeScript); see [ui-guide.md](ui-guide.md) |
 | `docint/utils/env_cfg.py` | Centralised environment-variable configuration |
@@ -63,8 +69,8 @@ The diagram below expands what happens when the UI calls `POST /query` or
 
 1. **FastAPI entry** — `docint/core/api.py` validates the payload
    (`QueryIn` / `AgentChatIn`). For `/query`, it routes directly to
-   `RAG.run_query()` or `RAG.chat()` (a stateless assessment turn to
-   `RAG.stream_stateless_assessment()`); for `/agent/chat` it calls the
+   `RAG.run_query()` or `RAG.chat()` (a stateless agent turn to
+   `RAG.stream_stateless_agent_turn()`); for `/agent/chat` it calls the
    orchestrator.
 2. **AgentOrchestrator.handle_turn()** — `docint/agents/orchestrator.py:106`
    runs the four-step pipeline:
@@ -100,6 +106,36 @@ The diagram below expands what happens when the UI calls `POST /query` or
 5. **Response envelope** — the backend reassembles a `QueryOut` /
    `AgentChatOut` payload and returns JSON. The streaming variants are
    described under [Streaming](#streaming) below.
+
+## Request flow: an agent turn
+
+`/query` and `/stream_query` answer a chat turn as an agent turn whenever the
+deployment allows it (see
+[retrieval-and-agents.md](retrieval-and-agents.md#agent-turns)).
+
+1. **Gate** — `_agent_turn_allowed()` (`docint/core/api.py`) checks for a
+   text model, `AGENT_TURNS_ENABLED`, a context window of at least 8192
+   tokens, and that no rejection of tools is cached for the request's
+   reasoning flag.
+2. **Turn** — `SessionManager.stream_agent_turn()`
+   (`docint/core/state/session_manager.py`) reads the conversation window
+   before the turn is stored, then builds the turn through
+   `RAG.agent_turn()`: the request's engine, the target's tools, the prompts
+   and the budget. A stateless turn goes through
+   `RAG.stream_stateless_agent_turn()` with an empty window.
+3. **Loop** — `AgentLoop.run()` (`docint/agents/turn/loop.py`) streams
+   rounds on the agent model. Tool calls run on the search slots
+   (`docint/agents/turn/tools.py`, `image_tools.py`, `keyword.py`): `search`
+   retrieves through the turn's engine, while `keyword` counts its matches and
+   retrieves through its own retriever, narrowed to them. What they find enters
+   the evidence ledger, and each step goes out as an `agent` frame.
+4. **Fallback** — a listed failure before anything was shown (see
+   [retrieval-and-agents.md](retrieval-and-agents.md#fallback-to-the-plain-path))
+   hands the message to the plain path, which `chat()` and `stream_chat()` then
+   run as above. Any other failure before then is the turn's error.
+5. **Finish** — an answer carrying the assessment sentinel is labelled, the
+   turn is stored with its answer mode and trail, and the API validates it by
+   its mode, handing the validator the turn's keyword counts as facts.
 
 ## Request flow: ingesting documents
 
@@ -181,12 +217,14 @@ override.
 - **Stateless** — `retrieval_mode="stateless"` on `/query`. No session is
   created, no history is used. Useful for one-shot questions and API
   integrations.
-- **Session** — `retrieval_mode="session"` (the default). Each turn is
-  condensed against the rolling summary and prior turns, and persisted as
+- **Session** — `retrieval_mode="session"` (the default). A plain turn is
+  condensed against the rolling summary and prior turns; an agent turn reads
+  them as its conversation window instead. Either way the turn is persisted as
   a `Turn` row plus `Citation` rows tied to a `Conversation`.
 
-Both modes ultimately call `RAG.run_query()`; the difference lives in
-`SessionManager.chat()` which decides how to condense the question.
+For a plain turn the difference lives in `SessionManager.chat()`, which decides
+how to condense the question. An agent turn is never condensed: its model reads
+the conversation and writes its own searches.
 
 ## Streaming
 
@@ -208,9 +246,12 @@ used on exactly one path: a lookup turn on `/stream_query` with
 whole answer before streaming starts. Every session path — `/stream_query`
 with the default mode, and `/agent/chat/stream` — streams from
 `RAG.stream_chat()` through `_aiter_sync_gen()`
-(`docint/core/api.py:673`), and so does a stateless assessment turn,
-through `RAG.stream_stateless_assessment()`; those tokens arrive as the
-model produces them rather than on a timer.
+(`docint/core/api.py:673`), and so does a stateless agent turn,
+through `RAG.stream_stateless_agent_turn()`; those tokens arrive as the
+model produces them rather than on a timer. An agent turn's stream also
+carries an `agent` frame per step, and a `note` step withdraws the text
+streamed before it (see
+[api-reference.md](api-reference.md#post-stream_query)).
 
 Ingestion streams are also SSE, but carry **progress events** rather than
 generated tokens: `POST /ingest/upload` streams save progress for the bytes

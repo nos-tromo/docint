@@ -31,14 +31,14 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 | `OPENAI_API_KEY` | `sk-no-key-required` | Bearer token. Required for the `openai` provider. |
 | `OPENAI_CTX_WINDOW` | `4096` (8192 min when provider is `vllm`) | Context window for the text model. Falls back to `CHAT_MAX_MODEL_LEN` when `vllm`. |
 | `OPENAI_DIMENSIONS` | *unset* | Optional override for embedding dimension. |
-| `OPENAI_MAX_RETRIES` | `2` | Retry count for OpenAI HTTP calls. The assessment classifier and research calls ignore it and make one attempt each. |
+| `OPENAI_MAX_RETRIES` | `2` | Retry count for OpenAI HTTP calls. Agent turns ignore it: each of their model calls, and the probe that confirms a refusal of tools, makes one attempt. |
 | `OPENAI_NUM_OUTPUT` | `256` | Max tokens reserved for the model response by the LlamaIndex prompt helper. |
 | `OPENAI_REUSE_CLIENT` | `false` | Reuse the OpenAI client across calls. |
 | `OPENAI_SEED` | `42` | Sampling seed. |
 | `OPENAI_TEMPERATURE` | `0.0` | Sampling temperature. |
 | `OPENAI_TOP_P` | `0.1` | Nucleus sampling. |
 | `OPENAI_TIMEOUT` | `300.0` | Request timeout in seconds. |
-| `OPENAI_ENABLE_THINKING` | `false` | Default for reasoning/"thinking" mode on post-retrieval answer synthesis. The chat UI's reasoning toggle overrides it per turn (`reasoning` on `/query`, `/stream_query`, `/agent/chat*`); the default only governs API clients that omit the field. On `INFERENCE_PROVIDER=vllm` the switch is sent as `chat_template_kwargs.enable_thinking`, explicitly in both states. |
+| `OPENAI_ENABLE_THINKING` | `false` | Default for reasoning/"thinking" mode on post-retrieval answer synthesis, and on every round of an agent turn. The chat UI's reasoning toggle overrides it per turn (`reasoning` on `/query`, `/stream_query`, `/agent/chat*`); the default only governs API clients that omit the field. On `INFERENCE_PROVIDER=vllm` the switch is sent as `chat_template_kwargs.enable_thinking`, explicitly in both states. |
 | `OPENAI_THINKING_EFFORT` | `medium` | One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
 
 ## Embedding — `EmbeddingConfig`
@@ -185,8 +185,9 @@ The postprocessor adds every non-whitelisted metadata key to each
 emitted node's `excluded_llm_metadata_keys`, so the chat prompt only
 carries a tight set of locator fields: `filename`, `origin`, `page` /
 `page_number`, `start_ts` / `end_ts` / `speaker` / `sentence_index`,
-`table` (containing `row_index`), `reference_metadata`, and
-`docint_doc_kind`. Everything else (`entities`, `relations`,
+`table` (containing `row_index`), `reference_metadata`,
+`docint_doc_kind`, and for a video frame `keyframe` (its number in
+the clip and when it appears, such as `#3 @ 01:12`). Everything else (`entities`, `relations`,
 `llm_description`, `file_hash`, per-column row dumps, internal
 hierarchical / ingest markers) stays in `node.metadata` on the
 docstore-side parent but is hidden from the LLM prompt.
@@ -456,7 +457,7 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 | `IMAGE_FAIL_ON_TAG_ERROR` | `false` | Treat tagging failures as fatal. |
 | `IMAGE_RETRIEVE_TOP_K` | `5` | CLIP candidates the image lane contributes to each query's ranking. |
 | `IMAGE_RERANK_MIN_SCORE` | `0.05` | Minimum reranker relevance score for a retrieved image to surface as a source. A sub-floor image that would land inside the top-n still gets the re-score below before it is dropped. |
-| `IMAGE_RESCORE_ENABLED` | `true` | Give such a sub-floor image one second look: its caption is reranked against a one-line list of the visible cues the query needs, with their alternatives rather than a guessed answer, which costs one chat call and one rerank call on a turn that has such an image. `false` drops sub-floor images unasked. |
+| `IMAGE_RESCORE_ENABLED` | `true` | Give such a sub-floor image one second look: its caption is reranked against a one-line list of the visible cues the query needs, with their alternatives rather than a guessed answer, which costs one chat call and one rerank call on a turn that has such an image. `false` drops sub-floor images unasked. An agent turn's own searches never re-score. |
 | `IMAGE_RESCORE_MIN_SCORE` | `0.02` | Description score that keeps a re-scored image, at the position and with the score it already had. |
 | `IMAGE_RESCORE_TIMEOUT` | `10` | Seconds the description call may take, in one attempt with no retries: it runs before the answer's first token. A value that is not a positive number keeps the default and logs a warning. |
 | `IMAGE_TAGGING_MAX_IMAGE_DIM` | `1024` | Max dimension for images sent to the vision tagging endpoint. |
@@ -464,7 +465,7 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
 | `KEYFRAME_OCR_ENABLED` | `false` | Read video keyframes too. Off by default: a clip contributes many frames and only slides tend to carry text. |
 | `IMAGE_OCR_MAX_IMAGE_DIM` | `1536` | Longest side of an image sent to be read. |
 | `VISUAL_RETRIEVE_TOP_K` | `24` | Candidate depth for the `visual` retrieval target, where imagery is the whole evidence set rather than a lane beside the text. |
-| `VISUAL_ANSWER_MAX_IMAGES` | `6` | How many stored thumbnails a visual answer attaches to the generation call. Each costs roughly 600 prompt tokens, which is taken off the caption context. Must not exceed the inference endpoint's own images-per-prompt limit (vLLM's `--limit-mm-per-prompt`); above it the model refuses and the turn degrades to a caption-only answer. |
+| `VISUAL_ANSWER_MAX_IMAGES` | `6` | How many stored thumbnails a visual answer attaches to the generation call. Each costs roughly 600 prompt tokens, which is taken off the caption context. Must not exceed the inference endpoint's own images-per-prompt limit (vLLM's `--limit-mm-per-prompt`); above it the model refuses and the turn degrades to a caption-only answer. On an agent turn it caps the pictures the loop shows across the whole turn. |
 
 Images retrieve as ordinary sources: `IMAGE_RETRIEVE_TOP_K` CLIP candidates join
 the text hits *before* ranking, so the shared reranker scores both modalities in
@@ -793,24 +794,55 @@ Loaded by `load_corrective_retry_env()`.
 |---|---|---|
 | `CORRECTIVE_RETRY_ENABLED` | `true` | Re-answer once with a reformulated query when validation flags a mismatch *and* the answer is weak. Depends on response validation being on — without a mismatch verdict there is nothing to retry. A triggered retry costs up to three extra LLM round-trips (reformulate, regenerate, re-validate) inside the same request, so a turn that fires it is noticeably slower; untriggered turns are unaffected. |
 
-## Assessment turns — `AssessmentConfig`
+## Agent turns — `AgentConfig`
+
+Loaded by `load_agent_env()`. Every chat turn on `/query` and `/stream_query`
+runs as an agent turn when these settings and the endpoint allow it: the chat
+model searches the collection through tools, reads the replies, and answers.
+See [retrieval-and-agents.md](retrieval-and-agents.md#agent-turns). A blank
+value counts as unset. A number that cannot be used falls back to its default,
+with one warning per value, rather than failing a turn.
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGENT_TURNS_ENABLED` | `true` | Answer chat turns with the agent loop. Off means every turn is a plain retrieve-then-answer lookup. Needs a chat context window of at least 8192 tokens: `OPENAI_CTX_WINDOW` must say so, and the chat endpoint must actually serve it. Below 8192, agent turns stay off, with one warning per window size. |
+| `AGENT_MAX_ROUNDS` | `6` | Tool-calling rounds a turn may run before the model must answer. At least `1`, so a turn may always search once: a lower value is raised to `1`, with a warning. Unset or blank, it follows `ASSESSMENT_MAX_STEPS`. |
+| `AGENT_TIME_BUDGET_S` | `120` | Seconds a turn may spend before the model must answer. Positive and finite. Checked between rounds: an answer already streaming is never cut. |
+| `AGENT_MAX_CALLS_PER_ROUND` | `4` | Tool calls one round may run at once; further calls are answered without running. At least `1`. |
+| `ASSESSMENT_MAX_STEPS` | *unset* | The older name for `AGENT_MAX_ROUNDS`, read only while that is unset or blank, so a deployment that tuned it keeps its budget. |
+
+**What the chat endpoint must do.** Agent turns need an OpenAI-compatible chat
+endpoint that:
+
+- accepts `tools` with `tool_choice: "auto"`, and streams the tool calls a
+  model makes, several in one reply when it calls tools in parallel;
+- accepts `tool_choice: "none"` with the tools still declared, for the round
+  in which the model must answer;
+- accepts a request with no tools at all, for a pinned scope;
+- accepts a request that carries earlier tool calls and their replies but
+  declares no tools, neither `tools` nor `tool_choice`. An answer round that
+  only called tools is sent once more this way;
+- renders the model's own earlier tool calls, and the `tool` replies matched
+  to them by `tool_call_id`, in its chat template.
+
+When the endpoint refuses a turn's first request offering tools, the turn is
+answered as a plain lookup and reports `tools_unavailable`. A fixed probe, which
+carries nothing of any turn, then asks the endpoint again. Only a refused probe
+switches agent turns off, for 10 minutes and for that reasoning setting alone,
+with one warning that names the requirement. On a visual turn, the endpoint's
+own limit on images per prompt applies as for plain visual answers; a refusal
+there costs the pictures, never the answer.
+
+How well the model chooses its searches and judges what it read follows the
+chat model.
+
+## Assessments — `AssessmentConfig`
 
 Loaded by `load_assessment_env()`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `ASSESSMENT_ENABLED` | `true` | Classify each chat turn and answer evaluative questions with a researched, labelled model assessment. Off means every turn is a lookup and no classifier call is made. Needs a chat context window of at least 8192 tokens: `OPENAI_CTX_WINDOW` must say so, and the chat endpoint must actually serve it. With `OPENAI_CTX_WINDOW` below 8192 the feature stays off and logs one warning. |
-| `ASSESSMENT_MAX_STEPS` | `6` | Research rounds per assessment turn. Each round is one tool-calling request on the plain chat model plus one search; `0` answers from the first search alone. |
-
-The research step calls tools with `tool_choice="required"`, so the chat
-endpoint must support OpenAI-style tool calling with a required tool choice.
-Each later research round sends the model's own tool calls back with their
-results, so the chat template must render both; a template that cannot fails
-that round, and the turn answers from what research found so far, flagged as
-`research_failed`. When the endpoint rejects tool calls, or answers without one,
-the turn still answers — from the first search's passages — and says so. The
-quality of a judgement follows the chat model: a ~2B model keeps the format, but
-its assessments are shallow.
+| `ASSESSMENT_ENABLED` | `true` | Let an agent turn answer a judgement in two labelled parts: what the sources say, then the model's own assessment. The rule is part of the agent turn's system prompt; off means every agent turn answers as a lookup. |
 
 ## Offline mode
 

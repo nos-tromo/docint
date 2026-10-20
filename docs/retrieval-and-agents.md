@@ -8,7 +8,10 @@ engine, and the postprocessing stages that shape the final result.
 
 All agent code lives under `docint/agents/`. The entry point is
 `AgentOrchestrator` (`docint/agents/orchestrator.py:70`), which wires up
-four optional agents behind a single `handle_turn()` method.
+four optional agents behind a single `handle_turn()` method. It serves the
+`/agent/chat*` endpoints. Chat turns on `/query` and `/stream_query` run as
+[agent turns](#agent-turns) (`docint/agents/turn/`) when agent turns are on and
+available, and as plain lookups otherwise.
 
 ### Stages
 
@@ -84,9 +87,11 @@ the contextual understanding agent.
   (`docint/core/storage/sqlite_kvstore.py`).
 - **Query engine construction** — `create_query_engine()` attaches the
   reranker, postprocessors, and response synthesiser.
-- **Stateless query** — `run_query(prompt, metadata_filters=...,
-  vector_store_kwargs=...)` returns a `dict` with `response`,
-  `sources`, `retrieval_query`, `coverage_unit`, and `retrieval_mode`.
+- **Stateless query** — `run_query(prompt, expanded_query=...,
+  metadata_filters=..., vector_store_kwargs=...)` retrieves with
+  `expanded_query` (the prompt itself when omitted), answers `prompt`, and
+  returns a `dict` with `response`, `sources`, `retrieval_query`,
+  `coverage_unit`, and `retrieval_mode`.
 - **Session chat** — `chat(...)` proxies to
   `SessionManager.chat()` (`docint/core/state/session_manager.py`).
 - **Streaming chat** — `stream_chat(...)` yields token-level events
@@ -165,6 +170,10 @@ would spend an inference call reordering a set the user already chose. Only
 `RAG.measure_scope()` sizes a candidate selection against the same
 `usable_tokens` figure the parent-context packer works from, so the budget the
 API enforces and the budget retrieval assumes cannot drift apart.
+
+An agent turn fetches the pinned chunks through the same scoped engine and
+answers from them in one round that offers no tools (see
+[Pinned scope](#pinned-scope)).
 
 ## Reranking
 
@@ -365,8 +374,9 @@ endpoint leaves keyword-only, a rejected scroll leaves CLIP-only.
 stored 768px thumbnails of the top sources (`VISUAL_ANSWER_MAX_IMAGES`,
 default 6) are attached to the same synthesis call as image parts, with a
 legend tying each to its citation number. The context window is shortened by
-what they cost, so the captions still fit beside them. This is the only place
-in docint where a chat turn sends pixels. When the thumbnails cannot be
+what they cost, so the captions still fit beside them. The visual target is the
+only one on which a chat turn sends pixels; an agent turn attaches them round by
+round instead (see [Visual target](#visual-target)). When the thumbnails cannot be
 fetched the answer is written from the captions alone and reports
 `visual: {"images_attached": 0}` — a degraded turn the SPA flags rather than
 presenting as an ordinary one.
@@ -411,16 +421,29 @@ the retriever, the engine:
 4. Appends the neighbour names to the retrieval query so that Qdrant
    sees a richer embedding.
 
+The appended names serve retrieval alone. A session lookup retrieves with the
+rewritten, expanded query but is asked the user's own words, with the
+history-resolved rewrite on a labelled line beneath them when it adds any
+(`question_block` in `docint/agents/turn/history.py`). A follow-up such as
+"Are those all?" is therefore answered as asked, and the neighbour names never
+reach the generation prompt. A stateless query has no rewrite: it retrieves with
+the expanded question and is asked the question alone. The `retrieval_query` and
+`graph_debug` the response reports do not change.
+
+An agent turn runs no turn-level expansion. Each query its model writes is
+expanded for that search alone, and its `graph_debug` reports the skip with the
+reason `agent`.
+
 A `graph_debug` payload is returned in the `QueryOut` for the
 stateless path so the UI can visualise what was added.
 
 ## Response validation
 
 When `RESPONSE_VALIDATION_ENABLED=true`, the orchestrator attaches a
-`ResultValidationResponseAgent`. If no sources were retrieved, validation
-short-circuits with `validation_mismatch=true` and a reason of "Answer
-produced without retrieved sources." Otherwise, it asks the text LLM two
-questions:
+`ResultValidationResponseAgent`. If no sources were retrieved, and the turn
+made no keyword check with a known count, validation short-circuits with
+`validation_mismatch=true` and a reason of "Answer produced without retrieved
+sources." Otherwise, it asks the text LLM two questions:
 
 1. Does the answer match the retrieved sources?
 2. Do the sources actually contain the answer?
@@ -442,6 +465,9 @@ tells the validator to judge only visible contradictions.
 If the LLM answers "no" to either question, `validation_mismatch=true`
 is set on the `QueryOut` / `AgentChatOut` payload and `validation_reason`
 carries the LLM's explanation. The frontend surfaces this as a warning banner.
+
+An agent turn is validated by its answer mode (see
+[Answer, validation and storage](#answer-validation-and-storage)).
 
 ## Corrective retry
 
@@ -470,14 +496,20 @@ Both chat paths run it:
   (`{"retry": {"query": ...}}`) *before* the replacement streams, so the SPA
   discards the rejected answer on arrival rather than swapping it silently at
   the end; the final envelope carries `retried` / `retry_query`, and both are
-  persisted on the turn so a reloaded session still names the retry.
+  persisted on the turn so a reloaded session still names the retry. The
+  second pass retrieves with the reformulation, which it never rewrites again,
+  and is asked the user's own words, the reformulation on a labelled line
+  beneath them.
 
 The gate is deliberately narrow. A mismatched but substantive answer is kept —
 discarding it to chase a better one trades a real answer for a coin flip. That
 includes an answer that flags the one detail it lacks ("the log does not
 mention the captain's name"). A
 scoped turn is skipped entirely, since it runs no retrieval for a new query to
-change, and so is an assessment turn (see [Assessment turns](#assessment-turns)).
+change, and so is an agent turn: it wrote its own searches, and a plain second
+pass would overwrite its stored row. A turn an agent turn handed to the plain
+path because tools were refused retries as any plain lookup does, and keeps the
+trail that says why.
 And the second attempt overwrites the first attempt's turn
 (`replace_turn_idx`) instead of appending, so one user message stays one turn.
 
@@ -489,131 +521,516 @@ The cost is up to three extra LLM round-trips (reformulate, regenerate,
 re-validate) inside the one request, so a turn that triggers a retry is
 noticeably slower than one that does not.
 
-## Assessment turns
+## Agent turns
 
-A question that asks for a judgement — "what could be improved in this
-paper?", "is the method convincing?", "which option is better?" — is not a
-lookup. Its answer is written nowhere in the collection, and the passages that
-best match its wording are rarely the ones a judgement rests on: asked what
-could be improved, plain retrieval returns the paper's own "improvements over
-prior work". Such turns are answered differently, and say so.
+Every chat turn on `/query` and `/stream_query`, session or stateless, is
+answered by an agent loop when the deployment can run one
+(`docint/agents/turn/`). The model reads the conversation and the message,
+calls tools to search the collection, reads every reply, and goes again until
+it answers. Its last reply, the one that calls no tool, is the answer. A later
+round's answer streams as it is written. The first round's goes out once it is
+complete, and is asked again first if it looked nothing up (see
+[The loop](#the-loop)). The plain path described above answers instead when agent
+turns are off or cannot run, and a turn falls back to it as long as nothing has
+been shown (see [Fallback to the plain path](#fallback-to-the-plain-path)). The
+legacy `/agent/chat*` endpoints keep the orchestrator's plain path.
 
-**Classification.** `/stream_query` and `/query` classify every turn once,
-before retrieval, with one short call on the plain chat model
-(`agents/assessment/classify.py`, prompt `prompts/{en,de}/assessment_classify.txt`).
-Any failure — no model, no JSON, a transport error — classifies as a lookup,
-which is the behaviour without this feature. No classifier call is made when
-`ASSESSMENT_ENABLED=false`, when the resolved context window is below 8192
-tokens (`agents/assessment/gate.py` logs one warning naming
-`OPENAI_CTX_WINDOW`), on the `visual` target, or on a corrective retry.
-Classification and research make a single attempt per call, whatever
-`OPENAI_MAX_RETRIES` says, and their 15-second and two-minute deadlines hold
-however a reply arrives: one that trickles in, each piece within the client's
-timeout, is abandoned at the deadline all the same. Lookups and the answer keep
-the retries.
+### When a turn is an agent turn
 
-**Evidence.** An assessment seeds its evidence with the passages a lookup
-would have used — the turn's own engine, filters, rerank and parent-context
-chain — then lets the plain model search further through a
-`search(query)` tool until it calls `finish()` (`agents/assessment/research.py`,
-prompt `assessment_research.txt`, `tool_choice="required"`). The seed and every
-search keep every child the reranker returned. A section still yields one
-passage: the whole section, a window of it, a cut of its first child when that
-child outgrows the window, or the first child itself once the parent-context
-budget is spent or the child cannot be located. That passage carries every child
-retrieved under the section, each appended after a `…` line when the passage
-does not show it whole. Lookups are unchanged. Research stops at
-`ASSESSMENT_MAX_STEPS`, at the context budget or a two-minute research budget,
-on a repeated query, when the evidence ledger is full, when the model replies
-without calling a tool, or after two searches in a row that add nothing new.
-The research budget covers the model calls as well as the searches, and model
-calls run like searches: each on its own thread, abandoned when the budget runs
-out, and the turn reports `time_budget`; a reply that lands after the budget,
-even a `finish`, is not acted on. Research searches and research model calls
-each share a per-process bound of eight: an abandoned call holds its slot until
-it ends, and when no slot frees within five seconds (or the time left, if less)
-research stops with `research_failed`; a slot that frees only as the time runs
-out ends research with `time_budget`, the call never started. The classifier
-has eight slots of its own, so research never uses up what every turn needs:
-with more than eight classifications in flight in one process, a further turn
-waits up to a second for a slot and is answered as a lookup.
-Research admits a passage only while every passage stays legible in the answer,
-headers included; a result that would crowd the others is refused, and the
-ledger counts as full once not even a bare 300-character passage would fit.
-Every match an entry holds keeps room in the answer: each costs 250 characters
-(200 of text and a cut marker) in its window, each further window 55, and an
-extension whose matches would no longer fit is refused. Matches that touch or
-overlap are counted apart, each keeping its own region.
-A new window of a section the ledger already holds is not dropped. Text the entry
-lacks extends it after a `…` line, a window that repeats it adds only a match
-whose kept text the entry lacks, and the entry keeps its number; a window with a
-located match never merges with one without, so whichever comes second adds
-nothing. When the answer has to shorten such an entry, the cut is
-shared across its windows rather than taken from the end. Shortening keeps the
-text around each passage's retrieved match, so a section promoted from a matched
-chunk is cut around that chunk rather than to its opening. A match longer than
-200 characters, typically a whole retrieved child chunk, keeps only its first
-200 when it has to be cut. The research model's digest of a passage shows only
-text the answer is sure to keep: the first 200 characters of each match,
-top-ranked first, up to 400 in all, or the passage's opening when it has no
-match.
-Each step reaches the SPA as an `{"agent": {...}}` frame. A pinned scope is
-never widened: a scoped assessment answers from its chunks with no research.
-Evidence too large to show legibly in one answer — typically a large pinned
-scope — is answered as a lookup instead.
+The API asks for an agent turn (`_agent_turn_allowed` in `core/api.py`) when
+all of these hold:
 
-**Answer.** One streamed call on the answer model (the reasoning toggle
-applies) writes two parts separated by a `[[ASSESSMENT]]` line
-(`assessment_answer.txt`): what the sources say, every claim cited, then the
+- a text model is configured;
+- `AGENT_TURNS_ENABLED` is on, which is the default;
+- the resolved context window is at least 8192 tokens
+  (`agents/assessment/gate.py`). Below that, agent turns stay off, with one
+  warning per window size naming `OPENAI_CTX_WINDOW`;
+- no rejection of tools is cached for the request's reasoning flag (see
+  [When the endpoint refuses tools](#when-the-endpoint-refuses-tools)).
+
+Every retrieval target may run one. If the check itself fails, the turn is
+answered on the plain path. The corrective retry's second pass is always a
+plain lookup.
+
+`RAG.agent_turn` then builds the turn. It measures four parts:
+
+- the system prompt: `agent_system.txt`, filled with
+  - the target's tools guide (`agent_tools_{all,documents,visual}.txt`);
+  - where `keyword` is offered, its line (`agent_tools_keyword.txt`), and the
+    fields line (`agent_tools_keyword_fields.txt`) when it offers more than
+    the text;
+  - the assessment rule while `ASSESSMENT_ENABLED` is on;
+  - the conversation's summary block;
+- the offered tool schemas;
+- the recent exchanges;
+- the message.
+
+The room for tool replies is what these leave of the window, less a 5% margin
+and the answer's reserve: 1024 tokens, or 3072 when reasoning is on. With less
+than 1500 tokens of room no turn is built, and the plain path answers. One
+warning gives the numbers. If `keyword` is offered and the room is under 1500,
+the turn is first built again with `keyword` on the text alone, then without
+it (see [Keyword checks](#keyword-checks)).
+
+### The loop
+
+Each round is one streamed model call, offered the turn's tools with
+`tool_choice: "auto"`.
+
+- **A round that calls tools** has every call answered, as a `tool` message
+  under the call's id, and the model goes again. Arguments that are not a
+  JSON object are echoed back as `{}`, so a chat template that parses earlier
+  calls never meets them.
+- **A round that calls none** is the answer.
+- **A round's text is provisional.** It is held until 120 visible characters
+  have arrived with no tool call begun, then streamed. If the round still ends
+  in calls, or breaks off, a `note` step tells the client to withdraw what was
+  streamed. The note carries that text, cut to 500 characters, and the next
+  tokens begin a fresh answer.
+- **The first round is held whole.** None of its text streams before it ends.
+  Text it wrote before its calls becomes its note without ever showing as
+  answer text, and an answer goes out once it is complete. Held so, the first
+  round can be asked again, once per turn, for one of two causes below.
+- **A first round that looks nothing up is asked again.** If the first round
+  calls no tool, its reply is dropped unseen, its reasoning with it. The search
+  note (`agent_search_first.txt`) is joined to the user's message, and the
+  round runs once more. The note asks the model to look up what its answer
+  relies on, including any phrase or name the user just gave, and to cite the
+  passages. Its cost counts against the room for tool replies. One INFO line,
+  with no text, says the round was asked again.
+- **A first round that breaks off is asked again.** If the first round breaks
+  off after its first chunk, it has shown nothing, so it is sent once more as
+  it was, with no search note: the break-off is not about searching. One
+  warning gives the error's type.
+- **The second try runs under the first round's rules.** A turn gets one, for
+  either cause. It is no tool round, but it is a model call. The limits are
+  checked before it, the search note's cost included, so a turn whose first
+  round used up the time, or whose room cannot hold the search note as well,
+  answers at once. The second try waits for a model slot as the first round
+  does. It fails as the first round does, except that a refusal of it never
+  reads as the endpoint taking no tools; a second break-off before it shows
+  anything fails the turn. It streams as later rounds do, so text it shows
+  before breaking off is withdrawn by its note like any later round's. If it
+  calls no tool either, its reply is the answer. A pinned scope offers no tools
+  and is never asked again.
+- **An answer no call has led to carries the final note alone.** Until a
+  round's calls are in the transcript, nothing has answered the search note,
+  and it asks for a search the answer round cannot make. An answer forced
+  before the second try, or after the second try broke off or had its calls
+  withdrawn, is therefore sent the user's message without the search note.
+- **Reasoning is never streamed as the answer.** Think blocks, and a reasoning
+  field the endpoint sends apart from the content, are kept for the response's
+  `reasoning` field, every round's in order.
+- **Every round runs on the request's model.** The reasoning toggle picks it,
+  and it makes one attempt per call, whatever `OPENAI_MAX_RETRIES` says,
+  because the loop's time budget and slots assume one.
+- **Model calls share a bound.** A process runs at most eight agent-turn model
+  calls at once. A tool round waits up to five seconds for a slot, never longer
+  than the time left. The answer of a turn that has shown something waits up
+  to the time left, and at least five seconds.
+- **Calls run at once.** A round's calls run together, up to
+  `AGENT_MAX_CALLS_PER_ROUND`. They share the process-wide eight search slots,
+  run in a copy of the request's context, and are numbered in call order.
+  Calls past the limit are answered "not run".
+
+When a limit is reached, the model answers in one more round. That round
+sends the same conversation, with the final note (`agent_final.txt`) joined to
+the last user message, so a strict chat template never sees two user messages
+in a row. The tools stay declared, with `tool_choice: "none"`. The final note
+asks the model to say what is missing when the passages do not answer. An
+evaluation or opinion question still gets its source-backed part, then the
+model's own assessment in the form the rules give, where they ask for one.
+
+An endpoint that ignores `tool_choice` may still answer that round with tool
+calls and no text. The round is then sent once more with no tools declared,
+neither `tools` nor `tool_choice`, and its reply is the answer. Only if that
+reply is empty too is the answer left empty. One warning, with the number of
+calls, says the round was sent again.
+
+### Tools offered
+
+| Target | Tools |
+|---|---|
+| `documents` | `search`, `keyword`, `read` |
+| `visual` | `search_images`, `keyframes`, `read` |
+| `all` | `search`, `search_images`, `keyframes`, `keyword`, `read` |
+
+`keyword` is offered only where the collection's indexes allow it (see
+[Keyword checks](#keyword-checks)).
+
+- **`search(query)`** retrieves through the turn's own engine, so the request's
+  filters, rerank and parent-context expansion apply as on a lookup. Every
+  retrieved child of a section is kept (`AgentSearchQuery`). Each query is
+  expanded with graph neighbours for retrieval alone; the reply and the trail
+  show the model's own words. A sub-floor image gets no description re-score
+  here: the agent searches pictures with its own image tools.
+- **`search_images(description)`** runs the visual target's chain over the
+  `{collection}_images` companion, under the request's filters: CLIP and the
+  keyword lane fused, then reranked against the description, with no relevance
+  floor. The description names visible cues, never a guessed answer.
+- **`keyframes(file, index)`** shows one clip's frames in time order, labelled
+  `#n @ mm:ss`. A clip of up to eight frames shows them all; a longer one shows
+  eight evenly spaced, its first and last among them, with the total. `file` is
+  the clip's file name or the number of a passage from the clip, and `index`
+  opens one frame. A file name that two clips share is answered with a way to
+  name each, never with a merged list.
+- **`keyword(words[, field])`** counts the indexed chunks that contain every
+  word, exactly over what was checked, and shows the best new ones (see
+  [Keyword checks](#keyword-checks)).
+- **`read(n)`** shows passage `[n]` again, as much of it as one reply holds.
+
+A reply numbers only what it shows:
+
+- a passage new to the turn is shown under the number the answer cites it by
+  (its `citation_index:` line);
+- a passage shown before is named by its number ("Also matched, shown
+  before: [1]");
+- a passage that grew is named with a note that `read(n)` shows its new text;
+- matching passages that did not fit are counted, with a hint to search again
+  with narrower words.
+
+A call made before is answered from memory and never run again; a `read` only
+while its passage is unchanged. A call is the same call when it names the same
+tool and its arguments are equal, compared on one line and case-folded. A tool
+may key its own repeats instead (`recall_key`): `keyword` keys a call by its
+field and the index tokens or exact values of its words, and `keyframes` by its
+clip as the listing matches it, the file name exactly (case and inner spaces
+kept) or the passage number, together with the frame asked for. A reply answered from
+memory names the passages the first call showed and admits none. It is never
+informative (see [Limits and reasons](#limits-and-reasons)). A call to a tool
+the turn does not offer, or with arguments that will not do, gets an error reply
+saying what to send instead.
+
+A reply holds at most 3000 characters, and each passage's text at most 900;
+with reasoning on, 2000 and 700. A header shows whole up to 500 characters;
+past that it keeps its citation line and 240 characters of the rest. The model
+reads passages through an agent view. That view cuts metadata strings to 200
+characters, and leads a social row's header with its file and who wrote it.
+
+### Keyword checks
+
+`keyword(words[, field])` counts the indexed chunks that contain every word, in
+any order, and shows the best new ones (`agents/turn/keyword.py`). It is for
+exact names, numbers and ids, and for whether something is mentioned at all.
+A ranked search cannot promise that: a count of 0 here is exact over what was
+checked. The tool asks the model for one to three words.
+
+**Where it is offered.** `keyword` is offered on the `all` and `documents`
+targets, never on a `visual` turn or a scoped one, which offers no tools.
+`RAG.agent_turn` decides it from the collection's indexes. Deciding only reads:
+the keyword index's coverage, whether the `_images` companion exists, and the
+payload schemas. It creates no index and does not profile the collection. The
+tool is withheld, and the turn keeps its other tools, when:
+
+- the request's filters cannot be compiled for Qdrant, since a count would then
+  cover other material than the turn searches;
+- the keyword index's coverage cannot be read, for the collection or for the
+  `_images` companion in scope on `all`;
+- the text is not ready: it has no keyword index, or no chunk carries its
+  indexed copy yet;
+- anything else fails while deciding, such as the lookup of the companion;
+- the context window leaves no room for it, even on the text alone. If the room
+  for tool replies is under 1500 tokens with `keyword` offered on more than the
+  text, the turn is first built again with `keyword` on the text alone: its
+  schema takes no `field` and the system prompt names no fields. Only if that
+  is still under 1500 is the turn built without the tool, its lines and its
+  schema. A thinking model at the 8192-token minimum therefore keeps `keyword`
+  on the text alone where a collection has every field's index ready.
+
+A log line says why, carrying no document text or query: at DEBUG, once, the
+reason (`filters`, `coverage`, `text_not_ready`, or `fault` with the exception's
+type); at INFO, the room the turn had with every field when `keyword` fell back
+to the text alone, and the room it had with the tool when it was withheld.
+
+**Fields.** `field` is one of the Search panel's **Search in** options, which
+search the same payload keys (see [`POST /search`](api-reference.md#post-search)):
+`text`, the default, `author`, `network` and `uuid`. The text must be ready for
+the tool to be offered. Another field is offered when every payload key it
+searches carries the index its match needs, whatever kind of collection it is.
+The schema has a `field` argument, and the system prompt names the fields, only
+when more than the text is offered.
+
+- On a collection of documents alone, `author`, `network` and `uuid` match
+  nothing and count 0, as its chunks carry none of them. A transcript segment
+  carries the network `nextext` and the speaker as its author.
+- On `all`, the `_images` companion joins a field only when its points carry it
+  (`text`, `author` and `uuid`, not `network`) and it has the same indexes.
+
+**The match and the count.**
+
+- Every word must occur in the same chunk, in any order. A word is matched as in
+  the Search panel: case-insensitive and at the start of a word, so `measure`
+  matches `measurement`. Unlike the panel, a check does not require several
+  words to stand together as a phrase.
+- The count is exact: a Qdrant `count`, not an estimate, within the turn's
+  metadata filters, with coarse parent chunks left out. Where the companion
+  joins, it also counts the companion's points, whose indexed text is an
+  image's caption, tags and OCR text.
+- One known excess: on `all`, a standalone image is counted twice, once in the
+  main collection, which holds its caption and printed words as a document, and
+  once in its companion.
+- A count that fails is reported unavailable, never as 0. That call is not
+  remembered, so asking again runs it again.
+- Chunks the keyword index does not cover are reported as not checked: text not
+  yet backfilled (`make search-index`) and, on `all`, a companion without the
+  field's index. The number counts the whole collection, whatever the filters,
+  so it can overstate what the filtered count missed.
+
+**Passages.** The passages are retrieved as a search retrieves them, narrowed to
+the matches by the filter that counts them: the same rerank, image floor and
+parent context, every retrieved child kept. The social diversity cap and
+link-following are left out, so every passage a check adds is a match. They are
+numbered, and named when shown before, as a search's are.
+
+- On a check of the text, a hit's matches are moved to just before the word,
+  with up to 80 characters of left context, so the answer shows the word and not
+  the chunk's opening. A match whose opening already shows the word stays where
+  it is. The word is found as the count reads it: its pieces in order, each at
+  the start of a word, whatever separates them. `placebo-controlled` finds
+  `placebo controlled`, and the `19` of `COVID-19` never anchors alone. The
+  hits of the other fields are shown as retrieved.
+- A passage the turn already holds from an earlier search, with no match of its
+  own, merges with its anchored copy. Its opening then counts as matches, so the
+  entry keeps what either showed.
+
+**Refused calls.** A call the index cannot answer exactly gets an error reply
+saying why, and no trail step. It is refused when:
+
+- the words are empty or run over 100 characters (never cut: a cut last word
+  would widen the match);
+- no word has two or more characters, or a word is a single letter or digit,
+  such as the `D` of `vitamin D`, which the index drops, so the count would
+  answer for every `vitamin`;
+- a word holds no letter or digit at all, such as `...`, which the index does
+  not read, so it is refused as unindexable;
+- the index splits a word on dots or signs into pieces and one is a single
+  letter or digit: `2.5`, `U.S.`, `p<0.05`. A word whose pieces all have two or
+  more characters, such as `placebo-controlled` or `COVID-19`, is not refused;
+- a word holds more than 30 letters or digits in a row, the most the index
+  reads;
+- `field` is not an offered field, or `uuid` is given more than one word.
+
+`uuid` matches one exact value and is never split, so a dashed id is one word.
+Any other match that cannot be compiled is refused as if it gave `uuid`
+several words, and one DEBUG line names the exception's type, never the words.
+
+**Repeats and idle rounds.** A check is a repeat when it names the same field
+and the same index tokens, the words as the index reads them:
+`placebo-controlled`, `Placebo controlled` and `controlled placebo` are one
+check. Exact values are compared as written: always on `uuid`, and on
+`author` for any single word, which may be an id. One id in two cases is
+therefore two checks, and so are `Alice` and `alice` on `author`, while a uuid
+pasted with or without its dashes is one. A repeat is answered from memory:
+the reply names the passages the first check showed, and its trail step shows
+the first check's `field`, `matches` and `unchecked` again.
+
+A check with a known count is informative, a 0 included, so a round holding one
+is not idle although it admits no passage. A repeat is never informative, and
+neither is a count that failed: either can make an idle round.
+
+**The count in the answer.** A count is a fact about the collection, not a
+source. The keyword line of the system prompt tells the model to state it
+without `[n]`, and to report a 0 only as "no passage contains these words",
+never as the idea being absent. The reply opens with the count
+(`3 indexed chunks in the searched material contain all of these words.`) and,
+over a partial index, a line for the chunks not checked
+(`2 chunks are not in the keyword index yet, so they were not checked and may still contain these words.`),
+then the passages. Leading, the count survives the overflow retry, which keeps
+the head of each tool reply. The validator is given the same counts (see
+[Answer, validation and storage](#answer-validation-and-storage)).
+
+### Evidence and sources
+
+The turn's evidence is everything its tool replies showed, numbered in the
+order it was found. The windows of one section are one passage, which keeps its
+number as it grows. The evidence holds at most 64 passages, or as many as a
+larger pinned scope holds. The answer's sources are this evidence in number
+order, so the model's `[n]` is the number on the source card.
+
+The trail (`agent.actions`) holds one `{action, detail, found}` per note, and
+one per call its tool answered. A keyword step adds `field`, `matches` and,
+where the keyword index leaves chunks out, `unchecked`. The `agent` frames in
+[api-reference.md](api-reference.md#post-stream_query) say when each is absent,
+and [ui-guide.md](ui-guide.md#chat-srcrouteschattsx) shows how the SPA reads
+them. A call that was not answered gets its reply but no step: one skipped,
+refused for room or time, failed, or carrying an argument error.
+
+### Limits and reasons
+
+`agent.reason` names the first cause that cut a turn short or left evidence out.
+The one exception is `answer_cut`: a cut answer matters more than a limit or a
+failure before it, so it replaces whatever reason stood.
+
+| `agent.reason` | When |
+|---|---|
+| `round_budget` | The turn ran `AGENT_MAX_ROUNDS` tool rounds (default 6). |
+| `time_budget` | `AGENT_TIME_BUDGET_S` ran out (default 120 s). Limits are checked between rounds, so an answer already streaming is never cut, and a search that outlives the time left gets a "no reply in time" reply. |
+| `context_budget` | No room is left for one more full reply. A round whose own calls do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
+| `idle` | Two rounds in a row added no passage and told the model nothing new (see below). |
+| `research_failed` | Evidence may be missing; the answer is still written. A call could not be prepared, a search failed or found no search slot, or a later round failed or found no model slot. |
+| `answer_cut` | The endpoint cut the answer at its length limit (`finish_reason: "length"`), so it may be incomplete. The answer is kept as written. This covers every round whose text is the answer: one answering by choice, the forced answer and its resend without tools, and a pinned round. |
+| `tools_unavailable` | The endpoint refused tools, and the plain path answered (see below). |
+| `no_evidence` | Found only on turns stored by the earlier assessment pipeline. |
+
+These are protocol tokens; the SPA maps each to its own copy.
+
+A round is idle when none of its replies admitted a passage or was informative.
+A reply is informative when it told the model something about the collection
+without admitting a passage, as a keyword count does, a 0 included, and as a
+`read` does, which shows a passage's text. A reply answered from memory is never
+informative, so reading an unchanged passage again still counts toward `idle`.
+
+### Fallback to the plain path
+
+Until the turn has shown a step or text, these failures hand the message to the
+plain path, which answers as it would without agent turns:
+
+- the budget leaves under 1500 tokens for tool replies;
+- the first call, tools declared, is refused with HTTP 400 or 422 that is not
+  an overflow. The plain answer then reports
+  `agent: {"steps": 0, "actions": [], "reason": "tools_unavailable", "answer": "plain"}`,
+  and the stored turn keeps it;
+- no model slot comes free in time;
+- a pinned scope cannot be shown legibly in the room;
+- the prompt overflows the context window.
+
+Any other failure before anything was shown, such as a server error, a timeout
+or the first round's second try breaking off before it showed anything, is the
+turn's error, as it would be on a plain lookup. A refusal of a later call, the
+second try included, is such a failure too: only the turn's first call can
+show that the endpoint takes no tools.
+
+Once a step or text is out, a failed tool call or tool round no longer ends the
+turn: the model answers from what it found, with `research_failed`. What does
+end it is a failure of the answer itself: the answer round failing, finding no
+model slot, or overflowing once its tool replies were already cut. Its resend
+without tools ends the turn in the same ways, and on any overflow. The turn
+then sends one `error` frame and stores nothing. The code is `context_overflow`
+for an overflow, and `generation_failed` otherwise.
+
+### When the endpoint refuses tools
+
+A turn's refusal can come from its own content: a message, a picture, or a
+schema its chat template trips. Switching agent turns off on that would let
+one request turn them off for every user. So the turn's refusal starts a probe
+on the same model client, before anything is cached. The probe carries nothing
+of any user or collection:
+
+- a fixed system line and the message `ping`;
+- one tool, `noop`, with no parameters, and `tool_choice: "auto"`;
+- streamed, one attempt, with a 10-second timeout.
+
+| Probe | What follows |
+|---|---|
+| Refused (HTTP 400 or 422, not an overflow) | The rejection is cached: for 10 minutes, turns with that reasoning flag are plain lookups. One warning names the flag and the requirement. |
+| Accepted | Nothing is cached. One warning, naming the flag, says that something in that turn's own request was refused. |
+| Inconclusive (a timeout, a 5xx, a 429, an unreachable endpoint) | Nothing is cached. One warning, naming the flag, says the probe could not tell. |
+
+The cache and the probe are kept per reasoning flag, since the toggle picks
+the client and an endpoint may refuse tools in one mode only. At most one probe
+runs at a time per flag. A refusal that arrives during a probe, or while a
+rejection is cached, probes nothing. Either way, the turn that hit the refusal
+has already fallen back. The session layer also logs each refusal at INFO, with
+its HTTP status.
+
+### Pinned scope
+
+A turn with a pinned scope answers from the pinned passages alone, in one
+round that offers no tools. That round sends neither `tools` nor
+`tool_choice`, and its refusal is the turn's own error, never a rejection of
+tools. The passages are rendered into the user message between fence lines,
+after the scope note (`agent_scope.txt`) and before the user's words, within the
+turn's room. Pinned evidence is never dropped: a scope the room cannot show
+legibly is answered on the plain path's scoped engine instead. The trail opens
+with a `seed` step (step 0) that counts the pinned passages. The response
+reports `retrieval_mode: "scoped"` and `scoped_chunk_count`. A scope outranks
+the target, so no picture is shown.
+
+### Visual target
+
+On the `visual` target the loop shows the model the pictures themselves. After
+each tool round, the passages the round admitted that are pictures have their
+stored thumbnails fetched, in one call. They are shown in one user message after
+the round's tool replies: a legend (`agent_image_legend.txt`) tying each
+picture to its citation number, then the images.
+
+- A turn shows at most `VISUAL_ANSWER_MAX_IMAGES` pictures, and no more than
+  its room holds. A picture costs about 600 tokens, plus its legend line.
+- A picture is shown once per turn.
+- A round that carries pictures and fails before its first event is taken as
+  refusing them. Every picture is taken back, and the round is sent once more
+  without them.
+
+The response reports `visual: {"images_attached": n}`, where `0` means the
+model saw no pixels. Only the visual target shows pictures; turns on `all` and
+`documents` see captions.
+
+### Answer, validation and storage
+
+While `ASSESSMENT_ENABLED` is on (the default), the system prompt carries the
+assessment rule. A question that asks for a judgement is then answered in two
+parts: what the sources say, a line holding only `[[ASSESSMENT]]`, then the
 model's own assessment, which may draw on general knowledge and must say so.
-The backend replaces the sentinel with a localized label (`ui_strings`
-`assessment_heading` / `assessment_disclaimer`) in the stream and in the
-persisted text, so the boundary survives into history, transcripts and report
-exports without any of them knowing the protocol. Sources are the evidence
-ledger, numbered 1..N in the order it was found; an entry is shortened to fit
-the context rather than dropped, because replay numbers citations by position.
-If the final estimate still does not fit, the latest research additions are
-left out, never the seed, so the numbering stays contiguous, and the turn
-reports `context_budget`; it does the same when what remains, a dense seed
-included, can only be sent cut below its legible minimum. If the prompt
-still overflows the model's context, it is rebuilt once with less evidence and
-compacted metadata headers, each passage's citation line kept whole (a rebuild
-that cuts passages below their minimum is reported the same way); a second
-overflow, or compact headers that alone fill the room, ends the turn with
-`context_overflow` on `/stream_query` (`/query` answers HTTP 500, as for a lookup).
+The rule forbids answering such a question with "the passages do not say"
+alone: the answer gives what the passages show, however little, and then the
+model's own assessment.
 
-**Validation.** Only the source-backed part is validated, against the sources it
-cites (at most six; the first six when it cites none), with a note
-(`response_validator_assessment.txt`) that puts the
-judgement out of scope. An answer that did not separate the two parts is
-labelled as a whole and not validated. Assessments never take the corrective
-retry: their evidence was gathered on purpose, not by one query that a
-reformulation could improve.
+- **An assessment** is a reply carrying the sentinel: `answer_mode:
+  "assessment"`, `agent.answer` `split` (or `empty` for a reply of nothing but
+  the sentinel), and `evidence_chars`, the length of the source-backed part. The
+  backend swaps the sentinel for a localized label (`ui_strings`
+  `assessment_heading` / `assessment_disclaimer`) in the stream and in the
+  stored text. History, transcripts and report exports then show the boundary
+  without knowing the protocol.
+- **A lookup** is any other reply: `answer_mode: "lookup"`, `agent.answer:
+  "plain"`.
 
-**Degraded turns** say why. `agent.reason` is `tools_unavailable` (the endpoint
-rejected tool calls or answered without one; the answer rests on the seed
-passages), `research_failed`, `context_budget` (the context window ended
-research early or never let it start, the last search lost a passage to the
-room, passages were left out at a fit, or the evidence was sent below its
-legible minimum; a refusal that a later search follows is not reported, and an
-earlier reason is kept), `time_budget` or `no_evidence`;
-`agent.answer` is `unsplit` or `empty`. These are protocol tokens; the SPA maps
-each to catalog copy.
+With the switch off, every agent turn answers as a lookup.
 
-**Follow-ups.** A lookup asked after an assessment receives only the
-source-backed part of that answer as its prior turn, so the model's judgement is
-never restated as sourced fact. The cut is made where the prior turn is bound to
-the generation prompt, so the legacy `/agent/*` endpoints, which build theirs
-from stored history, get it too. The prior turn is read by
-`SessionManager.get_prior_turn`, without rehydrating any citation. An assessment
-asked after one sees both parts of it, each labelled: the source-backed part,
-whose `[n]` refer to the previous turn's sources, and the model's own
-assessment. They share the 4,000-character prior-answer budget shortest-first,
-so a long source-backed part cannot push the judgement out. Research and the
-answer also see the rewrite a lookup answers from, on a labelled line under the
-user's own words, with reasoning and citation numbers dropped and cut at 1,000
-characters. The line is left out when the rewrite adds no words, and on
-stateless turns, which have no history. It is a reading aid, never a source.
+Validation follows the mode. An assessment is validated on its source-backed
+part only, against the sources that part cites, with a note
+(`response_validator_assessment.txt`) that puts the judgement out of scope. An
+answer without a separate source-backed part is labelled but not validated. An
+agent lookup is validated against the sources it cites, with the user's
+previous message shown ahead of the question. Either way the validator sees at
+most six sources: the first six when the answer cites none, or none when the
+turn holds keyword checks with a known count, since such an answer rests on the
+checks. Agent turns never take the corrective retry.
+
+In both modes the validator is also given the turn's keyword checks with a
+known count, as facts about the collection rather than sources: one line per
+check, with its words, its field, its count and any chunks not checked, under
+their own heading after any summary diagnostics. A failed count is left out.
+Both validator prompts accept a statement of how many indexed chunks hold some
+words, a 0 included, when a listed check gives that count. An answer that rests
+on checks alone, citing no passage, is therefore validated by the model against
+the checks, its relevance judged by them, rather than mismatched for having no
+sources or judged against passages the search happened to find.
+
+An agent turn is stored with its `answer_mode` and its trail. It reports
+`retrieval_mode: "agent"` (or `"scoped"`), `retrieval_query: null` and a
+`graph_debug` skipped with the reason `agent`. Its `Turn complete | …` log line
+adds `answer=`, `steps=`, `outcome=` and `reason=`: counts and protocol tokens,
+never a query, an argument or document text.
+
+### Conversation history
+
+An agent turn reads the conversation before its message, built before the turn
+is stored (`agents/turn/history.py`). It holds:
+
+- the last two exchanges, as real messages, or one when reasoning is on;
+- the user's earlier questions, newest first;
+- the newest part of the rolling summary.
+
+All of it fits within 1300 tokens, or 750 with reasoning. Citation numbers are
+dropped from earlier answers, since they number earlier sources. An earlier
+assessment shows its two parts, each labelled. A stateless turn reads none.
+The model writes its own searches, so an agent turn runs no history rewrite and
+no turn-level graph expansion.
+
+A plain lookup that follows an assessment (a fallback, or any turn while agent
+turns are off) receives only the source-backed part of that answer as its prior
+turn. The model's judgement is never restated as sourced fact.
 
 ## Citation numbering
 

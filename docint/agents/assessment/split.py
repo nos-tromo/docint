@@ -24,6 +24,8 @@ ASSESSMENT_RULE = "\n\n---\n\n"
 # Tolerates what models do to a marker: case, single brackets, bold, heading marks.
 _SENTINEL_RE = re.compile(r"(?:#{1,6}\s*)?(?:\*\*|__)?\[{1,2}\s*assessment\s*\]{1,2}(?:\*\*|__)?", re.IGNORECASE)
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+#: A bracketed citation number, list or range (hyphen or en dash), as an answer cites its sources.
+CITATION_NUMBERS_RE = re.compile(r"\[\s*\d+(?:\s*[,;\u2013-]\s*\d+)*\s*\]")
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 # str.lower() can change length (U+0130), which would misalign buffer indices.
@@ -111,7 +113,9 @@ def compose_labelled_answer(text: str) -> LabelledAnswer:
     )
 
 
-def cited_sources(evidence: str, sources: Sequence[dict[str, Any]], *, limit: int = 6) -> list[dict[str, Any]]:
+def cited_sources(
+    evidence: str, sources: Sequence[dict[str, Any]], *, limit: int = 6, fallback: bool = True
+) -> list[dict[str, Any]]:
     """Pick the sources a source-backed part cites, in citation order.
 
     Args:
@@ -119,10 +123,13 @@ def cited_sources(evidence: str, sources: Sequence[dict[str, Any]], *, limit: in
         sources (Sequence[dict[str, Any]]): The turn's sources, each carrying
             its ``citation_index``.
         limit (int): How many sources the validator is shown.
+        fallback (bool): Whether evidence citing none is shown the first ``limit``
+            sources; without it, such evidence rests on no source, as an answer
+            stating only a keyword count does.
 
     Returns:
-        list[dict[str, Any]]: The cited sources, or the first ``limit`` sources
-        when the evidence cites none.
+        list[dict[str, Any]]: The cited sources; when the evidence cites none, the
+        first ``limit`` sources, or none without ``fallback``.
     """
     cited: set[int] = set()
     for match in _CITATION_RE.finditer(evidence):
@@ -133,6 +140,8 @@ def cited_sources(evidence: str, sources: Sequence[dict[str, Any]], *, limit: in
         if isinstance(source.get("citation_index"), int) and source["citation_index"] in cited
     ]
     picked.sort(key=lambda source: source["citation_index"])
+    if not picked and not fallback:
+        return []
     return (picked or list(sources))[:limit]
 
 

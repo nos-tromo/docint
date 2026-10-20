@@ -130,8 +130,11 @@ def test_concurrent_session_chats_persist_under_correct_owner(monkeypatch: pytes
         build_barrier.wait(timeout=10)
 
         class _Engine:
-            def query(self, prompt: str) -> Response:
-                return Response(response=f"answer::{prompt}", source_nodes=[])
+            def retrieve(self, query_bundle: Any) -> list[Any]:
+                return []
+
+            def synthesize(self, query_bundle: Any, nodes: list[Any]) -> Response:
+                return Response(response=f"answer::{query_bundle.query_str}", source_nodes=[])
 
         return _Engine()
 
@@ -202,8 +205,11 @@ def test_session_collection_pin_conflict_returns_409(monkeypatch: pytest.MonkeyP
 
     def _fake_build(self: RAG, **_kwargs: Any) -> Any:
         class _Engine:
-            def query(self, prompt: str) -> Response:
-                return Response(response=f"answer::{prompt}", source_nodes=[])
+            def retrieve(self, query_bundle: Any) -> list[Any]:
+                return []
+
+            def synthesize(self, query_bundle: Any, nodes: list[Any]) -> Response:
+                return Response(response=f"answer::{query_bundle.query_str}", source_nodes=[])
 
         return _Engine()
 

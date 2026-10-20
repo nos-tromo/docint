@@ -64,7 +64,7 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     filtered_response = MagicMock()
     filtered_response.metadata = cast(dict[str, Any], {})
     filtered_response.source_nodes = cast(list[Any], [])
-    engine.query.return_value = filtered_response
+    engine.synthesize.return_value = filtered_response
 
     session_manager.rag.query_engine = engine
     session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
@@ -85,10 +85,14 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     session_manager.chat("Please elaborate.", prior_turn=prior)
 
     session_manager.rag.rewrite_retrieval_query.assert_not_called()  # type: ignore[attr-defined]
-    engine.query.assert_called_once_with("expanded")
     session_manager.rag.expand_query_with_graph_with_debug.assert_called_once_with(  # type: ignore[attr-defined]
         "Please elaborate."
     )
+    # Retrieval runs on the expanded query; the answer is asked the message alone.
+    engine.retrieve.assert_called_once()
+    assert engine.retrieve.call_args.args[0].query_str == "expanded"
+    engine.synthesize.assert_called_once()
+    assert engine.synthesize.call_args.args[0].query_str == "Please elaborate."
 
 
 def test_chat_binds_prior_turn_context_via_update_prompts(
@@ -100,7 +104,7 @@ def test_chat_binds_prior_turn_context_via_update_prompts(
     filtered_response = MagicMock()
     filtered_response.metadata = cast(dict[str, Any], {})
     filtered_response.source_nodes = cast(list[Any], [])
-    engine.query.return_value = filtered_response
+    engine.synthesize.return_value = filtered_response
 
     session_manager.rag.query_engine = engine
     session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
@@ -140,7 +144,7 @@ def test_chat_default_path_still_rewrites(
     filtered_response = MagicMock()
     filtered_response.metadata = cast(dict[str, Any], {})
     filtered_response.source_nodes = cast(list[Any], [])
-    engine.query.return_value = filtered_response
+    engine.synthesize.return_value = filtered_response
 
     session_manager.rag.query_engine = engine
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten"  # type: ignore[attr-defined]

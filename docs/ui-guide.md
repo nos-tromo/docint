@@ -79,9 +79,9 @@ hate-speech-only, custom field/operator/value rules) via
 mismatches, and an optional `GraphDebugPanel`. Cancellation uses an
 `AbortController`.
 
-The answer is Markdown: `grounded_qa.txt`, and `assessment_answer.txt` on an
-assessment turn, ask the model for lists, bold, tables and topic headings where
-structure helps, and for plain paragraphs otherwise.
+The answer is Markdown: `grounded_qa.txt` on a plain turn, and
+`agent_system.txt` on an agent turn, ask the model for lists, bold, tables and
+topic headings where structure helps, and for plain paragraphs otherwise.
 `components/common/MarkdownProse.tsx` renders it, shared with the Analysis
 summary. A table scrolls inside its own box, citation markers such as `[3]` stay
 plain text, and raw HTML in an answer is shown as text, never parsed.
@@ -126,19 +126,53 @@ chip is drawn from the target stored with the turn, so it survives a reload.
 Everything shows no chip, nor does a turn answered from a hand-picked scope
 (the scope outranks the target) or one saved before the target was recorded.
 
+Most turns are **agent turns**: the model searches the collection itself before
+it answers (see [retrieval-and-agents.md](retrieval-and-agents.md#agent-turns)).
+While it works, the turn lists each step as it happens:
+
+- a search, with its query and how many new passages it found;
+- an image search, with the visual cues it looked for and how many new images
+  it found;
+- the keyframes of a clip, or one of them ("Viewed keyframe #3 of …");
+- a keyword check, with its words, the field when that is not the text, the
+  exact number of chunks that contain them, how many chunks the keyword index
+  could not check, and how many new passages it found ("Keyword check “…” in
+  Author: 3 matches (2 chunks not checked), 1 new"). When the count failed, the
+  step says "count unavailable" in place of the number;
+- a passage read again ("Read passage [2]");
+- a note ("Note: …"): text the model wrote before it decided to search
+  again. Whatever of that text had already streamed into the answer moves into
+  the trail, and the answer starts afresh;
+- "Started from n passages", on a scoped turn: the pinned selection it
+  answers from.
+
+When the turn finishes, its steps fold behind a **Searches behind this
+answer** disclosure where the live list stood. Every agent turn with a step
+besides its starting passages gets one, lookups included. A turn whose stream
+failed keeps the steps it showed behind the same disclosure, above the error.
+
+A muted note says when a turn stopped searching at one of its limits: the
+round limit, the time for the turn, the room for evidence in the model's
+context, or searches that found nothing new. A limit is how research ends,
+not a failure: at the smallest context window a turn often stops for room,
+above all when pictures fill it. An amber notice is kept for a turn that may
+rest on less than it could: the model could not run its own searches, so the
+answer rests on a standard search, or not every search could be completed. An
+answer the model's length limit cut off gets an amber notice too, saying it may
+be incomplete. Each maps one `agent.reason` token to its own copy.
+
 A question that asks for a judgement — what could be improved, whether a
-method convinces — gets an **assessment**. While it is researched, the turn
-lists each search the model makes. The answer then opens with what the sources
-say, cited as usual, and continues under a **Model assessment** label with the
-model's own judgement, which may draw on general knowledge and is not checked
-against the sources. A note under the answer says so and, behind a disclosure
-caret, lists the searches; the validation banner speaks of the source-backed
-part only. A turn whose research failed, stopped early or found nothing, whose
-evidence was partly left out for lack of room, or whose model did not separate
-the two parts, says so in an amber notice. An assessment cut off before it
-finished, by an error or a dropped connection, opens with a note that it may
-be incomplete and may contain the model's own judgement without its label. A
-turn that failed cannot be added to a report.
+method convinces — gets an **assessment**. The answer opens with what the
+sources say, cited as usual, and continues under a **Model assessment** label
+with the model's own judgement, which may draw on general knowledge and is not
+checked against the sources. A note under the answer says so, and the
+validation banner speaks of the source-backed part only. An assessment the
+model left empty says so in an amber notice. A turn cut off after its text
+began, by an error or a dropped connection, opens with a note that it did not
+finish and may be incomplete; the note travels with the text into the
+transcript export. An agent turn that had shown a step adds that the text may
+contain the model's own judgement without its label. A turn that failed cannot
+be added to a report.
 
 A **Search in** picker under the query field chooses what the keywords
 match: Text (the chunk body, the default), Author, Network or UUID. The

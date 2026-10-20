@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 from loguru import logger
 
-from docint.agents.generation import ResultValidationResponseAgent
+from docint.agents.generation import NO_SOURCES_BESIDE_CHECKS, ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 
 MARKER = "MARKER-SECRET-1234"
@@ -548,3 +548,135 @@ def test_validation_assessment_note_is_localized(monkeypatch: pytest.MonkeyPatch
     prompt = agent._build_prompt(query="q", answer="a", sources=[{"text": "t"}], intent="assessment")
 
     assert "nicht Gegenstand der Prüfung" in prompt
+
+
+def test_the_validator_reads_the_previous_user_message_ahead_of_the_query() -> None:
+    """A follow-up is judged against what it follows, so the message before it comes first, labelled."""
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(answer="Seit 2019 [1].", sources=[{"text": "Person A leitet den Hafenverein seit 2019."}])
+
+    agent.finalize(result, Turn(user_input="Und seit wann?", previous_user_input="Wer leitet den Hafenverein?"))
+
+    assert llm.last_prompt is not None
+    assert "Previous user message:\nWer leitet den Hafenverein?\n\nUser query:\nUnd seit wann?\n\n" in llm.last_prompt
+
+
+@pytest.mark.parametrize("previous", [None, "", "   "], ids=["none", "empty", "blank"])
+def test_without_a_previous_message_the_validator_context_is_unchanged(previous: str | None) -> None:
+    """A turn that follows nothing is validated as before: no previous-message line.
+
+    Args:
+        previous (str | None): What the turn carries as the previous message.
+    """
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+
+    agent.finalize(
+        RetrievalResult(answer="answer", sources=[{"text": "source"}]),
+        Turn(user_input="question", previous_user_input=previous),
+    )
+
+    assert llm.last_prompt is not None
+    assert "Previous user message" not in llm.last_prompt
+    assert "User query:\nquestion\n\n" in llm.last_prompt
+
+
+#: A turn's keyword checks as the validator is handed them: one line per check with a known count.
+CHECKS = '- "Kontrollgruppe" (text): 0'
+#: What heads them in the validator's prompt.
+CHECKS_HEADING = (
+    "Keyword checks (exact counts of indexed chunks that contain all the words; facts about the collection, "
+    "not sources):"
+)
+#: The sources a validator is shown beside an answer that cites them.
+SOURCES: list[dict[str, Any]] = [{"text": "Der Hafenverein plant das Fest im Mai.", "citation_index": 1}]
+#: Coverage diagnostics a summary carries.
+DIAGNOSTICS: dict[str, Any] = {
+    "total_documents": 4,
+    "covered_documents": 3,
+    "coverage_ratio": 0.75,
+    "coverage_target": 0.7,
+    "uncovered_documents": ["protokoll.pdf"],
+}
+
+
+def test_an_answer_resting_on_keyword_checks_alone_is_validated_by_the_model() -> None:
+    """A zero count is a fact the validator can check the answer against, not an answer without evidence."""
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(answer="Keine Passage enthält das Wort Kontrollgruppe.", sources=[], keyword_checks=CHECKS)
+
+    finalized = agent.finalize(result, Turn(user_input="Gibt es eine Kontrollgruppe?"))
+
+    assert llm.calls == 1
+    assert llm.last_prompt is not None
+    assert llm.last_prompt.endswith(f"{CHECKS_HEADING}\n{CHECKS}\n\nRetrieved sources:\n{NO_SOURCES_BESIDE_CHECKS}")
+    assert (finalized.validation_checked, finalized.validation_mismatch) == (True, False)
+    assert finalized.validation_reason is None
+
+
+@pytest.mark.parametrize("checks", [None, ""], ids=["none", "empty"])
+def test_an_answer_without_sources_or_checks_is_a_mismatch_the_model_is_not_asked_about(checks: str | None) -> None:
+    """With nothing to ground it, an answer is mismatched by construction, as before.
+
+    Args:
+        checks (str | None): The turn's keyword checks: none.
+    """
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(answer="Ja.", sources=[], keyword_checks=checks)
+
+    finalized = agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.calls == 0
+    assert (finalized.validation_checked, finalized.validation_mismatch) == (True, True)
+    assert finalized.validation_reason == "Answer produced without retrieved sources."
+
+
+def test_the_checks_follow_the_summary_diagnostics_and_sit_beside_the_cited_sources() -> None:
+    """A mixed answer is judged against its passages and its counts at once."""
+    agent = ResultValidationResponseAgent(enabled=True, llm=None)
+
+    prompt = agent._build_prompt(
+        query="q",
+        answer="Das Fest ist im Mai [1]; keine Passage enthält das Wort Kontrollgruppe.",
+        sources=SOURCES,
+        summary_diagnostics=DIAGNOSTICS,
+        keyword_checks=CHECKS,
+    )
+
+    diagnostics_at = prompt.index("Summary diagnostics:")
+    checks_at = prompt.index(f"{CHECKS_HEADING}\n{CHECKS}\n\n")
+    sources_at = prompt.index("Retrieved sources:\nSource 1 [")
+    assert diagnostics_at < checks_at < sources_at
+    assert "Der Hafenverein plant das Fest im Mai." in prompt[sources_at:]
+
+
+@pytest.mark.parametrize("diagnostics", [None, DIAGNOSTICS], ids=["no-diagnostics", "diagnostics"])
+@pytest.mark.parametrize("checks", [None, ""], ids=["none", "empty"])
+def test_without_keyword_checks_the_prompt_is_byte_identical(
+    checks: str | None, diagnostics: dict[str, Any] | None
+) -> None:
+    """A turn without a check with a known count is shown to the validator exactly as before.
+
+    Args:
+        checks (str | None): The turn's keyword checks: none.
+        diagnostics (dict[str, Any] | None): Summary diagnostics, which keep their place.
+    """
+    agent = ResultValidationResponseAgent(enabled=True, llm=None)
+
+    prompt = agent._build_prompt(
+        query="q", answer="Im Mai [1].", sources=SOURCES, summary_diagnostics=diagnostics, keyword_checks=checks
+    )
+
+    assert prompt == agent._build_prompt(
+        query="q", answer="Im Mai [1].", sources=SOURCES, summary_diagnostics=diagnostics
+    )
+    assert prompt == agent._prompt_template.format(
+        retrieval_context="User query:\nq\n\n",
+        answer="Im Mai [1].",
+        diagnostics_text=agent._summary_diagnostics_to_text(diagnostics),
+        sources_text=agent._sources_to_text(SOURCES)[0],
+    )
+    assert CHECKS_HEADING not in prompt

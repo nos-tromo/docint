@@ -42,6 +42,14 @@ DEFAULT_ASSESSMENT_NOTE = (
     "each statement in the answer is supported by the sources."
 )
 
+#: Heads an agent turn's keyword checks, which the validator reads as facts, never as sources.
+KEYWORD_CHECKS_HEADING = (
+    "Keyword checks (exact counts of indexed chunks that contain all the words; facts about the collection, "
+    "not sources):"
+)
+#: The sources of an answer that rests on keyword checks alone.
+NO_SOURCES_BESIDE_CHECKS = "(none: the answer rests on the keyword checks above, so judge sources_relevant by them)"
+
 DEFAULT_RESPONSE_VALIDATOR_PROMPT = (
     "You are a strict response validator for a RAG system.\n"
     "Assess if the answer is faithful to the retrieved sources and if the "
@@ -109,6 +117,9 @@ class ResultValidationResponseAgent(ResponseAgent):
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
         """Validate the answer against retrieved sources and set alert metadata.
 
+        An answer with no source is checked against the turn's keyword checks when it has
+        any; with neither, it is mismatched without asking the model.
+
         Args:
             result (RetrievalResult): The retrieval result to validate.
             turn (Turn): Current conversation turn.
@@ -130,9 +141,9 @@ class ResultValidationResponseAgent(ResponseAgent):
                 reason="No answer to validate.",
             )
             return result
-        if not result.sources:
-            # An answer with no retrieved sources is mismatched by construction:
-            # there is nothing to be grounded against.
+        if not result.sources and not result.keyword_checks:
+            # An answer with neither sources nor keyword checks is mismatched by
+            # construction: there is nothing to be grounded against.
             result.validation_checked = True
             result.validation_mismatch = True
             result.validation_reason = "Answer produced without retrieved sources."
@@ -148,6 +159,8 @@ class ResultValidationResponseAgent(ResponseAgent):
                 rewritten_query=result.rewritten_query,
                 intent=result.intent,
                 tool_used=result.tool_used,
+                previous_query=turn.previous_user_input,
+                keyword_checks=result.keyword_checks,
             )
             response = self.llm.complete(prompt)
             response_text = str(getattr(response, "text", "") or "").strip()
@@ -225,6 +238,8 @@ class ResultValidationResponseAgent(ResponseAgent):
         rewritten_query: str | None = None,
         intent: str | None = None,
         tool_used: str | None = None,
+        previous_query: str | None = None,
+        keyword_checks: str | None = None,
     ) -> str:
         """Build validation prompt for the secondary LLM check.
 
@@ -237,20 +252,29 @@ class ResultValidationResponseAgent(ResponseAgent):
             rewritten_query (str | None): The rewritten query produced by the understanding agent, if any.
             intent (str | None): Detected intent label.
             tool_used (str | None): Retrieval tool that produced the sources.
+            previous_query (str | None): The user's message before this one, shown ahead of the query.
+            keyword_checks (str | None): An agent turn's keyword checks, one line each, shown after any
+                summary diagnostics under :data:`KEYWORD_CHECKS_HEADING`; ``None`` or empty adds nothing.
 
         Returns:
             str: Prompt asking for groundedness/relevance validation.
         """
+        checks = (keyword_checks or "").strip()
         sources_text, truncated = self._sources_to_text(sources)
         if truncated:
             sources_text = f"{self._truncation_note}\n\n{sources_text}"
+        if checks and not sources:
+            sources_text = NO_SOURCES_BESIDE_CHECKS
         diagnostics_text = self._summary_diagnostics_to_text(summary_diagnostics)
+        if checks:
+            diagnostics_text += f"{KEYWORD_CHECKS_HEADING}\n{checks}\n\n"
         retrieval_context = self._retrieval_context_to_text(
             user_query=query,
             retrieval_query=retrieval_query,
             rewritten_query=rewritten_query,
             intent=intent,
             tool_used=tool_used,
+            previous_query=previous_query,
         )
         if intent == "assessment":
             retrieval_context = f"{retrieval_context}{self._assessment_note}\n\n"
@@ -269,8 +293,12 @@ class ResultValidationResponseAgent(ResponseAgent):
         rewritten_query: str | None,
         intent: str | None,
         tool_used: str | None,
+        previous_query: str | None = None,
     ) -> str:
         """Render retrieval context (original query + rewrite + intent) for the validator.
+
+        A previous message comes first: a follow-up such as "And since when?" is only judged
+        right against what it follows.
 
         Args:
             user_query (str): Verbatim user input.
@@ -278,11 +306,14 @@ class ResultValidationResponseAgent(ResponseAgent):
             rewritten_query (str | None): Rewritten query from the understanding agent.
             intent (str | None): Detected intent label.
             tool_used (str | None): Retrieval tool that produced the sources.
+            previous_query (str | None): The user's message before this one; left out when blank.
 
         Returns:
             str: Prompt context block ending in a blank line.
         """
-        lines = [f"User query:\n{user_query}"]
+        previous = (previous_query or "").strip()
+        lines = [f"Previous user message:\n{previous}"] if previous else []
+        lines.append(f"User query:\n{user_query}")
         effective_retrieval = retrieval_query or rewritten_query
         if effective_retrieval and effective_retrieval.strip().casefold() != user_query.strip().casefold():
             lines.append(f"Retrieval query (after rewrite):\n{effective_retrieval}")

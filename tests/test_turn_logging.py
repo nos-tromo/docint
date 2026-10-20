@@ -244,3 +244,33 @@ def test_an_assessment_turn_logs_its_shape_but_never_its_queries(loguru_caplog_i
     assert "outcome=split" in line
     assert "reason=time_budget" in line
     assert "zzsecretquestionzz" not in "\n".join(loguru_caplog_info.messages)
+
+
+def test_a_researched_lookup_logs_answer_lookup(loguru_caplog_info: LogCaptureFixture) -> None:
+    """A lookup the agent researched logs the same fields as an assessment, and never its queries.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    agent = {
+        "steps": 2,
+        "answer": "plain",
+        "reason": None,
+        "actions": [{"action": "search", "detail": "zzsecretquestionzz method", "found": 2}],
+    }
+
+    _log_turn_summary(
+        collection="u000000000000__field-notes",
+        session_id="s-1",
+        turn_idx=2,
+        response=_response(retrieval_mode="agent", answer_mode="lookup", agent=agent),
+        elapsed_s=1.0,
+    )
+
+    line = next(message for message in loguru_caplog_info.messages if "Turn complete" in message)
+    assert "mode=agent" in line
+    assert "answer=lookup" in line
+    assert "steps=2" in line
+    assert "outcome=plain" in line
+    assert "reason=none" in line
+    assert "zzsecretquestionzz" not in "\n".join(loguru_caplog_info.messages)

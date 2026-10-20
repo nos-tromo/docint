@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import gc
 import hashlib
 import json
@@ -24,12 +25,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from docint.agents.types import AnswerMode, PriorTurn
+    from docint.agents.turn.history import ConversationWindow
+    from docint.agents.types import PriorTurn
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -49,6 +51,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SparseClientConfig,
     SummaryConfig,
+    load_agent_env,
     load_assessment_env,
     load_embed_client_env,
     load_embedding_env,
@@ -128,8 +131,21 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from docint.agents.assessment.research import ResearchLoop
-from docint.agents.assessment.runner import AssessmentDoesNotFit, AssessmentRunner
+from docint.agents.assessment.ledger import EvidenceLedger
+from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, message_cost, schema_tokens
+from docint.agents.turn.history import question_block
+from docint.agents.turn.keyword import (
+    DEFAULT_KEYWORD_FIELD,
+    LONG_WORD,
+    NO_USABLE_WORD,
+    ONE_VALUE_ONLY,
+    UNINDEXABLE_WORD,
+    KeywordMatcher,
+    KeywordResult,
+)
+from docint.agents.turn.loop import AgentLoop
+from docint.agents.turn.tools import ToolRegistry
+from docint.agents.turn.toolsets import toolset_for
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
     ResolutionSummary,
@@ -165,7 +181,7 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
-from docint.core.retrieval.evidence import EveryChildQuery
+from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval.visual import (
     BLOB_PAYLOAD_KEYS,
     DEFAULT_RETRIEVAL_TARGET,
@@ -182,22 +198,28 @@ from docint.core.retrieval.visual import (
 )
 from docint.core.retrieval_filters import build_qdrant_filter, matches_metadata_filters, merge_qdrant_filters
 from docint.core.search.fields import (
+    DEFAULT_SEARCH_FIELD,
     IMAGE_LANE_FIELDS,
     SEARCH_FIELDS,
     UnknownSearchFieldError,
     ensure_field_indexes,
     field_indexes_ready,
+    field_ready_in_schema,
+    read_payload_schema,
     search_field_spec,
 )
 from docint.core.search.fulltext import (
     build_any_keyword_filter,
     build_scan_filter,
     build_search_filter,
+    index_tokens,
     matches_any_phrase,
     not_coarse_condition,
     parse_keywords,
 )
 from docint.core.search.index import (
+    SEARCH_MAX_TOKEN_LEN,
+    SEARCH_MIN_TOKEN_LEN,
     SEARCH_TEXT_FIELD,
     ensure_search_index,
     image_companion_name,
@@ -206,7 +228,7 @@ from docint.core.search.index import (
 )
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
-from docint.core.state.session_manager import SessionManager
+from docint.core.state.session_manager import SessionManager, start_agent_turn
 from docint.core.storage.artifact_gc import (
     collection_artifacts,
     recorded_sources,
@@ -249,6 +271,7 @@ from docint.utils.retry import (
     retry_with_backoff,
 )
 from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
+from docint.utils.timefmt import format_short
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -510,6 +533,8 @@ def _quantization_matches(
 #   answer's evidence set, stamped by
 #   :class:`CitationNumberingPostprocessor` so the answer's "source 3"
 #   and the chat window's third card are the same chunk.
+# * Video keyframes: ``keyframe`` (``#3 @ 01:12``), derived by
+#   ``RAG._image_caption_node``; the raw index and time stay hidden.
 #
 # Explicitly excluded via absence: ``entities`` / ``relations`` (NER
 # output, can exceed 60 KB), per-column row dumps in ``tables.py``
@@ -520,7 +545,7 @@ def _quantization_matches(
 # bulky), pipeline artefacts, and our own
 # ``parent_context_windowed`` / ``parent_full_chars`` / ``window_chars``
 # debug markers and ``docint_match_spans`` (where the retrieved child sits
-# in an emitted parent; read by assessment packing, never by the prompt).
+# in an emitted parent; read by agent-turn packing, never by the prompt).
 # Any new metadata key added by a future reader defaults
 # to excluded — safer than accidentally reintroducing the overflow.
 LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
@@ -537,6 +562,7 @@ LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
         "table",
         "reference_metadata",
         "docint_doc_kind",
+        "keyframe",
     }
 )
 
@@ -603,24 +629,27 @@ DEFAULT_SUMMARIZE_PROMPT = (
     "metadata. Limit the response to 15 sentences."
 )
 DEFAULT_RETRIEVAL_REWRITE_PROMPT = (
-    "Rewrite the user's latest message into a standalone retrieval query "
-    "suitable for vector search.\n\n"
+    "Rewrite the user's latest message into a standalone retrieval query suitable for vector search.\n\n"
     "Rules:\n"
-    "- Resolve all pronouns and ellipses using the conversation context.\n"
-    "- If the user is asking to elaborate, clarify, or expand on a previous "
-    'answer ("tell me more", "please elaborate", "I didn\'t understand X", '
-    '"what do you mean by ..."), EXTRACT the specific entities, names, '
-    "organizations, claims, or topics they are referring to from the most "
-    "recent assistant turn and inline them in the rewritten query. Example: "
-    '"Tell me more about the UN references" becomes a query that names the '
-    "specific UN bodies/resolutions/claims the prior assistant turn "
-    "mentioned.\n"
+    '- Use the conversation context only to resolve references: pronouns, ellipses, and what "this", '
+    '"those" or "it" point to.\n'
+    "- Never copy names or claims from the assistant's earlier answers into the query unless the user"
+    ' refers to them explicitly ("tell me more about the second person", "what do you mean by ..."); '
+    "then name exactly what the user refers to.\n"
+    "- A statement, correction or hint is not a new topic: rewrite it into the open question it bears"
+    ' on, keeping what it says. Example: after "What was the weather like in harbour_walk.webm?", the'
+    ' hint "It was filmed in November!" becomes "weather in harbour_walk.webm in November".\n'
+    '- A follow-up asking whether the answer was complete or right, such as "Is anyone missing?" or '
+    '"Were they the only ones?", continues the earlier question, even when it points at that answer: '
+    'the names in that answer are never copied in. Example: after "Who appears in '
+    'harbour_walk.webm?", it becomes "people appearing in harbour_walk.webm".\n'
     "- Do not answer the question; only produce search terms.\n"
-    "- Do not invent facts that are absent from both the user message and the "
-    "conversation context.\n"
+    "- Do not invent facts that are absent from both the user message and the conversation context.\n"
     "- Return ONLY the rewritten query, no preamble.\n\n"
-    "Conversation context:\n{conversation_context}\n\n"
-    "Latest user message:\n{user_msg}\n\n"
+    "Conversation context:\n"
+    "{conversation_context}\n\n"
+    "Latest user message:\n"
+    "{user_msg}\n\n"
     "Standalone retrieval query:"
 )
 DEFAULT_CONVERSATION_SUMMARY_PROMPT = (
@@ -630,53 +659,71 @@ DEFAULT_CONVERSATION_SUMMARY_PROMPT = (
     "conclusions. Do not add new claims.\n\n"
 )
 DEFAULT_GROUNDED_TEXT_QA_PROMPT = (
-    "You are answering a question from retrieved evidence in an ongoing "
-    "conversation.\n\n"
+    "You are answering a question from retrieved evidence in an ongoing conversation.\n"
+    "\n"
     "Conversation continuity:\n"
-    "{prior_turn_context}\n\n"
+    "{prior_turn_context}\n"
+    "\n"
     "Retrieved context snippets:\n"
     "---------------------\n"
     "{context_str}\n"
     "---------------------\n"
-    "Current question: {query_str}\n\n"
-    "Instructions:\n"
-    "- Treat each retrieved snippet as a distinct source chunk; do not blend "
-    "claims across chunks unless the overlap is explicit.\n"
-    "- Each snippet is labelled with a `citation_index`. Refer to a snippet "
-    "only by that number, in square brackets (e.g. [3]); never number the "
-    "snippets yourself.\n"
-    "- If the current question asks to elaborate on, clarify, or expand on the "
-    "prior assistant turn, restate and expand the specific claims from that "
-    "prior turn that the user is asking about. Use the retrieved snippets to "
-    "corroborate or add supporting detail. The prior assistant turn was itself "
-    "sourced; you may quote and elaborate on it.\n"
-    "- If snippets conflict, say so explicitly.\n"
-    "- Only respond that evidence is insufficient when BOTH the retrieved "
-    "snippets AND the prior assistant turn lack the requested information. In "
-    "that case, name the specific aspect that is missing.\n"
-    "- Preserve source-specific metadata such as author, network, timestamp, "
-    "page, or row when it matters.\n\n"
+    "Current question: {query_str}\n"
+    "\n"
+    "Write only the answer the user should read. Apply the rules below silently — do not narrate them, restate "
+    'the question, add sections about your process like "Check"/"Result"/"Evidence"/"Conclusion", or describe '
+    "your own process:\n"
+    "- Respond directly and naturally in the user's language. Do not open or close with commentary about the "
+    "retrieved snippets, the sources, the conversation, or whether the evidence was sufficient, consistent, or "
+    "free of contradictions. State what is true and cite specifics inline.\n"
+    "- Ground every claim in the retrieved snippets; treat each as a distinct source and do not blend claims "
+    "across them unless the overlap is explicit. The one exception is a conclusion the snippets support but do "
+    "not state (such as the weather from the sky and the clothing in a picture): start its sentence with "
+    '"Inference:" and cite the snippets it rests on — one sentence, never a closing section.\n'
+    "- Never name a person in a picture unless a snippet links that name to them, not even as an inference; "
+    "describe them instead.\n"
+    "- Each snippet is labelled with a `citation_index`. Refer to a snippet only by that number, in square "
+    "brackets (e.g. [3]); never number the snippets yourself.\n"
+    "- If a prior assistant turn is shown above and the user asks to elaborate on, clarify, or expand it, "
+    "restate and expand the specific claims it raised, using the snippets for support; you may quote it.\n"
+    "- When the user states or corrects something, say whether the snippets confirm it.\n"
+    "- Point out a contradiction only when the snippets genuinely disagree; otherwise do not mention consistency "
+    "at all.\n"
+    "- Say the evidence is insufficient only when neither the snippets nor any prior assistant turn contain the "
+    "requested information or support an inference about it, and then name just the specific missing aspect.\n"
+    "- Preserve source-specific metadata (author, network, timestamp, page, or row) when it matters to the "
+    "answer.\n"
+    "- Format the answer in Markdown where structure helps the reader: a bulleted or numbered list for several "
+    "items or steps, **bold** for a key name or term, a table to compare several items on the same attributes, "
+    "and `###` headings that name topics only when a long answer covers several distinct ones. Keep a short "
+    "answer to one or two plain paragraphs. Write every citation as plain [3] — never inside a link, code span "
+    "or heading — and never wrap the answer in a code block.\n"
+    "\n"
     "Grounded answer:"
 )
 DEFAULT_GROUNDED_REFINE_PROMPT = (
-    "You are refining an answer from retrieved evidence in an ongoing "
-    "conversation.\n\n"
+    "You are refining an answer from retrieved evidence in an ongoing conversation.\n"
+    "\n"
     "Conversation continuity:\n"
-    "{prior_turn_context}\n\n"
+    "{prior_turn_context}\n"
+    "\n"
     "Original question: {query_str}\n"
     "Current answer: {existing_answer}\n"
     "New context snippet(s):\n"
     "---------------------\n"
     "{context_msg}\n"
     "---------------------\n"
-    "Update the answer only when the new evidence materially improves or "
-    "corrects it. Keep source-specific claims distinct. If the original "
-    "question is an elaboration of the prior assistant turn, you may quote "
-    "and expand on the prior turn's claims when the new snippets corroborate "
-    "them. If the new context is not useful, return the current answer "
-    "unchanged. Each snippet is labelled with a `citation_index`; refer to a "
-    "snippet only by that number, in square brackets (e.g. [3]), and leave "
-    "the numbers already used in the current answer as they are.\n"
+    "Update the answer only when the new evidence materially improves or corrects it, and keep source-specific "
+    "claims distinct. A conclusion the snippets support but do not state is allowed when its sentence starts "
+    'with "Inference:" and cites the snippets it rests on. Never name a person in a picture unless a snippet '
+    "links that name to them, not even as an inference. When the user states or corrects something, say whether "
+    "the snippets confirm it. Each snippet is labelled with a `citation_index`; refer to a snippet only by that "
+    "number, in square brackets (e.g. [3]), and leave the numbers already used in the current answer as they "
+    "are. Keep the current answer's Markdown structure — lists, bold, tables, headings — and format any addition "
+    "the same way. If a prior assistant turn is shown above and the original question elaborates on it, you may "
+    "quote and expand on its claims when the new snippets corroborate them. If the new context is not useful, "
+    "return the current answer unchanged. Return only the answer the user should read — do not narrate these "
+    "rules, describe the snippets or sources, or comment on whether the evidence was sufficient or consistent.\n"
     "Refined grounded answer:"
 )
 DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT = (
@@ -1512,7 +1559,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             match_spans: Where the retrieved child sits in *source*'s text,
                 as ``[start, end]`` spans. Written under
                 ``MATCH_SPANS_KEY`` before the exclusion list is built, so
-                the prompt never sees it; only assessment packing reads it.
+                the prompt never sees it; only agent-turn packing reads it.
 
         Returns:
             A fresh ``TextNode`` preserving the original ``node_id`` and
@@ -1769,7 +1816,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             seen_parent_ids.add(parent_id)
             parent_hits += 1
             parent_text = parent_node.get_content()
-            # An assessment folds this section's later hits into its one emission; a lookup skips them.
+            # An agent search folds this section's later hits into its one emission; a lookup skips them.
             group: list[NodeWithScore] = (
                 [hit for hit in nodes[position:] if self._parent_id(hit) == parent_id] if every_child else []
             )
@@ -2466,11 +2513,12 @@ class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
         Returns:
             set[str]: Ids of the candidates whose description score reaches
             ``rescore_min_score``. Empty with no candidate, no re-score or no
-            query, and when the re-score raises. A completed call logs its
+            query, for an agent's own search (:class:`AgentSearchQuery`), and
+            when the re-score raises. A completed call logs its
             counts and duration at DEBUG, never the query or the description.
         """
         query = str(getattr(query_bundle, "query_str", "") or "").strip()
-        if not candidates or self.rescore is None or not query:
+        if not candidates or self.rescore is None or not query or isinstance(query_bundle, AgentSearchQuery):
             return set()
         started_at = time.monotonic()
         try:
@@ -2953,6 +3001,145 @@ _reasoning_override: ContextVar[bool | None] = ContextVar("docint_reasoning_over
 # request keeps its own reference and the OS reclaims the fd once it is gone.
 _RETRIEVAL_HANDLE_CACHE_MAX = 32
 
+#: Most passages an agent turn's evidence holds; a larger pinned scope raises it to hold every pinned passage.
+AGENT_LEDGER_CAP = 64
+#: Longest LLM-visible metadata string an agent turn's passage header shows; a longer one is cut with an ellipsis.
+AGENT_METADATA_VALUE_CHARS = 200
+#: What a reference row's header leads with after its citation line: a frame's label, then its file and reference block.
+_AGENT_LEADING_KEYS = ("keyframe", "filename", "reference_metadata")
+#: Who wrote a reference row and when, in the order its reference block leads with them: the row's own
+#: identity, then that of the post a frame, an image or a transcript segment inherits.
+_AGENT_IDENTITY_KEYS = (
+    "type",
+    "author",
+    "author_id",
+    "vanity",
+    "timestamp",
+    "network",
+    "text_id",
+    "uuid",
+    "url",
+    "posting_author",
+    "posting_author_id",
+    "posting_vanity",
+    "posting_timestamp",
+    "posting_network",
+)
+
+#: Why a collection cannot offer an agent turn a keyword match: the request's filters do not compile for Qdrant, a
+#: lane in scope was not counted, or the text, which a call matches by default, has no index to match.
+KeywordUnavailable = Literal["filters", "coverage", "text_not_ready"]
+
+
+@dataclass(frozen=True)
+class AgentTurn:
+    """One chat turn's agent loop, built for a request and not yet run.
+
+    Attributes:
+        loop (AgentLoop): The loop, bound to the request's model, tools, prompts and limits.
+        ledger (EvidenceLedger): The turn's evidence, empty, for :meth:`AgentLoop.run`; it
+            holds every passage the turn's pinned scope needs.
+        budget (TurnBudget): How the turn spends the chat model's context window.
+        reasoning (bool): Whether the request's reasoning model runs the turn.
+    """
+
+    loop: AgentLoop
+    ledger: EvidenceLedger
+    budget: TurnBudget
+    reasoning: bool
+
+
+def _trimmed(value: Any) -> Any:
+    """Cut every string in a metadata value to ``AGENT_METADATA_VALUE_CHARS``, and drop its ``None`` leaves.
+
+    Args:
+        value (Any): A metadata value: a string, or a dict or list that may hold some.
+
+    Returns:
+        Any: The value with each longer string cut, an ellipsis last, and each ``None`` dropped
+        from its dicts and lists; containers rebuilt, other leaves as given.
+    """
+    if isinstance(value, str):
+        return value if len(value) <= AGENT_METADATA_VALUE_CHARS else value[: AGENT_METADATA_VALUE_CHARS - 1] + "…"
+    if isinstance(value, dict):
+        return {key: _trimmed(item) for key, item in value.items() if item is not None}
+    if isinstance(value, (list, tuple)):
+        return [_trimmed(item) for item in value if item is not None]
+    return value
+
+
+def _identity_first(metadata: dict[str, Any], hidden: set[str]) -> dict[str, Any]:
+    """Lead a reference row's metadata with its identity, so a compacted header still names it.
+
+    Only a row carrying a ``reference_metadata`` block is reordered. After a leading citation
+    line come a frame's label, the file and the reference block, who and when first in it;
+    the other keys follow in their order. A row without a file name, as an older table
+    export's, has its ``origin`` in the file's place. An ``origin`` that repeats the row's file
+    is dropped; one that names another file, or is the only file the row names, is kept.
+
+    Args:
+        metadata (dict[str, Any]): A view's metadata, its visible values trimmed.
+        hidden (set[str]): The keys the model is not shown.
+
+    Returns:
+        dict[str, Any]: The metadata reordered; the same dict for a row without a reference block.
+    """
+    reference = metadata.get("reference_metadata")
+    if not isinstance(reference, dict):
+        return metadata
+    leading = {key: reference[key] for key in _AGENT_IDENTITY_KEYS if key in reference}
+    dropped = "origin" if _repeats_file(metadata) else None
+    rest = {key: value for key, value in metadata.items() if key != dropped}
+    rest["reference_metadata"] = {**leading, **{key: value for key, value in reference.items() if key not in leading}}
+    visible = [key for key in rest if key not in hidden]
+    head = ["citation_index"] if visible[:1] == ["citation_index"] else []
+    file_key = "filename" if rest.get("filename") else "origin"
+    slots = [file_key if key == "filename" else key for key in _AGENT_LEADING_KEYS]
+    order = [*head, *(key for key in slots if key in rest)]
+    return {**{key: rest[key] for key in order}, **{key: value for key, value in rest.items() if key not in order}}
+
+
+def _repeats_file(metadata: dict[str, Any]) -> bool:
+    """Tell whether a row's ``origin`` names the same file as its ``filename``.
+
+    Args:
+        metadata (dict[str, Any]): The row's metadata.
+
+    Returns:
+        bool: ``True`` when the row has a file name and its ``origin`` names that file.
+    """
+    origin, filename = metadata.get("origin"), metadata.get("filename")
+    return bool(filename) and isinstance(origin, dict) and origin.get("filename") == filename
+
+
+def agent_llm_view(node: BaseNode) -> BaseNode:
+    """Render a passage as an agent turn's model reads it: the chat prompt's view, trimmed, its identity first.
+
+    A social row carries long text in its header, such as the post a comment answers, and
+    its file, origin, table and reference block already run past what a reply shows whole:
+    the header is compacted to its start, which loses who wrote the passage. Every LLM-visible
+    string is cut to ``AGENT_METADATA_VALUE_CHARS`` and every visible ``None`` dropped; a row
+    carrying a reference block then leads with its identity (see :func:`_identity_first`).
+    Hidden keys and the passage's text stay as the chat view has them, and a passage without
+    a reference block keeps its order. The view is a clone, so the stored node is never
+    written to.
+
+    Args:
+        node (BaseNode): A passage of the turn's evidence.
+
+    Returns:
+        BaseNode: The clone :meth:`ParentContextPostprocessor._emit_with_llm_exclusion` makes,
+        its visible metadata trimmed and, for a reference row, its identity first.
+    """
+    view = ParentContextPostprocessor._emit_with_llm_exclusion(node)
+    hidden = set(view.excluded_llm_metadata_keys)
+    metadata = {
+        key: value if key in hidden else _trimmed(value)
+        for key, value in view.metadata.items()
+        if key in hidden or value is not None
+    }
+    return view.model_copy(update={"metadata": _identity_first(metadata, hidden)})
+
 
 # ``slots=True`` is intentionally NOT used here. ``qdrant_collection`` is a
 # normal field for the type checker / generated ``__init__`` signature, but its
@@ -3119,6 +3306,7 @@ class RAG:
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _bounded_text_model: OpenAI | None = field(default=None, init=False, repr=False)
+    _agent_reasoning_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
     sparse_client_config: SparseClientConfig | None = field(default=None, init=False, repr=False)
     embed_client_config: EmbedClientConfig | None = field(default=None, init=False, repr=False)
@@ -3753,9 +3941,7 @@ class RAG:
         Returns:
             OpenAI: The post-retrieval generation model.
         """
-        override = _reasoning_override.get()
-        enabled = self.openai_config.thinking_enabled if override is None else override
-        if not enabled or get_openai_reasoning_effort(self.openai_config, enabled=True) is None:
+        if not self.reasoning_requested:
             return self.text_model
 
         if self._post_retrieval_text_model is None:
@@ -3763,16 +3949,31 @@ class RAG:
         return self._post_retrieval_text_model
 
     @property
+    def reasoning_requested(self) -> bool:
+        """Whether this request's answer runs on the reasoning model.
+
+        The request's toggle decides while a :meth:`reasoning_scope` is active, else the
+        ``OPENAI_ENABLE_THINKING`` default; either way only when a reasoning effort is
+        configured. :attr:`post_retrieval_text_model` and :attr:`agent_text_model` follow it.
+
+        Returns:
+            bool: ``True`` when the reasoning model answers.
+        """
+        override = _reasoning_override.get()
+        enabled = self.openai_config.thinking_enabled if override is None else override
+        return bool(enabled) and get_openai_reasoning_effort(self.openai_config, enabled=True) is not None
+
+    @property
     def bounded_text_model(self) -> OpenAI:
         """Return the plain chat model with retries off, for calls that promise a time bound.
 
         The SDK retries a failed call and llama-index retries it again, so with
         ``OPENAI_MAX_RETRIES`` set one call can outlast its own ``timeout`` several
-        times over. The turn classifier and the research step use this instance
-        instead: a failure ends the call and each degrades on its own. Both abandon
-        a call at their deadline, but an abandoned call holds its slot until it
-        ends, so a single attempt still bounds how long it holds it. Lookups and
-        the answer keep ``OPENAI_MAX_RETRIES``.
+        times over. Every round of an agent turn without reasoning (see
+        :attr:`agent_text_model`), its answer included, uses this instance
+        instead: a failure ends the call, and the loop decides what follows. Its
+        time budget and its model slots assume one attempt per call. Lookups keep
+        ``OPENAI_MAX_RETRIES``.
 
         Returns:
             OpenAI: The non-reasoning model, making a single attempt per call.
@@ -3780,6 +3981,23 @@ class RAG:
         if self._bounded_text_model is None:
             self._bounded_text_model = self._create_text_model(max_retries=0)
         return self._bounded_text_model
+
+    @property
+    def agent_text_model(self) -> OpenAI:
+        """Return the chat model every round of an agent turn calls, one attempt per call.
+
+        It follows the request's reasoning toggle as :attr:`post_retrieval_text_model` does
+        (see :attr:`reasoning_requested`): the reasoning model, else :attr:`bounded_text_model`.
+        Retries are off for both, since the loop's time budget and model slots assume none.
+
+        Returns:
+            OpenAI: The model; each kind is built once.
+        """
+        if not self.reasoning_requested:
+            return self.bounded_text_model
+        if self._agent_reasoning_text_model is None:
+            self._agent_reasoning_text_model = self._create_text_model(enable_reasoning=True, max_retries=0)
+        return self._agent_reasoning_text_model
 
     @property
     def qdrant_client(self) -> QdrantClient:
@@ -4714,6 +4932,40 @@ class RAG:
 
         return _lane
 
+    @staticmethod
+    def _companion_filter(
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        vector_store_kwargs: dict[str, Any] | None,
+    ) -> Any | None:
+        """Compile a request's filter for the image companion: the compiled one it carries, else its rules.
+
+        The visual retriever and an agent turn's image tools both search the companion
+        under it, so both compile it here.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): Raw request filters.
+            metadata_filters_active (bool): Whether filters are in play.
+            vector_store_kwargs (dict[str, Any] | None): Native query kwargs,
+                carrying the request's compiled filter when it has one.
+
+        Returns:
+            Any | None: The native filter; ``None`` when the request has none.
+
+        Raises:
+            ValueError: When the request declared filters that reached the
+                runtime as neither raw rules nor a compiled filter: unfiltered
+                imagery would answer a filtered question.
+        """
+        qdrant_filter = (vector_store_kwargs or {}).get("qdrant_filters")
+        if qdrant_filter is None and metadata_filter_rules:
+            qdrant_filter = build_qdrant_filter(metadata_filter_rules)
+        if metadata_filters_active and not metadata_filter_rules and qdrant_filter is None:
+            logger.error("ValueError: An image companion search asked for filters that reached it in neither form.")
+            raise ValueError("Metadata filters are active but none reached the image companion.")
+        return qdrant_filter
+
     def _build_visual_retriever(
         self,
         *,
@@ -4740,13 +4992,11 @@ class RAG:
                 unfiltered imagery is exactly the silent wrong answer this
                 target exists to avoid, so it is loud instead.
         """
-        qdrant_filter = (vector_store_kwargs or {}).get("qdrant_filters")
-        if qdrant_filter is None and metadata_filter_rules:
-            qdrant_filter = build_qdrant_filter(metadata_filter_rules)
-        if metadata_filters_active and not metadata_filter_rules and qdrant_filter is None:
-            logger.error("ValueError: Visual retrieval asked for filters that reached neither lane.")
-            raise ValueError("Metadata filters are active but none reached the visual retriever.")
-
+        qdrant_filter = self._companion_filter(
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            vector_store_kwargs=vector_store_kwargs,
+        )
         self._ensure_visual_indexes_once(self.qdrant_collection)
         top_k = max(1, int(self._image_config_value("visual_retrieve_top_k", DEFAULT_VISUAL_RETRIEVE_TOP_K)))
         return VisualRetriever(
@@ -4755,6 +5005,34 @@ class RAG:
             make_node=self._visual_candidate_node,
             limit=top_k,
         )
+
+    def _agent_search_images(self, description: str, *, qdrant_filter: Any | None = None) -> list[NodeWithScore]:
+        """Find the pictures that show a description, for an agent turn's ``search_images`` tool.
+
+        The visual target's chain up to its numbering: the two-lane visual retriever, then
+        the rerank against the description, as deep as a visual answer may look. No image
+        relevance floor: a description of what a picture shows scores the right image as
+        low on the cross-encoder as a question about the imagery does (see the visual
+        branch of :meth:`build_query_engine`). Both lanes and the rerank fail soft, so an
+        outage leaves fewer pictures, or the fused order, rather than failing the call.
+        Runs under the caller's collection scope (:meth:`collection_scope`).
+
+        Args:
+            description (str): The visible cues to look for.
+            qdrant_filter (Any | None): The request's compiled native filter, which the
+                image companion applies itself.
+
+        Returns:
+            list[NodeWithScore]: Caption nodes, best first; empty when nothing matched.
+        """
+        retriever = self._build_visual_retriever(
+            metadata_filter_rules=None,
+            metadata_filters_active=qdrant_filter is not None,
+            vector_store_kwargs={"qdrant_filters": qdrant_filter} if qdrant_filter is not None else None,
+        )
+        query = QueryBundle(query_str=description)
+        reranker = LazyRerankerPostprocessor(rag=self, top_n=max(self.rerank_top_n, self._visual_answer_max_images()))
+        return reranker.postprocess_nodes(retriever.retrieve(query), query_bundle=query)
 
     def _image_caption_node(self, payload: dict[str, Any], caption: str) -> NodeWithScore:
         """Wrap one image payload as a retrieval node.
@@ -4777,6 +5055,11 @@ class RAG:
         filename = RAG._source_from_payload(collection=self.qdrant_collection, payload=payload).get("filename")
         if filename:
             metadata.setdefault("filename", filename)
+        keyframe = RAG._keyframe_label(payload)
+        if keyframe:
+            # First, so a header cut to its opening (a social frame's long posting block) still names the frame.
+            metadata.pop("keyframe", None)
+            metadata = {"keyframe": keyframe, **metadata}
 
         node = TextNode(text=caption, metadata=metadata)
         node_id = str(payload.get("node_id") or payload.get("image_id") or "").strip()
@@ -4789,6 +5072,96 @@ class RAG:
         # enabled for this collection.
         node.excluded_llm_metadata_keys = sorted(k for k in metadata if k not in LLM_VISIBLE_METADATA_KEYS)
         return NodeWithScore(node=node, score=float(raw_score) if isinstance(raw_score, (int, float)) else None)
+
+    @staticmethod
+    def _keyframe_label(payload: dict[str, Any]) -> str | None:
+        """Name a video frame as the model reads it: its number in the clip and when it appears.
+
+        Args:
+            payload (dict[str, Any]): An `_images` companion point payload.
+
+        Returns:
+            str | None: ``#<keyframe_index + 1> @ <mm:ss>``, or ``#<n>`` alone for a frame
+            stored without Nextext's time manifest or with a time it cannot print; ``None``
+            for a point with no ``keyframe_index``, which is no video frame.
+        """
+        index = payload.get("keyframe_index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            return None
+        seconds = payload.get("keyframe_time_sec")
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            return f"#{index + 1}"
+        if not math.isfinite(seconds) or seconds < 0:
+            return f"#{index + 1}"
+        return f"#{index + 1} @ {format_short(seconds)}"
+
+    def _agent_list_keyframes(self, file_or_hash: str, *, qdrant_filter: Any | None = None) -> list[NodeWithScore]:
+        """List one clip's frames in time order, for an agent turn's ``keyframes`` tool.
+
+        A frame belongs to the clip when its ``source_file`` is the clip's file name or its
+        ``media_file_hash`` the clip's content hash; in the image companion only a clip's
+        frames carry either. A point counts as a frame by its ``keyframe_index``, the test
+        its label uses, which holds on the standalone and the social path alike (a social
+        frame's ``source_type`` is ``social_media``). Frames stored before keyframe indices
+        existed can be neither ordered nor labelled, so they are not listed here;
+        ``search_images`` still finds them. Thumbnails and the search text stay in the
+        store: pixels never ride a node. Runs under the caller's collection scope
+        (:meth:`collection_scope`).
+
+        Args:
+            file_or_hash (str): The clip's file name, or its content hash.
+            qdrant_filter (Any | None): The request's compiled native filter, ANDed with
+                the clip and frame conditions.
+
+        Returns:
+            list[NodeWithScore]: One caption node per frame, ordered by ``keyframe_index``;
+            empty when the collection has no image companion or the clip no frame.
+
+        Raises:
+            Exception: Whatever the store raises, so an outage fails the call rather than
+                reading as a clip without frames.
+        """
+        key = file_or_hash.strip()
+        companion = image_companion_name(self.qdrant_collection)
+        if not key or not self.qdrant_client.collection_exists(collection_name=companion):
+            return []
+        clip = qdrant_models.Filter(
+            should=[
+                qdrant_models.FieldCondition(key="source_file", match=qdrant_models.MatchValue(value=key)),
+                qdrant_models.FieldCondition(key="media_file_hash", match=qdrant_models.MatchValue(value=key)),
+            ]
+        )
+        frame = qdrant_models.Filter(
+            must_not=[qdrant_models.IsEmptyCondition(is_empty=qdrant_models.PayloadField(key="keyframe_index"))]
+        )
+        payloads = [
+            {**(point.payload or {}), "node_id": str(point.id)}
+            for page in iter_scroll(
+                self.qdrant_client,
+                collection_name=companion,
+                scroll_filter=merge_qdrant_filters(qdrant_filter, [frame, clip]),
+                with_payload=qdrant_models.PayloadSelectorExclude(exclude=list(BLOB_PAYLOAD_KEYS)),
+                with_vectors=False,
+                on_error="raise",
+            )
+            for point in page
+        ]
+        payloads.sort(key=RAG._keyframe_order)
+        return [self._image_caption_node(payload, RAG._image_caption_text(payload)) for payload in payloads]
+
+    @staticmethod
+    def _keyframe_order(payload: dict[str, Any]) -> tuple[float, str]:
+        """Order a clip's frames by their place in it, an unreadable index last.
+
+        Args:
+            payload (dict[str, Any]): A frame's payload, carrying its point id as ``node_id``.
+
+        Returns:
+            tuple[float, str]: Its ``keyframe_index``, then its point id for a stable tie.
+        """
+        index = payload.get("keyframe_index")
+        place = float(index) if isinstance(index, (int, float)) and not isinstance(index, bool) else math.inf
+        return place, str(payload.get("node_id") or "")
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.
@@ -6495,6 +6868,50 @@ class RAG:
                 ),
             )
 
+        node_postprocessors = self._text_postprocessors(profile=profile, retrieval_options=retrieval_options)
+        return RetrieverQueryEngine.from_args(
+            retriever=self._build_retriever(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+                retrieval_options=retrieval_options,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
+                include_images=retrieval_target != "documents",
+            ),
+            llm=self.post_retrieval_text_model,
+            node_postprocessors=node_postprocessors,
+            response_synthesizer=self._build_response_synthesizer(
+                streaming=streaming,
+                social_table=bool(profile.get("is_social_table")),
+            ),
+        )
+
+    def _text_postprocessors(
+        self,
+        *,
+        profile: dict[str, Any],
+        retrieval_options: dict[str, Any] | None = None,
+        social_links: bool = True,
+    ) -> list[BaseNodePostprocessor]:
+        """Build the postprocessor chain of the ``all`` and ``documents`` targets.
+
+        A lookup's engine runs it, and so does an agent turn's keyword match, which
+        leaves the social steps out.
+
+        Args:
+            profile (dict[str, Any]): The collection profile; ``is_social_table`` sizes
+                parent context and decides whether the social steps can join.
+            retrieval_options (dict[str, Any] | None): Runtime overrides for
+                parent-context expansion.
+            social_links (bool): Whether a social collection's diversity cap and
+                link-following join the chain. A keyword match leaves them out: its
+                passages must be matches, and the cap would thin an author's postings.
+
+        Returns:
+            list[BaseNodePostprocessor]: Rerank, the image floor with its description
+            re-score, parent context when enabled, the social steps when asked, then
+            citation numbering.
+        """
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
@@ -6531,7 +6948,7 @@ class RAG:
                     budget_enforced=True,
                 )
             )
-        if bool(profile.get("is_social_table")):
+        if social_links and bool(profile.get("is_social_table")):
             # Configurable via SOCIAL_SOURCE_DIVERSITY_LIMIT (RetrievalConfig)
             # — this knob used to be sourced from the (now-deleted) sampling
             # summarizer's social config, but this call site is on the
@@ -6541,23 +6958,7 @@ class RAG:
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.
         node_postprocessors.append(CitationNumberingPostprocessor())
-
-        return RetrieverQueryEngine.from_args(
-            retriever=self._build_retriever(
-                metadata_filters=metadata_filters,
-                vector_store_kwargs=vector_store_kwargs,
-                retrieval_options=retrieval_options,
-                metadata_filter_rules=metadata_filter_rules,
-                metadata_filters_active=metadata_filters_active,
-                include_images=retrieval_target != "documents",
-            ),
-            llm=self.post_retrieval_text_model,
-            node_postprocessors=node_postprocessors,
-            response_synthesizer=self._build_response_synthesizer(
-                streaming=streaming,
-                social_table=bool(profile.get("is_social_table")),
-            ),
-        )
+        return node_postprocessors
 
     def _build_response_synthesizer(
         self,
@@ -8018,6 +8419,7 @@ class RAG:
         self,
         prompt: str,
         *,
+        expanded_query: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -8027,8 +8429,14 @@ class RAG:
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
 
+        Retrieval runs on ``expanded_query`` and the answer is asked ``prompt``, so
+        the terms the entity graph appends widen the search and never reach the
+        synthesis prompt.
+
         Args:
-            prompt (str): The query prompt.
+            prompt (str): The user's question, which the answer is asked as it stands.
+            expanded_query (str | None): What retrieval runs on, the question with the
+                graph's terms appended. ``None`` retrieves with ``prompt``.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
@@ -8086,7 +8494,8 @@ class RAG:
             engine = self.build_query_engine()
             self.query_engine = engine
         try:
-            result = engine.query(prompt)
+            nodes = engine.retrieve(QueryBundle(expanded_query or prompt))
+            result = engine.synthesize(QueryBundle(question_block(prompt, None)), nodes)
         except ValueError as exc:
             if "context size" in str(exc):
                 logger.error(
@@ -8134,6 +8543,7 @@ class RAG:
         self,
         prompt: str,
         *,
+        expanded_query: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -8143,8 +8553,12 @@ class RAG:
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection asynchronously.
 
+        Retrieves and answers as :meth:`run_query` does.
+
         Args:
-            prompt (str): The query prompt.
+            prompt (str): The user's question, which the answer is asked as it stands.
+            expanded_query (str | None): What retrieval runs on, the question with the
+                graph's terms appended. ``None`` retrieves with ``prompt``.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
@@ -8200,7 +8614,8 @@ class RAG:
             engine = self.build_query_engine()
             self.query_engine = engine
         try:
-            result = await engine.aquery(prompt)
+            nodes = await engine.aretrieve(QueryBundle(expanded_query or prompt))
+            result = await engine.asynthesize(QueryBundle(question_block(prompt, None)), nodes)
         except ValueError as exc:
             if "context size" in str(exc):
                 logger.error(
@@ -8396,7 +8811,7 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
-        answer_mode: AnswerMode = "lookup",
+        agent: bool = False,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -8427,7 +8842,7 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
-            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
+            agent (bool): Forwarded to :class:`SessionManager`; see there.
 
         Returns:
             dict[str, Any]: The chat response data, including ``turn_idx``.
@@ -8445,7 +8860,7 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
-            answer_mode=answer_mode,
+            agent=agent,
         )
 
     def stream_chat(
@@ -8463,7 +8878,9 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         replace_turn_idx: int | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
-        answer_mode: AnswerMode = "lookup",
+        agent: bool = False,
+        retrieval_query: str | None = None,
+        fallback_trail: dict[str, Any] | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -8494,7 +8911,12 @@ class RAG:
                 overwrites that turn instead of appending one.
             retrieval_target (RetrievalTarget): Which evidence may answer the
                 turn. See :mod:`docint.core.retrieval.visual`.
-            answer_mode (AnswerMode): Forwarded to :class:`SessionManager`; see there.
+            agent (bool): Forwarded to :class:`SessionManager`; see there.
+            retrieval_query (str | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.stream_chat`;
+                the corrective retry's query, retrieved with as given.
+            fallback_trail (dict[str, Any] | None): Forwarded likewise; the
+                trail the retry of a turn the agent handed over carries.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -8512,54 +8934,469 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             replace_turn_idx=replace_turn_idx,
             retrieval_target=retrieval_target,
-            answer_mode=answer_mode,
+            agent=agent,
+            retrieval_query=retrieval_query,
+            fallback_trail=fallback_trail,
         )
 
-    def assessment_runner(self, engine: Any, *, scoped: bool) -> AssessmentRunner:
-        """Build the runner for one assessment turn over this turn's engine.
-
-        Research runs on the plain (non-reasoning) chat model, which picks the
-        queries, with retries off so a call research abandons at its time budget
-        frees its slot at its own timeout; the answer is written by whichever
-        model the request's reasoning toggle selects.
-
-        Args:
-            engine (Any): The turn's query engine; research searches through its
-                ``retrieve``, so filters, rerank and parent context apply as on a
-                lookup without building a second engine, every child the reranker
-                returns kept (see :class:`EveryChildQuery`).
-            scoped (bool): Whether the turn answers from a pinned scope, which
-                forbids searching beyond it.
+    @property
+    def agent_char_token_ratio(self) -> float:
+        """Characters per token an agent turn is measured with: its window, its budget and its loop.
 
         Returns:
-            AssessmentRunner: A runner bound to this request's models and limits.
+            float: ``EMBED_CHAR_TOKEN_RATIO``, or 3.5 when it is unset or zero.
         """
-        research_llm = self.bounded_text_model
-        answer_llm = self.post_retrieval_text_model
-        ratio = float(self.embed_char_token_ratio or 3.5)
-        counter = self._embed_token_counter
-        researcher = (
-            None
-            if scoped
-            else ResearchLoop(
-                llm=research_llm,
-                search=lambda query: list(engine.retrieve(EveryChildQuery(query))),
-                max_steps=load_assessment_env().max_steps,
-                ctx_window=int(self.openai_ctx_window),
-                char_token_ratio=ratio,
-            )
-        )
-        return AssessmentRunner(
-            answer_llm=answer_llm,
-            llm_view=ParentContextPostprocessor._emit_with_llm_exclusion,
-            ctx_window=int(self.openai_ctx_window),
-            char_token_ratio=ratio,
-            reasoning=answer_llm is not self.text_model,
-            researcher=researcher,
-            count_tokens=(lambda text: len(counter(text))) if counter is not None else None,
+        return float(self.embed_char_token_ratio or 3.5)
+
+    def _agent_prompt(self, name: str) -> str:
+        """Load one of an agent turn's prompts from the locale's prompt directory, as the other prompts load.
+
+        Args:
+            name (str): The prompt's file name without ``.txt``.
+
+        Returns:
+            str: The prompt, stripped.
+
+        Raises:
+            FileNotFoundError: When the locale lacks the file; agent prompts have no bundled default.
+            ValueError: When no prompt directory is configured.
+        """
+        path = None if self.prompt_dir is None else self.prompt_dir / f"{name}.txt"
+        return self._load_prompt_text(path, default="", required=True)
+
+    def _agent_system_prompt(
+        self,
+        retrieval_target: str,
+        window: ConversationWindow,
+        keyword_fields: Sequence[str] | None = None,
+    ) -> str:
+        """Render an agent turn's system prompt.
+
+        Args:
+            retrieval_target (str): The turn's retrieval target, which picks the tools guide.
+            window (ConversationWindow): The conversation before the message; its summary block
+                ends the prompt.
+            keyword_fields (Sequence[str] | None): The fields the turn's keyword tool offers, the
+                text first; ``None`` (or empty) when the turn offers no keyword tool.
+
+        Returns:
+            str: ``agent_system`` with the target's tools guide, the assessment rule while
+            ``ASSESSMENT_ENABLED`` is on, and the window's summary block. When ``keyword_fields``
+            is given, the guide is followed by the keyword line (``agent_tools_keyword``) and,
+            when more than the text is offered, by a line naming the fields
+            (``agent_tools_keyword_fields``); without it the prompt is the target's alone.
+        """
+        rule = self._agent_prompt("agent_assessment_rule") if load_assessment_env().enabled else ""
+        guide = self._agent_prompt(f"agent_tools_{retrieval_target}")
+        if keyword_fields:
+            guide = f"{guide}\n{self._agent_prompt('agent_tools_keyword')}"
+            if len(keyword_fields) > 1:
+                fields_line = self._agent_prompt("agent_tools_keyword_fields").format(fields=", ".join(keyword_fields))
+                guide = f"{guide}\n{fields_line}"
+        return self._agent_prompt("agent_system").format(
+            tools_guide=guide,
+            assessment_rule=rule,
+            conversation_summary=window.summary_block(),
         )
 
-    def stream_stateless_assessment(
+    def _agent_keyword_matcher(
+        self,
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        retrieval_target: RetrievalTarget,
+    ) -> KeywordMatcher | None:
+        """Offer an agent turn an exact word match over its collection, where the collection's indexes allow one.
+
+        Deciding only reads (see :meth:`_keyword_matcher`): it creates no index and never
+        profiles the collection. A visual turn is never offered one, and is not even looked at.
+        A withheld match is logged once at DEBUG by its reason: ``visual``, ``filters``,
+        ``coverage``, ``text_not_ready``, or ``fault`` for anything that raised, a failed lookup
+        of the image companion included, with the exception's type and never its message; the
+        turn then keeps its other tools.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+            retrieval_target (RetrievalTarget): Which evidence the turn may answer from; a match
+                counts and retrieves the same.
+
+        Returns:
+            KeywordMatcher | None: The match, bound to this collection, the request's filters and
+            the target; ``None`` when it is withheld.
+        """
+        reason: KeywordUnavailable | Literal["visual"]
+        if retrieval_target == "visual":
+            reason = "visual"
+        else:
+            try:
+                built = self._keyword_matcher(
+                    metadata_filter_rules=metadata_filter_rules,
+                    metadata_filters_active=metadata_filters_active,
+                    retrieval_target=retrieval_target,
+                )
+            except Exception as exc:
+                logger.debug("The keyword tool was withheld from an agent turn: fault ({})", type(exc).__name__)
+                return None
+            if isinstance(built, KeywordMatcher):
+                return built
+            reason = built
+        logger.debug("The keyword tool was withheld from an agent turn: {}", reason)
+        return None
+
+    def _keyword_matcher(
+        self,
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        retrieval_target: RetrievalTarget,
+    ) -> KeywordMatcher | KeywordUnavailable:
+        """Build the keyword match of a text turn, or say why its collection cannot offer one.
+
+        It reads the keyword index's coverage per lane, whether the image companion exists,
+        and one payload schema per collection. A field is offered when every key it searches
+        carries its own index kind in the main collection's schema, social export or not; the
+        text, which a call matches by default, comes first and is required, and needs chunks
+        that carry it. The image companion is in scope on the ``all`` target when it exists,
+        and joins a field's match only where it carries the same indexes; otherwise its chunks
+        are reported unchecked, never counted as misses, as are the chunks either lane holds
+        without the text. A ``documents`` turn leaves the companion out: the coverage read still
+        counts it, since it reports every lane, but the turn discards that lane, reads no
+        companion schema, and neither counts its points nor reports them unchecked.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
+                match compiles as the API compiles them.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+            retrieval_target (RetrievalTarget): ``all`` or ``documents``.
+
+        Returns:
+            KeywordMatcher | KeywordUnavailable: The match; otherwise why there is none: ``filters``
+            when the filters cannot be compiled for Qdrant (a count would cover the wrong material),
+            ``coverage`` when a lane in scope was not counted, ``text_not_ready``.
+
+        Raises:
+            Exception: Whatever reading the store raises, a failed companion lookup included,
+                so an outage never reads as "no companion".
+        """
+        request_filter = build_qdrant_filter(metadata_filter_rules)
+        if metadata_filters_active and request_filter is None:
+            return "filters"
+        collection = self.qdrant_collection
+        companion = image_companion_name(collection)
+        client = self.qdrant_client
+        lanes = search_index_status(client, collection, by_lane=True).get("lanes") or {}
+        main = lanes.get(collection)
+        images = lanes.get(companion)
+        in_scope = retrieval_target != "documents" and (
+            images is not None or bool(client.collection_exists(collection_name=companion))
+        )
+        if main is None or (in_scope and images is None):
+            return "coverage"
+        main_schema = read_payload_schema(client, collection)
+        image_schema: dict[str, Any] = read_payload_schema(client, companion) if in_scope else {}
+        image_total = int(images["total"]) if in_scope and images is not None else 0
+        image_missing = image_total - int(images["with_search_text"]) if in_scope and images is not None else 0
+        main_missing = int(main["total"]) - int(main["with_search_text"])
+        joins: dict[str, bool] = {}
+        unchecked: dict[str, int] = {}
+        for name in SEARCH_FIELDS:
+            if not field_ready_in_schema(main_schema, name):
+                continue
+            if name == DEFAULT_SEARCH_FIELD and int(main["with_search_text"]) == 0:
+                continue
+            reaches_images = in_scope and name in IMAGE_LANE_FIELDS
+            joins[name] = reaches_images and field_ready_in_schema(image_schema, name)
+            left_out = image_total if reaches_images and not joins[name] else 0
+            covered = image_missing if joins[name] else 0
+            unchecked[name] = left_out + (main_missing + covered if name == DEFAULT_SEARCH_FIELD else 0)
+        if DEFAULT_SEARCH_FIELD not in joins:
+            return "text_not_ready"
+
+        def _filter(words: str, field: str, base: qdrant_models.Filter | None) -> qdrant_models.Filter | None:
+            """Compile a match as the Search panel compiles a field search.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+                base (qdrant_models.Filter | None): The request filter to AND in.
+
+            Returns:
+                qdrant_models.Filter | None: The filter; ``None`` when nothing compiles.
+            """
+            spec = search_field_spec(field)
+            return build_search_filter(
+                parse_keywords(words),
+                text_keys=spec.text_keys,
+                value_keys=spec.value_keys,
+                value_forms=spec.value_forms(words),
+                base_filter=base,
+            )
+
+        def _check(words: str, field: str) -> str | None:
+            """Say why a call cannot run, without touching Qdrant; never raise.
+
+            Every typed word is read as the index reads it, before :func:`parse_keywords`
+            drops the short ones. The index skips a piece under ``SEARCH_MIN_TOKEN_LEN``
+            characters and cuts one over ``SEARCH_MAX_TOKEN_LEN``, so a match holding either
+            would count a broader query than the one it names: ``vitamin D`` would count every
+            ``vitamin``. Exact-value fields are matched whole and never split. It runs while a
+            call is keyed and prepared, where a raise would fail the call, so anything that
+            keeps the match from compiling is answered ``ONE_VALUE_ONLY``, with one DEBUG line
+            naming the exception's type.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+
+            Returns:
+                str | None: ``NO_USABLE_WORD``, ``UNINDEXABLE_WORD``, ``LONG_WORD``,
+                ``ONE_VALUE_ONLY`` or ``None``.
+            """
+            try:
+                keywords = parse_keywords(words)
+                if not keywords:
+                    return NO_USABLE_WORD
+                if search_field_spec(field).text_keys:
+                    pieces = [piece for word in words.split() for piece in index_tokens(word)]
+                    # A keyword with no letter or digit at all (``...``) would compile to a match on nothing.
+                    if not all(map(index_tokens, keywords)) or any(
+                        len(piece) < SEARCH_MIN_TOKEN_LEN for piece in pieces
+                    ):
+                        return UNINDEXABLE_WORD
+                    if any(len(piece) > SEARCH_MAX_TOKEN_LEN for piece in pieces):
+                        return LONG_WORD
+                compiled = _filter(words, field, None)
+            except Exception as exc:
+                logger.debug("A keyword call was refused: its match could not be compiled ({})", type(exc).__name__)
+                return ONE_VALUE_ONLY
+            return ONE_VALUE_ONLY if compiled is None else None
+
+        def _run(words: str, field: str) -> KeywordResult:
+            """Count the matches exactly, then retrieve the best of them as a search does.
+
+            The search is an agent's own (:class:`AgentSearchQuery`), so every child is kept and
+            no sub-floor image is re-scored by description; the social steps are left out. Runs
+            on a search thread, inside the request's collection scope.
+
+            Args:
+                words (str): The words.
+                field (str): The field.
+
+            Returns:
+                KeywordResult: The matches, their count and what the index leaves unchecked.
+
+            Raises:
+                RuntimeError: When the active collection is not the one the match was built for,
+                    before anything is read: the count reads that one and the retrieval the active
+                    one, which must never be two collections. The call is answered as failed.
+            """
+            if self.qdrant_collection != collection:
+                raise RuntimeError("A keyword match ran outside the collection it was built for.")
+            keywords = tuple(parse_keywords(words))
+            conditions = _filter(words, field, request_filter)
+            if conditions is None:
+                return KeywordResult(nodes=[], matches=None, unchecked=unchecked[field], keywords=keywords)
+            matches = self._keyword_count(collection, conditions)
+            if matches is not None and joins[field]:
+                in_images = self._keyword_count(companion, conditions)
+                matches = None if in_images is None else matches + in_images
+            nodes: list[NodeWithScore] = []
+            if matches != 0:
+                bundle = AgentSearchQuery(words)
+                retriever = self._build_retriever(
+                    vector_store_kwargs={"qdrant_filters": conditions},
+                    metadata_filter_rules=metadata_filter_rules,
+                    metadata_filters_active=metadata_filters_active,
+                    include_images=joins[field],
+                )
+                nodes = list(retriever.retrieve(bundle))
+                # No profile: without the social steps it would only size parent context's prompt allowance.
+                for postprocessor in self._text_postprocessors(profile={}, social_links=False):
+                    nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
+            return KeywordResult(nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords)
+
+        fields = (DEFAULT_SEARCH_FIELD, *(name for name in joins if name != DEFAULT_SEARCH_FIELD))
+        return KeywordMatcher(fields=fields, check=_check, run=_run)
+
+    def _keyword_count(self, collection: str, conditions: qdrant_models.Filter) -> int | None:
+        """Count exactly how many chunks of one collection a keyword match holds, coarse parents excluded.
+
+        Unlike :meth:`_search_total`, a failed count is ``None``: a keyword reply states its
+        count as a fact, and a failure must never read as zero.
+
+        Args:
+            collection (str): The collection to count.
+            conditions (qdrant_models.Filter): The compiled match, the request's filter in it.
+
+        Returns:
+            int | None: The count, or ``None`` when it failed.
+        """
+        try:
+            return int(self.qdrant_client.count(collection_name=collection, count_filter=conditions, exact=True).count)
+        except Exception as exc:
+            logger.warning("An agent's keyword count in '{}' failed: {}", collection, type(exc).__name__)
+            return None
+
+    def agent_turn(
+        self,
+        engine: Any,
+        *,
+        retrieval_target: RetrievalTarget,
+        scoped: bool,
+        pinned_count: int,
+        window: ConversationWindow,
+        message: str,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+        vector_store_kwargs: dict[str, Any] | None,
+    ) -> AgentTurn | None:
+        """Build one agent turn over this request's engine, or none when its budget leaves no room.
+
+        Every round runs on :attr:`agent_text_model`. The tools are the target's (see
+        :func:`~docint.agents.turn.toolsets.toolset_for`). ``search`` expands its own query
+        with graph neighbours for retrieval alone and retrieves through ``engine``, so the
+        request's filters, rerank and target apply, every child kept (:class:`EveryChildQuery`).
+        The image tools search the image companion under the request's filter, compiled as the
+        visual retriever compiles it. An unscoped ``all`` or ``documents`` turn is also offered
+        ``keyword`` where the collection's indexes allow it (:meth:`_agent_keyword_matcher`),
+        with its lines in the system prompt. A tool's I/O runs on a search thread in a copy of
+        the request's context, so :meth:`collection_scope` holds there. The budget is measured
+        on the rendered system prompt, the offered schemas (none on a pinned scope, whose round
+        offers no tools), the window's messages, each with its envelope, and the message. When
+        keyword with every field it can offer leaves the turn less room for tool replies than it
+        needs, the turn is built again with keyword on the text alone, and when even that does
+        not fit, without keyword; each rebuild changes the tools, prompt and budget alike, and
+        its INFO line gives the numbers. Only a visual turn shows the model the pictures it
+        finds, and only an unscoped turn asks a first round that looked nothing up again, with
+        the search note (``agent_search_first``).
+
+        Args:
+            engine (Any): The turn's query engine.
+            retrieval_target (RetrievalTarget): Which evidence the turn may answer from.
+            scoped (bool): Whether the turn answers a pinned scope.
+            pinned_count (int): How many distinct passages the scope pinned; ``0`` without one.
+            window (ConversationWindow): The conversation before the message, built at
+                :attr:`agent_char_token_ratio` within the history allowance for
+                :attr:`reasoning_requested`.
+            message (str): The user's message, verbatim.
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters.
+            vector_store_kwargs (dict[str, Any] | None): Native query kwargs, carrying the
+                request's compiled filter when it has one.
+
+        Returns:
+            AgentTurn | None: The turn, its ledger empty; ``None`` when the budget leaves less
+            room for tool replies than a turn needs, even without keyword.
+
+        Raises:
+            ValueError: For a target without a tool set, or filters that reached the turn as
+                neither rules nor a compiled filter.
+            FileNotFoundError: When the locale lacks one of the agent prompts.
+        """
+        reasoning = self.reasoning_requested
+        llm = self.agent_text_model
+        ratio = self.agent_char_token_ratio
+        companion_filter = self._companion_filter(
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+            vector_store_kwargs=vector_store_kwargs,
+        )
+        matcher = (
+            None
+            if scoped or retrieval_target == "visual"
+            else self._agent_keyword_matcher(
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
+                retrieval_target=retrieval_target,
+            )
+        )
+        history_tokens = sum(message_cost(sent.content or "", ratio) for sent in window.messages())
+        message_tokens = estimate_tokens(message, ratio)
+
+        def _offer(keyword: KeywordMatcher | None) -> tuple[ToolRegistry, str, TurnBudget]:
+            """Build the turn's tools, its system prompt and the budget measured on both.
+
+            Args:
+                keyword (KeywordMatcher | None): The keyword match to offer; ``None`` for none.
+
+            Returns:
+                tuple[ToolRegistry, str, TurnBudget]: The tools, the rendered system prompt and
+                the budget.
+            """
+            registry = toolset_for(
+                retrieval_target,
+                search=lambda query: list(engine.retrieve(AgentSearchQuery(self.expand_query_with_graph(query)))),
+                search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
+                list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
+                keyword=keyword,
+            )
+            # The keyword lines only where the tools really offer keyword.
+            fields = keyword.fields if keyword is not None and "keyword" in registry.names else None
+            system_prompt = self._agent_system_prompt(retrieval_target, window, keyword_fields=fields)
+            budget = TurnBudget(
+                ctx_window=int(self.openai_ctx_window),
+                reasoning=reasoning,
+                char_token_ratio=ratio,
+                system_tokens=estimate_tokens(system_prompt, ratio),
+                # A pinned round offers no tools.
+                tool_schema_tokens=0 if scoped else schema_tokens(registry.schemas(), ratio),
+                history_tokens=history_tokens,
+                message_tokens=message_tokens,
+            )
+            return registry, system_prompt, budget
+
+        registry, system_prompt, budget = _offer(matcher)
+        if matcher is not None and len(matcher.fields) > 1 and "keyword" in registry.names and not budget.available:
+            logger.info(
+                "The keyword tool was offered on the text alone in an agent turn: {} tokens of room with its {} "
+                "fields, under the {} one needs",
+                budget.round_room,
+                len(matcher.fields),
+                MIN_ROUND_ROOM,
+            )
+            matcher = KeywordMatcher(fields=(DEFAULT_KEYWORD_FIELD,), check=matcher.check, run=matcher.run)
+            registry, system_prompt, budget = _offer(matcher)
+        if "keyword" in registry.names and not budget.available:
+            logger.info(
+                "The keyword tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
+                budget.round_room,
+                MIN_ROUND_ROOM,
+            )
+            registry, system_prompt, budget = _offer(None)
+        if not budget.available:
+            logger.warning(
+                "An agent turn would have {} tokens of room for tool replies, under the {} one needs; none is built",
+                budget.round_room,
+                MIN_ROUND_ROOM,
+            )
+            return None
+        visual = retrieval_target == "visual"
+        limits = load_agent_env()
+        loop = AgentLoop(
+            llm=llm,
+            registry=registry,
+            budget=budget,
+            system_prompt=system_prompt,
+            final_note=self._agent_prompt("agent_final"),
+            max_rounds=limits.max_rounds,
+            time_budget_s=limits.time_budget_s,
+            max_calls_per_round=limits.max_calls_per_round,
+            char_token_ratio=ratio,
+            llm_view=agent_llm_view,
+            # Only vLLM is sent ``enable_thinking``, so only there may a reply open inside a think block.
+            reasoning_open=reasoning and self.openai_config.inference_provider == "vllm",
+            scope_note=self._agent_prompt("agent_scope"),
+            fetch_thumbnails=self._fetch_companion_thumbnails if visual else None,
+            legend_template=self._agent_prompt("agent_image_legend") if visual else "",
+            max_images=self._visual_answer_max_images() if visual else 0,
+            # A pinned round offers no tools, so its reply is always the answer.
+            search_note="" if scoped else self._agent_prompt("agent_search_first"),
+        )
+        ledger = EvidenceLedger(cap=max(AGENT_LEDGER_CAP, pinned_count))
+        return AgentTurn(loop=loop, ledger=ledger, budget=budget, reasoning=reasoning)
+
+    def stream_stateless_agent_turn(
         self,
         question: str,
         *,
@@ -8571,19 +9408,20 @@ class RAG:
         scoped_node_ids: Sequence[str] | None = None,
         retrieval_target: RetrievalTarget = DEFAULT_RETRIEVAL_TARGET,
     ) -> Iterator[Any]:
-        """Answer one stateless turn as an assessment.
+        """Answer one stateless turn as an agent turn.
 
-        A stateless turn has no session: no prior turn and nothing persisted.
-        Otherwise it is the session path exactly, with the same runner and frames.
-        Evidence too large to show legibly is answered as a lookup through
-        :meth:`run_query` instead, as the session path does.
+        A stateless turn has no session: an empty window and nothing persisted.
+        Otherwise it is the session path exactly, with the same loop and frames.
+        A turn the plain path answers instead (see
+        :meth:`~docint.core.state.session_manager.SessionManager.stream_agent_turn`)
+        is answered through :meth:`run_query`, its expansion reported as the
+        plain stateless path reports it.
 
         Args:
             question (str): The user's message, verbatim.
-            expanded_query (str): The graph-expanded query to seed with.
-            graph_debug (dict[str, Any] | None): The expansion's debug payload;
-                ``None`` when expansion did not run, which is reported as skipped
-                (``scoped`` under a pinned scope, otherwise ``unavailable``).
+            expanded_query (str): The graph-expanded query a fallback retrieves with.
+            graph_debug (dict[str, Any] | None): That expansion's debug payload;
+                ``None`` when expansion did not run.
             metadata_filters (MetadataFilters | None): Compiled request filters.
             metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
             vector_store_kwargs (dict[str, Any] | None): Native vector-store kwargs.
@@ -8591,12 +9429,10 @@ class RAG:
             retrieval_target (RetrievalTarget): Which evidence may answer.
 
         Yields:
-            Any: Research steps, answer text, then the final payload.
+            Any: Steps, answer text, then the final payload.
         """
         turn_started_at = time.monotonic()
         metadata_filters_active = metadata_filters is not None or bool(vector_store_kwargs)
-        if graph_debug is None:
-            graph_debug = self.graph_debug_skipped(expanded_query, "scoped" if scoped_node_ids else "unavailable")
         engine = self.build_query_engine(
             metadata_filters=metadata_filters,
             streaming=True,
@@ -8606,19 +9442,15 @@ class RAG:
             scoped_node_ids=scoped_node_ids,
             retrieval_target=retrieval_target,
         )
-        stream = self.ensure_session_manager().stream_assessment(
+        started = start_agent_turn(
+            self.ensure_session_manager(),
             question,
             engine=engine,
-            expanded_query=expanded_query,
-            retrieval_query=expanded_query,
-            # No history to resolve, and the expanded query carries graph terms.
-            resolved_question=None,
-            prior_turn=None,
             scoped_node_ids=scoped_node_ids,
-            graph_debug=graph_debug,
             coverage_unit=str(self._infer_collection_profile().get("coverage_unit") or "documents"),
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
+            vector_store_kwargs=vector_store_kwargs,
             retrieval_target=retrieval_target,
             session_id=None,
             owner=None,
@@ -8626,29 +9458,24 @@ class RAG:
             turn_started_at=turn_started_at,
             persist=False,
         )
-        # The runner refuses before its first yield, so nothing has streamed yet.
-        try:
-            first = next(stream, None)
-        except AssessmentDoesNotFit as exc:
-            logger.warning(
-                "Assessment evidence does not fit the context window ({} passages); answering as a lookup",
-                exc.passages,
-            )
-            data = self.run_query(
-                expanded_query,
-                metadata_filters=metadata_filters,
-                metadata_filter_rules=metadata_filter_rules,
-                vector_store_kwargs=vector_store_kwargs,
-                scoped_node_ids=scoped_node_ids,
-                retrieval_target=retrieval_target,
-            )
-            yield str(data.get("response") or "")
-            yield data
+        if started.items is not None:
+            yield from started.items
             return
-        if first is None:
-            return
-        yield first
-        yield from stream
+        data = self.run_query(
+            question,
+            expanded_query=expanded_query,
+            metadata_filters=metadata_filters,
+            metadata_filter_rules=metadata_filter_rules,
+            vector_store_kwargs=vector_store_kwargs,
+            scoped_node_ids=scoped_node_ids,
+            retrieval_target=retrieval_target,
+        )
+        if graph_debug is not None:
+            data["graph_debug"] = graph_debug
+        if started.trail is not None:
+            data["agent"] = started.trail
+        yield str(data.get("response") or "")
+        yield data
 
     def _graph_debug_base(self, query: str) -> dict[str, Any]:
         """Build the not-yet-applied GraphRAG debug payload for a query.

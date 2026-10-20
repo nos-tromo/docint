@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from qdrant_client import models
 
 from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.fulltext import (
     build_scan_filter,
     build_search_filter,
+    index_pieces,
+    index_tokens,
     matches_any_phrase,
     matches_phrase,
     not_coarse_condition,
@@ -247,6 +250,12 @@ def test_multi_key_filter_still_excludes_coarse_parents_and_keeps_base_filter() 
 
 # ---------- value_match_forms ----------
 
+#: Digits ``str.isdigit`` accepts and ``int`` rejects: SUPERSCRIPT TWO and CIRCLED DIGIT ONE.
+NOT_DECIMAL_DIGITS = ["\N{SUPERSCRIPT TWO}\N{SUPERSCRIPT TWO}", "\N{CIRCLED DIGIT ONE}", "1\N{SUPERSCRIPT TWO}"]
+#: Decimal digits of another script, which ``int`` reads: ARABIC-INDIC DIGIT ONE, TWO and THREE.
+ARABIC_THREE = "\N{ARABIC-INDIC DIGIT THREE}"
+ARABIC_ONE_TWO_THREE = "\N{ARABIC-INDIC DIGIT ONE}\N{ARABIC-INDIC DIGIT TWO}\N{ARABIC-INDIC DIGIT THREE}"
+
 
 def test_value_match_forms_offers_the_numeric_and_string_reading() -> None:
     """A digit-only query could be stored either way."""
@@ -256,6 +265,23 @@ def test_value_match_forms_offers_the_numeric_and_string_reading() -> None:
 def test_value_match_forms_keeps_a_non_numeric_handle_as_a_string() -> None:
     """Not every network numbers its accounts."""
     assert value_match_forms("krieger.advokat") == ["krieger.advokat"]
+
+
+@pytest.mark.parametrize("raw", NOT_DECIMAL_DIGITS, ids=["superscripts", "circled-digit", "digit-then-superscript"])
+def test_value_match_forms_keeps_a_digit_that_is_no_decimal_as_a_string(raw: str) -> None:
+    """``isdigit`` is true of superscripts and circled digits, which ``int`` rejects: they are a handle, not a number.
+
+    Args:
+        raw (str): A query of characters that count as digits but are not decimals.
+    """
+    assert value_match_forms(raw) == [raw]
+
+
+def test_value_match_forms_reads_decimals_of_another_script_as_the_numbers_they_are() -> None:
+    """``int`` reads any script's decimal digits, so such an id keeps its numeric reading too."""
+    assert value_match_forms(ARABIC_THREE) == [ARABIC_THREE, 3]
+    assert value_match_forms(ARABIC_ONE_TWO_THREE) == [ARABIC_ONE_TWO_THREE, 123]
+    assert value_match_forms("1" + ARABIC_THREE) == ["1" + ARABIC_THREE, 13]
 
 
 def test_value_match_forms_rejects_anything_with_a_space() -> None:
@@ -335,3 +361,31 @@ def test_build_scan_filter_keeps_the_callers_metadata_filter() -> None:
     f = build_scan_filter(base)
     assert cast(list[Any], f.must)[0] == cast(list[Any], base.must)[0]
     assert not_coarse_condition() in cast(list[Any], f.must)
+
+
+def test_index_tokens_split_a_word_where_the_index_does() -> None:
+    """The index splits on everything but letters and digits, so a number or abbreviation falls apart."""
+    assert index_tokens("COVID-19") == ["covid", "19"]
+    assert index_tokens("2.5") == ["2", "5"]
+    assert index_tokens("U.S.") == ["u", "s"]
+    assert index_tokens("snake_case") == ["snake", "case"]
+    assert index_tokens("Straße") == ["straße"]
+    assert index_tokens("...") == []
+
+
+def test_index_tokens_keep_a_word_whole_where_the_index_does() -> None:
+    """A word splits only where the index splits it, and is lowercased after that.
+
+    Lowercased first, the dotted capital I turns into an ``i`` and a combining
+    dot, which split the word apart; and a vowel sign counts as a letter to the
+    index, though ``re`` does not count it as a word character.
+    """
+    assert index_tokens("İstanbul") == ["İstanbul".lower()]
+    assert index_tokens("भारत") == ["भारत"]
+
+
+def test_index_pieces_split_as_the_index_does_and_keep_their_case() -> None:
+    """The pieces are the index's tokens before lowercasing, as a case-insensitive search needs them."""
+    assert index_pieces("Placebo-Controlled") == ["Placebo", "Controlled"]
+    assert index_pieces("İstanbul") == ["İstanbul"]
+    assert index_tokens("Placebo-Controlled") == [piece.lower() for piece in index_pieces("Placebo-Controlled")]

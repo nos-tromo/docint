@@ -39,7 +39,7 @@ def _patch_engine_factory(monkeypatch: pytest.MonkeyPatch, capture_barrier: thre
     """Patch the engine builder to capture the active collection at build time.
 
     The fake query engine records ``self.qdrant_collection`` when it is built
-    and echoes it back from ``.query()``; the normalizer then surfaces that
+    and echoes it back from ``.synthesize()``; the normalizer then surfaces that
     captured name as the single source's ``collection``. A cached engine that
     leaks across collections therefore returns the wrong name and fails the
     isolation assertions.
@@ -63,7 +63,10 @@ def _patch_engine_factory(monkeypatch: pytest.MonkeyPatch, capture_barrier: thre
             capture_barrier.wait()
 
         class _Engine:
-            def query(self, prompt: str) -> Response:
+            def retrieve(self, query_bundle: Any) -> list[Any]:
+                return []
+
+            def synthesize(self, query_bundle: Any, nodes: list[Any]) -> Response:
                 return Response(response=captured, source_nodes=[])
 
         return _Engine()
@@ -233,7 +236,10 @@ def test_concurrent_query_requests_isolated_per_owner(monkeypatch: pytest.Monkey
         rag_ref = self
 
         class _Engine:
-            def query(self, prompt: str) -> Response:
+            def retrieve(self, query_bundle: Any) -> list[Any]:
+                return []
+
+            def synthesize(self, query_bundle: Any, nodes: list[Any]) -> Response:
                 # Two rendezvous, both inside the request's collection scope:
                 #   1. wait until BOTH requests have entered their scope, so a
                 #      shared global already holds the last writer's value;

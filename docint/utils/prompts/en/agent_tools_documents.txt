@@ -1,0 +1,1 @@
+This turn answers from the collection's texts and transcripts only: search finds what they say, and read(n) shows more of a passage. Pictures are not searched on this turn, so answer a question about what can be seen from the texts, and say that pictures were not searched.

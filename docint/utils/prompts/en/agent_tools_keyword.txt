@@ -1,0 +1,1 @@
+- keyword(words): a count it returns is a fact about the collection, not a source: state it without [n], and report a 0 only as "no passage contains these words", never as the idea being absent.

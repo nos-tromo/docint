@@ -26,6 +26,7 @@ from collections.abc import Mapping, Sequence
 
 from docint.core.extract.units import DocumentUnit, Figure, ImageUnit, MediaUnit, PostingUnit, Segment, Unit
 from docint.core.state.report_render import _esc, _format_date, _format_timestamp, _html_style, _provenance_rows
+from docint.utils.timefmt import format_short
 from docint.utils.ui_strings import ui_string
 
 __all__ = [
@@ -157,21 +158,6 @@ def format_clock(seconds: float | None) -> str:
         return ""
     total = int(seconds)
     return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
-
-
-def format_short(seconds: float | None) -> str:
-    """Format seconds as ``mm:ss``, the way a frame caption reads.
-
-    Args:
-        seconds (float | None): Offset into a clip.
-
-    Returns:
-        str: The stamp, or ``""`` when there is no offset.
-    """
-    if seconds is None:
-        return ""
-    total = int(seconds)
-    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def _stamps(segment: Segment) -> tuple[str, str]:

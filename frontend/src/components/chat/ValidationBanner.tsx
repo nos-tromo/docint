@@ -22,8 +22,11 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
   // disappears.
   const reason = v.validation_reason ?? undefined
   const assessment = v.answer_mode === 'assessment'
-  // The backend skips validation exactly when the answer is not `split` or its evidence part is empty.
-  const noSourcePart = !!v.agent && (v.agent.answer !== 'split' || v.agent.evidence_chars === 0)
+  // The backend skips an assessment's validation exactly when it is not `split` or its evidence part is
+  // empty; only an assessment's tokens say so, as a lookup's `plain` answer is source-backed whole.
+  const answer = v.agent?.answer
+  const noSourcePart =
+    answer === 'unsplit' || answer === 'empty' || (answer === 'split' && v.agent?.evidence_chars === 0)
   if (v.validation_checked === true && v.validation_mismatch === true) {
     return {
       tone: 'border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] text-[var(--status-amber-strong)]',

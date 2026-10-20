@@ -6,37 +6,57 @@ from typing import Any, Literal, Protocol
 AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
-AgentAction = Literal["seed", "search", "answer"]
-"""What one step of an assessment turn did."""
+AgentAction = Literal["seed", "search", "answer", "note", "search_images", "keyframes", "keyword", "read"]
+"""What one step of an agent turn did: a tool call by the tool's name, or a ``note``, the text a
+round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages;
+``answer`` is found only in trails stored by the earlier assessment pipeline."""
 
 
 @dataclass(frozen=True, slots=True)
 class AgentProgress:
-    """One step of an assessment turn, streamed to the client as an ``{"agent": ...}`` frame.
+    """One step of an agent turn, streamed to the client as an ``{"agent": ...}`` frame.
 
     A dataclass rather than a dict on purpose: the API treats the one dict a
     chat stream yields as its final payload, and ``None`` as its end.
 
     Attributes:
-        step (int): ``0`` for the first search, then one per research round.
+        step (int): The round the step belongs to, from ``1``; a scoped turn's
+            ``seed`` is ``0``.
         action (AgentAction): What the step did.
-        detail (str): The model-written search query; empty otherwise. Shown to
-            the user, never logged.
-        found (int): Passages the step added to the evidence.
+        detail (str): The call's main argument, such as a model-written search
+            query, or a note's text; empty when there is none. Shown to the user,
+            never logged.
+        found (int): Passages the step added to the evidence or extended there.
+        field (str | None): The field a keyword check matched; ``None`` on any other step.
+        matches (int | None): Indexed chunks a keyword check counted, 0 included; ``None`` on any
+            other step, or when the count failed.
+        unchecked (int | None): Chunks a keyword check could not reach because the keyword index
+            does not cover them; ``None`` on any other step, or when it covers all.
     """
 
     step: int
     action: AgentAction
     detail: str
     found: int
+    field: str | None = None
+    matches: int | None = None
+    unchecked: int | None = None
 
 
 @dataclass
 class Turn:
-    """Represents a single user turn."""
+    """Represents a single user turn.
+
+    Attributes:
+        user_input (str): The user's message, verbatim.
+        session_id (str | None): The conversation it belongs to, if any.
+        previous_user_input (str | None): The user's message before this one, for a validator
+            judging a follow-up; ``None`` when it is not shown one.
+    """
 
     user_input: str
     session_id: str | None = None
+    previous_user_input: str | None = None
 
 
 @dataclass
@@ -133,6 +153,12 @@ class RetrievalResult:
     rewritten_query: str | None = None
     retried: bool | None = None
     retry_query: str | None = None
+    keyword_checks: str | None = None
+    """An agent turn's keyword checks with a known count, one line each.
+
+    Facts about the collection the validator reads beside the sources, so an
+    answer may state a count no passage shows. ``None`` or empty for none.
+    """
     turn_idx: int | None = None
     """Index of the persisted conversation turn; an internal join key.
 

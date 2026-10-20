@@ -1,15 +1,13 @@
-"""The numbered evidence an assessment turn gathers, and the room it may use."""
+"""The numbered evidence a turn gathers, and how its passages are packed into a budget."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
 from typing import NamedTuple
 
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, TextNode
 
 from docint.agents.assessment.split import neutralize_sentinel
-from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.text_budget import (
     MARKER_RESERVE_CHARS,
     MATCH_SPANS_KEY,
@@ -22,27 +20,18 @@ from docint.utils.text_budget import (
     fit_with_marker,
 )
 
-MAX_LEDGER_ENTRIES = 24
-#: Smallest share of the answer budget worth giving one entry (~200 text + header).
-MIN_ENTRY_TOKENS = 240
-DIGEST_CHARS = 400
-#: Longest file name a digest label carries.
-DIGEST_LABEL_CHARS = 120
 #: What a passage pays for each window past its first when it is cut: the join and that window's marker.
 SEAM_CHARS = len(WINDOW_JOIN) + MARKER_RESERVE_CHARS
 #: Fewest characters a shortened passage may keep and still be read.
 MIN_TEXT_CHARS = 300
-#: Metadata a compact header keeps after its citation line; compaction is the overflow retry's fallback only.
+#: Metadata a compact header keeps after its citation line.
 COMPACT_HEADER_CHARS = 240
+#: Tokens a turn keeps free in the context window for the answer.
 ANSWER_OUTPUT_TOKENS = 1024
 #: A thinking model spends its reply budget on reasoning before the answer.
 ANSWER_OUTPUT_TOKENS_REASONING = 3072
-PRIOR_TURN_TOKENS = 400
-QUESTION_TOKENS = 150
-SLACK_TOKENS = 64
+#: Share of the context window a turn plans to use; the rest absorbs estimation error.
 SAFETY_MARGIN = 0.95
-#: Share of the evidence budget an overflowing answer prompt is rebuilt with, once.
-OVERFLOW_RETRY_SHARE = 0.6
 #: How OpenAI-compatible servers word a prompt longer than the model's context.
 CONTEXT_ERROR_MARKERS = (
     "context length",
@@ -66,51 +55,6 @@ def is_context_overflow(exc: BaseException) -> bool:
     """
     message = str(exc).lower()
     return any(marker in message for marker in CONTEXT_ERROR_MARKERS)
-
-
-@dataclass(frozen=True)
-class AnswerBudget:
-    """How much the answer step may spend.
-
-    Attributes:
-        evidence_tokens (int): Room for the rendered ledger.
-        output_tokens (int): Reply room kept free inside the window; no longer
-            sent as ``max_tokens``, so the answer call is uncapped like a lookup's.
-        max_entries (int): Ledger cap that keeps every entry legible.
-    """
-
-    evidence_tokens: int
-    output_tokens: int
-    max_entries: int
-
-
-def answer_budget(*, ctx_window: int, template: str, reasoning: bool, char_token_ratio: float) -> AnswerBudget:
-    """Size the answer step from the context window.
-
-    Args:
-        ctx_window (int): The chat model's context window in tokens.
-        template (str): The answer prompt template, measured for its overhead.
-        reasoning (bool): Whether the answer model thinks before answering.
-        char_token_ratio (float): Characters per token for estimation.
-
-    Returns:
-        AnswerBudget: Evidence room, output reserve and ledger cap.
-    """
-    output = ANSWER_OUTPUT_TOKENS_REASONING if reasoning else ANSWER_OUTPUT_TOKENS
-    evidence = max(
-        0,
-        int(ctx_window * SAFETY_MARGIN)
-        - estimate_tokens(template, char_token_ratio)
-        - PRIOR_TURN_TOKENS
-        - QUESTION_TOKENS
-        - SLACK_TOKENS
-        - output,
-    )
-    return AnswerBudget(
-        evidence_tokens=evidence,
-        output_tokens=output,
-        max_entries=max(1, min(MAX_LEDGER_ENTRIES, evidence // MIN_ENTRY_TOKENS)),
-    )
 
 
 def _anchors(node: BaseNode) -> list[tuple[int, int]]:
@@ -197,6 +141,38 @@ def _covered(needed: Sequence[tuple[int, int]], others: Sequence[Sequence[tuple[
     )
 
 
+def _head_spans(text: str) -> list[tuple[int, int]]:
+    """Return matches whose kept text is all that packing keeps of a passage without any.
+
+    An unstamped passage keeps its opening (see :func:`kept_ranges`), which can
+    run past ``MIN_REGION_CHARS`` and, in a short passage, across a window join,
+    while a match keeps only its first ``MIN_REGION_CHARS`` in each window. So
+    each window's share of the opening becomes a match to the window's end, and
+    a share longer than one match keeps gets a second, whose kept text ends
+    where the share does. Merged with a stamped emission of the same text, the
+    passage then still keeps everything the model was shown of it.
+
+    Args:
+        text (str): The passage text.
+
+    Returns:
+        list[tuple[int, int]]: The matches; none when packing keeps nothing of the passage.
+    """
+    spans: list[tuple[int, int]] = []
+    kept = kept_ranges(text, [])
+    offset = 0
+    for window in text.split(WINDOW_JOIN):
+        end = offset + len(window)
+        for lo, hi in kept:
+            first, last = max(lo, offset), min(hi, end)
+            if last > first:
+                spans.append((first, end))
+                if last - first > MIN_REGION_CHARS:
+                    spans.append((last - MIN_REGION_CHARS, end))
+        offset = end + len(WINDOW_JOIN)
+    return spans
+
+
 def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScore | None:
     """Fold another emission of a held passage into its entry, with its match.
 
@@ -204,13 +180,17 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     node when the arriving window extends it or adds only a match, the arriving
     one when it already holds the held text. Each side's match spans are moved
     to where its text sits in the result. Matches count one by one, as packing
-    counts them, by what packing keeps of each (see :func:`kept_ranges`): an
+    counts them, by what packing keeps of each (see :func:`_match_ranges`): an
     arriving match is news unless a single held match keeps all of it, and a held
     match a single arriving one keeps is dropped when the arriving window
     replaces the entry. A re-cut of a child that the child's own opening holds
     therefore adds no floor, while one that starts inside a long child keeps its
-    own. A stamped and an unstamped emission keep different text, so they never
-    merge. Anything but a ``TextNode`` keeps the held entry as is.
+    own. A stamped and an unstamped emission of different texts never merge: one
+    keeps its opening, the other its match. Of one text they do, as when a
+    keyword check anchors a passage held unstamped: the unstamped side counts
+    its opening as matches (see :func:`_head_spans`), so the merged entry keeps
+    all that the model was shown of either. Anything but a ``TextNode`` keeps the
+    held entry as is.
 
     Args:
         held (NodeWithScore): The ledger's entry.
@@ -219,14 +199,21 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     Returns:
         NodeWithScore | None: A new entry with both excerpts, every match and the
         higher score; ``None`` when the entry already keeps the arriving text and
-        every match it carries, or when exactly one side holds a match in its
-        text. Neither input is written to.
+        every match it carries, or when exactly one of two different texts holds
+        a match. Neither input is written to.
     """
     held_text = held.node.get_content(metadata_mode=MetadataMode.NONE)
     new_text = arriving.node.get_content(metadata_mode=MetadataMode.NONE)
     held_spans, new_spans = _anchors(held.node), _anchors(arriving.node)
-    if _has_match(held_text, held_spans) != _has_match(new_text, new_spans):
-        return None
+    held_match = _has_match(held_text, held_spans)
+    if held_match != _has_match(new_text, new_spans):
+        if new_text != held_text:
+            return None
+        # One text with and without a match: the unmatched side keeps its opening as matches.
+        if held_match:
+            new_spans = _head_spans(new_text)
+        else:
+            held_spans = _head_spans(held_text)
     if new_text in held_text:
         held_matches = distinct_spans(held_spans, len(held_text))
         arriving_matches = distinct_spans(_shifted(new_spans, held_text.find(new_text)), len(held_text))
@@ -258,7 +245,7 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     return NodeWithScore(node=node, score=max(scores, default=None))
 
 
-def _stamp(scored: NodeWithScore, number: int) -> NodeWithScore:
+def stamp(scored: NodeWithScore, number: int) -> NodeWithScore:
     """Clone a passage stamped with the ledger number it is cited by.
 
     Args:
@@ -286,8 +273,6 @@ class EvidenceLedger:
         self._cap = max(1, cap)
         self._entries: list[NodeWithScore] = []
         self._positions: dict[str, int] = {}
-        self._room: Room | None = None
-        self._refusals = 0
 
     def __len__(self) -> int:
         """Return how many entries the ledger holds.
@@ -298,57 +283,13 @@ class EvidenceLedger:
         return len(self._entries)
 
     @property
-    def refusals(self) -> int:
-        """How many passages the room has turned away.
-
-        Returns:
-            int: Extensions and new passages the room refused, and new passages
-            skipped while it was out of room; none skipped at the entry cap, and
-            none before a room is installed.
-        """
-        return self._refusals
-
-    @property
-    def out_of_room(self) -> bool:
-        """Whether the room, and not the entry cap, has closed the ledger.
-
-        Returns:
-            bool: ``True`` while the ledger is below its cap but its room cannot
-            hold one more legible passage; never without a room installed.
-        """
-        return len(self._entries) < self._cap and self._room is not None and self._room.closed
-
-    @property
     def full(self) -> bool:
         """Whether the ledger admits no more entries.
 
         Returns:
-            bool: ``True`` at the cap, or once its room cannot hold even one more legible passage.
+            bool: ``True`` at the cap.
         """
-        return len(self._entries) >= self._cap or (self._room is not None and self._room.closed)
-
-    def restrict(self, admits: Room) -> None:
-        """Admit from now on only what keeps the evidence legible.
-
-        Installed once the seed is in: research may then add an entry, or extend
-        one, only while ``admits`` says every passage still fits legibly.
-
-        Args:
-            admits (Room): The room the evidence must stay legible in, holding the entries so far.
-        """
-        self._room = admits
-
-    def _admitted(self, number: int, candidate: NodeWithScore) -> bool:
-        """Ask the room, if one is installed, whether a new or extended entry keeps the evidence legible.
-
-        Args:
-            number (int): The ledger number the entry carries.
-            candidate (NodeWithScore): The new entry, or the merged one replacing it.
-
-        Returns:
-            bool: ``True`` when it may be taken; the room then counts it.
-        """
-        return self._room is None or self._room(number, candidate)
+        return len(self._entries) >= self._cap
 
     def add(self, nodes: Iterable[NodeWithScore]) -> list[tuple[int, NodeWithScore]]:
         """Admit passages not seen before, up to the cap, and fold in new windows of passages held.
@@ -356,12 +297,10 @@ class EvidenceLedger:
         Parent-context windows of one section share the section's node id, so a
         later window of a held id is new evidence: it extends that entry, which
         keeps its number. So is a window the entry already shows when it carries
-        a match whose kept text the entry lacks (see :func:`kept_ranges`). A
-        stamped and an unstamped emission of one id never merge: whichever comes
-        second is nothing new. A full ledger admits no new entry but still
-        extends one. Once :meth:`restrict` is installed, a passage or extension
-        that would leave the evidence illegible is refused and the rest of the
-        batch is still considered; :attr:`refusals` counts what the room turns away.
+        a match whose kept text the entry lacks (see :func:`_match_ranges`). A
+        stamped and an unstamped emission of one id merge only when their text is
+        the same (see :func:`_merge_windows`); otherwise whichever comes second is
+        nothing new. A full ledger admits no new entry but still extends one.
 
         Args:
             nodes (Iterable[NodeWithScore]): Passages in ranked order.
@@ -379,19 +318,12 @@ class EvidenceLedger:
                 merged = _merge_windows(self._entries[position], scored)
                 if merged is None:
                     continue
-                if self._admitted(position + 1, merged):
-                    self._entries[position] = merged
-                    changed.append((position + 1, scored))
-                else:
-                    self._refusals += 1
-            elif self.out_of_room:
-                self._refusals += 1
-            elif not self.full and self._admitted(len(self._entries) + 1, scored):
+                self._entries[position] = merged
+                changed.append((position + 1, scored))
+            elif not self.full:
                 self._positions[node_id] = len(self._entries)
                 self._entries.append(scored)
                 changed.append((len(self._entries), scored))
-            elif not self.full:
-                self._refusals += 1
         return changed
 
     def entries(self) -> list[NodeWithScore]:
@@ -409,7 +341,20 @@ class EvidenceLedger:
             list[NodeWithScore]: Clones carrying ``citation_index``; the cached
             originals are never written to.
         """
-        return [_stamp(scored, number) for number, scored in enumerate(self._entries, start=1)]
+        return [stamp(scored, number) for number, scored in enumerate(self._entries, start=1)]
+
+    def number_of(self, node_id: str) -> int | None:
+        """Return the number a held passage is cited by.
+
+        Args:
+            node_id (str): The passage's node id, the ledger's dedupe key.
+
+        Returns:
+            int | None: Its ledger number, which a later window never moves; ``None``
+            when the ledger holds no passage of that id.
+        """
+        position = self._positions.get(node_id)
+        return None if position is None else position + 1
 
 
 def kept_ranges(body: str, anchors: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -446,47 +391,6 @@ def kept_ranges(body: str, anchors: Sequence[tuple[int, int]]) -> list[tuple[int
     lengths = [len(window) for window in windows]
     share = allocate_with_floors(lengths, [0] * len(windows), floor - (len(windows) - 1) * SEAM_CHARS)[0]
     return [(0, share)] if share else []
-
-
-def digest(number: int, scored: NodeWithScore) -> str:
-    """Render one bounded line the research model reads instead of the passage.
-
-    The line shows only what every legible packing of the passage keeps (see
-    :func:`kept_ranges`): each retrieved match's opening, top-ranked first, or the
-    opening of a passage without one. Pieces are joined by ``…``, take at most
-    ``DIGEST_CHARS`` of the passage together, and the line is led by ``…`` when
-    the first piece does not start the passage.
-
-    Args:
-        number (int): The passage's ledger number.
-        scored (NodeWithScore): The passage.
-
-    Returns:
-        str: ``[n] (file, p. x) text … text`` on a single line.
-    """
-    meta = scored.node.metadata or {}
-    name = " ".join(str(meta.get("filename") or meta.get("file_name") or "").split())
-    # Brackets would read as an entry marker, so the label keeps only parentheses.
-    name = name[:DIGEST_LABEL_CHARS].replace("[", "(").replace("]", ")")
-    page = meta.get("page") if meta.get("page") is not None else meta.get("page_number")
-    where = f"{name}, p. {page}" if name and page is not None else name
-    raw = scored.node.get_content(metadata_mode=MetadataMode.NONE)
-    pieces: list[str] = []
-    first: int | None = None
-    left = DIGEST_CHARS
-    for start, end in kept_ranges(raw, _anchors(scored.node)):
-        if left <= 0:
-            break
-        taken = raw[start : min(end, start + left)]
-        left -= len(taken)
-        piece = " ".join(taken.split())
-        if piece:
-            first = start if first is None else first
-            pieces.append(piece)
-    snippet = " … ".join(pieces)
-    snippet = f"… {snippet}" if first else snippet
-    line = f"[{number}] ({where}) {snippet}" if where else f"[{number}] {snippet}"
-    return neutralize_sentinel(" ".join(line.split()))
 
 
 def effective_ratio(
@@ -594,7 +498,7 @@ def text_floor(body: str, anchors: Sequence[tuple[int, int]]) -> int:
     return min(len(body), max(MIN_TEXT_CHARS, (len(windows) - 1) * SEAM_CHARS + max(len(windows), needed)))
 
 
-def _parts(
+def passage_parts(
     nodes: list[NodeWithScore], llm_view: Callable[[BaseNode], BaseNode], *, compact: bool = False
 ) -> tuple[list[str], list[str], list[list[tuple[int, int]]]]:
     """Split each passage's LLM view into its metadata header, its text and where its matches sit.
@@ -621,7 +525,7 @@ def _parts(
     return headers, bodies, anchors
 
 
-def _costs(header: str, body: str, anchors: Sequence[tuple[int, int]]) -> tuple[int, int]:
+def passage_costs(header: str, body: str, anchors: Sequence[tuple[int, int]]) -> tuple[int, int]:
     """Price one passage as packing does.
 
     Args:
@@ -634,110 +538,6 @@ def _costs(header: str, body: str, anchors: Sequence[tuple[int, int]]) -> tuple[
         least text it must keep, every match it holds included (see :func:`text_floor`).
     """
     return len(header) + 4 + MARKER_RESERVE_CHARS, text_floor(body, anchors)
-
-
-class Room:
-    """Legibility of growing evidence, kept as running sums.
-
-    With ``room = int(budget * ratio) - sum(header + 4 + MARKER_RESERVE_CHARS)``, the
-    evidence is legible exactly when ``room > 0`` and ``room >= sum(text_floor)``,
-    which is what :func:`evidence_fits` finds by packing it. The ratio is measured
-    once, on the evidence the room starts from, and then held, so each candidate
-    costs one header render.
-    """
-
-    def __init__(
-        self,
-        nodes: list[NodeWithScore],
-        *,
-        llm_view: Callable[[BaseNode], BaseNode],
-        budget_tokens: int,
-        char_token_ratio: float,
-        count_tokens: Callable[[str], int] | None = None,
-        compact: bool = False,
-    ) -> None:
-        """Measure the evidence so far.
-
-        Args:
-            nodes (list[NodeWithScore]): The numbered entries held so far.
-            llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
-            budget_tokens (int): Tokens the rendered evidence may use.
-            char_token_ratio (float): The configured characters per token.
-            count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
-            compact (bool): Whether headers are priced compacted.
-        """
-        headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
-        ratio = effective_ratio(headers + bodies, char_token_ratio=char_token_ratio, count_tokens=count_tokens)
-        self._llm_view = llm_view
-        self._compact = compact
-        self._chars = int(budget_tokens * ratio)
-        self._costs = [_costs(*part) for part in zip(headers, bodies, anchors, strict=True)]
-        self._reserved = sum(reserve for reserve, _ in self._costs)
-        self._floor = sum(floor for _, floor in self._costs)
-
-    def _fits(self, reserved: int, floor: int) -> bool:
-        """Apply the closed form.
-
-        Args:
-            reserved (int): Characters every header, join and marker reserves.
-            floor (int): Text every passage must keep.
-
-        Returns:
-            bool: Whether text room remains and covers the floor.
-        """
-        room = self._chars - reserved
-        return room > 0 and room >= floor
-
-    @property
-    def legible(self) -> bool:
-        """Whether every passage held can be shown legibly.
-
-        Returns:
-            bool: The closed form over the entries so far.
-        """
-        return self._fits(self._reserved, self._floor)
-
-    @property
-    def headers_fit(self) -> bool:
-        """Whether any text room is left once the headers, joins and markers are reserved.
-
-        Returns:
-            bool: ``True`` while the headers alone do not exhaust the budget.
-        """
-        return self._chars - self._reserved > 0
-
-    @property
-    def closed(self) -> bool:
-        """Whether not even a header-less passage of ``MIN_TEXT_CHARS`` would still fit.
-
-        Returns:
-            bool: ``True`` once research can add nothing worth reading.
-        """
-        return self._chars - self._reserved - self._floor < 4 + MARKER_RESERVE_CHARS + MIN_TEXT_CHARS
-
-    def __call__(self, number: int, candidate: NodeWithScore) -> bool:
-        """Admit a new entry, or the merged form of a held one, when the evidence stays legible.
-
-        Args:
-            number (int): The ledger number it carries; one past the last for a new entry.
-            candidate (NodeWithScore): The entry as it would be held.
-
-        Returns:
-            bool: ``True`` when it fits; its cost is then counted in place of the entry it replaces.
-        """
-        headers, bodies, anchors = _parts([_stamp(candidate, number)], self._llm_view, compact=self._compact)
-        reserve, floor = _costs(headers[0], bodies[0], anchors[0])
-        held_reserve, held_floor = self._costs[number - 1] if number <= len(self._costs) else (0, 0)
-        reserved = self._reserved - held_reserve + reserve
-        floors = self._floor - held_floor + floor
-        if not self._fits(reserved, floors):
-            return False
-        if number <= len(self._costs):
-            self._costs[number - 1] = (reserve, floor)
-        else:
-            self._costs.append((reserve, floor))
-        self._reserved, self._floor = reserved, floors
-        return True
 
 
 def _allowances(
@@ -786,85 +586,6 @@ def _legible(char_budget: int, floors: Sequence[int], allowances: Sequence[int])
     return char_budget > 0 and all(allowance >= floor for floor, allowance in zip(floors, allowances, strict=True))
 
 
-def evidence_fits(
-    nodes: list[NodeWithScore],
-    *,
-    llm_view: Callable[[BaseNode], BaseNode],
-    budget_tokens: int,
-    char_token_ratio: float,
-    count_tokens: Callable[[str], int] | None = None,
-    compact: bool = False,
-) -> bool:
-    """Return whether the evidence can be shown legibly in its budget, packed as :func:`render_context` packs it.
-
-    Args:
-        nodes (list[NodeWithScore]): The numbered ledger.
-        llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
-        budget_tokens (int): Tokens the rendered evidence may use.
-        char_token_ratio (float): The configured characters per token.
-        count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
-        compact (bool): Whether headers are compacted, as the overflow retry renders them.
-
-    Returns:
-        bool: ``True`` when text room remains after the headers and every passage
-        keeps its :func:`text_floor`: at least ``MIN_TEXT_CHARS``, and a region for
-        every retrieved match it holds; a passage shown whole fits however short it is.
-    """
-    headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
-    return _legible(
-        *_allowances(
-            headers,
-            bodies,
-            anchors,
-            budget_tokens=budget_tokens,
-            char_token_ratio=char_token_ratio,
-            count_tokens=count_tokens,
-        )
-    )
-
-
-def fit_ledger(
-    nodes: list[NodeWithScore],
-    *,
-    keep: int,
-    llm_view: Callable[[BaseNode], BaseNode],
-    budget_tokens: int,
-    char_token_ratio: float,
-    count_tokens: Callable[[str], int] | None = None,
-    compact: bool = False,
-) -> list[NodeWithScore]:
-    """Leave out the latest research additions until every passage can be shown legibly.
-
-    Density is measured afresh on each candidate set, so evidence denser than the
-    seed it was admitted against still fits. Entries go from the tail, which keeps
-    the numbering contiguous; the first ``keep`` (the seed) are never left out, even
-    when they alone are not legible.
-
-    Args:
-        nodes (list[NodeWithScore]): The numbered ledger.
-        keep (int): How many leading entries must stay.
-        llm_view (Callable[[BaseNode], BaseNode]): Hides metadata the prompt must not see.
-        budget_tokens (int): Tokens the rendered evidence may use.
-        char_token_ratio (float): The configured characters per token.
-        count_tokens (Callable[[str], int] | None): A tokenizer, if one is loaded.
-        compact (bool): Whether headers are compacted.
-
-    Returns:
-        list[NodeWithScore]: The leading entries that will be rendered.
-    """
-    kept = list(nodes)
-    while len(kept) > keep and not evidence_fits(
-        kept,
-        llm_view=llm_view,
-        budget_tokens=budget_tokens,
-        char_token_ratio=char_token_ratio,
-        count_tokens=count_tokens,
-        compact=compact,
-    ):
-        kept.pop()
-    return kept
-
-
 def _fit_windows(body: str, allowance: int, anchors: Sequence[tuple[int, int]] = ()) -> tuple[str, bool]:
     """Fit one passage to its allowance, window by window when it joins several, around its matches.
 
@@ -899,13 +620,13 @@ def _fit_windows(body: str, allowance: int, anchors: Sequence[tuple[int, int]] =
 
 
 class RenderedContext(NamedTuple):
-    """Evidence packed into the answer prompt's context.
+    """Evidence packed into a budget.
 
     Attributes:
         context (str): The context block.
         shortened (int): How many entries were shortened.
-        legible (bool): Whether every passage kept its :func:`text_floor`, as
-            :func:`evidence_fits` judges it for the same evidence and budget.
+        legible (bool): Whether text room remained after the headers and every
+            passage kept its :func:`text_floor`.
     """
 
     context: str
@@ -939,14 +660,13 @@ def render_context(
         char_token_ratio (float): Characters per token for the budget.
         count_tokens (Callable[[str], int] | None): A tokenizer; when given, the
             evidence is packed at its measured density (see :func:`effective_ratio`).
-        compact (bool): Whether headers are compacted (see :func:`_compact_header`);
-            only the overflow retry compacts them.
+        compact (bool): Whether headers are compacted (see :func:`_compact_header`).
 
     Returns:
         RenderedContext: The context block, how many entries were shortened, and
         whether the packing kept every passage legible.
     """
-    headers, bodies, anchors = _parts(nodes, llm_view, compact=compact)
+    headers, bodies, anchors = passage_parts(nodes, llm_view, compact=compact)
     char_budget, floors, allowances = _allowances(
         headers,
         bodies,

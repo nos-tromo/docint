@@ -91,8 +91,10 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
             # that the answer on screen came from a second attempt.
             ("retried", "BOOLEAN"),
             ("retry_query", "TEXT"),
-            # Assessment provenance; NULL marks a lookup turn.
+            # Agent provenance; NULL on a turn the agent loop did not answer.
             ("agent_trail", "TEXT"),
+            # How the turn was answered; NULL on rows from before this column.
+            ("answer_mode", "TEXT"),
             # The evidence target a turn answered under, so a reloaded session can say what drew its answers.
             ("retrieval_target", "TEXT"),
         ]

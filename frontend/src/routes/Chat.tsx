@@ -37,7 +37,7 @@ type Action =
   | { type: 'retry'; query: string }
   | { type: 'agent'; step: AgentStep }
   | { type: 'finalize'; meta: ChatFinalEvent }
-  | { type: 'fail'; error?: string; note?: string }
+  | { type: 'fail'; error?: string; note?: string; agentNote?: string }
 
 function reducer(s: State, a: Action): State {
   switch (a.type) {
@@ -81,12 +81,13 @@ function reducer(s: State, a: Action): State {
       const updated = { ...last, assistant: '', retryQuery: a.query }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
-    // A research step of an assessment turn. The turn stays open: only the
-    // final envelope finishes it.
+    // A step of an agent turn; only the final envelope finishes the turn. A note
+    // withdraws the text streamed before it, as a retry does, and stays in the trail.
     case 'agent': {
       const last = s.turns[s.turns.length - 1]
       if (!last) return s
-      const updated = { ...last, agentSteps: [...(last.agentSteps ?? []), a.step] }
+      const assistant = a.step.action === 'note' ? '' : last.assistant
+      const updated = { ...last, assistant, agentSteps: [...(last.agentSteps ?? []), a.step] }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
     case 'finalize': {
@@ -100,13 +101,14 @@ function reducer(s: State, a: Action): State {
       const updated = { ...last, assistant: finalText, done: true, meta: a.meta }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
-    // An assessment's judgement is labelled once its answer is complete, so one
-    // cut off before that carries the caveat in its text, wherever the text goes.
+    // An answer cut off mid-text carries the caveat in its text, wherever the text goes. A judgement
+    // is labelled once its answer is complete, so a turn that showed a step says it may hold one.
     case 'fail': {
       const last = s.turns[s.turns.length - 1]
       if (!last) return { ...s, inflight: false }
-      const cutOff = !!a.note && !last.done && !!last.agentSteps?.length && last.assistant.trim() !== ''
-      const assistant = cutOff ? `*${a.note}*\n\n${last.assistant}` : last.assistant
+      const note = (last.agentSteps?.length ? a.agentNote : undefined) ?? a.note
+      const cutOff = !!note && !last.done && last.assistant.trim() !== ''
+      const assistant = cutOff ? `*${note}*\n\n${last.assistant}` : last.assistant
       const updated = { ...last, assistant, done: true, error: a.error ?? null }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
@@ -279,8 +281,9 @@ export function Chat() {
 
     const ac = new AbortController()
     abortRef.current = ac
-    // Passed with every failure; the reducer puts it only on a cut-off assessment.
-    const note = t('chat.assessment_interrupted')
+    // Passed with every failure; the reducer heads a cut-off answer with one, the agent note after a step.
+    const note = t('chat.answer_interrupted')
+    const agentNote = t('chat.assessment_interrupted')
     // Set once the turn has ended either way, so nothing arriving later can fail it.
     let settled = false
     try {
@@ -352,7 +355,12 @@ export function Chat() {
           // and named its failure. Only the transport path below, which
           // carries no code at all, may claim the stream ended.
           settled = true
-          dispatch({ type: 'fail', error: streamErrorText(t, data.code, 'chat.error_backend_failed'), note })
+          dispatch({
+            type: 'fail',
+            error: streamErrorText(t, data.code, 'chat.error_backend_failed'),
+            note,
+            agentNote
+          })
           continue
         }
         const final = data as unknown as ChatFinalEvent
@@ -390,7 +398,7 @@ export function Chat() {
       // Closed with neither its envelope nor an error frame, as a backend shut down mid-answer does.
       if (!settled && !ac.signal.aborted) {
         settled = true
-        dispatch({ type: 'fail', error: t('chat.error_stream_ended'), note })
+        dispatch({ type: 'fail', error: t('chat.error_stream_ended'), note, agentNote })
       }
     } catch (e) {
       // A finished turn stays finished. An aborted request's turn is gone: the
@@ -421,7 +429,7 @@ export function Chat() {
         // to report; the actionable message is that the stream ended.
         error = t('chat.error_stream_ended')
       }
-      dispatch({ type: 'fail', error, note })
+      dispatch({ type: 'fail', error, note, agentNote })
     } finally {
       abortRef.current = null
     }

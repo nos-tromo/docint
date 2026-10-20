@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from docint.agents.turn.history import question_block
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS
 from docint.core.state.base import Base, _make_session_maker
 from docint.core.state.session_manager import SessionManager
@@ -49,6 +50,23 @@ def session_manager() -> Generator[SessionManager, None, None]:
     sm._SessionMaker = SessionMaker
     yield sm
     engine.dispose()
+
+
+def _asked(engine: MagicMock) -> tuple[str, str]:
+    """Read what an engine double was asked to retrieve with and what it was asked to answer.
+
+    Args:
+        engine (MagicMock): The engine double, called once through ``retrieve`` and ``synthesize``.
+
+    Returns:
+        tuple[str, str]: The retrieval query and the question the synthesizer was handed.
+    """
+    engine.retrieve.assert_called_once()
+    engine.synthesize.assert_called_once()
+    (retrieved,), _ = engine.retrieve.call_args
+    (answered, nodes), _ = engine.synthesize.call_args
+    assert nodes is engine.retrieve.return_value
+    return retrieved.query_str, answered.query_str
 
 
 def test_persist_and_retrieve_citation_with_hash(
@@ -256,7 +274,7 @@ def test_chat_uses_request_scoped_filtered_engine(
     """
     filtered_engine = MagicMock()
     filtered_response = MagicMock()
-    filtered_engine.query.return_value = filtered_response
+    filtered_engine.synthesize.return_value = filtered_response
 
     session_manager.rag.query_engine = MagicMock()
     session_manager.rag.build_query_engine.return_value = filtered_engine  # type: ignore[attr-defined]
@@ -280,7 +298,7 @@ def test_chat_uses_request_scoped_filtered_engine(
     )
 
     session_manager.rag.build_query_engine.assert_called_once()  # type: ignore[attr-defined]
-    filtered_engine.query.assert_called_once_with("expanded hello")
+    assert _asked(filtered_engine) == ("expanded hello", question_block("hello", "rewritten hello"))
     session_manager.rag._normalize_response_data.assert_called_once_with(  # type: ignore[attr-defined]
         "hello",
         filtered_response,
@@ -307,7 +325,7 @@ def test_stream_chat_includes_final_response_when_no_tokens(
     streaming_response = MagicMock()
     streaming_response.response_gen = iter(())
     streaming_response.source_nodes = cast(list[Any], [])
-    streaming_engine.query.return_value = streaming_response
+    streaming_engine.synthesize.return_value = streaming_response
 
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
@@ -369,7 +387,7 @@ def test_scoped_chat_reports_that_it_answered_from_the_scope(
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
     """
     scoped_engine = MagicMock()
-    scoped_engine.query.return_value = MagicMock()
+    scoped_engine.synthesize.return_value = MagicMock()
     session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
     session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
@@ -391,17 +409,15 @@ def test_a_scoped_turn_does_not_expand_the_query_with_the_graph(
 ) -> None:
     """Graph expansion widens *retrieval*, and a scoped turn does none.
 
-    It appends "Related entities for retrieval: …" to the query string, and
-    that string is what the synthesizer is asked to answer — so on a scoped
-    turn it is noise in the generation prompt, paid for with an NER-aggregate
-    load that buys nothing.
+    A scope retrieves by id, so expanding the query would only pay for an
+    NER-aggregate load that buys nothing.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
     """
     scoped_engine = MagicMock()
-    scoped_engine.query.return_value = MagicMock()
+    scoped_engine.synthesize.return_value = MagicMock()
     session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
     session_manager.rag.graph_debug_skipped.return_value = {"applied": False, "reason": "scoped"}  # type: ignore[attr-defined]
@@ -415,7 +431,7 @@ def test_a_scoped_turn_does_not_expand_the_query_with_the_graph(
     response = session_manager.chat("hello", scoped_node_ids=["c1"])
 
     session_manager.rag.expand_query_with_graph_with_debug.assert_not_called()  # type: ignore[attr-defined]
-    scoped_engine.query.assert_called_once_with("rewritten hello")
+    assert _asked(scoped_engine) == ("rewritten hello", question_block("hello", "rewritten hello"))
     assert response["graph_debug"] == {"applied": False, "reason": "scoped"}
 
 
@@ -432,7 +448,7 @@ def test_scoped_stream_chat_reports_the_scope_in_its_final_frame(
     streaming_response = MagicMock()
     streaming_response.response_gen = iter(())
     streaming_response.source_nodes = cast(list[Any], [])
-    streaming_engine.query.return_value = streaming_response
+    streaming_engine.synthesize.return_value = streaming_response
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
     session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
@@ -489,7 +505,7 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     filtered_response = MagicMock()
     filtered_response.metadata = cast(dict[str, Any], {})
     filtered_response.source_nodes = cast(list[Any], [])
-    engine.query.return_value = filtered_response
+    engine.synthesize.return_value = filtered_response
 
     session_manager.rag.query_engine = engine
     session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
@@ -515,6 +531,7 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     session_manager.rag.expand_query_with_graph_with_debug.assert_called_once_with(  # type: ignore[attr-defined]
         "Please elaborate."
     )
+    assert _asked(engine) == ("expanded", "Please elaborate.")
 
 
 def test_stream_chat_binds_prior_turn_but_keeps_rewrite_when_not_skipped(
@@ -538,7 +555,7 @@ def test_stream_chat_binds_prior_turn_but_keeps_rewrite_when_not_skipped(
     streaming_response = MagicMock()
     streaming_response.response_gen = iter(())
     streaming_response.source_nodes = cast(list[Any], [])
-    streaming_engine.query.return_value = streaming_response
+    streaming_engine.synthesize.return_value = streaming_response
 
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten people"  # type: ignore[attr-defined]
@@ -600,7 +617,7 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
 
     engine = MagicMock()
     filtered_response = MagicMock()
-    engine.query.return_value = filtered_response
+    engine.synthesize.return_value = filtered_response
     session_manager.rag.query_engine = engine
     session_manager.rag.rewrite_retrieval_query.return_value = "What did Alice post?"  # type: ignore[attr-defined]
     session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
@@ -618,7 +635,7 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     rewrite_context = session_manager.rag.rewrite_retrieval_query.call_args.kwargs["conversation_context"]  # type: ignore[attr-defined]
     assert "Tell me about Alice" in rewrite_context
     assert "Alice posted about launch" in rewrite_context
-    engine.query.assert_called_once_with("What did Alice post?")
+    assert _asked(engine) == ("What did Alice post?", question_block("What did she post?", "What did Alice post?"))
 
 
 def test_an_image_citation_persists_a_hash_the_store_can_resolve(
@@ -673,7 +690,7 @@ def test_a_scoped_visual_turn_is_not_reported_as_degraded(
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
     """
     scoped_engine = MagicMock()
-    scoped_engine.query.return_value = MagicMock()
+    scoped_engine.synthesize.return_value = MagicMock()
     session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
     session_manager.rag._normalize_response_data.return_value = {"response": "Hi", "sources": []}  # type: ignore[attr-defined]
     monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
@@ -707,7 +724,9 @@ def _wire_a_real_turn(session_manager: SessionManager, monkeypatch: pytest.Monke
         return response
 
     engine = MagicMock()
-    engine.query.side_effect = _answer
+    # The plain path retrieves with the expanded query, then synthesizes the user's words.
+    engine.retrieve.return_value = cast(list[Any], [])
+    engine.synthesize.side_effect = lambda query, _nodes, **_kw: _answer(str(query))
     rag = cast(Any, session_manager.rag)
     rag.query_engine = engine
     rag.build_query_engine.return_value = engine

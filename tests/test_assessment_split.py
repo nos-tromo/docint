@@ -168,6 +168,15 @@ def test_cited_sources_falls_back_to_the_first_sources() -> None:
     assert len(cited_sources("no citations here", sources)) == 6
 
 
+def test_cited_sources_without_the_fallback_picks_nothing_for_evidence_citing_nothing() -> None:
+    """Without the fallback, evidence that cites nothing rests on no source, and cited evidence is unchanged."""
+    sources = [{"citation_index": index, "id": f"s{index}"} for index in range(1, 9)]
+
+    assert cited_sources("no citations here", sources, fallback=False) == []
+    assert cited_sources("a cited [9] that no source has", sources, fallback=False) == []
+    assert [source["id"] for source in cited_sources("a [2]", sources, fallback=False)] == ["s2"]
+
+
 @pytest.mark.parametrize("cut", range(1, len(STREAM)))
 def test_splitter_swaps_a_sentinel_split_at_any_position(cut: int) -> None:
     """A sentinel arriving across two tokens is still caught.

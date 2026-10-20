@@ -3,7 +3,9 @@
 import math
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Literal, cast
 
@@ -2306,31 +2308,136 @@ def load_corrective_retry_env(default_enabled: bool = True) -> CorrectiveRetryCo
 
 @dataclass(frozen=True)
 class AssessmentConfig:
-    """Dataclass for assessment-turn configuration."""
+    """Dataclass for assessment configuration."""
 
     enabled: bool
-    max_steps: int
 
 
-def load_assessment_env(default_enabled: bool = True, default_max_steps: int = 6) -> AssessmentConfig:
-    """Load assessment-turn configuration from environment variables.
+def load_assessment_env(default_enabled: bool = True) -> AssessmentConfig:
+    """Load assessment configuration from environment variables.
+
+    ``ASSESSMENT_MAX_STEPS`` is no longer read here: it survives only as the
+    fallback of ``AGENT_MAX_ROUNDS`` (see :func:`load_agent_env`).
 
     Args:
-        default_enabled (bool): Whether assessment turns are enabled by default.
-        default_max_steps (int): Research rounds an assessment turn may run by default.
+        default_enabled (bool): Whether assessments are enabled by default.
 
     Returns:
         AssessmentConfig: Parsed assessment settings.
-        - enabled (bool): Whether chat turns are classified and evaluative ones
-          answered with a researched, labelled model assessment. Off means
-          every turn is a lookup and no classifier call is made.
-        - max_steps (int): Upper bound on tool-calling research rounds per
-          assessment turn; ``0`` answers from the first search alone. A blank
-          value counts as unset.
+        - enabled (bool): Whether an agent turn's system prompt carries the
+          assessment rule, so a question asking for a judgement is answered in
+          two labelled parts: what the sources say, then the model's own
+          assessment. Off means every agent turn answers as a lookup.
     """
     return AssessmentConfig(
         enabled=str(os.getenv("ASSESSMENT_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
-        max_steps=max(0, int(os.getenv("ASSESSMENT_MAX_STEPS") or default_max_steps)),
+    )
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """Dataclass for agent-turn configuration."""
+
+    enabled: bool
+    max_rounds: int
+    time_budget_s: float
+    max_calls_per_round: int
+
+
+@cache
+def _warn_agent_setting(message: str, *args: object) -> None:
+    """Warn once per distinct message and values about an agent setting that cannot be used as written.
+
+    The settings are read at least twice a turn, so a typo would otherwise warn on every
+    turn. The values name the variable and the value read, so a new unusable value warns again.
+
+    Args:
+        message (str): The warning, with loguru ``{}`` placeholders.
+        *args (object): The values it is formatted with.
+    """
+    logger.warning(message, *args)
+
+
+def _parse_agent_time_budget(*, default: float) -> float:
+    """Parse ``AGENT_TIME_BUDGET_S``, which must be a positive, finite number of seconds.
+
+    Zero or less would never let a turn start, and an infinite value would
+    never end one. Like :func:`_parse_parent_context_safety_margin`, an unusable
+    value is logged and replaced by ``default`` rather than raised, so a typo
+    cannot fail a chat turn; each unusable value is logged once.
+
+    Args:
+        default (float): The value returned when the variable is unset, blank or unusable.
+
+    Returns:
+        float: Seconds, positive and finite.
+    """
+    raw = os.getenv("AGENT_TIME_BUDGET_S", "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        _warn_agent_setting("AGENT_TIME_BUDGET_S={!r} is not a number; using default {}.", raw, default)
+        return default
+    if not (math.isfinite(parsed) and parsed > 0):
+        _warn_agent_setting(
+            "AGENT_TIME_BUDGET_S={!r} must be a positive, finite number of seconds; using default {}.",
+            raw,
+            default,
+        )
+        return default
+    return parsed
+
+
+def load_agent_env(
+    default_enabled: bool = True,
+    default_max_rounds: int = 6,
+    default_time_budget_s: float = 120.0,
+    default_max_calls_per_round: int = 4,
+) -> AgentConfig:
+    """Load agent-turn configuration from environment variables.
+
+    A blank value counts as unset for every variable, ``AGENT_TURNS_ENABLED``
+    included, so an empty ``NAME=`` line in ``.env`` or compose keeps the
+    default. A number that cannot be used falls back to its default with a
+    warning rather than failing a chat turn. Each unusable value warns once per
+    process, since every turn reads these settings at least twice.
+
+    Args:
+        default_enabled (bool): Whether agent turns are enabled by default.
+        default_max_rounds (int): Tool-calling rounds a turn may run when neither
+            ``AGENT_MAX_ROUNDS`` nor ``ASSESSMENT_MAX_STEPS`` is set.
+        default_time_budget_s (float): Seconds a turn may spend before the model
+            is made to answer.
+        default_max_calls_per_round (int): Tool calls the model may make in one round.
+
+    Returns:
+        AgentConfig: Parsed agent settings.
+        - enabled (bool): Whether every chat turn runs as one tool-calling agent
+          loop; off means a plain retrieve-then-answer lookup. When set, it is
+          true for ``true``, ``1`` or ``yes`` (any case) and false for any other
+          value, without a warning, as for the other docint flags.
+        - max_rounds (int): Upper bound on tool-calling rounds per turn; at
+          least ``1``, so a turn may always search once. A lower value is raised
+          to ``1`` with a warning naming the variable. When ``AGENT_MAX_ROUNDS``
+          is unset or blank it follows ``ASSESSMENT_MAX_STEPS``, the older
+          assessment setting, so a deployment that tuned that keeps its budget;
+          that variable is not read otherwise.
+        - time_budget_s (float): Wall-clock seconds a turn may spend before the
+          model is made to answer; positive and finite.
+        - max_calls_per_round (int): Most tool calls the model may make in one
+          round; at least ``1``.
+    """
+    raw_enabled = os.getenv("AGENT_TURNS_ENABLED", "").strip().lower()
+    rounds_var = "AGENT_MAX_ROUNDS" if os.getenv("AGENT_MAX_ROUNDS", "").strip() else "ASSESSMENT_MAX_STEPS"
+    return AgentConfig(
+        enabled=raw_enabled in {"true", "1", "yes"} if raw_enabled else default_enabled,
+        max_rounds=_extract_int(rounds_var, default_max_rounds, minimum=1, warn=_warn_agent_setting),
+        time_budget_s=_parse_agent_time_budget(default=default_time_budget_s),
+        max_calls_per_round=_extract_int(
+            "AGENT_MAX_CALLS_PER_ROUND", default_max_calls_per_round, minimum=1, warn=_warn_agent_setting
+        ),
     )
 
 
@@ -2707,13 +2814,14 @@ class ExtractConfig:
     sync_max_units: int
 
 
-def _extract_int(name: str, default: int, *, minimum: int = 0) -> int:
+def _extract_int(name: str, default: int, *, minimum: int = 0, warn: Callable[..., None] = logger.warning) -> int:
     """Read one non-negative integer knob, warning on anything unusable.
 
     Args:
         name (str): Environment variable to read.
         default (int): Value used when unset or unparseable.
         minimum (int): Lower bound the value is clamped to.
+        warn (Callable[..., None]): Logs a warning from a loguru message and its values.
 
     Returns:
         int: The configured value, at least ``minimum``.
@@ -2724,10 +2832,10 @@ def _extract_int(name: str, default: int, *, minimum: int = 0) -> int:
     try:
         value = int(raw)
     except ValueError:
-        logger.warning("Invalid {} {!r}; using {}.", name, raw, default)
+        warn("Invalid {} {!r}; using {}.", name, raw, default)
         return default
     if value < minimum:
-        logger.warning("{} {} is < {}; clamping.", name, value, minimum)
+        warn("{} {} is < {}; clamping.", name, value, minimum)
         return minimum
     return value
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -203,8 +203,28 @@ describe('Chat SSE handling', () => {
     expect(await screen.findByText(/stream ended unexpectedly/i)).toBeInTheDocument()
     expect(screen.getByText(/The council met/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
-    // A lookup carries no judgement, so it gets no assessment caveat.
-    expect(screen.queryByText(/did not finish/i)).not.toBeInTheDocument()
+    // Cut off mid-answer, it says so; with no step shown, nothing says it may hold a judgement.
+    expect(screen.getByText(/did not finish and may be incomplete/i)).toBeInTheDocument()
+    expect(screen.queryByText(/judgement/i)).not.toBeInTheDocument()
+  })
+
+  it('marks an answer that an error frame cuts off before any research step', async () => {
+    // An agent turn that answers in its first round sends no step, just as a plain lookup does.
+    const frames = 'data: {"token":"The council met on Sunday"}\n\n' + 'data: {"error":"Internal server error"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'When did the council meet?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/did not finish and may be incomplete/i)).toBeInTheDocument()
+    expect(screen.getByText(/The council met on Sunday/)).toBeInTheDocument()
+    expect(screen.getByText(/answer could not be generated/i)).toBeInTheDocument()
+    expect(screen.queryByText(/judgement/i)).not.toBeInTheDocument()
   })
 
   it('keeps a finished answer when the connection drops after its final envelope', async () => {
@@ -1298,36 +1318,40 @@ describe('Chat session switching', () => {
     expect(next.inflight).toBe(true)
   })
 
-  it('heads the partial text of an assessment that fails with the interrupted note', () => {
-    // The label that marks the judgement arrives with the finished answer, so a
-    // cut-off answer carries the caveat in its text: the transcript and every
-    // other place the text goes keep it.
+  it('heads the partial text of an agent turn that fails with the agent caveat', () => {
+    // The label that marks a judgement arrives with the finished answer, so an
+    // agent turn cut off mid-answer says its text may hold one unlabelled.
     const seed = { step: 0, action: 'seed' as const, detail: '', found: 2 }
     const open = {
       turns: [{ user: 'q', assistant: 'A second dataset would help.', done: false, meta: null, agentSteps: [seed] }],
       inflight: true
     }
 
-    const next = chatReducer(open, { type: 'fail', error: 'boom', note: 'Cut off.' })
+    const next = chatReducer(open, { type: 'fail', error: 'boom', note: 'Cut off.', agentNote: 'Cut off, unlabelled.' })
 
-    expect(next.turns[0].assistant).toBe('*Cut off.*\n\nA second dataset would help.')
+    expect(next.turns[0].assistant).toBe('*Cut off, unlabelled.*\n\nA second dataset would help.')
     expect(next.turns[0]).toMatchObject({ done: true, error: 'boom' })
     expect(next.inflight).toBe(false)
-    expect(chatTranscriptToText(next.turns)).toContain('*Cut off.*')
+    expect(chatTranscriptToText(next.turns)).toContain('*Cut off, unlabelled.*')
   })
 
-  it('adds no interrupted note to a lookup, to an assessment with no text yet, or twice', () => {
+  it('heads any answer cut off mid-text with a caveat, but not blank text and never twice', () => {
     const seed = { step: 0, action: 'seed' as const, detail: '', found: 2 }
     const turn = (assistant: string, agentSteps?: (typeof seed)[]) => ({
       turns: [{ user: 'q', assistant, done: false, meta: null, agentSteps }],
       inflight: true
     })
-    const fail = { type: 'fail' as const, error: 'boom', note: 'Cut off.' }
+    const fail = { type: 'fail' as const, error: 'boom', note: 'Cut off.', agentNote: 'Cut off, unlabelled.' }
 
-    expect(chatReducer(turn('Partial'), fail).turns[0].assistant).toBe('Partial')
+    // A lookup and an agent turn that answered before any step look alike, and either may be incomplete.
+    const lookup = chatReducer(turn('Partial'), fail)
+    expect(lookup.turns[0].assistant).toBe('*Cut off.*\n\nPartial')
+    expect(chatTranscriptToText(lookup.turns)).toContain('*Cut off.*\n\nPartial')
+    expect(chatReducer(turn('  '), fail).turns[0].assistant).toBe('  ')
     expect(chatReducer(turn('  ', [seed]), fail).turns[0].assistant).toBe('  ')
+    expect(chatReducer(chatReducer(turn('Partial'), fail), fail).turns[0].assistant).toBe('*Cut off.*\n\nPartial')
     expect(chatReducer(chatReducer(turn('Partial', [seed]), fail), fail).turns[0].assistant).toBe(
-      '*Cut off.*\n\nPartial'
+      '*Cut off, unlabelled.*\n\nPartial'
     )
   })
 
@@ -1348,6 +1372,7 @@ describe('Chat session switching', () => {
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
 
     expect(await screen.findByText(/did not finish/i)).toBeInTheDocument()
+    expect(screen.getByText(/judgement without its label/i)).toBeInTheDocument()
     expect(screen.getByText(/A second dataset would help/)).toBeInTheDocument()
     expect(screen.getByText(/answer could not be generated/i)).toBeInTheDocument()
   })
@@ -1441,7 +1466,7 @@ describe('Chat session switching', () => {
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
     stream.enqueue(enc.encode('data: {"agent":{"step":0,"action":"seed","detail":"","found":2}}\n\n'))
 
-    expect(await screen.findByTestId('agent-trail-live')).toHaveTextContent('Initial search: 2 passages')
+    expect(await screen.findByTestId('agent-trail-live')).toHaveTextContent('Started from 2 passages')
     expect(screen.getByRole('button', { name: /send/i })).toHaveAttribute('aria-busy', 'true')
 
     stream.enqueue(
@@ -1456,6 +1481,110 @@ describe('Chat session switching', () => {
     expect(await screen.findByTestId('assessment-notice')).toBeInTheDocument()
     expect(screen.queryByTestId('agent-trail-live')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy')
+  })
+
+  it('a note frame moves streamed text out of the answer', async () => {
+    const enc = new TextEncoder()
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stream = controller
+      }
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, body }))
+    const send = (frame: object) => stream.enqueue(enc.encode(`data: ${JSON.stringify(frame)}\n\n`))
+    const provisional = 'Ich sehe mir zuerst den Clip an'
+    const note = { step: 1, action: 'note', detail: provisional, found: 0 }
+    const keyframes = { step: 1, action: 'keyframes', detail: 'harbour_walk.webm', found: 4 }
+    const answer = 'Zwei Personen in Regenjacken am Hafen [1].'
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'Wer steht am Hafen?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    send({ token: provisional })
+    expect(await screen.findByText(provisional)).toBeInTheDocument()
+
+    send({ agent: note })
+    send({ agent: keyframes })
+    const trail = await screen.findByTestId('agent-trail-live')
+    await waitFor(() => expect(trail).toHaveTextContent('harbour_walk.webm'))
+    // Withdrawn from the answer, the text stays in the trail as the note.
+    expect(screen.queryAllByText(new RegExp(provisional)).filter((el) => !trail.contains(el))).toEqual([])
+    expect(trail).toHaveTextContent(provisional)
+
+    // Tokens after the note start a fresh answer rather than continue the withdrawn text.
+    send({ token: answer })
+    expect(await screen.findByText(answer)).toBeInTheDocument()
+
+    send({
+      response: answer,
+      sources: [],
+      session_id: 'sess-1',
+      retrieval_mode: 'agent',
+      answer_mode: 'lookup',
+      agent: { steps: 1, actions: [note, keyframes], reason: null, answer: 'plain' }
+    })
+    stream.close()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy'))
+    expect(screen.getByText(answer)).toBeInTheDocument()
+    expect(screen.queryByText(new RegExp(provisional))).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
+  })
+
+  it('keeps the steps of an agent turn that fails behind the disclosure', async () => {
+    // An error frame ends the turn with no envelope, so the streamed steps are all that says what it did.
+    const note = { step: 1, action: 'note', detail: 'Ich sehe mir zuerst den Clip an', found: 0 }
+    const search = { step: 1, action: 'search', detail: 'Hafen Regenjacken', found: 2 }
+    const frames =
+      `data: ${JSON.stringify({ token: note.detail })}\n\n` +
+      `data: ${JSON.stringify({ agent: note })}\n\n` +
+      `data: ${JSON.stringify({ agent: search })}\n\n` +
+      'data: {"error":"Internal server error","code":"generation_failed"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'Wer steht am Hafen?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText(/answer could not be generated/i)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    expect(
+      within(screen.getByTestId('agent-trail'))
+        .getAllByRole('listitem')
+        .map((row) => row.textContent)
+    ).toEqual(['Note: Ich sehe mir zuerst den Clip an', 'Searched “Hafen Regenjacken”: 2 new passages'])
+  })
+
+  it('clears the provisional text on a note step and keeps the note on the open turn', () => {
+    const open = {
+      turns: [{ user: 'q', assistant: 'Ich sehe mir zuerst den Clip an', done: false, meta: null }],
+      inflight: true
+    }
+    const note = { step: 1, action: 'note' as const, detail: 'Ich sehe mir zuerst den Clip an', found: 0 }
+
+    const next = chatReducer(open, { type: 'agent', step: note })
+
+    expect(next.turns[0]).toMatchObject({ assistant: '', done: false, agentSteps: [note] })
+    expect(next.inflight).toBe(true)
+  })
+
+  it('keeps the streamed text on a step that is not a note', () => {
+    const open = {
+      turns: [{ user: 'q', assistant: 'Person A', done: false, meta: null }],
+      inflight: true
+    }
+    const read = { step: 2, action: 'read' as const, detail: '2', found: 0 }
+
+    expect(chatReducer(open, { type: 'agent', step: read }).turns[0]).toMatchObject({
+      assistant: 'Person A',
+      agentSteps: [read]
+    })
   })
 
   it('sends the retrieval target with the question it applies to', async () => {

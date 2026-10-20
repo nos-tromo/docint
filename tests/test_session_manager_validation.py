@@ -227,15 +227,18 @@ def test_idempotent_column_migration_adds_missing_columns_on_legacy_db() -> None
         "retried",
         "retry_query",
         "agent_trail",
+        # How the turn was answered; the agent loop stores a trail for lookups too.
+        "answer_mode",
         # So does the evidence target a turn answered under.
         "retrieval_target",
     } <= (post_columns)
 
     with engine.begin() as conn:
-        legacy_checked, legacy_target = conn.execute(
-            text("SELECT validation_checked, retrieval_target FROM turns")
+        legacy_checked, legacy_mode, legacy_target = conn.execute(
+            text("SELECT validation_checked, answer_mode, retrieval_target FROM turns")
         ).one()
     assert legacy_checked is None  # legacy row keeps NULL — not False
+    assert legacy_mode is None  # NULL sends readers to the trail rule, not to a default
     assert legacy_target is None  # and claims no target it never recorded
     engine.dispose()
 
