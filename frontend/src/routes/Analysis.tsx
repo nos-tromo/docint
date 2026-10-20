@@ -33,6 +33,7 @@ export function Analysis() {
   const nerView = useAnalysisUiStore((s) => s.nerView)
   const setNerView = useAnalysisUiStore((s) => s.setNerView)
   const collection = useUiStore((s) => s.selectedCollection)
+  const owner = useUiStore((s) => s.selectedOwner)
   const cfg = useConfig()
   const graphTopK = useUiStore((s) => s.graphTopK)
   const setGraphTopK = useUiStore((s) => s.setGraphTopK)
@@ -61,7 +62,7 @@ export function Analysis() {
     warmCollectionNer(collection).catch(() => {
       /* warm is best-effort */
     })
-  }, [collection])
+  }, [collection, owner])
 
   const entities = useMemo(() => stats.data?.top_entities ?? [], [stats.data])
   const selectedEntityKey = useAnalysisUiStore(selectEntityKeyFor(collection))

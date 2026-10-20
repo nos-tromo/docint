@@ -100,3 +100,32 @@ export const useUiStore = create<UiState>()(
 
 setOwnerParam(useUiStore.getState().selectedOwner)
 useUiStore.subscribe((s) => setOwnerParam(s.selectedOwner))
+
+/** Whether the active collection has changed since a watch began. */
+export interface CollectionWatch {
+  changed: () => boolean
+  stop: () => void
+}
+
+/**
+ * Watch the active (collection, owner) pair for the length of one operation.
+ *
+ * Requests follow the owner selected when they are sent, while an operation
+ * keeps what it gathered earlier. An operation that writes after an await
+ * checks this first, so it never writes one collection's findings into
+ * another's. A change that is switched back still counts: whatever was
+ * fetched in between came from the other collection.
+ *
+ * @returns `changed()`, true once the pair has differed from its value at the
+ *     start, and `stop()` to end the watch.
+ */
+export function watchCollectionChange(): CollectionWatch {
+  const start = useUiStore.getState()
+  let changed = false
+  const stop = useUiStore.subscribe((s) => {
+    if (s.selectedCollection !== start.selectedCollection || s.selectedOwner !== start.selectedOwner) {
+      changed = true
+    }
+  })
+  return { changed: () => changed, stop }
+}

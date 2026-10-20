@@ -24,6 +24,7 @@ import type {
 import { ImageTextParts } from '@/components/common/ImageTextParts'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import { ReportSection } from '@/components/report/ReportSection'
+import { UnassignedReports } from '@/components/report/UnassignedReports'
 import {
   useCreateReport,
   useDeleteReport,
@@ -31,6 +32,7 @@ import {
   useRemoveReportItem,
   useReorderReportItems,
   useReport,
+  useReportCollection,
   useReports,
   useUpdateReport,
   useUpdateReportItem
@@ -131,6 +133,7 @@ function PdfStatusLine({ view, t }: { view: ReportPdfView; t: Translate }) {
  * @returns The export control and the PDF's status line.
  */
 function ExportMenu({ report, t }: { report: Pick<ReportSummary, 'id' | 'updated_at'>; t: Translate }) {
+  const collection = useReportCollection()
   const pdf = useReportPdf(report)
   const rendering = pdf.phase === 'queued' || pdf.phase === 'running'
   const pdfLabel = t('report.format_pdf')
@@ -149,7 +152,7 @@ function ExportMenu({ report, t }: { report: Pick<ReportSummary, 'id' | 'updated
       >
         {pdf.phase === 'ready' && pdf.pdf ? (
           <MenuItem
-            href={reportPdfHref(report.id)}
+            href={reportPdfHref(collection, report.id)}
             download={pdf.pdf.filename}
             hint={t('report.download_format_title', { label: pdfLabel })}
           >
@@ -173,7 +176,7 @@ function ExportMenu({ report, t }: { report: Pick<ReportSummary, 'id' | 'updated
         {exportFormats(t).map((e) => (
           <MenuItem
             key={e.format}
-            href={reportExportHref(report.id, e.format)}
+            href={reportExportHref(collection, report.id, e.format)}
             {...(e.view ? { target: '_blank' as const, rel: 'noreferrer' } : { download: true })}
             hint={
               e.view
@@ -394,10 +397,11 @@ export function Report() {
       : null
 
   const onCreate = async () => {
+    if (!collection) return
     try {
       const created = await createReport.mutateAsync({
         title: t('report.untitled_title'),
-        collection_name: collection ?? undefined,
+        collection_name: collection,
         // Create-time default only: the operator field stays editable, and an
         // unknown identity (dev without the gateway, or a failed /whoami) must
         // leave it empty rather than guess.
@@ -432,6 +436,18 @@ export function Report() {
   }
 
   const reportList = reports.data?.reports ?? []
+
+  // A report belongs to one collection and is reachable only while it is the
+  // active one, so with none active there is nothing to list or start.
+  if (!collection) {
+    return (
+      <div className="p-8 flex flex-col gap-4 h-full min-h-0">
+        <h1 className="sr-only">{t('report.title')}</h1>
+        <p className="text-sm text-muted-foreground">{t('report.select_collection')}</p>
+        <UnassignedReports collection={null} />
+      </div>
+    )
+  }
 
   return (
     <div className="p-8 flex flex-col gap-4 h-full min-h-0">
@@ -480,6 +496,8 @@ export function Report() {
           {report && <ExportMenu report={report} t={t} />}
         </div>
       </div>
+
+      <UnassignedReports collection={collection} />
 
       {reports.isError && (
         <p className="text-xs text-[var(--status-red-fg)]" role="alert">

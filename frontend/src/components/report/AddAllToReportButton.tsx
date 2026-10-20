@@ -40,6 +40,7 @@ export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className
   if (status === 'too_many') message = t('report.add_all_too_many', { max: cap })
   else if (status === 'too_large') message = t('report.add_all_too_large')
   else if (failed) message = t('report.add_all_failed')
+  else if (status === 'cancelled') message = t('report.add_all_cancelled')
   else if (status === 'done') {
     if (added === 0 && updated === 0 && skipped > 0) message = t('report.add_all_none')
     else if (updated > 0) message = t('report.add_all_done_updated', { added, updated, skipped })

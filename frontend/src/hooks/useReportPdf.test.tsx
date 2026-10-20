@@ -4,21 +4,24 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { resetReportPdfJobs, useReportPdf } from './useReportPdf'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useUiStore } from '@/stores/ui'
 import type { IngestEvent, IngestJobSnapshot, ReportPdfStatus } from '@/api/types'
 
 let status: ReportPdfStatus = { job: null, pdf: null }
-const reportPdfStatus = vi.fn(async () => status)
-const queueReportPdf = vi.fn(async (): Promise<{ job_id: string; adopted: boolean }> => ({
-  job_id: 'j1',
-  adopted: false
-}))
+const reportPdfStatus = vi.fn(async (_collection: string, _id: number) => status)
+const queueReportPdf = vi.fn(
+  async (_collection: string, _id: number): Promise<{ job_id: string; adopted: boolean }> => ({
+    job_id: 'j1',
+    adopted: false
+  })
+)
 
 vi.mock('@/api/reports', async () => {
   const actual = await vi.importActual<typeof import('@/api/reports')>('@/api/reports')
   return {
     ...actual,
-    reportPdfStatus: () => reportPdfStatus(),
-    queueReportPdf: () => queueReportPdf()
+    reportPdfStatus: (collection: string, id: number) => reportPdfStatus(collection, id),
+    queueReportPdf: (collection: string, id: number) => queueReportPdf(collection, id)
   }
 })
 
@@ -72,6 +75,7 @@ function downloads(): HTMLAnchorElement[] {
 
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  useUiStore.setState({ selectedCollection: 'docs' })
   status = { job: null, pdf: null }
   reportPdfStatus.mockClear()
   queueReportPdf.mockClear()
@@ -230,8 +234,16 @@ describe('useReportPdf — download when ready', () => {
     await renderAndComplete()
     await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
     const [anchor] = downloads()
-    expect(anchor.getAttribute('href')).toMatch(/\/reports\/1\/pdf$/)
+    expect(anchor.getAttribute('href')).toMatch(/\/reports\/1\/pdf\?collection=docs$/)
     expect(anchor.download).toBe('report-1-Case Alpha.pdf')
+  })
+
+  it('asks about and queues the render through the active collection', async () => {
+    // The server answers 404 for a report outside the collection a request names.
+    await renderAndComplete()
+    expect(queueReportPdf.mock.calls).toEqual([['docs', 1]])
+    expect(reportPdfStatus.mock.calls.length).toBeGreaterThan(0)
+    expect(reportPdfStatus.mock.calls.every((call) => call[0] === 'docs' && call[1] === 1)).toBe(true)
   })
 
   it('does not download again when the stream replays the completion', async () => {

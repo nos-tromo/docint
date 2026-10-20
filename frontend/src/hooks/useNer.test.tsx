@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { useHateSpeechPages, useNerSources, useNerStats } from './useNer'
@@ -9,7 +9,7 @@ import { ENTITY_MERGE_MODE } from '@/api/types'
 afterEach(() => vi.restoreAllMocks())
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: null })
+  useUiStore.setState({ selectedCollection: null, selectedOwner: null })
 })
 
 function mockFetch(body: unknown) {
@@ -57,6 +57,28 @@ describe('analysis hooks thread the selected collection into requests', () => {
       expect(call).toBeDefined()
       expect(String(call![0])).toContain('collection=docs')
     })
+  })
+
+  it("fetches the other owner's findings when only the owner changes", async () => {
+    // An admin moving between two owners' collections that share a name: the
+    // first owner's rows must not stay on screen, where they could be added
+    // to the second owner's report.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string) => {
+        const owner = new URL(String(u), 'http://localhost').searchParams.get('owner')
+        const body = { items: [{ chunk_id: `${owner}-c1` }], next_cursor: null }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
+      })
+    )
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: 'alice' })
+    const { result } = renderHook(() => useHateSpeechPages(), { wrapper })
+    const chunkIds = () => result.current.data?.pages.flatMap((p) => p.items.map((i) => i.chunk_id))
+    await waitFor(() => expect(chunkIds()).toEqual(['alice-c1']))
+
+    act(() => useUiStore.getState().setSelectedCollection('docs', 'bob'))
+
+    await waitFor(() => expect(chunkIds()).toEqual(['bob-c1']))
   })
 
   it('does not fire NER requests until a collection is selected', async () => {

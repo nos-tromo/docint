@@ -3023,13 +3023,15 @@ def test_ingest_sync_forwards_hybrid_without_coercion(
     assert recorded["hybrid"] is expected_hybrid
 
 
-def test_sessions_endpoints(client: TestClient) -> None:
+def test_sessions_endpoints(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Test session management endpoints.
 
     Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
     headers = {"X-Auth-User": "tester"}
+    monkeypatch.setattr(api_module.rag.sessions, "get_session_collection", lambda session_id, owner=None: "docs")
 
     # List
     resp = client.get("/sessions/list", headers=headers)
@@ -3039,7 +3041,7 @@ def test_sessions_endpoints(client: TestClient) -> None:
     assert data["sessions"][0]["id"] == "123"
 
     # History
-    resp = client.get("/sessions/123/history", headers=headers)
+    resp = client.get("/sessions/123/history", params={"collection": "docs"}, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["messages"]) == 1
@@ -3049,6 +3051,34 @@ def test_sessions_endpoints(client: TestClient) -> None:
     resp = client.delete("/sessions/123", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+def test_session_history_is_read_only_from_its_own_collection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A chat's answers are served only while the collection it is pinned to is active.
+
+    Back in the browser reopens an old session's URL after a collection switch;
+    serving its history there is how its answers reached the other collection's
+    report.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    pins = {"123": "docs", "legacy": None}
+    monkeypatch.setattr(
+        api_module.rag.sessions, "get_session_collection", lambda session_id, owner=None: pins.get(session_id)
+    )
+
+    assert client.get("/sessions/123/history", params={"collection": "docs"}).status_code == 200
+    assert client.get("/sessions/123/history", params={"collection": "other"}).status_code == 404
+    assert client.get("/sessions/legacy/history", params={"collection": "docs"}).status_code == 404
+    assert client.get("/sessions/123/history").status_code == 422
+
+    unowned = types.SimpleNamespace(resolve=lambda owner, logical: None)
+    monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: unowned)
+    assert client.get("/sessions/123/history", params={"collection": "docs"}).status_code == 404
 
 
 def test_ingest_missing_directory(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
@@ -4317,6 +4347,10 @@ def test_sessions_endpoints_pass_principal_and_404_on_cross_owner(
             # Simulate a cross-owner / missing session: empty history.
             return [] if owner == "bob" else [{"role": "user", "content": "hi"}]
 
+        def get_session_collection(self, session_id: str, owner: str) -> str | None:
+            # Owner-scoped like the real manager: another owner's session has no pin.
+            return None if owner == "bob" else "docs"
+
         def delete_session(self, session_id: str, owner: str) -> bool:
             seen["delete"] = (session_id, owner)
             return owner == "alice"
@@ -4330,13 +4364,13 @@ def test_sessions_endpoints_pass_principal_and_404_on_cross_owner(
     assert resp.json()["sessions"][0]["id"] == "s1"
 
     # History for the owner succeeds.
-    resp = client.get("/sessions/s1/history", headers={"X-Auth-User": "alice"})
+    resp = client.get("/sessions/s1/history", params={"collection": "docs"}, headers={"X-Auth-User": "alice"})
     assert resp.status_code == 200
     assert seen["history"] == ("s1", "alice")
     assert resp.json()["messages"][0]["content"] == "hi"
 
-    # Cross-owner history is 404 (empty -> not found, no existence leak).
-    resp = client.get("/sessions/s1/history", headers={"X-Auth-User": "bob"})
+    # Cross-owner history is 404 (no pin for that owner -> not found, no existence leak).
+    resp = client.get("/sessions/s1/history", params={"collection": "docs"}, headers={"X-Auth-User": "bob"})
     assert resp.status_code == 404
 
     # Cross-owner delete is 404.

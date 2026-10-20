@@ -1660,10 +1660,12 @@ class AgentChatOut(BaseModel):
 
 
 class ReportCreateIn(BaseModel):
-    """Request payload creating a new (empty) report."""
+    """Request payload creating a new (empty) report in a collection."""
 
     title: str
-    collection_name: str | None = None
+    # Required: a report is reachable only while its collection is active, so
+    # one created without a collection could never be opened again.
+    collection_name: str = Field(min_length=1)
     operator: str | None = None
     reference_number: str | None = None
     session_id: str | None = None
@@ -1686,12 +1688,6 @@ class ReportItemIn(BaseModel):
     dedupe_key: str
     snapshot: dict[str, Any]
     note: str | None = None
-    # The logical collection the artifact was taken from. A report is bound to
-    # one collection, but the client's active collection is the authority on
-    # where this artifact's evidence lives -- the two disagree while an item is
-    # added from a collection the report was not created in, and the companion
-    # lookup must follow the artifact, not the report.
-    collection: str | None = None
 
 
 # The most items one batch add may carry; reports themselves stay uncapped.
@@ -1705,9 +1701,6 @@ class ReportItemBatchIn(BaseModel):
     """Request payload adding many snapshotted artifacts to a report at once."""
 
     items: list[ReportItemIn] = Field(min_length=1, max_length=REPORT_BATCH_MAX_ITEMS)
-    # The collection the artifacts were taken from, as on the single add. One
-    # per batch: a batch comes from one Analysis section, hence one collection.
-    collection: str | None = None
 
 
 class TranslateIn(BaseModel):
@@ -3576,25 +3569,63 @@ def _report_stem(report: dict[str, Any]) -> str:
     return f"report-{report.get('id')}-{report.get('title') or 'report'}"
 
 
-def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
-    """Fetch a report owned by ``principal`` or raise 404.
+def _get_owned_report(report_id: int, principal: str, collection: str) -> dict[str, Any]:
+    """Fetch a report owned by ``principal`` in the request's collection, or raise 404.
+
+    The route gate checked the collection in its own transaction; checking it
+    again on the row read here keeps a report whose id passed to another of the
+    caller's collections in between from being served.
 
     Args:
         report_id (int): The report id.
         principal (str): The resolved request principal name.
+        collection (str): The caller's active collection.
 
     Returns:
         dict[str, Any]: The report, including its ordered items.
 
     Raises:
-        HTTPException: 404 when the report is missing or owned by another principal.
+        HTTPException: 404 when the report is missing, owned by another
+            principal, or in another collection.
     """
-    report = rag.ensure_report_manager().get_report(report_id, principal)
+    report = rag.ensure_report_manager().get_report(report_id, principal, collection=collection)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     if report.get("collection_name"):
         _record_activity(principal, str(report["collection_name"]))
     return report
+
+
+def _require_report_in_collection(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> None:
+    """Refuse a report that does not belong to the caller's active collection.
+
+    A report holds one collection's evidence, so it is reachable only while that
+    collection is the active one. From any other, every report route answers 404,
+    exactly as for another owner's report, so nothing can be read from it,
+    edited in it, or added to it. Attached as a route dependency: it runs before
+    the request body is validated, and it records no activity.
+
+    Args:
+        report_id (int): The report id from the path.
+        collection (str): The caller's active logical collection.
+        principal (Principal): The resolved request principal.
+
+    Raises:
+        HTTPException: 404 when the report is missing, owned by another
+            principal, or belongs to another collection.
+    """
+    meta = rag.ensure_report_manager().get_report_meta(report_id, principal.effective_owner)
+    if meta is None or meta["collection_name"] != collection:
+        raise HTTPException(status_code=404, detail="Report not found.")
+
+
+# Every /reports/{report_id}* route carries this; tests/test_api_reports.py
+# enumerates the app's routes, so one added without it fails there.
+_REPORT_IN_COLLECTION = [Depends(_require_report_in_collection)]
 
 
 def _thumbnail_from_point(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -3631,7 +3662,6 @@ def _enrich_snapshot_thumbnails(
     artifact_type: str,
     report: dict[str, Any],
     principal: Principal,
-    collection: str | None = None,
 ) -> dict[str, Any]:
     """Freeze visual evidence into a report snapshot at add-time.
 
@@ -3641,16 +3671,13 @@ def _enrich_snapshot_thumbnails(
     it with no Qdrant access, and the report survives re-ingestion or
     collection deletion like the rest of the frozen snapshot.
 
-    The companion collection is derived from the collection the artifact was
-    taken from — the request's ``collection`` when it names one the caller
-    owns, else the report's own — always through the caller's ownership
-    mapping. A snapshot's ``image_collection`` is treated as a cross-check,
-    never as an address, so a crafted snapshot cannot make the server read an
-    arbitrary collection. The request's collection leads because that is where
-    the evidence actually lives: an artifact added while working in a
-    collection the report was not created in resolves against a companion that
-    never held its pixels, which is how a chat answer citing three images came
-    to freeze one thumbnail.
+    The companion is the report's own collection's, resolved through the
+    caller's ownership mapping. That is also where the artifact was retrieved:
+    a report takes evidence only while its collection is the active one
+    (:func:`_require_report_in_collection`), so the two cannot differ. A
+    snapshot's ``image_collection`` is treated as a cross-check, never as an
+    address, so a crafted snapshot cannot make the server read an arbitrary
+    collection.
 
     Fail-soft by contract: any failure (companion missing, Qdrant down, point
     without a thumbnail) returns the snapshot untouched — a text-only item,
@@ -3661,13 +3688,11 @@ def _enrich_snapshot_thumbnails(
         artifact_type (str): The report item's artifact type.
         report (dict[str, Any]): The owned report the item is being added to.
         principal (Principal): The resolved request principal.
-        collection (str | None): Logical collection the artifact was taken
-            from, when the client sent one.
 
     Returns:
         dict[str, Any]: The snapshot, enriched where possible.
     """
-    _enrich_snapshots_thumbnails([(snapshot, artifact_type)], report, principal, collection)
+    _enrich_snapshots_thumbnails([(snapshot, artifact_type)], report, principal)
     return snapshot
 
 
@@ -3695,7 +3720,6 @@ def _enrich_snapshots_thumbnails(
     pairs: list[tuple[dict[str, Any], str]],
     report: dict[str, Any],
     principal: Principal,
-    collection: str | None = None,
 ) -> None:
     """Freeze visual evidence into many snapshots with one companion scroll.
 
@@ -3712,8 +3736,6 @@ def _enrich_snapshots_thumbnails(
             for each item being added.
         report (dict[str, Any]): The owned report the items are being added to.
         principal (Principal): The resolved request principal.
-        collection (str | None): Logical collection the artifacts were taken
-            from, when the client sent one.
     """
     try:
         containers: list[dict[str, Any]] = []
@@ -3722,17 +3744,9 @@ def _enrich_snapshots_thumbnails(
         if not containers:
             return
 
-        physical: str | None = None
-        for logical in (collection, report.get("collection_name")):
-            name = str(logical or "").strip()
-            if not name:
-                continue
-            try:
-                physical = _require_owned_collection(name, principal)
-            except HTTPException:
-                continue
-            break
-        if physical is None:
+        try:
+            physical = _require_owned_collection(str(report.get("collection_name") or ""), principal)
+        except HTTPException:
             return
         companion = rag._image_collection_name(physical)
 
@@ -3787,7 +3801,9 @@ def _capture_collection_overview(report_id: int, collection: str, principal: Pri
     with _scoped_collection(collection, principal):
         documents = rag.list_documents()
     overview = build_collection_overview(documents, collection, datetime.now(UTC))
-    return rag.ensure_report_manager().set_collection_overview_snapshot(report_id, principal.effective_owner, overview)
+    return rag.ensure_report_manager().set_collection_overview_snapshot(
+        report_id, principal.effective_owner, overview, collection=collection
+    )
 
 
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
@@ -4003,15 +4019,21 @@ def list_sessions(
 )
 def get_session_history(
     session_id: str,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
-    """Get history for a session owned by the calling principal.
+    """Get history for a session owned by the calling principal, from its own collection.
 
-    A session that does not exist or is owned by another principal is
-    reported as 404 (no existence leak).
+    A session that does not exist, is owned by another principal, or is pinned
+    to a collection other than the caller's active one is reported as 404 (no
+    existence leak). Without the collection check, the browser's Back button
+    could reopen an old session's URL after a collection switch, and its
+    answers could then be added to the other collection's report. An unpinned
+    legacy session belongs to no collection, so it is never served.
 
     Args:
         session_id (str): The ID of the session.
+        collection (str): The caller's active logical collection.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4019,10 +4041,15 @@ def get_session_history(
 
     Raises:
         HTTPException: 404 when the session is not found for this
-            principal; 500 on unexpected errors.
+            principal in this collection; 500 on unexpected errors.
     """
     try:
-        messages = rag.ensure_session_manager().get_session_history(session_id, principal.effective_owner)
+        sm = rag.ensure_session_manager()
+        owner = principal.effective_owner
+        physical = rag.ensure_collection_owner_manager().resolve(owner, collection)
+        if physical is None or sm.get_session_collection(session_id, owner) != physical:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        messages = sm.get_session_history(session_id, owner)
     except HTTPException:
         raise
     except Exception as e:
@@ -4181,7 +4208,7 @@ def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolv
     """Create a new, empty report owned by the calling principal.
 
     Args:
-        payload (ReportCreateIn): Title and optional collection/session scope.
+        payload (ReportCreateIn): Title, collection, and optional session.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4203,25 +4230,27 @@ def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolv
     # Default-on document overview: capture once at create. Fail-soft — a Qdrant
     # hiccup must not fail report creation; the snapshot stays null until a
     # successful refresh.
-    if payload.collection_name:
-        try:
-            enriched = _capture_collection_overview(report["id"], payload.collection_name, principal)
-            if enriched is not None:
-                report = enriched
-        except Exception as e:
-            logger.warning("Collection-overview capture failed for report {}: {}", report["id"], e)
+    try:
+        enriched = _capture_collection_overview(report["id"], payload.collection_name, principal)
+        if enriched is not None:
+            report = enriched
+    except Exception as e:
+        logger.warning("Collection-overview capture failed for report {}: {}", report["id"], e)
     return report
 
 
 @app.get("/reports", response_model=ReportListOut, tags=["Reports"])
 def list_reports(
-    collection: str | None = None,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
-    """List the caller's reports, optionally filtered by collection.
+    """List the caller's reports in their active collection.
+
+    A report is reachable only from its own collection, so there is no listing
+    across collections.
 
     Args:
-        collection (str | None): Optional collection filter.
+        collection (str): The caller's active logical collection.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4234,12 +4263,81 @@ def list_reports(
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
-@app.get("/reports/{report_id}", tags=["Reports"])
-def get_report(report_id: int, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
+# Declared before /reports/{report_id}, which would otherwise take the path
+# and refuse "unassigned" as a report id.
+@app.get("/reports/unassigned", response_model=ReportListOut, tags=["Reports"])
+def list_unassigned_reports(
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, list[dict[str, Any]]]:
+    """List the caller's reports that belong to no collection.
+
+    Reports created before every report had to name its collection have none,
+    so no collection reaches them. They are listed here so each can be placed
+    in a collection with :func:`assign_report_collection`.
+
+    Args:
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, list[dict[str, Any]]]: The caller's unassigned report summaries.
+    """
+    try:
+        return {"reports": rag.ensure_report_manager().list_unassigned_reports(principal.effective_owner)}
+    except Exception as e:
+        logger.opt(exception=e).error("Error listing unassigned reports")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+@app.post("/reports/unassigned/{report_id}/assign", tags=["Reports"])
+def assign_report_collection(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
+    """Place a report that belongs to no collection into one of the caller's collections.
+
+    The one way such a report becomes reachable again. Only a report without a
+    collection is assigned, so this never moves a report between collections
+    — the contamination the collection gate exists to refuse. The document
+    overview is captured as it is at create, and just as fail-soft.
+
+    Args:
+        report_id (int): The report id.
+        collection (str): The caller's active logical collection, to place it in.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The report, now in ``collection``.
+
+    Raises:
+        HTTPException: 404 when the collection is not the caller's, or the
+            report is missing, another owner's, or already in a collection.
+    """
+    _require_owned_collection(collection, principal)
+    name = collection.strip()
+    report = rag.ensure_report_manager().assign_collection(report_id, principal.effective_owner, name)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    try:
+        captured = _capture_collection_overview(report_id, name, principal)
+        if captured is not None:
+            report = captured
+    except Exception as e:
+        logger.warning("Collection-overview capture failed for report {}: {}", report_id, e)
+    return report
+
+
+@app.get("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
+def get_report(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
     """Return a report (with items) owned by the calling principal.
 
     Args:
         report_id (int): The report id.
+        collection (str): The caller's active collection, re-checked on the read.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4248,13 +4346,14 @@ def get_report(report_id: int, principal: Principal = Depends(resolve_principal)
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    return _get_owned_report(report_id, principal.effective_owner)
+    return _get_owned_report(report_id, principal.effective_owner, collection)
 
 
-@app.patch("/reports/{report_id}", tags=["Reports"])
+@app.patch("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def update_report(
     report_id: int,
     payload: ReportUpdateIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Update a report (title, case metadata, or contents toggle) owned by the caller.
@@ -4262,6 +4361,7 @@ def update_report(
     Args:
         report_id (int): The report id.
         payload (ReportUpdateIn): Fields to update; only non-null fields apply.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4278,38 +4378,40 @@ def update_report(
         reference_number=payload.reference_number,
         show_toc=payload.show_toc,
         show_collection_overview=payload.show_collection_overview,
+        collection=collection,
     )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return report
 
 
-@app.post("/reports/{report_id}/collection-overview/refresh", tags=["Reports"])
+@app.post("/reports/{report_id}/collection-overview/refresh", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def refresh_report_collection_overview(
     report_id: int,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Recapture a report's document-overview snapshot from its collection.
 
     Point-in-time refresh: rebuilds the frozen manifest from the collection's
-    *current* documents.
+    *current* documents. The request's collection is used throughout, never the
+    one a fresh read of the report names: between the gate and this handler the
+    report's id may have passed to the caller's report in another collection,
+    and the locked write then finds no match.
 
     Args:
         report_id (int): The report id.
+        collection (str): The caller's active collection.
         principal (Principal): The resolved request principal (owner).
 
     Returns:
         dict[str, Any]: The report with its refreshed ``collection_overview`` snapshot.
 
     Raises:
-        HTTPException: 404 when the report is missing or owned by another
-            principal (or its collection is no longer owned); 400 when the report
-            has no collection; 502 when the manifest build fails.
+        HTTPException: 404 when the report is missing, owned by another
+            principal, or no longer in ``collection`` (or the collection is no
+            longer owned); 502 when the manifest build fails.
     """
-    report = _get_owned_report(report_id, principal.effective_owner)
-    collection = report.get("collection_name")
-    if not collection:
-        raise HTTPException(status_code=400, detail="Report has no collection to summarize.")
     try:
         updated = _capture_collection_overview(report_id, collection, principal)
     except HTTPException:
@@ -4317,15 +4419,22 @@ def refresh_report_collection_overview(
     except Exception as e:
         logger.error("Collection-overview refresh failed for report {}: {}", report_id, e)
         raise HTTPException(status_code=502, detail="Failed to build the document overview.") from e
-    return updated if updated is not None else report
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return updated
 
 
-@app.delete("/reports/{report_id}", tags=["Reports"])
-def delete_report(report_id: int, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
+@app.delete("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
+def delete_report(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
     """Delete a report (and its items) owned by the calling principal.
 
     Args:
         report_id (int): The report id.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4334,24 +4443,26 @@ def delete_report(report_id: int, principal: Principal = Depends(resolve_princip
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner):
+    if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner, collection=collection):
         raise HTTPException(status_code=404, detail="Report not found.")
     _discard_report_pdfs([report_id])
     return {"ok": True}
 
 
-@app.post("/reports/{report_id}/items", tags=["Reports"])
+@app.post("/reports/{report_id}/items", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def add_report_item(
     report_id: int,
     payload: ReportItemIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Add a snapshotted artifact to a report (idempotent by dedupe key).
 
     Args:
         report_id (int): The report id.
-        payload (ReportItemIn): Artifact type, dedupe key, snapshot, optional
-            note, and the collection the artifact was taken from.
+        payload (ReportItemIn): Artifact type, dedupe key, snapshot, and
+            optional note.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4360,10 +4471,8 @@ def add_report_item(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = _get_owned_report(report_id, principal.effective_owner)
-    snapshot = _enrich_snapshot_thumbnails(
-        payload.snapshot, payload.artifact_type, report, principal, payload.collection
-    )
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
+    snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
     item = rag.ensure_report_manager().add_item(
         report_id,
         principal.effective_owner,
@@ -4371,16 +4480,18 @@ def add_report_item(
         dedupe_key=payload.dedupe_key,
         snapshot=snapshot,
         note=payload.note,
+        collection=collection,
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return item
 
 
-@app.post("/reports/{report_id}/items/batch", tags=["Reports"])
+@app.post("/reports/{report_id}/items/batch", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def add_report_items(
     report_id: int,
     payload: ReportItemBatchIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Add many snapshotted artifacts to a report in one request.
@@ -4398,8 +4509,8 @@ def add_report_items(
 
     Args:
         report_id (int): The report id.
-        payload (ReportItemBatchIn): The items and the collection they were
-            taken from.
+        payload (ReportItemBatchIn): The items to add.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4408,13 +4519,10 @@ def add_report_items(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = _get_owned_report(report_id, principal.effective_owner)
-    collection = payload.collection or next((item.collection for item in payload.items if item.collection), None)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     # Enrichment edits the snapshots in place, so the manager stores what the
     # one companion scroll stamped.
-    _enrich_snapshots_thumbnails(
-        [(item.snapshot, item.artifact_type) for item in payload.items], report, principal, collection
-    )
+    _enrich_snapshots_thumbnails([(item.snapshot, item.artifact_type) for item in payload.items], report, principal)
     result = rag.ensure_report_manager().add_items(
         report_id,
         principal.effective_owner,
@@ -4427,6 +4535,7 @@ def add_report_items(
             }
             for item in payload.items
         ],
+        collection=collection,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Report not found.")
@@ -4441,11 +4550,12 @@ def add_report_items(
     return result
 
 
-@app.patch("/reports/{report_id}/items/{item_id}", tags=["Reports"])
+@app.patch("/reports/{report_id}/items/{item_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def annotate_report_item(
     report_id: int,
     item_id: int,
     payload: ReportItemNoteIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Set or clear the note on a report item.
@@ -4454,6 +4564,7 @@ def annotate_report_item(
         report_id (int): The report id.
         item_id (int): The item id.
         payload (ReportItemNoteIn): The new note (``None`` clears it).
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4462,16 +4573,19 @@ def annotate_report_item(
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    item = rag.ensure_report_manager().annotate_item(report_id, principal.effective_owner, item_id, note=payload.note)
+    item = rag.ensure_report_manager().annotate_item(
+        report_id, principal.effective_owner, item_id, note=payload.note, collection=collection
+    )
     if item is None:
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return item
 
 
-@app.delete("/reports/{report_id}/items/{item_id}", tags=["Reports"])
+@app.delete("/reports/{report_id}/items/{item_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def remove_report_item(
     report_id: int,
     item_id: int,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, bool]:
     """Remove a single item from a report owned by the calling principal.
@@ -4479,6 +4593,7 @@ def remove_report_item(
     Args:
         report_id (int): The report id.
         item_id (int): The item id.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4487,15 +4602,18 @@ def remove_report_item(
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    if not rag.ensure_report_manager().remove_item(report_id, principal.effective_owner, item_id):
+    if not rag.ensure_report_manager().remove_item(
+        report_id, principal.effective_owner, item_id, collection=collection
+    ):
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return {"ok": True}
 
 
-@app.post("/reports/{report_id}/items/reorder", tags=["Reports"])
+@app.post("/reports/{report_id}/items/reorder", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def reorder_report_items(
     report_id: int,
     payload: ReportReorderIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Reorder a report's items to match the supplied id order.
@@ -4503,6 +4621,7 @@ def reorder_report_items(
     Args:
         report_id (int): The report id.
         payload (ReportReorderIn): Desired item id order.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4511,18 +4630,24 @@ def reorder_report_items(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = rag.ensure_report_manager().reorder_items(report_id, principal.effective_owner, payload.item_ids)
+    report = rag.ensure_report_manager().reorder_items(
+        report_id, principal.effective_owner, payload.item_ids, collection=collection
+    )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return report
 
 
-@app.get("/reports/{report_id}/export.md", tags=["Reports"])
-def export_report_markdown(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+@app.get("/reports/{report_id}/export.md", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
+def export_report_markdown(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a single Markdown document (attachment download)."""
     from docint.core.state.report_render import render_markdown
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=render_markdown(report),
         media_type="text/markdown; charset=utf-8",
@@ -4530,12 +4655,16 @@ def export_report_markdown(report_id: int, principal: Principal = Depends(resolv
     )
 
 
-@app.get("/reports/{report_id}/export.html", tags=["Reports"])
-def export_report_html(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+@app.get("/reports/{report_id}/export.html", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
+def export_report_html(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a self-contained HTML document (served inline)."""
     from docint.core.state.report_render import render_html
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=render_html(report),
         media_type="text/html; charset=utf-8",
@@ -4543,12 +4672,16 @@ def export_report_html(report_id: int, principal: Principal = Depends(resolve_pr
     )
 
 
-@app.get("/reports/{report_id}/export.json", tags=["Reports"])
-def export_report_json(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+@app.get("/reports/{report_id}/export.json", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
+def export_report_json(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export the full report (with snapshots) as JSON (attachment download)."""
     from docint.core.state.report_render import render_json
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=render_json(report),
         media_type="application/json",
@@ -4556,12 +4689,16 @@ def export_report_json(report_id: int, principal: Principal = Depends(resolve_pr
     )
 
 
-@app.get("/reports/{report_id}/export.zip", tags=["Reports"])
-def export_report_zip(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+@app.get("/reports/{report_id}/export.zip", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
+def export_report_zip(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a ZIP bundle of per-type CSVs (attachment download)."""
     from docint.core.state.report_render import report_csv_bundle
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     return Response(
         content=report_csv_bundle(report),
         media_type="application/zip",
@@ -4569,8 +4706,12 @@ def export_report_zip(report_id: int, principal: Principal = Depends(resolve_pri
     )
 
 
-@app.get("/reports/{report_id}/export.pdf", tags=["Reports"])
-def export_report_pdf(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+@app.get("/reports/{report_id}/export.pdf", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
+def export_report_pdf(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Export a report as a real paginated PDF rendered by WeasyPrint.
 
     Returns 503 if the PDF engine (WeasyPrint + native libs) is unavailable,
@@ -4578,7 +4719,7 @@ def export_report_pdf(report_id: int, principal: Principal = Depends(resolve_pri
     """
     from docint.core.state.report_render import PdfEngineUnavailableError, render_pdf
 
-    report = _get_owned_report(report_id, principal.effective_owner)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
     try:
         pdf_bytes = render_pdf(report)
     except PdfEngineUnavailableError as e:
@@ -5838,7 +5979,7 @@ def _report_pdf_preflight(report_id: int, owner: str) -> dict[str, Any]:
     return meta
 
 
-@app.post("/reports/{report_id}/pdf", response_model=None, tags=["Reports"])
+@app.post("/reports/{report_id}/pdf", response_model=None, tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 async def queue_report_pdf(
     report_id: int,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
@@ -5882,7 +6023,7 @@ async def queue_report_pdf(
     return JSONResponse({"job_id": state.job_id}, status_code=202)
 
 
-@app.get("/reports/{report_id}/pdf", tags=["Reports"])
+@app.get("/reports/{report_id}/pdf", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def download_report_pdf(
     report_id: int,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
@@ -5914,7 +6055,7 @@ def download_report_pdf(
     )
 
 
-@app.get("/reports/{report_id}/pdf/status", tags=["Reports"])
+@app.get("/reports/{report_id}/pdf/status", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 async def report_pdf_status(
     report_id: int,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker

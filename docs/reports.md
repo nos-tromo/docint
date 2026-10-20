@@ -52,8 +52,9 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   the browser for the session, and only reach the server when a finding they
   belong to is added to a report. A finding already in the active locale gets
   no translation, so its snapshot carries none.
-- The **Report** view lists your reports and, for the active one, shows the
-  picked artifacts grouped by type with per-item notes, reordering, and removal.
+- The **Report** view lists the active collection's reports and, for the active
+  one, shows the picked artifacts grouped by type with per-item notes,
+  reordering, and removal. With no collection selected it lists none.
 - Reports are **owner-scoped** and persisted server-side in the same SQLite
   store as chat sessions; each item is **snapshotted at add-time**, so later
   re-ingestion of the collection never changes a finished report.
@@ -70,10 +71,16 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   its source list, each captioned with the number the answer cites (`[2]`), so
   a reader can tell which figure the text means; a finding opens with its one
   figure, its printed words beside it (see [Exporting](#exporting)).
-- **A report belongs to one collection.** Switching the active collection
-  releases the active report, so the next "+ Report" click starts one for the
-  collection you are actually working in — a report's document overview and its
-  evidence always describe the same collection.
+- **A report belongs to one collection and is reachable only while that
+  collection is active.** Every report request names the active collection,
+  and the server answers 404 for a report of another one, on every route alike:
+  opening, editing, adding, exporting. Evidence from one investigation therefore
+  never lands in another's report, and a report's document overview and its
+  evidence always describe the same collection. Switching the collection
+  releases the open report, so the next "+ Report" click starts one in the
+  collection you are working in. A chat's history is served the same way, only
+  in the collection the chat ran in, so the browser's Back button cannot bring
+  another collection's answers into view.
 - **Findings from pictures show the picture in the Analysis tab too.** An
   entity or hate-speech finding whose chunk was read out of an image (a
   screenshot, a photographed page, a video keyframe) renders the source image
@@ -115,14 +122,16 @@ already in report").
 Export a finished report in five formats (also available directly over HTTP —
 see [api-reference.md](api-reference.md#reports)). The examples below assume
 the API is reachable on port 8000; under Docker the backend publishes no host
-port, so run them from inside the network or through the gateway:
+port, so run them from inside the network or through the gateway. Every report
+route names the report's collection (`collection`); from any other it answers
+404:
 
 ```bash
-curl -O "http://localhost:8000/reports/1/export.pdf"   # paginated case-file PDF (WeasyPrint), rendered on the request
-curl -O "http://localhost:8000/reports/1/export.md"    # combined Markdown
-curl    "http://localhost:8000/reports/1/export.html"  # self-contained HTML (also the PDF source)
-curl -O "http://localhost:8000/reports/1/export.json"  # structured selection
-curl -O "http://localhost:8000/reports/1/export.zip"   # per-type CSV bundle (reuses csv_stream.py schemas)
+curl -OJ "http://localhost:8000/reports/1/export.pdf?collection=mydocs"   # paginated case-file PDF (WeasyPrint), rendered on the request
+curl -OJ "http://localhost:8000/reports/1/export.md?collection=mydocs"    # combined Markdown
+curl     "http://localhost:8000/reports/1/export.html?collection=mydocs"  # self-contained HTML (also the PDF source)
+curl -OJ "http://localhost:8000/reports/1/export.json?collection=mydocs"  # structured selection
+curl -OJ "http://localhost:8000/reports/1/export.zip?collection=mydocs"   # per-type CSV bundle (reuses csv_stream.py schemas)
 ```
 
 Every export leads with the **summaries**, then chat answers, entity findings,
@@ -194,9 +203,9 @@ downloads at once; an edited report renders again. Scripts can use the same
 flow (see [api-reference.md](api-reference.md#pdf-render-jobs--reportsreport_idpdf)):
 
 ```bash
-curl -X POST "http://localhost:8000/reports/1/pdf"        # 202 {"job_id": …}
-curl "http://localhost:8000/reports/1/pdf/status"         # job progress, and the stored PDF once done
-curl -OJ "http://localhost:8000/reports/1/pdf"            # the rendered PDF
+curl -X POST "http://localhost:8000/reports/1/pdf?collection=mydocs"   # 202 {"job_id": …}
+curl "http://localhost:8000/reports/1/pdf/status?collection=mydocs"    # job progress, and the stored PDF once done
+curl -OJ "http://localhost:8000/reports/1/pdf?collection=mydocs"       # the rendered PDF
 ```
 
 ## When the collection is deleted
@@ -206,8 +215,11 @@ A report is deleted together with the collection it was built from — by
 ([retention.md](retention.md)) alike — so nothing derived from a deleted
 collection stays behind in docint. Export the report first if it has to
 survive: an exported file carries its evidence inline and keeps working after
-the collection is gone. Reports started outside any collection are not tied to
-one and are kept.
+the collection is gone. Every report is created in a collection. A report
+started without one before this rule is listed in the Report tab under
+**Reports without a collection**. **Move to …** places it in the active
+collection, once; from then on it is reached and deleted with that collection
+like any other.
 
 ## Further reading
 

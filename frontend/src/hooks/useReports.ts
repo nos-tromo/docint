@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   addReportItem,
   addReportItems,
+  assignReport,
   createReport,
   deleteReport,
   getReport,
   listReports,
+  listUnassignedReports,
   refreshCollectionOverview,
   removeReportItem,
   reorderReportItems,
@@ -15,27 +17,89 @@ import {
 } from '@/api/reports'
 import type { ReportItemInput } from '@/api/types'
 import { ApiError } from '@/api/client'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { useConfig } from '@/hooks/useConfig'
 import { useReportStore } from '@/stores/report'
-import { useUiStore } from '@/stores/ui'
+import { useUiStore, watchCollectionChange, type CollectionWatch } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
 
 export const reportsKey = ['reports'] as const
 export const reportKey = (id: number) => ['reports', id] as const
 
-export function useReports(collection?: string) {
+/**
+ * The collection every report request names: the active one, or '' while none
+ * is active, which no report belongs to. A report is reachable only from its
+ * own collection, and the server answers 404 for any other.
+ */
+export function useReportCollection(): string {
+  return useUiStore((s) => s.selectedCollection) ?? ''
+}
+
+/** The active collection's reports. Like the session list: no collection, no list. */
+export function useReports() {
+  const scope = useActiveCollection()
+  const collection = scope.collection ?? ''
   return useQuery({
-    queryKey: collection ? (['reports', { collection }] as const) : reportsKey,
-    queryFn: () => listReports(collection)
+    queryKey: ['reports', scope] as const,
+    queryFn: () => listReports(collection),
+    enabled: !!collection
   })
 }
 
-export function useReport(id: number | null) {
+/**
+ * The caller's reports that belong to no collection.
+ *
+ * Kept from before every report named its collection, so no collection lists
+ * them. Keyed by owner because an admin reads them in the selected owner's
+ * namespace, and under the `['reports']` prefix so every report mutation
+ * refreshes it.
+ */
+export function useUnassignedReports() {
+  const { owner } = useActiveCollection()
   return useQuery({
-    queryKey: id != null ? reportKey(id) : ['reports', 'none'],
-    queryFn: () => getReport(id as number),
-    enabled: id != null
+    queryKey: ['reports', 'unassigned', { owner }] as const,
+    queryFn: listUnassignedReports
   })
+}
+
+/** Move a report without a collection into the active one, then open it there. */
+export function useAssignReport() {
+  const collection = useReportCollection()
+  const setActiveReportId = useReportStore((s) => s.setActiveReportId)
+  const invalidate = useReportInvalidator()
+  return useMutation({
+    mutationFn: (id: number) => assignReport(id, collection),
+    onSuccess: async (report) => {
+      await invalidate()
+      setActiveReportId(report.id)
+    }
+  })
+}
+
+/**
+ * One report, read through the active collection.
+ *
+ * Every reader of the active report comes through here, so this is where a
+ * stale active id is dropped: another tab's report, one kept from before
+ * reports were scoped to their collection, or one deleted elsewhere comes back
+ * 404, and clearing it lets the next add start a report in this collection
+ * instead of failing against it forever. Only while it is still the active
+ * id — an answer about an older id must not clear a newer choice.
+ */
+export function useReport(id: number | null) {
+  const collection = useReportCollection()
+  const query = useQuery({
+    queryKey: id != null ? reportKey(id) : ['reports', 'none'],
+    queryFn: () => getReport(collection, id as number),
+    enabled: id != null && !!collection
+  })
+  const gone = query.error instanceof ApiError && query.error.status === 404
+  useEffect(() => {
+    if (!gone) return
+    const { activeReportId, setActiveReportId } = useReportStore.getState()
+    if (activeReportId === id) setActiveReportId(null)
+  }, [gone, id])
+  return query
 }
 
 // Every mutation invalidates the `['reports']` prefix, which React Query
@@ -51,6 +115,7 @@ export function useCreateReport() {
 }
 
 export function useUpdateReport() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
     mutationFn: ({
@@ -63,69 +128,71 @@ export function useUpdateReport() {
       reference_number?: string
       show_toc?: boolean
       show_collection_overview?: boolean
-    }) => updateReport(id, body),
+    }) => updateReport(collection, id, body),
     onSuccess: invalidate
   })
 }
 
 export function useDeleteReport() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
-  return useMutation({ mutationFn: (id: number) => deleteReport(id), onSuccess: invalidate })
+  return useMutation({ mutationFn: (id: number) => deleteReport(collection, id), onSuccess: invalidate })
 }
 
 export function useAddReportItem() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
-    mutationFn: ({ reportId, item }: { reportId: number; item: ReportItemInput }) => addReportItem(reportId, item),
+    mutationFn: ({ reportId, item }: { reportId: number; item: ReportItemInput }) =>
+      addReportItem(collection, reportId, item),
     onSuccess: invalidate
   })
 }
 
 export function useAddReportItems() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
-    mutationFn: ({
-      reportId,
-      items,
-      collection
-    }: {
-      reportId: number
-      items: ReportItemInput[]
-      collection?: string | null
-    }) => addReportItems(reportId, items, collection),
+    mutationFn: ({ reportId, items }: { reportId: number; items: ReportItemInput[] }) =>
+      addReportItems(collection, reportId, items),
     onSuccess: invalidate
   })
 }
 
 export function useRemoveReportItem() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
-    mutationFn: ({ reportId, itemId }: { reportId: number; itemId: number }) => removeReportItem(reportId, itemId),
+    mutationFn: ({ reportId, itemId }: { reportId: number; itemId: number }) =>
+      removeReportItem(collection, reportId, itemId),
     onSuccess: invalidate
   })
 }
 
 export function useUpdateReportItem() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
     mutationFn: ({ reportId, itemId, note }: { reportId: number; itemId: number; note: string | null }) =>
-      updateReportItem(reportId, itemId, { note }),
+      updateReportItem(collection, reportId, itemId, { note }),
     onSuccess: invalidate
   })
 }
 
 export function useReorderReportItems() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
     mutationFn: ({ reportId, itemIds }: { reportId: number; itemIds: number[] }) =>
-      reorderReportItems(reportId, itemIds),
+      reorderReportItems(collection, reportId, itemIds),
     onSuccess: invalidate
   })
 }
 
 export function useRefreshCollectionOverview() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
-  return useMutation({ mutationFn: (id: number) => refreshCollectionOverview(id), onSuccess: invalidate })
+  return useMutation({ mutationFn: (id: number) => refreshCollectionOverview(collection, id), onSuccess: invalidate })
 }
 
 /** Dedupe keys already in the active report, for the "already added" UI state. */
@@ -147,25 +214,38 @@ export function useReportUntranslatedKeys(id: number | null): Set<string> {
   )
 }
 
+/** The active collection changed while an add was in flight, so it stopped before writing. */
+export class CollectionChangedError extends Error {
+  constructor() {
+    super('The active collection changed, so the add stopped before writing.')
+    this.name = 'CollectionChangedError'
+  }
+}
+
 /**
  * Resolve the report an add should land in, creating one if none is active.
  *
  * The first add from anywhere in the app auto-creates an "Untitled report"
  * scoped to the current collection (one click, no modal). Shared by the
  * per-row toggle and the section-wide "Add all" so the two cannot drift.
+ * Given a watch, a report created while the collection changed is not opened:
+ * it belongs to the collection that is no longer in front of the operator.
  */
 export function useEnsureActiveReport() {
   const t = useT()
   const activeReportId = useReportStore((s) => s.activeReportId)
   const setActiveReportId = useReportStore((s) => s.setActiveReportId)
-  const collection = useUiStore((s) => s.selectedCollection)
+  const collection = useReportCollection()
   const createReport = useCreateReport()
-  return async (): Promise<number> => {
+  return async (watch?: CollectionWatch): Promise<number> => {
     if (activeReportId != null) return activeReportId
+    // Every report belongs to a collection; with none active there is nowhere to add.
+    if (!collection) throw new Error('No collection is active, so there is no report to add to.')
     const created = await createReport.mutateAsync({
       title: t('report.untitled_title'),
-      collection_name: collection ?? undefined
+      collection_name: collection
     })
+    if (watch?.changed()) throw new CollectionChangedError()
     setActiveReportId(created.id)
     return created.id
   }
@@ -185,6 +265,7 @@ export type AddAllStatus =
   | 'failed'
   | 'too_many'
   | 'too_large'
+  | 'cancelled'
 
 export interface AddAllOutcome {
   status: AddAllStatus
@@ -206,6 +287,10 @@ export interface AddAllOutcome {
  * The walk asks for one row past the cap because `fetchAllPages` truncates
  * silently: at exactly the cap, a section that just fits and one that
  * overflows look the same, and "Add all" would carry an arbitrary sample.
+ *
+ * The run stops before writing (`cancelled`) if the active collection or its
+ * owner changes while it waits: requests follow the newly selected owner,
+ * while the rows it fetched belong to the collection it started in.
  */
 export function useAddAllToReport<Row>(params: {
   fetchAll: (maxItems: number) => Promise<Row[]>
@@ -214,7 +299,6 @@ export function useAddAllToReport<Row>(params: {
   const t = useT()
   const ensureReport = useEnsureActiveReport()
   const activeReportId = useReportStore((s) => s.activeReportId)
-  const collection = useUiStore((s) => s.selectedCollection)
   const existingKeys = useReportDedupeKeys(activeReportId)
   const untranslatedKeys = useReportUntranslatedKeys(activeReportId)
   const addItems = useAddReportItems()
@@ -223,9 +307,11 @@ export function useAddAllToReport<Row>(params: {
   const [outcome, setOutcome] = useState<AddAllOutcome>({ status: 'idle', added: 0, skipped: 0, updated: 0 })
 
   const run = async (): Promise<void> => {
+    const watch = watchCollectionChange()
     setOutcome({ status: 'fetching', added: 0, skipped: 0, updated: 0 })
     try {
       const rows = await params.fetchAll(cap + 1)
+      if (watch.changed()) throw new CollectionChangedError()
       // Checked on the raw walk: the extra row means it stopped early, so no
       // subset of what came back can honestly be called "all".
       if (rows.length > cap) {
@@ -256,7 +342,7 @@ export function useAddAllToReport<Row>(params: {
           }
         }
         seen.add(item.dedupe_key)
-        items.push({ ...item, collection: collection ?? null })
+        items.push(item)
       }
       if (items.length === 0) {
         setOutcome({ status: 'done', added: 0, skipped, updated: 0 })
@@ -270,10 +356,15 @@ export function useAddAllToReport<Row>(params: {
         return
       }
       setOutcome({ status: 'adding', added: 0, skipped: 0, updated: 0 })
-      const reportId = await ensureReport()
-      const result = await addItems.mutateAsync({ reportId, items, collection })
+      // Stops, via the watch, if the collection changed while it created a report.
+      const reportId = await ensureReport(watch)
+      const result = await addItems.mutateAsync({ reportId, items })
       setOutcome({ status: 'done', added: result.added, skipped: skipped + result.skipped, updated: result.updated })
     } catch (e) {
+      if (e instanceof CollectionChangedError) {
+        setOutcome({ status: 'cancelled', added: 0, skipped: 0, updated: 0 })
+        return
+      }
       console.error('Add all to report failed', e)
       // nginx refuses an oversize body before FastAPI sees it, so a retry
       // cannot succeed — say it is too big rather than offering one.
@@ -282,6 +373,8 @@ export function useAddAllToReport<Row>(params: {
         return
       }
       setOutcome({ status: 'failed', added: 0, skipped: 0, updated: 0 })
+    } finally {
+      watch.stop()
     }
   }
 

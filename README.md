@@ -64,8 +64,8 @@ cite as one thing with the post. See
 **The Report Builder turns findings into a case file.** Collection-wide CSV
 exports are all-or-nothing; a case usually needs a curated document instead. An
 "+ Report" control on every chat answer, entity finding and hate-speech finding
-snapshots that one artifact — image evidence frozen in as a data URI — into an
-owner-scoped report you can reorder, annotate, and export as Markdown, HTML,
+snapshots that one artifact — image evidence frozen in as a data URI — into a
+report scoped to you and that collection, which you can reorder, annotate, and export as Markdown, HTML,
 JSON, a CSV bundle, or a paginated PDF that references nothing outside itself.
 See [reports.md](docs/reports.md).
 

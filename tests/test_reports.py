@@ -1,15 +1,20 @@
 """Tests for owner-scoped curated reports (ReportManager)."""
 
+import json
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, delete, event, func, insert
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
 
-from docint.core.state.base import Base
+from docint.core.state.base import Base, _make_session_maker
+from docint.core.state.report import Report
 from docint.core.state.report_item import ReportItem
 from docint.core.state.report_manager import ReportManager
 
@@ -578,3 +583,313 @@ def test_report_meta_moves_with_every_change(report_manager: ReportManager) -> N
         stamps.append(_ok(report_manager.get_report_meta(rid, "alice"))["updated_at"])
 
     assert len(set(stamps)) == 3
+
+
+@contextmanager
+def _on_first_commit(report_manager: ReportManager, change: Callable[[Session], None]) -> Iterator[list[bool]]:
+    """Apply ``change`` through a second session right after the next commit, once.
+
+    That moment is where another request can slip in before a write reads its
+    record back; the hook makes the interleaving deterministic.
+    """
+    maker = report_manager._SessionMaker
+    assert maker is not None
+    fired: list[bool] = []
+
+    def hook(_session: Session) -> None:
+        if fired:
+            return
+        fired.append(True)
+        with maker() as other:
+            change(other)
+            other.commit()
+
+    event.listen(maker, "after_commit", hook)
+    try:
+        yield fired
+    finally:
+        event.remove(maker, "after_commit", hook)
+
+
+def _bobs_item(report_id: int, item_id: int | None = None) -> ReportItem:
+    """A finding in one of Bob's reports."""
+    snapshot = json.dumps({"chunk_id": "bob-chunk", "chunk_text": "Bob's evidence"})
+    return ReportItem(
+        id=item_id,
+        report_id=report_id,
+        artifact_type="entity_finding",
+        dedupe_key="entity:bob-chunk",
+        snapshot=snapshot,
+        position=0,
+    )
+
+
+def _give_the_newest_report_to_bob(other: Session) -> None:
+    """Delete the newest report and let one of Bob's take its id, as SQLite does."""
+    newest = other.query(func.max(Report.id)).scalar()
+    other.query(ReportItem).filter(ReportItem.report_id == newest).delete()
+    other.query(Report).filter(Report.id == newest).delete()
+    other.add(Report(id=newest, title="Bob's case", owner="bob", collection_name="bobs"))
+    other.add(_bobs_item(newest))
+
+
+def _give_the_newest_item_to(bob_report_id: int) -> Callable[[Session], None]:
+    """Delete the newest item and let a finding in Bob's report take its id."""
+
+    def change(other: Session) -> None:
+        newest = other.query(func.max(ReportItem.id)).scalar()
+        other.query(ReportItem).filter(ReportItem.id == newest).delete()
+        other.add(_bobs_item(bob_report_id, item_id=newest))
+
+    return change
+
+
+@pytest.mark.parametrize(
+    ("write", "unassigned", "items"),
+    [
+        pytest.param(
+            lambda rm, rid: rm.create_report(title="Alice's case", owner="alice", collection_name="docs"),
+            False,
+            [],
+            id="create_report",
+        ),
+        pytest.param(
+            lambda rm, rid: rm.update_report(rid, "alice", title="Alice's case"),
+            False,
+            ["entity:alice-chunk"],
+            id="update_report",
+        ),
+        pytest.param(
+            lambda rm, rid: rm.set_collection_overview_snapshot(rid, "alice", {"document_count": 1}),
+            False,
+            ["entity:alice-chunk"],
+            id="set_collection_overview_snapshot",
+        ),
+        pytest.param(
+            lambda rm, rid: rm.reorder_items(rid, "alice", []),
+            False,
+            ["entity:alice-chunk"],
+            id="reorder_items",
+        ),
+        pytest.param(
+            lambda rm, rid: rm.assign_collection(rid, "alice", "docs"),
+            True,
+            ["entity:alice-chunk"],
+            id="assign_collection",
+        ),
+    ],
+)
+def test_a_report_write_never_returns_another_owners_report(
+    report_manager: ReportManager,
+    write: Callable[[ReportManager, int], dict[str, Any] | None],
+    unassigned: bool,
+    items: list[str],
+) -> None:
+    """A write reads its report back before it commits, so an id reused right after cannot come back.
+
+    SQLite hands a deleted highest id to the next insert. Read back after the
+    commit, the report could be deleted and another owner's could take its id
+    in between, and that owner's report and evidence would be returned.
+    """
+    collection = None if unassigned else "docs"
+    rid = report_manager.create_report(title="Alice's case", owner="alice", collection_name=collection)["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("alice-chunk"))
+
+    with _on_first_commit(report_manager, _give_the_newest_report_to_bob) as fired:
+        written = _ok(write(report_manager, rid))
+
+    assert fired
+    assert (written["title"], written["collection_name"]) == ("Alice's case", "docs")
+    assert [i["dedupe_key"] for i in written["items"]] == items
+
+
+@pytest.mark.parametrize(
+    ("write", "dedupe_key"),
+    [
+        pytest.param(
+            lambda rm, rid, iid: rm.add_item(rid, "alice", **_entity_item("alice-new")),
+            "entity:alice-new",
+            id="add_item",
+        ),
+        pytest.param(
+            lambda rm, rid, iid: rm.annotate_item(rid, "alice", iid, note="checked"),
+            "entity:alice-chunk",
+            id="annotate_item",
+        ),
+    ],
+)
+def test_an_item_write_never_returns_another_owners_item(
+    report_manager: ReportManager,
+    write: Callable[[ReportManager, int, int], dict[str, Any] | None],
+    dedupe_key: str,
+) -> None:
+    """An item is read back before its write commits, so a reused item id cannot return another owner's finding."""
+    bob_rid = report_manager.create_report(title="Bob's case", owner="bob", collection_name="bobs")["id"]
+    rid = report_manager.create_report(title="Alice's case", owner="alice", collection_name="docs")["id"]
+    iid = _ok(report_manager.add_item(rid, "alice", **_entity_item("alice-chunk")))["id"]
+
+    with _on_first_commit(report_manager, _give_the_newest_item_to(bob_rid)) as fired:
+        written = _ok(write(report_manager, rid, iid))
+
+    assert fired
+    assert written["dedupe_key"] == dedupe_key
+    assert written["snapshot"]["chunk_id"] != "bob-chunk"
+
+
+@pytest.fixture
+def stored_report_manager(tmp_path: Path) -> Iterator[tuple[ReportManager, str]]:
+    """A ReportManager over a file-backed store, built as production builds it.
+
+    Its sessions get their own connections, so another request can be played
+    against a write on a second connection, as two requests would be.
+    """
+    url = f"sqlite:///{tmp_path / 'sessions.sqlite3'}"
+    rm = ReportManager(rag=MagicMock())
+    rm._SessionMaker = _make_session_maker(url)
+    yield rm, url
+    rm._SessionMaker.kw["bind"].dispose()
+
+
+@contextmanager
+def _another_request_before_the_write(
+    report_manager: ReportManager, url: str, rid: int, iid: int
+) -> Iterator[list[str]]:
+    """Just before a write's first change, after its ownership check, let another request give the ids to Bob.
+
+    The other request deletes the report and stores one of Bob's under the same
+    report and item ids, as SQLite's id reuse allows. It runs on its own
+    connection with a short busy timeout, so it either gets in (``interleaved``)
+    or finds the write lock already taken (``blocked``).
+    """
+    maker = report_manager._SessionMaker
+    assert maker is not None
+    other = create_engine(url, connect_args={"timeout": 0.05})
+    outcome: list[str] = []
+
+    def hook(_conn: Any, _cursor: Any, statement: str, *_rest: Any) -> None:
+        if outcome or not statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            return
+        try:
+            with other.begin() as conn:
+                conn.execute(delete(ReportItem).where(ReportItem.report_id == rid))
+                conn.execute(delete(Report).where(Report.id == rid))
+                conn.execute(insert(Report).values(id=rid, title="Bob's case", owner="bob", collection_name="docs"))
+                conn.execute(
+                    insert(ReportItem).values(
+                        id=iid,
+                        report_id=rid,
+                        artifact_type="entity_finding",
+                        dedupe_key="entity:bob-chunk",
+                        snapshot=json.dumps({"chunk_id": "bob-chunk"}),
+                        position=0,
+                    )
+                )
+            outcome.append("interleaved")
+        except OperationalError:
+            outcome.append("blocked")
+
+    engine = maker.kw["bind"]
+    event.listen(engine, "before_cursor_execute", hook)
+    try:
+        yield outcome
+    finally:
+        event.remove(engine, "before_cursor_execute", hook)
+        other.dispose()
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        pytest.param(lambda rm, rid, iid: rm.update_report(rid, "alice", title="Renamed"), id="update_report"),
+        pytest.param(
+            lambda rm, rid, iid: rm.set_collection_overview_snapshot(rid, "alice", {"document_count": 1}),
+            id="set_collection_overview_snapshot",
+        ),
+        pytest.param(lambda rm, rid, iid: rm.reorder_items(rid, "alice", [iid]), id="reorder_items"),
+        pytest.param(lambda rm, rid, iid: rm.delete_report(rid, "alice"), id="delete_report"),
+        pytest.param(
+            lambda rm, rid, iid: rm.delete_reports_for_collection("alice", "docs"), id="delete_reports_for_collection"
+        ),
+        pytest.param(lambda rm, rid, iid: rm.add_item(rid, "alice", **_entity_item("alice-new")), id="add_item"),
+        pytest.param(
+            lambda rm, rid, iid: rm.add_items(rid, "alice", items=[_entity_item("alice-new")]), id="add_items"
+        ),
+        pytest.param(lambda rm, rid, iid: rm.annotate_item(rid, "alice", iid, note="checked"), id="annotate_item"),
+        pytest.param(lambda rm, rid, iid: rm.remove_item(rid, "alice", iid), id="remove_item"),
+    ],
+)
+def test_a_write_holds_the_lock_from_its_ownership_check(
+    stored_report_manager: tuple[ReportManager, str], write: Callable[[ReportManager, int, int], Any]
+) -> None:
+    """No other request can change a report between a write's ownership check and the write itself.
+
+    If the check took no lock, the report could be deleted in that gap and one
+    of Bob's take its id, and the write would land on Bob's report: Codex
+    reproduced Alice renaming it and receiving its overview.
+    """
+    rm, url = stored_report_manager
+    rid = rm.create_report(title="Alice's case", owner="alice", collection_name="docs")["id"]
+    iid = _ok(rm.add_item(rid, "alice", **_entity_item("alice-chunk")))["id"]
+
+    with _another_request_before_the_write(rm, url, rid, iid) as outcome:
+        write(rm, rid, iid)
+
+    assert outcome == ["blocked"]
+    assert rm.get_report_meta(rid, "bob") is None
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        pytest.param(
+            lambda rm, rid, iid: rm.update_report(rid, "alice", title="Renamed", collection="other"),
+            id="update_report",
+        ),
+        pytest.param(
+            lambda rm, rid, iid: rm.set_collection_overview_snapshot(
+                rid, "alice", {"document_count": 1}, collection="other"
+            ),
+            id="set_collection_overview_snapshot",
+        ),
+        pytest.param(
+            lambda rm, rid, iid: rm.reorder_items(rid, "alice", [iid], collection="other"), id="reorder_items"
+        ),
+        pytest.param(lambda rm, rid, iid: rm.delete_report(rid, "alice", collection="other"), id="delete_report"),
+        pytest.param(
+            lambda rm, rid, iid: rm.add_item(rid, "alice", collection="other", **_entity_item("alice-new")),
+            id="add_item",
+        ),
+        pytest.param(
+            lambda rm, rid, iid: rm.add_items(rid, "alice", items=[_entity_item("alice-new")], collection="other"),
+            id="add_items",
+        ),
+        pytest.param(
+            lambda rm, rid, iid: rm.annotate_item(rid, "alice", iid, note="checked", collection="other"),
+            id="annotate_item",
+        ),
+        pytest.param(lambda rm, rid, iid: rm.remove_item(rid, "alice", iid, collection="other"), id="remove_item"),
+    ],
+)
+def test_a_write_refuses_a_report_from_another_collection(
+    report_manager: ReportManager, write: Callable[[ReportManager, int, int], Any]
+) -> None:
+    """Inside the lock a report counts as not found unless it is in the request's collection too.
+
+    The route checks the collection first, in its own transaction. Between that
+    check and the write, the report's id could pass to another of the caller's
+    reports, in another collection.
+    """
+    rid = report_manager.create_report(title="Alice's case", owner="alice", collection_name="docs")["id"]
+    iid = _ok(report_manager.add_item(rid, "alice", **_entity_item("alice-chunk")))["id"]
+    before = report_manager.get_report(rid, "alice")
+
+    assert not write(report_manager, rid, iid)
+    assert report_manager.get_report(rid, "alice") == before
+
+
+def test_a_report_is_read_only_in_its_own_collection(report_manager: ReportManager) -> None:
+    """Named a collection, the read checks it on the same row it returns."""
+    rid = report_manager.create_report(title="Alice's case", owner="alice", collection_name="docs")["id"]
+
+    assert report_manager.get_report(rid, "alice", collection="other") is None
+    assert _ok(report_manager.get_report(rid, "alice", collection="docs"))["title"] == "Alice's case"

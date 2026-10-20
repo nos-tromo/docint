@@ -2,15 +2,16 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { fetchChunkText, searchCollection } from '@/api/search'
 import { clearScope, setScope } from '@/api/scope'
 import type { ChunkText, MetadataFilter, SearchField, SearchResult } from '@/api/types'
+import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveCollection'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 
 export const searchQueryKey = (
-  collection: string | null,
+  scope: CollectionScope,
   query: string,
   field: SearchField,
   filters: MetadataFilter[]
-) => ['search', collection, query, field, filters] as const
+) => ['search', scope, query, field, filters] as const
 
 /**
  * Run a keyword search against the active collection.
@@ -27,7 +28,8 @@ export const searchQueryKey = (
  * @returns The TanStack Query result carrying hits and index status.
  */
 export function useSearch(query: string, field: SearchField = 'text') {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   // Whole-store subscription (the idiom Chat.tsx already uses) so any filter
   // edit re-renders and rebuilds the payload. The payload is a fresh array
   // every render, which is harmless — React Query hashes keys structurally.
@@ -35,7 +37,7 @@ export function useSearch(query: string, field: SearchField = 'text') {
   const trimmed = query.trim()
 
   return useQuery<SearchResult>({
-    queryKey: searchQueryKey(collection, trimmed, field, filters),
+    queryKey: searchQueryKey(scope, trimmed, field, filters),
     queryFn: () =>
       searchCollection({
         question: trimmed,
@@ -50,8 +52,8 @@ export function useSearch(query: string, field: SearchField = 'text') {
   })
 }
 
-export const chunkTextQueryKey = (collection: string | null, id: string) =>
-  ['search-chunk', collection, id] as const
+export const chunkTextQueryKey = (scope: CollectionScope, id: string) =>
+  ['search-chunk', scope, id] as const
 
 /**
  * Fetch one hit's full chunk text, on demand.
@@ -71,10 +73,11 @@ export const chunkTextQueryKey = (collection: string | null, id: string) =>
  * @returns The TanStack Query result carrying the chunk text.
  */
 export function useChunkText(id: string, enabled: boolean) {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
 
   return useQuery<ChunkText>({
-    queryKey: chunkTextQueryKey(collection, id),
+    queryKey: chunkTextQueryKey(scope, id),
     queryFn: () => fetchChunkText(id, collection ?? undefined),
     enabled: enabled && !!collection && id.length > 0,
     staleTime: Infinity,

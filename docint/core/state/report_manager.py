@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import ColumnElement, or_
 from sqlalchemy.orm import Session
 
 from docint.core.state.base import _make_session_maker
@@ -28,6 +28,16 @@ if TYPE_CHECKING:
 # Keys per backfill lookup: SQLite caps host parameters at 999, and a batch
 # may carry REPORT_BATCH_MAX_ITEMS of them.
 _BACKFILL_KEY_CHUNK = 500
+
+
+def _without_collection() -> ColumnElement[bool]:
+    """Match a report that names no collection: ``NULL``, or the blank name an old client could send."""
+    return or_(Report.collection_name.is_(None), Report.collection_name == "")
+
+
+def _belongs(report: Report, owner: str | None, collection: str | None) -> bool:
+    """Whether ``report`` is ``owner``'s and, when a ``collection`` is named, in that collection."""
+    return report.owner == owner and (collection is None or report.collection_name == collection)
 
 
 @dataclass(slots=True)
@@ -81,6 +91,25 @@ class ReportManager:
             yield session
         finally:
             session.close()
+
+    @contextmanager
+    def _write_scope(self) -> Iterator[Session]:
+        """A session whose transaction holds the database's write lock from its first statement.
+
+        Every write reads the report first to check whose it is. Under SQLite's
+        default deferred transaction that read takes no lock, so before the
+        write the report could be deleted and its id, which SQLite reuses,
+        taken by another owner's; the write would then land on that report.
+        ``BEGIN IMMEDIATE`` takes the lock first, so the check, the write and
+        the read-back see one state, and other writers wait for the commit.
+
+        Yields:
+            Iterator[Session]: A session already inside its write transaction.
+        """
+        with self._session_scope() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            yield session
 
     # --- serialization helpers ---
     @staticmethod
@@ -137,6 +166,26 @@ class ReportManager:
             data["item_count"] = s.query(ReportItem).filter_by(report_id=report.id).count()
         return data
 
+    def _commit_returning(self, s: Session, record: Report | ReportItem) -> dict[str, Any]:
+        """Flush a write, read ``record`` back, then commit, and return what was read.
+
+        The read comes before the commit, while the write still locks out other
+        writers. Read after it, the record could be deleted and its id, which
+        SQLite reuses, taken by another owner's, which would then be returned.
+
+        Args:
+            s (Session): The session holding the write.
+            record (Report | ReportItem): The written report or item.
+
+        Returns:
+            dict[str, Any]: The record as it was written.
+        """
+        s.flush()
+        s.refresh(record)
+        data = self._serialize_report(s, record) if isinstance(record, Report) else self._item_to_dict(record)
+        s.commit()
+        return data
+
     # --- report CRUD ---
     def create_report(
         self,
@@ -161,7 +210,7 @@ class ReportManager:
         Returns:
             dict[str, Any]: The created report (with an empty item list).
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = Report(
                 title=title or "Untitled report",
                 owner=cast(Any, owner),
@@ -171,9 +220,7 @@ class ReportManager:
                 session_id=cast(Any, session_id),
             )
             s.add(report)
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
     def list_reports(self, owner: str | None, collection: str | None = None) -> list[dict[str, Any]]:
         """List the caller's reports, most-recently-updated first.
@@ -192,20 +239,82 @@ class ReportManager:
             reports = query.order_by(Report.updated_at.desc(), Report.id.desc()).all()
             return [self._serialize_report(s, r, include_items=False) for r in reports]
 
-    def get_report(self, report_id: int, owner: str | None) -> dict[str, Any] | None:
+    def list_unassigned_reports(self, owner: str | None) -> list[dict[str, Any]]:
+        """List the caller's reports that belong to no collection, most-recently-updated first.
+
+        A report created before every report had to name its collection has
+        none, and no collection-scoped route reaches it. This is how such a
+        report is found again, so :meth:`assign_collection` can place it.
+
+        Args:
+            owner (str | None): The principal whose reports to list.
+
+        Returns:
+            list[dict[str, Any]]: Report summaries (no item bodies).
+        """
+        with self._session_scope() as s:
+            reports = (
+                s.query(Report)
+                .filter(Report.owner == owner, _without_collection())
+                .order_by(Report.updated_at.desc(), Report.id.desc())
+                .all()
+            )
+            return [self._serialize_report(s, r, include_items=False) for r in reports]
+
+    def assign_collection(self, report_id: int, owner: str | None, collection: str) -> dict[str, Any] | None:
+        """Place a report that belongs to no collection into ``collection``.
+
+        Only a report without a collection is assigned, so this can never move
+        a report from one collection to another. The check and the write are
+        one conditional ``UPDATE``: two concurrent calls cannot both see the
+        report unassigned and each write a different collection. The report is
+        read back before the commit, while the write still locks out other
+        writers: read after it, the report could be deleted and its id, which
+        SQLite reuses, taken by another owner's report, which would then be
+        returned.
+
+        Args:
+            report_id (int): The report id.
+            owner (str | None): The principal requesting the assignment.
+            collection (str): The logical collection to place the report in.
+
+        Returns:
+            dict[str, Any] | None: The updated report, or ``None`` when it is
+                missing, not owned by ``owner``, or already in a collection.
+        """
+        with self._write_scope() as s:
+            matched = (
+                s.query(Report)
+                .filter(Report.id == report_id, Report.owner == owner, _without_collection())
+                .update(
+                    {Report.collection_name: collection, Report.updated_at: datetime.now(UTC)},
+                    synchronize_session=False,
+                )
+            )
+            if not matched:
+                s.rollback()
+                return None
+            report = s.get(Report, report_id)
+            assigned = self._serialize_report(s, report) if report is not None else None
+            s.commit()
+            return assigned
+
+    def get_report(self, report_id: int, owner: str | None, *, collection: str | None = None) -> dict[str, Any] | None:
         """Return a report the caller owns, including its ordered items.
 
         Args:
             report_id (int): The report id.
             owner (str | None): The principal requesting the report.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
-            dict[str, Any] | None: The report, or ``None`` when missing or
-                not owned by ``owner``.
+            dict[str, Any] | None: The report, or ``None`` when missing, not
+                owned by ``owner``, or in another collection.
         """
         with self._session_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             return self._serialize_report(s, report)
 
@@ -262,6 +371,7 @@ class ReportManager:
         reference_number: str | None = None,
         show_toc: bool | None = None,
         show_collection_overview: bool | None = None,
+        collection: str | None = None,
     ) -> dict[str, Any] | None:
         """Update a report the caller owns.
 
@@ -278,14 +388,16 @@ class ReportManager:
                 section, when provided.
             show_collection_overview (bool | None): Whether the exports render
                 the collection's document overview section, when provided.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
-            dict[str, Any] | None: The updated report, or ``None`` when missing
-                or not owned by ``owner``.
+            dict[str, Any] | None: The updated report, or ``None`` when missing,
+                not owned by ``owner``, or in another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             if title is not None:
                 report.title = cast(Any, title)
@@ -297,12 +409,15 @@ class ReportManager:
                 report.show_toc = cast(Any, show_toc)
             if show_collection_overview is not None:
                 report.show_collection_overview = cast(Any, show_collection_overview)
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
     def set_collection_overview_snapshot(
-        self, report_id: int, owner: str | None, snapshot: dict[str, Any] | None
+        self,
+        report_id: int,
+        owner: str | None,
+        snapshot: dict[str, Any] | None,
+        *,
+        collection: str | None = None,
     ) -> dict[str, Any] | None:
         """Store (or clear) a report's frozen collection-overview snapshot.
 
@@ -311,34 +426,38 @@ class ReportManager:
             owner (str | None): The principal requesting the write.
             snapshot (dict | None): The overview snapshot to freeze, or ``None``
                 to clear it.
+            collection (str | None): The collection the snapshot describes,
+                which the report must belong to; ``None`` checks only the owner.
 
         Returns:
-            dict | None: The updated report, or ``None`` when missing or not owned.
+            dict | None: The updated report, or ``None`` when missing, not
+                owned, or in another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             report.collection_overview_snapshot = cast(
                 Any, json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None
             )
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
-    def delete_report(self, report_id: int, owner: str | None) -> bool:
+    def delete_report(self, report_id: int, owner: str | None, *, collection: str | None = None) -> bool:
         """Delete a report (and its items) the caller owns.
 
         Args:
             report_id (int): The report id.
             owner (str | None): The principal requesting the deletion.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
-            bool: ``True`` if deleted, ``False`` when missing or not owned.
+            bool: ``True`` if deleted, ``False`` when missing, not owned, or in
+                another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return False
             s.delete(report)
             s.commit()
@@ -360,7 +479,7 @@ class ReportManager:
             list[int]: The ids of the deleted reports, so what was derived from
                 them (a rendered PDF) can follow.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             reports = s.query(Report).filter(Report.owner == owner, Report.collection_name == logical).all()
             ids = [report.id for report in reports]
             for report in reports:
@@ -378,11 +497,14 @@ class ReportManager:
         dedupe_key: str,
         snapshot: dict[str, Any],
         note: str | None = None,
+        collection: str | None = None,
     ) -> dict[str, Any] | None:
         """Append an artifact snapshot to a report, idempotently.
 
         If ``(report_id, dedupe_key)`` already exists the existing item is
-        returned unchanged (re-adding the same view is a no-op).
+        returned unchanged (re-adding the same view is a no-op). Two adds of
+        one finding cannot both insert: the write lock makes the check and the
+        insert one step, so the second add finds the first one's item.
 
         Args:
             report_id (int): The report id.
@@ -392,14 +514,17 @@ class ReportManager:
             dedupe_key (str): Type-prefixed stable key (see :class:`ReportItem`).
             snapshot (dict[str, Any]): Frozen artifact content (JSON-serializable).
             note (str | None): Optional investigator note.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
             dict[str, Any] | None: The added (or pre-existing) item, or
-                ``None`` when the report is missing or not owned by ``owner``.
+                ``None`` when the report is missing, not owned by ``owner``, or
+                in another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             existing = s.query(ReportItem).filter_by(report_id=report_id, dedupe_key=dedupe_key).one_or_none()
             if existing is not None:
@@ -415,15 +540,7 @@ class ReportManager:
                 position=position,
             )
             report.updated_at = cast(Any, datetime.now(UTC))
-            try:
-                s.commit()
-            except IntegrityError:
-                # Concurrent add of the same dedupe_key: fall back to the winner.
-                s.rollback()
-                existing = s.query(ReportItem).filter_by(report_id=report_id, dedupe_key=dedupe_key).one_or_none()
-                return self._item_to_dict(existing) if existing is not None else None
-            s.refresh(item)
-            return self._item_to_dict(item)
+            return self._commit_returning(s, item)
 
     def add_items(
         self,
@@ -431,6 +548,7 @@ class ReportManager:
         owner: str | None,
         *,
         items: list[dict[str, Any]],
+        collection: str | None = None,
     ) -> dict[str, Any] | None:
         """Append many artifact snapshots to a report in one transaction.
 
@@ -457,15 +575,17 @@ class ReportManager:
             report_id (int): The report id.
             owner (str | None): The principal requesting the adds.
             items (list[dict[str, Any]]): Per-item ``add_item`` kwargs.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
             dict[str, Any] | None: ``{"added", "skipped", "updated",
-                "item_count"}``, or ``None`` when the report is missing or not
-                owned by ``owner``.
+                "item_count"}``, or ``None`` when the report is missing, not
+                owned by ``owner``, or in another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             rows = s.query(ReportItem.dedupe_key).filter_by(report_id=report_id).all()
             stored_keys = {str(r[0]) for r in rows}
@@ -585,21 +705,23 @@ class ReportManager:
         session.add(item)
         return item
 
-    def remove_item(self, report_id: int, owner: str | None, item_id: int) -> bool:
+    def remove_item(self, report_id: int, owner: str | None, item_id: int, *, collection: str | None = None) -> bool:
         """Remove a single item from a report the caller owns.
 
         Args:
             report_id (int): The report id.
             owner (str | None): The principal requesting the removal.
             item_id (int): The item id.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
             bool: ``True`` if removed, ``False`` when the report/item is
-                missing or not owned by ``owner``.
+                missing, not owned by ``owner``, or in another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return False
             item = s.get(ReportItem, item_id)
             if item is None or item.report_id != report_id:
@@ -610,7 +732,13 @@ class ReportManager:
             return True
 
     def annotate_item(
-        self, report_id: int, owner: str | None, item_id: int, *, note: str | None
+        self,
+        report_id: int,
+        owner: str | None,
+        item_id: int,
+        *,
+        note: str | None,
+        collection: str | None = None,
     ) -> dict[str, Any] | None:
         """Set/clear the investigator note on an item.
 
@@ -619,25 +747,32 @@ class ReportManager:
             owner (str | None): The principal requesting the change.
             item_id (int): The item id.
             note (str | None): The new note (``None`` clears it).
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
-            dict[str, Any] | None: The updated item, or ``None`` when missing
-                or not owned by ``owner``.
+            dict[str, Any] | None: The updated item, or ``None`` when missing,
+                not owned by ``owner``, or in another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             item = s.get(ReportItem, item_id)
             if item is None or item.report_id != report_id:
                 return None
             item.note = cast(Any, note)
             report.updated_at = cast(Any, datetime.now(UTC))
-            s.commit()
-            s.refresh(item)
-            return self._item_to_dict(item)
+            return self._commit_returning(s, item)
 
-    def reorder_items(self, report_id: int, owner: str | None, item_ids: Sequence[int]) -> dict[str, Any] | None:
+    def reorder_items(
+        self,
+        report_id: int,
+        owner: str | None,
+        item_ids: Sequence[int],
+        *,
+        collection: str | None = None,
+    ) -> dict[str, Any] | None:
         """Reassign item positions to match ``item_ids`` order.
 
         Ids not belonging to the report are ignored; items omitted from
@@ -647,14 +782,16 @@ class ReportManager:
             report_id (int): The report id.
             owner (str | None): The principal requesting the reorder.
             item_ids (Sequence[int]): Desired item id order.
+            collection (str | None): The request's collection, which the report
+                must belong to; ``None`` checks only the owner.
 
         Returns:
             dict[str, Any] | None: The reordered report, or ``None`` when
-                missing or not owned by ``owner``.
+                missing, not owned by ``owner``, or in another collection.
         """
-        with self._session_scope() as s:
+        with self._write_scope() as s:
             report = s.get(Report, report_id)
-            if report is None or report.owner != owner:
+            if report is None or not _belongs(report, owner, collection):
                 return None
             items = (
                 s.query(ReportItem).filter_by(report_id=report_id).order_by(ReportItem.position, ReportItem.id).all()
@@ -674,9 +811,7 @@ class ReportManager:
                     item.position = cast(Any, pos)
                     pos += 1
             report.updated_at = cast(Any, datetime.now(UTC))
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
     def list_dedupe_keys(self, report_id: int, owner: str | None) -> list[str]:
         """Return the dedupe keys present in a report (for "already added" UI).

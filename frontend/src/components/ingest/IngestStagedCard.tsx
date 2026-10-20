@@ -4,6 +4,7 @@ import { getStagedBatch } from '@/api/jobs'
 import { formatBytes } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 import { PREPROCESS_POLL_INTERVAL_MS, preprocessQueryKey } from '@/hooks/usePreprocessProgress'
+import { useUiStore } from '@/stores/ui'
 import { BarList, preprocessBarItems } from './ProgressBars'
 
 interface IngestStagedCardProps {
@@ -30,11 +31,12 @@ interface IngestStagedCardProps {
  */
 export function IngestStagedCard({ collection }: IngestStagedCardProps) {
   const t = useT()
+  const owner = useUiStore((s) => s.selectedOwner)
 
   const staged = useQuery({
     // The same key the live run polls, so one request serves both and the
     // card is already filled when a reload lands on it.
-    queryKey: preprocessQueryKey(collection),
+    queryKey: preprocessQueryKey(collection, owner),
     queryFn: () => getStagedBatch(collection, { includeEntries: false }),
     enabled: collection.length > 0,
     retry: false,

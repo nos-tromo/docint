@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -109,8 +110,14 @@ def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def client() -> Generator[TestClient, None, None]:
-    """A TestClient bound to the FastAPI app."""
+    """A TestClient bound to the FastAPI app, working in collection ``docs``.
+
+    Every report request names the caller's active collection, so the client
+    sends one by default. A per-request ``params=`` overrides it; a query string
+    written into the URL does not, so overrides must go through ``params=``.
+    """
     with TestClient(api_module.app) as test_client:
+        test_client.params = {"collection": "docs"}
         yield test_client
 
 
@@ -307,8 +314,8 @@ def test_patch_toggles_collection_overview(client: TestClient) -> None:
 
 def test_refresh_builds_snapshot(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """POST .../collection-overview/refresh rebuilds the snapshot from current documents."""
-    _own_collection("c1")
-    rid = _create(client, collection="c1")["id"]
+    _own_collection("docs")
+    rid = _create(client)["id"]
     _stub_documents(
         monkeypatch,
         [
@@ -331,23 +338,16 @@ def test_refresh_builds_snapshot(client: TestClient, monkeypatch: pytest.MonkeyP
 
 def test_refresh_cross_owner_is_404(client: TestClient) -> None:
     """A non-owner cannot trigger a refresh on someone else's report (404, no leak)."""
-    _own_collection("c1")
-    rid = _create(client, collection="c1")["id"]
+    _own_collection("docs")
+    rid = _create(client)["id"]
     resp = client.post(f"/reports/{rid}/collection-overview/refresh", headers={"X-Auth-User": "alice"})
     assert resp.status_code == 404
 
 
-def test_refresh_no_collection_is_400(client: TestClient) -> None:
-    """Refreshing a report with no collection scope is a 400, not a crash."""
-    rid = _create(client, collection=None)["id"]
-    resp = client.post(f"/reports/{rid}/collection-overview/refresh")
-    assert resp.status_code == 400
-
-
 def test_refresh_build_failure_is_502(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """A manifest-build failure during refresh surfaces as 502, not 500 or a silent no-op."""
-    _own_collection("c1")
-    rid = _create(client, collection="c1")["id"]
+    _own_collection("docs")
+    rid = _create(client)["id"]
 
     def _boom() -> list[dict[str, Any]]:
         raise RuntimeError("qdrant unreachable")
@@ -365,7 +365,7 @@ def test_refresh_unowned_collection_is_404_not_502(client: TestClient) -> None:
     refresh verbatim, not get masked as a generic 502 by the catch-all handler.
     """
     rid = _create(client, collection="ghost-collection")["id"]
-    resp = client.post(f"/reports/{rid}/collection-overview/refresh")
+    resp = client.post(f"/reports/{rid}/collection-overview/refresh", params={"collection": "ghost-collection"})
     assert resp.status_code == 404
 
 
@@ -413,7 +413,7 @@ ADMIN = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
 def test_admin_lists_cross_owner_reports_with_owner_param(client: TestClient) -> None:
     """GET /reports?owner=alice as an admin returns alice's reports."""
     resp = client.post(
-        "/reports", json={"title": "Alice case", "collection_name": None}, headers={"X-Auth-User": "alice"}
+        "/reports", json={"title": "Alice case", "collection_name": "docs"}, headers={"X-Auth-User": "alice"}
     )
     assert resp.status_code == 200
 
@@ -427,7 +427,7 @@ def test_admin_lists_cross_owner_reports_with_owner_param(client: TestClient) ->
 def test_admin_reads_cross_owner_report_with_owner_param(client: TestClient) -> None:
     """GET /reports/{id}?owner=alice as an admin returns alice's report; without it, 404."""
     created = client.post(
-        "/reports", json={"title": "Alice case", "collection_name": None}, headers={"X-Auth-User": "alice"}
+        "/reports", json={"title": "Alice case", "collection_name": "docs"}, headers={"X-Auth-User": "alice"}
     ).json()
     rid = created["id"]
 
@@ -438,7 +438,7 @@ def test_admin_reads_cross_owner_report_with_owner_param(client: TestClient) -> 
 def test_non_admin_owner_param_does_not_rescope_reports(client: TestClient) -> None:
     """A non-admin passing ?owner= keeps their own report scope (404 cross-owner)."""
     created = client.post(
-        "/reports", json={"title": "Alice case", "collection_name": None}, headers={"X-Auth-User": "alice"}
+        "/reports", json={"title": "Alice case", "collection_name": "docs"}, headers={"X-Auth-User": "alice"}
     ).json()
     rid = created["id"]
 
@@ -614,20 +614,6 @@ def test_add_item_ignores_foreign_image_collection(client: TestClient, monkeypat
     assert fake.scrolled_collections == []
 
 
-def test_add_item_without_report_collection_skips_enrichment(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A report with no collection has no companion to consult — item still adds."""
-    fake = _wire_images(monkeypatch, {})
-    rid = _create(client, collection=None)["id"]
-
-    resp = client.post(f"/reports/{rid}/items", json=_chat_payload_with_image(None))
-
-    assert resp.status_code == 200, resp.text
-    assert "thumbnail" not in resp.json()["snapshot"]["sources"][0]
-    assert fake.scrolled_collections == []
-
-
 def test_enriched_item_stays_idempotent_on_re_add(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Re-adding the same dedupe key returns the frozen item unchanged."""
     _wire_images(
@@ -649,63 +635,6 @@ def test_enriched_item_stays_idempotent_on_re_add(client: TestClient, monkeypatc
 
     assert second["id"] == first["id"]
     assert second["snapshot"] == first["snapshot"]
-
-
-def test_add_item_resolves_the_request_collection_not_the_report_one(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The artifact's own collection addresses the companion, not the report's.
-
-    An investigator switches collections and keeps adding to the open report:
-    the evidence lives where it was retrieved, so a lookup against the report's
-    companion finds nothing.
-    """
-    fake = _wire_images(
-        monkeypatch,
-        {
-            "p1": {
-                "image_id": "img-1",
-                "thumbnail_b64": "QUJD",
-                "thumbnail_mime": "image/jpeg",
-                "source_type": "document",
-            }
-        },
-    )
-    _own_collection("other")
-    rid = _create(client)["id"]
-    payload = _chat_payload_with_image(None)
-    payload["collection"] = "other"
-
-    resp = client.post(f"/reports/{rid}/items", json=payload)
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["snapshot"]["sources"][0]["thumbnail"]["data_uri"] == "data:image/jpeg;base64,QUJD"
-    assert fake.scrolled_collections == [f"{_physical('other')}_images"]
-
-
-def test_add_item_falls_back_to_the_report_collection_when_unowned(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A request collection the caller does not own never redirects the lookup."""
-    fake = _wire_images(
-        monkeypatch,
-        {
-            "p1": {
-                "image_id": "img-1",
-                "thumbnail_b64": "QUJD",
-                "thumbnail_mime": "image/jpeg",
-                "source_type": "document",
-            }
-        },
-    )
-    rid = _create(client)["id"]
-    payload = _chat_payload_with_image(None)
-    payload["collection"] = "someone-elses"
-
-    resp = client.post(f"/reports/{rid}/items", json=payload)
-
-    assert resp.status_code == 200, resp.text
-    assert fake.scrolled_collections == [f"{_physical()}_images"]
 
 
 def test_add_chat_item_freezes_every_image_source(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -747,7 +676,6 @@ def test_add_summary_item_is_never_enriched(client: TestClient, monkeypatch: pyt
             "artifact_type": "summary",
             "dedupe_key": "summary:docs",
             "snapshot": {"collection": "docs", "text": "A summary.", "image_id": "img-1"},
-            "collection": "docs",
         },
     )
 
@@ -830,7 +758,9 @@ def test_batch_add_to_missing_report_404(client: TestClient) -> None:
 
 def test_batch_add_cross_owner_404(client: TestClient) -> None:
     """A batch against another owner's report is 404, like every other item route."""
-    rid = client.post("/reports", json={"title": "Alice case"}, headers={"X-Auth-User": "alice"}).json()["id"]
+    rid = client.post(
+        "/reports", json={"title": "Alice case", "collection_name": "docs"}, headers={"X-Auth-User": "alice"}
+    ).json()["id"]
 
     resp = client.post(
         f"/reports/{rid}/items/batch", json={"items": [_entity_payload("c1")]}, headers={"X-Auth-User": "bob"}
@@ -865,7 +795,7 @@ def test_batch_add_freezes_thumbnails_in_one_companion_scroll(
     first["snapshot"]["image_id"] = "kf-1"
     second["snapshot"]["image_id"] = "kf-2"
 
-    resp = client.post(f"/reports/{rid}/items/batch", json={"items": [first, second, third], "collection": "docs"})
+    resp = client.post(f"/reports/{rid}/items/batch", json={"items": [first, second, third]})
 
     assert resp.status_code == 200, resp.text
     assert fake.scrolled_collections == [f"{_physical()}_images"]
@@ -887,7 +817,7 @@ def test_batch_add_survives_companion_scroll_failure(client: TestClient, monkeyp
     payload = _entity_payload("c1")
     payload["snapshot"]["image_id"] = "kf-1"
 
-    resp = client.post(f"/reports/{rid}/items/batch", json={"items": [payload], "collection": "docs"})
+    resp = client.post(f"/reports/{rid}/items/batch", json={"items": [payload]})
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["added"] == 1
@@ -916,13 +846,6 @@ def test_report_work_moves_its_collections_retention_clock(client: TestClient) -
 
     [row] = mgr.list_activity("test-operator")
     assert row.last_activity_at is not None and row.last_activity_at > long_ago
-
-
-def test_a_report_without_a_collection_touches_no_clock(client: TestClient) -> None:
-    """A report started outside any collection still opens."""
-    rid = _create(client, collection=None)["id"]
-
-    assert client.get(f"/reports/{rid}").status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -1058,7 +981,7 @@ def test_pdf_routes_hide_another_owners_report(
     """Every PDF route answers 404 across owners, so a report's existence never leaks."""
     _fake_engine(monkeypatch)
     alice = {"X-Auth-User": "alice"}
-    rid = client.post("/reports", json={"title": "Alice case", "collection_name": None}, headers=alice).json()["id"]
+    rid = client.post("/reports", json={"title": "Alice case", "collection_name": "docs"}, headers=alice).json()["id"]
     bob = {"X-Auth-User": "bob"}
 
     assert client.post(f"/reports/{rid}/pdf", headers=bob).status_code == 404
@@ -1074,7 +997,7 @@ def test_an_admin_renders_another_owners_pdf_with_the_owner_param(
     """An admin working in a user's namespace can render and fetch that user's PDF."""
     _fake_engine(monkeypatch)
     alice = {"X-Auth-User": "alice"}
-    rid = client.post("/reports", json={"title": "Alice case", "collection_name": None}, headers=alice).json()["id"]
+    rid = client.post("/reports", json={"title": "Alice case", "collection_name": "docs"}, headers=alice).json()["id"]
     as_alice = {"params": {"owner": "alice"}, "headers": ADMIN}
 
     assert client.post(f"/reports/{rid}/pdf", **as_alice).status_code == 202
@@ -1192,3 +1115,314 @@ def test_a_reused_report_id_does_not_inherit_the_deleted_reports_render(
 
     assert new == old
     assert client.get(f"/reports/{new}/pdf/status").json() == {"job": None, "pdf": None}
+
+
+# ---------------------------------------------------------------------------
+# Collection scope — a report is reachable only from the collection it belongs to
+# ---------------------------------------------------------------------------
+
+
+def _report_routes() -> list[tuple[str, str]]:
+    """Every ``(method, path)`` under ``/reports/{report_id}``, read off the app.
+
+    Read rather than listed, so a report route added later without the
+    collection gate fails here instead of slipping through.
+    """
+    return sorted(
+        (method, route.path)
+        for route in api_module.app.routes
+        if isinstance(route, APIRoute) and route.path.startswith("/reports/{report_id}")
+        for method in route.methods or ()
+    )
+
+
+@pytest.mark.parametrize(("method", "path"), _report_routes())
+def test_a_report_is_unreachable_from_another_collection(
+    client: TestClient,
+    pdf_jobs: IngestJobManager,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    method: str,
+    path: str,
+) -> None:
+    """Every report route answers 404 from another collection, as for another owner's report.
+
+    The report is set up so each route would succeed from its own collection —
+    an item to annotate, a stored PDF to download, an owned collection to
+    refresh against — so the 404 can only come from the collection gate.
+    """
+    _own_collection("docs")
+    _fake_engine(monkeypatch)
+    report = _create(client, title="Case A")
+    item = client.post(f"/reports/{report['id']}/items", json=_entity_payload("c1")).json()
+    ReportPdfStore(tmp_path / "report-pdfs").write(
+        report["id"],
+        b"%PDF-1.7 fake",
+        report_created_at=report["created_at"],
+        report_updated_at=report["updated_at"],
+        filename="report.pdf",
+        pages=1,
+        now=datetime.now(UTC),
+    )
+    before = client.get(f"/reports/{report['id']}").json()
+
+    resp = client.request(
+        method, path.format(report_id=report["id"], item_id=item["id"]), params={"collection": "other"}
+    )
+
+    assert resp.status_code == 404
+    assert client.get(f"/reports/{report['id']}").json() == before
+
+
+def test_evidence_from_another_collection_never_lands_in_a_report(client: TestClient) -> None:
+    """Findings added while another collection is active are refused, singly or in a batch."""
+    rid = _create(client)["id"]
+
+    single = client.post(f"/reports/{rid}/items", json=_entity_payload("c1"), params={"collection": "other"})
+    batch = client.post(
+        f"/reports/{rid}/items/batch", json={"items": [_entity_payload("c2")]}, params={"collection": "other"}
+    )
+
+    assert (single.status_code, batch.status_code) == (404, 404)
+    assert client.get(f"/reports/{rid}").json()["items"] == []
+
+
+@pytest.mark.parametrize(
+    ("manager_method", "method", "path", "body"),
+    [
+        ("update_report", "PATCH", "/reports/{rid}", {"title": "Renamed"}),
+        ("delete_report", "DELETE", "/reports/{rid}", None),
+        ("add_item", "POST", "/reports/{rid}/items", _entity_payload("c2")),
+        ("add_items", "POST", "/reports/{rid}/items/batch", {"items": [_entity_payload("c2")]}),
+        ("annotate_item", "PATCH", "/reports/{rid}/items/{iid}", {"note": "checked"}),
+        ("remove_item", "DELETE", "/reports/{rid}/items/{iid}", None),
+        ("reorder_items", "POST", "/reports/{rid}/items/reorder", {"item_ids": []}),
+        ("set_collection_overview_snapshot", "POST", "/reports/{rid}/collection-overview/refresh", None),
+    ],
+)
+def test_every_report_write_rechecks_the_collection_with_the_write(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    manager_method: str,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """The route's collection reaches the manager, which checks it again inside the write's lock.
+
+    The route gate runs in its own transaction before the write; only the
+    re-check inside the write is atomic with it.
+    """
+    _own_collection("docs")
+    rid = _create(client)["id"]
+    iid = client.post(f"/reports/{rid}/items", json=_entity_payload("c1")).json()["id"]
+    real = getattr(ReportManager, manager_method)
+    seen: list[str | None] = []
+
+    def spy(self: ReportManager, *args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("collection"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReportManager, manager_method, spy)
+    resp = client.request(method, path.format(rid=rid, iid=iid), json=body)
+
+    assert resp.status_code == 200, resp.text
+    assert seen == ["docs"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/reports/{rid}", None),
+        ("GET", "/reports/{rid}/export.md", None),
+        ("GET", "/reports/{rid}/export.html", None),
+        ("GET", "/reports/{rid}/export.json", None),
+        ("GET", "/reports/{rid}/export.zip", None),
+        ("GET", "/reports/{rid}/export.pdf", None),
+        ("POST", "/reports/{rid}/items", _entity_payload("c2")),
+        ("POST", "/reports/{rid}/items/batch", {"items": [_entity_payload("c2")]}),
+        ("POST", "/reports/{rid}/collection-overview/refresh", None),
+    ],
+)
+def test_a_report_moved_to_another_collection_after_the_gate_is_neither_served_nor_refreshed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """A handler acts only on a report in the request's collection, whatever the gate saw.
+
+    The gate checks the collection in its own transaction. Between it and the
+    handler the report can be deleted and its id, which SQLite reuses, taken by
+    the same owner's report in another collection. Here the gate is made to see
+    the report in ``docs`` while it is stored in ``other``, as it would after
+    that swap: the handler must answer 404 and leave that report alone.
+    """
+    _own_collection("docs")
+    _own_collection("other")
+    rid = _create(client, collection="other")["id"]
+    client.post(f"/reports/{rid}/items", json=_entity_payload("c1"), params={"collection": "other"})
+    manager = api_module.rag.ensure_report_manager()
+    before = manager.get_report(rid, "test-operator")
+    _stub_documents(monkeypatch, _ONE_DOCUMENT)
+    real_meta = ReportManager.get_report_meta
+
+    def gate_sees_docs(self: ReportManager, report_id: int, owner: str | None) -> dict[str, Any] | None:
+        meta = real_meta(self, report_id, owner)
+        return {**meta, "collection_name": "docs"} if meta else meta
+
+    monkeypatch.setattr(ReportManager, "get_report_meta", gate_sees_docs)
+    resp = client.request(method, path.format(rid=rid), json=body)
+
+    assert resp.status_code == 404
+    assert manager.get_report(rid, "test-operator") == before
+
+
+def test_listing_reports_names_a_collection(client: TestClient) -> None:
+    """A list without a collection is refused, never answered with every collection's reports."""
+    _create(client)
+    client.params = {}
+
+    assert client.get("/reports").status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"title": "Loose"}, {"title": "Loose", "collection_name": None}, {"title": "Loose", "collection_name": ""}],
+)
+def test_a_report_is_always_created_in_a_collection(client: TestClient, payload: dict[str, Any]) -> None:
+    """A report without a collection could never be opened again, so none is created."""
+    assert client.post("/reports", json=payload).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Reports without a collection — kept from before every report needed one
+# ---------------------------------------------------------------------------
+
+_ONE_DOCUMENT = [
+    {
+        "filename": "a.pdf",
+        "mimetype": "application/pdf",
+        "file_hash": "h",
+        "node_count": 2,
+        "page_count": 3,
+        "entity_types": ["ORG"],
+    }
+]
+
+
+def _report_without_collection(
+    title: str = "Old case", owner: str = "test-operator", collection: str | None = None
+) -> int:
+    """Store a report as one could be created before every report named its collection."""
+    report = api_module.rag.ensure_report_manager().create_report(title=title, owner=owner, collection_name=collection)
+    return int(report["id"])
+
+
+def _stored_collection(report_id: int, owner: str = "test-operator") -> str | None:
+    """Read a report's collection straight from the store, past every route's gate."""
+    meta = api_module.rag.ensure_report_manager().get_report_meta(report_id, owner)
+    assert meta is not None
+    return cast(str | None, meta["collection_name"])
+
+
+def test_unassigned_lists_the_callers_reports_without_a_collection(client: TestClient) -> None:
+    """Only the caller's reports with no collection are listed, a blank name counting as none."""
+    old = _report_without_collection("Old case")
+    blank = _report_without_collection("Blank case", collection="")
+    _report_without_collection("Alice's old case", owner="alice")
+    _create(client, title="Current case")
+
+    resp = client.get("/reports/unassigned")
+
+    assert resp.status_code == 200, resp.text
+    assert sorted(r["id"] for r in resp.json()["reports"]) == sorted([old, blank])
+
+
+def test_assign_moves_a_report_without_a_collection_into_one(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report becomes reachable from that collection, with its overview captured as at create."""
+    _own_collection("docs")
+    _stub_documents(monkeypatch, _ONE_DOCUMENT)
+    rid = _report_without_collection()
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["collection_name"] == "docs"
+    assert resp.json()["collection_overview"]["document_count"] == 1
+    assert [r["id"] for r in client.get("/reports").json()["reports"]] == [rid]
+    assert client.get(f"/reports/{rid}").status_code == 200
+    assert client.get("/reports/unassigned").json()["reports"] == []
+
+
+def test_assign_keeps_the_report_when_the_overview_capture_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture failure leaves the overview empty, as at create, and never undoes the move."""
+    _own_collection("docs")
+
+    def _boom() -> list[dict[str, Any]]:
+        raise RuntimeError("qdrant unreachable")
+
+    monkeypatch.setattr(api_module.rag, "list_documents", _boom)
+    rid = _report_without_collection()
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["collection_overview"] is None
+    assert _stored_collection(rid) == "docs"
+
+
+def test_assign_never_moves_a_report_out_of_its_collection(client: TestClient) -> None:
+    """A report that has a collection keeps it — whether it was created there or assigned once already."""
+    _own_collection("docs")
+    _own_collection("other")
+    created = _create(client)["id"]
+    assigned = _report_without_collection()
+    assert client.post(f"/reports/unassigned/{assigned}/assign").status_code == 200
+
+    for rid in (created, assigned):
+        resp = client.post(f"/reports/unassigned/{rid}/assign", params={"collection": "other"})
+        assert resp.status_code == 404
+        assert _stored_collection(rid) == "docs"
+
+
+def test_assign_refuses_another_owners_report(client: TestClient) -> None:
+    """Another owner's report answers 404, exactly as everywhere else, and stays unassigned."""
+    _own_collection("docs")
+    rid = _report_without_collection(owner="alice")
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign")
+
+    assert resp.status_code == 404
+    assert _stored_collection(rid, owner="alice") is None
+
+
+@pytest.mark.parametrize("collection", ["ghost", "alices-docs"])
+def test_assign_refuses_a_collection_the_caller_does_not_own(client: TestClient, collection: str) -> None:
+    """The target must be one of the caller's own collections: a missing or foreign one is 404."""
+    _own_collection("alices-docs", owner="alice")
+    rid = _report_without_collection()
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign", params={"collection": collection})
+
+    assert resp.status_code == 404
+    assert _stored_collection(rid) is None
+
+
+def test_admin_moves_another_owners_report_into_that_owners_collection(client: TestClient) -> None:
+    """With the owner param an admin lists and assigns in that owner's namespace."""
+    _own_collection("docs", owner="alice")
+    rid = _report_without_collection(owner="alice")
+    as_alice = {"owner": "alice"}
+
+    listed = client.get("/reports/unassigned", params=as_alice, headers=ADMIN).json()["reports"]
+    resp = client.post(f"/reports/unassigned/{rid}/assign", params={**as_alice, "collection": "docs"}, headers=ADMIN)
+
+    assert [r["id"] for r in listed] == [rid]
+    assert resp.status_code == 200, resp.text
+    assert _stored_collection(rid, owner="alice") == "docs"

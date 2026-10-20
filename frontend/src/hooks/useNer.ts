@@ -6,13 +6,14 @@ import {
   getNerSourcesPage,
   getNerStats
 } from '@/api/collections'
-import { useUiStore } from '@/stores/ui'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { ENTITY_MERGE_MODE } from '@/api/types'
 
 export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useQuery({
-    queryKey: ['ner-stats', collection, params],
+    queryKey: ['ner-stats', scope, params],
     queryFn: () => getNerStats({ ...params, collection: collection ?? undefined }),
     enabled: !!collection
   })
@@ -24,10 +25,11 @@ export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
  * layout and Qdrant scroll are wasted work in the table view.
  */
 export function useNerGraph(params: { topKNodes: number; enabled?: boolean }) {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   const topKNodes = params.topKNodes
   return useQuery({
-    queryKey: ['ner-graph', collection, ENTITY_MERGE_MODE, topKNodes],
+    queryKey: ['ner-graph', scope, ENTITY_MERGE_MODE, topKNodes],
     queryFn: () =>
       getNerGraph({
         top_k_nodes: topKNodes,
@@ -46,9 +48,10 @@ export function useNerGraph(params: { topKNodes: number; enabled?: boolean }) {
  * full-collection scroll on every collection switch.
  */
 export function useNerSources(entityKey: string | null) {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useInfiniteQuery({
-    queryKey: ['ner-sources', collection, entityKey, ENTITY_MERGE_MODE],
+    queryKey: ['ner-sources', scope, entityKey, ENTITY_MERGE_MODE],
     queryFn: ({ pageParam }) =>
       getNerSourcesPage({
         cursor: pageParam as string | null,
@@ -64,9 +67,10 @@ export function useNerSources(entityKey: string | null) {
 }
 
 export function useHateSpeechPages() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useInfiniteQuery({
-    queryKey: ['hate-speech-pages', collection],
+    queryKey: ['hate-speech-pages', scope],
     queryFn: ({ pageParam }) =>
       getHateSpeechPage({
         cursor: pageParam as string | null,
@@ -80,9 +84,10 @@ export function useHateSpeechPages() {
 }
 
 export function useIeStats() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useQuery({
-    queryKey: ['ie-stats', collection],
+    queryKey: ['ie-stats', scope],
     queryFn: () => getIeStats(collection!),
     enabled: !!collection
   })
