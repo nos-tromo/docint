@@ -91,6 +91,16 @@ export function describeBatchFailure(
 
 const fileLabel = (f: File): string => f.webkitRelativePath || f.name
 
+/** Drop one pending file per save ack, so same-named files are not all cleared by one. */
+function withoutSaved(pending: File[], saved: string[]): File[] {
+  const left = [...pending]
+  for (const name of saved) {
+    const i = left.findIndex((f) => fileLabel(f) === name)
+    if (i !== -1) left.splice(i, 1)
+  }
+  return left
+}
+
 /**
  * Upload a file selection in size-bounded batches, staging every batch on the
  * server — yielding one normalised upload event stream.
@@ -164,7 +174,7 @@ export async function* streamIngestUploadBatched(
   for (let i = 0; i < batches.length; i++) {
     let pending = batches[i]
     for (let attempt = 0; ; attempt++) {
-      const saved = new Set<string>()
+      const saved: string[] = []
       let complete = false
       let serverError = false
       let caught: unknown
@@ -177,7 +187,7 @@ export async function* streamIngestUploadBatched(
           // happens to the rest of the stream.
           if (ev.event === 'upload_complete') complete = true
           if (ev.event === 'start' || ev.event === 'upload_complete') continue
-          if (ev.event === 'file_saved' && typeof data.filename === 'string') saved.add(data.filename)
+          if (ev.event === 'file_saved' && typeof data.filename === 'string') saved.push(data.filename)
           if (ev.event === 'error') {
             serverError = true
             // Backend error events are protocol flags — never forward their
@@ -199,9 +209,9 @@ export async function* streamIngestUploadBatched(
       } catch (err) {
         caught = err
       }
-      if (saved.size > 0) anySaved = true
+      if (saved.length > 0) anySaved = true
       if (complete) break
-      pending = pending.filter((f) => !saved.has(fileLabel(f)))
+      pending = withoutSaved(pending, saved)
       if (pending.length === 0) break
 
       const status = caught instanceof UploadHttpError ? caught.status : undefined

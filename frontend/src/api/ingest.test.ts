@@ -195,6 +195,24 @@ describe('streamIngestUploadBatched', () => {
     expect(result).toEqual({ anySaved: true, failures: [] })
   })
 
+  it('clears one pending file per save ack, so a same-named file still gets re-sent', async () => {
+    vi.useFakeTimers()
+    uploadMock
+      .mockImplementationOnce(reply([['file_saved', { filename: 'a' }]], new UploadStalledError()))
+      .mockImplementationOnce(staged('a'))
+
+    const first = new File([new Uint8Array(1)], 'a')
+    const second = new File([new Uint8Array(2)], 'a')
+    const run = collect(streamIngestUploadBatched('c1', [first, second], 1000))
+    await vi.runAllTimersAsync()
+    const { result } = await run
+
+    expect(uploadMock).toHaveBeenCalledTimes(2)
+    const resent = (uploadMock.mock.calls[1][1] as FormData).getAll('files') as File[]
+    expect(resent.map((f) => f.size)).toEqual([2])
+    expect(result).toEqual({ anySaved: true, failures: [] })
+  })
+
   it('retries a gateway error and a stream that ended without upload_complete', async () => {
     vi.useFakeTimers()
     uploadMock
