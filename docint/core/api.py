@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import secrets
 import threading
 import time
 import zipfile
@@ -757,6 +758,54 @@ def _safe_relative_dest(batch_dir: Path, raw_name: str) -> Path:
     if not parts:
         parts = ["upload"]
     return batch_dir.joinpath(*parts)
+
+
+#: When this process started. The backend runs as a single process, so a
+#: partial upload last written before this belongs to no attempt still running.
+_PROCESS_STARTED_AT = time.time()
+
+
+def _partial_path(dest: Path) -> Path:
+    """Name this upload attempt's own temp file beside ``dest``.
+
+    The random token keeps two attempts at one file from writing the same
+    bytes on disk. The rest of the name is cut so the whole fits the 255-byte
+    limit most filesystems put on a name, which the token would otherwise push
+    a long but valid file name past.
+
+    Args:
+        dest (Path): The file's final path.
+
+    Returns:
+        Path: A ``.part`` path in the same directory, unique to this attempt.
+    """
+    suffix = f".{secrets.token_hex(6)}{PARTIAL_UPLOAD_SUFFIX}"
+    stem = dest.name.encode()[: 255 - len(suffix)].decode(errors="ignore")
+    return dest.with_name(stem + suffix)
+
+
+def _clear_stale_partials(directory: Path) -> None:
+    """Remove partial uploads an earlier server process left in ``directory``.
+
+    Every upload attempt writes its own temp file, so one left by a process
+    that died mid-write is never reused, and nothing else would ever remove
+    it. A temp written since this process started may belong to an attempt
+    still running, and is left alone.
+
+    Args:
+        directory (Path): A directory uploads are about to be written into.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.name.endswith(PARTIAL_UPLOAD_SUFFIX):
+                    continue
+                with suppress(OSError):
+                    stale = entry.stat(follow_symlinks=False).st_mtime < _PROCESS_STARTED_AT
+                    if stale and entry.is_file(follow_symlinks=False):
+                        os.unlink(entry.path)
+    except OSError as exc:
+        logger.warning("Could not clear partial uploads in '{}': {}", directory, exc)
 
 
 def _resolve_source_file_path(
@@ -5818,19 +5867,20 @@ async def ingest_upload(
         )
 
         staged_bytes = 0
+        swept: set[Path] = set()
         for upload in files:
             dest = _safe_relative_dest(batch_dir, upload.filename or "upload")
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.parent not in swept:
+                swept.add(dest.parent)
+                await to_thread.run_sync(_clear_stale_partials, dest.parent)
             filename = str(dest.relative_to(batch_dir))
-            # Bytes land beside the final name and are renamed onto it once
-            # the last chunk is in, so a cut-off upload leaves a `.part`
-            # nothing counts as an input. Written straight to `dest`, a
-            # truncated file is indistinguishable from a whole one, and the
-            # staged-batch report called it staged.
-            partial_dest = dest.with_name(dest.name + PARTIAL_UPLOAD_SUFFIX)
+            # This attempt's own temp file, renamed onto the final name once
+            # whole: a retry overlapping a stalled attempt cannot truncate it.
+            partial_dest = _partial_path(dest)
             bytes_written = 0
             try:
-                with partial_dest.open("wb") as buffer:
+                with partial_dest.open("xb") as buffer:
                     while True:
                         chunk = await upload.read(1024 * 1024)
                         if not chunk:
@@ -5842,13 +5892,13 @@ async def ingest_upload(
                             {"filename": filename, "bytes_written": bytes_written},
                         )
 
+                # Hashed before the rename, so the hash is of exactly the bytes
+                # this attempt commits. Off the loop: hashing reads the whole
+                # file back, so a large one stalls every other request — the
+                # jobs SSE ping loop included — for as long as it takes.
+                file_hash = await to_thread.run_sync(partial(compute_file_hash, partial_dest))
                 os.replace(partial_dest, dest)
                 staged_bytes += bytes_written
-                # We calculate hash but don't store the file index anymore.
-                # Off the loop: hashing reads the whole file back, so a large
-                # one stalls every other request — the jobs SSE ping loop
-                # included — for as long as it takes.
-                file_hash = await to_thread.run_sync(partial(compute_file_hash, dest))
                 if load_ingestion_env().ingest_preprocess_on_upload:
                     # The file's heavy stage (PDF layout/OCR, image caption,
                     # transcription) starts now, while the rest of the batch is
@@ -5866,7 +5916,6 @@ async def ingest_upload(
                     },
                 )
             except Exception as exc:
-                partial_dest.unlink(missing_ok=True)
                 logger.opt(exception=exc).error("Error saving uploaded file {}", filename)
                 # `filename` travels as a structured field (client-supplied
                 # name, echoed) so the SPA can validate it against its own
@@ -5876,6 +5925,11 @@ async def ingest_upload(
                     {"message": "Failed to save file.", "code": "save_failed", "filename": filename},
                 )
                 return
+            finally:
+                # An error, a cancelled request or a closed stream: a temp file
+                # not yet renamed is incomplete.
+                with suppress(OSError):
+                    partial_dest.unlink(missing_ok=True)
 
         # An upload that is never finalized creates no job, so without this
         # line it leaves no trace in the log at all. Per-file detail belongs

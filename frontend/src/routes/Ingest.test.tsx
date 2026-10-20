@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -6,6 +6,7 @@ import type { ReactElement } from 'react'
 import { Ingest } from './Ingest'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useUiStore } from '@/stores/ui'
 import { deriveIngestStatus } from '@/lib/ingestStatus'
 
 /** Counts how often `@infra/ui`'s `FileList` actually renders. */
@@ -53,10 +54,17 @@ let jobTimes: Record<string, { started_at: string | null; finished_at: string | 
 let finishedJobIds: Set<string>
 /** Per-job collection names, for tests that run several collections at once. */
 let jobCollections: Record<string, string>
+/** Per-job owners, for an admin's jobs in another user's namespace; absent = the caller's own. */
+let jobOwners: Record<string, string>
+
+/** The `owner` a request was sent under, as the server reads it; `null` for the caller's own. */
+function ownerOf(u: string): string | null {
+  return new URL(u, 'http://localhost').searchParams.get('owner')
+}
 
 /** Track a job the way `run.start()` does once its finalize resolves. */
-function track(jobId: string, collection = 'mydocs') {
-  useIngestRunStore.getState().trackJob(jobId, collection)
+function track(jobId: string, collection = 'mydocs', owner: string | null = null) {
+  useIngestRunStore.getState().trackJob(jobId, collection, owner)
 }
 
 function jobSnapshot(id: string) {
@@ -91,9 +99,11 @@ function notFoundRes() {
 beforeEach(() => {
   useIngestRunStore.getState().reset()
   useIngestJobsStore.getState().clear()
+  useUiStore.setState({ selectedCollection: null, selectedOwner: null })
   stagedFiles = 0
   stagedStages = []
   knownJobIds = new Set()
+  jobOwners = {}
   queuedJobIds = new Set()
   finishedJobIds = new Set()
   jobCollections = {}
@@ -117,7 +127,8 @@ beforeEach(() => {
       })
     if (u.includes('/ingest/jobs/')) {
       const id = u.split('/ingest/jobs/')[1]?.split('?')[0]
-      if (!id || !knownJobIds.has(id)) return notFoundRes()
+      // A job lives in the namespace it was queued in, and is unknown in any other.
+      if (!id || !knownJobIds.has(id) || (jobOwners[id] ?? null) !== ownerOf(u)) return notFoundRes()
       // Dismissal really removes the job, so the list stops carrying it —
       // otherwise a dismissed card would come straight back on the refetch.
       if (init?.method === 'DELETE') {
@@ -127,7 +138,11 @@ beforeEach(() => {
       return jsonRes(jobSnapshot(id))
     }
     if (u.includes('/ingest/jobs')) {
-      return jsonRes({ jobs: [...knownJobIds].map((id) => jobSnapshot(id)) })
+      return jsonRes({
+        jobs: [...knownJobIds]
+          .filter((id) => (jobOwners[id] ?? null) === ownerOf(u))
+          .map((id) => jobSnapshot(id))
+      })
     }
     if (u.includes('/config'))
       return jsonRes({
@@ -524,6 +539,44 @@ describe('Ingest — several runs at once', () => {
     expect(cards[0]).toHaveTextContent('second')
   })
 
+  it('lists only the jobs of the owner selected in the sidebar', async () => {
+    track('job-1', 'mine')
+    track('job-2', 'hers', 'alice')
+    knownJobIds.add('job-1')
+    knownJobIds.add('job-2')
+    jobCollections['job-1'] = 'mine'
+    jobCollections['job-2'] = 'hers'
+    jobOwners['job-2'] = 'alice'
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mine' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    await waitFor(() => expect(screen.getByText('mine')).toBeInTheDocument())
+    expect(screen.queryByText('hers')).not.toBeInTheDocument()
+
+    // An admin switches to another user's collection.
+    act(() => useUiStore.setState({ selectedCollection: 'hers', selectedOwner: 'alice' }))
+
+    await waitFor(() => expect(screen.getByText('hers')).toBeInTheDocument())
+    expect(screen.queryByText('mine')).not.toBeInTheDocument()
+    // Known under its own owner, so not mistaken for an interrupted run.
+    expect(screen.queryByRole('button', { name: /run again/i })).not.toBeInTheDocument()
+  })
+
+  it('offers the staged batch even when another owner tracks a job of that name', async () => {
+    track('job-2', 'mydocs', 'alice')
+    stagedFiles = 2
+    useIngestRunStore.setState({ collection: 'mydocs' })
+
+    renderIn(<Ingest />)
+
+    expect(await screen.findByText('Interrupted upload to “mydocs”')).toBeInTheDocument()
+  })
+
   it('shows a job the server lists but this browser never queued', async () => {
     // Queued from another tab, or before this page was loaded: only the
     // server list knows about it.
@@ -815,5 +868,33 @@ describe('Ingest preprocessing progress', () => {
       String(input).includes('/ingest/staged')
     )
     expect(stagedCalls.length).toBeLessThanOrEqual(1)
+  })
+})
+
+describe('Ingest — picking files', () => {
+  /** Hand `files` to the drop zone's plain file input, as the browser's picker would. */
+  function pick(files: File[]) {
+    const input = Array.from(document.querySelectorAll('input[type="file"]')).find(
+      (el) => !el.hasAttribute('webkitdirectory')
+    ) as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: files, configurable: true })
+    fireEvent.change(input)
+  }
+
+  it('refuses a different file under a name already picked, and says which', async () => {
+    renderIn(<Ingest />)
+
+    pick([new File(['x'], 'a.txt', { lastModified: 1 })])
+    pick([new File(['xy'], 'a.txt', { lastModified: 2 })])
+
+    const notice = await screen.findByRole('alert')
+    expect(notice).toHaveTextContent('A file was not added')
+    expect(within(notice).getByText('a.txt')).toBeInTheDocument()
+    const files = useIngestRunStore.getState().files
+    expect(files).toHaveLength(1)
+    expect(files[0].size).toBe(1)
+
+    pick([new File(['z'], 'b.txt', { lastModified: 3 })])
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

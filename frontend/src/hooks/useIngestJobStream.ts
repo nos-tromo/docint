@@ -1,7 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { streamSseGet } from '@/api/sse'
 import { INGEST_JOB_EVENTS_PATH } from '@/api/jobs'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useUiStore } from '@/stores/ui'
 import type { IngestEvent } from '@/api/types'
 
 /**
@@ -36,13 +37,23 @@ export const ingestStreamConfig = {
  * times; any received event resets the budget. On exhaustion the store's
  * `streamLost` flag lets the UI offer a manual reconnect rather than
  * freezing on the last frame.
+ *
+ * The server streams the jobs of one owner, so the connection follows the
+ * owner selected in the sidebar: a switch reopens it under the new owner and
+ * drops the last owner's logs, which no frame would ever update again.
  */
 export function useIngestJobStream(): void {
   // Re-subscribing needs a dependency that changes: `retryStream()` bumps
   // this so a user-triggered reconnect (after `streamLost`) tears down the
   // old effect and opens a fresh connection.
   const retryNonce = useIngestJobsStore((s) => s.retryNonce)
+  const owner = useUiStore((s) => s.selectedOwner)
+  const streamedOwner = useRef(owner)
   useEffect(() => {
+    if (streamedOwner.current !== owner) {
+      streamedOwner.current = owner
+      useIngestJobsStore.getState().resetLogs()
+    }
     const controller = new AbortController()
     // Set while the loop sleeps between reconnects; clears the pending timer and
     // resolves the wait so cleanup need not outlive it.
@@ -56,7 +67,9 @@ export function useIngestJobStream(): void {
     async function run(): Promise<void> {
       while (!cancelled && reconnects <= ingestStreamConfig.maxReconnects) {
         try {
-          for await (const frame of streamSseGet(INGEST_JOB_EVENTS_PATH, controller.signal)) {
+          for await (const frame of streamSseGet(INGEST_JOB_EVENTS_PATH, controller.signal, owner)) {
+            // A frame already read when the owner switched belongs to the old stream.
+            if (cancelled) return
             reconnects = 0 // a real event resets the consecutive-failure budget
             const data = (frame.data ?? {}) as Record<string, unknown>
             const jobId = typeof data.job_id === 'string' ? data.job_id : null
@@ -94,5 +107,5 @@ export function useIngestJobStream(): void {
       controller.abort()
       cancelReconnectWait?.()
     }
-  }, [retryNonce])
+  }, [retryNonce, owner])
 }

@@ -6,6 +6,7 @@ import { dismissIngestJob } from '@/api/jobs'
 import { useIngestJobs, ingestJobsKey } from '@/hooks/useIngestJobs'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useIngestRunStore } from '@/stores/ingestRun'
+import { useUiStore } from '@/stores/ui'
 import { IngestJobCard } from '@/components/ingest/IngestJobCard'
 import { isFinishedCard, mergeJobCards } from '@/lib/ingestJobCards'
 import { useT } from '@/i18n/LanguageContext'
@@ -23,13 +24,14 @@ interface ClearResult {
  * control must not have.
  *
  * @param jobIds - The jobs to dismiss.
+ * @param owner - The owner they were queued under.
  * @returns How many were cleared and how many refused.
  */
-async function dismissAll(jobIds: string[]): Promise<ClearResult> {
+async function dismissAll(jobIds: string[], owner: string | null): Promise<ClearResult> {
   const results = await Promise.allSettled(
     jobIds.map(async (jobId) => {
       try {
-        await dismissIngestJob(jobId)
+        await dismissIngestJob(jobId, owner)
       } catch (e) {
         if (!(e instanceof ApiError && e.status === 404)) throw e
       }
@@ -53,11 +55,14 @@ async function dismissAll(jobIds: string[]): Promise<ClearResult> {
  * and interrupted alike.
  *
  * Merges what this browser queued with what the server lists, so a run stays
- * visible when the next one starts, after a reload, and across tabs.
+ * visible when the next one starts, after a reload, and across tabs. Both
+ * halves are the selected owner's: a job queued in another namespace is
+ * unknown to this one, so its card could only ever read as interrupted.
  */
 export function IngestJobList() {
   const t = useT()
   const qc = useQueryClient()
+  const owner = useUiStore((s) => s.selectedOwner)
   const tracked = useIngestRunStore((s) => s.trackedJobs)
   const { data: listed } = useIngestJobs()
   // A map that changes once per run, not once per progress frame — see the
@@ -66,14 +71,17 @@ export function IngestJobList() {
   const terminal = useIngestJobsStore((s) => s.terminal)
   const [clearError, setClearError] = useState<string | null>(null)
 
-  const cards = useMemo(() => mergeJobCards(tracked, listed ?? []), [tracked, listed])
+  const cards = useMemo(
+    () => mergeJobCards(tracked.filter((job) => job.owner === owner), listed ?? []),
+    [tracked, listed, owner]
+  )
   const finishedIds = useMemo(
     () => cards.filter((card) => isFinishedCard(card, terminal)).map((card) => card.jobId),
     [cards, terminal]
   )
 
   const clearMutation = useMutation({
-    mutationFn: () => dismissAll(finishedIds),
+    mutationFn: () => dismissAll(finishedIds, owner),
     onSuccess: ({ cleared, failed }) => {
       setClearError(
         failed > 0
@@ -111,6 +119,7 @@ export function IngestJobList() {
           key={card.jobId}
           jobId={card.jobId}
           collection={card.collection}
+          owner={owner}
           listItem={card.listItem}
         />
       ))}

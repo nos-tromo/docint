@@ -624,6 +624,17 @@ describe('deriveIngestStatus', () => {
     expect(status.phase).toBe('complete')
     expect(status.warnings).toEqual(["No ingestable files found for 'mydocs'."])
   })
+
+  it('drops the retry notices of a batch that has ended', () => {
+    const retrying = 'Batch 2/3 did not go through — retrying (1/2).'
+    const events: IngestEvent[] = [
+      { event: 'start', data: { collection: 'c1', files: ['a.txt'] } },
+      { event: 'warning', data: { message: 'Batch 1/3 was skipped.' } },
+      { event: 'warning', data: { message: retrying } },
+      { event: 'warning_resolved', data: { messages: [retrying] } }
+    ]
+    expect(deriveIngestStatus(events).warnings).toEqual(['Batch 1/3 was skipped.'])
+  })
 })
 
 describe('deriveIngestStatus error message capture', () => {

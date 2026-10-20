@@ -3,6 +3,7 @@ import { Banner, Button, Card, FileList, Input, PageHeader, ToggleButton } from 
 import { useQueryClient } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useUiStore } from '@/stores/ui'
 import { useIngestDefaults } from '@/hooks/useIngestDefaults'
 import { ingestJobsKey } from '@/hooks/useIngestJobs'
 import { useCollections } from '@/hooks/useCollections'
@@ -37,6 +38,39 @@ const FALLBACK_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024
  */
 const MAX_LISTED_FILES = 500
 
+/** How many refused names the notice spells out before it summarises the rest. */
+const MAX_NAMED_REFUSALS = 5
+
+/**
+ * Says which picked files were left out because a different file in the
+ * selection already holds their name (see `mergeSelection`).
+ *
+ * @param names - The refused files' upload names, one per refused file.
+ */
+function RefusedFiles({ names }: { names: string[] }) {
+  const t = useT()
+  const distinct = [...new Set(names)]
+  return (
+    <Banner variant="danger">
+      <p>
+        {names.length === 1
+          ? t('ingest.name_taken_one')
+          : t('ingest.name_taken_other', { count: names.length })}
+      </p>
+      <ul className="mt-1 list-disc break-words pl-5">
+        {distinct.slice(0, MAX_NAMED_REFUSALS).map((name) => (
+          <li key={name}>{name}</li>
+        ))}
+      </ul>
+      {distinct.length > MAX_NAMED_REFUSALS && (
+        <p className="mt-1">
+          {t('ingest.name_taken_more', { count: distinct.length - MAX_NAMED_REFUSALS })}
+        </p>
+      )}
+    </Banner>
+  )
+}
+
 export function Ingest() {
   const t = useT()
   const run = useIngestRunStore()
@@ -52,6 +86,9 @@ export function Ingest() {
   // unreadable entries) never reaches the store — it is a transient,
   // view-only notice, not part of the run.
   const [dropError, setDropError] = useState<string | null>(null)
+  // The latest pick's files refused for a name already selected; the same
+  // kind of view-only notice.
+  const [refused, setRefused] = useState<string[]>([])
 
   // Seed the enrichment toggles once from the deployment defaults; the
   // user's own picks win afterwards for the rest of this mount. Reads the
@@ -91,13 +128,15 @@ export function Ingest() {
   // Files already on the server are only worth reporting when nothing else
   // in this browser describes them better: a picked selection, an upload in
   // flight, or a job this browser queued each says more than the staged card
-  // can. Debounced because the name is typed.
+  // can. Debounced because the name is typed. Only a job of the selected
+  // owner counts: the staged batch asked about is that owner's.
+  const owner = useUiStore((s) => s.selectedOwner)
   const stagedCollection = useDebounced(run.collection.trim())
   const showStaged =
     !busy &&
     run.files.length === 0 &&
     stagedCollection.length > 0 &&
-    !run.trackedJobs.some((j) => j.collection === stagedCollection)
+    !run.trackedJobs.some((j) => j.collection === stagedCollection && j.owner === owner)
 
   // Memoised on the selection alone. An upload emits thousands of progress
   // frames and each one re-renders this screen; without the memo every frame
@@ -161,9 +200,12 @@ export function Ingest() {
             disabled={busy}
             onFiles={(v) => {
               setDropError(null)
-              run.addFiles(v)
+              setRefused(run.addFiles(v))
             }}
-            onEmpty={() => setDropError(t('ingest.drop_empty'))}
+            onEmpty={() => {
+              setRefused([])
+              setDropError(t('ingest.drop_empty'))
+            }}
           />
 
           {picked}
@@ -218,6 +260,7 @@ export function Ingest() {
           </Button>
 
           {(dropError || run.error) && <Banner variant="danger">{dropError ?? run.error}</Banner>}
+          {refused.length > 0 && <RefusedFiles names={refused} />}
         </Card>
 
         <div className="min-w-0 space-y-4">
@@ -235,17 +278,6 @@ export function Ingest() {
           )}
 
           {showStaged && <IngestStagedCard collection={stagedCollection} />}
-
-          {uploadStatus.warnings.length > 0 && (
-            <ul className="text-sm text-[var(--status-amber-fg)] space-y-1" role="alert">
-              {uploadStatus.warnings.map((w, i) => (
-                // Warnings are plain strings that may legitimately repeat, appended in
-                // order and holding no state — the index is the identity.
-                // eslint-disable-next-line @eslint-react/no-array-index-key
-                <li key={i}>{w}</li>
-              ))}
-            </ul>
-          )}
 
           {uploadStatus.phase !== 'idle' && (
             <IngestionStatus

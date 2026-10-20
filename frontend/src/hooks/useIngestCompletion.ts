@@ -24,11 +24,14 @@ import type { IngestEvent } from '@/api/types'
  * @param events - That job's event log.
  * @param collection - Fallback collection name when the terminal frame
  *   carries none.
+ * @param owner - The owner the job was queued under: its collection is that
+ *   owner's, so it is selected in their namespace, not the caller's own.
  */
 export function useIngestCompletion(
   jobId: string,
   events: IngestEvent[],
-  collection: string
+  collection: string,
+  owner: string | null
 ): void {
   const qc = useQueryClient()
   const setSelected = useUiStore((s) => s.setSelectedCollection)
@@ -49,14 +52,14 @@ export function useIngestCompletion(
     void qc.invalidateQueries({ queryKey: ingestJobsKey })
     if (!name) return
     void (async () => {
-      await selectCollection(name)
+      await selectCollection(name, owner)
       // Refresh the owned-collections list BEFORE selecting: the Sidebar's
       // reconcile effect clears any active collection not present in that
       // cached list, so selecting a brand-new collection while the list is
       // stale would immediately snap the selection back to null. Awaiting the
       // refetch first ensures the new name is in the list before we select it.
       await qc.invalidateQueries({ queryKey: collectionsKey })
-      setSelected(name)
+      setSelected(name, owner)
     })()
-  }, [events, jobId, collection, qc, setSelected])
+  }, [events, jobId, collection, owner, qc, setSelected])
 }

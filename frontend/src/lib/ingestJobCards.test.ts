@@ -22,7 +22,7 @@ function snapshot(id: string, over: Partial<IngestJobSnapshot> = {}): IngestJobS
 describe('mergeJobCards', () => {
   it('lists a locally tracked job the server has not listed yet, first', () => {
     const cards = mergeJobCards(
-      [{ job_id: 'new', collection: 'fresh' }],
+      [{ job_id: 'new', collection: 'fresh', owner: null }],
       [snapshot('old')]
     )
     expect(cards.map((c) => c.jobId)).toEqual(['new', 'old'])
@@ -31,7 +31,7 @@ describe('mergeJobCards', () => {
 
   it('does not duplicate a job present in both sources', () => {
     const cards = mergeJobCards(
-      [{ job_id: 'job-1', collection: 'mydocs' }],
+      [{ job_id: 'job-1', collection: 'mydocs', owner: null }],
       [snapshot('job-1')]
     )
     expect(cards).toHaveLength(1)
@@ -45,7 +45,7 @@ describe('mergeJobCards', () => {
 
   it('falls back to the tracked name when a snapshot carries none', () => {
     const cards = mergeJobCards(
-      [{ job_id: 'job-1', collection: 'mydocs' }],
+      [{ job_id: 'job-1', collection: 'mydocs', owner: null }],
       [snapshot('job-1', { collection: '' })]
     )
     expect(cards[0].collection).toBe('mydocs')

@@ -157,6 +157,11 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
       aria-live="polite"
     >
       <Header status={status} theme={theme} elapsedMs={elapsedMs} />
+      {/* Inside the run's own box: with several runs listed, a warning outside
+          one names no run. For a job card these are the merged upload+job
+          warnings — a job-stream one (a soft-empty ingest, a failed entity
+          resolution) is as actionable as an upload one. */}
+      <IngestWarnings warnings={status.warnings} className="mt-3" />
 
       {status.phase === 'queued' && <QueuedBody />}
       {status.phase === 'uploading' && <UploadingBody status={status} />}
@@ -165,6 +170,27 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
       {status.phase === 'cancelled' && <CancelledBody status={status} />}
       {status.phase === 'error' && <ErrorBody status={status} />}
     </div>
+  )
+}
+
+/**
+ * A run's warnings, in amber. No `role="alert"`: they sit inside a status box
+ * that is already a live region, and a nested one is read out twice.
+ *
+ * @param warnings - The messages, in arrival order.
+ * @param className - Spacing from the content above.
+ */
+export function IngestWarnings({ warnings, className }: { warnings: string[]; className?: string }) {
+  if (warnings.length === 0) return null
+  return (
+    <ul className={cn('text-sm text-[var(--status-amber-fg)] space-y-1', className)}>
+      {warnings.map((w, i) => (
+        // Warnings are plain strings that may legitimately repeat, appended in
+        // order and holding no state — the index is the identity.
+        // eslint-disable-next-line @eslint-react/no-array-index-key
+        <li key={i}>{w}</li>
+      ))}
+    </ul>
   )
 }
 

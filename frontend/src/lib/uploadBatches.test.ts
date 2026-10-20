@@ -48,11 +48,12 @@ describe('planUploadBatches', () => {
   })
 
   it('caps a batch at MAX_FILES_PER_BATCH even when the byte budget has room', () => {
-    // Starlette's multipart parser rejects a request with more than 1000 file
-    // parts as HTTP 400, whatever its byte size.
-    const files = Array.from({ length: 2500 }, (_, i) => fileOfSize(`f${i}`, 1))
+    // Small requests keep a stalled one cheap to retry; Starlette's 1000-part
+    // limit is only the hard ceiling.
+    expect(MAX_FILES_PER_BATCH).toBeLessThanOrEqual(1000)
+    const files = Array.from({ length: 2 * MAX_FILES_PER_BATCH + 50 }, (_, i) => fileOfSize(`f${i}`, 1))
     const batches = planUploadBatches(files, Number.MAX_SAFE_INTEGER)
-    expect(batches.map((b) => b.length)).toEqual([MAX_FILES_PER_BATCH, MAX_FILES_PER_BATCH, 500])
+    expect(batches.map((b) => b.length)).toEqual([MAX_FILES_PER_BATCH, MAX_FILES_PER_BATCH, 50])
     expect(batches.flat().map((f) => f.name)).toEqual(files.map((f) => f.name))
   })
 

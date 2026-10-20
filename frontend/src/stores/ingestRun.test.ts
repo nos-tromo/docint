@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useIngestRunStore } from './ingestRun'
+import { mergeSelection, useIngestRunStore } from './ingestRun'
 import { useIngestJobsStore } from './ingestJobs'
 import { defaultT } from '@/i18n/defaultT'
 import { emptyStatus } from '@/lib/ingestStatus'
+import { setOwnerParam } from '@/api/client'
 
 // A `vi.fn()` wrapper (not a fixed factory) so individual tests can override
 // the upload outcome per-call with `mockImplementationOnce` — needed to
@@ -32,9 +33,17 @@ const stagedBatch = (entries: { name: string; bytes: number }[]) => ({
 
 const file = (name: string) => new File(['x'], name, { type: 'text/plain' })
 
+/** A file with a fixed modification time, so "the same file again" never depends on timing. */
+function pickedFile(name: string, opts: { body?: string; lastModified?: number; path?: string } = {}): File {
+  const f = new File([opts.body ?? 'x'], name, { type: 'text/plain', lastModified: opts.lastModified ?? 1 })
+  if (opts.path) Object.defineProperty(f, 'webkitRelativePath', { value: opts.path })
+  return f
+}
+
 beforeEach(() => {
   useIngestRunStore.getState().reset()
   useIngestJobsStore.getState().clear()
+  setOwnerParam(null)
 
   createIngestJob.mockReset()
   createIngestJob.mockResolvedValue({ job_id: 'job-1', adopted: false })
@@ -65,7 +74,7 @@ describe('useIngestRunStore', () => {
     expect(leg).toMatchObject({ totalFiles: 1, filesSaved: 1, collection: 'mydocs' })
     expect(useIngestRunStore.getState().uploadStatus).toEqual(emptyStatus())
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-1', collection: 'mydocs' }
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
     ])
     expect(useIngestRunStore.getState().uploading).toBe(false)
   })
@@ -93,6 +102,33 @@ describe('useIngestRunStore', () => {
     expect(payload.upload_elapsed_ms).toBeLessThan(3_000)
   })
 
+  it('keeps the whole run under the owner it started with', async () => {
+    setOwnerParam('alice')
+    // An admin switches the sidebar to other users' collections mid-run: once
+    // while the run asks what is staged, once while it uploads.
+    getStagedBatch.mockImplementationOnce(async () => {
+      setOwnerParam('bob')
+      return stagedBatch([])
+    })
+    streamIngestUploadBatched.mockImplementationOnce(async function* () {
+      setOwnerParam('carol')
+      yield { event: 'file_saved', data: { filename: 'a.txt' }, receivedAt: 0 }
+      return { anySaved: true, failures: [] }
+    })
+    const s = useIngestRunStore.getState()
+    s.setCollection('mydocs')
+    s.addFiles([file('a.txt')])
+
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    expect(getStagedBatch).toHaveBeenCalledWith('mydocs', { owner: 'alice' })
+    expect(streamIngestUploadBatched.mock.calls[0][5]).toBe('alice')
+    expect(createIngestJob.mock.calls[0][1]).toBe('alice')
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-1', collection: 'mydocs', owner: 'alice' }
+    ])
+  })
+
   it('clears the picked files once the job is queued', async () => {
     const s = useIngestRunStore.getState()
     s.setCollection('mydocs')
@@ -112,6 +148,20 @@ describe('useIngestRunStore', () => {
     s.addFiles([file('a.txt')])
     s.addFiles([file('a.txt'), file('b.txt')])
     expect(useIngestRunStore.getState().files.map((f) => f.name)).toEqual(['a.txt', 'b.txt'])
+  })
+
+  it('returns the upload names of files refused for a name already selected', () => {
+    const s = useIngestRunStore.getState()
+    s.addFiles([pickedFile('a.txt', { path: 'docs/a.txt' }), pickedFile('b.txt')])
+
+    const refused = useIngestRunStore
+      .getState()
+      .addFiles([pickedFile('a.txt', { body: 'yy', path: 'docs/a.txt' }), pickedFile('c.txt')])
+
+    expect(refused).toEqual(['docs/a.txt'])
+    const files = useIngestRunStore.getState().files
+    expect(files.map((f) => f.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    expect(files[0].size).toBe(1)
   })
 
   it('removes a file at the given index', () => {
@@ -246,8 +296,8 @@ describe('useIngestRunStore — tracking several jobs', () => {
     await useIngestRunStore.getState().start(1000, defaultT)
 
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-2', collection: 'second' },
-      { job_id: 'job-1', collection: 'first' }
+      { job_id: 'job-2', collection: 'second', owner: null },
+      { job_id: 'job-1', collection: 'first', owner: null }
     ])
   })
 
@@ -268,22 +318,22 @@ describe('useIngestRunStore — tracking several jobs', () => {
 
   it('re-tracking an adopted job id does not duplicate it', () => {
     const s = useIngestRunStore.getState()
-    s.trackJob('job-1', 'mydocs')
-    s.trackJob('job-1', 'mydocs')
+    s.trackJob('job-1', 'mydocs', null)
+    s.trackJob('job-1', 'mydocs', null)
     expect(useIngestRunStore.getState().trackedJobs).toHaveLength(1)
   })
 
   it('untracks one job and drops only its upload status', () => {
     const s = useIngestRunStore.getState()
-    s.trackJob('job-1', 'first')
-    s.trackJob('job-2', 'second')
+    s.trackJob('job-1', 'first', null)
+    s.trackJob('job-2', 'second', null)
     useIngestRunStore.setState({
       uploadStatusByJob: { 'job-1': emptyStatus(), 'job-2': emptyStatus() }
     })
     s.untrackJob('job-1')
 
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-2', collection: 'second' }
+      { job_id: 'job-2', collection: 'second', owner: null }
     ])
     expect(Object.keys(useIngestRunStore.getState().uploadStatusByJob)).toEqual(['job-2'])
   })
@@ -323,13 +373,36 @@ describe('useIngestRunStore — tracking several jobs', () => {
     useIngestRunStore.persist.rehydrate()
 
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-1', collection: 'mydocs' }
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
     ])
     expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-0'])
     expect(useIngestRunStore.getState().ner).toBe(true)
     // v1 predates the summary toggle; it carries over as on, the same value
     // a fresh store starts at, never as an accidental opt-out.
     expect(useIngestRunStore.getState().summary).toBe(true)
+  })
+
+  it('gives v2 tracked jobs no owner on migration, the only one a non-admin has', () => {
+    localStorage.setItem(
+      'docint-ingest-run',
+      JSON.stringify({
+        version: 2,
+        state: {
+          collection: 'mydocs',
+          ner: false,
+          hate: false,
+          summary: true,
+          trackedJobs: [{ job_id: 'job-1', collection: 'mydocs' }],
+          handledJobIds: ['job-0']
+        }
+      })
+    )
+    useIngestRunStore.persist.rehydrate()
+
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
+    ])
+    expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-0'])
   })
 })
 
@@ -374,14 +447,17 @@ describe('useIngestRunStore — finishing an interrupted upload', () => {
     await useIngestRunStore.getState().start(1000, defaultT)
 
     expect(streamIngestUploadBatched).not.toHaveBeenCalled()
-    expect(createIngestJob).toHaveBeenCalledWith({
-      collection: 'mydocs',
-      ner: false,
-      hate_speech: false,
-      summary: true
-    })
+    expect(createIngestJob).toHaveBeenCalledWith(
+      {
+        collection: 'mydocs',
+        ner: false,
+        hate_speech: false,
+        summary: true
+      },
+      null
+    )
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-1', collection: 'mydocs' }
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
     ])
     expect(useIngestRunStore.getState().files).toEqual([])
   })
@@ -400,5 +476,53 @@ describe('useIngestRunStore — finishing an interrupted upload', () => {
       'a.txt'
     ])
     expect(useIngestRunStore.getState().alreadyStaged).toBe(0)
+  })
+})
+
+describe('mergeSelection', () => {
+  it('skips the same file picked again, without refusing it', () => {
+    const held = pickedFile('a.txt')
+    const { files, refused } = mergeSelection([held], [pickedFile('a.txt')])
+    expect(files).toHaveLength(1)
+    expect(files[0]).toBe(held)
+    expect(refused).toEqual([])
+  })
+
+  it('refuses a different file under a name already held, and keeps the held one', () => {
+    const held = pickedFile('a.txt')
+    const other = pickedFile('a.txt', { body: 'yy' })
+    const { files, refused } = mergeSelection([held], [other])
+    expect(files).toHaveLength(1)
+    expect(files[0]).toBe(held)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toBe(other)
+  })
+
+  it('refuses a same-sized file whose modification time differs', () => {
+    // Name and size alone would take two different one-byte files for one.
+    const other = pickedFile('a.txt', { body: 'y', lastModified: 2 })
+    const { files, refused } = mergeSelection([pickedFile('a.txt')], [other])
+    expect(files).toHaveLength(1)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toBe(other)
+  })
+
+  it('keeps same-named files from different folders', () => {
+    const one = pickedFile('a.txt', { path: 'one/a.txt' })
+    const two = pickedFile('a.txt', { body: 'yy', path: 'two/a.txt' })
+    const { files, refused } = mergeSelection([one], [two])
+    expect(files.map((f) => f.webkitRelativePath)).toEqual(['one/a.txt', 'two/a.txt'])
+    expect(refused).toEqual([])
+  })
+
+  it('refuses a repeat within one pick, keeping the first', () => {
+    // A drop from a search-results window can carry two files of one name.
+    const first = pickedFile('a.txt')
+    const second = pickedFile('a.txt', { body: 'yy' })
+    const { files, refused } = mergeSelection([], [first, second, pickedFile('b.txt')])
+    expect(files.map((f) => f.name)).toEqual(['a.txt', 'b.txt'])
+    expect(files[0]).toBe(first)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toBe(second)
   })
 })

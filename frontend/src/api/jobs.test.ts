@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { createIngestJob } from './jobs'
+import { cancelIngestJob, createIngestJob, dismissIngestJob, getIngestJob, listIngestJobs } from './jobs'
+import { setOwnerParam } from './client'
 
 const mockFetch = (status: number, body: unknown) =>
   vi.stubGlobal(
@@ -37,5 +38,26 @@ describe('createIngestJob', () => {
   it('rethrows other errors', async () => {
     mockFetch(404, { detail: 'Collection not found' })
     await expect(createIngestJob({ collection: 'gone', hybrid: true })).rejects.toThrow()
+  })
+})
+
+describe('job helpers', () => {
+  afterEach(() => setOwnerParam(null))
+
+  it('act under the owner a caller pinned, whichever one is selected now', async () => {
+    setOwnerParam('bob')
+    mockFetch(200, { jobs: [], ok: true })
+
+    await listIngestJobs('alice')
+    await getIngestJob('job-1', 'alice')
+    await dismissIngestJob('job-1', 'alice')
+    await cancelIngestJob('job-1', 'alice')
+
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input))
+    expect(urls).toHaveLength(4)
+    for (const sent of urls) {
+      expect(sent).toContain('owner=alice')
+      expect(sent).not.toContain('owner=bob')
+    }
   })
 })

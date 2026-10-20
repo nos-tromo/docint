@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { mergeFiles } from '@infra/ui'
 import { streamIngestUploadBatched, type BatchFailure } from '@/api/ingest'
 import { createIngestJob, getStagedBatch } from '@/api/jobs'
+import { getOwnerParam } from '@/api/client'
 import { applyIngestEvent, emptyStatus, type IngestStatus } from '@/lib/ingestStatus'
 import type { IngestEvent } from '@/api/types'
 import type { Strings } from '@/i18n'
@@ -23,6 +23,12 @@ interface PersistedIngestRun {
 export interface TrackedJob {
   job_id: string
   collection: string
+  /**
+   * The namespace it was queued in: the admin owner context of the time, or
+   * `null` for the caller's own. A job is only shown, and only acted on, under
+   * that owner (see `withOwner`).
+   */
+  owner: string | null
 }
 
 /**
@@ -56,6 +62,37 @@ export function filesNotYetStaged(files: File[], staged: { name: string; bytes: 
   // space in every terminal and turned the whole file binary to git.
   const have = new Set(staged.map((e) => `${e.name}|${e.bytes}`))
   return files.filter((f) => !have.has(`${uploadName(f)}|${f.size}`))
+}
+
+/**
+ * Add picked files to a selection, refusing any whose upload name a different
+ * file already holds.
+ *
+ * The server stores a collection's uploads by that name, so two different files
+ * under one name cannot both arrive: the second overwrites the first, and the
+ * run still reports success. A file matching the held one's name, size and
+ * modification time is the same file picked again, and is skipped silently.
+ * Files already selected win, so the selection is never reordered.
+ *
+ * @param existing - The current selection, whose upload names are distinct.
+ * @param incoming - The newly picked files.
+ * @returns The new selection, and the incoming files refused for a taken name.
+ */
+export function mergeSelection(existing: File[], incoming: File[]): { files: File[]; refused: File[] } {
+  const held = new Map(existing.map((f) => [uploadName(f), f]))
+  const files = [...existing]
+  const refused: File[] = []
+  for (const f of incoming) {
+    const name = uploadName(f)
+    const prior = held.get(name)
+    if (!prior) {
+      held.set(name, f)
+      files.push(f)
+    } else if (prior.size !== f.size || prior.lastModified !== f.lastModified) {
+      refused.push(f)
+    }
+  }
+  return { files, refused }
 }
 
 /**
@@ -130,7 +167,13 @@ export interface IngestRunState {
   setNer: (v: boolean) => void
   setHate: (v: boolean) => void
   setSummary: (v: boolean) => void
-  addFiles: (v: File[]) => void
+  /**
+   * Add picked files to the selection (see {@link mergeSelection}).
+   *
+   * @returns The upload names of the files refused because a different file
+   *   already holds that name, so the screen can say which were left out.
+   */
+  addFiles: (v: File[]) => string[]
   removeFile: (i: number) => void
   clearFiles: () => void
   /**
@@ -164,9 +207,10 @@ export interface IngestRunState {
    *
    * @param jobId - The server's job id.
    * @param collection - The collection it was queued against.
+   * @param owner - The owner it was queued under (`null` for the caller's own).
    * @param uploadStatus - The upload leg that produced it, if any.
    */
-  trackJob: (jobId: string, collection: string, uploadStatus?: IngestStatus) => void
+  trackJob: (jobId: string, collection: string, owner: string | null, uploadStatus?: IngestStatus) => void
   /** Forget a job: drop it from the list along with its upload status. */
   untrackJob: (jobId: string) => void
   reset: () => void
@@ -200,7 +244,11 @@ export const useIngestRunStore = create<IngestRunState>()(
       setNer: (ner) => set({ ner }),
       setHate: (hate) => set({ hate }),
       setSummary: (summary) => set({ summary }),
-      addFiles: (v) => set((s) => ({ files: mergeFiles(s.files, v) })),
+      addFiles: (v) => {
+        const { files, refused } = mergeSelection(get().files, v)
+        set({ files })
+        return refused.map(uploadName)
+      },
       removeFile: (i) => set((s) => ({ files: s.files.filter((_, idx) => idx !== i) })),
       clearFiles: () => set({ files: [] }),
       markJobHandled: (jobId) =>
@@ -209,10 +257,10 @@ export const useIngestRunStore = create<IngestRunState>()(
             ? s
             : { handledJobIds: [...s.handledJobIds, jobId].slice(-MAX_HANDLED_JOBS) }
         ),
-      trackJob: (jobId, collection, uploadStatus) =>
+      trackJob: (jobId, collection, owner, uploadStatus) =>
         set((s) => ({
           trackedJobs: [
-            { job_id: jobId, collection },
+            { job_id: jobId, collection, owner },
             ...s.trackedJobs.filter((j) => j.job_id !== jobId)
           ],
           uploadStatusByJob: uploadStatus
@@ -242,6 +290,9 @@ export const useIngestRunStore = create<IngestRunState>()(
       start: async (limitBytes, t) => {
         const { collection, files, ner, hate, summary, uploading } = get()
         if (!collection || files.length === 0 || uploading) return
+        // Read once: every request of the run goes to the namespace it started
+        // in, even if an admin switches to another user's collection meanwhile.
+        const owner = getOwnerParam()
         set({
           uploading: true,
           error: null,
@@ -260,7 +311,7 @@ export const useIngestRunStore = create<IngestRunState>()(
         // branches assign, so `no-useless-assignment` reports one if given.
         let pending: File[]
         try {
-          const staged = await getStagedBatch(collection)
+          const staged = await getStagedBatch(collection, { owner })
           pending = filesNotYetStaged(files, staged.entries)
         } catch {
           pending = files
@@ -273,13 +324,16 @@ export const useIngestRunStore = create<IngestRunState>()(
           // mid-upload leaves behind once the transfer finished but finalize
           // never ran. Queue the job over the staged batch directly.
           try {
-            const { job_id } = await createIngestJob({
-              collection,
-              ner,
-              hate_speech: hate,
-              summary
-            })
-            get().trackJob(job_id, collection)
+            const { job_id } = await createIngestJob(
+              {
+                collection,
+                ner,
+                hate_speech: hate,
+                summary
+              },
+              owner
+            )
+            get().trackJob(job_id, collection, owner)
             set({ uploading: false, uploadStatus: emptyStatus(), files: [], failedFiles: [] })
           } catch {
             set({ uploading: false, error: t('ingest.failed_default') })
@@ -301,7 +355,7 @@ export const useIngestRunStore = create<IngestRunState>()(
         let failures: BatchFailure[]
         let lastEvent: IngestEvent | null = null
         try {
-          const stream = streamIngestUploadBatched(collection, pending, limitBytes, undefined, t)
+          const stream = streamIngestUploadBatched(collection, pending, limitBytes, undefined, t, owner)
           let next = await stream.next()
           while (!next.done) {
             const ev = next.value
@@ -343,19 +397,22 @@ export const useIngestRunStore = create<IngestRunState>()(
           // upload leg the user was already watching tick.
           const uploadStatus = get().uploadStatus
           const runStartedAt = uploadStatus.startedAt
-          const { job_id } = await createIngestJob({
-            collection,
-            ner,
-            hate_speech: hate,
-            summary,
-            upload_elapsed_ms:
-              runStartedAt === undefined ? undefined : Date.now() - runStartedAt
-          })
+          const { job_id } = await createIngestJob(
+            {
+              collection,
+              ner,
+              hate_speech: hate,
+              summary,
+              upload_elapsed_ms:
+                runStartedAt === undefined ? undefined : Date.now() - runStartedAt
+            },
+            owner
+          )
           // The upload leg belongs to the job it produced from here on, so
           // `uploadStatus` is free to describe the *next* upload. Without the
           // handover a second run in the same tab would fold the previous
           // run's log into its own card.
-          get().trackJob(job_id, collection, uploadStatus)
+          get().trackJob(job_id, collection, owner, uploadStatus)
           set({
             uploading: false,
             uploadStatus: emptyStatus(),
@@ -383,11 +440,19 @@ export const useIngestRunStore = create<IngestRunState>()(
         trackedJobs: s.trackedJobs,
         handledJobIds: s.handledJobIds
       }),
-      version: 2,
+      version: 3,
       // v1 tracked exactly one job in three scalars. Carry it over so a reload
       // across the upgrade still re-attaches to the run that was in flight.
+      // v1 and v2 recorded no owner; `null`, the caller's own namespace, is
+      // the only one a non-admin's job can have.
       migrate: (persisted, version): PersistedIngestRun => {
-        if (version >= 2) return persisted as PersistedIngestRun
+        if (version >= 3) return persisted as PersistedIngestRun
+        if (version === 2) {
+          const v2 = persisted as Omit<PersistedIngestRun, 'trackedJobs'> & {
+            trackedJobs?: Omit<TrackedJob, 'owner'>[]
+          }
+          return { ...v2, trackedJobs: (v2.trackedJobs ?? []).map((job) => ({ ...job, owner: null })) }
+        }
         const old = (persisted ?? {}) as Record<string, unknown>
         const jobId = typeof old.activeJobId === 'string' ? old.activeJobId : null
         const collection = typeof old.collection === 'string' ? old.collection : ''
@@ -399,7 +464,7 @@ export const useIngestRunStore = create<IngestRunState>()(
           ner: old.ner === true,
           hate: old.hate === true,
           summary: true,
-          trackedJobs: jobId ? [{ job_id: jobId, collection: jobCollection }] : [],
+          trackedJobs: jobId ? [{ job_id: jobId, collection: jobCollection, owner: null }] : [],
           handledJobIds: handled
         }
       }

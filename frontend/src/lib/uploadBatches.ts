@@ -1,9 +1,17 @@
 /**
- * Most file parts one `/ingest/upload` request may carry: the backend reads
- * the multipart body with Starlette's default `max_files=1000`, and a request
- * over that is rejected as a bare HTTP 400 regardless of its byte size.
+ * Most file parts one `/ingest/upload` request carries. The hard ceiling is
+ * Starlette's `max_files=1000` (a request over it is a bare HTTP 400); this
+ * stays well below it so a request that stalls costs little to retry.
  */
-export const MAX_FILES_PER_BATCH = 1000
+export const MAX_FILES_PER_BATCH = 100
+
+/**
+ * Most bytes one `/ingest/upload` request carries, however high the server's
+ * per-request limit is. A request sends no progress frame until its whole
+ * body has arrived, so a near-1 GB batch spent minutes looking frozen, and one
+ * that never finished froze the run.
+ */
+export const MAX_BATCH_BYTES = 64 * 1024 * 1024
 
 /**
  * Split a flat list of files into sequentially-uploadable batches whose total

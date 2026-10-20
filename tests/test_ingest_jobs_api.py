@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 import threading
 import time
@@ -488,10 +489,12 @@ def test_upload_stages_bytes_under_a_part_name_until_the_last_chunk(
     )
 
     assert res.status_code == 200
-    # By hashing time the rename has happened: the `.part` exists only while
-    # bytes are still arriving.
-    assert seen == [["a.pdf"]]
-    assert not list(tmp_path.rglob("*.part"))
+    # Hashed before the rename: until then the bytes sit under this attempt's
+    # own `.part` name, and afterwards only the final file is left.
+    assert len(seen) == 1
+    assert len(seen[0]) == 1
+    assert re.fullmatch(r"a\.pdf\.[0-9a-f]{12}\.part", seen[0][0])
+    assert [p.name for p in tmp_path.rglob("a.pdf*")] == ["a.pdf"]
 
 
 def test_staged_is_owner_scoped(client: TestClient) -> None:

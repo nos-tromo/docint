@@ -36,14 +36,16 @@ export interface CreateIngestJobPayload {
  *
  * @param path - The queueing route.
  * @param body - Its JSON body.
+ * @param owner - Owner to send instead of the one selected now (see `withOwner`).
  * @returns The job id, and whether it was adopted from an in-flight run.
  */
 export async function queueJob(
   path: string,
-  body?: unknown
+  body?: unknown,
+  owner?: string | null
 ): Promise<{ job_id: string; adopted: boolean }> {
   try {
-    const res = await apiPost<{ job_id: string }>(path, body)
+    const res = await apiPost<{ job_id: string }>(path, body, owner)
     return { job_id: res.job_id, adopted: false }
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) {
@@ -62,10 +64,11 @@ export async function queueJob(
  * adopted (see {@link queueJob}).
  *
  * @param payload - Collection and per-run enrichment overrides.
+ * @param owner - Owner to send instead of the one selected now (see `withOwner`).
  * @returns The job id, and whether it was adopted from an in-flight run.
  */
-export const createIngestJob = (payload: CreateIngestJobPayload) =>
-  queueJob('/ingest/finalize', payload)
+export const createIngestJob = (payload: CreateIngestJobPayload, owner?: string | null) =>
+  queueJob('/ingest/finalize', payload, owner)
 
 /** One file already on the server, as a re-picking client recognises it. */
 export interface StagedFile {
@@ -112,22 +115,37 @@ export interface StagedBatch {
  * @param collection - The caller's logical collection name.
  * @param opts - `includeEntries: false` leaves the names out, which is what a
  *   progress poll wants: a folder-sized batch lists tens of thousands of them.
+ *   `owner` replaces the one selected now (see `withOwner`).
  * @returns The staged file count, total size, names, and preprocessing counts.
  */
-export const getStagedBatch = (collection: string, opts?: { includeEntries?: boolean }) =>
-  apiGet<StagedBatch>('/ingest/staged', {
-    collection,
-    include_entries: opts?.includeEntries === false ? false : undefined
-  })
+export const getStagedBatch = (
+  collection: string,
+  opts?: { includeEntries?: boolean; owner?: string | null }
+) =>
+  apiGet<StagedBatch>(
+    '/ingest/staged',
+    {
+      collection,
+      include_entries: opts?.includeEntries === false ? false : undefined
+    },
+    opts?.owner
+  )
+
+// Every job helper below takes an optional `owner`: a job lives in the
+// namespace it was queued in, which need not be the one selected now (see
+// `withOwner`).
 
 /** List the caller's jobs, newest first. Powers reload re-discovery. */
-export const listIngestJobs = () => apiGet<{ jobs: IngestJobSnapshot[] }>('/ingest/jobs')
+export const listIngestJobs = (owner?: string | null) =>
+  apiGet<{ jobs: IngestJobSnapshot[] }>('/ingest/jobs', undefined, owner)
 
 /** Fetch one job's snapshot. Rejects with a 404 `ApiError` when it is gone. */
-export const getIngestJob = (id: string) => apiGet<IngestJobSnapshot>(`/ingest/jobs/${id}`)
+export const getIngestJob = (id: string, owner?: string | null) =>
+  apiGet<IngestJobSnapshot>(`/ingest/jobs/${id}`, undefined, owner)
 
 /** Dismiss a finished job. Rejects with 409 while it is still running. */
-export const dismissIngestJob = (id: string) => apiDelete<{ ok: boolean }>(`/ingest/jobs/${id}`)
+export const dismissIngestJob = (id: string, owner?: string | null) =>
+  apiDelete<{ ok: boolean }>(`/ingest/jobs/${id}`, owner)
 
 /**
  * Ask a running job to stop.
@@ -138,5 +156,5 @@ export const dismissIngestJob = (id: string) => apiDelete<{ ok: boolean }>(`/ing
  * terminal `ingestion_cancelled` frame. Rejects with 404 (unknown) or 409
  * (already finished).
  */
-export const cancelIngestJob = (id: string) =>
-  apiPost<{ ok: boolean }>(`/ingest/jobs/${id}/cancel`, {})
+export const cancelIngestJob = (id: string, owner?: string | null) =>
+  apiPost<{ ok: boolean }>(`/ingest/jobs/${id}/cancel`, {}, owner)

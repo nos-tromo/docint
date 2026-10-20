@@ -1,7 +1,7 @@
-import { streamUpload, UploadHttpError } from './upload'
+import { streamUpload, UploadHttpError, UploadStalledError } from './upload'
 import { streamErrorText } from './errorMessage'
 import { url, withOwner } from './client'
-import { planUploadBatches } from '@/lib/uploadBatches'
+import { MAX_BATCH_BYTES, planUploadBatches } from '@/lib/uploadBatches'
 import { formatBytes } from '@/lib/ingestStatus'
 import type { IngestEvent } from './types'
 import type { Strings } from '@/i18n'
@@ -16,6 +16,16 @@ type Translate = (key: keyof Strings, vars?: Record<string, string | number>) =>
  * over the real nginx `client_max_body_size` and gets 413'd.
  */
 export const UPLOAD_SAFETY_MARGIN = 0.9
+
+/**
+ * Pause before each extra attempt at a batch whose request stalled, dropped
+ * or met a gateway error — two retries, spread far enough apart to outlast a
+ * backend restart. Only the batch's files not yet saved are sent again.
+ */
+export const UPLOAD_RETRY_DELAYS_MS = [5_000, 15_000]
+
+/** Gateway statuses a retry can cure; any other HTTP status is the request's own fault. */
+const RETRYABLE_STATUSES = new Set([502, 503, 504])
 
 /**
  * Build the multipart body for a staged upload batch.
@@ -39,6 +49,8 @@ export interface BatchFailure {
   files: string[]
   /** HTTP status if the server responded (413 = too large); undefined = transport error. */
   status?: number
+  /** The request stopped making progress and was aborted. */
+  stalled?: boolean
 }
 
 /**
@@ -71,10 +83,23 @@ export function describeBatchFailure(
   if (f.status) {
     return t('ingest.batch_failed_http', { batch: f.batch, total: f.total, label, status: f.status })
   }
+  if (f.stalled) {
+    return t('ingest.batch_stalled', { batch: f.batch, total: f.total, label })
+  }
   return t('ingest.batch_failed_network', { batch: f.batch, total: f.total, label })
 }
 
 const fileLabel = (f: File): string => f.webkitRelativePath || f.name
+
+/** Drop one pending file per save ack, so same-named files are not all cleared by one. */
+function withoutSaved(pending: File[], saved: string[]): File[] {
+  const left = [...pending]
+  for (const name of saved) {
+    const i = left.findIndex((f) => fileLabel(f) === name)
+    if (i !== -1) left.splice(i, 1)
+  }
+  return left
+}
 
 /**
  * Upload a file selection in size-bounded batches, staging every batch on the
@@ -101,10 +126,15 @@ const fileLabel = (f: File): string => f.webkitRelativePath || f.name
  *   accumulates); per-batch `start` and `upload_complete` swallowed;
  * - a terminal `error` only when every batch failed to upload.
  *
- * Upload failures are non-fatal: a batch that errors (a lone oversize file →
- * 413, or a transient drop) is reported as a `warning` and the rest still
- * upload; the returned `failures` list is how the caller learns which files
- * never made it to the server.
+ * A batch is done only when the server says so (`upload_complete`). One that
+ * stalls, drops, meets a gateway error or ends early is sent again — only its
+ * files not yet saved — after each pause in `UPLOAD_RETRY_DELAYS_MS`, with a
+ * `warning` per retry, retracted by a `warning_resolved` once the batch has
+ * ended. Upload failures are non-fatal: a batch still failing
+ * after that, or failing in a way a retry cannot cure (a lone oversize file
+ * → 413, a server-side save error), is reported and the rest still upload;
+ * the returned `failures` list names exactly the files that never made it to
+ * the server.
  *
  * @param collection - Target logical collection name.
  * @param files - The full selection to upload, in user order.
@@ -113,6 +143,8 @@ const fileLabel = (f: File): string => f.webkitRelativePath || f.name
  *   `UPLOAD_SAFETY_MARGIN`.
  * @param signal - Optional abort signal cancelling the in-flight request.
  * @param t - Translate function; defaults to the English catalog for pure/test callers.
+ * @param owner - Owner every attempt is sent under, fixed when the run starts
+ *   (see `withOwner`); omitted, each request uses the one selected at the time.
  * @yields Normalised `IngestEvent`s, each stamped with `receivedAt`.
  * @returns Whether any batch saved, and the list of batches that failed.
  */
@@ -121,9 +153,10 @@ export async function* streamIngestUploadBatched(
   files: File[],
   limitBytes: number,
   signal?: AbortSignal,
-  t: Translate = defaultT
+  t: Translate = defaultT,
+  owner?: string | null
 ): AsyncGenerator<IngestEvent, { anySaved: boolean; failures: BatchFailure[] }, unknown> {
-  const budgetBytes = Math.max(1, Math.floor(limitBytes * UPLOAD_SAFETY_MARGIN))
+  const budgetBytes = Math.max(1, Math.min(MAX_BATCH_BYTES, Math.floor(limitBytes * UPLOAD_SAFETY_MARGIN)))
   const batches = planUploadBatches(files, budgetBytes)
 
   // Stamp each event with its arrival time so `deriveIngestStatus` can compute
@@ -143,40 +176,87 @@ export async function* streamIngestUploadBatched(
   let anySaved = false
 
   for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i]
-    const batchNames = batch.map(fileLabel)
-    try {
-      for await (const ev of streamUpload('/ingest/upload', buildIngestFormData(collection, batch), signal)) {
-        const data = (ev.data ?? {}) as Record<string, unknown>
-        // Swallow the per-batch `start` (one synthetic start already emitted)
-        // and `upload_complete` (staged-only terminal); forward save progress.
-        if (ev.event === 'start' || ev.event === 'upload_complete') continue
-        if (ev.event === 'error') {
-          // Backend error events are protocol flags — never forward their
-          // message. A save_failed event names the failing file in a
-          // structured field; render it only when it matches a file the
-          // client itself uploaded (echo-of-client-data, provably not prose).
-          const echoed =
-            typeof data.filename === 'string' && files.map(fileLabel).includes(data.filename)
-              ? (data.filename as string)
-              : null
-          const message = echoed
-            ? streamErrorText(t, data.code, 'ingest.save_failed_file', { filename: echoed })
-            : streamErrorText(t, data.code, 'ingest.failed_default')
-          yield stamp('error', { message })
-          continue
+    let pending = batches[i]
+    // This batch's retry notices, retracted once it ends: by then it either got
+    // through or carries its own "was skipped" warning.
+    const notices: string[] = []
+    for (let attempt = 0; ; attempt++) {
+      const saved: string[] = []
+      let complete = false
+      let serverError = false
+      let caught: unknown
+      try {
+        for await (const ev of streamUpload(
+          '/ingest/upload',
+          buildIngestFormData(collection, pending),
+          signal,
+          owner
+        )) {
+          const data = (ev.data ?? {}) as Record<string, unknown>
+          // Swallow the per-batch `start` (one synthetic start already emitted)
+          // and `upload_complete` (staged-only terminal); forward save progress.
+          // Once `upload_complete` is in, the batch is done whatever then
+          // happens to the rest of the stream.
+          if (ev.event === 'upload_complete') complete = true
+          if (ev.event === 'start' || ev.event === 'upload_complete') continue
+          if (ev.event === 'file_saved' && typeof data.filename === 'string') saved.push(data.filename)
+          if (ev.event === 'error') {
+            serverError = true
+            // Backend error events are protocol flags — never forward their
+            // message. A save_failed event names the failing file in a
+            // structured field; render it only when it matches a file the
+            // client itself uploaded (echo-of-client-data, provably not prose).
+            const echoed =
+              typeof data.filename === 'string' && files.map(fileLabel).includes(data.filename)
+                ? (data.filename as string)
+                : null
+            const message = echoed
+              ? streamErrorText(t, data.code, 'ingest.save_failed_file', { filename: echoed })
+              : streamErrorText(t, data.code, 'ingest.failed_default')
+            yield stamp('error', { message })
+            continue
+          }
+          yield stamp(ev.event as IngestEvent['event'], data)
         }
-        yield stamp(ev.event as IngestEvent['event'], data)
+      } catch (err) {
+        caught = err
       }
-      anySaved = true
-    } catch (err) {
-      const status = err instanceof UploadHttpError ? err.status : undefined
-      const failure: BatchFailure = { batch: i + 1, total: batches.length, files: batchNames, status }
+      if (saved.length > 0) anySaved = true
+      if (complete) break
+      pending = withoutSaved(pending, saved)
+      if (pending.length === 0) break
+
+      const status = caught instanceof UploadHttpError ? caught.status : undefined
+      const aborted = caught instanceof DOMException && caught.name === 'AbortError'
+      const retryable = !serverError && !aborted && (status === undefined || RETRYABLE_STATUSES.has(status))
+      if (retryable && attempt < UPLOAD_RETRY_DELAYS_MS.length) {
+        const message = t('ingest.batch_retrying', {
+          batch: i + 1,
+          total: batches.length,
+          attempt: attempt + 1,
+          max: UPLOAD_RETRY_DELAYS_MS.length
+        })
+        notices.push(message)
+        yield stamp('warning', { message })
+        await new Promise((resolve) => setTimeout(resolve, UPLOAD_RETRY_DELAYS_MS[attempt]))
+        continue
+      }
+
+      const failure: BatchFailure = {
+        batch: i + 1,
+        total: batches.length,
+        files: pending.map(fileLabel),
+        status,
+        ...(caught instanceof UploadStalledError ? { stalled: true } : {})
+      }
       failures.push(failure)
       // Surface inline (shows in the event log) but keep going — one bad batch
-      // must not sink the rest of a large upload.
-      yield stamp('warning', { message: describeBatchFailure(failure, limitBytes, t) })
+      // must not sink the rest of a large upload. A server-side save error has
+      // already been surfaced as its own `error` event.
+      if (!serverError) yield stamp('warning', { message: describeBatchFailure(failure, limitBytes, t) })
+      break
     }
+    if (notices.length > 0) yield stamp('warning_resolved', { messages: notices })
   }
 
   if (!anySaved) {

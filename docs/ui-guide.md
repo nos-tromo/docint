@@ -200,13 +200,28 @@ a blank query, where it exports the whole filtered collection.
 Drag-and-drop upload (`src/components/ingest/Dropzone.tsx`) into a selected
 or newly-created collection. Streams the multipart upload plus SSE progress
 events (`src/components/ingest/IngestionStatus.tsx`) for per-file and
-per-stage status. The entity-extraction, hate-speech and collection-summary
+per-stage status. A selection goes up in small batches (at most 100 files and
+64 MiB per request); a batch that stops making progress for two minutes is
+aborted and its unsaved files are sent again, up to twice — so a request that
+never completes can no longer freeze the run. Each retry shows as a warning in
+the run's card until that batch goes through or is skipped; a skipped batch
+keeps its own warning. A run's warnings always sit inside its card.
+Every request of a run (the staged check, each batch and retry, the finalize)
+goes to the owner the run started under, even if an admin switches to another
+user's collection while it uploads.
+The entity-extraction, hate-speech and collection-summary
 options are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount
 from `GET /config/ingest-defaults`. **Summary** gates the collection-summary
 rebuild that runs when the ingest finishes; it maps the whole collection, so
 on a long batch it is the longest part of the run and switching it off is
 what makes the job end at the last document. The summary can still be built
 later, on demand, from the Analysis screen's Summary tab.
+
+A picked file is not added when a different file in the selection already has
+its name (its path inside a picked folder, or its bare name otherwise), and a
+notice lists it. The server stores a collection's uploads under that name, so
+the second file would overwrite the first. Picking the same file again (same
+name, size and modification time) is ignored without a notice.
 
 While a run is live the card also carries a bar per preprocessing stage —
 PDFs read, scanned pages recognized, images described, audio and video
@@ -226,7 +241,10 @@ interrupted runs offering a re-queue. Starting a second run therefore never
 hides the first. Each card carries its own Dismiss once the run has ended;
 "Clear finished" above the list dismisses them all at once and leaves
 anything still running. A completed run selects the collection it filled, so
-with several finishing in a row the last one wins.
+with several finishing in a row the last one wins. The list and its live
+progress belong to the owner selected in the sidebar: an admin viewing another
+user's collections sees that user's jobs, and each job is checked, re-run,
+dismissed and selected in the namespace it was queued in.
 
 ### Analysis (`src/routes/Analysis.tsx`)
 

@@ -279,6 +279,11 @@ export const en = {
   'ingest.title': 'Ingest',
   'ingest.caption': 'Upload and index documents',
   'ingest.drop_empty': 'Nothing to add — that drop contained no files.',
+  'ingest.name_taken_one':
+    'A file was not added: a different file with the same name is already selected, and the server stores only one file per name. Rename it, or remove the selected file first.',
+  'ingest.name_taken_other':
+    '{count} files were not added: different files with the same names are already selected, and the server stores only one file per name. Rename them, or remove the selected files first.',
+  'ingest.name_taken_more': 'and {count} more',
   'ingest.clear_files': 'Clear selection',
   'ingest.staged_title': 'Interrupted upload to “{collection}”',
   'ingest.staged_idle': 'These files are on the server but no ingestion is running for them.',
@@ -644,6 +649,10 @@ export const en = {
     'Batch {batch}/{total} ({label}) failed (HTTP {status}) and was skipped; other batches continued.',
   'ingest.batch_failed_network':
     'Batch {batch}/{total} ({label}) failed (network error) and was skipped; other batches continued.',
+  'ingest.batch_stalled':
+    'Batch {batch}/{total} ({label}) stopped making progress and was skipped; other batches continued.',
+  'ingest.batch_retrying':
+    'Batch {batch}/{total} did not go through — retrying ({attempt}/{max}).',
   'ingest.upload_failed_too_large':
     'Upload failed: every batch exceeded the {limit} per-upload limit. Raise DOCINT_CLIENT_MAX_BODY_SIZE and restart, or upload smaller files.',
   'ingest.upload_failed_rejected':
