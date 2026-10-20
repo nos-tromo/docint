@@ -507,6 +507,7 @@ export const de: Strings = {
     '{added} hinzugefügt, {updated} Übersetzungen ergänzt, {skipped} bereits im Bericht',
   'report.add_all_none': 'Alle Funde sind bereits im Bericht',
   'report.add_all_failed': 'Funde konnten nicht hinzugefügt werden — zum Wiederholen klicken',
+  'report.add_all_cancelled': 'Die Sammlung wurde gewechselt, daher wurde nichts hinzugefügt',
   'report.add_all_too_many': 'Zu viele Funde auf einmal (Grenze {max}) — Auswahl zuerst eingrenzen',
   'report.add_all_too_large':
     'Die Anfrage übersteigt die vom Server akzeptierte Größe — Auswahl eingrenzen und Funde in kleineren Teilmengen hinzufügen',

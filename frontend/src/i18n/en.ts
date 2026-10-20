@@ -491,6 +491,7 @@ export const en = {
   'report.add_all_done_updated': '{added} added, {updated} translations added, {skipped} already in report',
   'report.add_all_none': 'All findings are already in the report',
   'report.add_all_failed': 'Could not add the findings — click to retry',
+  'report.add_all_cancelled': 'The collection changed, so nothing was added',
   'report.add_all_too_many': 'Too many findings to add at once (limit {max}) — narrow the selection first',
   'report.add_all_too_large':
     'The batch is larger than the server accepts — narrow the selection and add the findings in smaller sets',

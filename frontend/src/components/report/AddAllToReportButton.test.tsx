@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AddAllToReportButton } from './AddAllToReportButton'
@@ -390,5 +390,97 @@ describe('AddAllToReportButton', () => {
   it('is disabled when the section has no findings', () => {
     renderButton([], client())
     expect(screen.getByRole('button', { name: /add all findings to report/i })).toBeDisabled()
+  })
+})
+
+/** A promise the test settles by hand, to hold a step of the run open. */
+function gate<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+const switchTo = (owner: string) => act(() => useUiStore.getState().setSelectedCollection('docs', owner))
+
+describe('AddAllToReportButton — the collection changes during a run', () => {
+  // Two owners can name a collection the same. The findings of one must never
+  // land in a report of the other, which an admin moving between them could
+  // otherwise cause: requests follow the newly selected owner, while the run
+  // still holds what it fetched before.
+  beforeEach(() => {
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: 'alice' })
+  })
+
+  afterEach(() => {
+    useUiStore.setState({ selectedOwner: null })
+  })
+
+  function renderWalk(walk: Promise<Row[]>) {
+    return render(
+      <QueryClientProvider client={client()}>
+        <AddAllToReportButton fetchAll={() => walk} toItem={toItem} hasRows />
+      </QueryClientProvider>
+    )
+  }
+
+  it('adds nothing when the owner changes during the page walk', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+    const walk = gate<Row[]>()
+    renderWalk(walk.promise)
+
+    await clickAddAll()
+    switchTo('bob')
+    await act(async () => walk.resolve([{ chunk_id: 'c1' }]))
+
+    expect(await screen.findByText('The collection changed, so nothing was added')).toBeInTheDocument()
+    expect(captured).toEqual([])
+    expect(useReportStore.getState().activeReportId).toBeNull()
+  })
+
+  it('adds nothing when the owner changes and changes back during the page walk', async () => {
+    // The walk asks each page of whichever owner is selected at the time, so
+    // rows from the other owner may be among the ones it returns.
+    const captured: Captured[] = []
+    stubFetch(captured)
+    const walk = gate<Row[]>()
+    renderWalk(walk.promise)
+
+    await clickAddAll()
+    switchTo('bob')
+    switchTo('alice')
+    await act(async () => walk.resolve([{ chunk_id: 'c1' }]))
+
+    expect(await screen.findByText('The collection changed, so nothing was added')).toBeInTheDocument()
+    expect(captured).toEqual([])
+  })
+
+  it('neither opens nor fills a report created while the owner changes', async () => {
+    const posts: string[] = []
+    const created = gate<void>()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (init?.method === 'POST') posts.push(url)
+        if (init?.method === 'POST' && url.split('?')[0].endsWith('/reports')) {
+          await created.promise
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({ added: 1, skipped: 0, updated: 0, item_count: 1 }) }
+      })
+    )
+    renderButton([{ chunk_id: 'c1' }], client())
+
+    await clickAddAll()
+    await waitFor(() => expect(posts).toHaveLength(1))
+    switchTo('bob')
+    await act(async () => created.resolve())
+
+    expect(await screen.findByText('The collection changed, so nothing was added')).toBeInTheDocument()
+    expect(posts.filter((url) => url.includes('/items/batch'))).toEqual([])
+    expect(useReportStore.getState().activeReportId).toBeNull()
   })
 })

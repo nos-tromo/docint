@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AddToReportButton } from './AddToReportButton'
@@ -127,5 +127,39 @@ describe('AddToReportButton', () => {
     await waitFor(() => {
       expect(calls.some((c) => c.url.includes('/reports/1/items/9') && c.method === 'DELETE')).toBe(true)
     })
+  })
+
+  it('stops quietly when the owner changes while its report is being created', async () => {
+    // The add would be sent for the newly selected owner, into a report it
+    // does not own; the item belongs to neither that owner nor its report.
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: 'alice' })
+    const posts: string[] = []
+    let finishCreate!: () => void
+    const created = new Promise<void>((resolve) => {
+      finishCreate = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (init?.method === 'POST') posts.push(url)
+        if (init?.method === 'POST' && url.split('?')[0].endsWith('/reports')) {
+          await created
+          return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({ id: 9, dedupe_key: 'entity:c1' }) }
+      })
+    )
+
+    renderButton(false, new QueryClient({ defaultOptions: { queries: { retry: false } } }))
+    await userEvent.click(screen.getByRole('button', { name: /add to report/i }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    act(() => useUiStore.getState().setSelectedCollection('docs', 'bob'))
+    await act(async () => finishCreate())
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /add to report/i })).toBeEnabled())
+    expect(posts).toHaveLength(1)
+    expect(useReportStore.getState().activeReportId).toBeNull()
+    useUiStore.setState({ selectedOwner: null })
   })
 })
