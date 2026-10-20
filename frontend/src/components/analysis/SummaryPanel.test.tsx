@@ -69,7 +69,7 @@ function gatedFramesOf(frames: SseEvent[]): {
 }
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: 'c1' })
+  useUiStore.setState({ selectedCollection: 'c1', selectedOwner: null })
   mockSummarize.mockReset()
   mockStreamSseGet.mockReset()
   // Nothing cached by default, so the panel settles into its create state and
@@ -170,6 +170,22 @@ describe('SummaryPanel cache hit', () => {
 
     expect(await screen.findByText('Collection two.')).toBeInTheDocument()
     expect(mockCachedSummary).toHaveBeenLastCalledWith('c2')
+  })
+
+  it("re-probes when only the owner changes, for another owner's collection of the same name", async () => {
+    useUiStore.setState({ selectedOwner: 'alice' })
+    mockCachedSummary.mockResolvedValueOnce({ summary: "Alice's summary.", sources: [] })
+    mockCachedSummary.mockResolvedValueOnce({ summary: "Bob's summary.", sources: [] })
+
+    render(<SummaryPanel />)
+    expect(await screen.findByText("Alice's summary.")).toBeInTheDocument()
+
+    await act(async () => {
+      useUiStore.setState({ selectedOwner: 'bob' })
+    })
+
+    expect(await screen.findByText("Bob's summary.")).toBeInTheDocument()
+    expect(screen.queryByText("Alice's summary.")).not.toBeInTheDocument()
   })
 
   it('orders its actions like the findings tables: refresh, report, download', async () => {

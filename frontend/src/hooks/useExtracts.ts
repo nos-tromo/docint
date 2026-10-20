@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createExtract, deleteExtract, listExtracts } from '@/api/extracts'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { useAppendixFields } from '@/hooks/useAppendixFields'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useUiStore } from '@/stores/ui'
@@ -16,9 +17,10 @@ export interface ExtractProgress {
 
 /** Stored extracts for the active collection, newest first. */
 export function useExtracts() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useQuery({
-    queryKey: ['extracts', collection],
+    queryKey: ['extracts', scope],
     queryFn: () => listExtracts(collection ?? ''),
     enabled: !!collection
   })
@@ -26,11 +28,12 @@ export function useExtracts() {
 
 /** Delete one stored extract and refresh the listing. */
 export function useDeleteExtract() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (extractId: string) => deleteExtract(collection ?? '', extractId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['extracts', collection] })
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['extracts', scope] })
   })
 }
 
@@ -76,7 +79,7 @@ function readProgress(jobId: string, events: IngestEvent[]): ExtractProgress | n
  * build ends, the stored listing is refreshed.
  */
 export function useExtractJob() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
   const queryClient = useQueryClient()
   const events = useIngestJobsStore((s) => s.events)
   const start = useStartExtract()
@@ -99,8 +102,8 @@ export function useExtractJob() {
   )
 
   useEffect(() => {
-    if (finished) void queryClient.invalidateQueries({ queryKey: ['extracts', collection] })
-  }, [finished, collection, queryClient])
+    if (finished) void queryClient.invalidateQueries({ queryKey: ['extracts', scope] })
+  }, [finished, scope, queryClient])
 
   return { progress, start, running: progress !== null && !progress.error }
 }

@@ -12,7 +12,7 @@ import { downloadText } from '@/lib/csv'
 import { summaryToMarkdown } from '@/lib/exports'
 import { CoverageBanner } from './CoverageBanner'
 import type { SummaryResponse } from '@/api/types'
-import { useUiStore } from '@/stores/ui'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { summarySnapshot } from '@/lib/reportSnapshots'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { useT } from '@/i18n/LanguageContext'
@@ -121,7 +121,7 @@ function inFlightJobId(e: ApiError): string | null {
 
 export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<string> }) {
   const t = useT()
-  const collection = useUiStore((s) => s.selectedCollection)
+  const { collection, owner } = useActiveCollection()
   const [state, dispatch] = useReducer(reducer, initialState)
   // Tracks the in-flight build's SSE subscription so it can be torn down on
   // unmount as well as on a terminal frame — mirrors `useIngestJobStream`'s
@@ -138,10 +138,10 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
   // handler has no queue branch at all: `summarize(false, …)` would answer a
   // cache miss by starting a minutes-long build nobody asked for.
   useEffect(() => {
-    // Switching collections abandons any build this panel was following. The
-    // events stream is owner-multiplexed, so an un-torn-down subscription
-    // would keep dispatching the previous collection's frames into the new
-    // collection's state.
+    // Switching collections, or to another owner's of the same name, abandons
+    // any build this panel was following. The events stream is
+    // owner-multiplexed, so an un-torn-down subscription would keep
+    // dispatching the previous collection's frames into the new one's state.
     controllerRef.current?.abort()
     controllerRef.current = null
     dispatch({ type: 'reset' })
@@ -162,7 +162,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
       controllerRef.current?.abort()
       controllerRef.current = null
     }
-  }, [collection])
+  }, [collection, owner])
 
   // `finish`/`runBuild` are mutually recursive: after a `summary_completed`
   // frame, `finish` refetches and — if the refetch itself carries a fresh

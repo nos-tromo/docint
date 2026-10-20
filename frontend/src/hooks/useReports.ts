@@ -15,6 +15,7 @@ import {
 } from '@/api/reports'
 import type { ReportItemInput } from '@/api/types'
 import { ApiError } from '@/api/client'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { useConfig } from '@/hooks/useConfig'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
@@ -34,9 +35,10 @@ export function useReportCollection(): string {
 
 /** The active collection's reports. Like the session list: no collection, no list. */
 export function useReports() {
-  const collection = useReportCollection()
+  const scope = useActiveCollection()
+  const collection = scope.collection ?? ''
   return useQuery({
-    queryKey: ['reports', { collection }] as const,
+    queryKey: ['reports', scope] as const,
     queryFn: () => listReports(collection),
     enabled: !!collection
   })

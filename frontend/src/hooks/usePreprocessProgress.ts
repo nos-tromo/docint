@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getStagedBatch, type PreprocessStage } from '@/api/jobs'
 import type { IngestPhase } from '@/lib/ingestStatus'
+import { useUiStore } from '@/stores/ui'
 
 /** How often to re-ask while a run is live. */
 export const PREPROCESS_POLL_INTERVAL_MS = 5_000
@@ -20,10 +21,11 @@ const LIVE_PHASES: ReadonlySet<IngestPhase> = new Set<IngestPhase>([
  * than blanking while a fresh request goes out.
  *
  * @param collection - The logical collection name.
+ * @param owner - The owner whose namespace the request resolves in (the selected owner), or null for the caller's own.
  * @returns The react-query key.
  */
-export const preprocessQueryKey = (collection: string) =>
-  ['ingest-staged', collection, { entries: false }] as const
+export const preprocessQueryKey = (collection: string, owner: string | null) =>
+  ['ingest-staged', { collection, owner }, { entries: false }] as const
 
 /**
  * Poll what the preprocessing pool has done for a collection.
@@ -44,10 +46,11 @@ export function usePreprocessProgress(
   phase: IngestPhase
 ): PreprocessStage[] | undefined {
   const name = collection?.trim() ?? ''
+  const owner = useUiStore((s) => s.selectedOwner)
   const live = name.length > 0 && LIVE_PHASES.has(phase)
 
   const { data } = useQuery({
-    queryKey: preprocessQueryKey(name),
+    queryKey: preprocessQueryKey(name, owner),
     queryFn: () => getStagedBatch(name, { includeEntries: false }),
     enabled: live,
     retry: false,

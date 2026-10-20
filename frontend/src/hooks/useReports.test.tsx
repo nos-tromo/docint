@@ -49,6 +49,25 @@ describe('useReports', () => {
     expect(urls[0]).toContain('/reports?collection=docs')
   })
 
+  it("lists the other owner's reports when only the owner changes", async () => {
+    // An admin moving between two owners' collections that share a name.
+    useUiStore.setState({ selectedOwner: 'alice' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string) => {
+        const owner = new URL(String(u), 'http://localhost').searchParams.get('owner')
+        const body = { reports: [{ id: owner === 'alice' ? 1 : 2, title: `${owner}'s report` }] }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
+      })
+    )
+    const { result } = renderHook(() => useReports(), { wrapper })
+    await waitFor(() => expect(result.current.data?.reports.map((r) => r.id)).toEqual([1]))
+
+    act(() => useUiStore.getState().setSelectedCollection('docs', 'bob'))
+
+    await waitFor(() => expect(result.current.data?.reports.map((r) => r.id)).toEqual([2]))
+  })
+
   it('asks for no reports while no collection is active', async () => {
     useUiStore.setState({ selectedCollection: null })
     const urls = answer(200, { reports: [] })

@@ -1,15 +1,16 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { getDocumentsCount, getDocumentsPage, getDocumentsSummary } from '@/api/collections'
-import { useUiStore } from '@/stores/ui'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
 
 /**
  * Paginated document records for the active collection. The inspector uses
  * this to render rows without materializing the whole list.
  */
 export function useDocumentsPages() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useInfiniteQuery({
-    queryKey: ['documents-pages', collection],
+    queryKey: ['documents-pages', scope],
     queryFn: ({ pageParam }) =>
       getDocumentsPage({
         cursor: pageParam as string | null,
@@ -28,9 +29,10 @@ export function useDocumentsPages() {
  * inspector — the first warm pays one full scroll, subsequent calls are O(1).
  */
 export function useDocumentsCount() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useQuery({
-    queryKey: ['documents-count', collection],
+    queryKey: ['documents-count', scope],
     queryFn: () => getDocumentsCount(collection ?? undefined),
     enabled: !!collection
   })
@@ -43,9 +45,10 @@ export function useDocumentsCount() {
  * how many pages {@link useDocumentsPages} has loaded.
  */
 export function useDocumentsSummary() {
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   return useQuery({
-    queryKey: ['documents-summary', collection],
+    queryKey: ['documents-summary', scope],
     queryFn: () => getDocumentsSummary(collection ?? undefined),
     enabled: !!collection
   })
