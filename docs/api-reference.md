@@ -59,7 +59,7 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `PUT` | `/sessions/{session_id}/scope` | `Sessions` | Restrict the session's answers to hand-picked chunks. |
 | `DELETE` | `/sessions/{session_id}/scope` | `Sessions` | Return the session to normal retrieval. |
 | `POST` | `/reports` | `Reports` | Create an empty report owned by the caller. |
-| `GET`  | `/reports` | `Reports` | List the caller's reports, optionally filtered by collection. |
+| `GET`  | `/reports` | `Reports` | List the caller's reports in one collection. |
 | `GET`  | `/reports/{report_id}` | `Reports` | Return one owned report with its ordered items. |
 | `PATCH` | `/reports/{report_id}` | `Reports` | Update title, case metadata, or the contents toggle. |
 | `DELETE` | `/reports/{report_id}` | `Reports` | Delete a report and its items. |
@@ -752,21 +752,26 @@ selection of chat answers and findings, each **snapshotted at add-time** so a
 later re-ingestion never changes a finished report. See
 [reports.md](reports.md) for the workflow and the export formats.
 
-Every route resolves the caller's principal and answers `404` when the report
-(or item) is missing **or** owned by another principal — existence never leaks.
+A report belongs to one collection and is reachable only from it. Every
+`/reports/{report_id}*` route takes the caller's active logical collection as
+the required `collection` query parameter, and answers `404` when the report
+(or item) is missing, owned by another principal, **or** belongs to another
+collection — existence never leaks. The collection check runs before the
+request body is read, so a refused add writes nothing.
 
 ### `POST /reports`
 
-Creates an empty report (`ReportCreateIn`: `title`, plus optional
-`collection_name`, `operator`, `reference_number`, `session_id`). When
-`collection_name` is given, the document overview is captured once at create
-time; that capture is fail-soft — a Qdrant hiccup leaves the snapshot null
-rather than failing creation.
+Creates an empty report in a collection (`ReportCreateIn`: `title` and
+`collection_name`, both required, plus optional `operator`,
+`reference_number`, `session_id`); `422` without a collection. The document
+overview is captured once at create time; that capture is fail-soft — a Qdrant
+hiccup leaves the snapshot null rather than failing creation.
 
 ### `GET /reports`
 
-Lists the caller's reports (`ReportListOut` — `{"reports": [...]}`). Optional
-`collection` query parameter filters to one collection.
+Lists the caller's reports in one collection (`ReportListOut` —
+`{"reports": [...]}`). The `collection` query parameter is required; there is
+no listing across collections.
 
 ### `GET /reports/{report_id}`
 
@@ -784,23 +789,22 @@ Deletes the report and its items. Returns `{"ok": true}`.
 ### `POST /reports/{report_id}/collection-overview/refresh`
 
 Recaptures the frozen document-overview snapshot from the collection's
-*current* documents. `400` when the report has no collection; `502` when the
-manifest build fails.
+*current* documents. `502` when the manifest build fails.
 
 ### `POST /reports/{report_id}/items`
 
 Adds a snapshotted artifact (`ReportItemIn`: `artifact_type`, `dedupe_key`,
-`snapshot`, optional `note`, and the `collection` the artifact came from).
-Idempotent by `dedupe_key`, so re-adding the same chunk returns the existing
-item. Image-bearing snapshots are enriched with a frozen thumbnail on the way
-in.
+`snapshot`, optional `note`). Idempotent by `dedupe_key`, so re-adding the same
+chunk returns the existing item. Image-bearing snapshots are enriched with a
+frozen thumbnail on the way in, from the report's own collection, which the
+collection check makes the one the artifact was retrieved from.
 
 ### `POST /reports/{report_id}/items/batch`
 
 Adds many artifacts in one request (`ReportItemBatchIn`: `items`, a list of
-`ReportItemIn`, plus the `collection` they came from). Backs the Analysis
-screens' "Add all", where an investigator takes every finding of an entity or
-the whole hate-speech set into the report at once.
+`ReportItemIn`). Backs the Analysis screens' "Add all", where an investigator
+takes every finding of an entity or the whole hate-speech set into the report
+at once.
 
 Idempotent like the single add: an artifact the report already holds is
 counted in `skipped`, never stored twice, so the call is safe to retry. All
@@ -889,6 +893,12 @@ from `conversations` via `SessionManager.list_sessions()`.
 Returns `SessionHistoryOut` — `{"messages": [...]}` where each message
 comes from `Turn` / `Citation`. An assessment turn's assistant message also
 carries `answer_mode: "assessment"` and its `agent` trail.
+
+The `collection` query parameter (the caller's active logical collection) is
+required. `404` unless the session is the caller's and is pinned to that
+collection, so after a collection switch the browser's Back button cannot show
+another collection's answers (from which they could be added to a report). An
+unpinned legacy session belongs to no collection and is never served.
 
 An assistant message carries `retrieval_target` (`all`, `documents` or
 `visual`) — the evidence the turn answered under, as `POST /query` reports it —

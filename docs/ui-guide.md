@@ -294,14 +294,18 @@ click then queues a targeted build. See [extracts.md](extracts.md).
 
 ### Report (`src/routes/Report.tsx`)
 
-The Report Builder surface. Lists the caller's reports and, for the active one,
-shows the picked artifacts grouped by type with per-item notes, reordering, and
+The Report Builder surface. Lists the reports of the active collection, and
+only those (with no collection selected it lists none and offers no new one),
+and, for the active one, shows the picked artifacts grouped by type with per-item notes, reordering, and
 removal, plus the five export formats. Each type is a foldable section whose
 contents peek out while shut; the control is the `@infra/ui`
 `DisclosureButton` at the bar's right edge, not the bar itself. Artifacts are added from elsewhere in
 the app: an **"+ Report"** control sits on every chat answer, entity finding,
 and hate-speech finding. Switching the active collection releases the active
-report, so a report and its evidence always describe the same collection.
+report, so a report and its evidence always describe the same collection; every
+report request names the active collection and the server refuses any other, so
+a report kept active from elsewhere (another tab, an earlier session) answers
+404 and is dropped by `useReport` rather than written into.
 
 The PDF is the one export that is not a plain link. A large report renders for
 longer than the gateway waits on a single request, so choosing **PDF** queues a
