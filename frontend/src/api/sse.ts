@@ -30,13 +30,15 @@ export async function* streamSse(
  *
  * @param path - API path (owner param and base are applied here).
  * @param signal - Optional abort signal closing the connection.
+ * @param owner - Owner to stream for instead of the one selected now (see `withOwner`).
  * @yields Parsed SSE events.
  */
 export async function* streamSseGet(
   path: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  owner?: string | null
 ): AsyncGenerator<SseEvent, void, unknown> {
-  const res = await fetch(url(withOwner(path)), {
+  const res = await fetch(url(withOwner(path, owner)), {
     method: 'GET',
     headers: { Accept: 'text/event-stream' },
     signal

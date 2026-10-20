@@ -131,14 +131,21 @@ export const getStagedBatch = (
     opts?.owner
   )
 
+// Every job helper below takes an optional `owner`: a job lives in the
+// namespace it was queued in, which need not be the one selected now (see
+// `withOwner`).
+
 /** List the caller's jobs, newest first. Powers reload re-discovery. */
-export const listIngestJobs = () => apiGet<{ jobs: IngestJobSnapshot[] }>('/ingest/jobs')
+export const listIngestJobs = (owner?: string | null) =>
+  apiGet<{ jobs: IngestJobSnapshot[] }>('/ingest/jobs', undefined, owner)
 
 /** Fetch one job's snapshot. Rejects with a 404 `ApiError` when it is gone. */
-export const getIngestJob = (id: string) => apiGet<IngestJobSnapshot>(`/ingest/jobs/${id}`)
+export const getIngestJob = (id: string, owner?: string | null) =>
+  apiGet<IngestJobSnapshot>(`/ingest/jobs/${id}`, undefined, owner)
 
 /** Dismiss a finished job. Rejects with 409 while it is still running. */
-export const dismissIngestJob = (id: string) => apiDelete<{ ok: boolean }>(`/ingest/jobs/${id}`)
+export const dismissIngestJob = (id: string, owner?: string | null) =>
+  apiDelete<{ ok: boolean }>(`/ingest/jobs/${id}`, owner)
 
 /**
  * Ask a running job to stop.
@@ -149,5 +156,5 @@ export const dismissIngestJob = (id: string) => apiDelete<{ ok: boolean }>(`/ing
  * terminal `ingestion_cancelled` frame. Rejects with 404 (unknown) or 409
  * (already finished).
  */
-export const cancelIngestJob = (id: string) =>
-  apiPost<{ ok: boolean }>(`/ingest/jobs/${id}/cancel`, {})
+export const cancelIngestJob = (id: string, owner?: string | null) =>
+  apiPost<{ ok: boolean }>(`/ingest/jobs/${id}/cancel`, {}, owner)

@@ -1,9 +1,20 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useUiStore } from '@/stores/ui'
 import { useIngestJobStream, ingestStreamConfig } from './useIngestJobStream'
 
 const sse = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+
+/** A stream that delivers `frames` and then stays open, as a live connection does. */
+function openStreamOf(frames: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  return new ReadableStream({
+    start(controller) {
+      for (const f of frames) controller.enqueue(encoder.encode(f))
+    }
+  })
+}
 
 function streamOf(frames: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -26,6 +37,7 @@ const PRODUCTION_RECONNECT_DELAY_MS = ingestStreamConfig.reconnectDelayMs
 
 beforeEach(() => {
   useIngestJobsStore.getState().clear()
+  useUiStore.setState({ selectedCollection: null, selectedOwner: null })
   vi.unstubAllGlobals()
   ingestStreamConfig.reconnectDelayMs = 15
 })
@@ -140,4 +152,53 @@ describe('useIngestJobStream', () => {
     await waitFor(() => expect(useIngestJobsStore.getState().events['a']).toHaveLength(1))
     expect(useIngestJobsStore.getState().streamLost).toBe(false)
   }, 20000)
+
+  it('reopens under a newly selected owner, dropping the last owner\'s logs', async () => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        const jobId = String(input).includes('owner=bob') ? 'b' : 'a'
+        return new Response(openStreamOf([sse('ingestion_started', { job_id: jobId, collection: 'mydocs' })]), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' }
+        })
+      })
+    )
+    useUiStore.setState({ selectedCollection: 'mydocs', selectedOwner: 'alice' })
+    renderHook(() => useIngestJobStream())
+    await waitFor(() => expect(useIngestJobsStore.getState().events['a']).toHaveLength(1))
+
+    // An admin switches to another user's collection.
+    act(() => useUiStore.setState({ selectedOwner: 'bob' }))
+
+    await waitFor(() => expect(useIngestJobsStore.getState().events['b']).toHaveLength(1))
+    expect(useIngestJobsStore.getState().events['a']).toBeUndefined()
+    expect(urls).toHaveLength(2)
+    expect(urls[0]).toContain('owner=alice')
+    expect(urls[1]).toContain('owner=bob')
+  })
+
+  it('keeps its logs when it reconnects for the same owner', async () => {
+    let connections = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        connections += 1
+        const jobId = connections === 1 ? 'a' : 'c'
+        return new Response(openStreamOf([sse('ingestion_started', { job_id: jobId, collection: 'mydocs' })]), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' }
+        })
+      })
+    )
+    renderHook(() => useIngestJobStream())
+    await waitFor(() => expect(useIngestJobsStore.getState().events['a']).toHaveLength(1))
+
+    act(() => useIngestJobsStore.getState().retryStream())
+
+    await waitFor(() => expect(useIngestJobsStore.getState().events['c']).toHaveLength(1))
+    expect(useIngestJobsStore.getState().events['a']).toHaveLength(1)
+  })
 })

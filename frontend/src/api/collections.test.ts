@@ -12,6 +12,7 @@ import {
   getNerSourcesPage,
   getNerStats,
   listDocuments,
+  selectCollection,
   warmCollectionNer
 } from './collections'
 
@@ -134,5 +135,20 @@ describe('collections api carries the selected collection', () => {
     expect(csvExportHref('docs', 'documents')).toContain('owner=jane.doe')
     setOwnerParam(null)
     expect(csvExportHref('docs', 'documents')).not.toContain('owner=')
+  })
+})
+
+describe('selectCollection', () => {
+  afterEach(() => setOwnerParam(null))
+
+  it('validates under the owner it is given, whichever one is selected now', async () => {
+    setOwnerParam('bob')
+    mockFetch({ ok: true, name: 'mydocs' })
+
+    await selectCollection('mydocs', 'alice')
+
+    const called = String(vi.mocked(fetch).mock.calls[0][0])
+    expect(called).toContain('owner=alice')
+    expect(called).not.toContain('owner=bob')
   })
 })

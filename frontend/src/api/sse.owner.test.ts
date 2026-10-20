@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { streamSse } from './sse'
+import { streamSse, streamSseGet } from './sse'
 import { setOwnerParam } from './client'
 
 function emptyStream(): ReadableStream<Uint8Array> {
@@ -32,5 +32,13 @@ describe('streamSse owner query param', () => {
   it('adds nothing when no owner is set', async () => {
     await streamSse('/stream_query', { question: 'hi' }).next()
     expect(String(fetchMock.mock.calls[0][0])).not.toContain('owner=')
+  })
+
+  it('opens the job stream under the owner it is given, whichever one is selected now', async () => {
+    setOwnerParam('bob')
+    await streamSseGet('/ingest/jobs/events', undefined, 'alice').next()
+    const called = String(fetchMock.mock.calls[0][0])
+    expect(called).toContain('owner=alice')
+    expect(called).not.toContain('owner=bob')
   })
 })

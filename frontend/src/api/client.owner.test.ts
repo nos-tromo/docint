@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiGet, apiPost, setOwnerParam } from './client'
+import { apiDelete, apiGet, apiPost, setOwnerParam } from './client'
 
 describe('owner query param plumbing', () => {
   const fetchMock = vi.fn(async (..._args: unknown[]) => new Response(JSON.stringify({ ok: true })))
@@ -41,6 +41,12 @@ describe('owner query param plumbing', () => {
     expect(get).toContain('owner=alice')
     expect(get).not.toContain('owner=bob')
     expect(post).toContain('?owner=alice')
+  })
+
+  it('lets a DELETE carry a pinned owner too', async () => {
+    setOwnerParam('bob')
+    await apiDelete('/ingest/jobs/job-1', 'alice')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('?owner=alice')
   })
 
   it('sends no owner when a caller pinned none', async () => {

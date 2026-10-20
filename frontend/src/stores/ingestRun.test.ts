@@ -74,7 +74,7 @@ describe('useIngestRunStore', () => {
     expect(leg).toMatchObject({ totalFiles: 1, filesSaved: 1, collection: 'mydocs' })
     expect(useIngestRunStore.getState().uploadStatus).toEqual(emptyStatus())
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-1', collection: 'mydocs' }
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
     ])
     expect(useIngestRunStore.getState().uploading).toBe(false)
   })
@@ -124,6 +124,9 @@ describe('useIngestRunStore', () => {
     expect(getStagedBatch).toHaveBeenCalledWith('mydocs', { owner: 'alice' })
     expect(streamIngestUploadBatched.mock.calls[0][5]).toBe('alice')
     expect(createIngestJob.mock.calls[0][1]).toBe('alice')
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-1', collection: 'mydocs', owner: 'alice' }
+    ])
   })
 
   it('clears the picked files once the job is queued', async () => {
@@ -293,8 +296,8 @@ describe('useIngestRunStore — tracking several jobs', () => {
     await useIngestRunStore.getState().start(1000, defaultT)
 
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-2', collection: 'second' },
-      { job_id: 'job-1', collection: 'first' }
+      { job_id: 'job-2', collection: 'second', owner: null },
+      { job_id: 'job-1', collection: 'first', owner: null }
     ])
   })
 
@@ -315,22 +318,22 @@ describe('useIngestRunStore — tracking several jobs', () => {
 
   it('re-tracking an adopted job id does not duplicate it', () => {
     const s = useIngestRunStore.getState()
-    s.trackJob('job-1', 'mydocs')
-    s.trackJob('job-1', 'mydocs')
+    s.trackJob('job-1', 'mydocs', null)
+    s.trackJob('job-1', 'mydocs', null)
     expect(useIngestRunStore.getState().trackedJobs).toHaveLength(1)
   })
 
   it('untracks one job and drops only its upload status', () => {
     const s = useIngestRunStore.getState()
-    s.trackJob('job-1', 'first')
-    s.trackJob('job-2', 'second')
+    s.trackJob('job-1', 'first', null)
+    s.trackJob('job-2', 'second', null)
     useIngestRunStore.setState({
       uploadStatusByJob: { 'job-1': emptyStatus(), 'job-2': emptyStatus() }
     })
     s.untrackJob('job-1')
 
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-2', collection: 'second' }
+      { job_id: 'job-2', collection: 'second', owner: null }
     ])
     expect(Object.keys(useIngestRunStore.getState().uploadStatusByJob)).toEqual(['job-2'])
   })
@@ -370,13 +373,36 @@ describe('useIngestRunStore — tracking several jobs', () => {
     useIngestRunStore.persist.rehydrate()
 
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-1', collection: 'mydocs' }
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
     ])
     expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-0'])
     expect(useIngestRunStore.getState().ner).toBe(true)
     // v1 predates the summary toggle; it carries over as on, the same value
     // a fresh store starts at, never as an accidental opt-out.
     expect(useIngestRunStore.getState().summary).toBe(true)
+  })
+
+  it('gives v2 tracked jobs no owner on migration, the only one a non-admin has', () => {
+    localStorage.setItem(
+      'docint-ingest-run',
+      JSON.stringify({
+        version: 2,
+        state: {
+          collection: 'mydocs',
+          ner: false,
+          hate: false,
+          summary: true,
+          trackedJobs: [{ job_id: 'job-1', collection: 'mydocs' }],
+          handledJobIds: ['job-0']
+        }
+      })
+    )
+    useIngestRunStore.persist.rehydrate()
+
+    expect(useIngestRunStore.getState().trackedJobs).toEqual([
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
+    ])
+    expect(useIngestRunStore.getState().handledJobIds).toEqual(['job-0'])
   })
 })
 
@@ -431,7 +457,7 @@ describe('useIngestRunStore — finishing an interrupted upload', () => {
       null
     )
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
-      { job_id: 'job-1', collection: 'mydocs' }
+      { job_id: 'job-1', collection: 'mydocs', owner: null }
     ])
     expect(useIngestRunStore.getState().files).toEqual([])
   })

@@ -28,6 +28,9 @@ export interface IngestJobsState {
   /** Clear the lost-stream flag and bump `retryNonce` so the stream hook's
    *  effect re-runs and opens a fresh connection. */
   retryStream: () => void
+  /** Drop every log and the lost-stream flag but keep `retryNonce`: for a
+   *  stream reopened under another owner, whose replay starts from nothing. */
+  resetLogs: () => void
   clear: () => void
 }
 
@@ -107,6 +110,7 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
       return { events, terminal }
     }),
   retryStream: () => set((s) => ({ streamLost: false, retryNonce: s.retryNonce + 1 })),
+  resetLogs: () => set({ events: {}, terminal: {}, streamLost: false }),
   clear: () => set({ events: {}, terminal: {}, streamLost: false, retryNonce: 0 })
 }))
 

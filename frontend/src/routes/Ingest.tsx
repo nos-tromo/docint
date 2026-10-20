@@ -3,6 +3,7 @@ import { Banner, Button, Card, FileList, Input, PageHeader, ToggleButton } from 
 import { useQueryClient } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useUiStore } from '@/stores/ui'
 import { useIngestDefaults } from '@/hooks/useIngestDefaults'
 import { ingestJobsKey } from '@/hooks/useIngestJobs'
 import { useCollections } from '@/hooks/useCollections'
@@ -127,13 +128,15 @@ export function Ingest() {
   // Files already on the server are only worth reporting when nothing else
   // in this browser describes them better: a picked selection, an upload in
   // flight, or a job this browser queued each says more than the staged card
-  // can. Debounced because the name is typed.
+  // can. Debounced because the name is typed. Only a job of the selected
+  // owner counts: the staged batch asked about is that owner's.
+  const owner = useUiStore((s) => s.selectedOwner)
   const stagedCollection = useDebounced(run.collection.trim())
   const showStaged =
     !busy &&
     run.files.length === 0 &&
     stagedCollection.length > 0 &&
-    !run.trackedJobs.some((j) => j.collection === stagedCollection)
+    !run.trackedJobs.some((j) => j.collection === stagedCollection && j.owner === owner)
 
   // Memoised on the selection alone. An upload emits thousands of progress
   // frames and each one re-renders this screen; without the memo every frame

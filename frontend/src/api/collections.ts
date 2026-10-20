@@ -41,8 +41,8 @@ export const listCollections = async (): Promise<CollectionsView> => {
 export const getCollectionsRetention = () =>
   apiGet<CollectionsRetention>('/collections/retention', { all: true })
 
-export const selectCollection = (name: string) =>
-  apiPost<{ ok: boolean; name: string }>('/collections/select', { name })
+export const selectCollection = (name: string, owner?: string | null) =>
+  apiPost<{ ok: boolean; name: string }>('/collections/select', { name }, owner)
 
 export const deleteCollection = (name: string) =>
   apiDelete<{ ok: boolean }>(`/collections/${encodeURIComponent(name)}`)

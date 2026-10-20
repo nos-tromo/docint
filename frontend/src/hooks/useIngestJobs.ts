@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { listIngestJobs } from '@/api/jobs'
 import type { IngestJobSnapshot } from '@/api/types'
+import { useUiStore } from '@/stores/ui'
 
 export const ingestJobsKey = ['ingest-jobs'] as const
 
@@ -15,11 +16,15 @@ export const ingestJobsKey = ['ingest-jobs'] as const
  * Summary and extract jobs share the registry and the stream but have their
  * own surfaces, so they are filtered out here. A snapshot from a backend
  * that predates `kind` is an ingest job.
+ *
+ * Keyed by the owner selected in the sidebar, whose jobs these are: a switch
+ * fetches the new owner's list rather than showing the last one's.
  */
 export function useIngestJobs() {
+  const owner = useUiStore((s) => s.selectedOwner)
   return useQuery({
-    queryKey: ingestJobsKey,
-    queryFn: listIngestJobs,
+    queryKey: [...ingestJobsKey, owner],
+    queryFn: () => listIngestJobs(owner),
     select: (data: { jobs: IngestJobSnapshot[] }) =>
       data.jobs.filter((job) => (job.kind ?? 'ingest') === 'ingest')
   })

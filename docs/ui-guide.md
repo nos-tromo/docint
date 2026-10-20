@@ -239,7 +239,10 @@ interrupted runs offering a re-queue. Starting a second run therefore never
 hides the first. Each card carries its own Dismiss once the run has ended;
 "Clear finished" above the list dismisses them all at once and leaves
 anything still running. A completed run selects the collection it filled, so
-with several finishing in a row the last one wins.
+with several finishing in a row the last one wins. The list and its live
+progress belong to the owner selected in the sidebar: an admin viewing another
+user's collections sees that user's jobs, and each job is checked, re-run,
+dismissed and selected in the namespace it was queued in.
 
 ### Analysis (`src/routes/Analysis.tsx`)
 

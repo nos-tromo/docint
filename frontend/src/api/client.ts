@@ -125,6 +125,6 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   )
 }
 
-export async function apiDelete<T>(path: string): Promise<T> {
-  return handle<T>(await fetch(url(withOwner(path)), { method: 'DELETE' }))
+export async function apiDelete<T>(path: string, owner?: string | null): Promise<T> {
+  return handle<T>(await fetch(url(withOwner(path, owner)), { method: 'DELETE' }))
 }

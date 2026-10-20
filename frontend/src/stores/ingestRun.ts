@@ -23,6 +23,12 @@ interface PersistedIngestRun {
 export interface TrackedJob {
   job_id: string
   collection: string
+  /**
+   * The namespace it was queued in: the admin owner context of the time, or
+   * `null` for the caller's own. A job is only shown, and only acted on, under
+   * that owner (see `withOwner`).
+   */
+  owner: string | null
 }
 
 /**
@@ -201,9 +207,10 @@ export interface IngestRunState {
    *
    * @param jobId - The server's job id.
    * @param collection - The collection it was queued against.
+   * @param owner - The owner it was queued under (`null` for the caller's own).
    * @param uploadStatus - The upload leg that produced it, if any.
    */
-  trackJob: (jobId: string, collection: string, uploadStatus?: IngestStatus) => void
+  trackJob: (jobId: string, collection: string, owner: string | null, uploadStatus?: IngestStatus) => void
   /** Forget a job: drop it from the list along with its upload status. */
   untrackJob: (jobId: string) => void
   reset: () => void
@@ -250,10 +257,10 @@ export const useIngestRunStore = create<IngestRunState>()(
             ? s
             : { handledJobIds: [...s.handledJobIds, jobId].slice(-MAX_HANDLED_JOBS) }
         ),
-      trackJob: (jobId, collection, uploadStatus) =>
+      trackJob: (jobId, collection, owner, uploadStatus) =>
         set((s) => ({
           trackedJobs: [
-            { job_id: jobId, collection },
+            { job_id: jobId, collection, owner },
             ...s.trackedJobs.filter((j) => j.job_id !== jobId)
           ],
           uploadStatusByJob: uploadStatus
@@ -326,7 +333,7 @@ export const useIngestRunStore = create<IngestRunState>()(
               },
               owner
             )
-            get().trackJob(job_id, collection)
+            get().trackJob(job_id, collection, owner)
             set({ uploading: false, uploadStatus: emptyStatus(), files: [], failedFiles: [] })
           } catch {
             set({ uploading: false, error: t('ingest.failed_default') })
@@ -405,7 +412,7 @@ export const useIngestRunStore = create<IngestRunState>()(
           // `uploadStatus` is free to describe the *next* upload. Without the
           // handover a second run in the same tab would fold the previous
           // run's log into its own card.
-          get().trackJob(job_id, collection, uploadStatus)
+          get().trackJob(job_id, collection, owner, uploadStatus)
           set({
             uploading: false,
             uploadStatus: emptyStatus(),
@@ -433,11 +440,19 @@ export const useIngestRunStore = create<IngestRunState>()(
         trackedJobs: s.trackedJobs,
         handledJobIds: s.handledJobIds
       }),
-      version: 2,
+      version: 3,
       // v1 tracked exactly one job in three scalars. Carry it over so a reload
       // across the upgrade still re-attaches to the run that was in flight.
+      // v1 and v2 recorded no owner; `null`, the caller's own namespace, is
+      // the only one a non-admin's job can have.
       migrate: (persisted, version): PersistedIngestRun => {
-        if (version >= 2) return persisted as PersistedIngestRun
+        if (version >= 3) return persisted as PersistedIngestRun
+        if (version === 2) {
+          const v2 = persisted as Omit<PersistedIngestRun, 'trackedJobs'> & {
+            trackedJobs?: Omit<TrackedJob, 'owner'>[]
+          }
+          return { ...v2, trackedJobs: (v2.trackedJobs ?? []).map((job) => ({ ...job, owner: null })) }
+        }
         const old = (persisted ?? {}) as Record<string, unknown>
         const jobId = typeof old.activeJobId === 'string' ? old.activeJobId : null
         const collection = typeof old.collection === 'string' ? old.collection : ''
@@ -449,7 +464,7 @@ export const useIngestRunStore = create<IngestRunState>()(
           ner: old.ner === true,
           hate: old.hate === true,
           summary: true,
-          trackedJobs: jobId ? [{ job_id: jobId, collection: jobCollection }] : [],
+          trackedJobs: jobId ? [{ job_id: jobId, collection: jobCollection, owner: null }] : [],
           handledJobIds: handled
         }
       }

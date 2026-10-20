@@ -33,6 +33,8 @@ interface IngestJobCardProps {
   jobId: string
   /** The collection this job was queued against, shown on the card. */
   collection: string
+  /** The owner it was queued under (`null` for the caller's own); every request about it goes there. */
+  owner: string | null
   /** The server's snapshot, when this card came from the jobs list. */
   listItem?: IngestJobSnapshot
 }
@@ -44,9 +46,10 @@ interface IngestJobCardProps {
  *
  * @param jobId - The job to render.
  * @param collection - The collection it was queued against.
+ * @param owner - The owner it was queued under.
  * @param listItem - The server's snapshot, if the jobs list carried one.
  */
-export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProps) {
+export function IngestJobCard({ jobId, collection, owner, listItem }: IngestJobCardProps) {
   const t = useT()
   const qc = useQueryClient()
   const jobEvents = useIngestJobsStore(selectJobEvents(jobId))
@@ -59,7 +62,7 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
   // only locally has nothing to start from and asks.
   const jobQuery = useQuery({
     queryKey: ['ingest-job', jobId],
-    queryFn: () => getIngestJob(jobId),
+    queryFn: () => getIngestJob(jobId, owner),
     initialData: listItem,
     retry: false,
     staleTime: 30_000,
@@ -103,7 +106,7 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
   // collection, not to this job, and it carries on through finalize.
   const preprocess = usePreprocessProgress(collection, status.phase)
 
-  useIngestCompletion(jobId, jobEvents, collection)
+  useIngestCompletion(jobId, jobEvents, collection, owner)
 
   // A job the server 404s on is an interrupted run: the backend restarted
   // while it was in flight (jobs are in-memory by design). Answered by
@@ -133,7 +136,7 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
   }
 
   const dismissMutation = useMutation({
-    mutationFn: () => dismissIngestJob(jobId),
+    mutationFn: () => dismissIngestJob(jobId, owner),
     onSuccess: () => {
       forget()
       // The card unmounts in the same tick, which leaves this query inactive
@@ -152,15 +155,18 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
   const rerunMutation = useMutation({
     mutationFn: () => {
       const run = useIngestRunStore.getState()
-      return createIngestJob({
-        collection,
-        ner: run.ner,
-        hate_speech: run.hate,
-        summary: run.summary
-      })
+      return createIngestJob(
+        {
+          collection,
+          ner: run.ner,
+          hate_speech: run.hate,
+          summary: run.summary
+        },
+        owner
+      )
     },
     onSuccess: ({ job_id }) => {
-      useIngestRunStore.getState().trackJob(job_id, collection)
+      useIngestRunStore.getState().trackJob(job_id, collection, owner)
       if (job_id !== jobId) forget()
     }
   })
@@ -170,7 +176,7 @@ export function IngestJobCard({ jobId, collection, listItem }: IngestJobCardProp
   // keeps the button from inviting a second, pointless request — and the
   // mutation's own pending state covers the gap before the snapshot refreshes.
   const cancelMutation = useMutation({
-    mutationFn: () => cancelIngestJob(jobId),
+    mutationFn: () => cancelIngestJob(jobId, owner),
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['ingest-job', jobId] })
     }
