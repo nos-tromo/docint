@@ -143,6 +143,26 @@ class ReportManager:
             data["item_count"] = s.query(ReportItem).filter_by(report_id=report.id).count()
         return data
 
+    def _commit_returning(self, s: Session, record: Report | ReportItem) -> dict[str, Any]:
+        """Flush a write, read ``record`` back, then commit, and return what was read.
+
+        The read comes before the commit, while the write still locks out other
+        writers. Read after it, the record could be deleted and its id, which
+        SQLite reuses, taken by another owner's, which would then be returned.
+
+        Args:
+            s (Session): The session holding the write.
+            record (Report | ReportItem): The written report or item.
+
+        Returns:
+            dict[str, Any]: The record as it was written.
+        """
+        s.flush()
+        s.refresh(record)
+        data = self._serialize_report(s, record) if isinstance(record, Report) else self._item_to_dict(record)
+        s.commit()
+        return data
+
     # --- report CRUD ---
     def create_report(
         self,
@@ -177,9 +197,7 @@ class ReportManager:
                 session_id=cast(Any, session_id),
             )
             s.add(report)
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
     def list_reports(self, owner: str | None, collection: str | None = None) -> list[dict[str, Any]]:
         """List the caller's reports, most-recently-updated first.
@@ -363,9 +381,7 @@ class ReportManager:
                 report.show_toc = cast(Any, show_toc)
             if show_collection_overview is not None:
                 report.show_collection_overview = cast(Any, show_collection_overview)
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
     def set_collection_overview_snapshot(
         self, report_id: int, owner: str | None, snapshot: dict[str, Any] | None
@@ -388,9 +404,7 @@ class ReportManager:
             report.collection_overview_snapshot = cast(
                 Any, json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None
             )
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
     def delete_report(self, report_id: int, owner: str | None) -> bool:
         """Delete a report (and its items) the caller owns.
@@ -482,14 +496,20 @@ class ReportManager:
             )
             report.updated_at = cast(Any, datetime.now(UTC))
             try:
-                s.commit()
+                s.flush()
             except IntegrityError:
-                # Concurrent add of the same dedupe_key: fall back to the winner.
+                # Concurrent add of the same dedupe_key: fall back to the winner,
+                # read through the owner since the write no longer holds the lock.
                 s.rollback()
-                existing = s.query(ReportItem).filter_by(report_id=report_id, dedupe_key=dedupe_key).one_or_none()
+                existing = (
+                    s.query(ReportItem)
+                    .join(Report, Report.id == ReportItem.report_id)
+                    .filter(ReportItem.report_id == report_id, ReportItem.dedupe_key == dedupe_key)
+                    .filter(Report.owner == owner)
+                    .one_or_none()
+                )
                 return self._item_to_dict(existing) if existing is not None else None
-            s.refresh(item)
-            return self._item_to_dict(item)
+            return self._commit_returning(s, item)
 
     def add_items(
         self,
@@ -699,9 +719,7 @@ class ReportManager:
                 return None
             item.note = cast(Any, note)
             report.updated_at = cast(Any, datetime.now(UTC))
-            s.commit()
-            s.refresh(item)
-            return self._item_to_dict(item)
+            return self._commit_returning(s, item)
 
     def reorder_items(self, report_id: int, owner: str | None, item_ids: Sequence[int]) -> dict[str, Any] | None:
         """Reassign item positions to match ``item_ids`` order.
@@ -740,9 +758,7 @@ class ReportManager:
                     item.position = cast(Any, pos)
                     pos += 1
             report.updated_at = cast(Any, datetime.now(UTC))
-            s.commit()
-            s.refresh(report)
-            return self._serialize_report(s, report)
+            return self._commit_returning(s, report)
 
     def list_dedupe_keys(self, report_id: int, owner: str | None) -> list[str]:
         """Return the dedupe keys present in a report (for "already added" UI).
