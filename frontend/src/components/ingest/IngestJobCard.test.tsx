@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactElement } from 'react'
@@ -35,7 +35,7 @@ afterEach(() => {
 })
 
 describe('IngestJobCard', () => {
-  it('shows the job its own warnings, not the screen’s', async () => {
+  it('shows the job its own warnings, inside its own box', async () => {
     useIngestRunStore.getState().trackJob('job-1', 'mydocs', null)
     // Handled, so the 404 from the stubbed fetch does not read as interrupted.
     useIngestRunStore.getState().markJobHandled('job-1')
@@ -54,7 +54,9 @@ describe('IngestJobCard', () => {
     renderIn(<IngestJobCard jobId="job-1" collection="mydocs" owner={null} />)
 
     await waitFor(() =>
-      expect(screen.getByText('One file held no extractable text.')).toBeInTheDocument()
+      expect(
+        within(screen.getByRole('status')).getByText('One file held no extractable text.')
+      ).toBeInTheDocument()
     )
   })
 

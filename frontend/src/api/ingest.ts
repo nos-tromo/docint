@@ -129,8 +129,8 @@ function withoutSaved(pending: File[], saved: string[]): File[] {
  * A batch is done only when the server says so (`upload_complete`). One that
  * stalls, drops, meets a gateway error or ends early is sent again — only its
  * files not yet saved — after each pause in `UPLOAD_RETRY_DELAYS_MS`, with a
- * `warning` per retry, retracted by a `warning_resolved` once the batch goes
- * through. Upload failures are non-fatal: a batch still failing
+ * `warning` per retry, retracted by a `warning_resolved` once the batch has
+ * ended. Upload failures are non-fatal: a batch still failing
  * after that, or failing in a way a retry cannot cure (a lone oversize file
  * → 413, a server-side save error), is reported and the rest still upload;
  * the returned `failures` list names exactly the files that never made it to
@@ -177,7 +177,8 @@ export async function* streamIngestUploadBatched(
 
   for (let i = 0; i < batches.length; i++) {
     let pending = batches[i]
-    // This batch's retry notices: retracted if it gets through, kept if it fails.
+    // This batch's retry notices, retracted once it ends: by then it either got
+    // through or carries its own "was skipped" warning.
     const notices: string[] = []
     for (let attempt = 0; ; attempt++) {
       const saved: string[] = []
@@ -221,11 +222,9 @@ export async function* streamIngestUploadBatched(
         caught = err
       }
       if (saved.length > 0) anySaved = true
-      if (!complete) pending = withoutSaved(pending, saved)
-      if (complete || pending.length === 0) {
-        if (notices.length > 0) yield stamp('warning_resolved', { messages: notices })
-        break
-      }
+      if (complete) break
+      pending = withoutSaved(pending, saved)
+      if (pending.length === 0) break
 
       const status = caught instanceof UploadHttpError ? caught.status : undefined
       const aborted = caught instanceof DOMException && caught.name === 'AbortError'
@@ -257,6 +256,7 @@ export async function* streamIngestUploadBatched(
       if (!serverError) yield stamp('warning', { message: describeBatchFailure(failure, limitBytes, t) })
       break
     }
+    if (notices.length > 0) yield stamp('warning_resolved', { messages: notices })
   }
 
   if (!anySaved) {

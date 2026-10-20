@@ -625,7 +625,7 @@ describe('deriveIngestStatus', () => {
     expect(status.warnings).toEqual(["No ingestable files found for 'mydocs'."])
   })
 
-  it('drops the retry notices a batch retracted once it went through', () => {
+  it('drops the retry notices of a batch that has ended', () => {
     const retrying = 'Batch 2/3 did not go through — retrying (1/2).'
     const events: IngestEvent[] = [
       { event: 'start', data: { collection: 'c1', files: ['a.txt'] } },

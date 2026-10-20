@@ -663,7 +663,7 @@ export interface IngestEvent {
     | 'ingestion_complete'
     | 'ingestion_cancelled'
     | 'warning'
-    // Upload leg only: retracts the retry notices of a batch that went through.
+    // Upload leg only: retracts the retry notices of a batch that has ended.
     | 'warning_resolved'
     | 'error'
     // The owner-multiplexed `/ingest/jobs/events` stream is multiplexed

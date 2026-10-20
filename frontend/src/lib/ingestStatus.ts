@@ -478,7 +478,8 @@ export function deriveIngestStatus(
         break
       }
       case 'warning_resolved': {
-        // A batch's retry notices stop being true once the batch goes through.
+        // A batch's retry notices are moot once it has ended: it either got
+        // through or carries its own "was skipped" warning.
         const resolved = d.messages
         if (Array.isArray(resolved)) status.warnings = status.warnings.filter((w) => !resolved.includes(w))
         break

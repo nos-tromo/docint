@@ -8,7 +8,7 @@ import { usePreprocessProgress } from '@/hooks/usePreprocessProgress'
 import { useIngestCompletion } from '@/hooks/useIngestCompletion'
 import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
 import { useIngestRunStore } from '@/stores/ingestRun'
-import { IngestionStatus } from '@/components/ingest/IngestionStatus'
+import { IngestionStatus, IngestWarnings } from '@/components/ingest/IngestionStatus'
 import { deriveIngestStatus, withServerTimes, type IngestStatus } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 import type { IngestJobSnapshot } from '@/api/types'
@@ -189,26 +189,12 @@ export function IngestJobCard({ jobId, collection, owner, listItem }: IngestJobC
 
   return (
     <div className="space-y-2">
-      {/* Derived from the merged upload+job log (`status.warnings`), not the
-          run's own upload warnings — a job-stream warning (a soft-empty
-          ingest, a failed post-ingest entity resolution) is just as
-          actionable and must not go unreported. Kept with its own job: with
-          several runs listed, a page-level warning names no run. */}
-      {status.warnings.length > 0 && (
-        <ul className="text-sm text-[var(--status-amber-fg)] space-y-1" role="alert">
-          {status.warnings.map((w, i) => (
-            // Warnings are plain strings that may legitimately repeat, appended in
-            // order and holding no state — the index is the identity.
-            // eslint-disable-next-line @eslint-react/no-array-index-key
-            <li key={i}>{w}</li>
-          ))}
-        </ul>
-      )}
-
       {interrupted ? (
         <Card className="text-sm space-y-2" role="status">
           <CollectionLabel collection={collection} />
           <p className="text-muted-foreground">{t('ingest.job_interrupted')}</p>
+          {/* A batch the upload skipped is still missing after "Run again". */}
+          <IngestWarnings warnings={status.warnings} />
           <div className="flex gap-2">
             <Button
               variant="primary"

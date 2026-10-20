@@ -260,10 +260,12 @@ describe('streamIngestUploadBatched', () => {
     const { events, result } = await run
 
     expect(uploadMock).toHaveBeenCalledTimes(3)
-    expect(events.map((e) => e.event)).toEqual(['start', 'warning', 'warning', 'warning', 'error'])
+    expect(events.map((e) => e.event)).toEqual(['start', 'warning', 'warning', 'warning', 'warning_resolved', 'error'])
     expect(String(events[3].data.message)).toBe(
       'Batch 1/1 ("a") stopped making progress and was skipped; other batches continued.'
     )
+    // Only the outcome outlives the batch: both retry notices are retracted.
+    expect(events[4].data.messages).toEqual([events[1].data.message, events[2].data.message])
     expect(result.failures).toEqual([{ batch: 1, total: 1, files: ['a'], stalled: true }])
   })
 

@@ -12,6 +12,7 @@ function errorStatus(overrides: Partial<IngestStatus> = {}): IngestStatus {
     tasks: [],
     indexed: 0,
     totalChunks: 0,
+    warnings: [],
     ...overrides,
   } as IngestStatus
 }
@@ -60,6 +61,7 @@ function completeStatus(overrides: Partial<IngestStatus> = {}): IngestStatus {
     tasks: [],
     indexed: 2,
     totalChunks: 10,
+    warnings: [],
     ...overrides,
   } as IngestStatus
 }
@@ -155,6 +157,7 @@ describe('IngestionStatus task bars', () => {
               indexed: 0,
               totalChunks: 0,
               tasks: [{ key: 'summary', label: 'Summarizing collection', current: 12, total: 412 }],
+              warnings: [],
             } as IngestStatus
           }
         />
