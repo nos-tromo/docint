@@ -644,6 +644,10 @@ export const en = {
     'Batch {batch}/{total} ({label}) failed (HTTP {status}) and was skipped; other batches continued.',
   'ingest.batch_failed_network':
     'Batch {batch}/{total} ({label}) failed (network error) and was skipped; other batches continued.',
+  'ingest.batch_stalled':
+    'Batch {batch}/{total} ({label}) stopped making progress and was skipped; other batches continued.',
+  'ingest.batch_retrying':
+    'Batch {batch}/{total} did not go through — retrying ({attempt}/{max}).',
   'ingest.upload_failed_too_large':
     'Upload failed: every batch exceeded the {limit} per-upload limit. Raise DOCINT_CLIENT_MAX_BODY_SIZE and restart, or upload smaller files.',
   'ingest.upload_failed_rejected':

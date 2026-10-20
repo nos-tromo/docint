@@ -661,6 +661,10 @@ export const de: Strings = {
     'Batch {batch}/{total} ({label}) ist fehlgeschlagen (HTTP {status}) und wurde übersprungen; die übrigen Batches wurden fortgesetzt.',
   'ingest.batch_failed_network':
     'Batch {batch}/{total} ({label}) ist fehlgeschlagen (Netzwerkfehler) und wurde übersprungen; die übrigen Batches wurden fortgesetzt.',
+  'ingest.batch_stalled':
+    'Batch {batch}/{total} ({label}) kam nicht mehr voran und wurde übersprungen; die übrigen Batches wurden fortgesetzt.',
+  'ingest.batch_retrying':
+    'Batch {batch}/{total} ist nicht durchgekommen — neuer Versuch ({attempt}/{max}).',
   'ingest.upload_failed_too_large':
     'Upload fehlgeschlagen: Jeder Batch überschritt das Limit von {limit} pro Upload. Erhöhen Sie DOCINT_CLIENT_MAX_BODY_SIZE und starten Sie neu, oder laden Sie kleinere Dateien hoch.',
   'ingest.upload_failed_rejected':

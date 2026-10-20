@@ -200,7 +200,11 @@ a blank query, where it exports the whole filtered collection.
 Drag-and-drop upload (`src/components/ingest/Dropzone.tsx`) into a selected
 or newly-created collection. Streams the multipart upload plus SSE progress
 events (`src/components/ingest/IngestionStatus.tsx`) for per-file and
-per-stage status. The entity-extraction, hate-speech and collection-summary
+per-stage status. A selection goes up in small batches (at most 100 files and
+64 MiB per request); a batch that stops making progress for two minutes is
+aborted and its unsaved files are sent again, up to twice, each retry showing
+as a warning — so a request that never completes can no longer freeze the run.
+The entity-extraction, hate-speech and collection-summary
 options are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount
 from `GET /config/ingest-defaults`. **Summary** gates the collection-summary
 rebuild that runs when the ingest finishes; it maps the whole collection, so

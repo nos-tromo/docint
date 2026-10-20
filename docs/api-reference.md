@@ -1122,14 +1122,24 @@ any batch that happened to hold only reader-unsupported files).
 
 A failed batch is reported without blocking the rest: `/ingest/finalize` still
 runs over whatever was staged, and already-saved files are skipped on retry
-since ingestion is idempotent by file hash. The batch size the SPA picks comes
-from `max_upload_bytes` on `GET /config`, which mirrors
-`DOCINT_CLIENT_MAX_BODY_SIZE` — the nginx per-request cap. The total upload is
-therefore not bounded by that cap; only a *single* file larger than it is.
-Each batch also holds at most 1000 files: the backend reads the multipart body
-with Starlette's default `max_files=1000`, and a request carrying more file
-parts is rejected as HTTP 400 whatever its byte size, so the SPA splits a
-selection of many small files by count as well as by bytes.
+since ingestion is idempotent by file hash. The SPA packs each batch to at
+most 64 MiB, or 90% of `max_upload_bytes` on `GET /config` when that is lower
+— the value mirrors `DOCINT_CLIENT_MAX_BODY_SIZE`, the nginx per-request cap.
+The total upload is therefore not bounded by that cap; only a *single* file
+larger than it is (such a file goes up alone). Each batch also holds at most
+100 files. The hard ceiling is 1000: the backend reads the multipart body with
+Starlette's default `max_files=1000`, and a request carrying more file parts
+is rejected as HTTP 400 whatever its byte size.
+
+Batches are kept this small because a request sends no frame until its whole
+body has arrived, and nothing on the server side logs or times out a body the
+browser never finishes sending. The SPA therefore aborts a batch that neither
+sends a byte nor receives a frame for two minutes, and sends its files not yet
+saved (those without a `file_saved` frame) again, up to twice, 5 s and then
+15 s later. A batch counts as staged only once `upload_complete` arrives; a
+stall, a network error, a 502/503/504 and a stream that ends without
+`upload_complete` are retried, while any other HTTP status and an `error`
+frame are reported at once.
 
 ### `POST /ingest/finalize`
 

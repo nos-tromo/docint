@@ -1,8 +1,23 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { buildIngestFormData, streamIngestUploadBatched, type BatchFailure } from './ingest'
+import { streamUpload, UploadHttpError, UploadStalledError } from './upload'
 import type { IngestEvent } from './types'
 
-afterEach(() => vi.restoreAllMocks())
+vi.mock('./upload', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./upload')>()),
+  streamUpload: vi.fn()
+}))
+
+const uploadMock = vi.mocked(streamUpload)
+
+beforeEach(() => {
+  uploadMock.mockReset()
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 /** Build a File whose reported `size` is `size` bytes (no real allocation). */
 function fileOfSize(name: string, size: number): File {
@@ -11,28 +26,28 @@ function fileOfSize(name: string, size: number): File {
   return f
 }
 
-/** A mock fetch Response streaming the given SSE frame text. */
-function sseResponse(frames: string) {
-  const enc = new TextEncoder()
-  return {
-    ok: true,
-    status: 200,
-    body: new ReadableStream<Uint8Array>({
-      start(c) {
-        c.enqueue(enc.encode(frames))
-        c.close()
-      }
-    })
+type Frame = [event: string, data: Record<string, unknown>]
+
+/** A `streamUpload` stand-in that replays `frames`, then throws `failure` when given one. */
+function reply(frames: Frame[], failure?: unknown) {
+  return async function* () {
+    for (const [event, data] of frames) yield { event, data }
+    if (failure) throw failure
   }
 }
 
-/** SSE frames for one staged upload batch: start → file_saved → upload_complete. */
-function stagedBatch(filename: string) {
-  return sseResponse(
-    `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: [filename] })}\n\n` +
-      `event: file_saved\ndata: ${JSON.stringify({ filename })}\n\n` +
-      `event: upload_complete\ndata: ${JSON.stringify({ collection: 'c1', files_saved: 1 })}\n\n`
-  )
+/** One fully staged upload batch: start → file_saved per name → upload_complete. */
+function staged(...names: string[]) {
+  return reply([
+    ['start', { collection: 'c1', files: names }],
+    ...names.map((filename): Frame => ['file_saved', { filename }]),
+    ['upload_complete', { collection: 'c1', files_saved: names.length }]
+  ])
+}
+
+/** The file names the n-th upload request carried. */
+function sentNames(call: number): string[] {
+  return ((uploadMock.mock.calls[call][1] as FormData).getAll('files') as File[]).map((f) => f.name)
 }
 
 /** Drain the generator, splitting its yielded events from its final return value. */
@@ -53,15 +68,14 @@ async function collect(
 
 describe('streamIngestUploadBatched', () => {
   it('stages every batch, normalised to one logical upload stream', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(stagedBatch('a')).mockResolvedValueOnce(stagedBatch('b'))
-    vi.stubGlobal('fetch', fetchMock)
+    uploadMock.mockImplementationOnce(staged('a')).mockImplementationOnce(staged('b'))
 
     // budget = floor(1000 * 0.9) = 900; two 500-byte files → two batches.
     const files = [fileOfSize('a', 500), fileOfSize('b', 500)]
     const { events, result } = await collect(streamIngestUploadBatched('c1', files, 1000))
 
     // Two staged uploads — no finalize call; queuing the job is the caller's job now.
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(uploadMock).toHaveBeenCalledTimes(2)
     // One synthetic start (all files) plus both file_saved forwarded.
     expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'file_saved'])
     expect(events[0].data.files).toEqual(['a', 'b'])
@@ -69,30 +83,25 @@ describe('streamIngestUploadBatched', () => {
   })
 
   it('stages a small selection as a single batch', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(stagedBatch('a'))
-    vi.stubGlobal('fetch', fetchMock)
+    uploadMock.mockImplementationOnce(staged('a'))
 
     const { events, result } = await collect(
       streamIngestUploadBatched('c1', [fileOfSize('a', 100)], 1_000_000)
     )
 
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(uploadMock).toHaveBeenCalledTimes(1)
     expect(events.map((e) => e.event)).toEqual(['start', 'file_saved'])
     expect(result).toEqual({ anySaved: true, failures: [] })
   })
 
   it('continues past a 413 batch and reports it as a partial failure', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(stagedBatch('a'))
-      .mockResolvedValueOnce({ ok: false, status: 413, body: null })
-    vi.stubGlobal('fetch', fetchMock)
+    uploadMock.mockImplementationOnce(staged('a')).mockImplementationOnce(reply([], new UploadHttpError(413)))
 
     const files = [fileOfSize('a', 500), fileOfSize('big', 500)]
     const { events, result } = await collect(streamIngestUploadBatched('c1', files, 1000))
 
     // The bad batch surfaces as a warning; the good one still uploads.
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(uploadMock).toHaveBeenCalledTimes(2)
     expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'warning'])
     expect(String(events[2].data.message)).toContain('per-upload limit')
     expect(result.anySaved).toBe(true)
@@ -100,13 +109,12 @@ describe('streamIngestUploadBatched', () => {
   })
 
   it('emits a terminal error when every batch fails to upload', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 413, body: null })
-    vi.stubGlobal('fetch', fetchMock)
+    uploadMock.mockImplementation(reply([], new UploadHttpError(413)))
 
     const files = [fileOfSize('a', 500), fileOfSize('b', 500)]
     const { events, result } = await collect(streamIngestUploadBatched('c1', files, 1000))
 
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(uploadMock).toHaveBeenCalledTimes(2)
     expect(events.map((e) => e.event)).toEqual(['start', 'warning', 'warning', 'error'])
     expect(String(events[3].data.message)).toContain('per-upload limit')
     expect(result.anySaved).toBe(false)
@@ -114,27 +122,31 @@ describe('streamIngestUploadBatched', () => {
   })
 
   it('names the failing file on a save_failed event when it matches the upload list', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce(
-      sseResponse(
-        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
-          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: 'a.txt' })}\n\n`
-      )
-    ) as unknown as typeof fetch
+    uploadMock.mockImplementationOnce(
+      reply([
+        ['start', { collection: 'c1', files: ['a.txt'] }],
+        ['error', { message: 'Failed to save file.', code: 'save_failed', filename: 'a.txt' }]
+      ])
+    )
 
-    const { events } = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
+    const { events, result } = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
     const err = events.find((e) => e.event === 'error')
     expect(err).toBeDefined()
     expect(String(err!.data.message)).toContain('a.txt')
     expect(String(err!.data.message)).toContain('(save_failed)')
+    // A server-side save error is not something a retry cures; the file is
+    // reported as missing instead of being silently dropped.
+    expect(uploadMock).toHaveBeenCalledTimes(1)
+    expect(result.failures).toEqual([{ batch: 1, total: 1, files: ['a.txt'] }])
   })
 
   it('never names a file the client did not upload on save_failed', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce(
-      sseResponse(
-        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
-          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: '../../etc/passwd' })}\n\n`
-      )
-    ) as unknown as typeof fetch
+    uploadMock.mockImplementationOnce(
+      reply([
+        ['start', { collection: 'c1', files: ['a.txt'] }],
+        ['error', { message: 'Failed to save file.', code: 'save_failed', filename: '../../etc/passwd' }]
+      ])
+    )
 
     const { events } = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
     const err = events.find((e) => e.event === 'error')
@@ -144,18 +156,92 @@ describe('streamIngestUploadBatched', () => {
   })
 
   it('never puts enrichment flags into the staged upload body — /ingest/upload stages only', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(stagedBatch('a.txt'))
-    vi.stubGlobal('fetch', fetchMock)
+    uploadMock.mockImplementationOnce(staged('a.txt'))
 
     // Enrichment travels solely on the `createIngestJob` (`/ingest/finalize`)
     // call the run controller makes once every batch is staged — this
     // function has no enrichment parameter at all.
     await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
-    const uploadBody = fetchMock.mock.calls[0][1].body as FormData
+    const uploadBody = uploadMock.mock.calls[0][1]
     expect(uploadBody.get('ner')).toBeNull()
     expect(uploadBody.get('hate_speech')).toBeNull()
     expect(uploadBody.get('defer_ingest')).toBeNull()
     expect([...uploadBody.keys()].sort()).toEqual(['collection', 'files'])
+  })
+
+  it('packs batches at 64 MiB even when the server accepts far more per request', async () => {
+    uploadMock.mockImplementationOnce(staged('a')).mockImplementationOnce(staged('b'))
+    const mib = 1024 * 1024
+
+    await collect(streamIngestUploadBatched('c1', [fileOfSize('a', 40 * mib), fileOfSize('b', 40 * mib)], 1024 * mib))
+
+    expect(uploadMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('re-sends only the files a stalled batch had not saved yet', async () => {
+    vi.useFakeTimers()
+    uploadMock
+      .mockImplementationOnce(reply([['file_saved', { filename: 'a' }]], new UploadStalledError()))
+      .mockImplementationOnce(staged('b'))
+
+    const run = collect(streamIngestUploadBatched('c1', [fileOfSize('a', 1), fileOfSize('b', 1)], 1000))
+    await vi.runAllTimersAsync()
+    const { events, result } = await run
+
+    expect(sentNames(0)).toEqual(['a', 'b'])
+    expect(sentNames(1)).toEqual(['b'])
+    expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'warning', 'file_saved'])
+    expect(String(events[2].data.message)).toBe('Batch 1/1 did not go through — retrying (1/2).')
+    expect(result).toEqual({ anySaved: true, failures: [] })
+  })
+
+  it('retries a gateway error and a stream that ended without upload_complete', async () => {
+    vi.useFakeTimers()
+    uploadMock
+      .mockImplementationOnce(reply([], new UploadHttpError(502)))
+      .mockImplementationOnce(reply([['file_saved', { filename: 'a' }]]))
+      .mockImplementationOnce(staged('b'))
+
+    const run = collect(streamIngestUploadBatched('c1', [fileOfSize('a', 1), fileOfSize('b', 1)], 1000))
+    await vi.runAllTimersAsync()
+    const { result } = await run
+
+    expect(uploadMock).toHaveBeenCalledTimes(3)
+    expect(sentNames(2)).toEqual(['b'])
+    expect(result).toEqual({ anySaved: true, failures: [] })
+  })
+
+  it('gives up after the retries and reports exactly the files that never arrived', async () => {
+    vi.useFakeTimers()
+    uploadMock.mockImplementation(reply([], new UploadStalledError()))
+
+    const run = collect(streamIngestUploadBatched('c1', [fileOfSize('a', 1)], 1000))
+    await vi.runAllTimersAsync()
+    const { events, result } = await run
+
+    expect(uploadMock).toHaveBeenCalledTimes(3)
+    expect(events.map((e) => e.event)).toEqual(['start', 'warning', 'warning', 'warning', 'error'])
+    expect(String(events[3].data.message)).toBe(
+      'Batch 1/1 ("a") stopped making progress and was skipped; other batches continued.'
+    )
+    expect(result.failures).toEqual([{ batch: 1, total: 1, files: ['a'], stalled: true }])
+  })
+
+  it('counts a batch done once upload_complete arrived, even if the stream then stalls', async () => {
+    uploadMock.mockImplementationOnce(
+      reply(
+        [
+          ['file_saved', { filename: 'a' }],
+          ['upload_complete', { collection: 'c1', files_saved: 1 }]
+        ],
+        new UploadStalledError()
+      )
+    )
+
+    const { result } = await collect(streamIngestUploadBatched('c1', [fileOfSize('a', 1)], 1000))
+
+    expect(uploadMock).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ anySaved: true, failures: [] })
   })
 })
 
