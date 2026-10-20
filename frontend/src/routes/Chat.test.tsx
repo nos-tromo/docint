@@ -423,6 +423,20 @@ function mockHistoryFetch(messages: unknown[]) {
 }
 
 describe('Chat session-history validation restoration', () => {
+  // A session's history is served only through the collection it is pinned to.
+  beforeEach(() => {
+    useUiStore.setState({ selectedCollection: 'docs' })
+  })
+
+  it('reads the history through the active collection', async () => {
+    mockHistoryFetch([])
+    renderChatWithSession('sess-restored')
+    await waitFor(() => {
+      const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]))
+      expect(urls.some((u) => u.includes('/sessions/sess-restored/history?collection=docs'))).toBe(true)
+    })
+  })
+
   it('renders the validation banner state from restored session history', async () => {
     mockHistoryFetch([
       { role: 'user', content: 'hi' },
@@ -989,6 +1003,15 @@ describe('Chat session switching', () => {
     )
   }
 
+  function BackButton() {
+    const navigate = useNavigate()
+    return (
+      <button type="button" onClick={() => navigate(-1)}>
+        back
+      </button>
+    )
+  }
+
   // Both chat routes render the same `Chat` element, so React Router reuses
   // the component instance across the navigation — local state survives it.
   // That is what makes the transcript reset a real requirement rather than an
@@ -1003,12 +1026,57 @@ describe('Chat session switching', () => {
             <Route path="/chat/:sessionId" element={<Chat />} />
           </Routes>
           <NavigateButton to="/chat" />
+          <BackButton />
         </MemoryRouter>
       </QueryClientProvider>
     )
   }
 
+  it("shows none of a chat's answers when Back reopens it under another collection", async () => {
+    // The sidebar leaves /chat/:id on a collection switch, but Back returns to
+    // it, and any answer shown there could be added to the new collection's
+    // report. The server refuses the history outside its collection.
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string) => {
+        const url = String(u)
+        urls.push(url)
+        if (url.includes('/history') && url.includes('collection=other')) {
+          const body = JSON.stringify({ detail: 'Session not found.' })
+          return { ok: false, status: 404, json: async () => JSON.parse(body), text: async () => body }
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            messages: [
+              { role: 'user', content: 'earlier question' },
+              { role: 'assistant', content: 'earlier answer', sources: [] }
+            ]
+          })
+        }
+      })
+    )
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    renderChatAt('/chat/sess-old')
+    expect(await screen.findByText('earlier answer')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'go' }))
+    await waitFor(() => expect(screen.queryByText('earlier answer')).not.toBeInTheDocument())
+
+    act(() => useUiStore.getState().setSelectedCollection('other'))
+    await userEvent.click(screen.getByRole('button', { name: 'back' }))
+
+    await waitFor(() =>
+      expect(urls.some((u) => u.includes('/sessions/sess-old/history?collection=other'))).toBe(true)
+    )
+    expect(screen.queryByText('earlier answer')).not.toBeInTheDocument()
+  })
+
   it('clears the restored transcript when the user starts a new session', async () => {
+    useUiStore.setState({ selectedCollection: 'docs' })
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({

@@ -427,6 +427,7 @@ export const en = {
   'report.delete_aria': 'Delete report',
   'report.delete_confirm': 'Delete this report? This cannot be undone.',
   'report.select_hint': 'Select a report, or create one and add artifacts from Chat or Analysis.',
+  'report.select_collection': 'Select a collection to see its reports.',
   'report.load_failed': 'This report could not be loaded.',
   'report.clear_selection': 'Clear selection',
   'report.loading': 'Loading report…',

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { ApiError, setOwnerParam } from './client'
 import {
   addReportItem,
+  addReportItems,
   createReport,
   deleteReport,
   getReport,
@@ -16,6 +17,7 @@ import {
   updateReport,
   updateReportItem
 } from './reports'
+import type { ReportItemInput } from './types'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -54,71 +56,88 @@ describe('reports api', () => {
     expect(String(lastCall()[0])).toContain('collection=docs')
   })
 
-  it('getReport GETs the report path', async () => {
+  it('getReport GETs the report path in the active collection', async () => {
     mockFetch({ id: 4, items: [] })
-    await getReport(4)
+    await getReport('docs', 4)
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/4')
+    expect(String(call[0])).toContain('/reports/4?collection=docs')
     expect(call[1]).toBeUndefined()
+  })
+
+  it('escapes the collection, so its name cannot spill into the query', async () => {
+    mockFetch({ id: 4, items: [] })
+    await getReport('Fall A&B', 4)
+    expect(String(lastCall()[0])).toContain('/reports/4?collection=Fall%20A%26B')
   })
 
   it('updateReport uses PATCH', async () => {
     mockFetch({ id: 4 })
-    await updateReport(4, { title: 'New' })
+    await updateReport('docs', 4, { title: 'New' })
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/4')
+    expect(String(call[0])).toContain('/reports/4?collection=docs')
     expect(call[1].method).toBe('PATCH')
   })
 
   it('deleteReport uses DELETE', async () => {
     mockFetch({ ok: true })
-    await deleteReport(4)
-    expect(lastCall()[1].method).toBe('DELETE')
+    await deleteReport('docs', 4)
+    const call = lastCall()
+    expect(String(call[0])).toContain('/reports/4?collection=docs')
+    expect(call[1].method).toBe('DELETE')
   })
 
   it('addReportItem POSTs to the items path', async () => {
     mockFetch({ id: 5 })
-    await addReportItem(3, { artifact_type: 'entity_finding', dedupe_key: 'entity:c1', snapshot: {} })
+    await addReportItem('docs', 3, { artifact_type: 'entity_finding', dedupe_key: 'entity:c1', snapshot: {} })
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/3/items')
+    expect(String(call[0])).toContain('/reports/3/items?collection=docs')
     expect(call[1].method).toBe('POST')
+  })
+
+  it('addReportItems POSTs the batch with nothing but its items', async () => {
+    mockFetch({ added: 1, skipped: 0, updated: 0, item_count: 1 })
+    const items: ReportItemInput[] = [{ artifact_type: 'entity_finding', dedupe_key: 'entity:c1', snapshot: {} }]
+    await addReportItems('docs', 3, items)
+    const call = lastCall()
+    expect(String(call[0])).toContain('/reports/3/items/batch?collection=docs')
+    expect(JSON.parse(call[1].body)).toEqual({ items })
   })
 
   it('updateReportItem uses PATCH on the item path', async () => {
     mockFetch({ id: 5 })
-    await updateReportItem(3, 5, { note: 'n' })
+    await updateReportItem('docs', 3, 5, { note: 'n' })
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/3/items/5')
+    expect(String(call[0])).toContain('/reports/3/items/5?collection=docs')
     expect(call[1].method).toBe('PATCH')
   })
 
   it('removeReportItem uses DELETE on the item path', async () => {
     mockFetch({ ok: true })
-    await removeReportItem(3, 5)
+    await removeReportItem('docs', 3, 5)
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/3/items/5')
+    expect(String(call[0])).toContain('/reports/3/items/5?collection=docs')
     expect(call[1].method).toBe('DELETE')
   })
 
   it('reorderReportItems POSTs item_ids', async () => {
     mockFetch({ id: 3, items: [] })
-    await reorderReportItems(3, [2, 1])
+    await reorderReportItems('docs', 3, [2, 1])
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/3/items/reorder')
+    expect(String(call[0])).toContain('/reports/3/items/reorder?collection=docs')
     expect(JSON.parse(call[1].body)).toEqual({ item_ids: [2, 1] })
   })
 
   it('reportExportHref builds the export URL for each format', () => {
-    expect(reportExportHref(7, 'pdf')).toContain('/reports/7/export.pdf')
-    expect(reportExportHref(7, 'zip')).toContain('/reports/7/export.zip')
-    expect(reportExportHref(7, 'md')).toContain('/reports/7/export.md')
+    expect(reportExportHref('docs', 7, 'pdf')).toContain('/reports/7/export.pdf?collection=docs')
+    expect(reportExportHref('docs', 7, 'zip')).toContain('/reports/7/export.zip?collection=docs')
+    expect(reportExportHref('docs', 7, 'md')).toContain('/reports/7/export.md?collection=docs')
   })
 
   it('refreshCollectionOverview POSTs to the refresh route', async () => {
     mockFetch({ id: 7 })
-    await refreshCollectionOverview(7)
+    await refreshCollectionOverview('docs', 7)
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/7/collection-overview/refresh')
+    expect(String(call[0])).toContain('/reports/7/collection-overview/refresh?collection=docs')
     expect(call[1].method).toBe('POST')
   })
 })
@@ -134,9 +153,9 @@ describe('report PDF job api', () => {
 
   it('queues a render and returns its job id', async () => {
     mockFetch({ job_id: 'a1b2c3' })
-    await expect(queueReportPdf(7)).resolves.toEqual({ job_id: 'a1b2c3', adopted: false })
+    await expect(queueReportPdf('docs', 7)).resolves.toEqual({ job_id: 'a1b2c3', adopted: false })
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/7/pdf')
+    expect(String(call[0])).toContain('/reports/7/pdf?collection=docs')
     expect(call[1].method).toBe('POST')
   })
 
@@ -144,36 +163,36 @@ describe('report PDF job api', () => {
     mockError(409, {
       detail: { message: 'A PDF of this report is already being rendered.', job_id: 'd4e5f6' }
     })
-    await expect(queueReportPdf(7)).resolves.toEqual({ job_id: 'd4e5f6', adopted: true })
+    await expect(queueReportPdf('docs', 7)).resolves.toEqual({ job_id: 'd4e5f6', adopted: true })
   })
 
   it('adopts the render a 409 names at the top level', async () => {
     mockError(409, { message: 'A PDF of this report is already being rendered.', job_id: 'd4e5f6' })
-    await expect(queueReportPdf(7)).resolves.toEqual({ job_id: 'd4e5f6', adopted: true })
+    await expect(queueReportPdf('docs', 7)).resolves.toEqual({ job_id: 'd4e5f6', adopted: true })
   })
 
   it('rethrows a refusal that names no job', async () => {
     mockError(503, { detail: 'PDF export is not available.' })
-    await expect(queueReportPdf(7)).rejects.toBeInstanceOf(ApiError)
+    await expect(queueReportPdf('docs', 7)).rejects.toBeInstanceOf(ApiError)
   })
 
   it('reads the status from its own route', async () => {
     mockFetch({ job: null, pdf: null })
-    await expect(reportPdfStatus(7)).resolves.toEqual({ job: null, pdf: null })
+    await expect(reportPdfStatus('docs', 7)).resolves.toEqual({ job: null, pdf: null })
     const call = lastCall()
-    expect(String(call[0])).toContain('/reports/7/pdf/status')
+    expect(String(call[0])).toContain('/reports/7/pdf/status?collection=docs')
     expect(call[1]).toBeUndefined()
   })
 
   it('links the stored PDF', () => {
-    expect(reportPdfHref(7)).toMatch(/\/reports\/7\/pdf$/)
+    expect(reportPdfHref('docs', 7)).toMatch(/\/reports\/7\/pdf\?collection=docs$/)
   })
 
   it('carries the admin owner context on every download link', () => {
     // A link is not an apiGet, so nothing else adds it — and without it an
     // admin in another user's namespace is answered 404.
     setOwnerParam('other.operator')
-    expect(reportPdfHref(7)).toContain('/reports/7/pdf?owner=other.operator')
-    expect(reportExportHref(7, 'md')).toContain('/reports/7/export.md?owner=other.operator')
+    expect(reportPdfHref('docs', 7)).toContain('/reports/7/pdf?collection=docs&owner=other.operator')
+    expect(reportExportHref('docs', 7, 'md')).toContain('/reports/7/export.md?collection=docs&owner=other.operator')
   })
 })

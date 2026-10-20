@@ -9,7 +9,6 @@ import {
   useRemoveReportItem
 } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
-import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
@@ -28,7 +27,6 @@ export function AddToReportButton({ item, inReport, className }: Props) {
   const t = useT()
   const qc = useQueryClient()
   const activeReportId = useReportStore((s) => s.activeReportId)
-  const collection = useUiStore((s) => s.selectedCollection)
   const ensureReport = useEnsureActiveReport()
   const addItem = useAddReportItem()
   const removeItem = useRemoveReportItem()
@@ -52,10 +50,7 @@ export function AddToReportButton({ item, inReport, className }: Props) {
       // Shared with the section-wide "Add all" so the auto-create rules
       // cannot drift between the two paths.
       const reportId = await ensureReport()
-      // The active collection travels with the add: the report may have been
-      // created in another one, and the artifact's evidence lives where it was
-      // retrieved.
-      await addItem.mutateAsync({ reportId, item: { ...item, collection: collection ?? null } })
+      await addItem.mutateAsync({ reportId, item })
     } catch (e) {
       console.error('Report action failed', e)
       setFailed(true)

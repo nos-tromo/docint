@@ -33,18 +33,16 @@ afterEach(() => {
 })
 
 describe('AddToReportButton', () => {
-  it('sends the active collection with the add', async () => {
-    // The report may have been created in another collection; the artifact's
-    // evidence lives where it was retrieved, so the server needs to be told.
-    const bodies: Array<Record<string, unknown>> = []
+  it('adds through the active collection, the only one its report answers in', async () => {
+    const adds: Array<{ url: string; body: Record<string, unknown> }> = []
     vi.stubGlobal(
       'fetch',
       vi.fn(async (u: string, init?: RequestInit) => {
         const url = String(u)
-        if (init?.method === 'POST' && init.body) bodies.push(JSON.parse(String(init.body)))
         if (url.endsWith('/reports') && init?.method === 'POST') {
           return { ok: true, status: 200, json: async () => ({ id: 1, title: 'Untitled report', items: [] }) }
         }
+        if (init?.method === 'POST') adds.push({ url, body: JSON.parse(String(init.body)) })
         return { ok: true, status: 200, json: async () => ({ id: 9, dedupe_key: 'entity:c1' }) }
       })
     )
@@ -53,9 +51,9 @@ describe('AddToReportButton', () => {
     renderButton(false, qc)
     await userEvent.click(screen.getByRole('button', { name: /add to report/i }))
 
-    await waitFor(() => {
-      expect(bodies.some((b) => b.dedupe_key === 'entity:c1' && b.collection === 'docs')).toBe(true)
-    })
+    await waitFor(() => expect(adds).toHaveLength(1))
+    expect(adds[0].url).toContain('/reports/1/items?collection=docs')
+    expect(adds[0].body).toEqual(item)
   })
 
   it('auto-creates a report then adds the item when none is active', async () => {

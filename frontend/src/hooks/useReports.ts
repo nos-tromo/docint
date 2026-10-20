@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   addReportItem,
@@ -23,19 +23,49 @@ import { useT } from '@/i18n/LanguageContext'
 export const reportsKey = ['reports'] as const
 export const reportKey = (id: number) => ['reports', id] as const
 
-export function useReports(collection?: string) {
+/**
+ * The collection every report request names: the active one, or '' while none
+ * is active, which no report belongs to. A report is reachable only from its
+ * own collection, and the server answers 404 for any other.
+ */
+export function useReportCollection(): string {
+  return useUiStore((s) => s.selectedCollection) ?? ''
+}
+
+/** The active collection's reports. Like the session list: no collection, no list. */
+export function useReports() {
+  const collection = useReportCollection()
   return useQuery({
-    queryKey: collection ? (['reports', { collection }] as const) : reportsKey,
-    queryFn: () => listReports(collection)
+    queryKey: ['reports', { collection }] as const,
+    queryFn: () => listReports(collection),
+    enabled: !!collection
   })
 }
 
+/**
+ * One report, read through the active collection.
+ *
+ * Every reader of the active report comes through here, so this is where a
+ * stale active id is dropped: another tab's report, one kept from before
+ * reports were scoped to their collection, or one deleted elsewhere comes back
+ * 404, and clearing it lets the next add start a report in this collection
+ * instead of failing against it forever. Only while it is still the active
+ * id — an answer about an older id must not clear a newer choice.
+ */
 export function useReport(id: number | null) {
-  return useQuery({
+  const collection = useReportCollection()
+  const query = useQuery({
     queryKey: id != null ? reportKey(id) : ['reports', 'none'],
-    queryFn: () => getReport(id as number),
-    enabled: id != null
+    queryFn: () => getReport(collection, id as number),
+    enabled: id != null && !!collection
   })
+  const gone = query.error instanceof ApiError && query.error.status === 404
+  useEffect(() => {
+    if (!gone) return
+    const { activeReportId, setActiveReportId } = useReportStore.getState()
+    if (activeReportId === id) setActiveReportId(null)
+  }, [gone, id])
+  return query
 }
 
 // Every mutation invalidates the `['reports']` prefix, which React Query
@@ -51,6 +81,7 @@ export function useCreateReport() {
 }
 
 export function useUpdateReport() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
     mutationFn: ({
@@ -63,69 +94,71 @@ export function useUpdateReport() {
       reference_number?: string
       show_toc?: boolean
       show_collection_overview?: boolean
-    }) => updateReport(id, body),
+    }) => updateReport(collection, id, body),
     onSuccess: invalidate
   })
 }
 
 export function useDeleteReport() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
-  return useMutation({ mutationFn: (id: number) => deleteReport(id), onSuccess: invalidate })
+  return useMutation({ mutationFn: (id: number) => deleteReport(collection, id), onSuccess: invalidate })
 }
 
 export function useAddReportItem() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
-    mutationFn: ({ reportId, item }: { reportId: number; item: ReportItemInput }) => addReportItem(reportId, item),
+    mutationFn: ({ reportId, item }: { reportId: number; item: ReportItemInput }) =>
+      addReportItem(collection, reportId, item),
     onSuccess: invalidate
   })
 }
 
 export function useAddReportItems() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
-    mutationFn: ({
-      reportId,
-      items,
-      collection
-    }: {
-      reportId: number
-      items: ReportItemInput[]
-      collection?: string | null
-    }) => addReportItems(reportId, items, collection),
+    mutationFn: ({ reportId, items }: { reportId: number; items: ReportItemInput[] }) =>
+      addReportItems(collection, reportId, items),
     onSuccess: invalidate
   })
 }
 
 export function useRemoveReportItem() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
-    mutationFn: ({ reportId, itemId }: { reportId: number; itemId: number }) => removeReportItem(reportId, itemId),
+    mutationFn: ({ reportId, itemId }: { reportId: number; itemId: number }) =>
+      removeReportItem(collection, reportId, itemId),
     onSuccess: invalidate
   })
 }
 
 export function useUpdateReportItem() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
     mutationFn: ({ reportId, itemId, note }: { reportId: number; itemId: number; note: string | null }) =>
-      updateReportItem(reportId, itemId, { note }),
+      updateReportItem(collection, reportId, itemId, { note }),
     onSuccess: invalidate
   })
 }
 
 export function useReorderReportItems() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
   return useMutation({
     mutationFn: ({ reportId, itemIds }: { reportId: number; itemIds: number[] }) =>
-      reorderReportItems(reportId, itemIds),
+      reorderReportItems(collection, reportId, itemIds),
     onSuccess: invalidate
   })
 }
 
 export function useRefreshCollectionOverview() {
+  const collection = useReportCollection()
   const invalidate = useReportInvalidator()
-  return useMutation({ mutationFn: (id: number) => refreshCollectionOverview(id), onSuccess: invalidate })
+  return useMutation({ mutationFn: (id: number) => refreshCollectionOverview(collection, id), onSuccess: invalidate })
 }
 
 /** Dedupe keys already in the active report, for the "already added" UI state. */
@@ -158,13 +191,15 @@ export function useEnsureActiveReport() {
   const t = useT()
   const activeReportId = useReportStore((s) => s.activeReportId)
   const setActiveReportId = useReportStore((s) => s.setActiveReportId)
-  const collection = useUiStore((s) => s.selectedCollection)
+  const collection = useReportCollection()
   const createReport = useCreateReport()
   return async (): Promise<number> => {
     if (activeReportId != null) return activeReportId
+    // Every report belongs to a collection; with none active there is nowhere to add.
+    if (!collection) throw new Error('No collection is active, so there is no report to add to.')
     const created = await createReport.mutateAsync({
       title: t('report.untitled_title'),
-      collection_name: collection ?? undefined
+      collection_name: collection
     })
     setActiveReportId(created.id)
     return created.id
@@ -214,7 +249,6 @@ export function useAddAllToReport<Row>(params: {
   const t = useT()
   const ensureReport = useEnsureActiveReport()
   const activeReportId = useReportStore((s) => s.activeReportId)
-  const collection = useUiStore((s) => s.selectedCollection)
   const existingKeys = useReportDedupeKeys(activeReportId)
   const untranslatedKeys = useReportUntranslatedKeys(activeReportId)
   const addItems = useAddReportItems()
@@ -256,7 +290,7 @@ export function useAddAllToReport<Row>(params: {
           }
         }
         seen.add(item.dedupe_key)
-        items.push({ ...item, collection: collection ?? null })
+        items.push(item)
       }
       if (items.length === 0) {
         setOutcome({ status: 'done', added: 0, skipped, updated: 0 })
@@ -271,7 +305,7 @@ export function useAddAllToReport<Row>(params: {
       }
       setOutcome({ status: 'adding', added: 0, skipped: 0, updated: 0 })
       const reportId = await ensureReport()
-      const result = await addItems.mutateAsync({ reportId, items, collection })
+      const result = await addItems.mutateAsync({ reportId, items })
       setOutcome({ status: 'done', added: result.added, skipped: skipped + result.skipped, updated: result.updated })
     } catch (e) {
       console.error('Add all to report failed', e)

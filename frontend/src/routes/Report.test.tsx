@@ -73,7 +73,7 @@ function mockFetch(
       if (url.includes('/reports/1')) {
         return { ok: true, status: 200, json: async () => detail }
       }
-      if (url.endsWith('/reports')) {
+      if (url.split('?')[0].endsWith('/reports')) {
         return {
           ok: true,
           status: 200,
@@ -98,6 +98,7 @@ function renderReport() {
 
 beforeEach(() => {
   localStorage.clear()
+  useUiStore.setState({ selectedCollection: 'docs', selectedOwner: null })
   useReportStore.setState({ activeReportId: 1 })
   mockFetch()
 })
@@ -131,7 +132,7 @@ describe('Report view', () => {
     expect(pdf.tagName).toBe('BUTTON')
     expect(pdf).not.toHaveAttribute('href')
     const md = screen.getByRole('menuitem', { name: 'Markdown' })
-    expect(md).toHaveAttribute('href', expect.stringContaining('/reports/1/export.md'))
+    expect(md).toHaveAttribute('href', expect.stringContaining('/reports/1/export.md?collection=docs'))
     expect(md).toHaveAttribute('download')
     const html = screen.getByRole('menuitem', { name: 'HTML' })
     expect(html).toHaveAttribute('target', '_blank')
@@ -142,6 +143,24 @@ describe('Report view', () => {
     useReportStore.setState({ activeReportId: null })
     renderReport()
     expect(await screen.findByText(/select a report/i)).toBeInTheDocument()
+  })
+
+  it("reads only the active collection's reports", async () => {
+    renderReport()
+    await screen.findByDisplayValue('Case Alpha')
+    const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]))
+    const reportReads = urls.filter((u) => u.includes('/reports'))
+    expect(reportReads.length).toBeGreaterThan(0)
+    expect(reportReads.filter((u) => !u.includes('collection=docs'))).toEqual([])
+  })
+
+  it('shows no report, and offers to start none, until a collection is active', async () => {
+    useUiStore.setState({ selectedCollection: null })
+    renderReport()
+    expect(await screen.findByText('Select a collection to see its reports.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /new/i })).not.toBeInTheDocument()
+    const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]))
+    expect(urls.filter((u) => u.includes('/reports'))).toEqual([])
   })
 
   it('reflects show_toc and toggles it via PATCH', async () => {
@@ -220,7 +239,7 @@ describe('Report view — PDF export', () => {
     renderReport()
     await openExportMenu()
     await waitFor(() => expect(pdfEntry().tagName).toBe('A'))
-    expect(pdfEntry().getAttribute('href')).toMatch(/\/reports\/1\/pdf$/)
+    expect(pdfEntry().getAttribute('href')).toMatch(/\/reports\/1\/pdf\?collection=docs$/)
     expect(pdfEntry()).toHaveAttribute('download', 'report-1-Case Alpha.pdf')
   })
 
@@ -247,7 +266,7 @@ describe('Report view — PDF export', () => {
           return { ok: true, status: 202, json: async () => ({ job_id: 'f00d01' }) }
         }
         if (url.includes('/reports/1')) return { ok: true, status: 200, json: async () => reportDetail }
-        if (url.endsWith('/reports')) {
+        if (url.split('?')[0].endsWith('/reports')) {
           return { ok: true, status: 200, json: async () => ({ reports: [{ ...reportDetail, items: undefined }] }) }
         }
         return { ok: true, status: 200, json: async () => ({}) }
@@ -408,7 +427,7 @@ describe('Report view — document overview', () => {
           return { ok: true, status: 200, json: async () => reportDetail }
         }
         if (url.includes('/reports/1')) return { ok: true, status: 200, json: async () => reportDetail }
-        if (url.endsWith('/reports')) {
+        if (url.split('?')[0].endsWith('/reports')) {
           return { ok: true, status: 200, json: async () => ({ reports: [{ ...reportDetail, items: undefined }] }) }
         }
         return { ok: true, status: 200, json: async () => ({}) }
@@ -433,12 +452,12 @@ describe('Report view — document overview', () => {
           whoamiCallCount++
           return { ok: true, status: 200, json: async () => ({ username: 'jane.doe', display_name: 'Jane Doe' }) }
         }
-        if (url.endsWith('/reports') && init?.method === 'POST') {
+        if (url.split('?')[0].endsWith('/reports') && init?.method === 'POST') {
           calls.push({ url, body: JSON.parse(String(init.body)) })
           return { ok: true, status: 200, json: async () => ({ ...reportDetail, id: 2 }) }
         }
         if (url.includes('/reports/')) return { ok: true, status: 200, json: async () => reportDetail }
-        if (url.endsWith('/reports')) {
+        if (url.split('?')[0].endsWith('/reports')) {
           return { ok: true, status: 200, json: async () => ({ reports: [{ ...reportDetail, items: undefined }] }) }
         }
         return { ok: true, status: 200, json: async () => ({}) }
@@ -463,12 +482,12 @@ describe('Report view — document overview', () => {
           whoamiCallCount++
           return { ok: false, status: 401, json: async () => ({}) }
         }
-        if (url.endsWith('/reports') && init?.method === 'POST') {
+        if (url.split('?')[0].endsWith('/reports') && init?.method === 'POST') {
           calls.push({ body: JSON.parse(String(init.body)) })
           return { ok: true, status: 200, json: async () => ({ ...reportDetail, id: 3 }) }
         }
         if (url.includes('/reports/')) return { ok: true, status: 200, json: async () => reportDetail }
-        if (url.endsWith('/reports')) {
+        if (url.split('?')[0].endsWith('/reports')) {
           return { ok: true, status: 200, json: async () => ({ reports: [{ ...reportDetail, items: undefined }] }) }
         }
         return { ok: true, status: 200, json: async () => ({}) }
@@ -498,7 +517,7 @@ describe('Report view — the header selector', () => {
         if (url.includes('/reports/2')) {
           return { ok: true, status: 200, json: async () => ({ ...reportDetail, id: 2, title: 'Case Beta', item_count: 0, items: [] }) }
         }
-        if (url.endsWith('/reports')) {
+        if (url.split('?')[0].endsWith('/reports')) {
           return {
             ok: true,
             status: 200,
@@ -567,7 +586,7 @@ describe('Report view — the header selector', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (u: string) => {
-        if (String(u).endsWith('/reports')) {
+        if (String(u).split('?')[0].endsWith('/reports')) {
           return { ok: true, status: 200, json: async () => ({ reports: [] }) }
         }
         return { ok: true, status: 200, json: async () => ({}) }

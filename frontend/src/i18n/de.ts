@@ -442,6 +442,7 @@ export const de: Strings = {
   'report.delete_aria': 'Bericht löschen',
   'report.delete_confirm': 'Diesen Bericht löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
   'report.select_hint': 'Wählen Sie einen Bericht aus oder erstellen Sie einen und fügen Sie Artefakte aus Chat oder Analyse hinzu.',
+  'report.select_collection': 'Wählen Sie eine Sammlung aus, um deren Berichte zu sehen.',
   'report.load_failed': 'Dieser Bericht konnte nicht geladen werden.',
   'report.clear_selection': 'Auswahl aufheben',
   'report.loading': 'Bericht wird geladen…',

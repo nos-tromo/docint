@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { queueReportPdf, reportPdfHref, reportPdfStatus } from '@/api/reports'
+import { useReportCollection } from '@/hooks/useReports'
 import { selectJobEvents, useIngestJobsStore } from '@/stores/ingestJobs'
 import type { IngestEvent, IngestJobSnapshot, ReportPdfStatus, ReportSummary } from '@/api/types'
 
@@ -155,12 +156,14 @@ interface LocalRequest {
  */
 export function useReportPdf(report: Pick<ReportSummary, 'id' | 'updated_at'>) {
   const queryClient = useQueryClient()
+  // One value for the status, the queue and the download alike.
+  const collection = useReportCollection()
   const [request, setRequest] = useState<LocalRequest | null>(null)
   const own = request?.reportId === report.id ? request : null
 
   const statusQuery = useQuery({
     queryKey: [...reportPdfKey(report.id), report.updated_at],
-    queryFn: () => reportPdfStatus(report.id),
+    queryFn: () => reportPdfStatus(collection, report.id),
     staleTime: 0,
     // An edit changes the key; keeping this report's last answer meanwhile
     // stops a running render's status line from blinking out.
@@ -208,8 +211,8 @@ export function useReportPdf(report: Pick<ReportSummary, 'id' | 'updated_at'>) {
     if (!completedJobId || !currentFilename) return
     if (!requestedJobs.has(completedJobId) || downloadedJobs.has(completedJobId)) return
     downloadedJobs.add(completedJobId)
-    downloadFile(reportPdfHref(report.id), currentFilename)
-  }, [completedJobId, currentFilename, report.id])
+    downloadFile(reportPdfHref(collection, report.id), currentFilename)
+  }, [completedJobId, currentFilename, report.id, collection])
 
   const view = deriveReportPdfView({ job, pdf, frames, pending, startFailed: own?.failed ?? false })
 
@@ -219,7 +222,7 @@ export function useReportPdf(report: Pick<ReportSummary, 'id' | 'updated_at'>) {
     setRequest({ reportId, jobId: null, at: 0, failed: false })
     let jobId: string
     try {
-      jobId = (await queueReportPdf(reportId)).job_id
+      jobId = (await queueReportPdf(collection, reportId)).job_id
     } catch (e) {
       console.error('Queueing the report PDF failed', e)
       setRequest({ reportId, jobId: null, at: 0, failed: true })

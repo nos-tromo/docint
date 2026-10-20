@@ -137,7 +137,10 @@ describe('AddAllToReportButton', () => {
       'entity:c2',
       'entity:c3'
     ])
-    expect(batches[0].body.collection).toBe('docs')
+    // The report answers only in its own collection, so that is where the batch
+    // goes; the items carry no collection of their own.
+    expect(batches[0].url).toContain('/reports/1/items/batch?collection=docs')
+    expect(batches[0].body).toEqual({ items: [toItem({ chunk_id: 'c1' }), toItem({ chunk_id: 'c2' }), toItem({ chunk_id: 'c3' })] })
   })
 
   it('auto-creates a report when none is active, then adds into it', async () => {
