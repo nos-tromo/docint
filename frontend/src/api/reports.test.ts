@@ -3,10 +3,12 @@ import { ApiError, setOwnerParam } from './client'
 import {
   addReportItem,
   addReportItems,
+  assignReport,
   createReport,
   deleteReport,
   getReport,
   listReports,
+  listUnassignedReports,
   queueReportPdf,
   refreshCollectionOverview,
   removeReportItem,
@@ -54,6 +56,22 @@ describe('reports api', () => {
     mockFetch({ reports: [] })
     await listReports('docs')
     expect(String(lastCall()[0])).toContain('collection=docs')
+  })
+
+  it('listUnassignedReports GETs the reports that belong to no collection', async () => {
+    mockFetch({ reports: [] })
+    await listUnassignedReports()
+    const call = lastCall()
+    expect(String(call[0])).toMatch(/\/reports\/unassigned$/)
+    expect(call[1]).toBeUndefined()
+  })
+
+  it('assignReport POSTs the collection to move the report into', async () => {
+    mockFetch({ id: 3, items: [] })
+    await assignReport(3, 'docs 2')
+    const call = lastCall()
+    expect(String(call[0])).toMatch(/\/reports\/unassigned\/3\/assign\?collection=docs%202$/)
+    expect(call[1].method).toBe('POST')
   })
 
   it('getReport GETs the report path in the active collection', async () => {

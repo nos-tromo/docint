@@ -26,6 +26,13 @@ export const listReports = (collection: string) =>
 export const getReport = (collection: string, id: number) =>
   apiGet<Report>(inCollection(`/reports/${id}`, collection))
 
+/** The caller's reports kept from before every report named its collection — the one listing outside a collection. */
+export const listUnassignedReports = () => apiGet<{ reports: ReportSummary[] }>('/reports/unassigned')
+
+/** Place a report without a collection into `collection`. The server assigns only such a report, once. */
+export const assignReport = (id: number, collection: string) =>
+  apiPost<Report>(inCollection(`/reports/unassigned/${id}/assign`, collection))
+
 export const createReport = (body: {
   title: string
   collection_name: string

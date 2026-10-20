@@ -24,6 +24,7 @@ import type {
 import { ImageTextParts } from '@/components/common/ImageTextParts'
 import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import { ReportSection } from '@/components/report/ReportSection'
+import { UnassignedReports } from '@/components/report/UnassignedReports'
 import {
   useCreateReport,
   useDeleteReport,
@@ -443,6 +444,7 @@ export function Report() {
       <div className="p-8 flex flex-col gap-4 h-full min-h-0">
         <h1 className="sr-only">{t('report.title')}</h1>
         <p className="text-sm text-muted-foreground">{t('report.select_collection')}</p>
+        <UnassignedReports collection={null} />
       </div>
     )
   }
@@ -494,6 +496,8 @@ export function Report() {
           {report && <ExportMenu report={report} t={t} />}
         </div>
       </div>
+
+      <UnassignedReports collection={collection} />
 
       {reports.isError && (
         <p className="text-xs text-[var(--status-red-fg)]" role="alert">

@@ -87,6 +87,9 @@ function mockFetch(
   )
 }
 
+/** The one report listing outside a collection: reports that belong to none. */
+const isUnassignedList = (url: string) => url.split('?')[0].endsWith('/reports/unassigned')
+
 function renderReport() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -149,7 +152,7 @@ describe('Report view', () => {
     renderReport()
     await screen.findByDisplayValue('Case Alpha')
     const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]))
-    const reportReads = urls.filter((u) => u.includes('/reports'))
+    const reportReads = urls.filter((u) => u.includes('/reports') && !isUnassignedList(u))
     expect(reportReads.length).toBeGreaterThan(0)
     expect(reportReads.filter((u) => !u.includes('collection=docs'))).toEqual([])
   })
@@ -160,7 +163,7 @@ describe('Report view', () => {
     expect(await screen.findByText('Select a collection to see its reports.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /new/i })).not.toBeInTheDocument()
     const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]))
-    expect(urls.filter((u) => u.includes('/reports'))).toEqual([])
+    expect(urls.filter((u) => u.includes('/reports') && !isUnassignedList(u))).toEqual([])
   })
 
   it('reflects show_toc and toggles it via PATCH', async () => {
@@ -845,5 +848,72 @@ describe('Report view — image findings', () => {
 
     expect(await screen.findByText('bad')).toBeInTheDocument()
     expect(screen.getAllByText('Text in the image')).toHaveLength(1)
+  })
+})
+
+describe('Report view — reports without a collection', () => {
+  const oldCase = {
+    id: 7,
+    title: 'Old case',
+    collection_name: null,
+    item_count: 3,
+    created_at: '2026-03-02T10:00:00',
+    updated_at: '2026-03-02T10:00:00'
+  }
+
+  /** Serve one report kept from before reports named their collection, recording every request. */
+  function serveUnassigned(): string[] {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        calls.push(`${init?.method ?? 'GET'} ${url}`)
+        if (url.includes('/reports/unassigned/7/assign')) {
+          return { ok: true, status: 200, json: async () => ({ ...oldCase, collection_name: 'docs', items: [] }) }
+        }
+        if (url.includes('/reports/unassigned')) {
+          return { ok: true, status: 200, json: async () => ({ reports: [oldCase] }) }
+        }
+        if (url.split('?')[0].endsWith('/reports')) {
+          return { ok: true, status: 200, json: async () => ({ reports: [] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    return calls
+  }
+
+  beforeEach(() => {
+    useReportStore.setState({ activeReportId: null })
+  })
+
+  it('says nothing while every report has a collection', async () => {
+    renderReport()
+    await screen.findByText(/Select a report/)
+    expect(screen.queryByText('Reports without a collection')).not.toBeInTheDocument()
+  })
+
+  it('moves one into the active collection and opens it', async () => {
+    const calls = serveUnassigned()
+    renderReport()
+
+    expect(await screen.findByText('Reports without a collection')).toBeInTheDocument()
+    expect(screen.getByText('Old case (3)')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Move to docs' }))
+
+    await waitFor(() => expect(useReportStore.getState().activeReportId).toBe(7))
+    expect(calls).toContain('POST /reports/unassigned/7/assign?collection=docs')
+  })
+
+  it('lists them with no move to offer while no collection is active', async () => {
+    useUiStore.setState({ selectedCollection: null })
+    const calls = serveUnassigned()
+    renderReport()
+
+    expect(await screen.findByText('Old case (3)')).toBeInTheDocument()
+    expect(screen.getByText('Select a collection to move a report into it.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Move to/ })).not.toBeInTheDocument()
+    expect(calls.some((c) => c.startsWith('POST'))).toBe(false)
   })
 })

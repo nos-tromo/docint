@@ -3,10 +3,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   addReportItem,
   addReportItems,
+  assignReport,
   createReport,
   deleteReport,
   getReport,
   listReports,
+  listUnassignedReports,
   refreshCollectionOverview,
   removeReportItem,
   reorderReportItems,
@@ -41,6 +43,36 @@ export function useReports() {
     queryKey: ['reports', scope] as const,
     queryFn: () => listReports(collection),
     enabled: !!collection
+  })
+}
+
+/**
+ * The caller's reports that belong to no collection.
+ *
+ * Kept from before every report named its collection, so no collection lists
+ * them. Keyed by owner because an admin reads them in the selected owner's
+ * namespace, and under the `['reports']` prefix so every report mutation
+ * refreshes it.
+ */
+export function useUnassignedReports() {
+  const { owner } = useActiveCollection()
+  return useQuery({
+    queryKey: ['reports', 'unassigned', { owner }] as const,
+    queryFn: listUnassignedReports
+  })
+}
+
+/** Move a report without a collection into the active one, then open it there. */
+export function useAssignReport() {
+  const collection = useReportCollection()
+  const setActiveReportId = useReportStore((s) => s.setActiveReportId)
+  const invalidate = useReportInvalidator()
+  return useMutation({
+    mutationFn: (id: number) => assignReport(id, collection),
+    onSuccess: async (report) => {
+      await invalidate()
+      setActiveReportId(report.id)
+    }
   })
 }
 
