@@ -204,6 +204,9 @@ per-stage status. A selection goes up in small batches (at most 100 files and
 64 MiB per request); a batch that stops making progress for two minutes is
 aborted and its unsaved files are sent again, up to twice, each retry showing
 as a warning — so a request that never completes can no longer freeze the run.
+Every request of a run (the staged check, each batch and retry, the finalize)
+goes to the owner the run started under, even if an admin switches to another
+user's collection while it uploads.
 The entity-extraction, hate-speech and collection-summary
 options are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount
 from `GET /config/ingest-defaults`. **Summary** gates the collection-summary

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { streamIngestUploadBatched, type BatchFailure } from '@/api/ingest'
 import { createIngestJob, getStagedBatch } from '@/api/jobs'
+import { getOwnerParam } from '@/api/client'
 import { applyIngestEvent, emptyStatus, type IngestStatus } from '@/lib/ingestStatus'
 import type { IngestEvent } from '@/api/types'
 import type { Strings } from '@/i18n'
@@ -282,6 +283,9 @@ export const useIngestRunStore = create<IngestRunState>()(
       start: async (limitBytes, t) => {
         const { collection, files, ner, hate, summary, uploading } = get()
         if (!collection || files.length === 0 || uploading) return
+        // Read once: every request of the run goes to the namespace it started
+        // in, even if an admin switches to another user's collection meanwhile.
+        const owner = getOwnerParam()
         set({
           uploading: true,
           error: null,
@@ -300,7 +304,7 @@ export const useIngestRunStore = create<IngestRunState>()(
         // branches assign, so `no-useless-assignment` reports one if given.
         let pending: File[]
         try {
-          const staged = await getStagedBatch(collection)
+          const staged = await getStagedBatch(collection, { owner })
           pending = filesNotYetStaged(files, staged.entries)
         } catch {
           pending = files
@@ -313,12 +317,15 @@ export const useIngestRunStore = create<IngestRunState>()(
           // mid-upload leaves behind once the transfer finished but finalize
           // never ran. Queue the job over the staged batch directly.
           try {
-            const { job_id } = await createIngestJob({
-              collection,
-              ner,
-              hate_speech: hate,
-              summary
-            })
+            const { job_id } = await createIngestJob(
+              {
+                collection,
+                ner,
+                hate_speech: hate,
+                summary
+              },
+              owner
+            )
             get().trackJob(job_id, collection)
             set({ uploading: false, uploadStatus: emptyStatus(), files: [], failedFiles: [] })
           } catch {
@@ -341,7 +348,7 @@ export const useIngestRunStore = create<IngestRunState>()(
         let failures: BatchFailure[]
         let lastEvent: IngestEvent | null = null
         try {
-          const stream = streamIngestUploadBatched(collection, pending, limitBytes, undefined, t)
+          const stream = streamIngestUploadBatched(collection, pending, limitBytes, undefined, t, owner)
           let next = await stream.next()
           while (!next.done) {
             const ev = next.value
@@ -383,14 +390,17 @@ export const useIngestRunStore = create<IngestRunState>()(
           // upload leg the user was already watching tick.
           const uploadStatus = get().uploadStatus
           const runStartedAt = uploadStatus.startedAt
-          const { job_id } = await createIngestJob({
-            collection,
-            ner,
-            hate_speech: hate,
-            summary,
-            upload_elapsed_ms:
-              runStartedAt === undefined ? undefined : Date.now() - runStartedAt
-          })
+          const { job_id } = await createIngestJob(
+            {
+              collection,
+              ner,
+              hate_speech: hate,
+              summary,
+              upload_elapsed_ms:
+                runStartedAt === undefined ? undefined : Date.now() - runStartedAt
+            },
+            owner
+          )
           // The upload leg belongs to the job it produced from here on, so
           // `uploadStatus` is free to describe the *next* upload. Without the
           // handover a second run in the same tab would fold the previous

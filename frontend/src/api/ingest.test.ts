@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { buildIngestFormData, streamIngestUploadBatched, type BatchFailure } from './ingest'
 import { streamUpload, UploadHttpError, UploadStalledError } from './upload'
+import { setOwnerParam } from './client'
 import type { IngestEvent } from './types'
+import { defaultT } from '@/i18n/defaultT'
 
 vi.mock('./upload', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./upload')>()),
@@ -17,6 +19,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
+  setOwnerParam(null)
 })
 
 /** Build a File whose reported `size` is `size` bytes (no real allocation). */
@@ -211,6 +214,23 @@ describe('streamIngestUploadBatched', () => {
     const resent = (uploadMock.mock.calls[1][1] as FormData).getAll('files') as File[]
     expect(resent.map((f) => f.size)).toEqual([2])
     expect(result).toEqual({ anySaved: true, failures: [] })
+  })
+
+  it('sends every attempt under the owner the run started with', async () => {
+    vi.useFakeTimers()
+    uploadMock
+      .mockImplementationOnce(reply([['file_saved', { filename: 'a' }]], new UploadStalledError()))
+      .mockImplementationOnce(staged('b'))
+
+    const run = collect(
+      streamIngestUploadBatched('c1', [fileOfSize('a', 1), fileOfSize('b', 1)], 1000, undefined, defaultT, 'alice')
+    )
+    // An admin switches the sidebar to another user's collection mid-run.
+    setOwnerParam('bob')
+    await vi.runAllTimersAsync()
+    await run
+
+    expect(uploadMock.mock.calls.map((call) => call[3])).toEqual(['alice', 'alice'])
   })
 
   it('retries a gateway error and a stream that ended without upload_complete', async () => {

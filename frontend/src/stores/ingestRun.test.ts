@@ -3,6 +3,7 @@ import { mergeSelection, useIngestRunStore } from './ingestRun'
 import { useIngestJobsStore } from './ingestJobs'
 import { defaultT } from '@/i18n/defaultT'
 import { emptyStatus } from '@/lib/ingestStatus'
+import { setOwnerParam } from '@/api/client'
 
 // A `vi.fn()` wrapper (not a fixed factory) so individual tests can override
 // the upload outcome per-call with `mockImplementationOnce` — needed to
@@ -42,6 +43,7 @@ function pickedFile(name: string, opts: { body?: string; lastModified?: number; 
 beforeEach(() => {
   useIngestRunStore.getState().reset()
   useIngestJobsStore.getState().clear()
+  setOwnerParam(null)
 
   createIngestJob.mockReset()
   createIngestJob.mockResolvedValue({ job_id: 'job-1', adopted: false })
@@ -98,6 +100,30 @@ describe('useIngestRunStore', () => {
     const payload = createIngestJob.mock.calls[0][0] as { upload_elapsed_ms?: number }
     expect(payload.upload_elapsed_ms).toBeGreaterThanOrEqual(2_000)
     expect(payload.upload_elapsed_ms).toBeLessThan(3_000)
+  })
+
+  it('keeps the whole run under the owner it started with', async () => {
+    setOwnerParam('alice')
+    // An admin switches the sidebar to other users' collections mid-run: once
+    // while the run asks what is staged, once while it uploads.
+    getStagedBatch.mockImplementationOnce(async () => {
+      setOwnerParam('bob')
+      return stagedBatch([])
+    })
+    streamIngestUploadBatched.mockImplementationOnce(async function* () {
+      setOwnerParam('carol')
+      yield { event: 'file_saved', data: { filename: 'a.txt' }, receivedAt: 0 }
+      return { anySaved: true, failures: [] }
+    })
+    const s = useIngestRunStore.getState()
+    s.setCollection('mydocs')
+    s.addFiles([file('a.txt')])
+
+    await useIngestRunStore.getState().start(1000, defaultT)
+
+    expect(getStagedBatch).toHaveBeenCalledWith('mydocs', { owner: 'alice' })
+    expect(streamIngestUploadBatched.mock.calls[0][5]).toBe('alice')
+    expect(createIngestJob.mock.calls[0][1]).toBe('alice')
   })
 
   it('clears the picked files once the job is queued', async () => {
@@ -395,12 +421,15 @@ describe('useIngestRunStore — finishing an interrupted upload', () => {
     await useIngestRunStore.getState().start(1000, defaultT)
 
     expect(streamIngestUploadBatched).not.toHaveBeenCalled()
-    expect(createIngestJob).toHaveBeenCalledWith({
-      collection: 'mydocs',
-      ner: false,
-      hate_speech: false,
-      summary: true
-    })
+    expect(createIngestJob).toHaveBeenCalledWith(
+      {
+        collection: 'mydocs',
+        ner: false,
+        hate_speech: false,
+        summary: true
+      },
+      null
+    )
     expect(useIngestRunStore.getState().trackedJobs).toEqual([
       { job_id: 'job-1', collection: 'mydocs' }
     ])

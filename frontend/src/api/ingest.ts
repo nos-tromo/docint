@@ -142,6 +142,8 @@ function withoutSaved(pending: File[], saved: string[]): File[] {
  *   `UPLOAD_SAFETY_MARGIN`.
  * @param signal - Optional abort signal cancelling the in-flight request.
  * @param t - Translate function; defaults to the English catalog for pure/test callers.
+ * @param owner - Owner every attempt is sent under, fixed when the run starts
+ *   (see `withOwner`); omitted, each request uses the one selected at the time.
  * @yields Normalised `IngestEvent`s, each stamped with `receivedAt`.
  * @returns Whether any batch saved, and the list of batches that failed.
  */
@@ -150,7 +152,8 @@ export async function* streamIngestUploadBatched(
   files: File[],
   limitBytes: number,
   signal?: AbortSignal,
-  t: Translate = defaultT
+  t: Translate = defaultT,
+  owner?: string | null
 ): AsyncGenerator<IngestEvent, { anySaved: boolean; failures: BatchFailure[] }, unknown> {
   const budgetBytes = Math.max(1, Math.min(MAX_BATCH_BYTES, Math.floor(limitBytes * UPLOAD_SAFETY_MARGIN)))
   const batches = planUploadBatches(files, budgetBytes)
@@ -179,7 +182,12 @@ export async function* streamIngestUploadBatched(
       let serverError = false
       let caught: unknown
       try {
-        for await (const ev of streamUpload('/ingest/upload', buildIngestFormData(collection, pending), signal)) {
+        for await (const ev of streamUpload(
+          '/ingest/upload',
+          buildIngestFormData(collection, pending),
+          signal,
+          owner
+        )) {
           const data = (ev.data ?? {}) as Record<string, unknown>
           // Swallow the per-batch `start` (one synthetic start already emitted)
           // and `upload_complete` (staged-only terminal); forward save progress.

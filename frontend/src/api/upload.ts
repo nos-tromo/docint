@@ -43,6 +43,7 @@ export class UploadStalledError extends Error {
  * @param path - API path, resolved against the sub-path base and owner param.
  * @param formData - The multipart body.
  * @param signal - Optional abort signal cancelling the request.
+ * @param owner - Owner to send instead of the one selected now (see `withOwner`).
  * @yields Parsed SSE frames, in arrival order.
  * @throws UploadHttpError on a non-OK status, UploadStalledError when nothing
  *   moved for `UPLOAD_STALL_MS`, a TypeError on a network failure, and an
@@ -51,7 +52,8 @@ export class UploadStalledError extends Error {
 export async function* streamUpload(
   path: string,
   formData: FormData,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  owner?: string | null
 ): AsyncGenerator<SseEvent, void, unknown> {
   signal?.throwIfAborted()
   const xhr = new XMLHttpRequest()
@@ -125,7 +127,7 @@ export async function* streamUpload(
   signal?.addEventListener('abort', onAbort)
 
   try {
-    xhr.open('POST', url(withOwner(path)))
+    xhr.open('POST', url(withOwner(path, owner)))
     arm()
     xhr.send(formData)
     while (true) {

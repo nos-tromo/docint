@@ -32,4 +32,20 @@ describe('owner query param plumbing', () => {
     await apiGet('/collections/list')
     expect(String(fetchMock.mock.calls[0][0])).not.toContain('owner=')
   })
+
+  it('sends the owner a caller pinned, whichever one is selected now', async () => {
+    setOwnerParam('bob')
+    await apiGet('/ingest/staged', { collection: 'alpha' }, 'alice')
+    await apiPost('/ingest/finalize', { collection: 'alpha' }, 'alice')
+    const [get, post] = fetchMock.mock.calls.map((call) => String(call[0]))
+    expect(get).toContain('owner=alice')
+    expect(get).not.toContain('owner=bob')
+    expect(post).toContain('?owner=alice')
+  })
+
+  it('sends no owner when a caller pinned none', async () => {
+    setOwnerParam('bob')
+    await apiGet('/ingest/staged', { collection: 'alpha' }, null)
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain('owner=')
+  })
 })

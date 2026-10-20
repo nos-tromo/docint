@@ -50,10 +50,19 @@ export function getOwnerParam(): string | null {
   return ownerParam
 }
 
-export function withOwner(pathAndQuery: string): string {
-  if (!ownerParam) return pathAndQuery
+/**
+ * Add the admin owner context to a request path.
+ *
+ * @param pathAndQuery - The path, with any query string.
+ * @param owner - The owner to send; defaults to the one selected now. A run
+ *   spanning several requests passes the owner it started under, so a switch
+ *   to another user's collection mid-run cannot move its later requests.
+ * @returns The path, carrying `owner=` when there is one.
+ */
+export function withOwner(pathAndQuery: string, owner: string | null = ownerParam): string {
+  if (!owner) return pathAndQuery
   const sep = pathAndQuery.includes('?') ? '&' : '?'
-  return `${pathAndQuery}${sep}owner=${encodeURIComponent(ownerParam)}`
+  return `${pathAndQuery}${sep}owner=${encodeURIComponent(owner)}`
 }
 
 type QueryParams = Record<string, string | number | boolean | undefined>
@@ -67,8 +76,8 @@ function queryString(params?: QueryParams): string {
   return qs ? `?${qs}` : ''
 }
 
-export async function apiGet<T>(path: string, params?: QueryParams): Promise<T> {
-  return handle<T>(await fetch(url(withOwner(path + queryString(params)))))
+export async function apiGet<T>(path: string, params?: QueryParams, owner?: string | null): Promise<T> {
+  return handle<T>(await fetch(url(withOwner(path + queryString(params), owner))))
 }
 
 /**
@@ -86,9 +95,9 @@ export async function apiGetOrNull<T>(path: string, params?: QueryParams): Promi
   return handle<T>(res)
 }
 
-export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+export async function apiPost<T>(path: string, body?: unknown, owner?: string | null): Promise<T> {
   return handle<T>(
-    await fetch(url(withOwner(path)), {
+    await fetch(url(withOwner(path, owner)), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body)
