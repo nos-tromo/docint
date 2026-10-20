@@ -159,10 +159,14 @@ its own saying what the prompt cannot.
 What the server does provide is a way to *finish* an interrupted upload
 instead of repeating it:
 
-- **A file is staged whole or not at all.** `ingest_upload` writes to
-  `<name>.part` and renames onto the final name after the last chunk, so an
-  aborted request leaves only a `.part`. `describe_inputs` counts those as
-  `partial` and excludes them from everything else — written straight to its
+- **A file is staged whole or not at all.** Each upload attempt writes to its
+  own `<name>.<token>.part`, hashes it, and renames it onto the final name, so
+  a retry that overlaps a stalled attempt never truncates the other's bytes,
+  and the hash `file_saved` reports is of exactly the bytes committed. An
+  attempt that fails, is cancelled or loses its client deletes its temp; one
+  left by a server process that died mid-write is removed by the next upload
+  into that directory. `describe_inputs` counts any `.part` still present as
+  `partial` and excludes it from everything else — written straight to its
   final path, a truncated file is indistinguishable from a whole one, and the
   run banner, the staged report and the readers all counted it as an input.
 - **`GET /ingest/staged?collection=<logical>`** reports what is on disk, what
