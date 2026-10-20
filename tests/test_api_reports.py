@@ -1202,3 +1202,135 @@ def test_listing_reports_names_a_collection(client: TestClient) -> None:
 def test_a_report_is_always_created_in_a_collection(client: TestClient, payload: dict[str, Any]) -> None:
     """A report without a collection could never be opened again, so none is created."""
     assert client.post("/reports", json=payload).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Reports without a collection — kept from before every report needed one
+# ---------------------------------------------------------------------------
+
+_ONE_DOCUMENT = [
+    {
+        "filename": "a.pdf",
+        "mimetype": "application/pdf",
+        "file_hash": "h",
+        "node_count": 2,
+        "page_count": 3,
+        "entity_types": ["ORG"],
+    }
+]
+
+
+def _report_without_collection(
+    title: str = "Old case", owner: str = "test-operator", collection: str | None = None
+) -> int:
+    """Store a report as one could be created before every report named its collection."""
+    report = api_module.rag.ensure_report_manager().create_report(title=title, owner=owner, collection_name=collection)
+    return int(report["id"])
+
+
+def _stored_collection(report_id: int, owner: str = "test-operator") -> str | None:
+    """Read a report's collection straight from the store, past every route's gate."""
+    meta = api_module.rag.ensure_report_manager().get_report_meta(report_id, owner)
+    assert meta is not None
+    return cast(str | None, meta["collection_name"])
+
+
+def test_unassigned_lists_the_callers_reports_without_a_collection(client: TestClient) -> None:
+    """Only the caller's reports with no collection are listed, a blank name counting as none."""
+    old = _report_without_collection("Old case")
+    blank = _report_without_collection("Blank case", collection="")
+    _report_without_collection("Alice's old case", owner="alice")
+    _create(client, title="Current case")
+
+    resp = client.get("/reports/unassigned")
+
+    assert resp.status_code == 200, resp.text
+    assert sorted(r["id"] for r in resp.json()["reports"]) == sorted([old, blank])
+
+
+def test_assign_moves_a_report_without_a_collection_into_one(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report becomes reachable from that collection, with its overview captured as at create."""
+    _own_collection("docs")
+    _stub_documents(monkeypatch, _ONE_DOCUMENT)
+    rid = _report_without_collection()
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["collection_name"] == "docs"
+    assert resp.json()["collection_overview"]["document_count"] == 1
+    assert [r["id"] for r in client.get("/reports").json()["reports"]] == [rid]
+    assert client.get(f"/reports/{rid}").status_code == 200
+    assert client.get("/reports/unassigned").json()["reports"] == []
+
+
+def test_assign_keeps_the_report_when_the_overview_capture_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture failure leaves the overview empty, as at create, and never undoes the move."""
+    _own_collection("docs")
+
+    def _boom() -> list[dict[str, Any]]:
+        raise RuntimeError("qdrant unreachable")
+
+    monkeypatch.setattr(api_module.rag, "list_documents", _boom)
+    rid = _report_without_collection()
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["collection_overview"] is None
+    assert _stored_collection(rid) == "docs"
+
+
+def test_assign_never_moves_a_report_out_of_its_collection(client: TestClient) -> None:
+    """A report that has a collection keeps it — whether it was created there or assigned once already."""
+    _own_collection("docs")
+    _own_collection("other")
+    created = _create(client)["id"]
+    assigned = _report_without_collection()
+    assert client.post(f"/reports/unassigned/{assigned}/assign").status_code == 200
+
+    for rid in (created, assigned):
+        resp = client.post(f"/reports/unassigned/{rid}/assign", params={"collection": "other"})
+        assert resp.status_code == 404
+        assert _stored_collection(rid) == "docs"
+
+
+def test_assign_refuses_another_owners_report(client: TestClient) -> None:
+    """Another owner's report answers 404, exactly as everywhere else, and stays unassigned."""
+    _own_collection("docs")
+    rid = _report_without_collection(owner="alice")
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign")
+
+    assert resp.status_code == 404
+    assert _stored_collection(rid, owner="alice") is None
+
+
+@pytest.mark.parametrize("collection", ["ghost", "alices-docs"])
+def test_assign_refuses_a_collection_the_caller_does_not_own(client: TestClient, collection: str) -> None:
+    """The target must be one of the caller's own collections: a missing or foreign one is 404."""
+    _own_collection("alices-docs", owner="alice")
+    rid = _report_without_collection()
+
+    resp = client.post(f"/reports/unassigned/{rid}/assign", params={"collection": collection})
+
+    assert resp.status_code == 404
+    assert _stored_collection(rid) is None
+
+
+def test_admin_moves_another_owners_report_into_that_owners_collection(client: TestClient) -> None:
+    """With the owner param an admin lists and assigns in that owner's namespace."""
+    _own_collection("docs", owner="alice")
+    rid = _report_without_collection(owner="alice")
+    as_alice = {"owner": "alice"}
+
+    listed = client.get("/reports/unassigned", params=as_alice, headers=ADMIN).json()["reports"]
+    resp = client.post(f"/reports/unassigned/{rid}/assign", params={**as_alice, "collection": "docs"}, headers=ADMIN)
+
+    assert [r["id"] for r in listed] == [rid]
+    assert resp.status_code == 200, resp.text
+    assert _stored_collection(rid, owner="alice") == "docs"

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from sqlalchemy import ColumnElement, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,11 @@ if TYPE_CHECKING:
 # Keys per backfill lookup: SQLite caps host parameters at 999, and a batch
 # may carry REPORT_BATCH_MAX_ITEMS of them.
 _BACKFILL_KEY_CHUNK = 500
+
+
+def _without_collection() -> ColumnElement[bool]:
+    """Match a report that names no collection: ``NULL``, or the blank name an old client could send."""
+    return or_(Report.collection_name.is_(None), Report.collection_name == "")
 
 
 @dataclass(slots=True)
@@ -191,6 +197,60 @@ class ReportManager:
                 query = query.filter(Report.collection_name == collection)
             reports = query.order_by(Report.updated_at.desc(), Report.id.desc()).all()
             return [self._serialize_report(s, r, include_items=False) for r in reports]
+
+    def list_unassigned_reports(self, owner: str | None) -> list[dict[str, Any]]:
+        """List the caller's reports that belong to no collection, most-recently-updated first.
+
+        A report created before every report had to name its collection has
+        none, and no collection-scoped route reaches it. This is how such a
+        report is found again, so :meth:`assign_collection` can place it.
+
+        Args:
+            owner (str | None): The principal whose reports to list.
+
+        Returns:
+            list[dict[str, Any]]: Report summaries (no item bodies).
+        """
+        with self._session_scope() as s:
+            reports = (
+                s.query(Report)
+                .filter(Report.owner == owner, _without_collection())
+                .order_by(Report.updated_at.desc(), Report.id.desc())
+                .all()
+            )
+            return [self._serialize_report(s, r, include_items=False) for r in reports]
+
+    def assign_collection(self, report_id: int, owner: str | None, collection: str) -> dict[str, Any] | None:
+        """Place a report that belongs to no collection into ``collection``.
+
+        Only a report without a collection is assigned, so this can never move
+        a report from one collection to another. The check and the write are
+        one conditional ``UPDATE``: two concurrent calls cannot both see the
+        report unassigned and each write a different collection.
+
+        Args:
+            report_id (int): The report id.
+            owner (str | None): The principal requesting the assignment.
+            collection (str): The logical collection to place the report in.
+
+        Returns:
+            dict[str, Any] | None: The updated report, or ``None`` when it is
+                missing, not owned by ``owner``, or already in a collection.
+        """
+        with self._session_scope() as s:
+            matched = (
+                s.query(Report)
+                .filter(Report.id == report_id, Report.owner == owner, _without_collection())
+                .update(
+                    {Report.collection_name: collection, Report.updated_at: datetime.now(UTC)},
+                    synchronize_session=False,
+                )
+            )
+            s.commit()
+            if not matched:
+                return None
+            report = s.get(Report, report_id)
+            return self._serialize_report(s, report) if report is not None else None
 
     def get_report(self, report_id: int, owner: str | None) -> dict[str, Any] | None:
         """Return a report the caller owns, including its ordered items.

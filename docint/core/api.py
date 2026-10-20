@@ -4255,6 +4255,70 @@ def list_reports(
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
+# Declared before /reports/{report_id}, which would otherwise take the path
+# and refuse "unassigned" as a report id.
+@app.get("/reports/unassigned", response_model=ReportListOut, tags=["Reports"])
+def list_unassigned_reports(
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, list[dict[str, Any]]]:
+    """List the caller's reports that belong to no collection.
+
+    Reports created before every report had to name its collection have none,
+    so no collection reaches them. They are listed here so each can be placed
+    in a collection with :func:`assign_report_collection`.
+
+    Args:
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, list[dict[str, Any]]]: The caller's unassigned report summaries.
+    """
+    try:
+        return {"reports": rag.ensure_report_manager().list_unassigned_reports(principal.effective_owner)}
+    except Exception as e:
+        logger.opt(exception=e).error("Error listing unassigned reports")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+
+
+@app.post("/reports/unassigned/{report_id}/assign", tags=["Reports"])
+def assign_report_collection(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
+    """Place a report that belongs to no collection into one of the caller's collections.
+
+    The one way such a report becomes reachable again. Only a report without a
+    collection is assigned, so this never moves a report between collections
+    — the contamination the collection gate exists to refuse. The document
+    overview is captured as it is at create, and just as fail-soft.
+
+    Args:
+        report_id (int): The report id.
+        collection (str): The caller's active logical collection, to place it in.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The report, now in ``collection``.
+
+    Raises:
+        HTTPException: 404 when the collection is not the caller's, or the
+            report is missing, another owner's, or already in a collection.
+    """
+    _require_owned_collection(collection, principal)
+    name = collection.strip()
+    report = rag.ensure_report_manager().assign_collection(report_id, principal.effective_owner, name)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    try:
+        captured = _capture_collection_overview(report_id, name, principal)
+        if captured is not None:
+            report = captured
+    except Exception as e:
+        logger.warning("Collection-overview capture failed for report {}: {}", report_id, e)
+    return report
+
+
 @app.get("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def get_report(report_id: int, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
     """Return a report (with items) owned by the calling principal.
