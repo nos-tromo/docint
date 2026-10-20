@@ -27,7 +27,7 @@ dependencies = [
   "openai>=2.53.0",
   "openpyxl>=3.1.5",
   "pandas>=3.0.6",
-  "pillow>=12.3.0",
+  "pillow>=13.0.0",
   "prometheus-fastapi-instrumentator>=8.1.0",
   "pydantic>=2.14.1",
   "pypdfium2>=5.14.0",  # page rasterisation (vision OCR) + embedded-image pixels in core/readers/documents/
@@ -109,3 +109,5 @@ ignore-missing-imports = ["*"]
 package = true
 environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
 link-mode = "copy"
+# docling-core caps pillow<13; 13.0.0 carries the JPEG/TIFF/GIF/PDF security fixes.
+override-dependencies = ["pillow>=13.0.0"]
