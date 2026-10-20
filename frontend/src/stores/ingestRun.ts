@@ -1,6 +1,5 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { mergeFiles } from '@infra/ui'
 import { streamIngestUploadBatched, type BatchFailure } from '@/api/ingest'
 import { createIngestJob, getStagedBatch } from '@/api/jobs'
 import { applyIngestEvent, emptyStatus, type IngestStatus } from '@/lib/ingestStatus'
@@ -56,6 +55,37 @@ export function filesNotYetStaged(files: File[], staged: { name: string; bytes: 
   // space in every terminal and turned the whole file binary to git.
   const have = new Set(staged.map((e) => `${e.name}|${e.bytes}`))
   return files.filter((f) => !have.has(`${uploadName(f)}|${f.size}`))
+}
+
+/**
+ * Add picked files to a selection, refusing any whose upload name a different
+ * file already holds.
+ *
+ * The server stores a collection's uploads by that name, so two different files
+ * under one name cannot both arrive: the second overwrites the first, and the
+ * run still reports success. A file matching the held one's name, size and
+ * modification time is the same file picked again, and is skipped silently.
+ * Files already selected win, so the selection is never reordered.
+ *
+ * @param existing - The current selection, whose upload names are distinct.
+ * @param incoming - The newly picked files.
+ * @returns The new selection, and the incoming files refused for a taken name.
+ */
+export function mergeSelection(existing: File[], incoming: File[]): { files: File[]; refused: File[] } {
+  const held = new Map(existing.map((f) => [uploadName(f), f]))
+  const files = [...existing]
+  const refused: File[] = []
+  for (const f of incoming) {
+    const name = uploadName(f)
+    const prior = held.get(name)
+    if (!prior) {
+      held.set(name, f)
+      files.push(f)
+    } else if (prior.size !== f.size || prior.lastModified !== f.lastModified) {
+      refused.push(f)
+    }
+  }
+  return { files, refused }
 }
 
 /**
@@ -130,7 +160,13 @@ export interface IngestRunState {
   setNer: (v: boolean) => void
   setHate: (v: boolean) => void
   setSummary: (v: boolean) => void
-  addFiles: (v: File[]) => void
+  /**
+   * Add picked files to the selection (see {@link mergeSelection}).
+   *
+   * @returns The upload names of the files refused because a different file
+   *   already holds that name, so the screen can say which were left out.
+   */
+  addFiles: (v: File[]) => string[]
   removeFile: (i: number) => void
   clearFiles: () => void
   /**
@@ -200,7 +236,11 @@ export const useIngestRunStore = create<IngestRunState>()(
       setNer: (ner) => set({ ner }),
       setHate: (hate) => set({ hate }),
       setSummary: (summary) => set({ summary }),
-      addFiles: (v) => set((s) => ({ files: mergeFiles(s.files, v) })),
+      addFiles: (v) => {
+        const { files, refused } = mergeSelection(get().files, v)
+        set({ files })
+        return refused.map(uploadName)
+      },
       removeFile: (i) => set((s) => ({ files: s.files.filter((_, idx) => idx !== i) })),
       clearFiles: () => set({ files: [] }),
       markJobHandled: (jobId) =>

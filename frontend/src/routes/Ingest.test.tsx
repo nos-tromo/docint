@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -815,5 +815,33 @@ describe('Ingest preprocessing progress', () => {
       String(input).includes('/ingest/staged')
     )
     expect(stagedCalls.length).toBeLessThanOrEqual(1)
+  })
+})
+
+describe('Ingest — picking files', () => {
+  /** Hand `files` to the drop zone's plain file input, as the browser's picker would. */
+  function pick(files: File[]) {
+    const input = Array.from(document.querySelectorAll('input[type="file"]')).find(
+      (el) => !el.hasAttribute('webkitdirectory')
+    ) as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: files, configurable: true })
+    fireEvent.change(input)
+  }
+
+  it('refuses a different file under a name already picked, and says which', async () => {
+    renderIn(<Ingest />)
+
+    pick([new File(['x'], 'a.txt', { lastModified: 1 })])
+    pick([new File(['xy'], 'a.txt', { lastModified: 2 })])
+
+    const notice = await screen.findByRole('alert')
+    expect(notice).toHaveTextContent('A file was not added')
+    expect(within(notice).getByText('a.txt')).toBeInTheDocument()
+    const files = useIngestRunStore.getState().files
+    expect(files).toHaveLength(1)
+    expect(files[0].size).toBe(1)
+
+    pick([new File(['z'], 'b.txt', { lastModified: 3 })])
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

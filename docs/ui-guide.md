@@ -212,6 +212,12 @@ on a long batch it is the longest part of the run and switching it off is
 what makes the job end at the last document. The summary can still be built
 later, on demand, from the Analysis screen's Summary tab.
 
+A picked file is not added when a different file in the selection already has
+its name (its path inside a picked folder, or its bare name otherwise), and a
+notice lists it. The server stores a collection's uploads under that name, so
+the second file would overwrite the first. Picking the same file again (same
+name, size and modification time) is ignored without a notice.
+
 While a run is live the card also carries a bar per preprocessing stage —
 PDFs read, scanned pages recognized, images described, audio and video
 transcribed, keyframes described. That work starts as each file is saved, so

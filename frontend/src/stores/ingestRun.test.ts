@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useIngestRunStore } from './ingestRun'
+import { mergeSelection, useIngestRunStore } from './ingestRun'
 import { useIngestJobsStore } from './ingestJobs'
 import { defaultT } from '@/i18n/defaultT'
 import { emptyStatus } from '@/lib/ingestStatus'
@@ -31,6 +31,13 @@ const stagedBatch = (entries: { name: string; bytes: number }[]) => ({
 })
 
 const file = (name: string) => new File(['x'], name, { type: 'text/plain' })
+
+/** A file with a fixed modification time, so "the same file again" never depends on timing. */
+function pickedFile(name: string, opts: { body?: string; lastModified?: number; path?: string } = {}): File {
+  const f = new File([opts.body ?? 'x'], name, { type: 'text/plain', lastModified: opts.lastModified ?? 1 })
+  if (opts.path) Object.defineProperty(f, 'webkitRelativePath', { value: opts.path })
+  return f
+}
 
 beforeEach(() => {
   useIngestRunStore.getState().reset()
@@ -112,6 +119,20 @@ describe('useIngestRunStore', () => {
     s.addFiles([file('a.txt')])
     s.addFiles([file('a.txt'), file('b.txt')])
     expect(useIngestRunStore.getState().files.map((f) => f.name)).toEqual(['a.txt', 'b.txt'])
+  })
+
+  it('returns the upload names of files refused for a name already selected', () => {
+    const s = useIngestRunStore.getState()
+    s.addFiles([pickedFile('a.txt', { path: 'docs/a.txt' }), pickedFile('b.txt')])
+
+    const refused = useIngestRunStore
+      .getState()
+      .addFiles([pickedFile('a.txt', { body: 'yy', path: 'docs/a.txt' }), pickedFile('c.txt')])
+
+    expect(refused).toEqual(['docs/a.txt'])
+    const files = useIngestRunStore.getState().files
+    expect(files.map((f) => f.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    expect(files[0].size).toBe(1)
   })
 
   it('removes a file at the given index', () => {
@@ -400,5 +421,53 @@ describe('useIngestRunStore — finishing an interrupted upload', () => {
       'a.txt'
     ])
     expect(useIngestRunStore.getState().alreadyStaged).toBe(0)
+  })
+})
+
+describe('mergeSelection', () => {
+  it('skips the same file picked again, without refusing it', () => {
+    const held = pickedFile('a.txt')
+    const { files, refused } = mergeSelection([held], [pickedFile('a.txt')])
+    expect(files).toHaveLength(1)
+    expect(files[0]).toBe(held)
+    expect(refused).toEqual([])
+  })
+
+  it('refuses a different file under a name already held, and keeps the held one', () => {
+    const held = pickedFile('a.txt')
+    const other = pickedFile('a.txt', { body: 'yy' })
+    const { files, refused } = mergeSelection([held], [other])
+    expect(files).toHaveLength(1)
+    expect(files[0]).toBe(held)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toBe(other)
+  })
+
+  it('refuses a same-sized file whose modification time differs', () => {
+    // Name and size alone would take two different one-byte files for one.
+    const other = pickedFile('a.txt', { body: 'y', lastModified: 2 })
+    const { files, refused } = mergeSelection([pickedFile('a.txt')], [other])
+    expect(files).toHaveLength(1)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toBe(other)
+  })
+
+  it('keeps same-named files from different folders', () => {
+    const one = pickedFile('a.txt', { path: 'one/a.txt' })
+    const two = pickedFile('a.txt', { body: 'yy', path: 'two/a.txt' })
+    const { files, refused } = mergeSelection([one], [two])
+    expect(files.map((f) => f.webkitRelativePath)).toEqual(['one/a.txt', 'two/a.txt'])
+    expect(refused).toEqual([])
+  })
+
+  it('refuses a repeat within one pick, keeping the first', () => {
+    // A drop from a search-results window can carry two files of one name.
+    const first = pickedFile('a.txt')
+    const second = pickedFile('a.txt', { body: 'yy' })
+    const { files, refused } = mergeSelection([], [first, second, pickedFile('b.txt')])
+    expect(files.map((f) => f.name)).toEqual(['a.txt', 'b.txt'])
+    expect(files[0]).toBe(first)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toBe(second)
   })
 })

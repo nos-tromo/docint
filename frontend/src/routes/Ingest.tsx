@@ -37,6 +37,39 @@ const FALLBACK_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024
  */
 const MAX_LISTED_FILES = 500
 
+/** How many refused names the notice spells out before it summarises the rest. */
+const MAX_NAMED_REFUSALS = 5
+
+/**
+ * Says which picked files were left out because a different file in the
+ * selection already holds their name (see `mergeSelection`).
+ *
+ * @param names - The refused files' upload names, one per refused file.
+ */
+function RefusedFiles({ names }: { names: string[] }) {
+  const t = useT()
+  const distinct = [...new Set(names)]
+  return (
+    <Banner variant="danger">
+      <p>
+        {names.length === 1
+          ? t('ingest.name_taken_one')
+          : t('ingest.name_taken_other', { count: names.length })}
+      </p>
+      <ul className="mt-1 list-disc break-words pl-5">
+        {distinct.slice(0, MAX_NAMED_REFUSALS).map((name) => (
+          <li key={name}>{name}</li>
+        ))}
+      </ul>
+      {distinct.length > MAX_NAMED_REFUSALS && (
+        <p className="mt-1">
+          {t('ingest.name_taken_more', { count: distinct.length - MAX_NAMED_REFUSALS })}
+        </p>
+      )}
+    </Banner>
+  )
+}
+
 export function Ingest() {
   const t = useT()
   const run = useIngestRunStore()
@@ -52,6 +85,9 @@ export function Ingest() {
   // unreadable entries) never reaches the store — it is a transient,
   // view-only notice, not part of the run.
   const [dropError, setDropError] = useState<string | null>(null)
+  // The latest pick's files refused for a name already selected; the same
+  // kind of view-only notice.
+  const [refused, setRefused] = useState<string[]>([])
 
   // Seed the enrichment toggles once from the deployment defaults; the
   // user's own picks win afterwards for the rest of this mount. Reads the
@@ -161,9 +197,12 @@ export function Ingest() {
             disabled={busy}
             onFiles={(v) => {
               setDropError(null)
-              run.addFiles(v)
+              setRefused(run.addFiles(v))
             }}
-            onEmpty={() => setDropError(t('ingest.drop_empty'))}
+            onEmpty={() => {
+              setRefused([])
+              setDropError(t('ingest.drop_empty'))
+            }}
           />
 
           {picked}
@@ -218,6 +257,7 @@ export function Ingest() {
           </Button>
 
           {(dropError || run.error) && <Banner variant="danger">{dropError ?? run.error}</Banner>}
+          {refused.length > 0 && <RefusedFiles names={refused} />}
         </Card>
 
         <div className="min-w-0 space-y-4">

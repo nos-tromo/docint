@@ -293,6 +293,11 @@ export const de: Strings = {
   'ingest.title': 'Datenimport',
   'ingest.caption': 'Dokumente hochladen und indexieren',
   'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
+  'ingest.name_taken_one':
+    'Eine Datei wurde nicht hinzugefügt: Eine andere Datei mit demselben Namen ist bereits ausgewählt, und der Server speichert nur eine Datei pro Namen. Die Datei umbenennen oder zuerst die ausgewählte entfernen.',
+  'ingest.name_taken_other':
+    '{count} Dateien wurden nicht hinzugefügt: Andere Dateien mit denselben Namen sind bereits ausgewählt, und der Server speichert nur eine Datei pro Namen. Die Dateien umbenennen oder zuerst die ausgewählten entfernen.',
+  'ingest.name_taken_more': 'und {count} weitere',
   'ingest.clear_files': 'Auswahl leeren',
   'ingest.staged_title': 'Abgebrochener Upload nach „{collection}“',
   'ingest.staged_idle': 'Diese Dateien liegen auf dem Server, es läuft aber keine Verarbeitung dafür.',
