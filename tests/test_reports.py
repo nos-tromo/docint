@@ -6,10 +6,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import Session, sessionmaker
 
 from docint.core.state.base import Base
+from docint.core.state.report import Report
 from docint.core.state.report_item import ReportItem
 from docint.core.state.report_manager import ReportManager
 
@@ -578,3 +579,38 @@ def test_report_meta_moves_with_every_change(report_manager: ReportManager) -> N
         stamps.append(_ok(report_manager.get_report_meta(rid, "alice"))["updated_at"])
 
     assert len(set(stamps)) == 3
+
+
+def test_assign_returns_the_callers_report_when_its_id_is_reused_at_commit(report_manager: ReportManager) -> None:
+    """The assigned report is read inside the write, so an id reused once it commits cannot come back.
+
+    SQLite hands a deleted highest id to the next insert. Read after the
+    commit, the report could be deleted and another owner's could take its id
+    in between, and that owner's report would be returned to the caller.
+    """
+    rid = report_manager.create_report(title="Alice's case", owner="alice")["id"]
+    report_manager.add_item(rid, "alice", **_entity_item("alice-chunk"))
+    maker = report_manager._SessionMaker
+    assert maker is not None
+    fired: list[bool] = []
+
+    def reuse_the_id(_session: Session) -> None:
+        if fired:
+            return
+        fired.append(True)
+        with maker() as other:
+            other.query(ReportItem).filter(ReportItem.report_id == rid).delete()
+            other.query(Report).filter(Report.id == rid).delete()
+            other.add(Report(id=rid, title="Bob's case", owner="bob", collection_name="bobs"))
+            other.commit()
+
+    event.listen(maker, "after_commit", reuse_the_id)
+    try:
+        assigned = report_manager.assign_collection(rid, "alice", "docs")
+    finally:
+        event.remove(maker, "after_commit", reuse_the_id)
+
+    assert fired
+    assigned = _ok(assigned)
+    assert (assigned["title"], assigned["collection_name"]) == ("Alice's case", "docs")
+    assert [i["dedupe_key"] for i in assigned["items"]] == ["entity:alice-chunk"]

@@ -226,7 +226,11 @@ class ReportManager:
         Only a report without a collection is assigned, so this can never move
         a report from one collection to another. The check and the write are
         one conditional ``UPDATE``: two concurrent calls cannot both see the
-        report unassigned and each write a different collection.
+        report unassigned and each write a different collection. The report is
+        read back before the commit, while the write still locks out other
+        writers: read after it, the report could be deleted and its id, which
+        SQLite reuses, taken by another owner's report, which would then be
+        returned.
 
         Args:
             report_id (int): The report id.
@@ -246,11 +250,13 @@ class ReportManager:
                     synchronize_session=False,
                 )
             )
-            s.commit()
             if not matched:
+                s.rollback()
                 return None
             report = s.get(Report, report_id)
-            return self._serialize_report(s, report) if report is not None else None
+            assigned = self._serialize_report(s, report) if report is not None else None
+            s.commit()
+            return assigned
 
     def get_report(self, report_id: int, owner: str | None) -> dict[str, Any] | None:
         """Return a report the caller owns, including its ordered items.
