@@ -193,8 +193,10 @@ describe('streamIngestUploadBatched', () => {
 
     expect(sentNames(0)).toEqual(['a', 'b'])
     expect(sentNames(1)).toEqual(['b'])
-    expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'warning', 'file_saved'])
+    expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'warning', 'file_saved', 'warning_resolved'])
     expect(String(events[2].data.message)).toBe('Batch 1/1 did not go through — retrying (1/2).')
+    // The retry worked, so its notice is retracted rather than left on screen.
+    expect(events[4].data.messages).toEqual([events[2].data.message])
     expect(result).toEqual({ anySaved: true, failures: [] })
   })
 

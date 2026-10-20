@@ -477,6 +477,12 @@ export function deriveIngestStatus(
         }
         break
       }
+      case 'warning_resolved': {
+        // A batch's retry notices stop being true once the batch goes through.
+        const resolved = d.messages
+        if (Array.isArray(resolved)) status.warnings = status.warnings.filter((w) => !resolved.includes(w))
+        break
+      }
       case 'ingestion_complete': {
         status.phase = 'complete'
         status.collection = strOf(d.collection) ?? status.collection

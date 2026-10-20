@@ -129,7 +129,8 @@ function withoutSaved(pending: File[], saved: string[]): File[] {
  * A batch is done only when the server says so (`upload_complete`). One that
  * stalls, drops, meets a gateway error or ends early is sent again — only its
  * files not yet saved — after each pause in `UPLOAD_RETRY_DELAYS_MS`, with a
- * `warning` per retry. Upload failures are non-fatal: a batch still failing
+ * `warning` per retry, retracted by a `warning_resolved` once the batch goes
+ * through. Upload failures are non-fatal: a batch still failing
  * after that, or failing in a way a retry cannot cure (a lone oversize file
  * → 413, a server-side save error), is reported and the rest still upload;
  * the returned `failures` list names exactly the files that never made it to
@@ -176,6 +177,8 @@ export async function* streamIngestUploadBatched(
 
   for (let i = 0; i < batches.length; i++) {
     let pending = batches[i]
+    // This batch's retry notices: retracted if it gets through, kept if it fails.
+    const notices: string[] = []
     for (let attempt = 0; ; attempt++) {
       const saved: string[] = []
       let complete = false
@@ -218,22 +221,24 @@ export async function* streamIngestUploadBatched(
         caught = err
       }
       if (saved.length > 0) anySaved = true
-      if (complete) break
-      pending = withoutSaved(pending, saved)
-      if (pending.length === 0) break
+      if (!complete) pending = withoutSaved(pending, saved)
+      if (complete || pending.length === 0) {
+        if (notices.length > 0) yield stamp('warning_resolved', { messages: notices })
+        break
+      }
 
       const status = caught instanceof UploadHttpError ? caught.status : undefined
       const aborted = caught instanceof DOMException && caught.name === 'AbortError'
       const retryable = !serverError && !aborted && (status === undefined || RETRYABLE_STATUSES.has(status))
       if (retryable && attempt < UPLOAD_RETRY_DELAYS_MS.length) {
-        yield stamp('warning', {
-          message: t('ingest.batch_retrying', {
-            batch: i + 1,
-            total: batches.length,
-            attempt: attempt + 1,
-            max: UPLOAD_RETRY_DELAYS_MS.length
-          })
+        const message = t('ingest.batch_retrying', {
+          batch: i + 1,
+          total: batches.length,
+          attempt: attempt + 1,
+          max: UPLOAD_RETRY_DELAYS_MS.length
         })
+        notices.push(message)
+        yield stamp('warning', { message })
         await new Promise((resolve) => setTimeout(resolve, UPLOAD_RETRY_DELAYS_MS[attempt]))
         continue
       }

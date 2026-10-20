@@ -663,6 +663,8 @@ export interface IngestEvent {
     | 'ingestion_complete'
     | 'ingestion_cancelled'
     | 'warning'
+    // Upload leg only: retracts the retry notices of a batch that went through.
+    | 'warning_resolved'
     | 'error'
     // The owner-multiplexed `/ingest/jobs/events` stream is multiplexed
     // across job kinds, not just ingest runs (`jobs.py::KIND_EVENTS`) — a
