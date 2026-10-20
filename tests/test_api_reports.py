@@ -1187,6 +1187,49 @@ def test_evidence_from_another_collection_never_lands_in_a_report(client: TestCl
     assert client.get(f"/reports/{rid}").json()["items"] == []
 
 
+@pytest.mark.parametrize(
+    ("manager_method", "method", "path", "body"),
+    [
+        ("update_report", "PATCH", "/reports/{rid}", {"title": "Renamed"}),
+        ("delete_report", "DELETE", "/reports/{rid}", None),
+        ("add_item", "POST", "/reports/{rid}/items", _entity_payload("c2")),
+        ("add_items", "POST", "/reports/{rid}/items/batch", {"items": [_entity_payload("c2")]}),
+        ("annotate_item", "PATCH", "/reports/{rid}/items/{iid}", {"note": "checked"}),
+        ("remove_item", "DELETE", "/reports/{rid}/items/{iid}", None),
+        ("reorder_items", "POST", "/reports/{rid}/items/reorder", {"item_ids": []}),
+        ("set_collection_overview_snapshot", "POST", "/reports/{rid}/collection-overview/refresh", None),
+    ],
+)
+def test_every_report_write_rechecks_the_collection_with_the_write(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    manager_method: str,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """The route's collection reaches the manager, which checks it again inside the write's lock.
+
+    The route gate runs in its own transaction before the write; only the
+    re-check inside the write is atomic with it.
+    """
+    _own_collection("docs")
+    rid = _create(client)["id"]
+    iid = client.post(f"/reports/{rid}/items", json=_entity_payload("c1")).json()["id"]
+    real = getattr(ReportManager, manager_method)
+    seen: list[str | None] = []
+
+    def spy(self: ReportManager, *args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("collection"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReportManager, manager_method, spy)
+    resp = client.request(method, path.format(rid=rid, iid=iid), json=body)
+
+    assert resp.status_code == 200, resp.text
+    assert seen == ["docs"]
+
+
 def test_listing_reports_names_a_collection(client: TestClient) -> None:
     """A list without a collection is refused, never answered with every collection's reports."""
     _create(client)

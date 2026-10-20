@@ -3795,7 +3795,9 @@ def _capture_collection_overview(report_id: int, collection: str, principal: Pri
     with _scoped_collection(collection, principal):
         documents = rag.list_documents()
     overview = build_collection_overview(documents, collection, datetime.now(UTC))
-    return rag.ensure_report_manager().set_collection_overview_snapshot(report_id, principal.effective_owner, overview)
+    return rag.ensure_report_manager().set_collection_overview_snapshot(
+        report_id, principal.effective_owner, overview, collection=collection
+    )
 
 
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
@@ -4340,6 +4342,7 @@ def get_report(report_id: int, principal: Principal = Depends(resolve_principal)
 def update_report(
     report_id: int,
     payload: ReportUpdateIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Update a report (title, case metadata, or contents toggle) owned by the caller.
@@ -4347,6 +4350,7 @@ def update_report(
     Args:
         report_id (int): The report id.
         payload (ReportUpdateIn): Fields to update; only non-null fields apply.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4363,6 +4367,7 @@ def update_report(
         reference_number=payload.reference_number,
         show_toc=payload.show_toc,
         show_collection_overview=payload.show_collection_overview,
+        collection=collection,
     )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
@@ -4403,11 +4408,16 @@ def refresh_report_collection_overview(
 
 
 @app.delete("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
-def delete_report(report_id: int, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
+def delete_report(
+    report_id: int,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
     """Delete a report (and its items) owned by the calling principal.
 
     Args:
         report_id (int): The report id.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4416,7 +4426,7 @@ def delete_report(report_id: int, principal: Principal = Depends(resolve_princip
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner):
+    if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner, collection=collection):
         raise HTTPException(status_code=404, detail="Report not found.")
     _discard_report_pdfs([report_id])
     return {"ok": True}
@@ -4426,6 +4436,7 @@ def delete_report(report_id: int, principal: Principal = Depends(resolve_princip
 def add_report_item(
     report_id: int,
     payload: ReportItemIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Add a snapshotted artifact to a report (idempotent by dedupe key).
@@ -4434,6 +4445,7 @@ def add_report_item(
         report_id (int): The report id.
         payload (ReportItemIn): Artifact type, dedupe key, snapshot, and
             optional note.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4451,6 +4463,7 @@ def add_report_item(
         dedupe_key=payload.dedupe_key,
         snapshot=snapshot,
         note=payload.note,
+        collection=collection,
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Report not found.")
@@ -4461,6 +4474,7 @@ def add_report_item(
 def add_report_items(
     report_id: int,
     payload: ReportItemBatchIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Add many snapshotted artifacts to a report in one request.
@@ -4479,6 +4493,7 @@ def add_report_items(
     Args:
         report_id (int): The report id.
         payload (ReportItemBatchIn): The items to add.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4503,6 +4518,7 @@ def add_report_items(
             }
             for item in payload.items
         ],
+        collection=collection,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Report not found.")
@@ -4522,6 +4538,7 @@ def annotate_report_item(
     report_id: int,
     item_id: int,
     payload: ReportItemNoteIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Set or clear the note on a report item.
@@ -4530,6 +4547,7 @@ def annotate_report_item(
         report_id (int): The report id.
         item_id (int): The item id.
         payload (ReportItemNoteIn): The new note (``None`` clears it).
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4538,7 +4556,9 @@ def annotate_report_item(
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    item = rag.ensure_report_manager().annotate_item(report_id, principal.effective_owner, item_id, note=payload.note)
+    item = rag.ensure_report_manager().annotate_item(
+        report_id, principal.effective_owner, item_id, note=payload.note, collection=collection
+    )
     if item is None:
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return item
@@ -4548,6 +4568,7 @@ def annotate_report_item(
 def remove_report_item(
     report_id: int,
     item_id: int,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, bool]:
     """Remove a single item from a report owned by the calling principal.
@@ -4555,6 +4576,7 @@ def remove_report_item(
     Args:
         report_id (int): The report id.
         item_id (int): The item id.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4563,7 +4585,9 @@ def remove_report_item(
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    if not rag.ensure_report_manager().remove_item(report_id, principal.effective_owner, item_id):
+    if not rag.ensure_report_manager().remove_item(
+        report_id, principal.effective_owner, item_id, collection=collection
+    ):
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return {"ok": True}
 
@@ -4572,6 +4596,7 @@ def remove_report_item(
 def reorder_report_items(
     report_id: int,
     payload: ReportReorderIn,
+    collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Reorder a report's items to match the supplied id order.
@@ -4579,6 +4604,7 @@ def reorder_report_items(
     Args:
         report_id (int): The report id.
         payload (ReportReorderIn): Desired item id order.
+        collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -4587,7 +4613,9 @@ def reorder_report_items(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = rag.ensure_report_manager().reorder_items(report_id, principal.effective_owner, payload.item_ids)
+    report = rag.ensure_report_manager().reorder_items(
+        report_id, principal.effective_owner, payload.item_ids, collection=collection
+    )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return report
