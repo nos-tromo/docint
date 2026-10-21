@@ -1,6 +1,6 @@
 [project]
 name = "docint"
-version = "2.5.7"
+version = "2.6.0"
 description = "Document Intelligence — document ingestion, retrieval and agentic chat RAG over Qdrant (FastAPI + React)"
 authors = [
   { name = "nos-tromo" }
