@@ -3063,6 +3063,42 @@ class _KeywordReadiness:
     image_schema: dict[str, Any]
 
 
+def _keyword_plan(readiness: _KeywordReadiness) -> tuple[dict[str, bool], dict[str, int]]:
+    """Plan a keyword match on a collection's readiness: the fields it can match, and what each match cannot see.
+
+    A field is planned when every key it searches carries its own index kind in the main
+    collection's schema; the text also needs chunks that carry it. Where the image companion is
+    in scope, it joins the match of a field its points carry only when it has the same indexes;
+    otherwise its points are left unchecked. The text's match also leaves unchecked the chunks
+    either lane holds without the text.
+
+    Args:
+        readiness (_KeywordReadiness): The read the match is planned on.
+
+    Returns:
+        tuple[dict[str, bool], dict[str, int]]: Per planned field, in ``SEARCH_FIELDS`` order,
+        whether the companion joins its match, and how many chunks its match leaves unchecked.
+    """
+    main, images, in_scope = readiness.main, readiness.images, readiness.companion_exists
+    main_schema, image_schema = readiness.main_schema, readiness.image_schema
+    image_total = int(images["total"]) if in_scope and images is not None else 0
+    image_missing = image_total - int(images["with_search_text"]) if in_scope and images is not None else 0
+    main_missing = int(main["total"]) - int(main["with_search_text"])
+    joins: dict[str, bool] = {}
+    unchecked: dict[str, int] = {}
+    for name in SEARCH_FIELDS:
+        if not field_ready_in_schema(main_schema, name):
+            continue
+        if name == DEFAULT_SEARCH_FIELD and int(main["with_search_text"]) == 0:
+            continue
+        reaches_images = in_scope and name in IMAGE_LANE_FIELDS
+        joins[name] = reaches_images and field_ready_in_schema(image_schema, name)
+        left_out = image_total if reaches_images and not joins[name] else 0
+        covered = image_missing if joins[name] else 0
+        unchecked[name] = left_out + (main_missing + covered if name == DEFAULT_SEARCH_FIELD else 0)
+    return joins, unchecked
+
+
 @dataclass(frozen=True)
 class AgentTurn:
     """One chat turn's agent loop, built for a request and not yet run.
@@ -9224,7 +9260,11 @@ class RAG:
         never counted as misses, as are the chunks either lane holds without the text. A
         ``documents`` turn leaves the companion out: the coverage read does not look it up or
         count it, no companion schema is read, and its points are neither counted by a check
-        nor reported unchecked.
+        nor reported unchecked. The fields offered are decided once, on the read the match is
+        built with (:func:`_keyword_plan`). Each check asks for the readiness again before it
+        counts, in the same lane scope, and counts by that read: a write since the turn began,
+        or a read past its window, is read afresh, and a field no longer planned there has its
+        count reported unavailable.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
@@ -9246,27 +9286,12 @@ class RAG:
             return "filters"
         collection = self.qdrant_collection
         companion = image_companion_name(collection)
-        readiness = self._keyword_readiness(collection, with_images=retrieval_target != "documents")
+        with_images = retrieval_target != "documents"
+        readiness = self._keyword_readiness(collection, with_images=with_images)
         if isinstance(readiness, str):
             return readiness
-        main, images, in_scope = readiness.main, readiness.images, readiness.companion_exists
-        main_schema, image_schema = readiness.main_schema, readiness.image_schema
-        image_total = int(images["total"]) if in_scope and images is not None else 0
-        image_missing = image_total - int(images["with_search_text"]) if in_scope and images is not None else 0
-        main_missing = int(main["total"]) - int(main["with_search_text"])
-        joins: dict[str, bool] = {}
-        unchecked: dict[str, int] = {}
-        for name in SEARCH_FIELDS:
-            if not field_ready_in_schema(main_schema, name):
-                continue
-            if name == DEFAULT_SEARCH_FIELD and int(main["with_search_text"]) == 0:
-                continue
-            reaches_images = in_scope and name in IMAGE_LANE_FIELDS
-            joins[name] = reaches_images and field_ready_in_schema(image_schema, name)
-            left_out = image_total if reaches_images and not joins[name] else 0
-            covered = image_missing if joins[name] else 0
-            unchecked[name] = left_out + (main_missing + covered if name == DEFAULT_SEARCH_FIELD else 0)
-        if DEFAULT_SEARCH_FIELD not in joins:
+        planned, _ = _keyword_plan(readiness)
+        if DEFAULT_SEARCH_FIELD not in planned:
             return "text_not_ready"
 
         def _filter(words: str, field: str, base: qdrant_models.Filter | None) -> qdrant_models.Filter | None:
@@ -9331,9 +9356,16 @@ class RAG:
         def _run(words: str, field: str) -> KeywordResult:
             """Count the matches exactly, then retrieve the best of them as a search does.
 
-            The search is an agent's own (:class:`AgentSearchQuery`), so every child is kept and
-            no sub-floor image is re-scored by description; the social steps are left out. Runs
-            on a search thread, inside the request's collection scope.
+            Each check first asks for the collection's readiness again (:meth:`_keyword_readiness`),
+            in the match's own lane scope: a read still kept is reused with no I/O, while one that a
+            write in this process has since outdated, or one past its window, is read afresh. What
+            is counted and retrieved, the image companion's part in both, and what is reported
+            unchecked all follow that read (:func:`_keyword_plan`), never the one the match was
+            built on. When it finds a lane uncounted, or the field no longer planned, the count is
+            unavailable and nothing is retrieved. The search is an agent's own
+            (:class:`AgentSearchQuery`), so every child is kept and no sub-floor image is re-scored
+            by description; the social steps are left out. Runs on a search thread, inside the
+            request's collection scope.
 
             Args:
                 words (str): The words.
@@ -9346,10 +9378,19 @@ class RAG:
                 RuntimeError: When the active collection is not the one the match was built for,
                     before anything is read: the count reads that one and the retrieval the active
                     one, which must never be two collections. The call is answered as failed.
+                Exception: Whatever reading the readiness again raises, a failed companion lookup
+                    included, so an outage never reads as "no companion"; the call is answered as
+                    failed.
             """
             if self.qdrant_collection != collection:
                 raise RuntimeError("A keyword match ran outside the collection it was built for.")
             keywords = tuple(parse_keywords(words))
+            current = self._keyword_readiness(collection, with_images=with_images)
+            plan = None if isinstance(current, str) else _keyword_plan(current)
+            if plan is None or field not in plan[0]:
+                # A lane went uncounted, or the field lost its index: no count of it would be exact.
+                return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords)
+            joins, unchecked = plan
             conditions = _filter(words, field, request_filter)
             if conditions is None:
                 return KeywordResult(nodes=[], matches=None, unchecked=unchecked[field], keywords=keywords)
@@ -9372,7 +9413,7 @@ class RAG:
                     nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
             return KeywordResult(nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords)
 
-        fields = (DEFAULT_SEARCH_FIELD, *(name for name in joins if name != DEFAULT_SEARCH_FIELD))
+        fields = (DEFAULT_SEARCH_FIELD, *(name for name in planned if name != DEFAULT_SEARCH_FIELD))
         return KeywordMatcher(fields=fields, check=_check, run=_run)
 
     def _keyword_count(self, collection: str, conditions: qdrant_models.Filter) -> int | None:

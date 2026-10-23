@@ -2371,6 +2371,213 @@ def test_a_turn_while_an_upload_is_preprocessing_counts_the_images_already_store
     assert _store_reads(client) == read_afresh
 
 
+def _physical_matcher(rag: RAG, target: RetrievalTarget = "all") -> KeywordMatcher:
+    """Build the keyword match of a turn in the physical collection, as the turn builds it when it begins.
+
+    Args:
+        rag (RAG): The engine.
+        target (RetrievalTarget): The retrieval target.
+
+    Returns:
+        KeywordMatcher: The match; the test fails when it is withheld.
+    """
+    with rag.collection_scope(PHYSICAL):
+        matcher = rag._agent_keyword_matcher(
+            metadata_filter_rules=None, metadata_filters_active=False, retrieval_target=target
+        )
+    assert matcher is not None
+    return matcher
+
+
+def _physical_check(rag: RAG, matcher: KeywordMatcher, words: str, field: str = "text") -> KeywordResult:
+    """Run one keyword check inside the physical collection's request scope, as a turn's search thread runs it.
+
+    Args:
+        rag (RAG): The engine.
+        matcher (KeywordMatcher): The turn's keyword match.
+        words (str): The words.
+        field (str): The field.
+
+    Returns:
+        KeywordResult: What the check found.
+    """
+    with rag.collection_scope(PHYSICAL):
+        return matcher.run(words, field)
+
+
+def _store_images_and_unindexed_chunks(client: KeywordClient, lanes: dict[str, tuple[int, int]]) -> None:
+    """Store 3 matching images in a new image companion, and 5 chunks the keyword index does not cover yet.
+
+    Args:
+        client (KeywordClient): The store double, holding the physical collection alone so far.
+        lanes (dict[str, tuple[int, int]]): The coverage the store reports, as :func:`keyword_coverage` returned it.
+    """
+    companion = f"{PHYSICAL}_images"
+    client.schemas[companion] = ready_schema("text")
+    client.counts[companion] = 3
+    lanes.update({PHYSICAL: (15, 10), companion: (3, 3)})
+
+
+def test_a_check_counts_what_was_written_after_its_turn_began(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check counts the images a write stored after its turn began, and reports the chunks it left unindexed.
+
+    The turn read the collection before the write: no image companion, every chunk indexed. While the write goes
+    on, it stores matching images in a new companion and chunks the index does not cover yet, and the check runs.
+    Counting by the read its turn began with, the check would count no image and report nothing unchecked, an exact
+    zero for matches the write had stored.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    lanes = keyword_coverage(monkeypatch, {PHYSICAL: (10, 10)})
+    matcher = _physical_matcher(rag)
+
+    with collection_writes.writing(PHYSICAL):
+        _store_images_and_unindexed_chunks(client, lanes)
+        result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert (result.matches, result.unchecked) == (3, 5)
+    assert [name for name, _ in client.counted] == [PHYSICAL, f"{PHYSICAL}_images"]
+    assert [build["include_images"] for build in built] == [True]
+
+
+def test_a_check_after_the_ttl_reads_the_readiness_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check made once its turn's read is past the readiness window counts by a fresh read of the store.
+
+    Another process stored matching images in a new companion and chunks the index does not cover yet. It opens no
+    write window in this process, so the read's age is all that tells the check the read may be stale.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    clock = _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    lanes = keyword_coverage(monkeypatch, {PHYSICAL: (10, 10)})
+    matcher = _physical_matcher(rag)
+    unwritten = collection_writes.state(PHYSICAL)
+
+    _store_images_and_unindexed_chunks(client, lanes)
+    clock.now += 31
+    result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert collection_writes.state(PHYSICAL) == unwritten
+    assert (result.matches, result.unchecked) == (3, 5)
+    assert [build["include_images"] for build in built] == [True]
+
+
+@pytest.mark.parametrize("target", ["all", "documents"])
+def test_a_check_reads_nothing_more_when_nothing_was_written(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    """A check with nothing written since its turn began reuses the read its turn kept: no lookup, no schema read.
+
+    Only the match itself is counted. The read is kept per lane scope, so a check that asked in a scope other than
+    its turn's would read the store again.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, _ = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    matcher = _physical_matcher(rag, cast(RetrievalTarget, target))
+    read_by_the_turn = (list(client.exists_asked), list(client.schemas_read))
+
+    result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert read_by_the_turn == ([f"{PHYSICAL}_images"] if target == "all" else [], [PHYSICAL])
+    assert (client.exists_asked, client.schemas_read) == read_by_the_turn
+    assert [name for name, _ in client.counted] == [PHYSICAL]
+    assert (result.matches, result.unchecked) == (0, 0)
+
+
+def test_a_check_whose_field_lost_its_index_reports_its_count_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A field whose index is gone when its check runs is neither counted nor searched: its count is unavailable.
+
+    The turn was offered the author field. A write then left the field without its index, so a match on it would no
+    longer be exact: the check reports no number and nothing unchecked. The text, whose index stands, is counted as
+    before.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, fields=("text", "author"), collection=PHYSICAL)
+    matcher = _physical_matcher(rag, "documents")
+
+    with collection_writes.writing(PHYSICAL):
+        client.schemas[PHYSICAL] = ready_schema("text")
+        author = _physical_check(rag, matcher, "Person", "author")
+        text = _physical_check(rag, matcher, "Hafenfest")
+
+    assert matcher.fields == ("text", "author")
+    assert (author.matches, author.unchecked, author.nodes) == (None, 0, [])
+    assert (text.matches, text.unchecked) == (2, 0)
+    assert [name for name, _ in client.counted] == [PHYSICAL]
+    assert [build["include_images"] for build in built] == [False]
+
+
+def test_a_check_whose_lane_went_uncounted_reports_its_count_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check whose read finds the image lane uncounted neither counts nor searches: its count is unavailable.
+
+    The turn counted both lanes when it began. While a write goes on, the companion's coverage can no longer be
+    counted, so a count could miss what it holds: the check reports no number and nothing unchecked, never the
+    count the read its turn began with would have planned.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL)
+    lanes = keyword_coverage(monkeypatch, {PHYSICAL: (10, 10)})
+    _store_images_and_unindexed_chunks(client, lanes)
+    matcher = _physical_matcher(rag)
+
+    with collection_writes.writing(PHYSICAL):
+        del lanes[f"{PHYSICAL}_images"]
+        result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert (result.matches, result.unchecked, result.nodes) == (None, 0, [])
+    assert (client.counted, built) == ([], [])
+
+
+def test_a_check_whose_readiness_read_raises_fails_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store fault while a check reads the readiness again fails the call before anything is counted.
+
+    It fails as a fault in the check's retrieval does, and the turn's loop answers the call as failed; an outage
+    never reads as "no companion".
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL)
+    matcher = _physical_matcher(rag)
+
+    def _down(collection_name: str) -> bool:
+        """Fail as an unreachable store does.
+
+        Args:
+            collection_name (str): The collection.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(client, "collection_exists", _down)
+    with collection_writes.writing(PHYSICAL), pytest.raises(RuntimeError, match="store down"):
+        _physical_check(rag, matcher, "Hafenfest")
+
+    assert (client.counted, built) == ([], [])
+
+
 def _keyword_budgets(monkeypatch: pytest.MonkeyPatch) -> dict[str, TurnBudget]:
     """Measure an ``all`` turn's budget with keyword on every field, on the text alone, and without keyword.
 
