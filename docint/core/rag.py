@@ -9387,11 +9387,13 @@ class RAG:
                 raise RuntimeError("A keyword match ran outside the collection it was built for.")
             keywords = tuple(parse_keywords(words))
             current = self._keyword_readiness(collection, with_images=with_images)
-            plan = None if isinstance(current, str) else _keyword_plan(current)
-            if plan is None or field not in plan[0]:
-                # A lane went uncounted, or the field is no longer planned: no count of it would be exact.
+            if isinstance(current, str):
+                # A lane in scope went uncounted: no count would be exact.
                 return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords)
-            joins, unchecked = plan
+            joins, unchecked = _keyword_plan(current)
+            if field not in joins:
+                # The field is no longer planned: no count of it would be exact.
+                return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords)
             conditions = _filter(words, field, request_filter)
             if conditions is None:
                 return KeywordResult(nodes=[], matches=None, unchecked=unchecked[field], keywords=keywords)
