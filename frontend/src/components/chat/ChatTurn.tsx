@@ -325,6 +325,17 @@ function AgentTrailDisclosure({ steps }: { steps: TrailStep[] }) {
   )
 }
 
+/**
+ * A finished turn's trail: behind the disclosure, unless all the turn did was carry passages over. It searched
+ * nothing then, so its one row stands under the answer rather than behind a title that names searches.
+ */
+function FinishedTrail({ steps }: { steps: TrailStep[] }) {
+  if (steps.every((step) => step.action === 'carried')) {
+    return <TrailSteps steps={steps} testId="agent-trail" className="mt-3 text-xs text-muted-foreground" />
+  }
+  return <AgentTrailDisclosure steps={steps} />
+}
+
 /** Whether the answer text carries the assessment label the notice points to. */
 function carriesLabel(trail: AgentTrail): boolean {
   return trail.answer === 'unsplit' || (trail.answer === 'split' && typeof trail.evidence_chars === 'number')
@@ -451,7 +462,7 @@ export function ChatTurn({
             )}
           </div>
         )}
-        {research.length > 0 && <AgentTrailDisclosure steps={research} />}
+        {research.length > 0 && <FinishedTrail steps={research} />}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">{t('chat.error_title')}</div>

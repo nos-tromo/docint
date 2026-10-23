@@ -1067,12 +1067,52 @@ describe('ChatTurn', () => {
     ])
   })
 
-  it('keeps a follow-up that searched nothing behind a disclosure holding its carried passages', async () => {
+  it('shows a follow-up that only carried passages as one line, with no search disclosure', () => {
     const stored: AgentTrail = { ...LOOKUP_TRAIL, actions: [{ action: 'carried', detail: '', found: 2 }] }
 
     renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
 
+    // It searched nothing, so there is no title or toggle naming searches to put the row behind.
+    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+    expect(screen.queryByText('Searches behind this answer')).not.toBeInTheDocument()
+    expect(trailRows('agent-trail')).toEqual(['Carried over 2 passages from earlier answers'])
+    // The row is the trail's own: the passages icon, in the small muted text.
+    const trail = screen.getByTestId('agent-trail')
+    expect(trail).toHaveClass('text-xs', 'text-muted-foreground')
+    expect(within(trail).getByRole('listitem').querySelector('svg')?.innerHTML).toBe(innerMarkup(<DocumentsIcon />))
+  })
+
+  it('folds the carried row behind the disclosure when the follow-up also searched', async () => {
+    const stored: AgentTrail = {
+      ...LOOKUP_TRAIL,
+      actions: [
+        { action: 'carried', detail: '', found: 2 },
+        { action: 'search', detail: 'Hafen', found: 1 }
+      ]
+    }
+
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
+
+    // Shut, the disclosure holds both rows: the carried one is not also a line under the answer.
+    expect(screen.queryByText(/Carried over/)).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    expect(trailRows('agent-trail')).toEqual([
+      'Carried over 2 passages from earlier answers',
+      'Searched “Hafen”: 1 new passage'
+    ])
+  })
+
+  it('keeps the carried line of a follow-up whose stream failed before it searched', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: true,
+      meta: null,
+      error: 'Internal server error',
+      agentSteps: [{ step: 0, action: 'carried', detail: '', found: 2 }]
+    })
+
+    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
     expect(trailRows('agent-trail')).toEqual(['Carried over 2 passages from earlier answers'])
   })
 
