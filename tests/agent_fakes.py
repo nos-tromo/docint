@@ -678,15 +678,37 @@ class KeywordClient:
         return types.SimpleNamespace(count=value)
 
 
-def keyword_coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int, int]]) -> None:
+def keyword_coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int, int]]) -> dict[str, tuple[int, int]]:
     """Report the keyword index's coverage per lane, as RAG reads it, as ``(total, with_search_text)``.
+
+    Each read reports the lanes as they stand in the dict returned, so a test can change the coverage between reads.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         lanes (dict[str, tuple[int, int]]): The lanes counted in full; a lane left out was not counted.
+
+    Returns:
+        dict[str, tuple[int, int]]: The lanes reported, a copy of ``lanes``; change it to change the next read.
     """
-    status = {
-        "indexed": True,
-        "lanes": {name: {"total": total, "with_search_text": covered} for name, (total, covered) in lanes.items()},
-    }
-    monkeypatch.setattr("docint.core.rag.search_index_status", lambda client, collection, **kwargs: status)
+    reported = dict(lanes)
+
+    def _status(client: Any, collection: str, **kwargs: Any) -> dict[str, Any]:
+        """Report the lanes as they stand now.
+
+        Args:
+            client (Any): The store, unused.
+            collection (str): The collection, unused.
+            **kwargs (Any): The read's options, unused.
+
+        Returns:
+            dict[str, Any]: The status, with every lane reported counted in full.
+        """
+        return {
+            "indexed": True,
+            "lanes": {
+                name: {"total": total, "with_search_text": covered} for name, (total, covered) in reported.items()
+            },
+        }
+
+    monkeypatch.setattr("docint.core.rag.search_index_status", _status)
+    return reported

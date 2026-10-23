@@ -146,6 +146,7 @@ from docint.agents.turn.keyword import (
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.tools import ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
+from docint.core import collection_writes
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
     ResolutionSummary,
@@ -3368,11 +3369,10 @@ class RAG:
     _field_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _visual_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _keyword_readiness_cache: dict[tuple[str, bool], tuple[float, _KeywordReadiness]] = field(
+    _keyword_readiness_cache: dict[tuple[str, bool], tuple[float, int, _KeywordReadiness]] = field(
         default_factory=dict, init=False, repr=False
     )
     _keyword_readiness_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _keyword_readiness_generation: int = field(default=0, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
     collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
@@ -7926,8 +7926,9 @@ class RAG:
     ) -> IngestStats:
         """Ingest documents from the specified directory into the Qdrant collection.
 
-        Whatever the outcome, a failed run included, the collection's kept keyword
-        readiness is dropped afterwards (:meth:`forget_keyword_readiness`).
+        The run is a write window on the collection (:mod:`docint.core.collection_writes`) from
+        start to end, however it ends. While the window is open, no engine in this process
+        reuses a keyword readiness it read of the collection, and its end voids what was kept.
 
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
@@ -7951,7 +7952,7 @@ class RAG:
                 the orphan SQLite KV files; uploaded source files are kept.
         """
         collection = self.qdrant_collection
-        try:
+        with collection_writes.writing(collection):
             return self._ingest_docs(
                 data_dir,
                 build_query_engine=build_query_engine,
@@ -7959,8 +7960,6 @@ class RAG:
                 ner=ner,
                 hate_speech=hate_speech,
             )
-        finally:
-            self.forget_keyword_readiness(collection)
 
     def _ingest_docs(
         self,
@@ -9129,11 +9128,14 @@ class RAG:
 
         A read covers the keyword index's coverage per lane, whether the image companion
         exists, and one payload schema per collection. It is kept per physical collection and
-        lane scope for ``KEYWORD_READINESS_TTL_S``. Nothing that failed is kept: a lane in scope
-        that was not counted (``coverage``), a read that raised, and a schema that came back
-        empty, which reads the same as one that could not be read, so an outage neither
-        withholds nor offers keyword for the whole window. :meth:`forget_keyword_readiness`
-        drops a kept read early, and a read it overtook is returned to its turn but not kept.
+        lane scope for ``KEYWORD_READINESS_TTL_S``, and only while nothing in this process
+        writes the collection (:mod:`docint.core.collection_writes`): a kept read is reused only
+        at the epoch it was read at, and never while a write window on the collection is
+        open. Nothing that failed is kept: a lane in scope that was not counted (``coverage``),
+        a read that raised, and a schema that came back empty, which reads the same as one that
+        could not be read, so an outage neither withholds nor offers keyword for the whole
+        window. A read that a window opening, a window closing or a forget
+        (:meth:`forget_keyword_readiness`) overtook is returned to its turn but not kept.
 
         Args:
             collection (str): The physical main collection.
@@ -9149,11 +9151,13 @@ class RAG:
         """
         now = _readiness_now()
         key = (collection, with_images)
+        written = collection_writes.state(collection)
         with self._keyword_readiness_lock:
             kept = self._keyword_readiness_cache.get(key)
-            generation = self._keyword_readiness_generation
-        if kept is not None and now - kept[0] < KEYWORD_READINESS_TTL_S:
-            return kept[1]
+        if kept is not None:
+            stored_at, epoch, kept_read = kept
+            if not written.writing and epoch == written.epoch and now - stored_at < KEYWORD_READINESS_TTL_S:
+                return kept_read
         client = self.qdrant_client
         companion = image_companion_name(collection)
         lanes = search_index_status(client, collection, by_lane=True, include_companion=with_images).get("lanes") or {}
@@ -9175,24 +9179,26 @@ class RAG:
         )
         if read.main_schema and (read.image_schema or not in_scope):
             with self._keyword_readiness_lock:
-                if self._keyword_readiness_generation == generation:
-                    self._keyword_readiness_cache[key] = (now, read)
+                # Kept at the epoch it began at, unless a write or a forget moved it meanwhile.
+                if collection_writes.state(collection) == written:
+                    self._keyword_readiness_cache[key] = (now, written.epoch, read)
         return read
 
     def forget_keyword_readiness(self, collection: str) -> None:
-        """Drop a collection's kept keyword readiness in both lane scopes, so the next turn reads it afresh.
+        """Drop a collection's kept keyword readiness in every engine, so the next turn reads it afresh.
 
-        Called when this engine deletes or ingests the collection or creates its field
-        indexes, and by the API after an ingest, which runs on an engine of its own. A
-        change made by another process shows once the kept read is
-        ``KEYWORD_READINESS_TTL_S`` old. It also keeps out any read already in flight, of this
-        collection or another: that read is returned to its turn but not kept.
+        It moves the collection's epoch (:func:`docint.core.collection_writes.touch`), which voids
+        the read any engine of this process kept of it, in either lane scope, and drops this
+        engine's own. Called when this engine deletes the collection or creates its indexes,
+        and by the API after an ingest. A change made by another process shows once the kept
+        read is ``KEYWORD_READINESS_TTL_S`` old. A read of this collection already in flight is
+        returned to its turn but not kept.
 
         Args:
             collection (str): The physical main collection.
         """
+        collection_writes.touch(collection)
         with self._keyword_readiness_lock:
-            self._keyword_readiness_generation += 1
             for with_images in (True, False):
                 self._keyword_readiness_cache.pop((collection, with_images), None)
 

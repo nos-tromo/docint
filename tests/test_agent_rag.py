@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from itertools import pairwise
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -38,16 +39,18 @@ from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, MIN_ROUND_ROOM, TurnBudget, schema_tokens
 from docint.agents.turn.calls import SEARCH_THREAD_NAME
 from docint.agents.turn.history import NO_HISTORY, ConversationTurn, ConversationWindow
-from docint.agents.turn.keyword import KeywordMatcher
+from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.loop import AgentResult
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TOOL, probe_tools
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
+from docint.core import collection_writes
 from docint.core.rag import (
     AGENT_LEDGER_CAP,
     AGENT_METADATA_VALUE_CHARS,
     RAG,
     AgentTurn,
+    IngestStats,
     ParentContextPostprocessor,
     agent_llm_view,
 )
@@ -1653,18 +1656,20 @@ def _store_reads(client: KeywordClient) -> tuple[int, int, int]:
     return len(client.counted), len(client.exists_asked), len(client.schemas_read)
 
 
-def _ready_store(rag: RAG) -> KeywordClient:
+def _ready_store(rag: RAG, collection: str = "hafen") -> KeywordClient:
     """Give the engine a store whose collection and image companion are both ready for a text match.
 
     Args:
         rag (RAG): The engine.
+        collection (str): The physical collection; the engine's own by default.
 
     Returns:
         KeywordClient: The store double, nothing read from it yet.
     """
+    companion = f"{collection}_images"
     client = KeywordClient(
-        {"hafen": ready_schema("text"), "hafen_images": ready_schema("text")},
-        counts={"hafen": 10, "hafen_images": 4},
+        {collection: ready_schema("text"), companion: ready_schema("text")},
+        counts={collection: 10, companion: 4},
     )
     rag._qdrant_client = cast(Any, client)
     return client
@@ -2021,6 +2026,288 @@ def test_a_kept_readiness_never_carries_a_request_filter(monkeypatch: pytest.Mon
         (RULES, True),
         (None, False),
     ]
+
+
+def _every_turn_read_the_store(reads: Sequence[tuple[int, int, int]]) -> bool:
+    """Say whether the store was counted, looked up and read between every two totals of :func:`_store_reads`.
+
+    Args:
+        reads (Sequence[tuple[int, int, int]]): The totals, one before the first turn and one after each.
+
+    Returns:
+        bool: Whether all three totals grew at every turn.
+    """
+    return all(
+        all(now > before for now, before in zip(later, earlier, strict=True)) for earlier, later in pairwise(reads)
+    )
+
+
+def test_a_turn_while_its_collection_is_written_reads_it_live_and_keeps_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While this process writes a collection, each turn in it reads the store, though a read was kept before.
+
+    No read made meanwhile outlives the write: the turn after it reads afresh, and that read is kept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag, PHYSICAL)
+    _offered(rag, PHYSICAL, "all")
+    reads = [_store_reads(client)]
+
+    with collection_writes.writing(PHYSICAL):
+        for _ in range(2):
+            _offered(rag, PHYSICAL, "all")
+            reads.append(_store_reads(client))
+    _offered(rag, PHYSICAL, "all")
+    reads.append(_store_reads(client))
+    _offered(rag, PHYSICAL, "all")
+
+    assert _every_turn_read_the_store(reads)
+    assert _store_reads(client) == reads[-1]
+
+
+def test_a_read_a_write_began_during_is_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write that begins while a turn reads leaves the read to that turn alone, since it may predate the write.
+
+    The turns after it read again, while the write goes and once it has ended; only a read made after the end
+    is kept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag, PHYSICAL)
+    real = client.get_collection
+    closers: list[Callable[[], None]] = []
+
+    def _written_mid_read(collection_name: str) -> Any:
+        """Read a schema as the double does, a write on the collection beginning the first time.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: The double's answer.
+        """
+        if not closers:
+            closers.append(collection_writes.begin(PHYSICAL))
+        return real(collection_name)
+
+    monkeypatch.setattr(client, "get_collection", _written_mid_read)
+
+    first = _offered(rag, PHYSICAL, "all")
+    kept_by_then = dict(rag._keyword_readiness_cache)
+    reads = [_store_reads(client)]
+    _offered(rag, PHYSICAL, "all")
+    reads.append(_store_reads(client))
+    closers[0]()
+    _offered(rag, PHYSICAL, "all")
+    reads.append(_store_reads(client))
+    _offered(rag, PHYSICAL, "all")
+
+    assert first == ("text",)
+    assert kept_by_then == {}
+    assert _every_turn_read_the_store(reads)
+    assert _store_reads(client) == reads[-1]
+
+
+def test_a_read_begun_during_a_write_is_not_kept_though_the_write_ended_during_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read begun while a write was under way may hold part of it, so it is not kept though the write ended meanwhile.
+
+    The turn after it reads afresh, and that read is kept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag, PHYSICAL)
+    _offered(rag, PHYSICAL, "all")
+    reads = [_store_reads(client)]
+    real = client.get_collection
+    close = collection_writes.begin(PHYSICAL)
+    ended: list[str] = []
+
+    def _write_ended_mid_read(collection_name: str) -> Any:
+        """Read a schema as the double does, the write on the collection ending the first time.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: The double's answer.
+        """
+        if not ended:
+            ended.append(collection_name)
+            close()
+        return real(collection_name)
+
+    monkeypatch.setattr(client, "get_collection", _write_ended_mid_read)
+
+    for _ in range(2):
+        _offered(rag, PHYSICAL, "all")
+        reads.append(_store_reads(client))
+    _offered(rag, PHYSICAL, "all")
+
+    assert ended == [PHYSICAL]
+    assert not collection_writes.state(PHYSICAL).writing
+    assert _every_turn_read_the_store(reads)
+    assert _store_reads(client) == reads[-1]
+
+
+def test_a_collection_is_read_live_until_its_last_write_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With two writes at once, each turn reads the collection afresh until both have ended, not only the first.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag, PHYSICAL)
+    _offered(rag, PHYSICAL, "all")
+    reads = [_store_reads(client)]
+    first = collection_writes.begin(PHYSICAL)
+    second = collection_writes.begin(PHYSICAL)
+
+    first()
+    for _ in range(2):
+        _offered(rag, PHYSICAL, "all")
+        reads.append(_store_reads(client))
+    second()
+    _offered(rag, PHYSICAL, "all")
+    reads.append(_store_reads(client))
+    _offered(rag, PHYSICAL, "all")
+
+    assert _every_turn_read_the_store(reads)
+    assert _store_reads(client) == reads[-1]
+
+
+def test_a_forget_on_one_engine_drops_the_read_another_engine_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forget reaches every engine of the process, so the one serving turns reads afresh after another forgets.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    serving = _rag(monkeypatch)
+    client = _ready_store(serving, PHYSICAL)
+    other = _rag(monkeypatch)
+    other._qdrant_client = cast(Any, client)
+    _offered(serving, PHYSICAL, "all")
+    kept = _store_reads(client)
+    _offered(serving, PHYSICAL, "all")
+    assert _store_reads(client) == kept
+
+    other.forget_keyword_readiness(PHYSICAL)
+    _offered(serving, PHYSICAL, "all")
+    read_afresh = _store_reads(client)
+    _offered(serving, PHYSICAL, "all")
+
+    assert _every_turn_read_the_store([kept, read_afresh])
+    assert _store_reads(client) == read_afresh
+
+
+def test_a_forget_of_one_collection_keeps_a_read_of_another_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forget voids the reads of its own collection alone: a read of another one in flight is kept as usual.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag, PHYSICAL)
+    real = client.get_collection
+    forgotten: list[str] = []
+
+    def _other_forgotten_mid_read(collection_name: str) -> Any:
+        """Read a schema as the double does, another collection being forgotten the first time.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: The double's answer.
+        """
+        if not forgotten:
+            forgotten.append(collection_name)
+            rag.forget_keyword_readiness("hafen")
+        return real(collection_name)
+
+    monkeypatch.setattr(client, "get_collection", _other_forgotten_mid_read)
+
+    _offered(rag, PHYSICAL, "all")
+    in_flight = _store_reads(client)
+    _offered(rag, PHYSICAL, "all")
+
+    assert forgotten == [PHYSICAL]
+    assert _store_reads(client) == in_flight
+
+
+def test_a_turn_during_another_engines_ingest_counts_what_the_ingest_has_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A turn while another engine ingests its collection counts the images and chunks the run has stored so far.
+
+    The serving engine read the collection before the run: no image companion, every chunk indexed. The run goes
+    on an engine of its own, as the API's does, and stores matching images in a new companion and chunks the index
+    does not cover yet. Reusing the read made before the run, the turn would count no image and report nothing
+    unchecked, an exact zero for matches the run had stored. Once the run has ended, the next turn reads afresh and
+    that read is kept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The directory the run ingests.
+    """
+    _readiness_clock(monkeypatch)
+    serving = _rag(monkeypatch)
+    client, _ = _keyword_ready(monkeypatch, serving, collection=PHYSICAL, matches=0)
+    lanes = keyword_coverage(monkeypatch, {PHYSICAL: (10, 10)})
+    companion = f"{PHYSICAL}_images"
+    with serving.collection_scope(PHYSICAL):
+        assert "keyword" in _turn(serving).loop._registry.names
+    during: list[KeywordResult] = []
+
+    def _ingest(self: RAG, data_dir: str | Path, **kwargs: Any) -> IngestStats:
+        """Store matching images in a new companion and chunks the index does not cover yet, then let a turn check.
+
+        Args:
+            self (RAG): The ingesting engine.
+            data_dir (str | Path): The directory ingested, unused.
+            **kwargs (Any): The run's options, unused.
+
+        Returns:
+            IngestStats: What the run did.
+        """
+        client.schemas[companion] = ready_schema("text")
+        client.counts[companion] = 3
+        lanes.update({PHYSICAL: (15, 10), companion: (3, 3)})
+        with serving.collection_scope(PHYSICAL):
+            matcher = serving._agent_keyword_matcher(
+                metadata_filter_rules=None, metadata_filters_active=False, retrieval_target="all"
+            )
+            assert matcher is not None
+            during.append(matcher.run("Hafenfest", "text"))
+        return IngestStats(files_processed=1, files_skipped=0, files_failed=0, docs=1, nodes=5)
+
+    monkeypatch.setattr(RAG, "_ingest_docs", _ingest)
+    RAG(qdrant_collection=PHYSICAL).ingest_docs(tmp_path, build_query_engine=False)
+    after_run = _store_reads(client)
+    with serving.collection_scope(PHYSICAL):
+        _turn(serving)
+    read_afresh = _store_reads(client)
+    with serving.collection_scope(PHYSICAL):
+        _turn(serving)
+
+    assert [(result.matches, result.unchecked) for result in during] == [(3, 5)]
+    assert read_afresh != after_run
+    assert _store_reads(client) == read_afresh
 
 
 def _keyword_budgets(monkeypatch: pytest.MonkeyPatch) -> dict[str, TurnBudget]:

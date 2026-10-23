@@ -38,6 +38,7 @@ from qdrant_client import models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.agents.turn.keyword import LONG_WORD, NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD, KeywordMatcher
+from docint.core import collection_writes
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, CollectionCleanupError, LazyRerankerPostprocessor
 from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
@@ -9018,13 +9019,14 @@ def test_a_companion_lookup_that_fails_withholds_the_matcher_from_an_all_turn(mo
 
 
 @pytest.mark.parametrize("how", ["delete", "ingest", "failed-ingest"])
-def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
+def test_a_collection_is_read_live_while_ingested_and_afresh_once_ingested_or_deleted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
 ) -> None:
-    """A collection's kept keyword readiness is read afresh after it is deleted or ingested, a failed ingest too.
+    """A collection's keyword readiness is read live while it is ingested, and afresh once it is ingested or deleted.
 
-    The delete runs outside a request scope on another active collection, as the API's does. An ingest forgets
-    after its run, not before: the kept readiness is still in place while the run goes.
+    The run is a write window on the collection, so a turn during it reads the store; once the run has ended, a
+    failed one too, the next turn reads afresh and that read is kept. The delete runs outside a request scope on
+    another active collection, as the API's does.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -9050,10 +9052,11 @@ def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
     _decide()
     assert kept > 0
     assert len(client.schemas_read) == kept
+    written_mid_run: list[bool] = []
     mid_run: list[int] = []
 
     def _watch(self: _FakePipeline, processed_hashes: set[str]) -> list[Any]:
-        """Decide a turn's keyword matcher as the run goes, noting how much has been read by then.
+        """Decide a turn's keyword matcher as the run goes, noting whether the collection is written and what was read.
 
         Args:
             self (_FakePipeline): The pipeline.
@@ -9062,6 +9065,7 @@ def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
         Returns:
             list[Any]: No batches.
         """
+        written_mid_run.append(collection_writes.state("test").writing)
         _decide()
         mid_run.append(len(client.schemas_read))
         return []
@@ -9073,7 +9077,8 @@ def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
         monkeypatch.setattr(_FakePipeline, "build", _watch)
         with rag.collection_scope("test"):
             rag.ingest_docs(tmp_path, build_query_engine=False)
-        assert mid_run == [kept]
+        assert written_mid_run == [True]
+        assert mid_run[0] > kept
     else:
 
         def _fail(self: _FakePipeline, processed_hashes: set[str]) -> list[Any]:
@@ -9092,11 +9097,17 @@ def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
         monkeypatch.setattr(_FakePipeline, "build", _fail)
         with rag.collection_scope("test"), pytest.raises(RuntimeError, match="the run failed"):
             rag.ingest_docs(tmp_path, build_query_engine=False)
-        assert mid_run == [kept]
+        assert written_mid_run == [True]
+        assert mid_run[0] > kept
 
     after_it = len(client.schemas_read)
     _decide()
     assert len(client.schemas_read) > after_it
+    if how != "delete":
+        # The window closed: the read made after the run is kept.
+        read_afresh = len(client.schemas_read)
+        _decide()
+        assert len(client.schemas_read) == read_afresh
 
 
 def test_keyword_retrieval_keeps_every_child_and_leaves_the_social_links_out(monkeypatch: pytest.MonkeyPatch) -> None:
