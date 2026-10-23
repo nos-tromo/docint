@@ -9172,8 +9172,9 @@ class RAG:
     def forget_keyword_readiness(self, collection: str) -> None:
         """Drop a collection's kept keyword readiness in both lane scopes, so the next turn reads it afresh.
 
-        Called when this engine deletes or ingests the collection, or creates its field
-        indexes. A change made by another engine or process shows once the kept read is
+        Called when this engine deletes or ingests the collection or creates its field
+        indexes, and by the API after an ingest, which runs on an engine of its own. A
+        change made by another process shows once the kept read is
         ``KEYWORD_READINESS_TTL_S`` old.
 
         Args:

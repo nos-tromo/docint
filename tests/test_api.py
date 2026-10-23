@@ -334,6 +334,14 @@ class DummyRAG:
         """
         return None
 
+    def forget_keyword_readiness(self, collection: str) -> None:
+        """Record which collection's kept keyword readiness the API dropped.
+
+        Args:
+            collection (str): Physical collection name.
+        """
+        self.forgotten_readiness.append(collection)
+
     def probe_rerank_endpoint(self) -> None:
         """Satisfy the lifespan rerank probe without touching the network."""
         return None
@@ -357,6 +365,7 @@ class DummyRAG:
     def __init__(self) -> None:
         """Initialize the DummyRAG instance."""
         self.qdrant_collection = "alpha"
+        self.forgotten_readiness: list[str] = []
         self._owners = _DummyOwners(self)
         self.summarize_prompt = "Summarize collection"
         self.index = object()
@@ -3209,6 +3218,60 @@ def test_ingest_sync_generic_exception_propagates_as_500(
     response = client.post("/ingest", json={"collection": "col", "hybrid": True})
     assert response.status_code == 500
     assert response.json()["detail"] == "Request failed."
+
+
+@pytest.mark.parametrize("outcome", ["completed", "empty", "unsupported", "failed"])
+def test_ingest_sync_drops_the_kept_keyword_readiness_however_it_ends(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path, outcome: str
+) -> None:
+    """Whatever its outcome, a sync ingest makes the engine that serves turns forget its read of the collection.
+
+    ``ingest_docs`` runs on an engine of its own, so the serving one would otherwise keep the read it made
+    before the run for up to ``KEYWORD_READINESS_TTL_S``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+        outcome (str): How the run ends: ``completed``, ``empty`` (``EmptyIngestionError``), ``unsupported``
+            (``NoSupportedFilesError``) or ``failed`` (any other error, answered with a 500).
+    """
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+    ingested: list[str] = []
+
+    def fake_ingest(
+        collection: str, path: Path, hybrid: bool | None = None, progress_callback: Any = None, **kwargs: Any
+    ) -> None:
+        """Record the collection written to, then end as the case says.
+
+        Args:
+            collection (str): Physical collection name.
+            path (Path): Source directory path (ignored).
+            hybrid (bool | None): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
+
+        Raises:
+            EmptyIngestionError: For the ``empty`` outcome.
+            NoSupportedFilesError: For the ``unsupported`` outcome.
+            RuntimeError: For the ``failed`` outcome.
+        """
+        _ = (path, hybrid, progress_callback)
+        ingested.append(collection)
+        if outcome == "empty":
+            raise api_module.EmptyIngestionError(collection)
+        if outcome == "unsupported":
+            raise NoSupportedFilesError("nothing ingestable")
+        if outcome == "failed":
+            raise RuntimeError("Qdrant unreachable")
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    response = client.post("/ingest", json={"collection": "docs"})
+
+    assert response.status_code == (500 if outcome == "failed" else 200)
+    assert ingested == ["docs"]
+    assert cast(DummyRAG, api_module.rag).forgotten_readiness == ingested
 
 
 def test_ingest_upload_empty_emits_warning_and_completes(
