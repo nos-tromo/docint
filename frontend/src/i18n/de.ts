@@ -208,6 +208,8 @@ export const de: Strings = {
   'chat.agent_trail_hide': 'Suchen hinter dieser Antwort ausblenden',
   'chat.agent_trail_seed_one': 'Ausgangspunkt: {count} Passage',
   'chat.agent_trail_seed_other': 'Ausgangspunkt: {count} Passagen',
+  'chat.agent_trail_carried_one': '{count} Passage aus früheren Antworten übernommen',
+  'chat.agent_trail_carried_other': '{count} Passagen aus früheren Antworten übernommen',
   'chat.agent_trail_search_one': 'Gesucht nach „{query}“: {count} neue Passage',
   'chat.agent_trail_search_other': 'Gesucht nach „{query}“: {count} neue Passagen',
   'chat.agent_trail_search_images_one': 'Bilder durchsucht nach „{query}“: {count} neues Bild',

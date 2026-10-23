@@ -62,9 +62,19 @@ export type AnswerMode = 'lookup' | 'assessment'
 /**
  * What one step of an agent turn did: a tool the model called, or `note`, the
  * text it wrote before calling tools. `seed` is a scoped turn's pinned passages;
- * `answer` exists only in trails of the assessment turns that came before.
+ * `carried` is the passages a follow-up's earlier answers cite; `answer` exists
+ * only in trails of the assessment turns that came before.
  */
-export type AgentAction = 'seed' | 'search' | 'answer' | 'note' | 'search_images' | 'keyframes' | 'read' | 'keyword'
+export type AgentAction =
+  | 'seed'
+  | 'carried'
+  | 'search'
+  | 'answer'
+  | 'note'
+  | 'search_images'
+  | 'keyframes'
+  | 'read'
+  | 'keyword'
 
 /** One step of an agent turn, streamed as an `{agent}` frame. */
 export interface AgentStep {
@@ -73,7 +83,7 @@ export interface AgentStep {
   /**
    * The search's words, the image search's cues or the keyword check's words; the
    * clip, with ` #n` when one frame was asked for; the passage number read; or the
-   * note's text. Empty for `seed` and `answer`.
+   * note's text. Empty for `seed`, `carried` and `answer`.
    */
   detail: string
   found: number

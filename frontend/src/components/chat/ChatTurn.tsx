@@ -208,6 +208,8 @@ function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
   switch (step.action) {
     case 'seed':
       return t(single ? 'chat.agent_trail_seed_one' : 'chat.agent_trail_seed_other', { count: step.found })
+    case 'carried':
+      return t(single ? 'chat.agent_trail_carried_one' : 'chat.agent_trail_carried_other', { count: step.found })
     case 'answer':
       return t('chat.agent_trail_answer')
     case 'note':
@@ -248,6 +250,7 @@ function StepMarker({ action }: { action: AgentAction }) {
     case 'keyframes':
       return <ImageIcon className={className} />
     case 'seed':
+    case 'carried':
     case 'read':
       return <DocumentsIcon className={className} />
     case 'keyword':
@@ -284,7 +287,10 @@ function TrailSteps({
   )
 }
 
-/** The steps the model took itself: not the seed it started from, nor an earlier assessment's answer marker. */
+/**
+ * The steps behind the disclosure: not the seed a scope pinned, nor an earlier assessment's answer marker.
+ * A follow-up's carried passages stay: no banner says the turn started from them.
+ */
 function researchSteps(actions: TrailStep[] | undefined): TrailStep[] {
   if (!Array.isArray(actions)) return []
   return actions.filter(

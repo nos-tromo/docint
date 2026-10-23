@@ -196,6 +196,8 @@ export const en = {
   'chat.agent_trail_hide': 'Hide the searches behind this answer',
   'chat.agent_trail_seed_one': 'Started from {count} passage',
   'chat.agent_trail_seed_other': 'Started from {count} passages',
+  'chat.agent_trail_carried_one': 'Carried over {count} passage from earlier answers',
+  'chat.agent_trail_carried_other': 'Carried over {count} passages from earlier answers',
   'chat.agent_trail_search_one': 'Searched “{query}”: {count} new passage',
   'chat.agent_trail_search_other': 'Searched “{query}”: {count} new passages',
   'chat.agent_trail_search_images_one': 'Searched the images for “{query}”: {count} new image',
