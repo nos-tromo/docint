@@ -1041,9 +1041,10 @@ then the images.
   A retired picture message becomes one line naming its passages, where it
   stood. Its pictures no longer count toward the prompt's cap, so later rounds
   may attach others.
-- A picture the prompt carries is never attached twice. A retired picture comes
-  back only when a `read(n)` shows its passage, fresh or answered from memory,
-  and the prompt's cap and the room left allow: it is shown in a message of
+- A picture the prompt carries is never attached twice. While the turn
+  researches, a retired picture comes back only when a `read(n)` shows its
+  passage, fresh or answered from memory, and the prompt's cap and the room
+  left allow: it is shown in a message of
   its own after that round's replies. A search or keyframe listing that finds
   it again only names it, so the room just freed is not spent again on every
   mention. Before a forced answer, retired pictures are put back where they
