@@ -725,11 +725,13 @@ Readiness is kept for 30 s per collection and target (`all` or `documents`),
 and each check asks for it again before it counts. While this backend process
 writes the collection, during an ingest or while uploaded files are still
 preprocessing, no kept read is used: each turn and each check reads it afresh.
-The end of such a write, a deletion and an index this process creates drop the
-kept read at once. A read that failed or found a lane uncounted is not kept, so
-the next turn reads again. A change made by another process shows within 30 s:
-a `make search-index` backfill, which only adds coverage and indexes, or an
-`ingest` CLI run on a host. The tool is withheld, and the turn keeps its other
+The end of such a write and a deletion drop the kept read at once. A read that
+failed or found a lane uncounted is not kept, so the next turn reads again. A
+change that only makes more of the collection keyword-ready, such as a new
+index or a `make search-index` backfill, which runs in its own container, can
+take up to 30 s to show; until then a stale read only withholds what has become
+ready. An `ingest` CLI run on a host is another process too, and its additions
+also show within 30 s. The tool is withheld, and the turn keeps its other
 tools, when:
 
 - the request's filters cannot be compiled for Qdrant, since a count would then
@@ -779,8 +781,10 @@ when more than the text is offered.
 - One known excess: on `all`, a standalone image is counted twice, once in the
   main collection, which holds its caption and printed words as a document, and
   once in its companion.
-- A count that fails is reported unavailable, never as 0. That call is not
-  remembered, so asking again runs it again.
+- A count that fails is reported unavailable, never as 0. A check whose own
+  read of the readiness finds a lane in scope uncounted, or its field no longer
+  offered, reports its count unavailable too. That call is not remembered, so
+  asking again runs it again.
 - Chunks the keyword index does not cover are reported as not checked: text not
   yet backfilled (`make search-index`) and, on `all`, a companion without the
   field's index. The number counts the whole collection, whatever the filters,
