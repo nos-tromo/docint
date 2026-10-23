@@ -2,12 +2,12 @@
 
 A caption says what was written about a picture when it was stored, which answered a different
 question than the one asked now, so the visual target shows the model the pictures themselves.
-After a round's calls are answered, the passages it admitted or read that are pictures (they
-carry an ``image_id``, as :func:`~docint.core.retrieval.visual.select_answer_images` reads them)
-and that the turn has not shown have their stored thumbnails fetched by node id, in one fetch,
-and are shown in one user message after the round's tool replies: a legend tying each picture to
-the number it is cited by, then the pictures. A picture is shown once a turn, and a failed fetch
-shows none of the round's.
+After a round's calls are answered, the passages it admitted, showed or named that are pictures
+(they carry an ``image_id``, as :func:`~docint.core.retrieval.visual.select_answer_images` reads
+them) and that the turn has not shown have their stored thumbnails fetched by node id, in one
+fetch, and are shown in one user message after the round's tool replies: a legend tying each
+picture to the number it is cited by, then the pictures. A picture is shown once a turn, and a
+failed fetch shows none of the round's.
 
 Room. A prompt carries at most ``min(max_images, round_room // VISUAL_IMAGE_TOKEN_ESTIMATE)``
 pictures. A message is priced as it is sent: its rendered legend with the message's envelope
@@ -191,8 +191,8 @@ class TurnImages:
         holds and the message, priced as it is sent, fits the room left.
 
         Args:
-            entries (Sequence[tuple[int, NodeWithScore]]): The passages the round admitted or
-                read, under their numbers, in number order.
+            entries (Sequence[tuple[int, NodeWithScore]]): The passages the round admitted,
+                showed or named, under their numbers, in number order.
             room (int): Tokens the transcript may still take.
             after_round (int): The tool round after which the message is sent, by which the loop
                 tells whether the model has seen it.

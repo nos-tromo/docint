@@ -667,9 +667,9 @@ def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> PassageRe
     Returns:
         PassageReply | None: The numbers the earlier answer showed or named, admitting nothing
         and no news, under the trail the earlier answer carried; a read's also depends on the
-        passage it read, so the turn can show that passage's picture. ``None`` when nothing is
-        remembered, when the answer's states cannot be trusted yet, or when an entry the
-        answer depends on has grown since.
+        passage it read, as the read it repeats did. ``None`` when nothing is remembered, when
+        the answer's states cannot be trusted yet, or when an entry the answer depends on has
+        grown since.
     """
     answered = ctx.answered.get(key)
     if answered is None or (answered.states and not final):

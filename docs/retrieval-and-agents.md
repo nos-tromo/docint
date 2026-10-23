@@ -1010,20 +1010,25 @@ the target, so no picture is shown.
 ### Visual target
 
 On the `visual` target the loop shows the model the pictures themselves. After
-each tool round, the passages the round admitted or read that are pictures the
-turn has not shown have their stored thumbnails fetched, in one call. They are
-shown in one user message after the round's tool replies: a legend
-(`agent_image_legend.txt`) tying each picture to its citation number, then the
-images.
+each tool round, the passages the round admitted, showed or named that are
+pictures the turn has not shown have their stored thumbnails fetched, in one
+call. They are shown in one user message after the round's tool replies: a
+legend (`agent_image_legend.txt`) tying each picture to its citation number,
+then the images.
 
 - A prompt carries at most `VISUAL_ANSWER_MAX_IMAGES` pictures, and no more
   than the turn's room holds. A picture costs about 600 tokens, plus its
   legend line.
-- A `read(n)` of a passage whose picture the turn has not shown attaches that
-  picture, within the prompt's cap and the room left, as a search's new
-  pictures are. A repeated read answered from memory (`Already called read …`)
-  does too. So a picture the room or the cap kept back when a search found it
-  is shown by reading its passage once the room and the cap allow.
+- A passage counts when a reply shows it or names it by number, whether the
+  round admitted it or the turn already held it: a `read(n)`, a search or
+  keyframe listing that finds a held frame again and names it as shown before,
+  and a repeated call answered from memory (`Already called …`) all count. Its
+  picture is attached within the prompt's cap and the room left, as a
+  search's new pictures are, unless the turn has shown it. So a picture the
+  room or the cap kept back when a search found it is shown once a later round
+  names its passage and the room and the cap allow, and a carried frame (see
+  [Carried evidence](#carried-evidence)) that a search or keyframe listing
+  finds again is shown, though the reply admitted nothing.
 - Short of room, the pictures the model has seen are retired after every
   seen reply that may be cleared is cleared (see [Making room](#making-room)).
   A retired picture message becomes one line naming its passages, where it
@@ -1163,10 +1168,12 @@ without finding it again (`SessionManager._agent_window`,
   `found` the count). A call refused before any event has shown nothing, so
   the turn still falls back to the plain path.
 - **Reading one.** `read(n)` shows a carried passage, and on the
-  [visual target](#visual-target) attaches its picture. A carried section
-  counts its opening as its match, so `read(n)` shows its start, not the
-  window the earlier answer cited. A search that finds that window again
-  extends the passage, which keeps its number and shows the window.
+  [visual target](#visual-target) attaches its picture, as does a search or
+  keyframe listing that finds a carried frame again and names it as shown
+  before. A carried section counts its opening as its match, so `read(n)`
+  shows its start, not the window the earlier answer cited. A search that
+  finds that window again extends the passage, which keeps its number and
+  shows the window.
 - **What carries nothing.** A scoped turn, whose scope is the whole evidence;
   a stateless turn, which has no earlier answer; and a passage the store no
   longer holds. A turn written over an earlier one carries from the turns

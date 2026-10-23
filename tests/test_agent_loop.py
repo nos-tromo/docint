@@ -20,6 +20,7 @@ import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
+    CLIP,
     LEDGER_CAP,
     LOOP_FINAL_NOTE,
     LOOP_LEGEND,
@@ -91,6 +92,7 @@ from docint.agents.turn.tools import (
     error_reply,
     trail_detail,
 )
+from docint.agents.turn.toolsets import toolset_for
 from docint.agents.types import AgentProgress
 from docint.core.retrieval.visual import VISUAL_IMAGE_TOKEN_ESTIMATE, VISUAL_IMAGES_ATTACHED_KEY, render_legend
 from docint.utils.text_budget import MATCH_SPANS_KEY, fit_with_marker
@@ -4334,6 +4336,22 @@ def test_a_picture_shown_before_is_not_attached_again() -> None:
     assert (result.images_attached, _stamped(result)) == (2, [1, 2])
 
 
+def test_a_shown_picture_a_later_round_only_names_is_not_attached_a_second_time() -> None:
+    """A round that finds nothing but a frame the turn already showed names it as shown before and attaches nothing."""
+    store = ThumbnailStore(0)
+    registry = _pictures({"Regenjacken": [frame_passage(0)], "Schirm": [frame_passage(0)]})
+    llm = streaming_tool_llm(
+        [_calls(_image_call("call_a", "Regenjacken")), _calls(_image_call("call_b", "Schirm")), _answer()]
+    )
+
+    _, _, result = _drain(_turn(_visual(llm, registry, store)))
+
+    assert "shown before" in _tool_replies(llm, 2)["call_b"]
+    assert store.fetches == [["frame-0"]]
+    assert _pictures_by_call(llm) == [0, 1, 1]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
 def test_a_retried_tool_round_that_fails_too_makes_the_model_answer_from_what_it_found() -> None:
     """The retry without pictures is the round's one: a tool round failing it too ends research, as any does."""
     store = ThumbnailStore(0)
@@ -4721,6 +4739,38 @@ def test_a_read_of_a_carried_frame_shows_it_and_its_picture() -> None:
     assert store.fetches == [["frame-0"]]
     assert shown_numbers(_tool_replies(llm, 1)["call_a"]) == [1]
     assert _pictures_by_call(llm) == [0, 1]
+    assert _picture_turns(llm, 1) == [[thumbnail_url(0)]]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
+@pytest.mark.parametrize(
+    "call",
+    [("call_a", "search_images", {"description": "Regenjacken"}), ("call_a", "keyframes", {"file": CLIP})],
+    ids=["search-images", "keyframes"],
+)
+def test_a_carried_picture_found_again_is_shown_to_the_model(call: tuple[str, str, Any]) -> None:
+    """A carried frame that an image search or the clip's listing finds again reaches the model as a picture.
+
+    The frame is held, so the reply admits nothing and names it as shown before. Only naming its
+    passage can bring the picture, which the turn has not shown yet.
+
+    Args:
+        call (tuple[str, str, Any]): The call that finds the carried frame again.
+    """
+    store = ThumbnailStore(0)
+    registry = toolset_for(
+        "visual",
+        search=ScriptedSearch(),
+        search_images=ScriptedSearch([frame_passage(0)]),
+        list_keyframes=ScriptedSearch([frame_passage(0)]),
+    )
+    llm = streaming_tool_llm([call_round(call), answer_round(ANSWER)])
+
+    _, _, result = _drain(_turn(_visual(llm, registry, store), carried=[frame_passage(0)]))
+
+    reply = _tool_replies(llm, 1)["call_a"]
+    assert ("shown before" in reply, shown_numbers(reply)) == (True, [])
+    assert store.fetches == [["frame-0"]]
     assert _picture_turns(llm, 1) == [[thumbnail_url(0)]]
     assert (result.images_attached, _stamped(result)) == (1, [1])
 
