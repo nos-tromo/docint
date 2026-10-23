@@ -108,7 +108,6 @@ def begin(collection: str) -> Callable[[], None]:
         Callable[[], None]: The closer.
     """
     registry = _registry
-    registry.open(collection)
     # The first close takes it and never gives it back.
     once = threading.Lock()
 
@@ -117,6 +116,8 @@ def begin(collection: str) -> Callable[[], None]:
         if once.acquire(blocking=False):
             registry.close(collection)
 
+    # Opened last, so nothing that can fail is left to strand the window.
+    registry.open(collection)
     return close
 
 
