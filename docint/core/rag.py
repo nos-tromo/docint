@@ -4662,6 +4662,9 @@ class RAG:
         round-trips; both are fail-soft, because an unindexed companion still
         answers correctly, only slower.
 
+        The indexes it creates decide whether a keyword match reaches the image
+        lane, so an ensure that ran drops the collection's kept keyword readiness.
+
         Args:
             collection (str): Physical main collection name — the cache key,
                 even though the indexes land on its companion.
@@ -4673,6 +4676,7 @@ class RAG:
             return
         ok = ensure_visual_filter_indexes(self.qdrant_client, companion)
         ok = ensure_search_index(self.qdrant_client, companion) and ok
+        self.forget_keyword_readiness(collection)
         if ok:
             self._visual_indexes_ensured.add(collection)
 

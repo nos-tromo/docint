@@ -1950,6 +1950,49 @@ def test_ensuring_the_field_indexes_forgets_the_readiness_once(monkeypatch: pyte
     assert _store_reads(client) == read_afresh
 
 
+def test_ensuring_the_visual_indexes_forgets_the_readiness_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The companion's indexes decide whether a match reaches the image lane, so the first ensure drops the kept read.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    monkeypatch.setattr("docint.core.rag.ensure_visual_filter_indexes", lambda client, collection: True)
+    monkeypatch.setattr("docint.core.rag.ensure_search_index", lambda client, collection: True)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag)
+    _offered(rag, "hafen", "all")
+
+    rag._ensure_visual_indexes_once("hafen")
+    ensured = _store_reads(client)
+    _offered(rag, "hafen", "all")
+    read_afresh = _store_reads(client)
+    rag._ensure_visual_indexes_once("hafen")
+    _offered(rag, "hafen", "all")
+
+    assert read_afresh != ensured
+    assert _store_reads(client) == read_afresh
+
+
+def test_ensuring_the_visual_indexes_without_a_companion_forgets_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no image companion nothing is ensured, so the kept read stands.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = KeywordClient({"hafen": ready_schema("text")}, counts={"hafen": 10})
+    rag._qdrant_client = cast(Any, client)
+    _offered(rag, "hafen", "all")
+
+    rag._ensure_visual_indexes_once("hafen")
+    ensured = _store_reads(client)
+    _offered(rag, "hafen", "all")
+
+    assert _store_reads(client) == ensured
+
+
 def test_a_kept_readiness_never_carries_a_request_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     """The filters a match is built with are the request's own, taken at each turn and never from a kept read.
 
