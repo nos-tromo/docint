@@ -40,9 +40,10 @@ order, within the room and the time left. The turn's room for tool replies is th
 reply each of its calls needs, must fit the room left; a round that does not is withdrawn
 before any of its calls runs, its shown text withdrawn by its note, and the model answers.
 Only a call its tool answered is a step in the trail; an error reply, for arguments that will
-not do or for a call that did not run or failed, reaches the model alone. A call that could not
-be prepared, whose search failed or found no slot, or whose answer raised, marks the turn
-``research_failed`` without ending it: evidence may be missing.
+not do or for a call that did not run or failed, reaches the model alone, and its round logs it
+by tool and kind. A call that could not be prepared, whose search failed or found no slot, or
+whose answer raised, marks the turn ``research_failed`` without ending it: evidence may be
+missing.
 
 Pictures. With a thumbnail fetcher, the pictures a round admits are shown to the model after its
 tool replies, and a round refused with them is sent once more without (see
@@ -72,7 +73,7 @@ round that ran:
   tools fails the same way, an overflow of it raising ``ValueError`` naming the context window.
 
 Nothing here logs a query, an answer, a tool argument or document text: only counts, tool names,
-exception types and reason tokens.
+exception types, and reason and error-kind tokens.
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ from docint.agents.turn.calls import RoundCalls
 from docint.agents.turn.images import TurnImages
 from docint.agents.turn.scope import EvidenceDoesNotFit, scope_message
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
-from docint.agents.turn.tools import ToolContext, ToolRegistry, nested_too_deeply
+from docint.agents.turn.tools import ToolContext, ToolRegistry, ToolReply, nested_too_deeply
 from docint.agents.types import AgentAction, AgentProgress
 from docint.utils.text_budget import fit_with_marker
 
@@ -342,6 +343,21 @@ def _shortened(transcript: Sequence[ChatMessage]) -> list[ChatMessage] | None:
                 cut = True
         kept.append(message)
     return kept if cut else None
+
+
+def _error_items(errors: Sequence[ToolReply], offered: frozenset[str]) -> str:
+    """Name a round's error replies for the log: by tool and kind, a tool the turn does not offer by kind alone.
+
+    The model wrote the name of a tool the turn does not offer, so it never reaches the log.
+
+    Args:
+        errors (Sequence[ToolReply]): The round's error replies, in call order.
+        offered (frozenset[str]): The names of the tools the turn offers.
+
+    Returns:
+        str: ``'tool' kind``, or the bare kind, for each reply, separated by commas.
+    """
+    return ", ".join(f"'{reply.action}' {reply.kind}" if reply.action in offered else reply.kind for reply in errors)
 
 
 class AgentLoop:
@@ -1072,6 +1088,10 @@ class AgentLoop:
         withdrawn: its calls never reach the transcript, so they need no replies, it is no tool
         round, and the model answers next (``context_budget``).
 
+        A round that got error replies logs one INFO line naming them by tool and kind (see
+        :func:`_error_items`): the model's arguments, and the name of a tool the turn does not
+        offer, never reach the log.
+
         Args:
             turn (_Turn): The turn.
             done (RoundDone): The round, ended in calls.
@@ -1125,6 +1145,14 @@ class AgentLoop:
             if not reply.error:
                 news = news or reply.informative
                 yield self._step(turn, reply.action, reply.detail, reply.found, trail=reply.trail)
+        errors = [reply for reply in answered.replies if reply.error]
+        if errors:
+            logger.info(
+                "An agent round's {} of {} tool calls got error replies: {}",
+                len(errors),
+                len(done.calls),
+                _error_items(errors, self._registry.names),
+            )
         # A passage, or an answer that told the model something without one, ends the run of idle rounds.
         turn.idle = 0 if found or news else turn.idle + 1
         return False

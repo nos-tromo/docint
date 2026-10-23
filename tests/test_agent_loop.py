@@ -31,7 +31,9 @@ from agent_fakes import (
     text_chunks,
     thumbnail,
     thumbnail_url,
+    tool_call,
     tool_call_delta,
+    tool_context,
     turn_budget,
 )
 from assessment_fakes import bad_request, join_threads, llm_view, scored_node
@@ -68,7 +70,7 @@ from docint.agents.turn.image_tools import SearchImagesTool
 from docint.agents.turn.images import TurnImages
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
-from docint.agents.turn.stream import Provisional
+from docint.agents.turn.stream import Provisional, ToolCall
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
     PassageReply,
@@ -665,7 +667,7 @@ def test_every_call_gets_a_reply_even_on_timeout(held: threading.Event) -> None:
 
     replies = _tool_replies(llm, 2)
     assert list(replies) == ["call_a", "call_b", "call_c", "call_d", "call_e"]
-    assert replies["call_b"] == error_reply("search", LATE_REPLY).text
+    assert replies["call_b"] == error_reply("search", LATE_REPLY, kind="late").text
     assert shown_numbers(replies["call_c"]) == [1]
     assert replies["call_d"].startswith("Error: there is no tool named 'keyframes'")
     assert replies["call_e"].startswith("Error: the arguments for read must be a JSON object")
@@ -725,7 +727,7 @@ def test_a_search_back_in_time_is_answered_while_one_that_is_late_is_not(
     progress, _, result = _drain(_turn(loop))
 
     replies = _tool_replies(llm, 1)
-    assert replies["call_a"] == error_reply("search", LATE_REPLY).text
+    assert replies["call_a"] == error_reply("search", LATE_REPLY, kind="late").text
     assert shown_numbers(replies["call_b"]) == [1]
     assert (_steps(progress), result.reason) == ([("search", "Wetter", 1)], "time_budget")
 
@@ -981,7 +983,7 @@ def test_extra_calls_in_a_round_are_skipped_with_a_reply() -> None:
     assert sorted(search.queries) == ["Programm", "Wetter"]
     replies = _tool_replies(llm, 1)
     assert list(replies) == ["call_a", "call_b", "call_c"]
-    assert replies["call_c"] == error_reply("search", SKIPPED_REPLY.format(limit=2)).text
+    assert replies["call_c"] == error_reply("search", SKIPPED_REPLY.format(limit=2), kind="skipped").text
     assert _steps(progress) == [("search", "Programm", 1), ("search", "Wetter", 1)]
 
 
@@ -1167,7 +1169,7 @@ def test_a_search_that_outlives_the_time_left_keeps_its_slot_until_it_ends(
         )
     )
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY, kind="late").text}
     assert len(ledger) == 0
     assert slots.acquire(blocking=False) is False
     held.set()
@@ -1216,8 +1218,8 @@ def test_abandoned_searches_are_capped_at_the_slot_count(held: threading.Event) 
         _drain(_turn(_loop(llm, _documents(_search), time_budget_s=0.05, clock=lambda: 0.0)))
         replies.extend(_tool_replies(llm, 1).values())
 
-    assert replies == [error_reply("search", LATE_REPLY).text] * SEARCH_SLOTS + [
-        error_reply("search", NO_CAPACITY_REPLY).text
+    assert replies == [error_reply("search", LATE_REPLY, kind="late").text] * SEARCH_SLOTS + [
+        error_reply("search", NO_CAPACITY_REPLY, kind="no_capacity").text
     ]
     assert len(calls) == SEARCH_SLOTS
     assert _alive_searches() == SEARCH_SLOTS
@@ -1259,7 +1261,7 @@ def test_no_free_search_slot_answers_the_call_without_starting_it(
 
     assert slots.waits == [wait]
     assert (search.queries, started) == ([], [])
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", NO_CAPACITY_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", NO_CAPACITY_REPLY, kind="no_capacity").text}
     assert (_steps(progress), result.reason) == ([], "research_failed")
     assert loguru_caplog.messages == ["No search slot came free for 1 of an agent round's tool calls"]
 
@@ -1294,7 +1296,7 @@ def test_a_search_thread_that_cannot_start_is_answered_with_an_error(
 
     _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})), search_slots=slots)))
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY, kind="failed").text}
     assert ("".join(texts), result.reason) == (ANSWER, "research_failed")
     assert loguru_caplog.messages == ["An agent's 'search' call could not start: RuntimeError"]
     assert slots.acquire(blocking=False) is True
@@ -1357,7 +1359,7 @@ def test_a_search_raising_its_own_timeout_is_a_failed_call_not_a_spent_budget(
 
     _, _, result = _drain(_turn(_loop(llm, _documents(_search))))
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY, kind="failed").text}
     assert result.reason == "research_failed"
     assert loguru_caplog.messages == ["An agent's 'search' call failed: TimeoutError"]
 
@@ -1416,7 +1418,7 @@ def test_the_slot_wait_comes_out_of_the_time_budget(held: threading.Event, monke
     )
 
     assert waits == [pytest.approx(0.1)]
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY, kind="late").text}
 
 
 def test_calls_from_a_reply_after_the_time_budget_are_answered_without_running() -> None:
@@ -1434,7 +1436,7 @@ def test_calls_from_a_reply_after_the_time_budget_are_answered_without_running()
 
     assert search.queries == []
     replies = _tool_replies(llm, 1)
-    assert replies["call_a"] == error_reply("search", NO_TIME_REPLY).text
+    assert replies["call_a"] == error_reply("search", NO_TIME_REPLY, kind="no_time").text
     assert replies["call_b"].startswith("Error: there is no passage [4]")
     assert _steps(progress) == []
     assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
@@ -2257,7 +2259,7 @@ def test_a_call_without_room_for_its_reply_is_never_run() -> None:
     assert search.queries == ["Programm"]
     replies = _tool_replies(llm, 1)
     assert shown_numbers(replies["call_a"]) == [1]
-    assert replies["call_b"] == error_reply("search", NO_ROOM_REPLY).text
+    assert replies["call_b"] == error_reply("search", NO_ROOM_REPLY, kind="no_room").text
     assert _steps(progress) == [("search", "Programm", 1)]
 
 
@@ -2314,7 +2316,7 @@ def test_every_calls_reply_is_reserved_before_any_call_runs() -> None:
     _drain(_turn(_loop(llm, _documents(search), budget=TIGHT, max_calls_per_round=16)))
 
     assert search.queries == []
-    assert _tool_replies(llm, 1)["call_a"] == error_reply("search", NO_ROOM_REPLY).text
+    assert _tool_replies(llm, 1)["call_a"] == error_reply("search", NO_ROOM_REPLY, kind="no_room").text
 
 
 @pytest.mark.parametrize(("count", "withdrawn"), [(20, True), (2, False)], ids=["too-many", "fits"])
@@ -2414,7 +2416,9 @@ class _Counter:
                 ToolReply: The count, which admits no passage; an error reply when the tool errs.
             """
             if self._error:
-                return replace(error_reply(self.name, self._text, detail=detail), informative=self._informative)
+                return replace(
+                    error_reply(self.name, self._text, kind="failed", detail=detail), informative=self._informative
+                )
             return PassageReply(
                 text=self._text,
                 found=0,
@@ -2808,7 +2812,7 @@ def test_a_call_whose_answer_fails_gets_its_reply_and_marks_research_failed(
 
     progress, _, result = _drain(_turn(_loop(llm, ToolRegistry([_Brittle()]))))
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("brittle", FAILED_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("brittle", FAILED_REPLY, kind="failed").text}
     assert (progress, result.reason) == ([], "research_failed")
     assert loguru_caplog.messages == ["An agent's 'brittle' call failed: RuntimeError"]
 
@@ -2848,7 +2852,7 @@ def test_a_call_whose_prepare_raises_gets_its_reply_and_the_turn_answers(loguru_
 
     progress, texts, result = _drain(_turn(_loop(llm, registry)))
 
-    assert _tool_replies(llm, 2)["call_b"] == error_reply("unpreparable", FAILED_REPLY).text
+    assert _tool_replies(llm, 2)["call_b"] == error_reply("unpreparable", FAILED_REPLY, kind="failed").text
     assert _steps(progress) == [("search", "Programm", 1)]
     assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
     assert (result.reason, "".join(texts)) == ("research_failed", ANSWER)
@@ -2897,7 +2901,10 @@ def test_a_call_past_the_rounds_limit_is_never_prepared(loguru_caplog: LogCaptur
 
     progress, _, result = _drain(_turn(_loop(llm, registry, max_calls_per_round=1)))
 
-    assert _tool_replies(llm, 1)["call_b"] == error_reply("unpreparable", SKIPPED_REPLY.format(limit=1)).text
+    assert (
+        _tool_replies(llm, 1)["call_b"]
+        == error_reply("unpreparable", SKIPPED_REPLY.format(limit=1), kind="skipped").text
+    )
     assert (_steps(progress), result.reason) == ([("search", "Programm", 1)], None)
     assert loguru_caplog.messages == []
 
@@ -2948,6 +2955,229 @@ def test_a_call_to_a_tool_the_turn_does_not_offer_gets_a_reply_but_no_step() -> 
 
     assert _tool_replies(llm, 1)["call_a"].startswith("Error: there is no tool named 'keyframes'")
     assert (progress, result.actions, result.steps) == ([], [], 1)
+
+
+# --- Error replies name their kind, and a round logs them ----------------------------------
+
+
+def _round_replies(
+    registry: ToolRegistry,
+    calls: Sequence[ToolCall],
+    *,
+    max_calls: int = 4,
+    slots: threading.Semaphore | None = None,
+    tight: bool = False,
+    time_left: Callable[[], float] = lambda: 60.0,
+) -> list[ToolReply]:
+    """Answer one round's calls through ``RoundCalls`` and return the replies, in call order.
+
+    Args:
+        registry (ToolRegistry): The tools offered.
+        calls (Sequence[ToolCall]): The round's calls.
+        max_calls (int): Calls the round may run.
+        slots (threading.Semaphore | None): The search slots; two free ones when not given.
+        tight (bool): Whether the room is the least the replies can take, so no call has room to run.
+        time_left (Callable[[], float]): Reads the seconds the turn has left.
+
+    Returns:
+        list[ToolReply]: One reply per call.
+    """
+    ctx = tool_context()
+    round_calls = RoundCalls(
+        registry=registry,
+        result_chars=ctx.budget.result_chars,
+        max_calls_per_round=max_calls,
+        char_token_ratio=3.5,
+        search_slots=slots or threading.BoundedSemaphore(2),
+    )
+    prepared = round_calls.prepare(calls, ctx)
+    room = round_calls.least(prepared) if tight else 10_000
+    return round_calls.answer(prepared, ctx, room=room, time_left=time_left).replies
+
+
+@pytest.mark.parametrize(
+    ("overrides", "kinds"),
+    [
+        pytest.param({"max_calls": 1}, ["", "skipped"], id="past-the-limit"),
+        pytest.param({"tight": True}, ["no_room", "no_room"], id="no-room"),
+        pytest.param({"time_left": lambda: 0.0}, ["no_time", "no_time"], id="no-time"),
+        pytest.param({"slots": _Recording()}, ["no_capacity", "no_capacity"], id="no-search-slot"),
+    ],
+)
+def test_a_call_the_round_did_not_run_names_why_in_its_kind(overrides: dict[str, Any], kinds: list[str]) -> None:
+    """A call past the limit, without room or time, or without a search slot has its own kind; an answer has none.
+
+    Args:
+        overrides (dict[str, Any]): What differs from a round with room, time and slots to spare.
+        kinds (list[str]): The kind of each reply, in call order.
+    """
+    registry = _documents(QuerySearch({"Programm": [programme_passage()], "Wetter": [weather_passage()]}))
+    calls = [tool_call("search", query="Programm"), tool_call("search", query="Wetter")]
+
+    replies = _round_replies(registry, calls, **overrides)
+
+    assert [reply.kind for reply in replies] == kinds
+
+
+def test_a_search_that_outlives_the_time_left_has_the_late_kind(held: threading.Event) -> None:
+    """A search still running when the time is up is answered late, and says so by its kind.
+
+    Args:
+        held (threading.Event): Holds the search.
+    """
+
+    def _search(query: str) -> list[NodeWithScore]:
+        """Hold the search until the test ends.
+
+        Args:
+            query (str): What the tool searched for.
+
+        Returns:
+            list[NodeWithScore]: The passage.
+        """
+        held.wait(timeout=30)
+        return [programme_passage()]
+
+    # The first reading lets the search start, the second leaves it no time to end.
+    readings = iter([5.0, 0.0])
+
+    replies = _round_replies(
+        _documents(_search), [tool_call("search", query="Programm")], time_left=lambda: next(readings, 0.0)
+    )
+
+    assert [(reply.error, reply.kind) for reply in replies] == [(True, "late")]
+
+
+@pytest.mark.parametrize("cause", ["prepare", "start", "fetch", "answer"])
+def test_a_call_that_failed_has_the_failed_kind(cause: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call that could not be prepared or started, whose fetch failed, or whose answer raised has one kind.
+
+    Args:
+        cause (str): Where the call failed.
+        monkeypatch (pytest.MonkeyPatch): Makes the search thread's start fail.
+    """
+    failing: dict[str, tuple[ToolRegistry, ToolCall]] = {
+        "prepare": (ToolRegistry([_Unpreparable()]), tool_call("unpreparable")),
+        "start": (_documents(QuerySearch({})), tool_call("search", query="Programm")),
+        "fetch": (_documents(_failing_on("Programm", {})), tool_call("search", query="Programm")),
+        "answer": (ToolRegistry([_Brittle()]), tool_call("brittle")),
+    }
+    registry, call = failing[cause]
+    if cause == "start":
+        real_start = threading.Thread.start
+
+        def _start(thread: threading.Thread) -> None:
+            """Fail a search thread's start as a process out of threads does; start any other thread.
+
+            Args:
+                thread (threading.Thread): The thread.
+
+            Raises:
+                RuntimeError: For a search thread.
+            """
+            if thread.name == SEARCH_THREAD_NAME:
+                raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", _start)
+
+    replies = _round_replies(registry, [call])
+
+    assert [(reply.error, reply.kind) for reply in replies] == [(True, "failed")]
+
+
+def _error_lines(captured: LogCaptureFixture) -> list[str]:
+    """Pick the lines a round logs about its error replies.
+
+    Args:
+        captured (LogCaptureFixture): Bridged INFO capture.
+
+    Returns:
+        list[str]: The lines, in the order they were logged.
+    """
+    return [message for message in captured.messages if "got error replies" in message]
+
+
+def test_a_round_logs_its_error_replies_by_tool_and_kind(loguru_caplog_info: LogCaptureFixture) -> None:
+    """One INFO line names a round's error replies, a tool the turn does not offer by its kind alone.
+
+    The model wrote that tool's name and its arguments, so neither reaches the log.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm(
+        [
+            _calls(("call_a", "read", {"n": 7}), ("call_b", "Geheimwerkzeug", {"q": "zzsecretzz Hafenfest"})),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    assert _error_lines(loguru_caplog_info) == [
+        "An agent round's 2 of 2 tool calls got error replies: 'read' no_such_passage, unknown_tool"
+    ]
+    assert "Geheimwerkzeug" not in loguru_caplog_info.text
+    assert "zzsecretzz" not in loguru_caplog_info.text
+
+
+def test_a_round_without_error_replies_logs_no_error_line(loguru_caplog_info: LogCaptureFixture) -> None:
+    """A round whose calls were all answered leaves nothing to say about error replies.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), ("call_b", "read", {"n": 1})), _answer()])
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
+
+    assert _error_lines(loguru_caplog_info) == []
+
+
+def test_each_round_with_error_replies_logs_its_own_line(loguru_caplog_info: LogCaptureFixture) -> None:
+    """The count of error replies and of calls are the round's own, and each round logs one line.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Programm"), ("call_b", "read", {"n": 9})),
+            _calls(("call_c", "read", {"n": "drei"})),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
+
+    assert _error_lines(loguru_caplog_info) == [
+        "An agent round's 1 of 2 tool calls got error replies: 'read' no_such_passage",
+        "An agent round's 1 of 1 tool calls got error replies: 'read' bad_argument",
+    ]
+
+
+def test_a_call_past_the_rounds_limit_is_logged_by_its_tool_only_when_the_turn_offers_it(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A skipped call to an offered tool is named; one to a name the turn does not offer is its kind alone.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Programm"), ("call_b", "read", {"n": 1}), ("call_c", "Geheimwerkzeug", {})),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})), max_calls_per_round=1)))
+
+    assert _error_lines(loguru_caplog_info) == [
+        "An agent round's 2 of 3 tool calls got error replies: 'read' skipped, skipped"
+    ]
+    assert "Geheimwerkzeug" not in loguru_caplog_info.text
 
 
 def test_the_transcript_echoes_each_call_and_answers_it_by_id() -> None:

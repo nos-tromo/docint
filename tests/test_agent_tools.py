@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import pkgutil
 import re
@@ -337,6 +338,43 @@ def test_a_call_missing_its_argument_gets_the_tools_own_error(name: str, argumen
 
     assert (reply.text, reply.found, reply.action) == (expected, 0, name)
     assert search.queries == []
+
+
+def test_an_error_reply_must_name_its_kind() -> None:
+    """The kind is keyword-only and has no default, so a new error reply cannot go without one."""
+    kind = inspect.signature(error_reply).parameters["kind"]
+
+    assert (kind.kind, kind.default) == (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.empty)
+    assert error_reply("search", "invented", kind="failed").kind == "failed"
+
+
+@pytest.mark.parametrize(
+    ("call", "kind"),
+    [
+        pytest.param(tool_call("nope"), "unknown_tool", id="unknown-tool"),
+        pytest.param(ToolCall(id="call_0", name="read", arguments="[1]"), "bad_arguments", id="not-an-object"),
+        pytest.param(
+            ToolCall(id="call_0", name="read", arguments='{"n": ' + "[" * 600 + "]" * 600 + "}"),
+            "nested_arguments",
+            id="nested-too-deeply",
+        ),
+        pytest.param(tool_call("read", n="drei"), "bad_argument", id="read-not-a-number"),
+        pytest.param(tool_call("read"), "bad_argument", id="read-without-n"),
+        pytest.param(tool_call("read", n=9), "no_such_passage", id="read-no-such-passage"),
+        pytest.param(tool_call("search"), "missing_argument", id="search-without-query"),
+        pytest.param(tool_call("search", query="   "), "missing_argument", id="search-blank-query"),
+    ],
+)
+def test_every_error_reply_names_its_kind(call: ToolCall, kind: str) -> None:
+    """Each way the registry and the search and read tools refuse a call is told apart by a kind token.
+
+    Args:
+        call (ToolCall): The call the model made.
+        kind (str): Why it was refused.
+    """
+    reply = ToolRegistry([SearchTool(ScriptedSearch()), ReadTool()]).call(call, tool_context())
+
+    assert reply.error and reply.kind == kind
 
 
 def test_a_two_phase_run_answers_as_call_does() -> None:
@@ -940,8 +978,9 @@ def test_a_reply_says_whether_the_tool_answered_the_call() -> None:
 
     assert [type(reply) for reply in answers] == [PassageReply, ToolReply, PassageReply]
     assert [reply.error for reply in answers] == [False, False, False]
+    assert [reply.kind for reply in answers] == ["", "", ""]
     assert [reply.error for reply in errors] == [True, True, True, True]
-    assert error_reply("search", "invented").error is True
+    assert error_reply("search", "invented", kind="failed").error is True
     assert ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="").error is False
 
 
@@ -1174,7 +1213,7 @@ def test_a_repeat_key_that_raises_fails_its_call_alone(loguru_caplog: LogCapture
     answered = calls.answer(prepared, ctx, room=10_000, time_left=lambda: 60.0)
 
     assert (prepared.failed, answered.failed) == (1, 1)
-    assert answered.replies[0] == error_reply("count", FAILED_REPLY)
+    assert answered.replies[0] == error_reply("count", FAILED_REPLY, kind="failed")
     assert shown_numbers(answered.replies[1].text) == [1]
     assert search.queries == ["Hafenfest"]
     assert loguru_caplog.messages == ["An agent tool call could not be prepared: RuntimeError"]
@@ -1260,12 +1299,12 @@ def test_a_plain_reply_is_not_remembered_whatever_it_carries() -> None:
 
 
 def test_a_reply_is_by_default_no_news_and_carries_no_trail() -> None:
-    """The two new fields follow ``error`` and default to nothing, in a plain reply and a passage reply alike."""
+    """The fields after ``error`` default to nothing, in a plain reply and a passage reply alike."""
     plain = ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="")
     shown = PassageReply(text="[1]", found=1, action="search", detail="Hafenfest", numbers=(1,))
 
-    assert [(reply.informative, reply.trail) for reply in (plain, shown)] == [(False, None), (False, None)]
-    base = ["text", "found", "action", "detail", "error", "informative", "trail"]
+    assert [(reply.informative, reply.trail, reply.kind) for reply in (plain, shown)] == [(False, None, "")] * 2
+    base = ["text", "found", "action", "detail", "error", "informative", "trail", "kind"]
     assert [field.name for field in fields(ToolReply)] == base
     assert [field.name for field in fields(PassageReply)] == [*base, "numbers", "depends_on"]
 

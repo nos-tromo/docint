@@ -755,6 +755,42 @@ def test_keyframes_needs_a_clip(file: object) -> None:
 
 
 @pytest.mark.parametrize(
+    ("name", "arguments", "document_held", "indexes", "kind"),
+    [
+        pytest.param("search_images", {}, False, (), "missing_argument", id="search-images-without-description"),
+        pytest.param("keyframes", {}, False, (), "missing_argument", id="no-file"),
+        pytest.param("keyframes", {"file": CLIP, "index": "drei"}, False, (0,), "bad_argument", id="bad-index"),
+        pytest.param("keyframes", {"file": 7}, False, (), "no_such_passage", id="passage-out-of-range"),
+        pytest.param("keyframes", {"file": 1}, True, (), "not_a_clip", id="passage-from-no-clip"),
+        pytest.param("keyframes", {"file": "unbekannt.mp4"}, False, (), "no_keyframes", id="no-stored-frames"),
+        pytest.param(
+            "keyframes", {"file": CLIP, "index": 9}, False, (0, 1), "no_such_frame", id="frame-the-clip-lacks"
+        ),
+    ],
+)
+def test_every_image_tool_refusal_names_its_kind(
+    name: str, arguments: dict[str, object], document_held: bool, indexes: tuple[int, ...], kind: str
+) -> None:
+    """Each way search_images and keyframes refuse a call is told apart by a kind token.
+
+    Args:
+        name (str): The tool called.
+        arguments (dict[str, object]): The call's arguments.
+        document_held (bool): Whether the evidence already holds a document passage, as passage [1].
+        indexes (tuple[int, ...]): The ``keyframe_index`` of each frame the clip has stored.
+        kind (str): Why the call was refused.
+    """
+    ctx = _context()
+    if document_held:
+        ctx.ledger.add([programme_passage()])
+    lister = _Lister({CLIP: [_frame(index) for index in indexes]})
+
+    reply = _registry(list_keyframes=lister).call(tool_call(name, **arguments), ctx)
+
+    assert reply.error and reply.kind == kind
+
+
+@pytest.mark.parametrize(
     ("count", "labels"),
     [
         (8, [1, 2, 3, 4, 5, 6, 7, 8]),
@@ -861,7 +897,7 @@ def test_a_name_two_clips_share_is_answered_with_a_way_to_each(index: int | None
         f"Error: 2 clips are named '{SHARED}'; call keyframes with file set to the number of a passage from the "
         f"clip you mean, or to its id if none of its passages was shown, one per clip: [2], '{FIRST_HASH}'."
     )
-    assert (reply.found, len(ctx.ledger)) == (0, 2)
+    assert (reply.found, len(ctx.ledger), reply.kind) == (0, 2, "ambiguous_clip")
 
 
 def test_a_passage_or_an_id_lists_only_its_clip() -> None:

@@ -6,7 +6,8 @@ the numbers the answer cites them by, names the passages it showed before by num
 for; those stay unnumbered, so every number the model can cite was shown to it. ``read(n)``
 shows one passage again, as much of it as one reply holds. A call the registry cannot run
 (a tool the turn does not offer, arguments that are not a JSON object) gets an error reply
-saying what to call instead, and a call made before is answered by number from memory,
+saying what to call instead, and every error reply carries a kind (see :data:`ErrorKind`),
+the token the turn's log names it by. A call made before is answered by number from memory,
 never run again; a read only while its passage is unchanged. Which calls are one call is the
 tool's to say when it defines ``recall_key`` (see :class:`Tool`), else their arguments decide,
 compared on one line and case-folded. The image tools, ``search_images`` and ``keyframes``,
@@ -34,7 +35,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
 from loguru import logger
@@ -47,6 +48,39 @@ from docint.utils.text_budget import MATCH_SPANS_KEY
 
 SearchFn = Callable[[str], list[NodeWithScore]]
 """Run one search through the turn's engine and return its ranked passages."""
+
+ErrorKind = Literal[
+    "unknown_tool",
+    "bad_arguments",
+    "nested_arguments",
+    "missing_argument",
+    "bad_argument",
+    "no_such_passage",
+    "not_a_clip",
+    "no_keyframes",
+    "ambiguous_clip",
+    "no_such_frame",
+    "too_long",
+    "bad_field",
+    "no_usable_word",
+    "one_value_only",
+    "unindexable_word",
+    "long_word",
+    "skipped",
+    "no_room",
+    "no_time",
+    "late",
+    "failed",
+    "no_capacity",
+]
+"""Why a call got an error reply, as the token the turn's log names it by.
+
+``unknown_tool``, ``bad_arguments`` and ``nested_arguments`` are the registry's. ``skipped``,
+``no_room``, ``no_time``, ``late``, ``failed`` and ``no_capacity`` are the round's, for a call
+it did not or could not run. The rest are the tools' own refusals of the arguments they were
+given; the keyword matcher's problems (``no_usable_word``, ``one_value_only``,
+``unindexable_word`` and ``long_word``) keep the names the matcher gives them.
+"""
 
 #: Longest main argument a reply carries for the turn's trail.
 DETAIL_CHARS = 200
@@ -102,6 +136,9 @@ class ToolReply:
             copied verbatim; a key may hold ``None`` on purpose, as a failed count's ``matches``
             does. Its values must be JSON values (str, int, float, bool or ``None``), since the
             stored step is persisted with ``json.dumps``. ``None`` for none.
+        kind (str): Why the call was not answered, an :data:`ErrorKind` token, on every
+            :func:`error_reply`; empty on any other reply. The turn logs it in place of the
+            call's arguments.
     """
 
     text: str
@@ -111,6 +148,7 @@ class ToolReply:
     error: bool = False
     informative: bool = False
     trail: Mapping[str, Any] | None = None
+    kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -246,18 +284,21 @@ class HasRecallKey(Protocol):
         ...
 
 
-def error_reply(action: str, message: str, *, detail: str = "") -> ToolReply:
+def error_reply(action: str, message: str, *, kind: ErrorKind, detail: str = "") -> ToolReply:
     """Build the reply to a call that could not be answered as made.
 
     Args:
         action (str): The tool's name, for the trail.
         message (str): What went wrong and what to call instead, as one sentence.
+        kind (ErrorKind): Why, as the token the turn's log names the reply by. Required, so no
+            error reply goes unnamed.
         detail (str): The call's main argument, for the trail.
 
     Returns:
-        ToolReply: ``Error: <message>``, marked as an error; it admits nothing and is not remembered.
+        ToolReply: ``Error: <message>``, marked as an error and carrying its kind; it admits
+        nothing and is not remembered.
     """
-    return ToolReply(text=f"Error: {message}", found=0, action=action, detail=detail, error=True)
+    return ToolReply(text=f"Error: {message}", found=0, action=action, detail=detail, error=True, kind=kind)
 
 
 def trail_detail(value: Any) -> str:
@@ -323,7 +364,7 @@ def search_work(name: str, raw: Any, search: SearchFn, *, missing: str) -> ToolR
     """
     query = " ".join(raw.split())[:MAX_QUERY_CHARS] if isinstance(raw, str) else ""
     if not query:
-        return error_reply(name, missing, detail=trail_detail(raw))
+        return error_reply(name, missing, kind="missing_argument", detail=trail_detail(raw))
     detail = trail_detail(query)
     return ToolWork(
         detail=detail,
@@ -430,7 +471,10 @@ class ReadTool:
         number = passage_number(raw)
         if number is None:
             return error_reply(
-                self.name, "read needs n, the number of a passage shown before, such as 3.", detail=detail
+                self.name,
+                "read needs n, the number of a passage shown before, such as 3.",
+                kind="bad_argument",
+                detail=detail,
             )
         return ToolWork(detail=detail, fetch=None, answer=functools.partial(self._answer, number, detail))
 
@@ -451,7 +495,12 @@ class ReadTool:
         """
         held = len(ctx.ledger)
         if not 1 <= number <= held:
-            return error_reply(self.name, f"there is no passage [{number}]; {passage_range(held)}.", detail=detail)
+            return error_reply(
+                self.name,
+                f"there is no passage [{number}]; {passage_range(held)}.",
+                kind="no_such_passage",
+                detail=detail,
+            )
         text = render_entry(ctx.ledger.entries()[number - 1], number, ctx)
         return PassageReply(
             text=text,
@@ -718,7 +767,11 @@ class ToolRegistry:
             logger.warning("A model called a tool this turn does not offer; offered: {}", ", ".join(self._tools))
             called = name[:NAME_CHARS]
             offered = ", ".join(self._tools)
-            reply = error_reply(called, f"there is no tool named {called!r}; the tools you can call are {offered}.")
+            reply = error_reply(
+                called,
+                f"there is no tool named {called!r}; the tools you can call are {offered}.",
+                kind="unknown_tool",
+            )
             return PreparedCall(action=called, detail="", reply=reply)
         arguments = _arguments(call.arguments)
         if arguments is None:
@@ -726,6 +779,7 @@ class ToolRegistry:
             reply = error_reply(
                 tool.name,
                 f"the arguments for {tool.name} must be a JSON object, such as {_example(tool.parameters)}.",
+                kind="bad_arguments",
             )
             return PreparedCall(action=tool.name, detail="", reply=reply)
         if nested_too_deeply(arguments):
@@ -734,6 +788,7 @@ class ToolRegistry:
                 tool.name,
                 f"the arguments for {tool.name} are nested too deeply; send a flat JSON object, "
                 f"such as {_example(tool.parameters)}.",
+                kind="nested_arguments",
             )
             return PreparedCall(action=tool.name, detail="", reply=reply)
         key = (tool.name, _repeat_key(tool, arguments))

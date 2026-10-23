@@ -853,7 +853,11 @@ where the keyword index leaves chunks out, `unchecked`. The `agent` frames in
 [api-reference.md](api-reference.md#post-stream_query) say when each is absent,
 and [ui-guide.md](ui-guide.md#chat-srcrouteschattsx) shows how the SPA reads
 them. A call that was not answered gets its reply but no step: one skipped,
-refused for room or time, failed, or carrying an argument error.
+refused for room or time, failed, or carrying an argument error. Each round that
+got such replies logs one INFO line naming them by tool and kind (`An agent
+round's 2 of 3 tool calls got error replies: 'read' no_such_passage,
+unknown_tool`), never their arguments, and never the name of a tool the turn
+does not offer.
 
 ### Limits and reasons
 

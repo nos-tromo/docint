@@ -817,15 +817,18 @@ def test_a_matcher_must_offer_the_text_first_and_only_fields_the_search_knows(
         KeywordMatcher(fields=fields, check=_accepts, run=_finds_nothing)
 
 
-#: Calls the tool refuses: the arguments, the reason the match's check gives, the message, and the checks asked.
+#: Calls the tool refuses: the arguments, the reason the match's check gives, the message, the checks asked, the kind.
 REFUSALS = [
-    pytest.param({}, None, "call keyword with the words to match.", [], id="no-words"),
-    pytest.param({"words": " \n "}, None, "call keyword with the words to match.", [], id="blank-words"),
+    pytest.param({}, None, "call keyword with the words to match.", [], "missing_argument", id="no-words"),
+    pytest.param(
+        {"words": " \n "}, None, "call keyword with the words to match.", [], "missing_argument", id="blank-words"
+    ),
     pytest.param(
         {"words": "w" * (MAX_KEYWORD_CHARS + 1)},
         None,
         f"keep the words within {MAX_KEYWORD_CHARS} characters; use the most telling ones.",
         [],
+        "too_long",
         id="too-long",
     ),
     pytest.param(
@@ -833,6 +836,7 @@ REFUSALS = [
         None,
         "field must be one of: text, author, uuid.",
         [],
+        "bad_field",
         id="field-not-offered",
     ),
     pytest.param(
@@ -840,6 +844,7 @@ REFUSALS = [
         NO_USABLE_WORD,
         "give at least one word of two or more characters.",
         [("a b", "text")],
+        "no_usable_word",
         id="no-usable-word",
     ),
     pytest.param(
@@ -847,6 +852,7 @@ REFUSALS = [
         ONE_VALUE_ONLY,
         "uuid matches one exact value; give a single one.",
         [("abc def", "uuid")],
+        "one_value_only",
         id="one-value-only",
     ),
     pytest.param(
@@ -856,6 +862,7 @@ REFUSALS = [
         "split a word, such as 2.5, U.S. or p<0.05, nor a word with no letter or digit at all; check the other words "
         "only, or use search.",
         [("vitamin D", "text")],
+        "unindexable_word",
         id="unindexable-word",
     ),
     pytest.param(
@@ -864,6 +871,7 @@ REFUSALS = [
         f"the index reads a word only up to its first {SEARCH_MAX_TOKEN_LEN} characters, so a longer one cannot be "
         "checked exactly; check a shorter beginning of it, which also matches the longer words it begins.",
         [("x" * (SEARCH_MAX_TOKEN_LEN + 1), "text")],
+        "long_word",
         id="long-word",
     ),
     pytest.param(
@@ -871,30 +879,40 @@ REFUSALS = [
         None,
         f"keep the words within {MAX_KEYWORD_CHARS} characters; use the most telling ones.",
         [],
+        "too_long",
         id="too-long-before-field",
     ),
-    pytest.param({"field": "network"}, None, "call keyword with the words to match.", [], id="no-words-before-field"),
+    pytest.param(
+        {"field": "network"},
+        None,
+        "call keyword with the words to match.",
+        [],
+        "missing_argument",
+        id="no-words-before-field",
+    ),
     pytest.param(
         {"words": "a b", "field": "network"},
         NO_USABLE_WORD,
         "field must be one of: text, author, uuid.",
         [],
+        "bad_field",
         id="field-before-check",
     ),
 ]
 
 
-@pytest.mark.parametrize(("arguments", "problem", "message", "checks"), REFUSALS)
+@pytest.mark.parametrize(("arguments", "problem", "message", "checks", "kind"), REFUSALS)
 def test_a_call_that_cannot_run_is_refused_with_its_reason_and_fetches_nothing(
-    arguments: dict[str, Any], problem: str | None, message: str, checks: list[tuple[str, str]]
+    arguments: dict[str, Any], problem: str | None, message: str, checks: list[tuple[str, str]], kind: str
 ) -> None:
-    """Each reason has its own message, found in a fixed order, and the match is never run for a refused call.
+    """Each reason has its own message and kind, found in a fixed order, and the match is never run for a refused call.
 
     Args:
         arguments (dict[str, Any]): The call's arguments.
         problem (str | None): What the match's check says about every words it is asked.
         message (str): The message the reply carries after ``Error: ``.
         checks (list[tuple[str, str]]): The checks the refusal needed, in order.
+        kind (str): The kind token the reply carries.
     """
     words = " ".join(str(arguments.get("words", "")).split())
     double = _Matcher(fields=("text", "author", "uuid"), refused={} if problem is None else {words: problem})
@@ -903,6 +921,7 @@ def test_a_call_that_cannot_run_is_refused_with_its_reason_and_fetches_nothing(
 
     assert type(reply) is ToolReply
     assert (reply.text, reply.error, reply.action, reply.found) == (f"Error: {message}", True, "keyword", 0)
+    assert reply.kind == kind
     assert (reply.informative, reply.trail) == (False, None)
     assert reply.detail == trail_detail(words)
     assert (double.checks, double.runs) == (checks, [])
