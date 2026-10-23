@@ -30,7 +30,7 @@ from docint.agents.turn.history import (
 from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.passages import _trailer, search_hint
 from docint.agents.turn.scope import scope_message
-from docint.agents.turn.tools import ReadTool, SearchTool, ToolRegistry
+from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, cleared_text
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.rag import RAG
 from docint.utils.embed_chunking import estimate_tokens
@@ -65,7 +65,7 @@ ANSWER_PROMPTS = ("agent_system", "grounded_qa", "grounded_refine")
 #: The prompts that judge an answer: they accept every label, since an answer follows the user's language.
 VALIDATOR_PROMPTS = ("response_validator", "response_validator_assessment")
 #: Tokens the turn budget plans for the rendered system prompt, at 3.5 characters per token.
-SYSTEM_PROMPT_TOKENS = 900
+SYSTEM_PROMPT_TOKENS = 930
 CHAR_TOKEN_RATIO = 3.5
 #: The texts the system prompt must describe, each by a phrase it quotes from them.
 DESCRIBED = (
@@ -75,6 +75,7 @@ DESCRIBED = (
     "grown",
     "did not fit",
     "repeated call",
+    "cleared reply",
     "earlier assessment",
 )
 
@@ -393,8 +394,8 @@ def _named_tools(text: str) -> set[str]:
 def _written() -> dict[str, str]:
     """Render each text the system prompt describes, by the code that writes it.
 
-    The passage and the repeated call come from real tool calls; every note after a
-    search's passages comes from ``_trailer``, the one function that writes them.
+    The passage, the repeated call and the cleared reply come from real tool calls; every
+    note after a search's passages comes from ``_trailer``, the one function that writes them.
 
     Returns:
         dict[str, str]: By kind (see ``DESCRIBED``), the text as the model reads it.
@@ -403,7 +404,9 @@ def _written() -> dict[str, str]:
     plan = scored_node("plan", text, filename="plan.pdf", page=1)
     registry = ToolRegistry([SearchTool(ScriptedSearch([plan])), ReadTool()])
     ctx = tool_context()
-    header, _, body = registry.call(tool_call("search", query="Hafenverein"), ctx).text.partition("\n\n")
+    found = registry.call(tool_call("search", query="Hafenverein"), ctx)
+    assert isinstance(found, PassageReply)
+    header, _, body = found.text.partition("\n\n")
     note = functools.partial(
         _trailer, shown=True, again=(), grown=(), left_out=0, full=False, hint=search_hint("search"), note=""
     )
@@ -414,6 +417,7 @@ def _written() -> dict[str, str]:
         "grown": note(grown=(1,)),
         "did not fit": note(left_out=2),
         "repeated call": registry.call(tool_call("search", query="Hafenverein"), ctx).text,
+        "cleared reply": cleared_text(found),
         "earlier assessment": labelled_lines((ANSWER_SOURCED_LABEL, ANSWER_ASSESSMENT_LABEL), ("Teil 1", "Teil 2")),
     }
 

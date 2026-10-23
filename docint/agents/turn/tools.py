@@ -8,7 +8,8 @@ shows one passage again, as much of it as one reply holds. A call the registry c
 (a tool the turn does not offer, arguments that are not a JSON object) gets an error reply
 saying what to call instead, and every error reply carries a kind (see :data:`ErrorKind`),
 the token the turn's log names it by. A call made before is answered by number from memory,
-never run again; a read only while its passage is unchanged. Which calls are one call is the
+never run again; a read only while its passage is unchanged, and not once the turn cleared its
+reply to make room (see :func:`cleared_text`). Which calls are one call is the
 tool's to say when it defines ``recall_key`` (see :class:`Tool`), else their arguments decide,
 compared on one line and case-folded. The image tools, ``search_images`` and ``keyframes``,
 live in :mod:`docint.agents.turn.image_tools`.
@@ -114,6 +115,9 @@ READ_PARAMETERS: dict[str, Any] = {
     "properties": {"n": {"type": "integer", "description": "The passage's number, as in [n]."}},
     "required": ["n"],
 }
+#: What a reply the turn cleared to make room says instead, by the passages it showed or named.
+CLEARED_REPLY = "Cleared to make room: this reply showed {refs}; read(n) shows a passage again."
+CLEARED_NONE = "Cleared to make room: this reply showed no passages."
 
 
 @dataclass(frozen=True)
@@ -139,6 +143,8 @@ class ToolReply:
         kind (str): Why the call was not answered, an :data:`ErrorKind` token, on every
             :func:`error_reply`; empty on any other reply. The turn logs it in place of the
             call's arguments.
+        keep (str): What a cleared reply keeps of its text, ahead of its numbers (see
+            :func:`cleared_text`): a keyword count, which no ``read`` can show again; empty for none.
     """
 
     text: str
@@ -149,6 +155,7 @@ class ToolReply:
     informative: bool = False
     trail: Mapping[str, Any] | None = None
     kind: str = ""
+    keep: str = ""
 
 
 @dataclass(frozen=True)
@@ -347,6 +354,21 @@ def passage_reply(
     return PassageReply(
         text=rendered.text, found=rendered.found, action=action, detail=detail, numbers=rendered.numbers
     )
+
+
+def cleared_text(reply: PassageReply) -> str:
+    """Write what a reply says once the turn has cleared it to make room.
+
+    Args:
+        reply (PassageReply): The reply.
+
+    Returns:
+        str: Its ``keep`` text, if any, then a blank line and which passages it showed or named,
+        so ``read(n)`` can show one again (:data:`CLEARED_REPLY`), or that it showed none
+        (:data:`CLEARED_NONE`).
+    """
+    shown = CLEARED_REPLY.format(refs=refs(reply.numbers)) if reply.numbers else CLEARED_NONE
+    return "\n\n".join(part for part in (reply.keep, shown) if part)
 
 
 def search_work(name: str, raw: Any, search: SearchFn, *, missing: str) -> ToolReply | ToolWork:

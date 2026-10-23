@@ -69,6 +69,7 @@ from docint.agents.turn.history import ConversationTurn, ConversationWindow
 from docint.agents.turn.image_tools import SearchImagesTool
 from docint.agents.turn.images import TurnImages
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
+from docint.agents.turn.passages import NO_NEW_PASSAGES
 from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
 from docint.agents.turn.stream import Provisional, ToolCall
 from docint.agents.turn.tools import (
@@ -2692,6 +2693,299 @@ def test_a_reply_longer_than_one_reply_may_be_is_cut(loguru_caplog: LogCaptureFi
     assert len(reply) <= turn_budget().result_chars
     assert reply.endswith("characters not shown ...]")
     assert loguru_caplog.messages == ["A 'verbose' tool reply ran past 3000 characters and was cut"]
+
+
+# --- Making room: replies the model has read are cleared, and put back for a forced answer ---------
+
+#: A section long enough that a read of it fills a reply; a search shows ``passage_chars`` of it.
+SECTION = (HARBOUR_PLAN * 2)[:2900]
+#: A turn whose room holds two full replies and a little more: 1940 tokens once the final note is paid.
+TWO_REPLIES = _budget_with_room(2000)
+#: What a reply cleared to make room says, for the passages it showed.
+CLEARED = "Cleared to make room: this reply showed {refs}; read(n) shows a passage again."
+
+
+def _sections(*pages: int) -> list[NodeWithScore]:
+    """Build sections of the invented harbour plan, one per page, each long enough that a read of it fills a reply.
+
+    Args:
+        *pages (int): Their pages.
+
+    Returns:
+        list[NodeWithScore]: The sections.
+    """
+    return [scored_node(f"section-{page}", SECTION, filename="hafenplan.pdf", page=page) for page in pages]
+
+
+def _room_lines(captured: LogCaptureFixture) -> list[str]:
+    """Pick the lines a turn logs when it clears replies to make room or puts them back.
+
+    Args:
+        captured (LogCaptureFixture): Bridged INFO capture.
+
+    Returns:
+        list[str]: The lines, in the order they were logged.
+    """
+    return [
+        line for line in captured.messages if "tool replies to go on" in line or "tool replies for its answer" in line
+    ]
+
+
+def test_a_turn_out_of_room_clears_its_oldest_seen_reply_and_goes_on(loguru_caplog_info: LogCaptureFixture) -> None:
+    """Short of room for one more full reply, the turn cuts the oldest reply the model has read to a stub, and goes on.
+
+    Each search reply shows one section, 383 tokens with its round's message: after three, 791 of
+    the 1940 tokens of room are left, under the 938 one more full reply needs. The first reply's
+    stub frees 262.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    pages = {"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2), "Hafenplan drei": _sections(3)}
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei")),
+            _answer(),
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch(pages)), budget=TWO_REPLIES)))
+
+    assert (result.reason, result.steps, "".join(texts)) == (None, 3, ANSWER)
+    assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "auto"
+    before, after = _tool_replies(llm, 2), _tool_replies(llm, 3)
+    assert after["call_a"] == "Cleared to make room: this reply showed [1]; read(n) shows a passage again."
+    assert after["call_b"] == before["call_b"]
+    assert shown_numbers(after["call_c"]) == [3]
+    freed = message_cost(before["call_a"], 3.5) - message_cost(after["call_a"], 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 1 earlier tool replies to go on, freeing {freed} tokens"
+    ]
+
+
+def test_the_round_just_answered_is_never_cleared_at_the_limit_check() -> None:
+    """Between rounds only replies a model call has read may be cleared, so the round just answered stays whole.
+
+    A search reply (383 tokens with its round's message) and a read (947) leave 610 of the 1940
+    tokens of room. Clearing the search reply would free 262, short of the 938 one more full reply
+    needs, so the model answers: the read, whose stub would free 832, no call has read yet.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1)})
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_a", "Hafenplan eins")), _calls(_read_call("call_b", 1)), _answer()]
+    )
+
+    _, _, result = _drain(_turn(_loop(llm, _documents(search), budget=TWO_REPLIES)))
+
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
+    assert (result.reason, result.steps) == ("context_budget", 2)
+    replies = _tool_replies(llm, 2)
+    assert replies["call_a"] == _tool_replies(llm, 1)["call_a"]
+    assert shown_numbers(replies["call_b"]) == [1]
+
+
+def test_a_round_short_of_room_clears_seen_replies_instead_of_withdrawing() -> None:
+    """A round whose own calls do not fit the room left gets room from replies its call has read, and its calls run.
+
+    Its search and eleven calls to a tool the turn does not offer cost 282 tokens to ask and at
+    least 849 to answer: more than the 1030 left, so it would be withdrawn. The two earlier
+    replies, which this round's call has read, free 1094, room for every reply at its longest.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1)})
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(11)]
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_read_call("call_b", 1)),
+            _calls(_search_call("call_c", "Hafenplan zwei"), *unoffered),
+            _answer(),
+        ]
+    )
+
+    progress, texts, result = _drain(_turn(_loop(llm, _documents(search), budget=_budget_with_room(2420))))
+
+    assert search.queries == ["Hafenplan eins", "Hafenplan zwei"]
+    assert _steps(progress)[-1] == ("search", "Hafenplan zwei", 0)
+    assert (result.reason, result.steps, "".join(texts)) == (None, 3, ANSWER)
+    replies = _tool_replies(llm, 3)
+    assert len(replies) == 2 + 1 + len(unoffered)
+    assert [replies["call_a"], replies["call_b"]] == [CLEARED.format(refs="[1]")] * 2
+
+
+def test_clearing_that_cannot_make_room_changes_nothing(loguru_caplog_info: LogCaptureFixture) -> None:
+    """Clearing is priced first: when every reply it may clear would still leave a round short, none is cleared.
+
+    Twenty-four calls to a tool the turn does not offer cost 527 tokens to ask and 1716 to answer.
+    The 1557 tokens left, with the 262 the first reply's stub would free, do not hold them: the
+    round is withdrawn, and the answer is sent the transcript as it was.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1)})
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(24)]
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Hafenplan eins")), _calls(*unoffered), _answer()])
+
+    _, _, result = _drain(_turn(_loop(llm, _documents(search), budget=TWO_REPLIES)))
+
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
+    assert (result.reason, result.steps) == ("context_budget", 1)
+    assert _sent(llm, 2)[:-1] == _sent(llm, 1)
+    assert _room_lines(loguru_caplog_info) == []
+
+
+def test_a_read_repeated_after_its_reply_was_cleared_shows_the_passage_again() -> None:
+    """A read cleared with its reply is forgotten too, so reading the passage again shows its text, not a reference.
+
+    After a search, a read and a second search, 627 of the 2340 tokens of room are left, under the
+    938 one more full reply needs; the first search reply's stub frees 262, so the read's is
+    cleared too.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2)})
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_read_call("call_b", 1)),
+            _calls(_search_call("call_c", "Hafenplan zwei")),
+            _calls(_read_call("call_d", 1)),
+            _answer(),
+        ]
+    )
+
+    progress, _, _ = _drain(_turn(_loop(llm, _documents(search), budget=_budget_with_room(2400))))
+
+    replies = _tool_replies(llm, 4)
+    assert replies["call_b"] == CLEARED.format(refs="[1]")
+    assert shown_numbers(replies["call_d"]) == [1]
+    assert not replies["call_d"].startswith("Already called")
+    assert replies["call_d"] == _tool_replies(llm, 2)["call_b"]
+    assert _steps(progress)[-1] == ("read", "1", 0)
+
+
+def test_error_replies_are_never_cleared() -> None:
+    """An error reply says why a call was not answered, so clearing passes it by for the replies after it.
+
+    After three searches, 626 of the 1860 tokens of room are left. The first search reply's stub
+    frees 262 of the 312 the turn is short, so the second search reply is cleared next, past the
+    error reply between them.
+    """
+    pages = {"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2), "Hafenplan drei": _sections(3)}
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins"), ("call_x", "keyframes", {"file": "harbour_walk.webm"})),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei")),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch(pages)), budget=_budget_with_room(1920))))
+
+    replies = _tool_replies(llm, 3)
+    assert replies["call_x"].startswith("Error: ")
+    assert replies["call_x"] == _tool_replies(llm, 1)["call_x"]
+    assert [replies["call_a"], replies["call_b"]] == [CLEARED.format(refs="[1]"), CLEARED.format(refs="[2]")]
+    assert shown_numbers(replies["call_c"]) == [3]
+
+
+def test_a_forced_answer_restores_cleared_replies_newest_first_while_they_fit(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """Before a forced answer, cleared replies are put back newest first, until the first that does not fit.
+
+    Two searches each fill a reply with three sections, 920 tokens with their round's message,
+    leaving 200 of the 2040 tokens of room. The first reply is cleared between rounds 2 and 3, and
+    the second inside round 3, whose note and one full reply need 1112. Its search finds nothing
+    new, so 1533 tokens are left for the answer: room for the second reply again (796), and then
+    not for the first.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1, 2, 3), "Hafenplan zwei": _sections(4, 5, 6)})
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei"), text=LONG_PREFACE),
+            _answer(),
+        ]
+    )
+
+    _, _, result = _drain(_turn(_loop(llm, _documents(search), budget=_budget_with_room(2100), max_rounds=3)))
+
+    assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "none"
+    assert (result.reason, result.steps, result.raw_text) == ("round_budget", 3, ANSWER)
+    first, second = _tool_replies(llm, 1)["call_a"], _tool_replies(llm, 2)["call_b"]
+    replies = _tool_replies(llm, 3)
+    assert replies["call_a"] == CLEARED.format(refs="[1], [2], [3]")
+    assert replies["call_b"] == second
+    assert replies["call_c"] == NO_NEW_PASSAGES
+    freed = [
+        message_cost(first, 3.5) - message_cost(CLEARED.format(refs="[1], [2], [3]"), 3.5),
+        message_cost(second, 3.5) - message_cost(CLEARED.format(refs="[4], [5], [6]"), 3.5),
+    ]
+    assert _room_lines(loguru_caplog_info) == [
+        *(f"An agent turn cleared 1 earlier tool replies to go on, freeing {tokens} tokens" for tokens in freed),
+        "An agent turn restored 1 of its 2 cleared tool replies for its answer",
+    ]
+
+
+def test_a_turn_cut_after_an_overflow_neither_clears_nor_restores(loguru_caplog_info: LogCaptureFixture) -> None:
+    """After the overflow cut the answer reads what the cut left: no stub is put back, and nothing more is cleared.
+
+    The first reply is cleared as in a turn that goes on; the next round overflows the context window.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    pages = {"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2), "Hafenplan drei": _sections(3)}
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei")),
+            bad_request(OVERFLOW),
+            _answer(),
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch(pages)), budget=TWO_REPLIES)))
+
+    assert (result.reason, "".join(texts)) == ("context_budget", ANSWER)
+    assert _tool_replies(llm, 3)["call_a"] == CLEARED.format(refs="[1]")
+    assert _sent(llm, 4)[:-1] == turn_loop._shortened(_sent(llm, 3))
+    freed = message_cost(_tool_replies(llm, 2)["call_a"], 3.5) - message_cost(CLEARED.format(refs="[1]"), 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 1 earlier tool replies to go on, freeing {freed} tokens"
+    ]
+
+
+def test_the_most_a_rounds_replies_can_take_is_a_full_reply_for_each_call_with_work() -> None:
+    """At their longest, a call answered when prepared costs its reply, one with work a full reply.
+
+    A call past the round's limit costs the longest short reply, as in the least, where a call
+    with work costs that too.
+    """
+    ctx = tool_context()
+    round_calls = RoundCalls(
+        registry=_documents(QuerySearch({})),
+        result_chars=ctx.budget.result_chars,
+        max_calls_per_round=2,
+        char_token_ratio=3.5,
+        search_slots=threading.BoundedSemaphore(2),
+    )
+    calls = [tool_call("search", query="Programm"), tool_call("read", n="drei"), tool_call("search", query="Wetter")]
+
+    prepared = round_calls.prepare(calls, ctx)
+
+    refused = prepared.calls[1].reply
+    assert refused is not None and refused.error
+    answered = message_cost(refused.text, 3.5)
+    assert round_calls.most(prepared) == round_calls.full_reply + answered + round_calls.short_reply
+    assert round_calls.least(prepared) == round_calls.short_reply + answered + round_calls.short_reply
 
 
 # --- The trail and the transcript -------------------------------------------------------------

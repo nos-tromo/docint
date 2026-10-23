@@ -869,7 +869,7 @@ failure before it, so it replaces whatever reason stood.
 |---|---|
 | `round_budget` | The turn ran `AGENT_MAX_ROUNDS` tool rounds (default 6). |
 | `time_budget` | `AGENT_TIME_BUDGET_S` ran out (default 120 s). Limits are checked between rounds, so an answer already streaming is never cut, and a search that outlives the time left gets a "no reply in time" reply. |
-| `context_budget` | No room is left for one more full reply. A round whose own calls do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
+| `context_budget` | No room is left for one more full reply, even after clearing seen replies (see [Making room](#making-room)). A round whose own calls still do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
 | `idle` | Two rounds in a row added no passage and told the model nothing new (see below). |
 | `research_failed` | Evidence may be missing; the answer is still written. A call could not be prepared, a search failed or found no search slot, or a later round failed or found no model slot. |
 | `answer_cut` | The endpoint cut the answer at its length limit (`finish_reason: "length"`), so it may be incomplete. The answer is kept as written. This covers every round whose text is the answer: one answering by choice, the forced answer and its resend without tools, and a pinned round. |
@@ -883,6 +883,49 @@ A reply is informative when it told the model something about the collection
 without admitting a passage, as a keyword count does, a 0 included, and as a
 `read` does, which shows a passage's text. A reply answered from memory is never
 informative, so reading an unchanged passage again still counts toward `idle`.
+
+### Making room
+
+At a small context window the room for tool replies holds only a few full
+replies. Rather than stop there, the loop cuts replies the model has already
+read down to stubs, and research goes on.
+
+- **Two triggers.** Between rounds, when the room left cannot hold one more
+  full reply (with its envelope, and a search note still due), replies are
+  cleared until it can; the limits are then checked again. Inside a round,
+  when the room left cannot hold the round's replies at their longest (a full
+  reply for each call that runs), replies are cleared for that, or else for
+  the least the replies need. Only a round that cannot reach even the least is
+  withdrawn.
+- **What counts as seen.** A reply has been seen once a model call that began
+  carried it. Between rounds, that is every round before the one just
+  answered, so its replies are never cleared there. Inside a round, the
+  round's own model call has carried every round before it.
+- **What is cleared.** Seen replies that showed or named passages, oldest
+  first, while the room is still short. An error reply is never cleared: it
+  says why a call was not answered. Neither is a reply its stub would not
+  shorten.
+- **The stub.** A cleared reply reads `Cleared to make room: this reply showed [1], [3]; read(n) shows a passage again.`,
+  or `Cleared to make room: this reply showed no passages.` when it showed
+  none. A keyword reply keeps its count ahead of that line, since no `read`
+  shows a count again. The stub keeps the reply's role and call id.
+- **A cleared read is forgotten.** A call made before is answered from memory
+  (`Already called …`). Once a `read`'s reply is cleared, the same read is
+  answered anew with the passage's text.
+- **Priced first.** When clearing every reply that may be cleared would still
+  leave the room short, nothing is cleared and the limit stands.
+- **Restored before a forced answer.** When a limit makes the model answer,
+  the cleared replies are put back first, newest first, while each fits the
+  room left; the first that does not fit stops it. An answer the model writes
+  by choice while some replies are stubs stands as written, and validation
+  still checks the passages it cites.
+- **Nothing after an overflow cut.** Once the overflow retry has cut every
+  tool reply, nothing is cleared or put back.
+
+Each clearing logs one INFO line with counts only (`An agent turn cleared 1
+earlier tool replies to go on, freeing 262 tokens`), and so does a restore
+(`An agent turn restored 1 of its 2 cleared tool replies for its answer`). The
+SPA shows neither.
 
 ### Fallback to the plain path
 

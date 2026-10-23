@@ -8,6 +8,7 @@ Werkzeugantworten:
 - `more matching passages did not fit`: Die Notiz dahinter sagt, wie du sie siehst.
 - Eine mit `characters not shown` gekürzte Passage geht weiter; read(n) zeigt mehr davon.
 - `Already called`: Ein wiederholter Aufruf wird aus dem Gedächtnis beantwortet.
+- `Cleared to make room`: Eine frühere Antwort nennt nur noch ihre Passagen; read(n) zeigt eine wieder.
 
 Regeln:
 - Antworte in der Sprache der Nutzerin oder des Nutzers. Schreibe nur die Antwort, ohne deine Werkzeugaufrufe zu schildern.

@@ -522,7 +522,8 @@ class KeywordTool:
         Returns:
             ToolReply: The count note, then the passages, as a :class:`PassageReply` that is news even
             when it admits nothing, so the same call can be answered by number. A plain reply when
-            the count failed, which is never remembered, so a retry runs again.
+            the count failed, which is never remembered, so a retry runs again. Either keeps the
+            note when cleared to make room: no ``read`` shows a count again.
         """
         nodes = fetched.nodes
         if field == DEFAULT_KEYWORD_FIELD:
@@ -533,5 +534,7 @@ class KeywordTool:
         if fetched.unchecked > 0:
             trail["unchecked"] = fetched.unchecked
         if fetched.matches is None:
-            return ToolReply(text=shown.text, found=shown.found, action=shown.action, detail=shown.detail, trail=trail)
-        return replace(shown, informative=True, trail=trail)
+            return ToolReply(
+                text=shown.text, found=shown.found, action=shown.action, detail=shown.detail, trail=trail, keep=note
+            )
+        return replace(shown, informative=True, trail=trail, keep=note)

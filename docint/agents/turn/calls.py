@@ -12,8 +12,9 @@ missing. One that ran out of time is not; the turn's time limit says so.
 
 Room. A round first reserves the least reply every call needs (:meth:`RoundCalls.least`), which
 the loop has already checked fits; a call then runs only while a full reply, ``result_chars`` at
-the turn's ratio plus its envelope, still fits in place of its short one. No reply leaves here
-longer than ``result_chars``.
+the turn's ratio plus its envelope, still fits in place of its short one. :meth:`RoundCalls.most`
+is what the replies take at their longest, the room the loop makes before a round when it can. No
+reply leaves here longer than ``result_chars``.
 
 Nothing here logs a query, a tool argument or document text: only counts, tool names and
 exception types.
@@ -215,6 +216,37 @@ class RoundCalls:
         if position < self._max_calls and ready.reply is not None:
             return message_cost(ready.reply.text, self._ratio)
         return self.short_reply
+
+    def most(self, prepared: PreparedRound) -> int:
+        """Return the most tokens a round's replies can take: one reply per call, each as long as it can be.
+
+        A call answered when prepared costs its reply, and a call past the round's limit the
+        longest reply written here, as in :meth:`least`; a call with work, a full reply.
+
+        Args:
+            prepared (PreparedRound): The round's calls, prepared.
+
+        Returns:
+            int: The tokens.
+        """
+        return sum(self._most(position, ready) for position, ready in enumerate(prepared.calls))
+
+    def _most(self, position: int, ready: PreparedCall) -> int:
+        """Return the most tokens one call's reply can take.
+
+        Args:
+            position (int): The call's place in its round, from zero.
+            ready (PreparedCall): The call, prepared.
+
+        Returns:
+            int: Its reply's cost when it was answered at prepare within the round's limit, a full
+            reply when it has work within that limit, else the cost of the longest reply written here.
+        """
+        if position >= self._max_calls:
+            return self.short_reply
+        if ready.reply is not None:
+            return message_cost(ready.reply.text, self._ratio)
+        return self.full_reply
 
     def _admitted(self, prepared: Sequence[PreparedCall], room: int) -> list[bool | None]:
         """Decide which calls may run: within the round's limit, and while a full reply still fits.

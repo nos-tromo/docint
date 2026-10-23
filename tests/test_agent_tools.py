@@ -51,6 +51,7 @@ from docint.agents.turn.tools import (
     ToolRegistry,
     ToolReply,
     ToolWork,
+    cleared_text,
     error_reply,
     nested_too_deeply,
     passage_reply,
@@ -1303,10 +1304,44 @@ def test_a_reply_is_by_default_no_news_and_carries_no_trail() -> None:
     plain = ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="")
     shown = PassageReply(text="[1]", found=1, action="search", detail="Hafenfest", numbers=(1,))
 
-    assert [(reply.informative, reply.trail, reply.kind) for reply in (plain, shown)] == [(False, None, "")] * 2
-    base = ["text", "found", "action", "detail", "error", "informative", "trail", "kind"]
+    defaults = [(reply.informative, reply.trail, reply.kind, reply.keep) for reply in (plain, shown)]
+    assert defaults == [(False, None, "", "")] * 2
+    # What is left of a reply once cleared, ``keep``, comes last: it is the last thing to happen to a reply.
+    base = ["text", "found", "action", "detail", "error", "informative", "trail", "kind", "keep"]
     assert [field.name for field in fields(ToolReply)] == base
     assert [field.name for field in fields(PassageReply)] == [*base, "numbers", "depends_on"]
+
+
+@pytest.mark.parametrize(
+    ("numbers", "keep", "cleared"),
+    [
+        ((1,), "", "Cleared to make room: this reply showed [1]; read(n) shows a passage again."),
+        ((1, 3, 4), "", "Cleared to make room: this reply showed [1], [3], [4]; read(n) shows a passage again."),
+        ((), "", "Cleared to make room: this reply showed no passages."),
+        (
+            (2,),
+            "3 Treffer.",
+            "3 Treffer.\n\nCleared to make room: this reply showed [2]; read(n) shows a passage again.",
+        ),
+        ((), "0 Treffer.", "0 Treffer.\n\nCleared to make room: this reply showed no passages."),
+    ],
+    ids=["one", "several", "none", "kept-text-first", "kept-text-and-none"],
+)
+def test_a_cleared_reply_keeps_its_kept_text_then_names_its_passages(
+    numbers: tuple[int, ...], keep: str, cleared: str
+) -> None:
+    """A reply cut down to make room names the passages it showed, for read(n), after what it keeps of its text.
+
+    Args:
+        numbers (tuple[int, ...]): The passages the reply showed or named.
+        keep (str): What it keeps of its text; empty for none.
+        cleared (str): What it says once cleared.
+    """
+    reply = PassageReply(
+        text=OPENING * 20, found=len(numbers), action="search", detail="Hafenfest", numbers=numbers, keep=keep
+    )
+
+    assert cleared_text(reply) == cleared
 
 
 def test_arguments_nested_too_deeply_get_an_error_reply() -> None:

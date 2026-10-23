@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import pytest
-from agent_fakes import KEYWORD_STEPS, programme_passage, shown_numbers, tool_call, tool_context
+from agent_fakes import KEYWORD_STEPS, keyword_match, programme_passage, shown_numbers, tool_call, tool_context
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.schema import MetadataMode, NodeWithScore
@@ -41,6 +41,7 @@ from docint.agents.turn.tools import (
     ToolRegistry,
     ToolReply,
     ToolWork,
+    cleared_text,
     passage_reply,
     trail_detail,
 )
@@ -1165,6 +1166,22 @@ def test_a_failed_count_is_a_plain_reply_that_is_no_news() -> None:
     assert (reply.informative, reply.error) == (False, False)
     assert reply.trail == {"field": "text", "matches": None, "unchecked": 1}
     assert reply.text.startswith(note)
+    assert reply.keep == note
+
+
+def test_a_cleared_keyword_reply_keeps_its_count() -> None:
+    """Cut down to make room, a keyword reply keeps its count ahead of the passages it named: no read can restore it."""
+    reply = ToolRegistry([KeywordTool(keyword_match())]).call(
+        tool_call("keyword", words="Hafenfest", field="author"), tool_context()
+    )
+
+    note = keyword_note(matches=3, unchecked=2)
+    assert isinstance(reply, PassageReply)
+    assert reply.keep == note
+    assert cleared_text(reply).startswith(note)
+    assert (
+        cleared_text(reply) == f"{note}\n\nCleared to make room: this reply showed [1]; read(n) shows a passage again."
+    )
 
 
 def test_reordered_or_recased_words_on_the_text_are_answered_from_memory() -> None:
