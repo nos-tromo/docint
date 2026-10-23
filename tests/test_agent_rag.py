@@ -1579,6 +1579,35 @@ def test_a_visual_or_scoped_turn_is_never_offered_keyword(
     assert turn.loop._system_prompt == _system_prompt("en", target, rule=False, summary=NO_HISTORY)
 
 
+def test_a_documents_turn_reads_nothing_of_the_image_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``documents`` turn discards the companion, so its coverage read neither looks it up nor counts it.
+
+    An ``all`` turn on the same store reads it, which shows the records would have noticed.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    client = KeywordClient(
+        {"hafen": ready_schema("text"), "hafen_images": ready_schema("text")},
+        counts={"hafen": 10, "hafen_images": 4},
+    )
+    rag._qdrant_client = cast(Any, client)
+
+    documents = rag._agent_keyword_matcher(
+        metadata_filter_rules=None, metadata_filters_active=False, retrieval_target="documents"
+    )
+
+    assert documents is not None
+    assert {name for name, _ in client.counted} == {"hafen"}
+    assert client.exists_asked == []
+
+    rag._agent_keyword_matcher(metadata_filter_rules=None, metadata_filters_active=False, retrieval_target="all")
+
+    assert {name for name, _ in client.counted} == {"hafen", "hafen_images"}
+    assert client.exists_asked == ["hafen_images"]
+
+
 def _keyword_budgets(monkeypatch: pytest.MonkeyPatch) -> dict[str, TurnBudget]:
     """Measure an ``all`` turn's budget with keyword on every field, on the text alone, and without keyword.
 

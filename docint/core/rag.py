@@ -9060,9 +9060,9 @@ class RAG:
         that carry it. The image companion is in scope on the ``all`` target when it exists,
         and joins a field's match only where it carries the same indexes; otherwise its chunks
         are reported unchecked, never counted as misses, as are the chunks either lane holds
-        without the text. A ``documents`` turn leaves the companion out: the coverage read still
-        counts it, since it reports every lane, but the turn discards that lane, reads no
-        companion schema, and neither counts its points nor reports them unchecked.
+        without the text. A ``documents`` turn leaves the companion out: the coverage read does
+        not look it up or count it, no companion schema is read, and its points are neither
+        counted by a check nor reported unchecked.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
@@ -9085,12 +9085,11 @@ class RAG:
         collection = self.qdrant_collection
         companion = image_companion_name(collection)
         client = self.qdrant_client
-        lanes = search_index_status(client, collection, by_lane=True).get("lanes") or {}
+        with_images = retrieval_target != "documents"
+        lanes = search_index_status(client, collection, by_lane=True, include_companion=with_images).get("lanes") or {}
         main = lanes.get(collection)
         images = lanes.get(companion)
-        in_scope = retrieval_target != "documents" and (
-            images is not None or bool(client.collection_exists(collection_name=companion))
-        )
+        in_scope = with_images and (images is not None or bool(client.collection_exists(collection_name=companion)))
         if main is None or (in_scope and images is None):
             return "coverage"
         main_schema = read_payload_schema(client, collection)

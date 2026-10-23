@@ -602,7 +602,7 @@ def ready_schema(*fields: str) -> dict[str, str]:
 
 
 class KeywordClient:
-    """A Qdrant double for keyword matches: payload schemas, counts, and what was counted."""
+    """A Qdrant double for keyword matches: payload schemas, counts, what was counted and what was looked up."""
 
     def __init__(self, schemas: dict[str, dict[str, str]], counts: dict[str, int | Exception] | None = None) -> None:
         """Serve these schemas and counts.
@@ -614,6 +614,7 @@ class KeywordClient:
         self.schemas = schemas
         self.counts = dict(counts or {})
         self.counted: list[tuple[str, Any]] = []
+        self.exists_asked: list[str] = []
 
     def get_collection(self, collection_name: str) -> Any:
         """Return a collection's payload schema.
@@ -630,7 +631,7 @@ class KeywordClient:
         )
 
     def collection_exists(self, collection_name: str) -> bool:
-        """Report whether a collection exists.
+        """Report whether a collection exists, recording the question.
 
         Args:
             collection_name (str): The collection.
@@ -638,6 +639,7 @@ class KeywordClient:
         Returns:
             bool: Whether a schema was given for it.
         """
+        self.exists_asked.append(collection_name)
         return collection_name in self.schemas
 
     def count(self, collection_name: str, count_filter: Any = None, exact: bool = True) -> Any:
