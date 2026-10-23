@@ -122,7 +122,8 @@ class ConversationWindow:
             their share of the allowance. A citation number survives in an answer only where it
             names a carried passage, renumbered to that passage's number in ``carried``.
         carried (tuple[CarriedPassage, ...]): The passages the block lists, the first being
-            ``[1]``: as many of those asked for as fit their share of the allowance.
+            ``[1]``: the newest run of those asked for that fits their share of the allowance,
+            in the order asked for.
     """
 
     summary: str = ""
@@ -378,21 +379,23 @@ def _newest_summary(summary: str, chars: int) -> str:
 
 
 def _carried_within(carried: Sequence[CarriedPassage], chars: int) -> tuple[CarriedPassage, ...]:
-    """Take the carried passages whose lines fit a section of ``chars`` characters.
+    """Take the newest carried passages whose lines fit a section of ``chars`` characters.
 
     Args:
-        carried (Sequence[CarriedPassage]): The passages, in the order they are listed.
+        carried (Sequence[CarriedPassage]): The passages, oldest cited first, as
+            :func:`cited_node_ids` returns them.
         chars (int): The most characters the rendered section may use.
 
     Returns:
-        tuple[CarriedPassage, ...]: The longest prefix that fits. Lines are kept whole, and the
-        first that does not fit ends the list.
+        tuple[CarriedPassage, ...]: The longest newest run of ``carried`` that fits, in the order
+        given, so the oldest passage kept is ``[1]``. The lines are walked from the newest back
+        and kept whole; the first that does not fit ends the run, and every older passage is left out.
     """
     kept: list[CarriedPassage] = []
-    for passage in carried:
-        if len(_carried_section([*kept, passage])) > chars:
+    for passage in reversed(carried):
+        if len(_carried_section([passage, *kept])) > chars:
             break
-        kept.append(passage)
+        kept.insert(0, passage)
     return tuple(kept)
 
 
@@ -551,7 +554,9 @@ def cited_node_ids(turns: Sequence[ConversationTurn], positions: Sequence[int]) 
         positions (Sequence[int]): The exchanges to read, oldest first; see :func:`recent_positions`.
 
     Returns:
-        tuple[str, ...]: At most ``CARRIED_MAX_PASSAGES`` distinct node ids.
+        tuple[str, ...]: At most ``CARRIED_MAX_PASSAGES`` distinct node ids: the ones cited last,
+        each placed by its latest citation, oldest cited first. That is the order the window
+        numbers them in, the first being ``[1]`` when all of them are listed.
     """
     cited = [
         node_id
@@ -615,12 +620,12 @@ def build_window(
     carried passages first, so long answers cannot push an open question out. The block
     shows the carried passages last, nearest the messages whose markers they number.
 
-    The carried passages are listed in the order given, whole lines only, up to the first
-    that does not fit; the rest are not carried. Citation numbers are dropped from the
-    summary and every answer, except that a marker naming a carried passage stays,
-    renumbered to the passage's number in the list; an earlier assessment shows its two
-    parts labelled where :func:`split_answer` trusts its stored boundary. With nothing
-    carried, every marker is dropped.
+    The carried list is the newest run of ``carried`` whose lines fit, whole lines only,
+    numbered in the order given: when they do not all fit, the oldest give way and are not
+    carried. Citation numbers are dropped from the summary and every answer, except that a
+    marker naming a carried passage stays, renumbered to the passage's number in the list;
+    an earlier assessment shows its two parts labelled where :func:`split_answer` trusts its
+    stored boundary. With nothing carried, every marker is dropped.
 
     The allowance covers the whole window: the block, every message's text and the
     ``MESSAGE_OVERHEAD_TOKENS`` envelope each message costs, so a caller that counts the block
@@ -636,8 +641,9 @@ def build_window(
         summary (str): The rolling summary, which grows by appending, so its end is the newest.
         allowance_tokens (int): Tokens the window may cost; see ``history_allowance_tokens``.
         char_token_ratio (float): Characters per token for the estimate.
-        carried (Sequence[CarriedPassage]): The passages to list, distinct, in the order to
-            number them; see :func:`cited_node_ids` for which the recent answers cite.
+        carried (Sequence[CarriedPassage]): The passages to list, distinct, oldest cited first,
+            which is the order to number them in; see :func:`cited_node_ids` for which the recent
+            answers cite.
 
     Returns:
         ConversationWindow: The window, never over the allowance.

@@ -962,7 +962,7 @@ def test_the_summary_and_the_earlier_questions_never_carry_numbers() -> None:
 
 
 def test_carried_lines_that_do_not_fit_are_not_carried() -> None:
-    """The list stops at the first line that does not fit, and the markers of the passages left out go too."""
+    """The oldest give way: the list is the newest run that fits, and the markers of the others go."""
     passages = [_passage(number) for number in range(1, 7)]
     answer = "Erstens [1], zweitens [2], drittens [3], viertens [4], fünftens [5], sechstens [6]."
     turn = _cited(answer, *(passage.node_id for passage in passages))
@@ -970,21 +970,79 @@ def test_carried_lines_that_do_not_fit_are_not_carried() -> None:
     window = build_window([turn], "", allowance_tokens=380, char_token_ratio=RATIO, carried=passages)
 
     spare = 380 - 2 * MESSAGE_OVERHEAD_TOKENS - MIN_EXCHANGE_TOKENS
-    assert window.carried == tuple(passages[:2])
-    assert _contents(window)[1] == "Erstens [1], zweitens [2], drittens, viertens, fünftens, sechstens."
+    assert window.carried == tuple(passages[-2:])
+    assert window.summary_block().splitlines()[1:] == [f"[1] {passages[4].label}", f"[2] {passages[5].label}"]
+    assert _contents(window)[1] == "Erstens, zweitens, drittens, viertens, fünftens [1], sechstens [2]."
     assert estimate_tokens(ConversationWindow(carried=window.carried).summary_block(), RATIO) <= spare
-    assert estimate_tokens(ConversationWindow(carried=tuple(passages[:3])).summary_block(), RATIO) > spare
+    assert estimate_tokens(ConversationWindow(carried=tuple(passages[-3:])).summary_block(), RATIO) > spare
 
 
-def test_a_line_that_does_not_fit_ends_the_list_even_when_a_shorter_one_would() -> None:
-    """The list is a prefix: a short passage after a long one that was left out is not carried either."""
+def test_a_line_that_does_not_fit_ends_the_run_even_when_an_older_one_would() -> None:
+    """The run stops at the first line from the newest that does not fit; a short passage behind it is left out."""
     passages = [CarriedPassage("n1", "Kurz"), CarriedPassage("n2", "x" * 400), CarriedPassage("n3", "Kurz")]
     turn = _cited("Eins [1], zwei [2], drei [3].", "n1", "n2", "n3")
 
     window = build_window([turn], "", allowance_tokens=380, char_token_ratio=RATIO, carried=passages)
 
-    assert window.carried == (passages[0],)
-    assert _contents(window)[1] == "Eins [1], zwei, drei."
+    assert window.carried == (passages[2],)
+    assert _contents(window)[1] == "Eins, zwei, drei [1]."
+
+
+def _long_passage(node_id: str) -> CarriedPassage:
+    """Return an invented carried passage with a label of 128 characters.
+
+    Args:
+        node_id (str): The stored node, which also opens the label.
+
+    Returns:
+        CarriedPassage: The passage.
+    """
+    return CarriedPassage(node_id, f"{node_id}: " + " ".join(["Pegelstände der Anleger."] * 5))
+
+
+@pytest.mark.parametrize(
+    ("answer", "sources", "kept", "shown"),
+    [
+        (
+            "Neu: A [1], B [2], C [3], D [4].",
+            ("b1", "b2", "b3", "b4"),
+            ["b1", "b2", "b3", "b4"],
+            "Neu: A [1], B [2], C [3], D [4].",
+        ),
+        (
+            "Neu: A [1], B [2], C [3], D [4], E [5].",
+            ("b1", "b2", "b3", "b4", "b5"),
+            ["b2", "b3", "b4", "b5"],
+            "Neu: A, B [1], C [2], D [3], E [4].",
+        ),
+    ],
+    ids=["newest-answer-fits-whole", "newest-answer-loses-its-oldest"],
+)
+def test_the_passages_of_an_older_answer_give_way_to_the_newest_answers(
+    answer: str, sources: tuple[str, ...], kept: list[str], shown: str
+) -> None:
+    """A follow-up most likely concerns the latest answer, so the oldest citations are the ones the list loses.
+
+    At the plain allowance four of these 128-character lines fit in the 200 tokens; the older answer's three
+    passages are cited first, so they are the first to give way, and its markers go with them.
+
+    Args:
+        answer (str): The newest answer.
+        sources (tuple[str, ...]): The nodes its citation numbers name.
+        kept (list[str]): The nodes the window carries, in the order it numbers them.
+        shown (str): The newest answer as the window sends it.
+    """
+    turns = [_cited("Alt: X [1], Y [2], Z [3].", "a1", "a2", "a3"), _cited(answer, *sources)]
+    ids = cited_node_ids(turns, recent_positions(turns, PLAIN))
+    carried = [_long_passage(node_id) for node_id in ids]
+
+    window = build_window(turns, "", allowance_tokens=PLAIN, char_token_ratio=RATIO, carried=carried)
+
+    assert ids == ("a1", "a2", "a3", *sources)
+    assert [passage.node_id for passage in window.carried] == kept
+    assert window.summary_block().splitlines()[1] == f"[1] {_long_passage(kept[0]).label}"
+    assert _contents(window)[1] == "Alt: X, Y, Z."
+    assert _contents(window)[3] == shown
 
 
 @pytest.mark.parametrize(("label_chars", "carried"), [(265, True), (266, False)], ids=["fits", "one-over"])
@@ -1011,7 +1069,7 @@ def test_carried_passages_take_at_most_their_share_of_the_allowance() -> None:
     window = build_window([_turn(1)], "", allowance_tokens=PLAIN, char_token_ratio=RATIO, carried=passages)
 
     assert CARRIED_TOKENS == 200
-    assert len(window.carried) == 5
+    assert window.carried == tuple(passages[-5:])
     assert 180 <= estimate_tokens(window.summary_block(), RATIO) <= CARRIED_TOKENS
     assert _spent(window) <= PLAIN
 
@@ -1025,7 +1083,7 @@ def test_carried_passages_claim_their_room_before_the_earlier_questions_and_the_
     window = build_window(turns, FOLD, allowance_tokens=380, char_token_ratio=RATIO, carried=passages)
 
     assert baseline.earlier_questions and baseline.summary
-    assert len(window.carried) == 2
+    assert window.carried == tuple(passages[-2:])
     assert window.earlier_questions == () and window.summary == ""
     assert len(window.recent) == len(baseline.recent) == 1
     assert _spent(window) <= 380
@@ -1045,7 +1103,7 @@ def test_a_zero_allowance_carries_nothing() -> None:
 
 
 def test_random_histories_with_carried_passages_never_overspend_their_allowance() -> None:
-    """Whatever the lengths, ratio and allowance, the carried list is a prefix within its share and the window fits."""
+    """Whatever the lengths, ratio and allowance, the carried list is a newest run in its share and the window fits."""
     rng = random.Random(5)
     for _ in range(800):
         ratio = rng.choice([3.5, 2.0, 3.3, 2.3, 4.0, 1.7])
@@ -1069,7 +1127,7 @@ def test_random_histories_with_carried_passages_never_overspend_their_allowance(
             exchanges = len(window.recent)
             spare = max(0, allowance - 2 * exchanges * MESSAGE_OVERHEAD_TOKENS - exchanges * MIN_EXCHANGE_TOKENS)
             assert estimate_tokens(window.summary_block(), ratio) <= spare
-        assert window.carried == tuple(passages[: len(window.carried)])
+        assert window.carried == tuple(passages[len(passages) - len(window.carried) :])
         if window.carried:
             assert estimate_tokens(ConversationWindow(carried=window.carried).summary_block(), ratio) <= CARRIED_TOKENS
         markers = [group for text in _contents(window) for group in re.findall(r"\[([\d, ]+)\]", text)]
