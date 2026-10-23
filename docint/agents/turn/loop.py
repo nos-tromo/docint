@@ -57,10 +57,11 @@ whose answer raised, marks the turn ``research_failed`` without ending it: evide
 missing.
 
 Pictures. With a thumbnail fetcher, the pictures of the passages a round admits, and of those it
-reads that the turn has not shown, are shown to the model after its tool replies: a read is how a
-picture the turn holds but has not shown reaches the model. A picture is shown once a turn, so
-one retired to make room is never attached again. A round refused with pictures is sent once more
-without those still attached (see :mod:`~docint.agents.turn.images` and :meth:`AgentLoop._round`).
+reads that the turn has not shown, a read answered from memory included, are shown to the model
+after its tool replies, within the prompt's cap and the room left: a read is how a picture the
+turn holds but has not shown reaches the model. A picture is shown once a turn, so one retired to
+make room is never attached again. A round refused with pictures is sent once more without those
+still attached (see :mod:`~docint.agents.turn.images` and :meth:`AgentLoop._round`).
 
 A pinned scope is answered from the pinned passages alone, in one round that offers no tools (see
 :mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`).
@@ -168,8 +169,9 @@ class AgentResult:
             limit, a failed round, a call that could not be prepared, a failed search or missing
             search slot; ``answer_cut``, replacing any of these, when the endpoint cut the answer
             at its length limit; ``None`` when there was none.
-        images_attached (int): Pictures the model was shown this turn: those retired to make room
-            and those still attached when it ended; a refusal takes back only those still attached.
+        images_attached (int): The pictures retired to make room and those still attached when
+            the turn ended. A refusal takes back the pictures still attached, which then do not
+            count even when an earlier call carried them; retired ones stay counted.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.
     """
@@ -478,7 +480,7 @@ class AgentLoop:
                 :mod:`~docint.agents.turn.images`); ``None`` shows no picture.
             legend_template (str): Tells the model the pictures are its sources, with an
                 ``{image_legend}`` slot for the lines tying each to its number.
-            max_images (int): The most pictures a turn shows; ``0`` shows none.
+            max_images (int): The most pictures one prompt carries; ``0`` shows none.
             search_note (str): What a first round that called no tool is told when it is asked
                 again: look up what the answer relies on first. Empty, such a reply is the answer.
 

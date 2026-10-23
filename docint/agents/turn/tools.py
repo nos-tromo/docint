@@ -162,13 +162,14 @@ class ToolReply:
 class PassageReply(ToolReply):
     """A reply that answered its call by showing or naming numbered passages.
 
-    The registry remembers its numbers, so the same call made again is answered by number.
+    The registry remembers its numbers, so the same call made again is answered by number,
+    in a reply of this kind too, which is never remembered itself.
 
     Attributes:
         numbers (tuple[int, ...]): The ledger numbers the reply showed or named, ascending.
         depends_on (tuple[int, ...]): Entries the reply shows as they stand, as a read
-            does: the same call is answered from memory only while each is unchanged, and
-            answered anew once one of them has grown.
+            does; the same read answered from memory names them too. The same call is
+            answered from memory only while each is unchanged, and anew once one has grown.
     """
 
     numbers: tuple[int, ...] = ()
@@ -651,7 +652,7 @@ def _state(ledger: EvidenceLedger, number: int) -> tuple[int, int]:
     return len(node.get_content(metadata_mode=MetadataMode.NONE)), len(spans) if isinstance(spans, list) else 0
 
 
-def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> ToolReply | None:
+def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> PassageReply | None:
     """Answer a call from memory, when the same call was answered before in this turn.
 
     An answer kept by entry state, a read's, is recalled only once every earlier call in
@@ -664,8 +665,9 @@ def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> ToolReply
         final (bool): Whether every earlier call in the round has finished.
 
     Returns:
-        ToolReply | None: The numbers the earlier answer showed or named, admitting nothing
-        and no news, under the trail the earlier answer carried; ``None`` when nothing is
+        PassageReply | None: The numbers the earlier answer showed or named, admitting nothing
+        and no news, under the trail the earlier answer carried; a read's also depends on the
+        passage it read, so the turn can show that passage's picture. ``None`` when nothing is
         remembered, when the answer's states cannot be trusted yet, or when an entry the
         answer depends on has grown since.
     """
@@ -679,7 +681,15 @@ def _recall(key: tuple[str, str], ctx: ToolContext, *, final: bool) -> ToolReply
     text = f"Already called {name} with these arguments; " + (
         f"see {refs(answered.numbers)}." if answered.numbers else "it showed no passages."
     )
-    return ToolReply(text=text, found=0, action=name, detail=answered.detail, trail=answered.trail)
+    return PassageReply(
+        text=text,
+        found=0,
+        action=name,
+        detail=answered.detail,
+        trail=answered.trail,
+        numbers=answered.numbers,
+        depends_on=answered.numbers if answered.states else (),
+    )
 
 
 @dataclass(frozen=True)

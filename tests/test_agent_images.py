@@ -43,7 +43,7 @@ def _images(store: ThumbnailStore | None, *, max_images: int = 6, round_room: in
 
     Args:
         store (ThumbnailStore | None): The fetcher; ``None`` for a turn that shows no pictures.
-        max_images (int): The most pictures the turn may show.
+        max_images (int): The most pictures one prompt may carry.
         round_room (int): The turn's room for tool replies, which caps the pictures too.
 
     Returns:
@@ -139,7 +139,7 @@ def test_a_turn_without_a_fetcher_or_an_allowance_shows_no_picture(
 
     Args:
         store (ThumbnailStore | None): The fetcher, if any.
-        max_images (int): The most pictures the turn may show.
+        max_images (int): The most pictures one prompt may carry.
     """
     images = _images(store, max_images=max_images)
 
@@ -152,13 +152,15 @@ def test_a_turn_without_a_fetcher_or_an_allowance_shows_no_picture(
     [(2, WIDE, 2), (6, 2 * VISUAL_IMAGE_TOKEN_ESTIMATE + VISUAL_IMAGE_TOKEN_ESTIMATE - 1, 2)],
     ids=["by-max-images", "by-the-turns-room"],
 )
-def test_a_turn_shows_no_more_pictures_than_its_cap(max_images: int, round_room: int, shown: int) -> None:
-    """The cap is the fewer of ``max_images`` and the pictures the turn's whole room could hold, across rounds.
+def test_a_prompt_carries_no_more_pictures_than_its_cap(max_images: int, round_room: int, shown: int) -> None:
+    """The cap is the fewer of ``max_images`` and the pictures the turn's room could hold, less those still attached.
+
+    Pictures attached in an earlier round count until they are retired (see the retiring tests below).
 
     Args:
-        max_images (int): The most pictures the turn may show.
+        max_images (int): The most pictures one prompt may carry.
         round_room (int): The turn's room for tool replies.
-        shown (int): The pictures the turn shows in all.
+        shown (int): The pictures attached after both rounds, none of them retired.
     """
     store = ThumbnailStore(0, 1, 2, 3)
     images = _images(store, max_images=max_images, round_room=round_room)

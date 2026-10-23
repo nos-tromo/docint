@@ -802,6 +802,22 @@ def test_an_unchanged_remembered_read_is_answered_from_memory_at_finish() -> Non
     assert registry.finish(prepared, None, ctx).text == "Already called read with these arguments; see [1]."
 
 
+def test_a_call_answered_from_memory_names_its_passages_and_a_repeated_read_the_one_it_read() -> None:
+    """A repeat names the passages the first answer did; a read's also says which it read, so its picture can follow."""
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage(), _weather()]))
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+    registry.call(tool_call("read", n=2), ctx)
+
+    search = registry.call(tool_call("search", query="hafenfest sonntag"), ctx)
+    read = registry.call(tool_call("read", n=2), ctx)
+
+    assert isinstance(search, PassageReply) and isinstance(read, PassageReply)
+    assert (search.numbers, search.depends_on, search.found, search.informative) == ((1, 2), (), 0, False)
+    assert (read.numbers, read.depends_on, read.found, read.informative) == ((2,), (2,), 0, False)
+    assert read.text == "Already called read with these arguments; see [2]."
+
+
 def test_a_read_finished_after_an_extending_search_in_its_round_shows_the_growth() -> None:
     """Prepared together, the same read before and after a search that grows its passage is answered twice."""
     ctx = tool_context()
@@ -977,7 +993,7 @@ def test_a_reply_says_whether_the_tool_answered_the_call() -> None:
         registry.call(tool_call("read", n=9), ctx),
     ]
 
-    assert [type(reply) for reply in answers] == [PassageReply, ToolReply, PassageReply]
+    assert [type(reply) for reply in answers] == [PassageReply, PassageReply, PassageReply]
     assert [reply.error for reply in answers] == [False, False, False]
     assert [reply.kind for reply in answers] == ["", "", ""]
     assert [reply.error for reply in errors] == [True, True, True, True]

@@ -1016,7 +1016,10 @@ images.
   than the turn's room holds. A picture costs about 600 tokens, plus its
   legend line.
 - A `read(n)` of a passage whose picture the turn has not shown attaches that
-  picture: one the room or the cap kept back when a search found it, say.
+  picture, within the prompt's cap and the room left, as a search's new
+  pictures are. A repeated read answered from memory (`Already called read …`)
+  does too. So a picture the room or the cap kept back when a search found it
+  is shown by reading its passage once the room and the cap allow.
 - Short of room, the pictures the model has seen are retired after every
   seen reply that may be cleared is cleared (see [Making room](#making-room)).
   A retired picture message becomes one line naming its passages, where it
@@ -1030,10 +1033,12 @@ images.
   sent once more without them. A retired picture was seen by calls that began,
   so its line stays and it still counts as shown.
 
-The response reports `visual: {"images_attached": n}`: every picture the model
-was shown in the turn, retired ones included, and `0` when it saw no pixels.
-Only the visual target shows pictures; turns on `all` and `documents` see
-captions.
+The response reports `visual: {"images_attached": n}`: the pictures retired to
+make room plus those still attached when the turn ended. Pictures a refusal
+took back are not counted, even when an earlier call carried them; retired
+pictures stay counted. So `0` means that no picture was retired and none was
+attached at the end. Only the visual target shows pictures; turns on `all` and
+`documents` see captions.
 
 ### Answer, validation and storage
 

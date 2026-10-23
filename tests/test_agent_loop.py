@@ -4565,3 +4565,29 @@ def test_a_retired_picture_is_never_attached_again() -> None:
     assert _tool_replies(llm, 3)["call_a"] == _tool_replies(llm, 1)["call_a"]
     assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], LOOP_FINAL_NOTE]
     assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+
+
+def test_a_read_answered_from_memory_shows_the_picture_the_cap_kept_back() -> None:
+    """A repeated read answered from memory is still a read: once the cap has room, it shows the picture kept back.
+
+    The search finds two frames, and a cap of one shows the first. Reading the second finds the
+    cap full. After those two rounds, 867 of the 1800 tokens of room are left, 71 short of one
+    more full reply: the search reply's stub frees 33, so the first picture is retired too
+    (593). The same read, answered from memory, then shows the second frame.
+    """
+    store = ThumbnailStore(0, 1)
+    search = ScriptedSearch([frame_passage(0), frame_passage(1)])
+    calls = [FRAME_CALLS[0], ("call_b", "read", {"n": 2}), ("call_c", "read", {"n": 2})]
+    llm = streaming_tool_llm([*(call_round(call) for call in calls), answer_round(ANSWER)])
+    budget = _budget_with_room(1860)
+    loop = scripted_loop(
+        llm, target="visual", search_images=search, fetch_thumbnails=store, max_images=1, max_rounds=3, budget=budget
+    )
+
+    _, _, result = _drain(_turn(loop))
+
+    assert _tool_replies(llm, 3)["call_c"] == "Already called read with these arguments; see [2]."
+    assert store.fetches == [["frame-0", "frame-1"], ["frame-1"]]
+    assert _pictures_by_call(llm) == [0, 1, 0, 1]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])

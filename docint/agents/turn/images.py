@@ -125,7 +125,7 @@ class TurnImages:
                 base64)``; ``None`` for a turn that shows no picture.
             legend_template (str): Tells the model the pictures are its sources, with an
                 ``{image_legend}`` slot for the lines tying each to its number.
-            max_images (int): The most pictures the turn may show.
+            max_images (int): The most pictures one prompt may carry.
             round_room (int): The turn's room for tool replies (see
                 :attr:`~docint.agents.turn.budget.TurnBudget.round_room`), which caps the pictures too.
         """
@@ -148,11 +148,11 @@ class TurnImages:
 
     @property
     def shown(self) -> int:
-        """How many pictures the model was shown this turn.
+        """How many pictures count as shown this turn: those attached now and those retired.
 
         Returns:
-            int: The pictures attached now and those retired, which calls that began carried;
-            not those a refusal took back.
+            int: The pictures attached now and those retired, which calls that began carried.
+            Pictures a refusal took back are not counted, even when an earlier call carried them.
         """
         return sum(len(record.numbers) for record in self._attached)
 
