@@ -60,9 +60,11 @@ Pictures. With a thumbnail fetcher, the pictures of the passages a round admits,
 that the turn has not shown, a call answered from memory included, are shown to the model after
 its tool replies, within the prompt's cap and the room left: a picture the turn holds but has not
 shown, a carried one or one the cap kept back, reaches the model when a later search, listing or
-read shows or names its passage. A picture is shown once a turn, so one retired to make room is
-never attached again. A round refused with pictures is sent once more without those still
-attached (see :mod:`~docint.agents.turn.images` and :meth:`AgentLoop._round`).
+read shows or names its passage. A picture the prompt carries is never attached twice, and one
+retired to make room comes back only for a read of its passage, fresh or from memory: a search
+or listing that names it again does not bring it back. A round refused with pictures is sent
+once more without those still attached (see :mod:`~docint.agents.turn.images` and
+:meth:`AgentLoop._round`).
 
 Carried passages. A follow-up starts out holding the passages its earlier answers cite, which the
 window lists: they are seeded as ``[1..k]`` before the first round, each with its opening counted
@@ -104,7 +106,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -181,8 +183,9 @@ class AgentResult:
             search slot; ``answer_cut``, replacing any of these, when the endpoint cut the answer
             at its length limit; ``None`` when there was none.
         images_attached (int): The pictures retired to make room and those still attached when
-            the turn ended. A refusal takes back the pictures still attached, which then do not
-            count even when an earlier call carried them; retired ones stay counted.
+            the turn ended, each counted once. A refusal takes back the pictures still attached,
+            which then do not count even when an earlier call carried them; retired ones stay
+            counted.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.
     """
@@ -654,11 +657,12 @@ class AgentLoop:
                 yield from self._answer(turn, streamed)
                 return
             held = len(turn.ctx.ledger)
-            named = yield from self._tool_round(turn, streamed.done)
-            if named is None:
+            shown = yield from self._tool_round(turn, streamed.done)
+            if shown is None:
                 break
-            # The pictures of what the round admitted, showed or named that the turn has not shown.
-            self._show_pictures(turn, sorted({*range(held + 1, len(turn.ctx.ledger) + 1), *named}))
+            named, read = shown
+            # The pictures of what the round admitted, showed or named that the prompt lacks; retired ones only if read.
+            self._show_pictures(turn, sorted({*range(held + 1, len(turn.ctx.ledger) + 1), *named}), read=read)
         yield from self._final_round(turn)
 
     def _limit(self, turn: _Turn) -> str | None:
@@ -954,17 +958,22 @@ class AgentLoop:
         # A started turn owes its answer: it waits the time left, and at least the usual wait.
         return max(MODEL_SLOT_WAIT_S, time_left) if answer and turn.shown else min(MODEL_SLOT_WAIT_S, time_left)
 
-    def _show_pictures(self, turn: _Turn, numbers: Sequence[int]) -> None:
+    def _show_pictures(self, turn: _Turn, numbers: Sequence[int], *, read: Collection[int] = ()) -> None:
         """Show the model the new pictures among a round's passages, in one message after its tool replies.
 
         Args:
             turn (_Turn): The turn, the round's tool replies in its transcript.
             numbers (Sequence[int]): The passages the round admitted, showed or named, by number,
-                ascending; those whose pictures the turn has shown are passed over.
+                ascending; those whose pictures the prompt carries are passed over, and so are
+                those whose pictures were retired, unless the round read them.
+            read (Collection[int]): The passages the round's reads showed, by number.
         """
         entries = turn.ctx.ledger.entries()
         shown = turn.images.attach(
-            [(number, entries[number - 1]) for number in numbers], room=self._room - turn.spent, after_round=turn.steps
+            [(number, entries[number - 1]) for number in numbers],
+            room=self._room - turn.spent,
+            after_round=turn.steps,
+            read=read,
         )
         if shown is not None:
             message, cost = shown
@@ -1366,7 +1375,9 @@ class AgentLoop:
             unchecked=extra.get("unchecked"),
         )
 
-    def _tool_round(self, turn: _Turn, done: RoundDone) -> Generator[AgentProgress, None, tuple[int, ...] | None]:
+    def _tool_round(
+        self, turn: _Turn, done: RoundDone
+    ) -> Generator[AgentProgress, None, tuple[tuple[int, ...], tuple[int, ...]] | None]:
         """Answer a round's calls and add the round to the transcript, or withdraw it when it does not fit.
 
         The round's own cost, its assistant message and the least reply each call needs, calls
@@ -1389,9 +1400,10 @@ class AgentLoop:
             AgentProgress: The round's note, if it wrote text, then one step per call its tool answered.
 
         Returns:
-            tuple[int, ...] | None: The passages its replies showed or named (each answered
-            reply's ``numbers``, error replies aside), in call order and once each; ``None`` when
-            the round was withdrawn.
+            tuple[tuple[int, ...], tuple[int, ...]] | None: The passages its replies showed or
+            named (each answered reply's ``numbers``, error replies aside), and those its reads
+            showed (each answered reply's ``depends_on``, a read's fresh or from memory), each in
+            call order and once; ``None`` when the round was withdrawn.
         """
         number = turn.steps + 1
         note = " ".join(done.text.split())[:NOTE_CHARS]
@@ -1454,10 +1466,7 @@ class AgentLoop:
             )
         # A passage, or an answer that told the model something without one, ends the run of idle rounds.
         turn.idle = 0 if found or news else turn.idle + 1
-        named = (
-            number
-            for reply in answered.replies
-            if isinstance(reply, PassageReply) and not reply.error
-            for number in reply.numbers
-        )
-        return tuple(dict.fromkeys(named))
+        passages = [reply for reply in answered.replies if isinstance(reply, PassageReply) and not reply.error]
+        named = dict.fromkeys(number for reply in passages for number in reply.numbers)
+        read = dict.fromkeys(number for reply in passages for number in reply.depends_on)
+        return tuple(named), tuple(read)

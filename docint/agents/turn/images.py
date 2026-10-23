@@ -4,10 +4,11 @@ A caption says what was written about a picture when it was stored, which answer
 question than the one asked now, so the visual target shows the model the pictures themselves.
 After a round's calls are answered, the passages it admitted, showed or named that are pictures
 (they carry an ``image_id``, as :func:`~docint.core.retrieval.visual.select_answer_images` reads
-them) and that the turn has not shown have their stored thumbnails fetched by node id, in one
+them) and that the prompt does not carry have their stored thumbnails fetched by node id, in one
 fetch, and are shown in one user message after the round's tool replies: a legend tying each
-picture to the number it is cited by, then the pictures. A picture is shown once a turn, and a
-failed fetch shows none of the round's.
+picture to the number it is cited by, then the pictures. A picture the prompt carries is never
+attached twice, one retired to make room comes back only for a read (see below), and a failed
+fetch shows none of the round's.
 
 Room. A prompt carries at most ``min(max_images, round_room // VISUAL_IMAGE_TOKEN_ESTIMATE)``
 pictures. A message is priced as it is sent: its rendered legend with the message's envelope
@@ -18,8 +19,10 @@ new picture alone would fit. To make room, the loop retires the picture messages
 seen, oldest first, once it has cleared every reply it may (:meth:`TurnImages.retire_oldest`).
 A message is seen once a model call that began carried it: one attached after a round up to
 ``seen_through``, as a reply is read. Each becomes a line naming its passages
-(:data:`RETIRED_PICTURES`) and its pictures leave the prompt's count, so later ones may follow;
-a picture shown this turn, retired or not, is never attached again.
+(:data:`RETIRED_PICTURES`) and its pictures leave the prompt's count, so later ones may follow.
+A retired picture is attached again only when a round reads its passage, fresh or from memory,
+in that round's message and within its cap and room; a search or listing that names it does not
+bring it back, so the room just freed is not spent again on every mention.
 
 Stamps. The passages whose pictures the turn showed, retired ones included, are stamped
 ``VISUAL_IMAGES_ATTACHED_KEY`` on the numbered copies the turn's result returns, as
@@ -37,7 +40,7 @@ Nothing here logs a caption, a thumbnail or a passage: only exception types.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,7 +58,9 @@ from docint.core.retrieval.visual import (
 )
 
 #: What a picture message retired to make room says instead, by the passages whose pictures it showed.
-RETIRED_PICTURES = "The pictures of {refs} were shown above and are no longer attached, to make room."
+RETIRED_PICTURES = (
+    "The pictures of {refs} were shown above and are no longer attached, to make room; read(n) shows one again."
+)
 
 
 @dataclass
@@ -148,13 +153,14 @@ class TurnImages:
 
     @property
     def shown(self) -> int:
-        """How many pictures count as shown this turn: those attached now and those retired.
+        """How many pictures count as shown this turn: those attached now and those retired, each once.
 
         Returns:
-            int: The pictures attached now and those retired, which calls that began carried.
-            Pictures a refusal took back are not counted, even when an earlier call carried them.
+            int: The pictures attached now and those retired, which calls that began carried; a
+            picture retired and shown again by a read counts once. Pictures a refusal took back
+            are not counted, even when an earlier call carried them.
         """
-        return sum(len(record.numbers) for record in self._attached)
+        return len({picture for record in self._attached for picture in record.pictures})
 
     def _seen(self, seen_through: int) -> list[_Attached]:
         """Return the picture messages still attached that the model has seen, oldest first.
@@ -181,14 +187,20 @@ class TurnImages:
         return message_cost(legend, self._ratio) + VISUAL_IMAGE_TOKEN_ESTIMATE * len(shown)
 
     def attach(
-        self, entries: Sequence[tuple[int, NodeWithScore]], *, room: int, after_round: int
+        self,
+        entries: Sequence[tuple[int, NodeWithScore]],
+        *,
+        room: int,
+        after_round: int,
+        read: Collection[int] = (),
     ) -> tuple[ChatMessage, int] | None:
         """Show a round's new pictures in one message, within the prompt's cap and the room left.
 
-        The pictures this turn has not shown, retired ones counted as shown, are fetched at once,
-        unless the cheapest message, the first of them alone, would not fit. Those with a stored
-        thumbnail are then added in number order while the cap, less the pictures attached now,
-        holds and the message, priced as it is sent, fits the room left.
+        The pictures the prompt does not carry are fetched at once, those retired to make room
+        only when the round read their passages, unless the cheapest message, the first of them
+        alone, would not fit. Those with a stored thumbnail are then added in number order while
+        the cap, less the pictures attached now, holds and the message, priced as it is sent,
+        fits the room left.
 
         Args:
             entries (Sequence[tuple[int, NodeWithScore]]): The passages the round admitted,
@@ -196,6 +208,9 @@ class TurnImages:
             room (int): Tokens the transcript may still take.
             after_round (int): The tool round after which the message is sent, by which the loop
                 tells whether the model has seen it.
+            read (Collection[int]): The passages the round's reads showed, fresh or from memory,
+                by number: a picture of theirs retired to make room is shown again, and any other
+                retired picture is not.
 
         Returns:
             tuple[ChatMessage, int] | None: The user message showing the pictures and what it
@@ -203,8 +218,13 @@ class TurnImages:
             passages is a new picture, none fits, or the fetch failed.
         """
         free = self._cap - self.count
-        seen = {picture for record in self._attached for picture in record.pictures}
-        new = [(number, scored) for number, scored in entries if _picture(scored) and _picture(scored) not in seen]
+        carried = {picture for record in self._attached if not record.retired for picture in record.pictures}
+        retired = {picture for record in self._attached if record.retired for picture in record.pictures}
+        new = [
+            (number, scored)
+            for number, scored in entries
+            if (picture := _picture(scored)) and picture not in carried and (picture not in retired or number in read)
+        ]
         # The cheapest message shows the first new picture alone: its legend line is the shortest.
         if self._fetch is None or self._dropped or free <= 0 or not new or self._price([(new[0][0], "", "")]) > room:
             return None
@@ -217,12 +237,12 @@ class TurnImages:
         pictures: list[str] = []
         for number, scored in new:
             picture, thumbnail = _picture(scored), stored.get(scored.node.node_id)
-            if thumbnail is None or picture in seen:
+            if thumbnail is None or picture in carried:
                 continue
             # A later picture's number is no shorter, so once one does not fit, none does.
             if len(shown) == free or self._price([*shown, (number, *thumbnail)]) > room:
                 break
-            seen.add(picture)
+            carried.add(picture)
             pictures.append(picture)
             shown.append((number, *thumbnail))
         if not shown:

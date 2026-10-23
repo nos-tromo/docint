@@ -35,7 +35,7 @@ LONG_LEGEND = (
 #: Room enough for every picture the tests offer.
 WIDE = 10_000
 #: What a picture message retired to make room says, for the passages whose pictures it showed.
-RETIRED = "The pictures of {refs} were shown above and are no longer attached, to make room."
+RETIRED = "The pictures of {refs} were shown above and are no longer attached, to make room; read(n) shows one again."
 
 
 def _images(store: ThumbnailStore | None, *, max_images: int = 6, round_room: int = WIDE) -> TurnImages:
@@ -235,7 +235,7 @@ def test_a_picture_without_a_stored_thumbnail_is_passed_over() -> None:
 
 
 def test_a_picture_shown_before_is_not_shown_again() -> None:
-    """A picture is shown once a turn, even when another passage carries it too."""
+    """A picture the prompt carries is not shown again, even when another passage carries it too."""
     store = ThumbnailStore(0, 1)
     images = _images(store)
     again = frame_passage(0)
@@ -419,8 +419,8 @@ def test_only_picture_messages_the_model_has_seen_are_retired_oldest_first() -> 
     assert (images.count, images.shown) == (0, 3)
 
 
-def test_a_retired_picture_gives_its_place_under_the_cap_back_and_is_never_attached_again() -> None:
-    """The cap counts the pictures a prompt carries: retiring one frees its place, and it is never attached again."""
+def test_a_retired_picture_gives_its_place_under_the_cap_back_and_is_not_shown_again_unread() -> None:
+    """The cap counts a prompt's pictures: retiring one frees its place, and a mention does not bring it back."""
     store = ThumbnailStore(0, 1, 2)
     images = _images(store, max_images=2)
     first = images.attach(_numbered(frame_passage(0), frame_passage(1)), room=WIDE, after_round=1)
@@ -434,6 +434,36 @@ def test_a_retired_picture_gives_its_place_under_the_cap_back_and_is_never_attac
     assert later is not None
     assert (_parts(later[0])[1], store.fetches) == ([thumbnail_url(2)], [["frame-0", "frame-1"], ["frame-2"]])
     assert (images.count, images.shown) == (1, 3)
+
+
+def test_a_read_shows_a_retired_picture_again_and_it_counts_once() -> None:
+    """A read of a passage whose picture was retired fetches the picture again and shows it; the turn counts it once."""
+    store = ThumbnailStore(0)
+    images = _images(store)
+    first = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
+    assert first is not None
+    assert images.retire_oldest([first[0]], seen_through=1) is not None
+
+    again = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=2, read={1})
+
+    assert again is not None
+    assert (_parts(again[0]), again[1]) == (
+        (render_legend(LEGEND, [(1, *thumbnail(0))]), [thumbnail_url(0)]),
+        _price(1),
+    )
+    assert (store.fetches, images.count, images.shown) == ([["frame-0"], ["frame-0"]], 1, 1)
+    assert _stamped(images.stamp(_ledger(frame_passage(0)))) == [True]
+
+
+def test_a_read_of_a_picture_still_attached_shows_it_no_second_time() -> None:
+    """Only a retired picture comes back for a read: one the prompt carries now is not fetched or shown twice."""
+    store = ThumbnailStore(0)
+    images = _images(store)
+    assert images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1) is not None
+
+    again = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=2, read={1})
+
+    assert (again, store.fetches, images.count, images.shown) == (None, [["frame-0"]], 1, 1)
 
 
 def test_a_drop_takes_back_only_the_pictures_still_attached() -> None:

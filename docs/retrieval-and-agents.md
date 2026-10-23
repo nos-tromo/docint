@@ -914,10 +914,10 @@ goes on.
 - **Then pictures.** On the [visual target](#visual-target), only once every
   seen reply that may be cleared is cleared, the picture messages the model has
   seen are retired, oldest first, while the room is still short. Replies go
-  first: `read(n)` shows a cleared passage again, while a retired picture is
-  never attached again. A retired message reads
-  `The pictures of [2], [5] were shown above and are no longer attached, to make room.`
-  where the pictures stood.
+  first, since a visual answer rests on the pictures. A retired message reads
+  `The pictures of [2], [5] were shown above and are no longer attached, to make room; read(n) shows one again.`
+  where the pictures stood, and a `read(n)` of one of those passages shows its
+  picture again (see [Visual target](#visual-target)).
 - **The stub.** A cleared reply reads `Cleared to make room: this reply showed [1], [3]; read(n) shows a passage again.`,
   or `Cleared to make room: this reply showed no passages.` when it showed
   none. A keyword reply keeps its count ahead of that line, since no `read`
@@ -1024,9 +1024,10 @@ then the images.
   keyframe listing that finds a held frame again and names it as shown before,
   and a repeated call answered from memory (`Already called …`) all count. Its
   picture is attached within the prompt's cap and the room left, as a
-  search's new pictures are, unless the turn has shown it. So a picture the
-  room or the cap kept back when a search found it is shown once a later round
-  names its passage and the room and the cap allow, and a carried frame (see
+  search's new pictures are, unless the prompt carries it or it was retired
+  (see below). So a picture the room or the cap kept back when a search found
+  it is shown once a later round names its passage and the room and the cap
+  allow, and a carried frame (see
   [Carried evidence](#carried-evidence)) that a search or keyframe listing
   finds again is shown, though the reply admitted nothing.
 - Short of room, the pictures the model has seen are retired after every
@@ -1034,16 +1035,20 @@ then the images.
   A retired picture message becomes one line naming its passages, where it
   stood. Its pictures no longer count toward the prompt's cap, so later rounds
   may attach others.
-- A picture is shown once per turn: a retired picture is never attached again,
-  whether a later round finds it, a `read(n)` shows its passage, or the answer
-  has room for it.
+- A picture the prompt carries is never attached twice. A retired picture comes
+  back only when a `read(n)` shows its passage, fresh or answered from memory,
+  and the prompt's cap and the room left allow: it is shown in a message of
+  its own after that round's replies. A search or keyframe listing that finds
+  it again only names it, so the room just freed is not spent again on every
+  mention.
 - A round that carries pictures and fails before its first event is taken as
   refusing them. The pictures still attached are taken back, and the round is
   sent once more without them. A retired picture was seen by calls that began,
   so its line stays and it still counts as shown.
 
 The response reports `visual: {"images_attached": n}`: the pictures retired to
-make room plus those still attached when the turn ended. Pictures a refusal
+make room plus those still attached when the turn ended, each counted once, so
+a picture retired and shown again by a read counts once. Pictures a refusal
 took back are not counted, even when an earlier call carried them; retired
 pictures stay counted. So `0` means that no picture was retired and none was
 attached at the end. Only the visual target shows pictures; turns on `all` and

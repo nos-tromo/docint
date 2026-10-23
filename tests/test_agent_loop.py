@@ -2715,7 +2715,7 @@ TWO_REPLIES = _budget_with_room(2000)
 #: What a reply cleared to make room says, for the passages it showed.
 CLEARED = "Cleared to make room: this reply showed {refs}; read(n) shows a passage again."
 #: What a picture message retired to make room says, for the passages whose pictures it showed.
-RETIRED = "The pictures of {refs} were shown above and are no longer attached, to make room."
+RETIRED = "The pictures of {refs} were shown above and are no longer attached, to make room; read(n) shows one again."
 
 
 def _sections(*pages: int) -> list[NodeWithScore]:
@@ -4522,7 +4522,7 @@ def test_a_visual_turn_retires_seen_pictures_only_after_clearing_replies(loguru_
 
     After three rounds, 642 of the 3000 tokens of room are left, 296 short of one more full reply.
     The two seen replies' stubs free 12, so the first picture message is retired too, freeing
-    593; the second stays, since that is enough.
+    586; the second stays, since that is enough.
 
     Args:
         loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
@@ -4549,7 +4549,7 @@ def test_retiring_frees_the_per_prompt_picture_cap() -> None:
     """The cap bounds the pictures one prompt carries: once one is retired, a later round attaches a third.
 
     After two rounds, 629 of the 2200 tokens of room are left, 309 short of one more full reply:
-    the first reply's stub frees 8, and retiring the first picture message 593. Under a cap of
+    the first reply's stub frees 8, and retiring the first picture message 586. Under a cap of
     two, the third round's frame then joins the second, and the forced answer carries both.
     """
     store = ThumbnailStore(0, 1, 2)
@@ -4606,12 +4606,12 @@ def test_a_read_shows_the_picture_of_a_passage_the_turn_has_not_shown() -> None:
     assert (result.images_attached, _stamped(result)) == (1, [1])
 
 
-def test_a_retired_picture_is_never_attached_again() -> None:
-    """A read of a passage whose picture was retired fetches nothing, and the forced answer leaves it retired.
+def test_a_read_shows_a_retired_picture_again() -> None:
+    """A read of a passage whose picture was retired fetches the picture again and shows it after the round's replies.
 
-    The turn retires its first picture as in the tests above, then reads its passage. The forced
-    answer has 1107 tokens left: putting the cleared reply back takes 8, and the 593 the picture
-    would take back still fit, yet it stays retired.
+    The turn retires its first picture as in the tests above, then reads its passage. The picture
+    comes back in a message of its own, the forced answer carries both, and the turn counts the
+    first picture once.
     """
     store = ThumbnailStore(0, 1)
     calls = [call_round(call) for call in FRAME_CALLS[:2]]
@@ -4620,9 +4620,36 @@ def test_a_retired_picture_is_never_attached_again() -> None:
 
     _, _, result = _drain(_turn(loop))
 
-    assert store.fetches == [["frame-0"], ["frame-1"]]
+    assert store.fetches == [["frame-0"], ["frame-1"], ["frame-0"]]
     assert shown_numbers(_tool_replies(llm, 3)["call_c"]) == [1]
     assert _tool_replies(llm, 3)["call_a"] == _tool_replies(llm, 1)["call_a"]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], [thumbnail_url(0)]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+
+
+def test_a_search_that_finds_a_retired_picture_again_does_not_show_it() -> None:
+    """Only a read brings a retired picture back: a search that finds its frame again names it and fetches nothing.
+
+    The turn retires its first picture as in the tests above; its third search finds the first
+    frame again, which its reply names as shown before.
+    """
+    store = ThumbnailStore(0, 1)
+    search = ScriptedSearch([frame_passage(0)], [frame_passage(1)], [frame_passage(0)])
+    llm = streaming_tool_llm([*(call_round(call) for call in FRAME_CALLS), answer_round(ANSWER)])
+    loop = scripted_loop(
+        llm,
+        target="visual",
+        search_images=search,
+        fetch_thumbnails=store,
+        max_images=6,
+        max_rounds=3,
+        budget=TWO_FRAMES,
+    )
+
+    _, _, result = _drain(_turn(loop))
+
+    assert "Also matched, shown before: [1]." in _tool_replies(llm, 3)["call_c"]
+    assert store.fetches == [["frame-0"], ["frame-1"]]
     assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], LOOP_FINAL_NOTE]
     assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
 
@@ -4633,7 +4660,7 @@ def test_a_read_answered_from_memory_shows_the_picture_the_cap_kept_back() -> No
     The search finds two frames, and a cap of one shows the first. Reading the second finds the
     cap full. After those two rounds, 867 of the 1800 tokens of room are left, 71 short of one
     more full reply: the search reply's stub frees 33, so the first picture is retired too
-    (593). The same read, answered from memory, then shows the second frame.
+    (586). The same read, answered from memory, then shows the second frame.
     """
     store = ThumbnailStore(0, 1)
     search = ScriptedSearch([frame_passage(0), frame_passage(1)])
