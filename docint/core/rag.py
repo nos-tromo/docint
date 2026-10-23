@@ -3030,6 +3030,37 @@ _AGENT_IDENTITY_KEYS = (
 #: lane in scope was not counted, or the text, which a call matches by default, has no index to match.
 KeywordUnavailable = Literal["filters", "coverage", "text_not_ready"]
 
+#: How long a read of a collection's keyword readiness is reused before the store is read again.
+KEYWORD_READINESS_TTL_S = 30.0
+
+
+def _readiness_now() -> float:
+    """Return the instant the keyword readiness cache ages its reads by; tests patch it.
+
+    Returns:
+        float: Monotonic seconds.
+    """
+    return time.monotonic()
+
+
+@dataclass(frozen=True)
+class _KeywordReadiness:
+    """What a collection's keyword match is decided on: its coverage per lane, its companion and its schemas.
+
+    Attributes:
+        main (dict[str, int]): The main lane's ``total`` and ``with_search_text`` counts.
+        images (dict[str, int] | None): The companion lane's, ``None`` when it is out of scope or absent.
+        companion_exists (bool): Whether the image companion is in scope and exists.
+        main_schema (dict[str, Any]): The main collection's payload schema.
+        image_schema (dict[str, Any]): The companion's, empty when it is out of scope or absent.
+    """
+
+    main: dict[str, int]
+    images: dict[str, int] | None
+    companion_exists: bool
+    main_schema: dict[str, Any]
+    image_schema: dict[str, Any]
+
 
 @dataclass(frozen=True)
 class AgentTurn:
@@ -3337,6 +3368,10 @@ class RAG:
     _field_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _visual_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _keyword_readiness_cache: dict[tuple[str, bool], tuple[float, _KeywordReadiness]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _keyword_readiness_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
     collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
@@ -7451,6 +7486,7 @@ class RAG:
         with self._retrieval_cache_lock:
             self._index_cache.pop(target, None)
             self._query_engine_cache.pop(target, None)
+        self.forget_keyword_readiness(target)
 
         # 1b. If the deleted collection happens to be the active one, also clear
         #     the rest of the per-collection runtime so the next query does not
@@ -7885,6 +7921,9 @@ class RAG:
     ) -> IngestStats:
         """Ingest documents from the specified directory into the Qdrant collection.
 
+        Whatever the outcome, a failed run included, the collection's kept keyword
+        readiness is dropped afterwards (:meth:`forget_keyword_readiness`).
+
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
             build_query_engine (bool): Whether to eagerly build the query engine after
@@ -7905,6 +7944,39 @@ class RAG:
             EmptyIngestionError: When no documents/nodes were produced and the
                 target collection did not previously exist. Triggers cleanup of
                 the orphan SQLite KV files; uploaded source files are kept.
+        """
+        collection = self.qdrant_collection
+        try:
+            return self._ingest_docs(
+                data_dir,
+                build_query_engine=build_query_engine,
+                progress_callback=progress_callback,
+                ner=ner,
+                hate_speech=hate_speech,
+            )
+        finally:
+            self.forget_keyword_readiness(collection)
+
+    def _ingest_docs(
+        self,
+        data_dir: str | Path,
+        *,
+        build_query_engine: bool,
+        progress_callback: Callable[[str], None] | None,
+        ner: bool | None,
+        hate_speech: bool | None,
+    ) -> IngestStats:
+        """Run one ingest into the active collection; :meth:`ingest_docs` wraps it and documents the arguments.
+
+        Args:
+            data_dir (str | Path): The directory containing the documents to ingest.
+            build_query_engine (bool): Whether to eagerly build the query engine afterwards.
+            progress_callback (Callable[[str], None] | None): Optional progress reporter.
+            ner (bool | None): Per-request NER override.
+            hate_speech (bool | None): Per-request hate-speech override.
+
+        Returns:
+            IngestStats: What the run did.
         """
         # Make the target Qdrant collection visible to the user before any
         # batch work begins, so it remains selectable even if every embedding
@@ -9044,6 +9116,73 @@ class RAG:
         logger.debug("The keyword tool was withheld from an agent turn: {}", reason)
         return None
 
+    def _keyword_readiness(self, collection: str, *, with_images: bool) -> _KeywordReadiness | Literal["coverage"]:
+        """Read what a collection's keyword match is decided on, or reuse a read still inside its window.
+
+        A read covers the keyword index's coverage per lane, whether the image companion
+        exists, and one payload schema per collection. It is kept per physical collection and
+        lane scope for ``KEYWORD_READINESS_TTL_S``. Nothing that failed is kept: a lane in scope
+        that was not counted (``coverage``), a read that raised, and a schema that came back
+        empty, which reads the same as one that could not be read, so an outage neither
+        withholds nor offers keyword for the whole window. :meth:`forget_keyword_readiness`
+        drops a kept read early.
+
+        Args:
+            collection (str): The physical main collection.
+            with_images (bool): Whether the image companion is in scope.
+
+        Returns:
+            _KeywordReadiness | Literal["coverage"]: The read; ``coverage`` when a lane in scope
+            was not counted.
+
+        Raises:
+            Exception: Whatever reading the store raises, a failed companion lookup included,
+                so an outage never reads as "no companion".
+        """
+        now = _readiness_now()
+        key = (collection, with_images)
+        with self._keyword_readiness_lock:
+            kept = self._keyword_readiness_cache.get(key)
+        if kept is not None and now - kept[0] < KEYWORD_READINESS_TTL_S:
+            return kept[1]
+        client = self.qdrant_client
+        companion = image_companion_name(collection)
+        lanes = search_index_status(client, collection, by_lane=True, include_companion=with_images).get("lanes") or {}
+        main = lanes.get(collection)
+        images = lanes.get(companion)
+        in_scope = with_images and (images is not None or bool(client.collection_exists(collection_name=companion)))
+        if main is None or (in_scope and images is None):
+            return "coverage"
+        read = _KeywordReadiness(
+            main={"total": int(main["total"]), "with_search_text": int(main["with_search_text"])},
+            images=(
+                {"total": int(images["total"]), "with_search_text": int(images["with_search_text"])}
+                if in_scope and images is not None
+                else None
+            ),
+            companion_exists=in_scope,
+            main_schema=read_payload_schema(client, collection),
+            image_schema=read_payload_schema(client, companion) if in_scope else {},
+        )
+        if read.main_schema and (read.image_schema or not in_scope):
+            with self._keyword_readiness_lock:
+                self._keyword_readiness_cache[key] = (now, read)
+        return read
+
+    def forget_keyword_readiness(self, collection: str) -> None:
+        """Drop a collection's kept keyword readiness in both lane scopes, so the next turn reads it afresh.
+
+        Called when this engine deletes or ingests the collection, or creates its field
+        indexes. A change made by another engine or process shows once the kept read is
+        ``KEYWORD_READINESS_TTL_S`` old.
+
+        Args:
+            collection (str): The physical main collection.
+        """
+        with self._keyword_readiness_lock:
+            for with_images in (True, False):
+                self._keyword_readiness_cache.pop((collection, with_images), None)
+
     def _keyword_matcher(
         self,
         *,
@@ -9053,16 +9192,19 @@ class RAG:
     ) -> KeywordMatcher | KeywordUnavailable:
         """Build the keyword match of a text turn, or say why its collection cannot offer one.
 
-        It reads the keyword index's coverage per lane, whether the image companion exists,
-        and one payload schema per collection. A field is offered when every key it searches
-        carries its own index kind in the main collection's schema, social export or not; the
-        text, which a call matches by default, comes first and is required, and needs chunks
-        that carry it. The image companion is in scope on the ``all`` target when it exists,
-        and joins a field's match only where it carries the same indexes; otherwise its chunks
-        are reported unchecked, never counted as misses, as are the chunks either lane holds
-        without the text. A ``documents`` turn leaves the companion out: the coverage read does
-        not look it up or count it, no companion schema is read, and its points are neither
-        counted by a check nor reported unchecked.
+        It decides on the collection's readiness (:meth:`_keyword_readiness`): the keyword
+        index's coverage per lane, whether the image companion exists, and one payload schema
+        per collection, read at most once per ``KEYWORD_READINESS_TTL_S`` per collection and
+        lane scope. The request's filters and the closures that bind them are built on every
+        call. A field is offered when every key it searches carries its own index kind in the
+        main collection's schema, social export or not; the text, which a call matches by
+        default, comes first and is required, and needs chunks that carry it. The image
+        companion is in scope on the ``all`` target when it exists, and joins a field's match
+        only where it carries the same indexes; otherwise its chunks are reported unchecked,
+        never counted as misses, as are the chunks either lane holds without the text. A
+        ``documents`` turn leaves the companion out: the coverage read does not look it up or
+        count it, no companion schema is read, and its points are neither counted by a check
+        nor reported unchecked.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
@@ -9084,16 +9226,11 @@ class RAG:
             return "filters"
         collection = self.qdrant_collection
         companion = image_companion_name(collection)
-        client = self.qdrant_client
-        with_images = retrieval_target != "documents"
-        lanes = search_index_status(client, collection, by_lane=True, include_companion=with_images).get("lanes") or {}
-        main = lanes.get(collection)
-        images = lanes.get(companion)
-        in_scope = with_images and (images is not None or bool(client.collection_exists(collection_name=companion)))
-        if main is None or (in_scope and images is None):
-            return "coverage"
-        main_schema = read_payload_schema(client, collection)
-        image_schema: dict[str, Any] = read_payload_schema(client, companion) if in_scope else {}
+        readiness = self._keyword_readiness(collection, with_images=retrieval_target != "documents")
+        if isinstance(readiness, str):
+            return readiness
+        main, images, in_scope = readiness.main, readiness.images, readiness.companion_exists
+        main_schema, image_schema = readiness.main_schema, readiness.image_schema
         image_total = int(images["total"]) if in_scope and images is not None else 0
         image_missing = image_total - int(images["with_search_text"]) if in_scope and images is not None else 0
         main_missing = int(main["total"]) - int(main["with_search_text"])
@@ -10839,6 +10976,9 @@ class RAG:
         The two outcomes are ANDed together, so a companion-only failure is
         not cached as done and the next search retries it.
 
+        The indexes it creates decide which keyword fields a turn is offered,
+        so an ensure that ran drops the collection's kept keyword readiness.
+
         Args:
             collection (str): Physical main collection name — the cache key,
                 regardless of whether a companion was also ensured.
@@ -10849,6 +10989,7 @@ class RAG:
         companion = image_companion_name(collection)
         if self._collection_exists(companion):
             ok = ensure_field_indexes(self.qdrant_client, companion) and ok
+        self.forget_keyword_readiness(collection)
         if ok:
             self._field_indexes_ensured.add(collection)
 

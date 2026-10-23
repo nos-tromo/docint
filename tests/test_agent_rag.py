@@ -9,6 +9,7 @@ import json
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from itertools import pairwise
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -1601,11 +1602,336 @@ def test_a_documents_turn_reads_nothing_of_the_image_lane(monkeypatch: pytest.Mo
     assert documents is not None
     assert {name for name, _ in client.counted} == {"hafen"}
     assert client.exists_asked == []
+    assert set(client.schemas_read) == {"hafen"}
 
     rag._agent_keyword_matcher(metadata_filter_rules=None, metadata_filters_active=False, retrieval_target="all")
 
     assert {name for name, _ in client.counted} == {"hafen", "hafen_images"}
     assert client.exists_asked == ["hafen_images"]
+    assert set(client.schemas_read) == {"hafen", "hafen_images"}
+
+
+class _ReadinessClock:
+    """A settable stand-in for the clock the keyword readiness cache ages by."""
+
+    def __init__(self) -> None:
+        """Start at an arbitrary instant."""
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        """Return the instant.
+
+        Returns:
+            float: Seconds on the cache's clock.
+        """
+        return self.now
+
+
+def _readiness_clock(monkeypatch: pytest.MonkeyPatch) -> _ReadinessClock:
+    """Pin the clock the keyword readiness cache ages by, so no test depends on how long it runs.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        _ReadinessClock: The clock; move it by setting ``now``.
+    """
+    clock = _ReadinessClock()
+    monkeypatch.setattr("docint.core.rag._readiness_now", clock)
+    return clock
+
+
+def _store_reads(client: KeywordClient) -> tuple[int, int, int]:
+    """Say how much a store double has been asked: counts made, companion lookups and schema reads.
+
+    Args:
+        client (KeywordClient): The store double.
+
+    Returns:
+        tuple[int, int, int]: The three totals; unchanged while nothing was read.
+    """
+    return len(client.counted), len(client.exists_asked), len(client.schemas_read)
+
+
+def _ready_store(rag: RAG) -> KeywordClient:
+    """Give the engine a store whose collection and image companion are both ready for a text match.
+
+    Args:
+        rag (RAG): The engine.
+
+    Returns:
+        KeywordClient: The store double, nothing read from it yet.
+    """
+    client = KeywordClient(
+        {"hafen": ready_schema("text"), "hafen_images": ready_schema("text")},
+        counts={"hafen": 10, "hafen_images": 4},
+    )
+    rag._qdrant_client = cast(Any, client)
+    return client
+
+
+def _offered(rag: RAG, physical: str, target: RetrievalTarget) -> tuple[str, ...]:
+    """Ask for the keyword match of a turn in one collection, failing the test when it is withheld.
+
+    Args:
+        rag (RAG): The engine.
+        physical (str): The physical collection the request is scoped to.
+        target (RetrievalTarget): The retrieval target.
+
+    Returns:
+        tuple[str, ...]: The fields the match offers.
+    """
+    with rag.collection_scope(physical):
+        matcher = rag._agent_keyword_matcher(
+            metadata_filter_rules=None, metadata_filters_active=False, retrieval_target=target
+        )
+    assert matcher is not None
+    return matcher.fields
+
+
+def test_keyword_readiness_is_read_once_within_its_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second turn inside the window is offered keyword without a count, a lookup or a schema read.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    clock = _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag)
+
+    first = _turn(rag)
+    after_first = _store_reads(client)
+    clock.now += 29
+    second = _turn(rag)
+
+    assert min(after_first) > 0
+    assert "keyword" in first.loop._registry.names
+    assert "keyword" in second.loop._registry.names
+    assert _store_reads(client) == after_first
+
+
+def test_keyword_readiness_is_read_again_after_its_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the window has passed the next turn reads the store afresh, and that read is kept from then on.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    clock = _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag)
+
+    _turn(rag)
+    after_first = _store_reads(client)
+    clock.now += 31
+    expired = _turn(rag)
+    after_expiry = _store_reads(client)
+    clock.now += 1
+    _turn(rag)
+
+    assert "keyword" in expired.loop._registry.names
+    assert all(later > earlier for later, earlier in zip(after_expiry, after_first, strict=True))
+    assert _store_reads(client) == after_expiry
+
+
+def test_a_partial_coverage_read_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lane that could not be counted withholds keyword from that turn only: the next turn reads again.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag)
+    client.counts["hafen_images"] = RuntimeError("down")
+
+    first = _turn(rag)
+    after_first = _store_reads(client)
+    second = _turn(rag)
+    after_second = _store_reads(client)
+    client.counts["hafen_images"] = 4
+    healed = _turn(rag)
+    after_healed = _store_reads(client)
+    _turn(rag)
+
+    assert "keyword" not in first.loop._registry.names
+    assert "keyword" not in second.loop._registry.names
+    assert all(later > earlier for later, earlier in zip(after_second, after_first, strict=True))
+    assert "keyword" in healed.loop._registry.names
+    assert _store_reads(client) == after_healed
+
+
+@pytest.mark.parametrize("failure", ["companion-lookup", "schema-read"])
+def test_a_failed_readiness_read_is_never_cached(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    """A read that raised, or whose schema could not be read, withholds keyword from that turn only.
+
+    A schema that could not be read comes back empty, as a collection with no payload index does, so
+    like the raise it is not kept: the next turn reads again, and keyword returns once the store does.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        failure (str): Which read fails: the companion lookup, which raises, or the schema read, which is swallowed.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag)
+    name = "collection_exists" if failure == "companion-lookup" else "get_collection"
+    real = getattr(client, name)
+    asked: list[str] = []
+    down = [True]
+
+    def _flaky(collection_name: str) -> Any:
+        """Fail while the store is down, and answer as the double does once it is back.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: The double's answer.
+
+        Raises:
+            RuntimeError: While the store is down.
+        """
+        asked.append(collection_name)
+        if down[0]:
+            raise RuntimeError("store down")
+        return real(collection_name)
+
+    monkeypatch.setattr(client, name, _flaky)
+
+    first = _turn(rag)
+    after_first = len(asked)
+    second = _turn(rag)
+    after_second = len(asked)
+    down[0] = False
+    healed = _turn(rag)
+    after_healed = _store_reads(client)
+    _turn(rag)
+
+    assert after_first > 0
+    assert "keyword" not in first.loop._registry.names
+    assert "keyword" not in second.loop._registry.names
+    assert after_second > after_first
+    assert "keyword" in healed.loop._registry.names
+    assert _store_reads(client) == after_healed
+
+
+def test_readiness_is_kept_per_collection_and_lane_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two owners' collections never share a read, and neither do the ``all`` and ``documents`` scopes of one.
+
+    The other owner's collection offers fewer fields, so a shared read would show in what it is offered.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = KeywordClient(
+        {
+            "hafen": ready_schema("text", "author"),
+            "hafen_images": ready_schema("text"),
+            PHYSICAL: ready_schema("text"),
+        },
+        counts={"hafen": 10, "hafen_images": 4, PHYSICAL: 10},
+    )
+    rag._qdrant_client = cast(Any, client)
+    requests: list[tuple[str, RetrievalTarget]] = [("hafen", "all"), (PHYSICAL, "all"), ("hafen", "documents")]
+
+    reads = [_store_reads(client)]
+    fields = []
+    for physical, target in requests:
+        fields.append(_offered(rag, physical, target))
+        reads.append(_store_reads(client))
+    kept = [_offered(rag, physical, target) for physical, target in requests]
+
+    assert fields == [("text", "author"), ("text",), ("text", "author")]
+    assert all(later != earlier for earlier, later in pairwise(reads))
+    assert kept == fields
+    assert _store_reads(client) == reads[-1]
+
+
+def test_forgetting_a_collection_drops_both_its_lane_scopes_and_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next turn in a forgotten collection reads it afresh, whichever lane scope it asks for.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client = KeywordClient(
+        {"hafen": ready_schema("text"), "hafen_images": ready_schema("text"), PHYSICAL: ready_schema("text")},
+        counts={"hafen": 10, "hafen_images": 4, PHYSICAL: 10},
+    )
+    rag._qdrant_client = cast(Any, client)
+    requests: list[tuple[str, RetrievalTarget]] = [("hafen", "all"), ("hafen", "documents"), (PHYSICAL, "all")]
+    for physical, target in requests:
+        _offered(rag, physical, target)
+    warm = _store_reads(client)
+
+    rag.forget_keyword_readiness("hafen")
+    _offered(rag, PHYSICAL, "all")
+    untouched = _store_reads(client)
+    _offered(rag, "hafen", "all")
+    after_all = _store_reads(client)
+    _offered(rag, "hafen", "documents")
+    after_documents = _store_reads(client)
+
+    assert untouched == warm
+    assert after_all != untouched
+    assert after_documents != after_all
+    assert rag.forget_keyword_readiness("never-read") is None
+
+
+def test_ensuring_the_field_indexes_forgets_the_readiness_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The indexes ensured decide which fields are offered, so the first ensure of a collection drops its kept read.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    monkeypatch.setattr("docint.core.rag.ensure_field_indexes", lambda client, collection: True)
+    rag = _rag(monkeypatch)
+    client = _ready_store(rag)
+    _offered(rag, "hafen", "all")
+
+    rag._ensure_field_indexes_once("hafen")
+    ensured = _store_reads(client)
+    _offered(rag, "hafen", "all")
+    read_afresh = _store_reads(client)
+    rag._ensure_field_indexes_once("hafen")
+    _offered(rag, "hafen", "all")
+
+    assert read_afresh != ensured
+    assert _store_reads(client) == read_afresh
+
+
+def test_a_kept_readiness_never_carries_a_request_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The filters a match is built with are the request's own, taken at each turn and never from a kept read.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag)
+
+    filtered = rag._agent_keyword_matcher(
+        metadata_filter_rules=RULES, metadata_filters_active=True, retrieval_target="documents"
+    )
+    after_first = _store_reads(client)
+    plain = rag._agent_keyword_matcher(
+        metadata_filter_rules=None, metadata_filters_active=False, retrieval_target="documents"
+    )
+
+    assert filtered is not None and plain is not None
+    assert _store_reads(client) == after_first
+    filtered.run("Hafenfest", "text")
+    plain.run("Hafenfest", "text")
+    assert "source_type" in repr(client.counted[0][1])
+    assert "source_type" not in repr(client.counted[1][1])
+    assert [(build["metadata_filter_rules"], build["metadata_filters_active"]) for build in built] == [
+        (RULES, True),
+        (None, False),
+    ]
 
 
 def _keyword_budgets(monkeypatch: pytest.MonkeyPatch) -> dict[str, TurnBudget]:

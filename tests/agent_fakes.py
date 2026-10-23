@@ -602,7 +602,7 @@ def ready_schema(*fields: str) -> dict[str, str]:
 
 
 class KeywordClient:
-    """A Qdrant double for keyword matches: payload schemas, counts, what was counted and what was looked up."""
+    """A Qdrant double for keyword matches: payload schemas, counts, and each count, lookup and schema read made."""
 
     def __init__(self, schemas: dict[str, dict[str, str]], counts: dict[str, int | Exception] | None = None) -> None:
         """Serve these schemas and counts.
@@ -615,9 +615,11 @@ class KeywordClient:
         self.counts = dict(counts or {})
         self.counted: list[tuple[str, Any]] = []
         self.exists_asked: list[str] = []
+        self.schemas_read: list[str] = []
+        self.deleted: list[str] = []
 
     def get_collection(self, collection_name: str) -> Any:
-        """Return a collection's payload schema.
+        """Return a collection's payload schema, recording the read.
 
         Args:
             collection_name (str): The collection.
@@ -625,6 +627,7 @@ class KeywordClient:
         Returns:
             Any: An info object carrying ``payload_schema``.
         """
+        self.schemas_read.append(collection_name)
         schema = self.schemas.get(collection_name, {})
         return types.SimpleNamespace(
             payload_schema={key: types.SimpleNamespace(data_type=kind, params=None) for key, kind in schema.items()}
@@ -641,6 +644,18 @@ class KeywordClient:
         """
         self.exists_asked.append(collection_name)
         return collection_name in self.schemas
+
+    def delete_collection(self, collection_name: str) -> bool:
+        """Accept a collection's deletion, recording it; the schemas are left as they are.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            bool: Always ``True``.
+        """
+        self.deleted.append(collection_name)
+        return True
 
     def count(self, collection_name: str, count_filter: Any = None, exact: bool = True) -> Any:
         """Count, recording the filter, or fail as scripted.

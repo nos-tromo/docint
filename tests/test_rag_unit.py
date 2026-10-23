@@ -9017,6 +9017,67 @@ def test_a_companion_lookup_that_fails_withholds_the_matcher_from_an_all_turn(mo
     assert _keyword_matcher_for(rag, target="documents") is not None
 
 
+@pytest.mark.parametrize("how", ["delete", "ingest", "failed-ingest"])
+def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
+) -> None:
+    """A collection's kept keyword readiness is read afresh after it is deleted or ingested, a failed ingest too.
+
+    The delete runs outside a request scope on another active collection, as the API's does.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The source root.
+        how (str): What happens to the collection.
+    """
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, client, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+    rag.qdrant_collection = "active"
+    rag._qdrant_src_dir = tmp_path
+    rag._embed_model = cast(Any, object())
+    _patch_ingest_dependencies(monkeypatch)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+
+    def _decide() -> None:
+        """Build a turn's keyword matcher in the collection."""
+        with rag.collection_scope("test"):
+            _matcher(rag)
+
+    _decide()
+    kept = len(client.schemas_read)
+    _decide()
+    assert kept > 0
+    assert len(client.schemas_read) == kept
+
+    if how == "delete":
+        rag.delete_collection("test")
+        assert client.deleted[0] == "test"
+    elif how == "ingest":
+        with rag.collection_scope("test"):
+            rag.ingest_docs(tmp_path, build_query_engine=False)
+    else:
+
+        def _fail(self: _FakePipeline, processed_hashes: set[str]) -> list[Any]:
+            """Fail as a run does halfway through.
+
+            Args:
+                self (_FakePipeline): The pipeline.
+                processed_hashes (set[str]): Hashes already ingested.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("the run failed")
+
+        monkeypatch.setattr(_FakePipeline, "build", _fail)
+        with rag.collection_scope("test"), pytest.raises(RuntimeError, match="the run failed"):
+            rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    after_it = len(client.schemas_read)
+    _decide()
+    assert len(client.schemas_read) > after_it
+
+
 def test_keyword_retrieval_keeps_every_child_and_leaves_the_social_links_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """A match shows matches: every retrieved child stays, and no non-matching sibling joins them.
 
