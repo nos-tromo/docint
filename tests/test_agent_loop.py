@@ -21,11 +21,17 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
     LEDGER_CAP,
+    LOOP_FINAL_NOTE,
+    LOOP_LEGEND,
     PROGRAMME,
+    ScriptedSearch,
     ThumbnailStore,
+    answer_round,
+    call_round,
     chunk,
     frame_passage,
     programme_passage,
+    scripted_loop,
     shown_numbers,
     streaming_tool_llm,
     text_chunks,
@@ -86,7 +92,7 @@ from docint.agents.turn.tools import (
     trail_detail,
 )
 from docint.agents.types import AgentProgress
-from docint.core.retrieval.visual import VISUAL_IMAGES_ATTACHED_KEY, render_legend
+from docint.core.retrieval.visual import VISUAL_IMAGE_TOKEN_ESTIMATE, VISUAL_IMAGES_ATTACHED_KEY, render_legend
 from docint.utils.text_budget import fit_with_marker
 
 QUESTION = "zzsecretzz Wann öffnen die Stände beim Hafenfest?"
@@ -2703,6 +2709,8 @@ SECTION = (HARBOUR_PLAN * 2)[:2900]
 TWO_REPLIES = _budget_with_room(2000)
 #: What a reply cleared to make room says, for the passages it showed.
 CLEARED = "Cleared to make room: this reply showed {refs}; read(n) shows a passage again."
+#: What a picture message retired to make room says, for the passages whose pictures it showed.
+RETIRED = "The pictures of {refs} were shown above and are no longer attached, to make room."
 
 
 def _sections(*pages: int) -> list[NodeWithScore]:
@@ -2718,7 +2726,7 @@ def _sections(*pages: int) -> list[NodeWithScore]:
 
 
 def _room_lines(captured: LogCaptureFixture) -> list[str]:
-    """Pick the lines a turn logs when it clears replies to make room or puts them back.
+    """Pick the lines a turn logs when it clears replies or retires pictures to make room, or puts replies back.
 
     Args:
         captured (LogCaptureFixture): Bridged INFO capture.
@@ -2727,7 +2735,9 @@ def _room_lines(captured: LogCaptureFixture) -> list[str]:
         list[str]: The lines, in the order they were logged.
     """
     return [
-        line for line in captured.messages if "tool replies to go on" in line or "tool replies for its answer" in line
+        line
+        for line in captured.messages
+        if "picture messages to go on" in line or "tool replies for its answer" in line
     ]
 
 
@@ -2761,7 +2771,7 @@ def test_a_turn_out_of_room_clears_its_oldest_seen_reply_and_goes_on(loguru_capl
     assert shown_numbers(after["call_c"]) == [3]
     freed = message_cost(before["call_a"], 3.5) - message_cost(after["call_a"], 3.5)
     assert _room_lines(loguru_caplog_info) == [
-        f"An agent turn cleared 1 earlier tool replies to go on, freeing {freed} tokens"
+        f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {freed} tokens"
     ]
 
 
@@ -2928,7 +2938,10 @@ def test_a_forced_answer_restores_cleared_replies_newest_first_while_they_fit(
         message_cost(second, 3.5) - message_cost(CLEARED.format(refs="[4], [5], [6]"), 3.5),
     ]
     assert _room_lines(loguru_caplog_info) == [
-        *(f"An agent turn cleared 1 earlier tool replies to go on, freeing {tokens} tokens" for tokens in freed),
+        *(
+            f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {tokens} tokens"
+            for tokens in freed
+        ),
         "An agent turn restored 1 of its 2 cleared tool replies for its answer",
     ]
 
@@ -2959,7 +2972,7 @@ def test_a_turn_cut_after_an_overflow_neither_clears_nor_restores(loguru_caplog_
     assert _sent(llm, 4)[:-1] == turn_loop._shortened(_sent(llm, 3))
     freed = message_cost(_tool_replies(llm, 2)["call_a"], 3.5) - message_cost(CLEARED.format(refs="[1]"), 3.5)
     assert _room_lines(loguru_caplog_info) == [
-        f"An agent turn cleared 1 earlier tool replies to go on, freeing {freed} tokens"
+        f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {freed} tokens"
     ]
 
 
@@ -4368,3 +4381,187 @@ def test_an_overflow_with_pictures_is_taken_as_their_refusal_first() -> None:
     assert _tool_replies(llm, 2) == _tool_replies(llm, 1)
     assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
     assert (result.reason, result.images_attached, "".join(texts)) == (None, 0, ANSWER)
+
+
+# --- Retiring pictures to make room, and reading one in ---------------------------------------
+
+#: The calls of a visual turn whose image search finds one new frame a round.
+FRAME_CALLS = (
+    ("call_a", "search_images", {"description": "Regenjacken"}),
+    ("call_b", "search_images", {"description": "Schirm"}),
+    ("call_c", "search_images", {"description": "Fischkutter"}),
+)
+#: A turn whose room, 2200 tokens once the final note is paid, holds two rounds of one frame (61 or 62
+#: tokens to ask, 66 to 70 to answer, 656 for the picture) but not one more full reply besides.
+TWO_FRAMES = _budget_with_room(2260)
+
+
+def _frames(llm: Any, store: ThumbnailStore, *, frames: int, **overrides: Any) -> AgentLoop:
+    """Build a visual loop whose image search finds one new frame a run, frame 0 first.
+
+    Args:
+        llm (Any): The model double.
+        store (ThumbnailStore): The thumbnail fetcher.
+        frames (int): How many runs the image search answers.
+        **overrides (Any): Further loop arguments, such as the budget, the rounds or the most pictures.
+
+    Returns:
+        AgentLoop: The loop, over the visual target's tools.
+    """
+    search = ScriptedSearch(*([frame_passage(index)] for index in range(frames)))
+    return scripted_loop(llm, target="visual", search_images=search, fetch_thumbnails=store, **overrides)
+
+
+def _picture_turns(llm: Any, call: int) -> list[str | list[str]]:
+    """Read the user messages one model call was sent after the question: pictures, retired lines and notes.
+
+    Args:
+        llm (Any): The model double.
+        call (int): The call's position, from zero.
+
+    Returns:
+        list[str | list[str]]: Per message, in order, its pictures' URLs, or its text when it carries none.
+    """
+    return [
+        [str(block.url) for block in message.blocks if isinstance(block, ImageBlock)] or str(message.content)
+        for message in _sent(llm, call)[2:]
+        if message.role == MessageRole.USER
+    ]
+
+
+def _pictures_by_call(llm: Any) -> list[int]:
+    """Count the pictures each model call carried.
+
+    Args:
+        llm (Any): The model double.
+
+    Returns:
+        list[int]: The pictures in each prompt, in call order.
+    """
+    return [
+        sum(isinstance(block, ImageBlock) for message in call.args[0] for block in message.blocks)
+        for call in llm.stream_chat.call_args_list
+    ]
+
+
+def _picture_cost(*numbers: int) -> int:
+    """Return what a picture message of the scripted loop costs as it is sent.
+
+    Args:
+        *numbers (int): The numbers its pictures are cited by.
+
+    Returns:
+        int: Its legend with the message's envelope, and each picture's estimate.
+    """
+    legend = render_legend(LOOP_LEGEND, [(number, *thumbnail(0)) for number in numbers])
+    return message_cost(legend, 3.5) + VISUAL_IMAGE_TOKEN_ESTIMATE * len(numbers)
+
+
+def test_a_visual_turn_retires_seen_pictures_only_after_clearing_replies(loguru_caplog_info: LogCaptureFixture) -> None:
+    """Short of room, every reply the model has read is cleared before the oldest picture it has seen is retired.
+
+    After three rounds, 642 of the 3000 tokens of room are left, 296 short of one more full reply.
+    The two seen replies' stubs free 12, so the first picture message is retired too, freeing
+    593; the second stays, since that is enough.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    store = ThumbnailStore(0, 1, 2)
+    llm = streaming_tool_llm([*(call_round(call) for call in FRAME_CALLS), answer_round(ANSWER)])
+
+    _, texts, result = _drain(_turn(_frames(llm, store, frames=3, max_images=6, budget=_budget_with_room(3060))))
+
+    assert (result.reason, result.steps, "".join(texts)) == (None, 3, ANSWER)
+    before, after = _tool_replies(llm, 2), _tool_replies(llm, 3)
+    assert [after["call_a"], after["call_b"]] == [CLEARED.format(refs="[1]"), CLEARED.format(refs="[2]")]
+    assert shown_numbers(after["call_c"]) == [3]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], [thumbnail_url(2)]]
+    assert (result.images_attached, _stamped(result)) == (3, [1, 2, 3])
+    freed = sum(message_cost(before[call], 3.5) - message_cost(after[call], 3.5) for call in ("call_a", "call_b"))
+    freed += _picture_cost(1) - message_cost(RETIRED.format(refs="[1]"), 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 2 earlier tool replies and 1 picture messages to go on, freeing {freed} tokens"
+    ]
+
+
+def test_retiring_frees_the_per_prompt_picture_cap() -> None:
+    """The cap bounds the pictures one prompt carries: once one is retired, a later round attaches a third.
+
+    After two rounds, 629 of the 2200 tokens of room are left, 309 short of one more full reply:
+    the first reply's stub frees 8, and retiring the first picture message 593. Under a cap of
+    two, the third round's frame then joins the second, and the forced answer carries both.
+    """
+    store = ThumbnailStore(0, 1, 2)
+    llm = streaming_tool_llm([*(call_round(call) for call in FRAME_CALLS), answer_round(ANSWER)])
+    loop = _frames(llm, store, frames=3, max_images=2, max_rounds=3, budget=TWO_FRAMES)
+
+    _, _, result = _drain(_turn(loop))
+
+    assert _pictures_by_call(llm) == [0, 1, 1, 2]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], [thumbnail_url(2)]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 3, [1, 2, 3])
+
+
+def test_a_refusal_after_retiring_keeps_the_retired_pictures_shown(loguru_caplog: LogCaptureFixture) -> None:
+    """A refusal takes back the pictures still attached: a retired one was seen, so it stays shown and stamped.
+
+    The turn retires its first picture as in the test above; its forced answer, carrying the other
+    two, is refused before its first event and sent again without them.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    store = ThumbnailStore(0, 1, 2)
+    calls = [call_round(call) for call in FRAME_CALLS]
+    llm = streaming_tool_llm([*calls, bad_request(REFUSED_PICTURES), answer_round(ANSWER)])
+    loop = _frames(llm, store, frames=3, max_images=2, max_rounds=3, budget=TWO_FRAMES)
+
+    _, texts, result = _drain(_turn(loop))
+
+    assert _pictures_by_call(llm) == [0, 1, 1, 2, 0]
+    assert _picture_turns(llm, 4) == [RETIRED.format(refs="[1]"), LOOP_FINAL_NOTE]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 1, [1])
+    assert "".join(texts) == ANSWER
+    assert loguru_caplog.messages == [
+        "An agent round carrying 2 pictures failed before its first event (BadRequestError); "
+        "it is sent again without them"
+    ]
+
+
+def test_a_read_shows_the_picture_of_a_passage_the_turn_has_not_shown() -> None:
+    """A read of a picture passage the turn holds but has not shown attaches its picture after the round's replies."""
+    store = ThumbnailStore(0)
+    ledger = EvidenceLedger(cap=8)
+    ledger.add([frame_passage(0)])
+    llm = streaming_tool_llm([call_round(("call_a", "read", {"n": 1})), answer_round(ANSWER)])
+
+    _, _, result = _drain(
+        _turn(scripted_loop(llm, target="visual", fetch_thumbnails=store, max_images=6), ledger=ledger)
+    )
+
+    assert store.fetches == [["frame-0"]]
+    assert shown_numbers(_tool_replies(llm, 1)["call_a"]) == [1]
+    assert _picture_turns(llm, 1) == [[thumbnail_url(0)]]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
+def test_a_retired_picture_is_never_attached_again() -> None:
+    """A read of a passage whose picture was retired fetches nothing, and the forced answer leaves it retired.
+
+    The turn retires its first picture as in the tests above, then reads its passage. The forced
+    answer has 1107 tokens left: putting the cleared reply back takes 8, and the 593 the picture
+    would take back still fit, yet it stays retired.
+    """
+    store = ThumbnailStore(0, 1)
+    calls = [call_round(call) for call in FRAME_CALLS[:2]]
+    llm = streaming_tool_llm([*calls, call_round(("call_c", "read", {"n": 1})), answer_round(ANSWER)])
+    loop = _frames(llm, store, frames=2, max_images=6, max_rounds=3, budget=TWO_FRAMES)
+
+    _, _, result = _drain(_turn(loop))
+
+    assert store.fetches == [["frame-0"], ["frame-1"]]
+    assert shown_numbers(_tool_replies(llm, 3)["call_c"]) == [1]
+    assert _tool_replies(llm, 3)["call_a"] == _tool_replies(llm, 1)["call_a"]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], LOOP_FINAL_NOTE]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])

@@ -869,7 +869,7 @@ failure before it, so it replaces whatever reason stood.
 |---|---|
 | `round_budget` | The turn ran `AGENT_MAX_ROUNDS` tool rounds (default 6). |
 | `time_budget` | `AGENT_TIME_BUDGET_S` ran out (default 120 s). Limits are checked between rounds, so an answer already streaming is never cut, and a search that outlives the time left gets a "no reply in time" reply. |
-| `context_budget` | No room is left for one more full reply, even after clearing seen replies (see [Making room](#making-room)). A round whose own calls still do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
+| `context_budget` | No room is left for one more full reply, even after clearing seen replies and retiring seen pictures (see [Making room](#making-room)). A round whose own calls still do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
 | `idle` | Two rounds in a row added no passage and told the model nothing new (see below). |
 | `research_failed` | Evidence may be missing; the answer is still written. A call could not be prepared, a search failed or found no search slot, or a later round failed or found no model slot. |
 | `answer_cut` | The endpoint cut the answer at its length limit (`finish_reason: "length"`), so it may be incomplete. The answer is kept as written. This covers every round whose text is the answer: one answering by choice, the forced answer and its resend without tools, and a pinned round. |
@@ -888,7 +888,8 @@ informative, so reading an unchanged passage again still counts toward `idle`.
 
 At a small context window the room for tool replies holds only a few full
 replies. Rather than stop there, the loop cuts replies the model has already
-read down to stubs, and research goes on.
+read down to stubs, then retires pictures it has already seen, and research
+goes on.
 
 - **Two triggers.** Between rounds, when the room left cannot hold one more
   full reply (with its envelope, and a search note still due), replies are
@@ -898,13 +899,21 @@ read down to stubs, and research goes on.
   the least the replies need. Only a round that cannot reach even the least is
   withdrawn.
 - **What counts as seen.** A reply has been seen once a model call that began
-  carried it. Between rounds, that is every round before the one just
-  answered, so its replies are never cleared there. Inside a round, the
-  round's own model call has carried every round before it.
+  carried it, and so has a picture. Between rounds, that is every round before
+  the one just answered, so its replies and the pictures shown after it are
+  never touched there. Inside a round, the round's own model call has carried
+  every round before it.
 - **What is cleared.** Seen replies that showed or named passages, oldest
   first, while the room is still short. An error reply is never cleared: it
   says why a call was not answered. Neither is a reply its stub would not
   shorten.
+- **Then pictures.** On the [visual target](#visual-target), only once every
+  seen reply that may be cleared is cleared, the picture messages the model has
+  seen are retired, oldest first, while the room is still short. Replies go
+  first: `read(n)` shows a cleared passage again, while a retired picture is
+  never attached again. A retired message reads
+  `The pictures of [2], [5] were shown above and are no longer attached, to make room.`
+  where the pictures stood.
 - **The stub.** A cleared reply reads `Cleared to make room: this reply showed [1], [3]; read(n) shows a passage again.`,
   or `Cleared to make room: this reply showed no passages.` when it showed
   none. A keyword reply keeps its count ahead of that line, since no `read`
@@ -912,20 +921,21 @@ read down to stubs, and research goes on.
 - **A cleared read is forgotten.** A call made before is answered from memory
   (`Already called …`). Once a `read`'s reply is cleared, the same read is
   answered anew with the passage's text.
-- **Priced first.** When clearing every reply that may be cleared would still
-  leave the room short, nothing is cleared and the limit stands.
+- **Priced first.** When clearing every reply that may be cleared, and
+  retiring every picture that may be retired, would still leave the room
+  short, nothing changes and the limit stands.
 - **Restored before a forced answer.** When a limit makes the model answer,
   the cleared replies are put back first, newest first, while each fits the
-  room left; the first that does not fit stops it. An answer the model writes
-  by choice while some replies are stubs stands as written, and validation
-  still checks the passages it cites.
+  room left; the first that does not fit stops it. Retired pictures stay out.
+  An answer the model writes by choice while some replies are stubs stands as
+  written, and validation still checks the passages it cites.
 - **Nothing after an overflow cut.** Once the overflow retry has cut every
-  tool reply, nothing is cleared or put back.
+  tool reply, nothing is cleared, retired or put back.
 
-Each clearing logs one INFO line with counts only (`An agent turn cleared 1
-earlier tool replies to go on, freeing 262 tokens`), and so does a restore
-(`An agent turn restored 1 of its 2 cleared tool replies for its answer`). The
-SPA shows neither.
+Each clearing logs one INFO line with counts only (`An agent turn cleared 2
+earlier tool replies and 1 picture messages to go on, freeing 605 tokens`), and
+so does a restore (`An agent turn restored 1 of its 2 cleared tool replies for
+its answer`). The SPA shows neither.
 
 ### Fallback to the plain path
 
@@ -996,21 +1006,34 @@ the target, so no picture is shown.
 ### Visual target
 
 On the `visual` target the loop shows the model the pictures themselves. After
-each tool round, the passages the round admitted that are pictures have their
-stored thumbnails fetched, in one call. They are shown in one user message after
-the round's tool replies: a legend (`agent_image_legend.txt`) tying each
-picture to its citation number, then the images.
+each tool round, the passages the round admitted or read that are pictures the
+turn has not shown have their stored thumbnails fetched, in one call. They are
+shown in one user message after the round's tool replies: a legend
+(`agent_image_legend.txt`) tying each picture to its citation number, then the
+images.
 
-- A turn shows at most `VISUAL_ANSWER_MAX_IMAGES` pictures, and no more than
-  its room holds. A picture costs about 600 tokens, plus its legend line.
-- A picture is shown once per turn.
+- A prompt carries at most `VISUAL_ANSWER_MAX_IMAGES` pictures, and no more
+  than the turn's room holds. A picture costs about 600 tokens, plus its
+  legend line.
+- A `read(n)` of a passage whose picture the turn has not shown attaches that
+  picture: one the room or the cap kept back when a search found it, say.
+- Short of room, the pictures the model has seen are retired after every
+  seen reply that may be cleared is cleared (see [Making room](#making-room)).
+  A retired picture message becomes one line naming its passages, where it
+  stood. Its pictures no longer count toward the prompt's cap, so later rounds
+  may attach others.
+- A picture is shown once per turn: a retired picture is never attached again,
+  whether a later round finds it, a `read(n)` shows its passage, or the answer
+  has room for it.
 - A round that carries pictures and fails before its first event is taken as
-  refusing them. Every picture is taken back, and the round is sent once more
-  without them.
+  refusing them. The pictures still attached are taken back, and the round is
+  sent once more without them. A retired picture was seen by calls that began,
+  so its line stays and it still counts as shown.
 
-The response reports `visual: {"images_attached": n}`, where `0` means the
-model saw no pixels. Only the visual target shows pictures; turns on `all` and
-`documents` see captions.
+The response reports `visual: {"images_attached": n}`: every picture the model
+was shown in the turn, retired ones included, and `0` when it saw no pixels.
+Only the visual target shows pictures; turns on `all` and `documents` see
+captions.
 
 ### Answer, validation and storage
 

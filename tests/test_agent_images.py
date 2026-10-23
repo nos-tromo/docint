@@ -34,6 +34,8 @@ LONG_LEGEND = (
 )
 #: Room enough for every picture the tests offer.
 WIDE = 10_000
+#: What a picture message retired to make room says, for the passages whose pictures it showed.
+RETIRED = "The pictures of {refs} were shown above and are no longer attached, to make room."
 
 
 def _images(store: ThumbnailStore | None, *, max_images: int = 6, round_room: int = WIDE) -> TurnImages:
@@ -100,8 +102,8 @@ def test_a_picture_that_fits_the_flat_allowance_but_not_its_message_as_sent_is_n
     flat = VISUAL_LEGEND_TOKEN_ALLOWANCE + VISUAL_IMAGE_TOKEN_ESTIMATE
     as_sent = message_cost(render_legend(LONG_LEGEND, [(1, *thumbnail(0))]), 3.5) + VISUAL_IMAGE_TOKEN_ESTIMATE
 
-    refused = images.attach(_numbered(frame_passage(0)), room=flat)
-    shown = images.attach(_numbered(frame_passage(0)), room=as_sent)
+    refused = images.attach(_numbered(frame_passage(0)), room=flat, after_round=1)
+    shown = images.attach(_numbered(frame_passage(0)), room=as_sent, after_round=1)
 
     assert flat < as_sent
     assert (refused, store.fetches) == (None, [["frame-0"]])
@@ -113,7 +115,7 @@ def test_a_rounds_new_pictures_are_shown_after_a_legend_in_number_order() -> Non
     store = ThumbnailStore(0, 1)
     images = _images(store)
 
-    shown = images.attach(_numbered(programme_passage(), frame_passage(0), frame_passage(1)), room=WIDE)
+    shown = images.attach(_numbered(programme_passage(), frame_passage(0), frame_passage(1)), room=WIDE, after_round=1)
 
     assert shown is not None
     message, cost = shown
@@ -141,7 +143,7 @@ def test_a_turn_without_a_fetcher_or_an_allowance_shows_no_picture(
     """
     images = _images(store, max_images=max_images)
 
-    assert images.attach(_numbered(frame_passage(0)), room=WIDE) is None
+    assert images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1) is None
     assert (images.count, store.fetches if store else []) == (0, [])
 
 
@@ -161,8 +163,10 @@ def test_a_turn_shows_no_more_pictures_than_its_cap(max_images: int, round_room:
     store = ThumbnailStore(0, 1, 2, 3)
     images = _images(store, max_images=max_images, round_room=round_room)
 
-    first = images.attach(_numbered(frame_passage(0)), room=WIDE)
-    second = images.attach(_numbered(frame_passage(1), frame_passage(2), frame_passage(3), first=2), room=WIDE)
+    first = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
+    second = images.attach(
+        _numbered(frame_passage(1), frame_passage(2), frame_passage(3), first=2), room=WIDE, after_round=2
+    )
 
     assert first is not None and second is not None
     assert (len(_parts(first[0])[1]), _parts(second[0])[1], images.count) == (1, [thumbnail_url(1)], shown)
@@ -183,7 +187,7 @@ def test_each_picture_must_fit_the_room_left(room: int, shown: int) -> None:
     store = ThumbnailStore(0, 1)
     images = _images(store)
 
-    attached = images.attach(_numbered(frame_passage(0), frame_passage(1)), room=room)
+    attached = images.attach(_numbered(frame_passage(0), frame_passage(1)), room=room, after_round=1)
 
     assert (0 if attached is None else len(_parts(attached[0])[1]), images.count) == (shown, shown)
     assert store.fetches == ([["frame-0", "frame-1"]] if shown else [])
@@ -195,7 +199,7 @@ def test_the_fetch_waits_only_for_room_for_the_first_new_picture_alone() -> None
     store = ThumbnailStore(0, 1)
     images = _images(store)
 
-    shown = images.attach(_numbered(frame_passage(0), frame_passage(1), first=first), room=_price(first))
+    shown = images.attach(_numbered(frame_passage(0), frame_passage(1), first=first), room=_price(first), after_round=1)
 
     assert shown is not None
     assert (_parts(shown[0])[1], shown[1], store.fetches) == (
@@ -213,7 +217,7 @@ def test_a_failed_fetch_shows_nothing_and_names_only_its_type(loguru_caplog: Log
     """
     images = _images(ThumbnailStore(0, failure=RuntimeError("zzsecretzz invented store outage")))
 
-    assert images.attach(_numbered(frame_passage(0)), room=WIDE) is None
+    assert images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1) is None
     assert images.count == 0
     assert loguru_caplog.messages == ["An agent round's thumbnails could not be fetched (RuntimeError); none is shown"]
 
@@ -222,7 +226,7 @@ def test_a_picture_without_a_stored_thumbnail_is_passed_over() -> None:
     """Only pictures with a stored thumbnail are shown; one without leaves its turn to the next."""
     images = _images(ThumbnailStore(1), max_images=1)
 
-    shown = images.attach(_numbered(frame_passage(0), frame_passage(1)), room=WIDE)
+    shown = images.attach(_numbered(frame_passage(0), frame_passage(1)), room=WIDE, after_round=1)
 
     assert shown is not None
     assert (_parts(shown[0]), images.count) == ((render_legend(LEGEND, [(2, *thumbnail(1))]), [thumbnail_url(1)]), 1)
@@ -235,8 +239,8 @@ def test_a_picture_shown_before_is_not_shown_again() -> None:
     again = frame_passage(0)
     again.node.id_ = "frame-1"
 
-    first = images.attach(_numbered(frame_passage(0)), room=WIDE)
-    second = images.attach(_numbered(again, first=2), room=WIDE)
+    first = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
+    second = images.attach(_numbered(again, first=2), room=WIDE, after_round=2)
 
     assert first is not None
     assert (second, images.count, store.fetches) == (None, 1, [["frame-0"]])
@@ -248,7 +252,7 @@ def test_two_passages_of_one_picture_in_a_round_show_it_once() -> None:
     again = frame_passage(0)
     again.node.id_ = "frame-1"
 
-    shown = images.attach(_numbered(frame_passage(0), again), room=WIDE)
+    shown = images.attach(_numbered(frame_passage(0), again), room=WIDE, after_round=1)
 
     assert shown is not None
     assert (_parts(shown[0]), shown[1], images.count) == (
@@ -262,8 +266,8 @@ def test_a_drop_takes_every_picture_back_and_shows_no_more() -> None:
     """A refused turn takes back each picture message and its room, keeps every other message, and shows no more."""
     store = ThumbnailStore(0, 1, 2)
     images = _images(store)
-    first = images.attach(_numbered(frame_passage(0)), room=WIDE)
-    second = images.attach(_numbered(frame_passage(1), first=2), room=WIDE)
+    first = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
+    second = images.attach(_numbered(frame_passage(1), first=2), room=WIDE, after_round=2)
     assert first is not None and second is not None
     reply = ChatMessage(
         role=MessageRole.TOOL, content="citation_index: 1", additional_kwargs={"tool_call_id": "call_a"}
@@ -273,14 +277,14 @@ def test_a_drop_takes_every_picture_back_and_shows_no_more() -> None:
     kept, freed = images.drop(transcript)
 
     assert (kept, freed, images.count) == ([transcript[0], reply, reply], _price(1) + _price(2), 0)
-    assert images.attach(_numbered(frame_passage(2), first=3), room=WIDE) is None
+    assert images.attach(_numbered(frame_passage(2), first=3), room=WIDE, after_round=3) is None
     assert len(store.fetches) == 2
 
 
 def test_a_drop_takes_back_only_the_messages_it_built() -> None:
     """A drop takes back the messages ``attach`` built, by identity: other picture messages stay, even an equal one."""
     images = _images(ThumbnailStore(0))
-    built = images.attach(_numbered(frame_passage(0)), room=WIDE)
+    built = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
     assert built is not None
     foreign = ChatMessage(
         role=MessageRole.USER, blocks=[TextBlock(text="Ein Bild vom Anleger."), ImageBlock(url=thumbnail_url(1))]
@@ -322,7 +326,7 @@ def test_the_stamp_marks_the_passages_whose_pictures_were_shown_until_a_drop() -
     """The result's copies of the passages shown are stamped; after a drop none is, and the ledger is never written."""
     passages = (programme_passage(), frame_passage(0), frame_passage(1))
     images = _images(ThumbnailStore(1))
-    images.attach(_numbered(*passages), room=WIDE)
+    images.attach(_numbered(*passages), room=WIDE, after_round=1)
 
     before = _stamped(images.stamp(_ledger(*passages)))
     images.drop([])
@@ -336,7 +340,7 @@ def test_the_stamp_finds_each_passage_by_its_number_not_its_place() -> None:
     """The stamp reads the number each copy carries, so copies in any order are stamped right."""
     passages = (programme_passage(), frame_passage(0), frame_passage(1))
     images = _images(ThumbnailStore(1))
-    images.attach(_numbered(*passages), room=WIDE)
+    images.attach(_numbered(*passages), room=WIDE, after_round=1)
 
     stamped = images.stamp(list(reversed(_ledger(*passages))))
 
@@ -345,3 +349,104 @@ def test_the_stamp_finds_each_passage_by_its_number_not_its_place() -> None:
         (2, None),
         (1, None),
     ]
+
+
+def _retired_cost(refs: str) -> int:
+    """Return what the line a retired picture message leaves costs in the prompt.
+
+    Args:
+        refs (str): The passages it names, as ``[2], [3]``.
+
+    Returns:
+        int: Its text with the message's envelope.
+    """
+    return message_cost(RETIRED.format(refs=refs), 3.5)
+
+
+def _reply(call_id: str) -> ChatMessage:
+    """Build a tool reply, as a round adds one ahead of its pictures.
+
+    Args:
+        call_id (str): The id of the call it answers.
+
+    Returns:
+        ChatMessage: The reply.
+    """
+    return ChatMessage(role=MessageRole.TOOL, content="citation_index: 1", additional_kwargs={"tool_call_id": call_id})
+
+
+def test_retiring_replaces_the_oldest_seen_picture_message_where_it_stands() -> None:
+    """The oldest picture message the model has seen becomes a line naming its passages; every other message stays."""
+    images = _images(ThumbnailStore(0, 1, 2))
+    first = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
+    second = images.attach(_numbered(frame_passage(1), frame_passage(2), first=2), room=WIDE, after_round=2)
+    assert first is not None and second is not None
+    opening = ChatMessage(role=MessageRole.ASSISTANT, content="")
+    transcript = [opening, _reply("call_a"), first[0], _reply("call_b"), second[0]]
+
+    retirable = images.retirable(seen_through=1)
+    retired = images.retire_oldest(transcript, seen_through=1)
+
+    assert retired is not None
+    kept, freed = retired
+    assert retirable == freed == _price(1) - _retired_cost("[1]")
+    assert [after is before for after, before in zip(kept, transcript, strict=True)] == [True, True, False, True, True]
+    assert (kept[2].role, kept[2].blocks) == (MessageRole.USER, [TextBlock(text=RETIRED.format(refs="[1]"))])
+    assert transcript[2] is first[0]
+    assert (images.count, images.shown) == (2, 3)
+
+
+def test_only_picture_messages_the_model_has_seen_are_retired_oldest_first() -> None:
+    """A picture message is seen once a round up to ``seen_through`` attached it; each retirement takes the oldest."""
+    images = _images(ThumbnailStore(0, 1, 2))
+    first = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
+    second = images.attach(_numbered(frame_passage(1), frame_passage(2), first=2), room=WIDE, after_round=2)
+    assert first is not None and second is not None
+
+    unseen = (images.retirable(seen_through=0), images.retire_oldest([first[0], second[0]], seen_through=0))
+    both = images.retirable(seen_through=2)
+    once = images.retire_oldest([first[0], second[0]], seen_through=2)
+    assert once is not None
+    twice = images.retire_oldest(once[0], seen_through=2)
+    assert twice is not None
+
+    assert unseen == (0, None)
+    assert [message.content for message in twice[0]] == [RETIRED.format(refs="[1]"), RETIRED.format(refs="[2], [3]")]
+    assert both == once[1] + twice[1] == _price(1) + _price(2, 3) - _retired_cost("[1]") - _retired_cost("[2], [3]")
+    assert (images.retirable(seen_through=2), images.retire_oldest(twice[0], seen_through=2)) == (0, None)
+    assert (images.count, images.shown) == (0, 3)
+
+
+def test_a_retired_picture_gives_its_place_under_the_cap_back_and_is_never_attached_again() -> None:
+    """The cap counts the pictures a prompt carries: retiring one frees its place, and it is never attached again."""
+    store = ThumbnailStore(0, 1, 2)
+    images = _images(store, max_images=2)
+    first = images.attach(_numbered(frame_passage(0), frame_passage(1)), room=WIDE, after_round=1)
+    assert first is not None
+    full = images.attach(_numbered(frame_passage(2), first=3), room=WIDE, after_round=2)
+    assert images.retire_oldest([first[0]], seen_through=1) is not None
+
+    later = images.attach([(1, frame_passage(0)), (3, frame_passage(2))], room=WIDE, after_round=3)
+
+    assert full is None
+    assert later is not None
+    assert (_parts(later[0])[1], store.fetches) == ([thumbnail_url(2)], [["frame-0", "frame-1"], ["frame-2"]])
+    assert (images.count, images.shown) == (1, 3)
+
+
+def test_a_drop_takes_back_only_the_pictures_still_attached() -> None:
+    """A refusal takes back the attached pictures; a retired one was seen, so its line, its count and its stamp stay."""
+    passages = (frame_passage(0), frame_passage(1))
+    images = _images(ThumbnailStore(0, 1))
+    first = images.attach(_numbered(passages[0]), room=WIDE, after_round=1)
+    second = images.attach(_numbered(passages[1], first=2), room=WIDE, after_round=2)
+    assert first is not None and second is not None
+    retired = images.retire_oldest([_reply("call_a"), first[0], _reply("call_b"), second[0]], seen_through=1)
+    assert retired is not None
+
+    kept, freed = images.drop(retired[0])
+
+    assert [message.role for message in kept] == [MessageRole.TOOL, MessageRole.USER, MessageRole.TOOL]
+    assert (kept[1] is retired[0][1], kept[1].content, freed) == (True, RETIRED.format(refs="[1]"), _price(2))
+    assert (images.count, images.shown, _stamped(images.stamp(_ledger(*passages)))) == (0, 1, [True, None])
+    assert images.attach(_numbered(passages[1], first=2), room=WIDE, after_round=3) is None
