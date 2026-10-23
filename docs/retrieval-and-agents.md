@@ -1098,8 +1098,12 @@ is stored (`agents/turn/history.py`). It holds:
 - the newest part of the rolling summary.
 
 All of it fits within 1300 tokens, or 750 with reasoning. Citation numbers are
-dropped from earlier answers, since they number earlier sources. An earlier
-assessment shows its two parts, each labelled. A stateless turn reads none.
+dropped from earlier answers, since they number earlier sources, except the
+numbers of carried passages (the passages those answers cite), which are
+renumbered to their place in the carried list. That list holds up to 8 passages,
+takes at most 200 tokens of the allowance and comes after the summary and the
+earlier questions. An earlier assessment shows its two parts, each labelled. A
+stateless turn reads none.
 The model writes its own searches, so an agent turn runs no history rewrite and
 no turn-level graph expansion.
 
