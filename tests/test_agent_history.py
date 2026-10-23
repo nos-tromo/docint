@@ -6,6 +6,7 @@ import random
 import re
 from collections.abc import Generator, Iterator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -13,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 from llama_index.core.base.llms.types import MessageRole
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from docint.agents.assessment.split import SENTINEL, assessment_label, compose_labelled_answer
@@ -46,7 +48,7 @@ from docint.agents.turn.history import (
     question_block,
     recent_positions,
 )
-from docint.core.state.base import Base
+from docint.core.state.base import Base, _make_session_maker
 from docint.core.state.conversation import Conversation
 from docint.core.state.session_manager import SessionManager
 from docint.utils.embed_chunking import estimate_tokens
@@ -98,6 +100,7 @@ def _persist(
     owner: str | None = None,
     trail: dict[str, Any] | None = None,
     sources: Sequence[str | None] = (),
+    replace_idx: int | None = None,
 ) -> None:
     """Store one exchange the way a finished turn does.
 
@@ -110,6 +113,7 @@ def _persist(
         trail (dict[str, Any] | None): The assessment trail, if the answer was one.
         sources (Sequence[str | None]): The node each citation number of the answer names, in order;
             ``None`` stores a citation without a node id.
+        replace_idx (int | None): The turn to write over, as a corrective retry does; ``None`` appends.
     """
     resp = MagicMock()
     resp.metadata = cast(dict[str, Any], {})
@@ -117,7 +121,9 @@ def _persist(
         SimpleNamespace(node=None if node_id is None else SimpleNamespace(node_id=node_id, metadata={}), score=None)
         for node_id in sources
     ]
-    manager._persist_turn(session_id, question, resp, {"response": answer}, owner=owner, agent_trail=trail)
+    manager._persist_turn(
+        session_id, question, resp, {"response": answer}, owner=owner, agent_trail=trail, replace_idx=replace_idx
+    )
 
 
 def _question(number: int) -> str:
@@ -411,6 +417,105 @@ def test_get_conversation_loads_sources_only_for_the_recent_answers(session_mana
     assert [turn.assistant_text for turn in default] == [turn.assistant_text for turn in turns]
     assert sum("FROM citations" in statement for statement in ran) == 1
     assert not any("FROM citations" in statement for statement in plain)
+
+
+#: An invented answer, and the answer a corrective retry writes over it.
+MONDAY = "The invented deadline is Monday [1]."
+FRIDAY = "The invented deadline is Friday [1]."
+
+
+@pytest.fixture
+def stored_session_manager(tmp_path: Path) -> Iterator[tuple[SessionManager, str]]:
+    """A SessionManager over a file-backed store, built as production builds it.
+
+    Its sessions get their own connections, so a write can be played against a read on a second
+    connection, as two requests would be.
+
+    Args:
+        tmp_path (Path): A directory for the store.
+
+    Yields:
+        Iterator[tuple[SessionManager, str]]: The manager and its store's URL.
+    """
+    url = f"sqlite:///{tmp_path / 'sessions.sqlite3'}"
+    rag_mock = MagicMock()
+    rag_mock.qdrant_collection = "test_collection"
+    manager = SessionManager(rag=rag_mock)
+    manager._SessionMaker = _make_session_maker(url)
+    yield manager, url
+    cast(Any, manager._SessionMaker).kw["bind"].dispose()
+
+
+@contextmanager
+def _a_retry_before_the_citations_read(manager: SessionManager, url: str) -> Iterator[list[str]]:
+    """Just before a conversation read loads its citations, let a corrective retry write over its first turn.
+
+    The retry stores ``FRIDAY`` citing ``friday-node`` in place of the first turn, through
+    ``_persist_turn`` on its own connection with a short busy timeout, so it either commits
+    (``interleaved``) or finds the read holding the store (``blocked``).
+
+    Args:
+        manager (SessionManager): The session manager, over a file-backed store.
+        url (str): The store's URL.
+
+    Yields:
+        Iterator[list[str]]: How the retry went, once it ran.
+    """
+    other = create_engine(url, connect_args={"timeout": 0.05})
+    retry = SessionManager(rag=manager.rag)
+    retry._SessionMaker = sessionmaker(bind=other, expire_on_commit=False)
+    outcome: list[str] = []
+
+    def hook(_conn: Any, _cursor: Any, statement: str, *_rest: Any) -> None:
+        """Run the retry once, before the first statement that reads citations.
+
+        Args:
+            _conn (Any): The connection, unused.
+            _cursor (Any): The cursor, unused.
+            statement (str): The SQL about to run.
+            *_rest (Any): Its parameters and context, unused.
+        """
+        if outcome or "FROM citations" not in statement:
+            return
+        try:
+            _persist(retry, "s1", _question(1), FRIDAY, sources=("friday-node",), replace_idx=0)
+            outcome.append("interleaved")
+        except OperationalError:
+            outcome.append("blocked")
+
+    engine = cast(Any, manager._SessionMaker).kw["bind"]
+    event.listen(engine, "before_cursor_execute", hook)
+    try:
+        yield outcome
+    finally:
+        event.remove(engine, "before_cursor_execute", hook)
+        other.dispose()
+
+
+def test_get_conversation_pairs_each_answer_with_its_own_citations_while_a_retry_writes(
+    stored_session_manager: tuple[SessionManager, str],
+) -> None:
+    """A conversation is read in one snapshot, so a corrective retry that writes meanwhile cannot tear it.
+
+    The answers and their citations are two queries. Read apart, a retry that wrote over the
+    turn between them paired the old answer's [1] with the new answer's citation, and the
+    carried passage then backed a claim it never supported. Once the read ends, the retry's
+    write lands and reads back whole.
+
+    Args:
+        stored_session_manager (tuple[SessionManager, str]): The manager and its store's URL.
+    """
+    manager, url = stored_session_manager
+    _persist(manager, "s1", _question(1), MONDAY, sources=("monday-node",))
+
+    with _a_retry_before_the_citations_read(manager, url) as outcome:
+        during, _ = manager.get_conversation("s1", owner=None, sources_for=1)
+    _persist(manager, "s1", _question(1), FRIDAY, sources=("friday-node",), replace_idx=0)
+    after, _ = manager.get_conversation("s1", owner=None, sources_for=1)
+
+    assert len(outcome) == 1
+    assert [(turn.assistant_text, turn.sources) for turn in during] == [(MONDAY, ("monday-node",))]
+    assert [(turn.assistant_text, turn.sources) for turn in after] == [(FRIDAY, ("friday-node",))]
 
 
 FOLLOW_UP = "Should we proceed?"

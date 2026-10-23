@@ -1445,6 +1445,25 @@ class SessionManager:
         finally:
             session.close()
 
+    @contextmanager
+    def _read_scope(self) -> Iterator[Session]:
+        """A session whose reads all see one state of the database, until it closes.
+
+        SQLite's Python driver runs each SELECT outside a transaction, so a write can commit
+        between two reads of one method: a corrective retry writing over a turn could pair the
+        old answer's text with the new answer's citations. ``BEGIN`` opens one read transaction
+        before the first read, so every read sees the same state; closing the session rolls it
+        back. Other databases read at their own isolation level, as
+        :meth:`~docint.core.state.report_manager.ReportManager._write_scope` leaves them.
+
+        Yields:
+            Iterator[Session]: A session already inside its read transaction.
+        """
+        with self._session_scope() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                session.connection().exec_driver_sql("BEGIN")
+            yield session
+
     def _load_or_create_convo(self, session: Session, session_id: str, owner: str | None = None) -> Conversation:
         """Load an existing conversation or create a new one.
 
@@ -1984,7 +2003,9 @@ class SessionManager:
         stored before ``before``: the summary grows by appending, so its end is the newest
         part. Citations are read only for the last ``sources_for`` answered turns (see
         :func:`~docint.agents.turn.history.last_answered`), in one query, in the order they
-        were stored, which is the order their answer numbered them in.
+        were stored, which is the order their answer numbered them in. Every read sees one
+        state of the store (see :meth:`_read_scope`), so a turn written over meanwhile cannot
+        pair one answer's text with another's citations.
 
         Args:
             session_id (str): The ID of the session.
@@ -2001,7 +2022,7 @@ class SessionManager:
             stored node of each citation number (``None`` where a citation keeps no id); and
             the rolling summary. Both empty for a new, missing or foreign session.
         """
-        with self._session_scope() as s:
+        with self._read_scope() as s:
             conv = s.query(Conversation).filter_by(id=session_id).first()
             if not conv or conv.owner != owner:
                 return [], ""
