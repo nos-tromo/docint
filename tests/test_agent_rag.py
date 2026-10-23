@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+import types
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any, cast
@@ -31,6 +32,7 @@ from agent_fakes import (
 from assessment_fakes import scored_node
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore, QueryBundle, TextNode
+from loguru import logger
 
 from docint.agents.assessment.ledger import EvidenceLedger, render_context, stamp
 from docint.agents.assessment.split import SENTINEL
@@ -45,14 +47,16 @@ from docint.agents.turn.toolsets import toolset_for
 from docint.core.rag import (
     AGENT_LEDGER_CAP,
     AGENT_METADATA_VALUE_CHARS,
+    IMAGE_LANE_METADATA_KEY,
     RAG,
     AgentTurn,
     ParentContextPostprocessor,
     agent_llm_view,
 )
 from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
-from docint.core.retrieval.visual import RETRIEVAL_TARGETS, RetrievalTarget
+from docint.core.retrieval.visual import BLOB_PAYLOAD_KEYS, RETRIEVAL_TARGETS, RetrievalTarget
 from docint.core.retrieval_filters import build_qdrant_filter
+from docint.core.search.index import image_companion_name
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.prompt_loader import load_localized_prompt
@@ -1796,3 +1800,471 @@ def test_a_keyword_check_runs_on_a_search_thread_inside_the_requests_collection(
     assert isinstance(result, AgentResult)
     assert [scored.node.node_id for scored in result.nodes] == ["programme"]
     assert result.steps == 1
+
+
+#: The image companion of the request's collection.
+PHYSICAL_IMAGES = image_companion_name(PHYSICAL)
+#: An invented section too long to embed whole, which ingestion keeps only in the docstore.
+SECTION = " ".join(
+    f"Absatz {line}: Die Hafenordnung regelt Liegeplätze, Gebühren und Fristen für Anmeldungen am Kai."
+    for line in range(1, 61)
+)
+SECTION_ID = "5a1d7c3e-2b4f-4e8a-9c6d-0f1e2d3c4b5a"
+#: A chunk the main collection stores as a point; Qdrant hands its id back as an integer.
+CHUNK_ID = "7"
+#: A frame of the invented clip, stored in the image companion.
+FRAME_ID = "8c2e4a6f-1b3d-4f5e-a7c9-0d2b4f6e8a1c"
+
+
+def _section_node() -> TextNode:
+    """Build the invented section as the docstore keeps it.
+
+    Returns:
+        TextNode: The section, on page four of its file.
+    """
+    metadata = {"file_name": "hafenordnung.pdf", "filename": "hafenordnung.pdf", "page": 4, "source_type": "pdf"}
+    return TextNode(id_=SECTION_ID, text=SECTION, metadata=metadata)
+
+
+def _chunk_payload() -> dict[str, Any]:
+    """Build the payload the invented programme chunk is stored with in the main collection.
+
+    Returns:
+        dict[str, Any]: The payload.
+    """
+    return {
+        "text": programme_passage().node.get_content(),
+        "file_name": "hafenfest_programm.pdf",
+        "filename": "hafenfest_programm.pdf",
+        "page": 1,
+        "source_type": "pdf",
+    }
+
+
+def _frame_payload() -> dict[str, Any]:
+    """Build the payload a frame of the invented clip is stored with in the image companion, its blobs included.
+
+    Returns:
+        dict[str, Any]: The payload of the clip's third frame, twelve seconds in.
+    """
+    return {
+        "image_id": f"{CLIP}-image-2",
+        "source_type": "video_keyframe",
+        "source_doc_id": "c" * 64,
+        "source_file": CLIP,
+        "source_path": f"uploads/{CLIP}",
+        "media_file_hash": "c" * 64,
+        "keyframe_index": 2,
+        "keyframe_time_sec": 12.0,
+        "llm_description": "Zwei Personen in Regenjacken am Hafen, bedeckter Himmel",
+        "llm_tags": ["hafen"],
+        "thumbnail_b64": "QUJD",
+        "thumbnail_mime": "image/jpeg",
+        "search_text": "Zwei Personen in Regenjacken am Hafen",
+    }
+
+
+class _PointStore:
+    """A Qdrant double for carried passages: points by collection, read by id, every read recorded."""
+
+    def __init__(self, points: dict[str, dict[Any, dict[str, Any]]], *, failing: str | None = None) -> None:
+        """Hold the points.
+
+        Args:
+            points (dict[str, dict[Any, dict[str, Any]]]): Per existing collection, each point's stored payload by
+                its id as Qdrant returns it.
+            failing (str | None): A collection whose reads fail as an unreachable store's do.
+        """
+        self.points = points
+        self.failing = failing
+        self.retrieved: list[dict[str, Any]] = []
+
+    def collection_exists(self, collection_name: str) -> bool:
+        """Report whether a collection exists.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            bool: Whether points were given for it.
+        """
+        return collection_name in self.points
+
+    def retrieve(
+        self, collection_name: str, ids: Sequence[Any], with_payload: Any = True, with_vectors: bool = False
+    ) -> list[types.SimpleNamespace]:
+        """Read points by id, honouring the payload selector as Qdrant does.
+
+        Args:
+            collection_name (str): The collection.
+            ids (Sequence[Any]): The point ids, in the types Qdrant takes.
+            with_payload (Any): ``True``, or a selector excluding keys.
+            with_vectors (bool): Whether vectors are read.
+
+        Returns:
+            list[types.SimpleNamespace]: The points held, in no particular order.
+
+        Raises:
+            ConnectionError: For the failing collection, naming what it was asked for.
+        """
+        self.retrieved.append(
+            {
+                "collection_name": collection_name,
+                "ids": list(ids),
+                "with_payload": with_payload,
+                "with_vectors": with_vectors,
+            }
+        )
+        if collection_name == self.failing:
+            raise ConnectionError(f"invented outage while reading {list(ids)}")
+        held = self.points.get(collection_name, {})
+        excluded = set(getattr(with_payload, "exclude", None) or ())
+        return [
+            types.SimpleNamespace(id=point_id, payload={k: v for k, v in held[point_id].items() if k not in excluded})
+            for point_id in reversed(ids)
+            if point_id in held
+        ]
+
+
+def _store(*, failing: str | None = None) -> _PointStore:
+    """Hold the programme chunk in the main collection and the frame in the companion.
+
+    Args:
+        failing (str | None): A collection whose reads fail.
+
+    Returns:
+        _PointStore: The store.
+    """
+    return _PointStore(
+        {PHYSICAL: {7: _chunk_payload()}, PHYSICAL_IMAGES: {FRAME_ID: _frame_payload()}}, failing=failing
+    )
+
+
+class _Docstore:
+    """A docstore double: ``get_node`` answers the nodes it holds and ``None`` for any other id, recording each id."""
+
+    def __init__(self, *nodes: BaseNode, failing: str | None = None) -> None:
+        """Hold the nodes.
+
+        Args:
+            *nodes (BaseNode): The nodes, by their own ids.
+            failing (str | None): An id whose entry cannot be read, as a corrupt one cannot.
+        """
+        self.nodes = {node.node_id: node for node in nodes}
+        self.failing = failing
+        self.asked: list[str] = []
+
+    def get_node(self, node_id: str, raise_error: bool = True) -> BaseNode | None:
+        """Look one node up, as the docstore does when told not to raise.
+
+        Args:
+            node_id (str): The node id.
+            raise_error (bool): Must be ``False``: a carried id the docstore lacks is no error.
+
+        Returns:
+            BaseNode | None: The node, or ``None`` when it is not held.
+
+        Raises:
+            ValueError: For the failing id.
+        """
+        assert raise_error is False
+        self.asked.append(node_id)
+        if node_id == self.failing:
+            raise ValueError(f"invented corrupt entry {node_id}")
+        return self.nodes.get(node_id)
+
+
+def _carrying(monkeypatch: pytest.MonkeyPatch, store: _PointStore, docstore: _Docstore) -> RAG:
+    """Build a RAG over the given store and docstore.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Patches the index the docstore is reached through.
+        store (_PointStore): The Qdrant double.
+        docstore (_Docstore): The docstore double.
+
+    Returns:
+        RAG: The engine.
+    """
+    rag = _rag(monkeypatch)
+    rag._qdrant_client = cast(Any, store)
+    monkeypatch.setattr(RAG, "index", property(lambda self: types.SimpleNamespace(docstore=docstore)))
+    return rag
+
+
+def _carry(
+    rag: RAG,
+    node_ids: Sequence[str],
+    *,
+    target: RetrievalTarget = "all",
+    rules: Sequence[Any] | None = None,
+    active: bool = False,
+) -> list[NodeWithScore]:
+    """Load carried passages inside the request's collection scope.
+
+    Args:
+        rag (RAG): The engine.
+        node_ids (Sequence[str]): The cited ids.
+        target (RetrievalTarget): The turn's target.
+        rules (Sequence[Any] | None): The request's raw filter rules.
+        active (bool): Whether the request carries filters.
+
+    Returns:
+        list[NodeWithScore]: What the turn carries.
+    """
+    with rag.collection_scope(PHYSICAL):
+        return rag.agent_carried_evidence(
+            node_ids, retrieval_target=target, metadata_filter_rules=rules, metadata_filters_active=active
+        )
+
+
+@pytest.mark.parametrize("target", ["documents", "all"])
+def test_carried_evidence_reads_a_section_kept_only_in_the_docstore(
+    monkeypatch: pytest.MonkeyPatch, target: RetrievalTarget
+) -> None:
+    """An oversize section lives in the docstore alone; it is carried whole, and the store is never asked for it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (RetrievalTarget): A target that reads the main collection.
+    """
+    store = _PointStore({PHYSICAL: {}, PHYSICAL_IMAGES: {}})
+    rag = _carrying(monkeypatch, store, _Docstore(_section_node()))
+
+    (carried,) = _carry(rag, [SECTION_ID], target=target)
+
+    assert (carried.node.node_id, carried.score) == (SECTION_ID, None)
+    assert carried.node.get_content(metadata_mode=MetadataMode.NONE) == SECTION
+    assert store.retrieved == []
+
+
+@pytest.mark.parametrize("target", ["all", "visual"])
+def test_carried_evidence_reads_a_picture_as_the_image_tools_build_it(
+    monkeypatch: pytest.MonkeyPatch, target: RetrievalTarget
+) -> None:
+    """A cited frame is built as search_images and keyframes build it: its caption, its label first, and no blobs.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (RetrievalTarget): A target that reads the image companion.
+    """
+    store = _store()
+    rag = _carrying(monkeypatch, store, _Docstore())
+
+    (carried,) = _carry(rag, [FRAME_ID], target=target)
+
+    node = carried.node
+    assert node.get_content(metadata_mode=MetadataMode.NONE) == RAG._image_caption_text(_frame_payload())
+    assert next(iter(node.metadata)) == "keyframe"
+    assert node.metadata["keyframe"] == "#3 @ 00:12"
+    assert node.metadata[IMAGE_LANE_METADATA_KEY] is True
+    assert not set(BLOB_PAYLOAD_KEYS) & set(node.metadata)
+    assert (node.node_id, carried.score) == (FRAME_ID, None)
+    assert store.retrieved[-1]["collection_name"] == PHYSICAL_IMAGES
+    assert store.retrieved[-1]["with_vectors"] is False
+
+
+@pytest.mark.parametrize(
+    ("target", "carried", "docstore_asked", "collections_read"),
+    [
+        ("all", [SECTION_ID, CHUNK_ID, FRAME_ID], [SECTION_ID, CHUNK_ID, FRAME_ID], [PHYSICAL, PHYSICAL_IMAGES]),
+        ("documents", [SECTION_ID, CHUNK_ID], [SECTION_ID, CHUNK_ID, FRAME_ID], [PHYSICAL]),
+        ("visual", [FRAME_ID], [], [PHYSICAL_IMAGES]),
+    ],
+)
+def test_a_documents_turn_carries_no_picture_and_a_visual_turn_no_text(
+    monkeypatch: pytest.MonkeyPatch,
+    target: RetrievalTarget,
+    carried: list[str],
+    docstore_asked: list[str],
+    collections_read: list[str],
+) -> None:
+    """Each target reads its own lanes alone: a documents turn never the companion, a visual turn nothing else.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (RetrievalTarget): The turn's target.
+        carried (list[str]): The ids it carries.
+        docstore_asked (list[str]): The ids it looks up in the docstore.
+        collections_read (list[str]): The collections it reads, in order.
+    """
+    store, docstore = _store(), _Docstore(_section_node())
+    rag = _carrying(monkeypatch, store, docstore)
+
+    found = _carry(rag, [SECTION_ID, CHUNK_ID, FRAME_ID], target=target)
+
+    assert [scored.node.node_id for scored in found] == carried
+    assert docstore.asked == docstore_asked
+    assert [read["collection_name"] for read in store.retrieved] == collections_read
+
+
+def test_carried_evidence_drops_passages_outside_the_request_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With rules, a passage is carried only where it matches them, wherever it was read from.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _carrying(monkeypatch, _store(), _Docstore(_section_node()))
+    asked = [SECTION_ID, CHUNK_ID, FRAME_ID]
+
+    frames = _carry(rag, asked, rules=RULES, active=True)
+    later_pages = _carry(rag, asked, rules=[{"field": "page", "operator": "gte", "value": 2}], active=True)
+
+    assert [scored.node.node_id for scored in frames] == [FRAME_ID]
+    assert [scored.node.node_id for scored in later_pages] == [SECTION_ID]
+
+
+@pytest.mark.parametrize("rules", [None, []], ids=["none", "empty"])
+def test_filters_without_rules_carry_nothing(monkeypatch: pytest.MonkeyPatch, rules: list[Any] | None) -> None:
+    """Filters that arrived without their rules cannot be checked, so nothing is read or carried.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        rules (list[Any] | None): The rules the request arrived with.
+    """
+    store, docstore = _store(), _Docstore(_section_node())
+    rag = _carrying(monkeypatch, store, docstore)
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]), level="DEBUG")
+    try:
+        carried = _carry(rag, [SECTION_ID, CHUNK_ID, FRAME_ID], rules=rules, active=True)
+    finally:
+        logger.remove(sink)
+
+    assert carried == []
+    assert (store.retrieved, docstore.asked) == ([], [])
+    assert [line for line in messages if line.startswith("Carried passages")] == [
+        "Carried passages were withheld from an agent turn: filters"
+    ]
+
+
+def _broken_index(self: RAG) -> Any:
+    """Fail as an index that cannot be loaded does.
+
+    Args:
+        self (RAG): The engine.
+
+    Raises:
+        RuntimeError: Always.
+    """
+    raise RuntimeError(f"invented index failure for {SECTION_ID}")
+
+
+@pytest.mark.parametrize(
+    ("failing", "target", "error"),
+    [
+        ("main", "all", "ConnectionError"),
+        ("companion", "all", "ConnectionError"),
+        ("companion", "visual", "ConnectionError"),
+        ("index", "documents", "RuntimeError"),
+    ],
+)
+def test_a_store_outage_carries_nothing(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: Any, failing: str, target: RetrievalTarget, error: str
+) -> None:
+    """A failed read carries nothing, not the part read before it, and is logged by the exception's type alone.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (Any): Bridged WARNING capture.
+        failing (str): What fails: a collection's reads, or the index.
+        target (RetrievalTarget): The turn's target, one that reaches what fails.
+        error (str): The type of the exception raised.
+    """
+    store = _store(failing={"main": PHYSICAL, "companion": PHYSICAL_IMAGES}.get(failing))
+    rag = _carrying(monkeypatch, store, _Docstore(_section_node()))
+    if failing == "index":
+        monkeypatch.setattr(RAG, "index", property(_broken_index))
+    loguru_caplog.clear()
+
+    carried = _carry(rag, [SECTION_ID, CHUNK_ID, FRAME_ID], target=target)
+
+    assert carried == []
+    assert loguru_caplog.messages == [f"Carried passages could not be loaded ({error}); the turn carries none"]
+
+
+def test_carried_evidence_keeps_the_order_asked_and_skips_missing_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passages come back in the order asked, each once, under the id asked for; each lane reads what is still missing.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    store = _store()
+    rag = _carrying(monkeypatch, store, _Docstore(_section_node()))
+
+    carried = _carry(rag, [FRAME_ID, "gone", CHUNK_ID, SECTION_ID, FRAME_ID])
+
+    assert [scored.node.node_id for scored in carried] == [FRAME_ID, CHUNK_ID, SECTION_ID]
+    assert [scored.score for scored in carried] == [None, None, None]
+    assert [(read["collection_name"], read["ids"]) for read in store.retrieved] == [
+        (PHYSICAL, [FRAME_ID, "gone", 7]),
+        (PHYSICAL_IMAGES, [FRAME_ID, "gone"]),
+    ]
+
+
+def test_a_docstore_entry_that_cannot_be_read_is_looked_up_in_the_store(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: Any
+) -> None:
+    """One unreadable docstore entry is a miss, not an outage: its id goes on to the store, and the rest are carried.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (Any): Bridged WARNING capture.
+    """
+    store = _store()
+    rag = _carrying(monkeypatch, store, _Docstore(_section_node(), failing=CHUNK_ID))
+    loguru_caplog.clear()
+
+    carried = _carry(rag, [SECTION_ID, CHUNK_ID], target="documents")
+
+    assert [scored.node.node_id for scored in carried] == [SECTION_ID, CHUNK_ID]
+    assert [(read["collection_name"], read["ids"]) for read in store.retrieved] == [(PHYSICAL, [7])]
+    assert loguru_caplog.messages == []
+
+
+def test_a_collection_without_an_image_companion_carries_its_text_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a companion, a cited picture is not found, and nothing is read from a collection that does not exist.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    store = _PointStore({PHYSICAL: {7: _chunk_payload()}})
+    rag = _carrying(monkeypatch, store, _Docstore())
+
+    carried = _carry(rag, [CHUNK_ID, FRAME_ID])
+
+    assert [scored.node.node_id for scored in carried] == [CHUNK_ID]
+    assert [read["collection_name"] for read in store.retrieved] == [PHYSICAL]
+
+
+def test_a_carry_is_logged_by_its_counts_alone(monkeypatch: pytest.MonkeyPatch, loguru_caplog_info: Any) -> None:
+    """One INFO line counts what was carried, not found and left out; no id, label or text is logged.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog_info (Any): Bridged INFO capture.
+    """
+    rag = _carrying(monkeypatch, _store(), _Docstore(_section_node()))
+    loguru_caplog_info.clear()
+
+    _carry(rag, [SECTION_ID, "gone", CHUNK_ID, FRAME_ID], rules=RULES, active=True)
+
+    assert loguru_caplog_info.messages == [
+        "An agent turn carries 1 of the 4 passages its earlier answers cite "
+        "(1 not found, 2 outside its target or filters)"
+    ]
+    for secret in (SECTION_ID, FRAME_ID, "gone", "Hafenordnung", "Regenjacken", CLIP):
+        assert secret not in loguru_caplog_info.text
+
+
+def test_a_carried_passage_is_labelled_by_its_header_as_the_agent_reads_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window lists a carried passage by the header an agent turn's model reads, on one line.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _carrying(monkeypatch, _store(), _Docstore(_section_node()))
+
+    section, frame = _carry(rag, [SECTION_ID, FRAME_ID])
+
+    assert rag.agent_passage_label(section) == "filename: hafenordnung.pdf; page: 4"
+    assert rag.agent_passage_label(frame) == f"keyframe: #3 @ 00:12; docint_doc_kind: image; filename: {CLIP}"

@@ -17,8 +17,8 @@ from docint.agents.assessment.ledger import (
     WINDOW_JOIN,
     EvidenceLedger,
     _allowances,
-    _head_spans,
     effective_ratio,
+    head_spans,
     is_context_overflow,
     kept_ranges,
     passage_parts,
@@ -1243,7 +1243,7 @@ def test_an_opening_as_matches_keeps_all_an_unstamped_passage_keeps(body: str) -
         body (str): The passage text.
     """
     kept: set[int] = set()
-    for lo, hi in kept_ranges(body, _head_spans(body)):
+    for lo, hi in kept_ranges(body, head_spans(body)):
         kept.update(range(lo, hi))
     offset = 0
     for window in body.split(WINDOW_JOIN):

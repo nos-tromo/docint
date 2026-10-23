@@ -35,12 +35,24 @@ from docint.agents.assessment.ledger import (
     MARKER_RESERVE_CHARS,
     MIN_TEXT_CHARS,
     WINDOW_JOIN,
+    EvidenceLedger,
+    head_spans,
     passage_costs,
     passage_parts,
     stamp,
 )
+from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.calls import FAILED_REPLY, RoundCalls
-from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
+from docint.agents.turn.passages import (
+    HEADER_CHARS,
+    LABEL_CHARS,
+    NO_NEW_PASSAGES,
+    _fits,
+    _plan,
+    carried_entry,
+    passage_label,
+    render_entry,
+)
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
@@ -747,6 +759,87 @@ def test_a_read_is_shown_anew_once_its_passage_gained_a_match() -> None:
     assert late not in before.text
     assert late in after.text
     assert ctx.ledger.entries()[0].node.get_content() == body
+
+
+#: An invented harbour regulation kept as one section, longer than one reply shows.
+HARBOUR_RULES = " ".join(
+    f"Absatz {line}: Die Hafenordnung regelt Liegeplätze, Gebühren und Fristen für Anmeldungen am Kai."
+    for line in range(1, 71)
+)
+
+
+def _carried_section() -> NodeWithScore:
+    """Build the regulation section an earlier answer cited, as the store keeps it: without match spans.
+
+    Returns:
+        NodeWithScore: The section.
+    """
+    return scored_node("hafenordnung-4", HARBOUR_RULES, filename="hafenordnung.pdf", page=4)
+
+
+def test_a_carried_entry_stamps_its_opening_as_its_match_on_a_copy() -> None:
+    """A carried passage counts the opening packing keeps as its match; the passage loaded is never written to."""
+    section = _carried_section()
+
+    entry = carried_entry(section)
+
+    assert entry.node.metadata[MATCH_SPANS_KEY] == [[start, end] for start, end in head_spans(HARBOUR_RULES)]
+    assert MATCH_SPANS_KEY not in section.node.metadata
+    assert (entry.node.node_id, entry.node.get_content(), entry.score) == ("hafenordnung-4", HARBOUR_RULES, 1.0)
+
+
+def test_a_carried_entry_keeps_the_matches_a_passage_already_marks() -> None:
+    """A passage whose spans already mark a match is copied as it is."""
+    window = scored_node(
+        "hafenordnung-4", HARBOUR_RULES, filename="hafenordnung.pdf", **{MATCH_SPANS_KEY: [[900, 940]]}
+    )
+
+    entry = carried_entry(window)
+
+    assert entry.node.metadata[MATCH_SPANS_KEY] == [[900, 940]]
+    assert entry.node is not window.node
+
+
+def test_a_search_window_of_a_carried_section_extends_it() -> None:
+    """A search finding a carried section again merges its window into the entry, which then shows the window's match.
+
+    Unstamped, the section would refuse the window as shown before, and the match deep in it could not be seen.
+    """
+    ctx = tool_context()
+    anchor = "Absatz 60:"
+    start = HARBOUR_RULES.index(anchor) - 200
+    window = scored_node(
+        "hafenordnung-4",
+        HARBOUR_RULES[start : start + 500],
+        filename="hafenordnung.pdf",
+        page=4,
+        **{MATCH_SPANS_KEY: [[200, 200 + len(anchor)]]},
+    )
+    ctx.ledger.add([carried_entry(_carried_section())])
+    unstamped = EvidenceLedger(cap=LEDGER_CAP)
+    unstamped.add([_carried_section()])
+    assert anchor not in render_entry(ctx.ledger.entries()[0], 1, ctx)
+
+    changed = ctx.ledger.add([window])
+
+    assert changed == [(1, window)]
+    assert unstamped.add([window]) == []
+    assert anchor in render_entry(ctx.ledger.entries()[0], 1, ctx)
+
+
+def test_passage_label_is_one_line_cut_and_defused() -> None:
+    """A label is a passage's header on one line, defused and cut to LABEL_CHARS; without a header, its opening."""
+    long_name = "hafenfest_jahresbericht_" * 8 + ".pdf"
+    defused = scored_node("bericht-1", PROGRAMME, filename=f"hafen  {SENTINEL}\nbericht.pdf", page=2)
+    cut = scored_node("bericht-2", PROGRAMME, filename=long_name, page=3)
+    headless = scored_node("bericht-3", f"\n  Das Hafenfest   wurde verschoben.\n\n{SENTINEL} Stände ab zehn.", tag="x")
+
+    label = passage_label(cut, llm_view)
+
+    assert passage_label(defused, llm_view) == "filename: hafen (assessment); bericht.pdf; page: 2"
+    assert (len(label), label[-1]) == (LABEL_CHARS, "…")
+    assert label.startswith(f"filename: {long_name[:60]}")
+    assert passage_label(headless, llm_view) == "Das Hafenfest wurde verschoben.; (assessment) Stände ab zehn."
 
 
 def test_a_remembered_read_waits_for_finish_when_its_round_may_grow_the_passage() -> None:

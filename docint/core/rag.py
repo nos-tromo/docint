@@ -144,6 +144,7 @@ from docint.agents.turn.keyword import (
     KeywordResult,
 )
 from docint.agents.turn.loop import AgentLoop
+from docint.agents.turn.passages import passage_label
 from docint.agents.turn.tools import ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.collection_overview import summarize_document_types
@@ -2215,6 +2216,25 @@ def _as_qdrant_point_id(node_id: str) -> str | int:
     return int(node_id) if node_id.isdigit() else node_id
 
 
+def _point_node(node_id: str, payload: dict[str, Any]) -> NodeWithScore | None:
+    """Rebuild a stored point as an unscored node, under the id it was asked for.
+
+    Its text is the text that makes the point searchable (:meth:`RAG._extract_indexable_text`),
+    so an image that can be found can be rebuilt too.
+
+    Args:
+        node_id (str): The point id as asked for, which the node carries.
+        payload (dict[str, Any]): The point's payload, which becomes the node's metadata.
+
+    Returns:
+        NodeWithScore | None: The node; ``None`` when the payload holds no text.
+    """
+    text = RAG._extract_indexable_text(payload)
+    if not text:
+        return None
+    return NodeWithScore(node=TextNode(id_=node_id, text=text, metadata=payload), score=None)
+
+
 #: Characters of chunk text a search hit carries inline. Beyond this the
 #: panel fetches the whole chunk on demand (``GET /search/chunk``).
 _SEARCH_PREVIEW_CHARS = 600
@@ -2300,14 +2320,9 @@ class _ScopedRetriever(BaseRetriever):
             point = by_id.get(node_id)
             if point is None:
                 continue
-            payload = dict(getattr(point, "payload", {}) or {})
-            # The same text that made this chunk searchable is the text
-            # that resolves it; otherwise an image could be found but
-            # not scoped.
-            text = RAG._extract_indexable_text(payload)
-            if not text:
-                continue
-            nodes.append(NodeWithScore(node=TextNode(id_=node_id, text=text, metadata=payload), score=None))
+            scored = _point_node(node_id, dict(getattr(point, "payload", {}) or {}))
+            if scored is not None:
+                nodes.append(scored)
 
         self.missing = len(self._node_ids) - len(nodes)
         return nodes
@@ -9237,6 +9252,175 @@ class RAG:
         except Exception as exc:
             logger.warning("An agent's keyword count in '{}' failed: {}", collection, type(exc).__name__)
             return None
+
+    def agent_carried_evidence(
+        self,
+        node_ids: Sequence[str],
+        *,
+        retrieval_target: RetrievalTarget,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+    ) -> list[NodeWithScore]:
+        """Load the passages an agent turn's earlier answers cite, within the turn's target and filters.
+
+        A ``documents`` or ``all`` turn reads the main collection: its docstore first, the only
+        place an oversize parent section is kept, then one batched retrieve for the ids the
+        docstore lacks. An ``all`` or ``visual`` turn reads the image companion, when there is
+        one, for the ids still missing, and builds each picture as the image tools do
+        (:meth:`_image_caption_node`), so a later ``search_images`` or ``keyframes`` find of it
+        is the same passage; a ``visual`` turn reads nothing else. A lane the target leaves out
+        is never read, so an id only that lane holds counts as not found. With raw filter rules,
+        a passage they do not match is left out; filters active without them carry nothing,
+        logged once at DEBUG as ``filters``. A passage without text is not carried. A failure of
+        the store or the index carries nothing and is logged by the exception's type alone; a
+        docstore miss of one id only sends that id on to the store. One INFO line counts the
+        outcome. Runs under the caller's collection scope (:meth:`collection_scope`).
+
+        Args:
+            node_ids (Sequence[str]): The cited node ids, in the order to carry them.
+            retrieval_target (RetrievalTarget): Which evidence the turn may answer from.
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+
+        Returns:
+            list[NodeWithScore]: The passages carried, each id once and in the order asked, unscored,
+            each node's id the string asked for.
+        """
+        asked = list(dict.fromkeys(node_ids))
+        if not asked:
+            return []
+        if metadata_filters_active and not metadata_filter_rules:
+            logger.debug("Carried passages were withheld from an agent turn: {}", "filters")
+            return []
+        collection = self.qdrant_collection
+        try:
+            found: dict[str, NodeWithScore] = {}
+            if retrieval_target in ("documents", "all"):
+                found.update(self._carried_main(collection, asked))
+            if retrieval_target in ("all", "visual"):
+                found.update(self._carried_images(collection, [node_id for node_id in asked if node_id not in found]))
+            loaded = [found[node_id] for node_id in asked if node_id in found]
+            carried = [
+                scored
+                for scored in loaded
+                if not metadata_filter_rules or matches_metadata_filters(scored.node.metadata, metadata_filter_rules)
+            ]
+        except Exception as exc:
+            logger.warning("Carried passages could not be loaded ({}); the turn carries none", type(exc).__name__)
+            return []
+        logger.info(
+            "An agent turn carries {} of the {} passages its earlier answers cite "
+            "({} not found, {} outside its target or filters)",
+            len(carried),
+            len(asked),
+            len(asked) - len(loaded),
+            len(loaded) - len(carried),
+        )
+        return carried
+
+    def _carried_main(self, collection: str, node_ids: Sequence[str]) -> dict[str, NodeWithScore]:
+        """Find cited passages in the main collection: the docstore first, then one batched retrieve.
+
+        Args:
+            collection (str): The main collection.
+            node_ids (Sequence[str]): The ids to find.
+
+        Returns:
+            dict[str, NodeWithScore]: Each passage found with text, unscored, by the id asked for.
+
+        Raises:
+            RuntimeError: When the collection has no index to reach its docstore through.
+            Exception: Whatever the index or the store raises; a docstore failure for one id only
+                sends that id on to the store.
+        """
+        index = self.index
+        if index is None:
+            raise RuntimeError("The collection's index is not built.")
+        docstore = index.docstore
+        found: dict[str, NodeWithScore] = {}
+        for node_id in node_ids:
+            try:
+                node = docstore.get_node(node_id, raise_error=False)
+            except Exception:
+                continue
+            if node is None or not node.get_content(metadata_mode=MetadataMode.NONE).strip():
+                continue
+            # A copy under the id asked for, so a cached node is never written to.
+            node = node if node.node_id == node_id else node.model_copy(update={"id_": node_id})
+            found[node_id] = NodeWithScore(node=node, score=None)
+        missing = [node_id for node_id in node_ids if node_id not in found]
+        for node_id, payload in self._payloads_by_id(collection, missing, with_payload=True).items():
+            scored = _point_node(node_id, payload)
+            if scored is not None:
+                found[node_id] = scored
+        return found
+
+    def _carried_images(self, collection: str, node_ids: Sequence[str]) -> dict[str, NodeWithScore]:
+        """Find cited pictures in the image companion, each built as the image tools build it.
+
+        Args:
+            collection (str): The main collection, whose companion is read.
+            node_ids (Sequence[str]): The ids to find.
+
+        Returns:
+            dict[str, NodeWithScore]: Each picture found with a caption, unscored, by the id asked
+            for; empty without ids or without a companion.
+
+        Raises:
+            Exception: Whatever the store raises while reading the companion.
+        """
+        companion = image_companion_name(collection)
+        if not node_ids or not self._collection_exists(companion):
+            return {}
+        # Pixels and the search text stay in the store: they never ride a node.
+        blobs = qdrant_models.PayloadSelectorExclude(exclude=list(BLOB_PAYLOAD_KEYS))
+        found: dict[str, NodeWithScore] = {}
+        for node_id, stored in self._payloads_by_id(companion, node_ids, with_payload=blobs).items():
+            payload = {**stored, "node_id": node_id}
+            caption = RAG._image_caption_text(payload)
+            if caption:
+                found[node_id] = NodeWithScore(node=self._image_caption_node(payload, caption).node, score=None)
+        return found
+
+    def _payloads_by_id(
+        self, collection: str, node_ids: Sequence[str], *, with_payload: Any
+    ) -> dict[str, dict[str, Any]]:
+        """Read points of one collection by id in one batched retrieve, without vectors.
+
+        Args:
+            collection (str): The collection.
+            node_ids (Sequence[str]): The ids, as strings.
+            with_payload (Any): The payload to read: ``True``, or a selector.
+
+        Returns:
+            dict[str, dict[str, Any]]: The payload of each id found, by the id asked for, in the
+            order asked; empty, with nothing read, without ids.
+
+        Raises:
+            Exception: Whatever the store raises.
+        """
+        if not node_ids:
+            return {}
+        points = self.qdrant_client.retrieve(
+            collection_name=collection,
+            ids=[_as_qdrant_point_id(node_id) for node_id in node_ids],
+            with_payload=with_payload,
+            with_vectors=False,
+        )
+        # Qdrant answers an integer id as an int; keyed as a string, it is the id asked for.
+        payloads = {str(point.id): dict(point.payload or {}) for point in points}
+        return {node_id: payloads[node_id] for node_id in node_ids if node_id in payloads}
+
+    def agent_passage_label(self, scored: NodeWithScore) -> str:
+        """Describe a carried passage on one line by its header, as an agent turn's model reads it.
+
+        Args:
+            scored (NodeWithScore): A passage :meth:`agent_carried_evidence` loaded.
+
+        Returns:
+            str: Its :func:`agent_llm_view` header on one line (see :func:`passage_label`).
+        """
+        return passage_label(scored, agent_llm_view)
 
     def agent_turn(
         self,
