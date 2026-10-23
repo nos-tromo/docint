@@ -9207,9 +9207,10 @@ class RAG:
 
         It decides on the collection's readiness (:meth:`_keyword_readiness`): the keyword
         index's coverage per lane, whether the image companion exists, and one payload schema
-        per collection, read at most once per ``KEYWORD_READINESS_TTL_S`` per collection and
-        lane scope. The request's filters and the closures that bind them are built on every
-        call. A field is offered when every key it searches carries its own index kind in the
+        per collection, kept for ``KEYWORD_READINESS_TTL_S`` per collection and lane scope once
+        read; a read that failed or came back incomplete is not kept. The request's filters and
+        the closures that bind them are built on every call. A field is offered when every key
+        it searches carries its own index kind in the
         main collection's schema, social export or not; the text, which a call matches by
         default, comes first and is required, and needs chunks that carry it. The image
         companion is in scope on the ``all`` target when it exists, and joins a field's match
