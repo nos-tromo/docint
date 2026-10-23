@@ -2043,12 +2043,13 @@ def _every_turn_read_the_store(reads: Sequence[tuple[int, int, int]]) -> bool:
     )
 
 
-def test_a_turn_while_its_collection_is_written_reads_it_live_and_keeps_nothing(
+def test_a_turn_while_its_collection_is_written_reads_it_live_and_reuses_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """While this process writes a collection, each turn in it reads the store, though a read was kept before.
 
-    No read made meanwhile outlives the write: the turn after it reads afresh, and that read is kept.
+    A read made meanwhile may be stored, but is never served: the turn after the write reads afresh, and that read
+    is kept.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2307,7 +2308,7 @@ def test_a_turn_during_another_engines_ingest_counts_what_the_ingest_has_written
         _turn(serving)
 
     assert [(result.matches, result.unchecked) for result in during] == [(3, 5)]
-    assert read_afresh != after_run
+    assert read_afresh > after_run
     assert _store_reads(client) == read_afresh
 
 
@@ -2367,7 +2368,7 @@ def test_a_turn_while_an_upload_is_preprocessing_counts_the_images_already_store
     _offered(serving, PHYSICAL, "all")
 
     assert (counted.matches, counted.unchecked) == (5, 0)
-    assert all(later != earlier for earlier, later in pairwise([before_upload, *meanwhile, read_afresh]))
+    assert all(later > earlier for earlier, later in pairwise([before_upload, *meanwhile, read_afresh]))
     assert _store_reads(client) == read_afresh
 
 
@@ -2469,12 +2470,42 @@ def test_a_check_after_the_ttl_reads_the_readiness_again(monkeypatch: pytest.Mon
     assert [build["include_images"] for build in built] == [True]
 
 
+def test_a_check_after_a_write_closed_reads_the_readiness_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check made after a write has ended, inside the readiness TTL, counts by a fresh read of the store.
+
+    The turn read the collection before the write: no image companion, every chunk indexed. The write stored matching
+    images in a new companion and chunks the index does not cover yet, and has ended since. Nothing is being written
+    and the read the turn kept is not 30 s old, so only the epoch, which the write moved, tells the check it is stale.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    lanes = keyword_coverage(monkeypatch, {PHYSICAL: (10, 10)})
+    matcher = _physical_matcher(rag)
+    unwritten = collection_writes.state(PHYSICAL)
+
+    with collection_writes.writing(PHYSICAL):
+        _store_images_and_unindexed_chunks(client, lanes)
+    closed = collection_writes.state(PHYSICAL)
+    result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert not closed.writing
+    assert closed.epoch > unwritten.epoch
+    assert (result.matches, result.unchecked) == (3, 5)
+    assert [name for name, _ in client.counted] == [PHYSICAL, f"{PHYSICAL}_images"]
+    assert [build["include_images"] for build in built] == [True]
+    assert lanes.reads == [PHYSICAL, PHYSICAL]
+
+
 @pytest.mark.parametrize("target", ["all", "documents"])
 def test_a_check_reads_nothing_more_when_nothing_was_written(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
-    """A check with nothing written since its turn began reuses the read its turn kept: no lookup, no schema read.
+    """A check with nothing written since its turn began reuses the read its turn kept, and asks the store no more.
 
-    Only the match itself is counted. The read is kept per lane scope, so a check that asked in a scope other than
-    its turn's would read the store again.
+    It makes no coverage read, no lookup and no schema read: only the match itself is counted. The read is kept per
+    lane scope, so a check that asked in a scope other than its turn's would read the store again.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2483,13 +2514,14 @@ def test_a_check_reads_nothing_more_when_nothing_was_written(monkeypatch: pytest
     _readiness_clock(monkeypatch)
     rag = _rag(monkeypatch)
     client, _ = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    lanes = keyword_coverage(monkeypatch, {PHYSICAL: (10, 10)})
     matcher = _physical_matcher(rag, cast(RetrievalTarget, target))
-    read_by_the_turn = (list(client.exists_asked), list(client.schemas_read))
+    read_by_the_turn = (list(client.exists_asked), list(client.schemas_read), list(lanes.reads))
 
     result = _physical_check(rag, matcher, "Hafenfest")
 
-    assert read_by_the_turn == ([f"{PHYSICAL}_images"] if target == "all" else [], [PHYSICAL])
-    assert (client.exists_asked, client.schemas_read) == read_by_the_turn
+    assert read_by_the_turn == ([f"{PHYSICAL}_images"] if target == "all" else [], [PHYSICAL], [PHYSICAL])
+    assert (client.exists_asked, client.schemas_read, lanes.reads) == read_by_the_turn
     assert [name for name, _ in client.counted] == [PHYSICAL]
     assert (result.matches, result.unchecked) == (0, 0)
 

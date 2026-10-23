@@ -105,7 +105,7 @@ def test_windows_opened_and_closed_across_threads_all_close() -> None:
 
     The threads are switched every microsecond, so a registry without its lock would lose updates.
     """
-    start = threading.Barrier(8)
+    start = threading.Barrier(8, timeout=5)
 
     def _write() -> None:
         """Open and close 200 windows, starting together with the other threads."""
@@ -114,15 +114,16 @@ def test_windows_opened_and_closed_across_threads_all_close() -> None:
             close = begin(DOCS)
             close()
 
-    threads = [threading.Thread(target=_write) for _ in range(8)]
+    threads = [threading.Thread(target=_write, daemon=True) for _ in range(8)]
     interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
     try:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            thread.join(timeout=10)
     finally:
         sys.setswitchinterval(interval)
 
+    assert not any(thread.is_alive() for thread in threads)
     assert state(DOCS) == WriteState(3200, False)

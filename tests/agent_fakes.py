@@ -678,31 +678,50 @@ class KeywordClient:
         return types.SimpleNamespace(count=value)
 
 
-def keyword_coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int, int]]) -> dict[str, tuple[int, int]]:
+class CoverageLanes(dict[str, tuple[int, int]]):
+    """The lanes a coverage double reports, as ``(total, with_search_text)``, and each read made of them.
+
+    Attributes:
+        reads (list[str]): The collection of each coverage read, in order.
+    """
+
+    def __init__(self, lanes: dict[str, tuple[int, int]]) -> None:
+        """Report these lanes, with no read made yet.
+
+        Args:
+            lanes (dict[str, tuple[int, int]]): The lanes counted in full; a lane left out was not counted.
+        """
+        super().__init__(lanes)
+        self.reads: list[str] = []
+
+
+def keyword_coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int, int]]) -> CoverageLanes:
     """Report the keyword index's coverage per lane, as RAG reads it, as ``(total, with_search_text)``.
 
-    Each read reports the lanes as they stand in the dict returned, so a test can change the coverage between reads.
+    Each read reports the lanes as they stand in the dict returned, so a test can change the coverage between reads,
+    and notes its collection in that dict's ``reads``.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         lanes (dict[str, tuple[int, int]]): The lanes counted in full; a lane left out was not counted.
 
     Returns:
-        dict[str, tuple[int, int]]: The lanes reported, a copy of ``lanes``; change it to change the next read.
+        CoverageLanes: The lanes reported, a copy of ``lanes``; change it to change the next read.
     """
-    reported = dict(lanes)
+    reported = CoverageLanes(lanes)
 
     def _status(client: Any, collection: str, **kwargs: Any) -> dict[str, Any]:
-        """Report the lanes as they stand now.
+        """Report the lanes as they stand now, noting the read.
 
         Args:
             client (Any): The store, unused.
-            collection (str): The collection, unused.
+            collection (str): The collection.
             **kwargs (Any): The read's options, unused.
 
         Returns:
             dict[str, Any]: The status, with every lane reported counted in full.
         """
+        reported.reads.append(collection)
         return {
             "indexed": True,
             "lanes": {

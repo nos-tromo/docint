@@ -741,6 +741,7 @@ def test_shutting_the_pool_down_ends_the_writes_of_its_queued_tasks(one_worker_p
     assert all(future.cancelled() for future in queued)
     assert waiting == WriteState(2, True)
     assert shut_down == WriteState(4, False)
+    assert collection_writes.state(HAFEN) == shut_down
     assert running == WriteState(1, True)
     assert collection_writes.state(OTHER) == WriteState(2, False)
 
@@ -825,10 +826,10 @@ def test_a_submit_the_pool_refuses_leaves_no_write_open(pool: PreprocessPool) ->
     assert pool.inflight(HAFEN) == (0, 0)
 
 
-def test_a_submit_interrupted_while_it_is_queued_leaves_no_write_open(
+def test_a_submit_interrupted_in_the_executor_leaves_no_write_open(
     pool: PreprocessPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Whatever the executor raises as it is handed a task, an interrupt included, closes the window opened for it.
+    """An interrupt raised in the executor as it is handed a task closes the window opened for it, like any error.
 
     Args:
         pool (PreprocessPool): The pool.
