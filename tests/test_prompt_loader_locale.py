@@ -639,10 +639,11 @@ def test_the_search_note_names_no_tool_since_every_target_is_sent_it(code: str) 
 
 @pytest.mark.parametrize("code", ["en", "de"])
 def test_every_rule_on_citing_names_the_line_pinned_passages_show_too(code: str) -> None:
-    """Each line of the system prompt about [n] ties it to the ``citation_index:`` line a scoped round shows too.
+    """Every rule on [n] but the earlier-answers one ties it to the ``citation_index:`` line a scoped round shows too.
 
     A scoped round sends the same system prompt with its passages in the user message, not
-    in a tool reply, so a rule tied to tool replies would forbid the citations its note asks for.
+    in a tool reply, so a rule tying numbers to tool replies alone would forbid the citations
+    its note asks for.
 
     Args:
         code (str): The locale.
@@ -657,7 +658,12 @@ def test_every_rule_on_citing_names_the_line_pinned_passages_show_too(code: str)
         budget_tokens=1000,
         char_token_ratio=CHAR_TOKEN_RATIO,
     )
-    rules = [line for line in _prompt("agent_system", code).splitlines() if "[n]" in line]
+    # Exempt: it numbers carried passages, and a scoped turn carries none, so its earlier answers hold no numbers.
+    rules = [
+        line
+        for line in _prompt("agent_system", code).splitlines()
+        if "[n]" in line and "`Previous assistant answer`" not in line
+    ]
 
     assert shown_numbers(message) == [1]
     assert rules

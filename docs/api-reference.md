@@ -319,7 +319,12 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
     the answer text so far, and treat later tokens as a fresh answer. The first
     round's first try never streams, so its note withdraws nothing;
   - `seed`: a scoped turn's pinned passages, with `step` 0 and `found` their
-    count.
+    count;
+  - `carried`: the passages a follow-up's earlier answers cite, which the turn
+    starts out holding as its first sources, `[1]` onward, with `step` 0 and
+    `found` their count. It comes with the turn's first model call that gets an
+    event (see
+    [Carried evidence](retrieval-and-agents.md#carried-evidence)).
 
   A `keyword` step adds three keys. A frame leaves out a key that is unset, and
   keeps a `matches` of `0`:

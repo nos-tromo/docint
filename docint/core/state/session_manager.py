@@ -10,14 +10,14 @@ import time
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 from llama_index.core import Response
-from llama_index.core.schema import BaseNode, QueryBundle
+from llama_index.core.schema import BaseNode, NodeWithScore, QueryBundle
 from llama_index.core.vector_stores.types import MetadataFilters
 from loguru import logger
 from sqlalchemy.orm import Session
@@ -26,7 +26,17 @@ from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.split import LabelledAnswer, compose_labelled_answer
 from docint.agents.context import TurnContext as AgentTurnContext
 from docint.agents.turn.budget import history_allowance_tokens
-from docint.agents.turn.history import ConversationTurn, ConversationWindow, build_window, question_block
+from docint.agents.turn.history import (
+    RECENT_EXCHANGES,
+    CarriedPassage,
+    ConversationTurn,
+    ConversationWindow,
+    build_window,
+    cited_node_ids,
+    last_answered,
+    question_block,
+    recent_positions,
+)
 from docint.agents.turn.loop import AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import EvidenceDoesNotFit
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
@@ -1058,12 +1068,14 @@ class SessionManager:
 
         The model reads the user's message verbatim after the session's window, read before
         this turn is stored and built for the request's reasoning, as the turn's budget is;
-        a stateless turn has none. It writes its own searches, so there is no rewrite and no
-        turn-level graph expansion. A pinned scope is what the scoped engine retrieves,
-        answered in one round without tools; an empty one is still a scope. Its reply is an
-        assessment when it carries the sentinel, labelled and stored with its boundary;
-        otherwise a lookup, whose trail answers ``plain``. Closing it closes the loop, so a
-        suspended round's model slot comes back at once.
+        a stateless turn has none. The turn starts out holding the passages the window's
+        answers cite, loaded under its target and filters (see :meth:`_agent_window`). It
+        writes its own searches, so there is no rewrite and no turn-level graph expansion. A
+        pinned scope is what the scoped engine retrieves, answered in one round without tools;
+        an empty one is still a scope. Its reply is an assessment when it carries the sentinel,
+        labelled and stored with its boundary; otherwise a lookup, whose trail answers
+        ``plain``. Closing it closes the loop, so a suspended round's model slot comes back at
+        once.
 
         Args:
             user_msg (str): The user's message, verbatim.
@@ -1094,7 +1106,15 @@ class SessionManager:
             RuntimeError: If the loop ends without a result.
         """
         scoped = bool(scoped_node_ids)
-        window = self._agent_window(session_id, owner, replace_turn_idx)
+        window, carried = self._agent_window(
+            session_id,
+            owner,
+            replace_turn_idx,
+            scoped=scoped,
+            retrieval_target=retrieval_target,
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+        )
         # A scoped engine fetches exactly the pinned chunks, numbered, whatever the query.
         pinned = list(engine.retrieve(QueryBundle(user_msg))) if scoped else None
         turn = self.rag.agent_turn(
@@ -1113,7 +1133,7 @@ class SessionManager:
             raise AgentTurnFallback
         if self.rag.graphrag_enabled and not scoped and retrieval_target != "visual":
             self._warm_entity_graph()
-        run = turn.loop.run(window=window, message=user_msg, ledger=turn.ledger, pinned=pinned)
+        run = turn.loop.run(window=window, message=user_msg, ledger=turn.ledger, pinned=pinned, carried=carried)
         result: AgentResult | None = None
         try:
             first = _first_item(run)
@@ -1142,34 +1162,64 @@ class SessionManager:
         )
 
     def _agent_window(
-        self, session_id: str | None, owner: str | None, replace_turn_idx: int | None
-    ) -> ConversationWindow:
-        """Build the conversation an agent turn reads before its message.
+        self,
+        session_id: str | None,
+        owner: str | None,
+        replace_turn_idx: int | None,
+        *,
+        scoped: bool,
+        retrieval_target: RetrievalTarget,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+    ) -> tuple[ConversationWindow, list[NodeWithScore]]:
+        """Build the conversation an agent turn reads before its message, with the passages it carries.
 
         Built at the history allowance for the request's reasoning and at the turn's ratio,
         as the turn's budget is measured: a window built for the plain allowance would leave
-        a thinking model's turn no room.
+        a thinking model's turn no room. The passages the answers of the exchanges it sends
+        cite are loaded under the turn's target and filters (see
+        :meth:`~docint.core.rag.RAG.agent_carried_evidence`), each listed under its label; the
+        window keeps the newest that fit. A scoped turn carries none.
 
         Args:
             session_id (str | None): The conversation; ``None`` when stateless.
             owner (str | None): The owning principal.
             replace_turn_idx (int | None): A turn being written over: it and every later
                 turn stay out.
+            scoped (bool): Whether the turn answers a pinned scope.
+            retrieval_target (RetrievalTarget): The turn's target.
+            metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
+            metadata_filters_active (bool): Whether request filters are active.
 
         Returns:
-            ConversationWindow: The window; empty without a session.
+            tuple[ConversationWindow, list[NodeWithScore]]: The window, empty without a session,
+            and the passages its list carries, in its order, the first being ``[1]``.
         """
         if session_id is None:
-            return ConversationWindow()
-        turns, summary = self.get_conversation(session_id, owner)
-        if replace_turn_idx is not None:
-            turns = turns[:replace_turn_idx]
-        return build_window(
+            return ConversationWindow(), []
+        allowance = history_allowance_tokens(self.rag.reasoning_requested)
+        turns, summary = self.get_conversation(session_id, owner, before=replace_turn_idx, sources_for=RECENT_EXCHANGES)
+        nodes: list[NodeWithScore] = (
+            []
+            if scoped
+            else self.rag.agent_carried_evidence(
+                cited_node_ids(turns, recent_positions(turns, allowance)),
+                retrieval_target=retrieval_target,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
+            )
+        )
+        passages = [CarriedPassage(node_id=n.node.node_id, label=self.rag.agent_passage_label(n)) for n in nodes]
+        window = build_window(
             turns,
             summary,
-            allowance_tokens=history_allowance_tokens(self.rag.reasoning_requested),
+            allowance_tokens=allowance,
             char_token_ratio=self.rag.agent_char_token_ratio,
+            carried=passages,
         )
+        # The window keeps the newest run that fits, so its passages are picked by id, never sliced.
+        by_id = {n.node.node_id: n for n in nodes}
+        return window, [by_id[passage.node_id] for passage in window.carried]
 
     def _warm_entity_graph(self) -> None:
         """Build the collection's entity aggregate once, before an agent turn's searches expand against it.
@@ -1924,42 +1974,64 @@ class SessionManager:
                 evidence_chars=_evidence_chars(turn.agent_trail),
             )
 
-    def get_conversation(self, session_id: str, owner: str | None) -> tuple[list[ConversationTurn], str]:
+    def get_conversation(
+        self, session_id: str, owner: str | None, *, before: int | None = None, sources_for: int = 0
+    ) -> tuple[list[ConversationTurn], str]:
         """Read a session the caller owns as the agent loop's conversation.
 
-        Reads only the turns' text and trails and the rolling summary, never their
-        citations or stored reasoning. The window built from it keeps its own bounds,
-        so this returns everything stored: the summary grows by appending, so its end
-        is the newest part.
+        Reads the turns' text and trails and the rolling summary, never their stored
+        reasoning. The window built from it keeps its own bounds, so this returns everything
+        stored before ``before``: the summary grows by appending, so its end is the newest
+        part. Citations are read only for the last ``sources_for`` answered turns (see
+        :func:`~docint.agents.turn.history.last_answered`), in one query, in the order they
+        were stored, which is the order their answer numbered them in.
 
         Args:
             session_id (str): The ID of the session.
             owner (str | None): The principal requesting it; ``None`` matches
                 legacy un-owned rows.
+            before (int | None): Leave out the turn at this position and every later one, as
+                a turn written over an earlier one reads the conversation; ``None`` keeps all.
+            sources_for (int): How many of the last answered turns get their citations read;
+                ``0`` reads none.
 
         Returns:
-            tuple[list[ConversationTurn], str]: Every turn, oldest first, with where an
-            assessment's source-backed part ends, and the rolling summary; both empty
-            for a new, missing or foreign session.
+            tuple[list[ConversationTurn], str]: The turns, oldest first, with where an
+            assessment's source-backed part ends and, on the turns ``sources_for`` names, the
+            stored node of each citation number (``None`` where a citation keeps no id); and
+            the rolling summary. Both empty for a new, missing or foreign session.
         """
         with self._session_scope() as s:
             conv = s.query(Conversation).filter_by(id=session_id).first()
             if not conv or conv.owner != owner:
                 return [], ""
             rows = (
-                s.query(Turn.user_text, Turn.model_response, Turn.agent_trail)
+                s.query(Turn.id, Turn.user_text, Turn.model_response, Turn.agent_trail)
                 .filter(Turn.conversation_id == session_id)
                 .order_by(Turn.idx)
                 .all()
-            )
+            )[:before]
             turns = [
                 ConversationTurn(
                     user_text=(user_text or "").strip(),
                     assistant_text=(model_response or "").strip(),
                     evidence_chars=_evidence_chars(agent_trail),
                 )
-                for user_text, model_response, agent_trail in rows
+                for _, user_text, model_response, agent_trail in rows
             ]
+            # last_answered with a count of 0 finds every answered turn; 0 reads none.
+            answered: list[int] = last_answered(turns, sources_for) if sources_for > 0 else []
+            positions = {rows[position][0]: position for position in answered}
+            if positions:
+                cited: dict[int | None, list[str | None]] = {}
+                for turn_id, node_id in (
+                    s.query(Citation.turn_id, Citation.node_id)
+                    .filter(Citation.turn_id.in_(list(positions)))
+                    .order_by(Citation.id)
+                ):
+                    cited.setdefault(turn_id, []).append(node_id)
+                for turn_id, position in positions.items():
+                    turns[position] = replace(turns[position], sources=tuple(cited.get(turn_id, ())))
             return turns, (cast(str | None, conv.rolling_summary) or "").strip()
 
     def _pinned_collection_scope(self, conv: Conversation) -> AbstractContextManager[Any]:

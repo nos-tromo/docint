@@ -43,7 +43,7 @@ from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.history import build_prior_turn
-from docint.agents.turn.history import ConversationWindow, question_block
+from docint.agents.turn.history import CarriedPassage, ConversationWindow, question_block
 from docint.agents.turn.loop import AgentLoop
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.rag import AGENT_LEDGER_CAP, RAG, AgentTurn, agent_llm_view
@@ -137,6 +137,7 @@ def session_manager() -> Generator[SessionManager, None, None]:
     rag_mock.reasoning_requested = False
     rag_mock.agent_char_token_ratio = 3.5
     rag_mock.graphrag_enabled = False
+    rag_mock.agent_carried_evidence.return_value = cast(list[NodeWithScore], [])
     sm = SessionManager(rag=rag_mock)
     sm._SessionMaker = sessionmaker(bind=engine)
     yield sm
@@ -1129,7 +1130,9 @@ def test_the_window_is_built_at_the_allowance_of_the_turns_reasoning(
     built: list[tuple[int, float]] = []
     real = session_module.build_window
 
-    def _build(turns: Any, summary: str, *, allowance_tokens: int, char_token_ratio: float) -> ConversationWindow:
+    def _build(
+        turns: Any, summary: str, *, allowance_tokens: int, char_token_ratio: float, carried: Any
+    ) -> ConversationWindow:
         """Record the window's allowance and ratio, then build it.
 
         Args:
@@ -1137,12 +1140,15 @@ def test_the_window_is_built_at_the_allowance_of_the_turns_reasoning(
             summary (str): The rolling summary.
             allowance_tokens (int): The allowance.
             char_token_ratio (float): The ratio.
+            carried (Any): The passages to list.
 
         Returns:
             ConversationWindow: The window.
         """
         built.append((allowance_tokens, char_token_ratio))
-        return real(turns, summary, allowance_tokens=allowance_tokens, char_token_ratio=char_token_ratio)
+        return real(
+            turns, summary, allowance_tokens=allowance_tokens, char_token_ratio=char_token_ratio, carried=carried
+        )
 
     monkeypatch.setattr(session_module, "build_window", _build)
     _earlier_turns(session_manager)
@@ -1151,6 +1157,193 @@ def test_the_window_is_built_at_the_allowance_of_the_turns_reasoning(
     _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True)))
 
     assert built == [(allowance, 3.0)]
+
+
+def _sources() -> tuple[NodeWithScore, NodeWithScore, NodeWithScore]:
+    """Build the three invented passages an earlier answer was given, ``n1`` to ``n3``.
+
+    Returns:
+        tuple[NodeWithScore, NodeWithScore, NodeWithScore]: The stalls, the music and the weather.
+    """
+    return (
+        scored_node("n1", "Die Stände öffnen um zehn Uhr.", filename="programm.pdf", page=1),
+        scored_node("n2", "Musik gibt es ab Mittag.", filename="programm.pdf", page=2),
+        scored_node("n3", "Für Sonntag ist bedeckter Himmel gemeldet.", filename="wetter.pdf"),
+    )
+
+
+def _cited_turn(sm: SessionManager, question: str, answer: str, *sources: NodeWithScore) -> None:
+    """Store one answered lookup in session ``s1``, its citations in number order.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        question (str): The user's message.
+        answer (str): The answer, its markers numbering ``sources``.
+        *sources (NodeWithScore): The passages the answer was given, ``[1]`` first.
+    """
+    resp = SimpleNamespace(source_nodes=list(sources), metadata={})
+    sm._persist_turn("s1", question, resp, {"response": answer}, answer_mode="lookup")
+
+
+def _stored(sm: SessionManager, *nodes: NodeWithScore) -> None:
+    """Let the RAG double load these passages as carried evidence, each labelled by its file name.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        *nodes (NodeWithScore): The passages the store holds.
+    """
+    rag = cast(Any, sm.rag)
+    held = {scored.node.node_id: scored for scored in nodes}
+    rag.agent_carried_evidence.side_effect = lambda node_ids, **_kwargs: [held[i] for i in node_ids if i in held]
+    rag.agent_passage_label.side_effect = lambda scored: f"filename: {scored.node.metadata['filename']}"
+
+
+def test_a_follow_up_carries_what_its_last_answer_cites(session_manager: SessionManager) -> None:
+    """The passage an answer cites as [2] is loaded under the turn's target and filters and opens the turn as [1].
+
+    The window renumbers the answer's marker to match, the loop is handed the passage, and the new
+    answer stores it as its own first source, so a further follow-up can carry it again.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    stalls, music, weather = _sources()
+    _cited_turn(session_manager, "Wann beginnt die Musik?", "Die Musik beginnt am Mittag [2].", stalls, music, weather)
+    _stored(session_manager, stalls, music, weather)
+    armed = _arm(session_manager, [answer_round("Ab Mittag [1].")])
+    rules = [{"field": "mimetype", "operator": "eq", "value": "application/pdf"}]
+
+    final = _final(
+        list(
+            session_manager.stream_chat(
+                QUESTION,
+                session_id="s1",
+                agent=True,
+                retrieval_target="documents",
+                metadata_filters_active=True,
+                metadata_filter_rules=rules,
+            )
+        )
+    )
+
+    rag = cast(Any, session_manager.rag)
+    run = armed.loops[0].runs[0]
+    turns, _ = session_manager.get_conversation("s1", owner=None, sources_for=1)
+    assert rag.agent_carried_evidence.call_args == call(
+        ("n2",), retrieval_target="documents", metadata_filter_rules=rules, metadata_filters_active=True
+    )
+    assert [scored.node.node_id for scored in run["carried"]] == ["n2"]
+    assert run["window"].carried == (CarriedPassage("n2", "filename: programm.pdf"),)
+    assert _sent(armed.llm)[2].content == "Die Musik beginnt am Mittag [1]."
+    assert final["agent"]["actions"][0] == {"action": "carried", "detail": "", "found": 1}
+    assert [(source["id"], source["citation_index"]) for source in final["sources"]] == [("n2", 1)]
+    assert turns[-1].sources == ("n2",)
+
+
+@pytest.mark.parametrize(("reasoning", "carried"), [(False, ("n1", "n3")), (True, ("n3",))], ids=["plain", "thinking"])
+def test_a_follow_up_carries_from_the_exchanges_its_window_sends(
+    session_manager: SessionManager, reasoning: bool, carried: tuple[str, ...]
+) -> None:
+    """A thinking turn's window sends the last exchange alone, so only that answer's passages are carried.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        reasoning (bool): Whether the request asks the model to think.
+        carried (tuple[str, ...]): The ids the turn must ask to carry.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.reasoning_requested = reasoning
+    stalls, music, weather = _sources()
+    _cited_turn(session_manager, "Wann öffnen die Stände?", "Um zehn Uhr [1].", stalls)
+    _cited_turn(session_manager, "Und das Wetter?", "Bedeckter Himmel [1].", weather)
+    _stored(session_manager, stalls, music, weather)
+    _arm(session_manager, [answer_round(LOOKUP)])
+
+    _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True)))
+
+    assert rag.agent_carried_evidence.call_args.args == (carried,)
+
+
+def test_a_follow_up_carries_exactly_the_passages_its_window_lists(session_manager: SessionManager) -> None:
+    """When the list cannot hold every cited passage, the newest are listed, and the loop is handed those, by id.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    reports = [
+        scored_node(f"n{number}", f"Bericht {number}.", filename=f"hafenbericht_{number}_{'x' * 100}.pdf")
+        for number in range(1, 9)
+    ]
+    answer = "Es gibt acht Berichte " + " ".join(f"[{number}]" for number in range(1, 9)) + "."
+    _cited_turn(session_manager, "Welche Berichte gibt es?", answer, *reports)
+    _stored(session_manager, *reports)
+    armed = _arm(session_manager, [answer_round(LOOKUP)])
+
+    _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True)))
+
+    run = armed.loops[0].runs[0]
+    listed = [passage.node_id for passage in run["window"].carried]
+    assert 0 < len(listed) < len(reports)
+    assert listed == [f"n{number}" for number in range(len(reports) - len(listed) + 1, len(reports) + 1)]
+    assert [scored.node.node_id for scored in run["carried"]] == listed
+
+
+def test_a_scoped_turn_carries_nothing(session_manager: SessionManager) -> None:
+    """A pinned scope is the whole evidence: nothing is loaded, the loop is handed nothing, and the old marker goes.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    stalls, music, weather = _sources()
+    _cited_turn(session_manager, "Wann beginnt die Musik?", "Die Musik beginnt am Mittag [2].", stalls, music, weather)
+    _stored(session_manager, stalls, music, weather)
+    armed = _arm(session_manager, [answer_round("Ab Mittag [1].")], retrieved=[music])
+
+    _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True, scoped_node_ids=["n2"])))
+
+    run = armed.loops[0].runs[0]
+    cast(Any, session_manager.rag).agent_carried_evidence.assert_not_called()
+    assert (list(run["carried"]), run["window"].carried) == ([], ())
+    assert _sent(armed.llm)[2].content == "Die Musik beginnt am Mittag."
+
+
+def test_a_stateless_turn_carries_nothing(session_manager: SessionManager) -> None:
+    """Without a session there is no earlier answer: nothing is loaded and the loop is handed nothing.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.ensure_session_manager.return_value = session_manager
+    armed = _arm(session_manager, [answer_round(LOOKUP)])
+
+    _final(list(RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug=None)))
+
+    rag.agent_carried_evidence.assert_not_called()
+    assert list(armed.loops[0].runs[0]["carried"]) == []
+
+
+def test_a_replaced_turn_carries_from_the_turns_before_it(session_manager: SessionManager) -> None:
+    """A turn written over reads the conversation before it, so it carries what those answers cite, never its own.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    stalls, music, weather = _sources()
+    _cited_turn(session_manager, "Wann öffnen die Stände?", "Um zehn Uhr [1].", stalls)
+    _cited_turn(session_manager, "Und das Wetter?", "Bedeckter Himmel [1].", weather)
+    _stored(session_manager, stalls, music, weather)
+    armed = _arm(session_manager, [answer_round(LOOKUP)])
+
+    _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True, replace_turn_idx=1)))
+
+    assert cast(Any, session_manager.rag).agent_carried_evidence.call_args.args == (("n1",),)
+    assert [scored.node.node_id for scored in armed.loops[0].runs[0]["carried"]] == ["n1"]
+    assert [message.content for message in _sent(armed.llm)[1:]] == [
+        "Wann öffnen die Stände?",
+        "Um zehn Uhr [1].",
+        QUESTION,
+    ]
 
 
 def test_the_turn_is_built_from_the_requests_engine_target_and_filters(session_manager: SessionManager) -> None:

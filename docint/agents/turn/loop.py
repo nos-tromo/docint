@@ -63,8 +63,15 @@ turn holds but has not shown reaches the model. A picture is shown once a turn, 
 make room is never attached again. A round refused with pictures is sent once more without those
 still attached (see :mod:`~docint.agents.turn.images` and :meth:`AgentLoop._round`).
 
+Carried passages. A follow-up starts out holding the passages its earlier answers cite, which the
+window lists: they are seeded as ``[1..k]`` before the first round, each with its opening counted
+as its match, so a search window of the same section merges into it (see
+:func:`~docint.agents.turn.passages.carried_entry`). The turn's first model call that gets an
+event opens with a ``carried`` step counting them, so a call refused before any event has still
+shown nothing. ``read(n)`` shows a carried passage, and on the visual target its picture.
+
 A pinned scope is answered from the pinned passages alone, in one round that offers no tools (see
-:mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`).
+:mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`). It carries no passage.
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
 anything, as when the first round's second try breaks off before its text shows, a failure goes
@@ -110,6 +117,7 @@ from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
 from docint.agents.turn.calls import RoundCalls
 from docint.agents.turn.images import TurnImages
+from docint.agents.turn.passages import carried_entry
 from docint.agents.turn.scope import EvidenceDoesNotFit, scope_message
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
 from docint.agents.turn.tools import (
@@ -156,15 +164,16 @@ class AgentResult:
         raw_text (str): The answer exactly as the model wrote it, sentinel included, reasoning
             left out; empty only when the answer round wrote nothing. A result always comes from
             an answer round that ran.
-        nodes (list[NodeWithScore]): The turn's evidence numbered in ledger order: every passage
-            a tool reply showed, or a scoped turn's pinned passages, stamped with its
-            ``citation_index``; one whose picture the model was shown also carries
-            ``VISUAL_IMAGES_ATTACHED_KEY``.
+        nodes (list[NodeWithScore]): The turn's evidence numbered in ledger order, each stamped
+            with its ``citation_index``: the passages carried from earlier answers first, then
+            every passage a tool reply showed; a scoped turn's pinned passages. One whose picture
+            the model was shown also carries ``VISUAL_IMAGES_ATTACHED_KEY``.
         steps (int): Tool rounds whose calls were answered; a round withdrawn for want of room
             is not counted.
-        actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
-            per call its tool answered, in order, with the keys the reply's trail adds; a scoped
-            turn's is its ``seed`` alone.
+        actions (list[dict[str, Any]]): The trail: the ``carried`` step first when the turn
+            carried passages, then one ``{action, detail, found}`` per note and per call its tool
+            answered, in order, with the keys the reply's trail adds; a scoped turn's is its
+            ``seed`` alone.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
             limit, a failed round, a call that could not be prepared, a failed search or missing
             search slot; ``answer_cut``, replacing any of these, when the endpoint cut the answer
@@ -236,6 +245,10 @@ class _Turn:
             first round runs again, and never when a limit makes the model answer first.
         bare_base (list[ChatMessage] | None): The base as it was before the search note joined it,
             for an answer round sent while no round has answered to the note; ``None`` until then.
+        carried (int): The passages carried from earlier answers, which the ledger holds as
+            ``[1..carried]``.
+        carried_due (bool): Whether the ``carried`` step still waits for a model call that gets an
+            event.
     """
 
     ctx: ToolContext
@@ -257,6 +270,8 @@ class _Turn:
     asked_again: bool = False
     note_due: bool = False
     bare_base: list[ChatMessage] | None = None
+    carried: int = 0
+    carried_due: bool = False
 
     def stop(self, reason: str) -> None:
         """Record why the model must answer now, keeping the first cause.
@@ -539,6 +554,7 @@ class AgentLoop:
         message: str,
         ledger: EvidenceLedger,
         pinned: Sequence[NodeWithScore] | None = None,
+        carried: Sequence[NodeWithScore] = (),
     ) -> Iterator[AgentProgress | str | AgentResult]:
         """Run the turn.
 
@@ -550,6 +566,11 @@ class AgentLoop:
             pinned (Sequence[NodeWithScore] | None): The passages the user pinned: the turn then
                 answers from them alone, in one round that offers no tools (see :meth:`_scoped`).
                 ``None`` for a turn without a scope; an empty scope is still one, never widened.
+            carried (Sequence[NodeWithScore]): The passages the window lists as carried, in its
+                order. They are seeded into the ledger as ``[1..k]`` before the first round (see
+                :func:`~docint.agents.turn.passages.carried_entry`), and the turn's first model
+                call that gets an event opens with a ``carried`` step counting them (see
+                :meth:`_open_carried`). A scoped turn ignores them.
 
         Yields:
             AgentProgress | str | AgentResult: Steps and answer text as they come, the label
@@ -584,6 +605,10 @@ class AgentLoop:
                 round_room=self._budget.round_room,
             ),
         )
+        if carried:
+            # Numbered first; the step saying so waits for a model call that gets an event.
+            ledger.add([carried_entry(scored) for scored in carried])
+            turn.carried, turn.carried_due = len(ledger), True
         while True:
             limit = self._limit(turn)
             # No call has carried the replies of the round just answered, so they are not cleared.
@@ -846,6 +871,8 @@ class AgentLoop:
         refusing them, as ``VisualImagesMixin`` takes it: every picture still attached is taken
         back (see :meth:`~docint.agents.turn.images.TurnImages.drop`) and the round is sent again
         without any, once. Should that fail too, it fails as any round does; a dead endpoint does.
+        While the turn's ``carried`` step is due, each call opens with it (see
+        :meth:`_open_carried`).
 
         Args:
             turn (_Turn): The turn.
@@ -853,31 +880,47 @@ class AgentLoop:
             hold (bool): Whether the round is held whole, its text released by nothing but its end.
 
         Yields:
-            AgentProgress | str: Answer text the round releases; it opens with no step.
+            AgentProgress | str: The ``carried`` step while it is due, then answer text the round
+            releases.
 
         Returns:
             _Streamed | None: How the round went; ``None`` when no model slot came free.
         """
         retried = False
         while True:
-            carried = turn.images.count
+            pictures = turn.images.count
             streamed = yield from self._stream(
                 turn,
                 self._answer_prompt(turn) if answer else [*turn.base, *turn.transcript],
                 tool_choice="none" if answer else "auto",
                 wait=self._slot_wait(turn, answer=answer),
+                opening=(lambda: self._open_carried(turn)) if turn.carried_due else None,
                 hold=hold,
             )
-            if streamed is None or streamed.began or not carried or retried:
+            if streamed is None or streamed.began or not pictures or retried:
                 return streamed
             logger.warning(
                 "An agent round carrying {} pictures failed before its first event ({}); it is sent again without them",
-                carried,
+                pictures,
                 type(streamed.error).__name__,
             )
             turn.transcript, freed = turn.images.drop(turn.transcript)
             turn.spent -= freed
             retried = True
+
+    def _open_carried(self, turn: _Turn) -> AgentProgress:
+        """Record the step a turn holding carried passages opens with, once: its first call that got an event.
+
+        A call refused before any event has shown nothing, so the caller can still answer another way.
+
+        Args:
+            turn (_Turn): The turn, its carried passages seeded.
+
+        Returns:
+            AgentProgress: The ``carried`` step, step 0, counting the passages seeded.
+        """
+        turn.carried_due = False
+        return self._step(turn, "carried", "", turn.carried, step=0)
 
     def _answer_prompt(self, turn: _Turn) -> list[ChatMessage]:
         """Return what an answer round is sent: the turn so far, the final note joined last.
@@ -1293,7 +1336,8 @@ class AgentLoop:
 
         Args:
             turn (_Turn): The turn.
-            action (str): A note, or the name of the tool that answered the call.
+            action (str): A note, a turn's opening (``seed`` or ``carried``), or the name of the
+                tool that answered the call.
             detail (str): The note's text, or the call's main argument.
             found (int): Passages the call admitted or extended.
             step (int | None): The round it belongs to; the last tool round by default.

@@ -18,7 +18,7 @@ Rules:
 - Never name a person in a picture unless a passage links that name to them, not even as an inference; describe them instead.
 - Check the user's statements and corrections against the evidence and say whether they hold.
 - When the user gives a hint for a question still open from earlier turns, answer that question with it.
-- Earlier answers, shown without their numbers and some labelled `Previous assistant answer`, are context, not a format to copy.
+- Earlier answers, some labelled `Previous assistant answer`, are context, not a format to copy. A number [n] in them names a passage carried into this turn, listed below: read(n) shows it, and you cite it as [n].
 - Use Markdown where it helps. Write citations as plain [3], never in a link, code or heading.
 {assessment_rule}
 

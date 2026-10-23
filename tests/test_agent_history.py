@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import random
 import re
-from collections.abc import Generator
+from collections.abc import Generator, Iterator, Sequence
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 from llama_index.core.base.llms.types import MessageRole
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from docint.agents.assessment.split import SENTINEL, assessment_label, compose_labelled_answer
@@ -96,6 +97,7 @@ def _persist(
     *,
     owner: str | None = None,
     trail: dict[str, Any] | None = None,
+    sources: Sequence[str | None] = (),
 ) -> None:
     """Store one exchange the way a finished turn does.
 
@@ -106,10 +108,15 @@ def _persist(
         answer (str): The stored answer text.
         owner (str | None): The principal that owns the session.
         trail (dict[str, Any] | None): The assessment trail, if the answer was one.
+        sources (Sequence[str | None]): The node each citation number of the answer names, in order;
+            ``None`` stores a citation without a node id.
     """
     resp = MagicMock()
     resp.metadata = cast(dict[str, Any], {})
-    resp.source_nodes = cast(list[Any], [])
+    resp.source_nodes = [
+        SimpleNamespace(node=None if node_id is None else SimpleNamespace(node_id=node_id, metadata={}), score=None)
+        for node_id in sources
+    ]
     manager._persist_turn(session_id, question, resp, {"response": answer}, owner=owner, agent_trail=trail)
 
 
@@ -345,6 +352,65 @@ def test_get_conversation_reads_the_turns_oldest_first_with_their_evidence_bound
     assert labelled.evidence_chars == len("Fact one [1].")
     assert summary == ""
     cast(Any, session_manager.rag.get_source_by_node_id).assert_not_called()
+
+
+@contextmanager
+def _statements(manager: SessionManager) -> Iterator[list[str]]:
+    """Record every SQL statement the session store runs while the block runs.
+
+    Args:
+        manager (SessionManager): The session manager, its store an in-memory database.
+
+    Yields:
+        list[str]: The statements, appended to as they run.
+    """
+    engine = cast(Any, manager._SessionMaker).kw["bind"]
+    ran: list[str] = []
+
+    def _record(_conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+        """Keep one statement.
+
+        Args:
+            _conn (Any): The connection, unused.
+            _cursor (Any): The cursor, unused.
+            statement (str): The SQL.
+            *_args (Any): Its parameters and context, unused.
+        """
+        ran.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        yield ran
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+
+def test_get_conversation_loads_sources_only_for_the_recent_answers(session_manager: SessionManager) -> None:
+    """Only the last answered turns get their citations, read in one query, by number, a missing node id kept.
+
+    A turn written over is left out first, so the answers read are the last ones before it; by
+    default no citation is read at all.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    _persist(session_manager, "s1", _question(1), "Pier eins [1], [2].", sources=("a1", "a2"))
+    _persist(session_manager, "s1", _question(2), "Pier zwei [1].", sources=("b1",))
+    _persist(session_manager, "s1", _question(3), "[1]", sources=("c1",))
+    _persist(session_manager, "s1", _question(4), "Pier vier [1] [3].", sources=("d1", None, "d3"))
+
+    with _statements(session_manager) as ran:
+        turns, _ = session_manager.get_conversation("s1", owner=None, sources_for=2)
+    with _statements(session_manager) as plain:
+        default, _ = session_manager.get_conversation("s1", owner=None)
+    before, _ = session_manager.get_conversation("s1", owner=None, before=3, sources_for=2)
+
+    assert [turn.sources for turn in turns] == [(), ("b1",), (), ("d1", None, "d3")]
+    assert [turn.sources for turn in default] == [(), (), (), ()]
+    assert [turn.sources for turn in before] == [("a1", "a2"), ("b1",), ()]
+    assert [turn.assistant_text for turn in default] == [turn.assistant_text for turn in turns]
+    assert sum("FROM citations" in statement for statement in ran) == 1
+    assert not any("FROM citations" in statement for statement in plain)
 
 
 FOLLOW_UP = "Should we proceed?"

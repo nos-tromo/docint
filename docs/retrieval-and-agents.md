@@ -841,14 +841,17 @@ the head of each tool reply. The validator is given the same counts (see
 
 ### Evidence and sources
 
-The turn's evidence is everything its tool replies showed, numbered in the
-order it was found. The windows of one section are one passage, which keeps its
-number as it grows. The evidence holds at most 64 passages, or as many as a
-larger pinned scope holds. The answer's sources are this evidence in number
-order, so the model's `[n]` is the number on the source card.
+The turn's evidence is the passages it carried from earlier answers, numbered
+first (see [Carried evidence](#carried-evidence)), then everything its tool
+replies showed, numbered in the order it was found. The windows of one section
+are one passage, which keeps its number as it grows. The evidence holds at most
+64 passages, or as many as a larger pinned scope holds. The answer's sources
+are this evidence in number order, so the model's `[n]` is the number on the
+source card.
 
-The trail (`agent.actions`) holds one `{action, detail, found}` per note, and
-one per call its tool answered. A keyword step adds `field`, `matches` and,
+The trail (`agent.actions`) opens with a `carried` step when the turn carried
+passages, then holds one `{action, detail, found}` per note, and one per call
+its tool answered. A keyword step adds `field`, `matches` and,
 where the keyword index leaves chunks out, `unchecked`. The `agent` frames in
 [api-reference.md](api-reference.md#post-stream_query) say when each is absent,
 and [ui-guide.md](ui-guide.md#chat-srcrouteschattsx) shows how the SPA reads
@@ -1097,7 +1100,7 @@ is stored (`agents/turn/history.py`). It holds:
 - the user's earlier questions, newest first;
 - the newest part of the rolling summary;
 - the carried list: the passages those exchanges' answers cite, one numbered
-  line each.
+  line each (see [Carried evidence](#carried-evidence)).
 
 All of it fits within 1300 tokens, or 750 with reasoning. Citation numbers are
 dropped from earlier answers, since they number earlier sources, except the
@@ -1113,6 +1116,59 @@ no turn-level graph expansion.
 A plain lookup that follows an assessment (a fallback, or any turn while agent
 turns are off) receives only the source-backed part of that answer as its prior
 turn. The model's judgement is never restated as sourced fact.
+
+### Carried evidence
+
+A follow-up starts out holding the passages its earlier answers cite, so a
+question such as "Are those all?" can cite the frame the last answer cited
+without finding it again (`SessionManager._agent_window`,
+`RAG.agent_carried_evidence`).
+
+- **Which answers.** The exchanges the window sends as messages (see
+  [Conversation history](#conversation-history)): the last two, or one with
+  reasoning on. An answer's markers (`[3]`, `[3, 4]`, `[3–5]`) name its stored
+  citations by position, as replay numbers them. Only those turns' citations
+  are read, in one query.
+- **How many.** At most 8 passages: the ones cited last, a passage cited twice
+  counted once, at its latest citation. Their list takes at most 200 tokens of
+  the history allowance, and when its lines do not all fit, the oldest give
+  way. The newest win both cuts.
+- **Where they come from.** The request's collection only, by the turn's
+  target. A `documents` or `all` turn reads the main collection's docstore
+  first, the only place an oversize parent section is kept, then its points.
+  An `all` or `visual` turn reads the ids still missing from the
+  `{collection}_images` companion, each picture built as the image tools build
+  it. So a `documents` turn carries no picture, and a `visual` turn no text.
+- **Filters.** The request's filter rules judge each passage by its own
+  metadata. A filter on a field only a section's chunks carry, such as hate
+  speech, leaves that section out: it fails closed. Filters active without
+  rules carry nothing.
+- **Loading never fails a turn.** A store or index failure carries nothing,
+  with one warning naming the exception's type, and the turn goes on. One INFO
+  line counts the outcome (`An agent turn carries 2 of the 3 passages its
+  earlier answers cite (1 not found, 0 outside its target or filters)`), never
+  an id, a label or a text.
+- **The list.** The conversation block of the system prompt ends with
+  `Passages the earlier answers cite, carried into this turn (read(n) shows one)`
+  and one line `[n] label` per passage. The label is the passage's header as
+  the model reads it, on one line, defused, at most 120 characters. An earlier
+  answer keeps a marker only for a carried passage, renumbered to its line in
+  the list; every other marker is dropped. The summary and the earlier
+  questions carry none.
+- **The turn.** The loop seeds the passages into the evidence as `[1..k]`
+  before its first round, so they are the answer's first sources. The first
+  model call that gets an event opens the trail with a `carried` step (step 0,
+  `found` the count). A call refused before any event has shown nothing, so
+  the turn still falls back to the plain path.
+- **Reading one.** `read(n)` shows a carried passage, and on the
+  [visual target](#visual-target) attaches its picture. A carried section
+  counts its opening as its match, so `read(n)` shows its start, not the
+  window the earlier answer cited. A search that finds that window again
+  extends the passage, which keeps its number and shows the window.
+- **What carries nothing.** A scoped turn, whose scope is the whole evidence;
+  a stateless turn, which has no earlier answer; and a passage the store no
+  longer holds. A turn written over an earlier one carries from the turns
+  before it.
 
 ## Citation numbering
 

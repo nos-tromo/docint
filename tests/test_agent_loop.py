@@ -93,7 +93,7 @@ from docint.agents.turn.tools import (
 )
 from docint.agents.types import AgentProgress
 from docint.core.retrieval.visual import VISUAL_IMAGE_TOKEN_ESTIMATE, VISUAL_IMAGES_ATTACHED_KEY, render_legend
-from docint.utils.text_budget import fit_with_marker
+from docint.utils.text_budget import MATCH_SPANS_KEY, fit_with_marker
 
 QUESTION = "zzsecretzz Wann öffnen die Stände beim Hafenfest?"
 SYSTEM_PROMPT = "Beantworte Fragen zur Sammlung mit den Werkzeugen und belege jede Aussage mit [n]."
@@ -315,6 +315,7 @@ def _turn(
     window: ConversationWindow | None = None,
     ledger: EvidenceLedger | None = None,
     pinned: Sequence[NodeWithScore] | None = None,
+    carried: Sequence[NodeWithScore] = (),
 ) -> Iterator[AgentProgress | str | AgentResult]:
     """Run one turn of the user's invented question.
 
@@ -323,6 +324,7 @@ def _turn(
         window (ConversationWindow | None): The conversation before it; none by default.
         ledger (EvidenceLedger | None): The turn's evidence; an empty one by default.
         pinned (Sequence[NodeWithScore] | None): The passages the user pinned; no scope by default.
+        carried (Sequence[NodeWithScore]): The passages earlier answers cite; none by default.
 
     Returns:
         Iterator[AgentProgress | str | AgentResult]: The turn's output.
@@ -333,6 +335,7 @@ def _turn(
         # An empty ledger is falsy, so only a missing one is replaced.
         ledger=EvidenceLedger(cap=LEDGER_CAP) if ledger is None else ledger,
         pinned=pinned,
+        carried=carried,
     )
 
 
@@ -4591,3 +4594,104 @@ def test_a_read_answered_from_memory_shows_the_picture_the_cap_kept_back() -> No
     assert _pictures_by_call(llm) == [0, 1, 0, 1]
     assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)]]
     assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+
+
+#: A passage the turn's own search finds, after the carried ones.
+MUSIC = "Die Musik beginnt am Mittag auf der Bühne am Kai."
+
+
+def test_carried_passages_open_the_turn_as_its_first_numbers() -> None:
+    """A follow-up starts out holding what its earlier answers cite, as [1] and [2], and its trail says so first.
+
+    The ``carried`` step goes out with the first model call's first event and is stored as the
+    trail's first entry. The carried passages are sent in no message of their own, and a passage
+    the turn then finds is numbered after them.
+    """
+    found = scored_node("music", MUSIC, filename="hafenfest_programm.pdf", page=2)
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Musik")), _answer()])
+    pulled = _pulls(llm)
+    loop = _loop(llm, _documents(QuerySearch({"Musik": [found]})))
+    turn = _turn(loop, carried=[programme_passage(), weather_passage()])
+
+    first = next(turn)
+    begun = len(pulled)
+    progress, texts, result = _drain([first, *turn])
+
+    numbered = [(scored.node.node_id, scored.node.metadata["citation_index"]) for scored in result.nodes]
+    assert (first, begun > 0) == (AgentProgress(step=0, action="carried", detail="", found=2), True)
+    assert result.actions[0] == {"action": "carried", "detail": "", "found": 2}
+    assert _steps(progress) == [("carried", "", 2), ("search", "Musik", 1)]
+    assert numbered == [("programme", 1), ("weather", 2), ("music", 3)]
+    assert shown_numbers(_tool_replies(llm, 1)["call_a"]) == [3]
+    assert [message.role for message in _sent(llm, 0)] == [MessageRole.SYSTEM, MessageRole.USER]
+    assert (result.steps, "".join(texts)) == (1, ANSWER)
+
+
+def test_a_refusal_before_any_event_still_falls_back_with_carried_passages() -> None:
+    """The carried step waits for an event, so a first call refused as sent has shown nothing: the caller falls back."""
+    rejection = bad_request(TOOL_CHOICE_REJECTED)
+    llm = streaming_tool_llm([rejection])
+
+    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({}))), carried=[programme_passage()]))
+
+    assert (shown, type(raised), raised.__cause__) == ([], ToolsUnavailable, rejection)
+
+
+#: An invented harbour regulation kept as one section, longer than one reply shows.
+HARBOUR_RULES = " ".join(
+    f"Absatz {line}: Die Hafenordnung regelt Liegeplätze, Gebühren und Fristen für Anmeldungen am Kai."
+    for line in range(1, 71)
+)
+
+
+def test_a_search_finding_a_carried_section_again_extends_it() -> None:
+    """A window deep in a carried section merges into it and is shown, never refused as shown before.
+
+    The section is carried counting its opening as its match, as the window counts its own.
+    """
+    section = scored_node("hafenordnung-4", HARBOUR_RULES, filename="hafenordnung.pdf", page=4)
+    anchor = "Absatz 60:"
+    start = HARBOUR_RULES.index(anchor) - 200
+    window = scored_node(
+        "hafenordnung-4",
+        HARBOUR_RULES[start : start + 500],
+        filename="hafenordnung.pdf",
+        page=4,
+        **{MATCH_SPANS_KEY: [[200, 200 + len(anchor)]]},
+    )
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Fristen")), _answer(SHORT_ANSWER)])
+    loop = _loop(llm, _documents(QuerySearch({"Fristen": [window]})))
+
+    progress, _, result = _drain(_turn(loop, carried=[section]))
+
+    reply = _tool_replies(llm, 1)["call_a"]
+    assert _steps(progress) == [("carried", "", 1), ("search", "Fristen", 1)]
+    assert (shown_numbers(reply), anchor in reply, "shown before" in reply) == ([1], True, False)
+    assert [scored.node.get_content() for scored in result.nodes] == [HARBOUR_RULES]
+
+
+def test_a_read_of_a_carried_frame_shows_it_and_its_picture() -> None:
+    """A carried frame reaches a visual turn's model by a read: its passage, then its picture after the reply."""
+    store = ThumbnailStore(0)
+    llm = streaming_tool_llm([call_round(("call_a", "read", {"n": 1})), answer_round(ANSWER)])
+    loop = scripted_loop(llm, target="visual", fetch_thumbnails=store, max_images=6)
+
+    progress, _, result = _drain(_turn(loop, carried=[frame_passage(0)]))
+
+    assert _steps(progress)[0] == ("carried", "", 1)
+    assert store.fetches == [["frame-0"]]
+    assert shown_numbers(_tool_replies(llm, 1)["call_a"]) == [1]
+    assert _pictures_by_call(llm) == [0, 1]
+    assert _picture_turns(llm, 1) == [[thumbnail_url(0)]]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
+def test_a_scoped_turn_ignores_carried_passages() -> None:
+    """A pinned scope is the whole evidence: passages handed in as carried are neither held nor announced."""
+    llm = streaming_tool_llm([_answer(SHORT_ANSWER)])
+    loop = _loop(llm, _documents(QuerySearch({})))
+
+    progress, _, result = _drain(_turn(loop, pinned=[programme_passage()], carried=[weather_passage()]))
+
+    assert progress == [AgentProgress(step=0, action="seed", detail="", found=1)]
+    assert [scored.node.node_id for scored in result.nodes] == ["programme"]
