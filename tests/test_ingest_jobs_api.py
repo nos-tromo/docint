@@ -410,69 +410,6 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.parametrize("outcome", ["completed", "empty", "unsupported", "failed"])
-def test_an_ingest_job_drops_the_serving_engines_kept_keyword_readiness(
-    monkeypatch: pytest.MonkeyPatch, outcome: str
-) -> None:
-    """However a run ends, the engine that serves turns forgets the read it kept of the collection, after the run.
-
-    ``ingest_docs`` runs on an engine of its own, so the serving one would otherwise keep the read it made
-    before the run for up to ``KEYWORD_READINESS_TTL_S``. Forgotten before the run instead, a read a turn makes
-    mid-run would be kept past its end, so the kept read must still be in place while the run goes.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        outcome (str): How the run ends: ``completed``, ``empty`` (``EmptyIngestionError``), ``unsupported``
-            (``NoSupportedFilesError``) or ``failed`` (any other error, which fails the job).
-    """
-    monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
-    monkeypatch.setattr("docint.core.rag._readiness_now", lambda: 1000.0)
-    state = _make_state(kind="ingest", resolve=False)
-    store = KeywordClient({state.physical: ready_schema("text")}, counts={state.physical: 10})
-    monkeypatch.setattr(api_module.rag, "_qdrant_client", store)
-    monkeypatch.setattr(api_module.rag, "_keyword_readiness_cache", {})
-    mid_run: list[int] = []
-
-    def fake_ingest(*args: Any, **kwargs: Any) -> None:
-        """Note how much has been read from the store as the run goes, then end it as the case says.
-
-        Args:
-            *args (Any): The run's arguments (ignored).
-            **kwargs (Any): The run's options (ignored).
-
-        Raises:
-            EmptyIngestionError: For the ``empty`` outcome.
-            NoSupportedFilesError: For the ``unsupported`` outcome.
-            RuntimeError: For the ``failed`` outcome.
-        """
-        api_module.rag._keyword_readiness(state.physical, with_images=False)
-        mid_run.append(len(store.schemas_read))
-        if outcome == "empty":
-            raise api_module.EmptyIngestionError(state.physical)
-        if outcome == "unsupported":
-            raise NoSupportedFilesError("nothing ingestable")
-        if outcome == "failed":
-            raise RuntimeError("the run failed")
-
-    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
-    api_module.rag._keyword_readiness(state.physical, with_images=False)
-    kept = len(store.schemas_read)
-    api_module.rag._keyword_readiness(state.physical, with_images=False)
-    assert kept > 0
-    assert len(store.schemas_read) == kept
-
-    if outcome == "failed":
-        with pytest.raises(RuntimeError, match="the run failed"):
-            api_module._run_ingest_job(state, lambda ev, p: None)
-    else:
-        api_module._run_ingest_job(state, lambda ev, p: None)
-
-    assert mid_run == [kept]
-    after_run = len(store.schemas_read)
-    api_module.rag._keyword_readiness(state.physical, with_images=False)
-    assert len(store.schemas_read) > after_run
-
-
-@pytest.mark.parametrize("outcome", ["completed", "empty", "unsupported", "failed"])
 def test_a_turn_during_an_ingest_job_reads_its_physical_collection_live(
     monkeypatch: pytest.MonkeyPatch, outcome: str
 ) -> None:

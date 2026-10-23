@@ -5063,9 +5063,6 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
     except Exception as exc:
         logger.opt(exception=exc).error(f"Unexpected error during ingestion of '{name}'")
         raise HTTPException(status_code=500, detail="Request failed.") from exc
-    finally:
-        # ``ingest_docs`` runs on an engine of its own; this one serves turns and holds the readiness it kept before.
-        rag.forget_keyword_readiness(physical)
 
     logger.info("Ingestion complete in {}.", format_elapsed(time.monotonic() - started_ticks))
     return {
@@ -5296,9 +5293,6 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         logger.warning("No ingestable files for collection '{}'; completing as empty.", state.logical_name)
         push("warning", {"message": f"No ingestable files found for '{state.logical_name}'."})
         return {"empty": True, "resolution": None}
-    finally:
-        # ``ingest_docs`` runs on an engine of its own; this one serves turns and holds the readiness it kept before.
-        rag.forget_keyword_readiness(state.physical)
 
     resolution: dict[str, Any] | None = None
     if state.resolve:
