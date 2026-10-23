@@ -198,6 +198,25 @@ def _hermetic_preprocess() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_collection_writes() -> Iterator[None]:
+    """Give each test a registry of collection writes of its own.
+
+    The registry is process-wide, so a window a test left open, or an epoch it moved, would
+    otherwise reach every test after it. A private ``MonkeyPatch`` for the reason
+    :func:`_hermetic_hybrid_env` gives.
+
+    Yields:
+        None.
+    """
+    from docint.core import collection_writes
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(collection_writes, "_registry", collection_writes._Registry())
+    yield
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_image_description() -> Iterator[None]:
     """Keep the image floor's description re-score from reaching a chat endpoint.
 
