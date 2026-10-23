@@ -3227,7 +3227,8 @@ def test_ingest_sync_drops_the_kept_keyword_readiness_however_it_ends(
     """Whatever its outcome, a sync ingest makes the engine that serves turns forget its read of the collection.
 
     ``ingest_docs`` runs on an engine of its own, so the serving one would otherwise keep the read it made
-    before the run for up to ``KEYWORD_READINESS_TTL_S``.
+    before the run for up to ``KEYWORD_READINESS_TTL_S``. The forget comes after the run: forgotten before it,
+    a read a turn makes mid-run would be kept past its end.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -3238,11 +3239,12 @@ def test_ingest_sync_drops_the_kept_keyword_readiness_however_it_ends(
     """
     monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
     ingested: list[str] = []
+    forgotten_mid_run: list[list[str]] = []
 
     def fake_ingest(
         collection: str, path: Path, hybrid: bool | None = None, progress_callback: Any = None, **kwargs: Any
     ) -> None:
-        """Record the collection written to, then end as the case says.
+        """Record the collection written to and what has been forgotten by then, then end as the case says.
 
         Args:
             collection (str): Physical collection name.
@@ -3258,6 +3260,7 @@ def test_ingest_sync_drops_the_kept_keyword_readiness_however_it_ends(
         """
         _ = (path, hybrid, progress_callback)
         ingested.append(collection)
+        forgotten_mid_run.append(list(cast(DummyRAG, api_module.rag).forgotten_readiness))
         if outcome == "empty":
             raise api_module.EmptyIngestionError(collection)
         if outcome == "unsupported":
@@ -3271,6 +3274,7 @@ def test_ingest_sync_drops_the_kept_keyword_readiness_however_it_ends(
 
     assert response.status_code == (500 if outcome == "failed" else 200)
     assert ingested == ["docs"]
+    assert forgotten_mid_run == [[]]
     assert cast(DummyRAG, api_module.rag).forgotten_readiness == ingested
 
 

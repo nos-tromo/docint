@@ -39,12 +39,14 @@ class _FakeIngest:
     def __init__(self, dummy: "_OwnRAG") -> None:
         self.dummy = dummy
         self.calls: list[str] = []
+        self.forgotten_at_run: list[list[str]] = []
 
     def ingest_docs(self, collection: str, *args: Any, **kwargs: Any) -> None:
         # The JSON /ingest path passes (collection, data_dir, hybrid=...); the
         # streaming /ingest/upload path passes (collection, data_dir, hybrid,
         # progress_callback) positionally. Accept both.
         self.calls.append(collection)
+        self.forgotten_at_run.append(list(self.dummy.forgotten_readiness))
         self.dummy.existing.add(collection)
 
 
@@ -352,7 +354,8 @@ def test_an_ingest_forgets_the_readiness_of_the_physical_collection_it_wrote(
 ) -> None:
     """The kept read dropped is the owner-namespaced collection written to, never the logical name or the caller's.
 
-    Alice and Bob each ingest 'mydocs', and an admin then ingests into alice's namespace.
+    Alice and Bob each ingest 'mydocs', and an admin then ingests into alice's namespace. A run forgets after
+    it ingests, so each finds only the earlier runs' collections forgotten.
     """
     assert _ingest(client, "alice", "mydocs").status_code == 200
     assert _ingest(client, "bob", "mydocs").status_code == 200
@@ -362,6 +365,7 @@ def test_an_ingest_forgets_the_readiness_of_the_physical_collection_it_wrote(
     alice, bob = owners.resolve("alice", "mydocs"), owners.resolve("bob", "mydocs")
     assert alice is not None and bob is not None and alice != bob
     assert _patch_rag.forgotten_readiness == [alice, bob, alice]
+    assert cast(_FakeIngest, api_module.ingest_module).forgotten_at_run == [[], [alice], [alice, bob]]
 
 
 def test_admin_lists_cross_owner_sessions_with_owner_param(client: TestClient, _patch_rag: _OwnRAG) -> None:

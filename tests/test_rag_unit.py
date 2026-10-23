@@ -9023,13 +9023,15 @@ def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
 ) -> None:
     """A collection's kept keyword readiness is read afresh after it is deleted or ingested, a failed ingest too.
 
-    The delete runs outside a request scope on another active collection, as the API's does.
+    The delete runs outside a request scope on another active collection, as the API's does. An ingest forgets
+    after its run, not before: the kept readiness is still in place while the run goes.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         tmp_path (Path): The source root.
         how (str): What happens to the collection.
     """
+    monkeypatch.setattr(rag_module, "_readiness_now", lambda: 1000.0)
     keyword_coverage(monkeypatch, {"test": (10, 10)})
     rag, client, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
     rag.qdrant_collection = "active"
@@ -9048,13 +9050,30 @@ def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
     _decide()
     assert kept > 0
     assert len(client.schemas_read) == kept
+    mid_run: list[int] = []
+
+    def _watch(self: _FakePipeline, processed_hashes: set[str]) -> list[Any]:
+        """Decide a turn's keyword matcher as the run goes, noting how much has been read by then.
+
+        Args:
+            self (_FakePipeline): The pipeline.
+            processed_hashes (set[str]): Hashes already ingested.
+
+        Returns:
+            list[Any]: No batches.
+        """
+        _decide()
+        mid_run.append(len(client.schemas_read))
+        return []
 
     if how == "delete":
         rag.delete_collection("test")
         assert client.deleted[0] == "test"
     elif how == "ingest":
+        monkeypatch.setattr(_FakePipeline, "build", _watch)
         with rag.collection_scope("test"):
             rag.ingest_docs(tmp_path, build_query_engine=False)
+        assert mid_run == [kept]
     else:
 
         def _fail(self: _FakePipeline, processed_hashes: set[str]) -> list[Any]:
@@ -9067,11 +9086,13 @@ def test_deleting_or_ingesting_a_collection_forgets_its_readiness(
             Raises:
                 RuntimeError: Always.
             """
+            _watch(self, processed_hashes)
             raise RuntimeError("the run failed")
 
         monkeypatch.setattr(_FakePipeline, "build", _fail)
         with rag.collection_scope("test"), pytest.raises(RuntimeError, match="the run failed"):
             rag.ingest_docs(tmp_path, build_query_engine=False)
+        assert mid_run == [kept]
 
     after_it = len(client.schemas_read)
     _decide()
