@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from agent_fakes import LEDGER_CAP, ScriptedSearch, shown_numbers, tool_call, tool_context
+from agent_fakes import LEDGER_CAP, PLANNED_SYSTEM_TOKENS, ScriptedSearch, shown_numbers, tool_call, tool_context
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.schema import NodeWithScore
 
@@ -64,8 +64,6 @@ INFERENCE_LABELS = {"en": "Inference:", "de": "Schlussfolgerung:"}
 ANSWER_PROMPTS = ("agent_system", "grounded_qa", "grounded_refine")
 #: The prompts that judge an answer: they accept every label, since an answer follows the user's language.
 VALIDATOR_PROMPTS = ("response_validator", "response_validator_assessment")
-#: Tokens the turn budget plans for the rendered system prompt, at 3.5 characters per token.
-SYSTEM_PROMPT_TOKENS = 930
 CHAR_TOKEN_RATIO = 3.5
 #: The texts the system prompt must describe, each by a phrase it quotes from them.
 DESCRIBED = (
@@ -714,7 +712,7 @@ def test_the_rendered_agent_system_prompt_fits_its_planned_tokens(code: str, tar
     """
     rendered = _system_prompt(code, target)
 
-    assert estimate_tokens(rendered, CHAR_TOKEN_RATIO) <= SYSTEM_PROMPT_TOKENS, (
+    assert estimate_tokens(rendered, CHAR_TOKEN_RATIO) <= PLANNED_SYSTEM_TOKENS, (
         f"{code}/{target}: {len(rendered)} chars"
     )
 
