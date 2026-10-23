@@ -9233,7 +9233,10 @@ class RAG:
         A change that only makes more of the collection keyword-ready, such as an index created any
         other way or by another process, shows once the kept read is ``KEYWORD_READINESS_TTL_S``
         old, and until then a stale read only withholds what has become ready. A read of this
-        collection already in flight is returned to its turn but not kept.
+        collection already in flight is returned to its turn but not kept. A touch after the change
+        is enough only because a stale read of these changes withholds coverage and never claims
+        more: a change that could make a stale read claim more than the store holds must be a write
+        window (:func:`docint.core.collection_writes.writing`), never a touch.
 
         Args:
             collection (str): The physical main collection.

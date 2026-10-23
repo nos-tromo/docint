@@ -4,7 +4,8 @@ A write in this process is a window on the physical collection it writes, open f
 change until after its last, however the write ends. Each collection carries an epoch, which moves
 whenever a window on it opens or closes and whenever a change made in one step touches it. A cached
 read of a collection is valid only for the epoch it was read at, and never while a window on it is
-open.
+open. Whether a window is open never changes without the epoch moving, so a read still valid at its
+epoch was taken while no window was open.
 
 The registry is keyed by physical collection name and holds nothing else: no user, no session and no
 active collection, so it never selects what a request works on. Standard library only.
