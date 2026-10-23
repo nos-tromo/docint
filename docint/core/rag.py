@@ -9341,7 +9341,11 @@ class RAG:
         for node_id in node_ids:
             try:
                 node = docstore.get_node(node_id, raise_error=False)
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "A carried passage could not be read from the docstore ({}); the vector store is tried instead",
+                    type(exc).__name__,
+                )
                 continue
             if node is None or not node.get_content(metadata_mode=MetadataMode.NONE).strip():
                 continue

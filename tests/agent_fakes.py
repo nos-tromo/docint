@@ -229,6 +229,7 @@ def turn_budget(*, reasoning: bool = False) -> TurnBudget:
         ctx_window=8192,
         reasoning=reasoning,
         char_token_ratio=3.5,
+        # A sizing fake for tool replies, deliberately not the planned prompt size (PLANNED_SYSTEM_TOKENS).
         system_tokens=900,
         tool_schema_tokens=PLANNED_SCHEMA_TOKENS,
         history_tokens=1300,

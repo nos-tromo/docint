@@ -2827,6 +2827,45 @@ def test_a_round_short_of_room_clears_seen_replies_instead_of_withdrawing() -> N
     assert [replies["call_a"], replies["call_b"]] == [CLEARED.format(refs="[1]")] * 2
 
 
+def test_a_round_whose_longest_replies_will_not_fit_gets_room_for_its_shortest_instead(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """Clearing that cannot hold a round's longest replies still makes room for its shortest, and the round runs.
+
+    The first search reply shows one section, 383 tokens with its round's message, leaving 1557 of
+    the 1940 tokens of room. The second round's search and seventeen calls to a tool the turn does
+    not offer cost 404 tokens to ask and 1287 at the least to answer, 2112 at the most. The first
+    reply's stub frees 262: 1819 tokens, room for the least (1691) and not for the most (2516). The
+    stub is cut and the round is not withdrawn; its search, left with no room for a full reply, is
+    never run.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2)})
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(17)]
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei"), *unoffered),
+            _answer(),
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(search), budget=TWO_REPLIES)))
+
+    assert search.queries == ["Hafenplan eins"]
+    assert (result.reason, result.steps, "".join(texts)) == ("context_budget", 2, ANSWER)
+    replies = _tool_replies(llm, 2)
+    assert len(replies) == 2 + len(unoffered)
+    assert replies["call_a"] == CLEARED.format(refs="[1]")
+    assert replies["call_b"] == error_reply("search", NO_ROOM_REPLY, kind="no_room").text
+    freed = message_cost(_tool_replies(llm, 1)["call_a"], 3.5) - message_cost(replies["call_a"], 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {freed} tokens"
+    ]
+
+
 def test_clearing_that_cannot_make_room_changes_nothing(loguru_caplog_info: LogCaptureFixture) -> None:
     """Clearing is priced first: when every reply it may clear would still leave a round short, none is cleared.
 

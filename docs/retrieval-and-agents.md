@@ -690,7 +690,8 @@ A reply numbers only what it shows:
   with narrower words.
 
 A call made before is answered from memory and never run again; a `read` only
-while its passage is unchanged. A call is the same call when it names the same
+while its passage is unchanged and its reply not cleared to make room (see
+[Making room](#making-room)). A call is the same call when it names the same
 tool and its arguments are equal, compared on one line and case-folded. A tool
 may key its own repeats instead (`recall_key`): `keyword` keys a call by its
 field and the index tokens or exact values of its words, and `keyframes` by its
@@ -1127,8 +1128,9 @@ without finding it again (`SessionManager._agent_window`,
 - **Which answers.** The exchanges the window sends as messages (see
   [Conversation history](#conversation-history)): the last two, or one with
   reasoning on. An answer's markers (`[3]`, `[3, 4]`, `[3–5]`) name its stored
-  citations by position, as replay numbers them. Only those turns' citations
-  are read, in one query.
+  citations by position, as replay numbers them. One query reads the citations
+  of the last two answered turns, even when reasoning cuts the window to one;
+  only the exchanges the window sends carry passages.
 - **How many.** At most 8 passages: the ones cited last, a passage cited twice
   counted once, at its latest citation. Their list takes at most 200 tokens of
   the history allowance, and when its lines do not all fit, the oldest give

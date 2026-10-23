@@ -2221,6 +2221,27 @@ def test_a_docstore_entry_that_cannot_be_read_is_looked_up_in_the_store(
     assert loguru_caplog.messages == []
 
 
+def test_an_unreadable_docstore_entry_is_noted_by_its_exception_type_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A docstore that fails for an id leaves one DEBUG line naming the exception's type, never the id or its text.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _carrying(monkeypatch, _store(), _Docstore(failing=SECTION_ID))
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]), level="DEBUG")
+    try:
+        carried = _carry(rag, [SECTION_ID, CHUNK_ID], target="documents")
+    finally:
+        logger.remove(sink)
+
+    assert [scored.node.node_id for scored in carried] == [CHUNK_ID]
+    assert [line for line in messages if line.startswith("A carried passage ")] == [
+        "A carried passage could not be read from the docstore (ValueError); the vector store is tried instead"
+    ]
+    assert not any(SECTION_ID in line or "invented corrupt entry" in line for line in messages)
+
+
 def test_a_collection_without_an_image_companion_carries_its_text_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a companion, a cited picture is not found, and nothing is read from a collection that does not exist.
 

@@ -149,12 +149,12 @@ While it works, the turn lists each step as it happens:
   its earlier answers cite, which it starts out holding as its first sources.
   The row opens the trail, ahead of any search, and stays in it once the turn
   is done: in the disclosure below with the turn's other steps, or, when the
-  turn searched nothing, alone as a line under the answer.
+  turn took no other step, alone as a line under the answer.
 
 When the turn finishes, its steps fold behind a **Searches behind this
 answer** disclosure where the live list stood. Every agent turn with a step
 besides its pinned selection and its carried passages gets one, lookups
-included. A follow-up that only carried passages searched nothing, so its row
+included. A follow-up that only carried passages took no other step, so its row
 stands as a line under the answer, with no disclosure. A turn whose stream
 failed keeps the steps it showed, in the same form, above the error.
 
