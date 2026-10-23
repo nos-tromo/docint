@@ -47,9 +47,9 @@ reply has been read, and a picture seen, once a model call that began carried it
 between rounds never touches the round just answered. A stub keeps the reply's ``keep`` text and
 names its passages for ``read(n)``; a cleared read is forgotten, so the same read shows its
 passage again; an error reply is never cleared. Clearing is priced first: when it cannot make the
-room, nothing changes. Before a forced answer the stubs are put back, newest first, while each
-fits (:meth:`AgentLoop._restore`), and retired pictures stay out; after the overflow cut,
-nothing is cleared, retired or put back.
+room, nothing changes. Before a forced answer what making room took out is put back
+(:meth:`AgentLoop._restore`): the retired pictures first, as the cap allows, then the stubs,
+each newest first while it fits; after the overflow cut, nothing is cleared, retired or put back.
 Only a call its tool answered is a step in the trail; an error reply, for arguments that will
 not do or for a call that did not run or failed, reaches the model alone, and its round logs it
 by tool and kind. A call that could not be prepared, whose search failed or found no slot, or
@@ -61,10 +61,10 @@ that the turn has not shown, a call answered from memory included, are shown to 
 its tool replies, within the prompt's cap and the room left: a picture the turn holds but has not
 shown, a carried one or one the cap kept back, reaches the model when a later search, listing or
 read shows or names its passage. A picture the prompt carries is never attached twice, and one
-retired to make room comes back only for a read of its passage, fresh or from memory: a search
-or listing that names it again does not bring it back. A round refused with pictures is sent
-once more without those still attached (see :mod:`~docint.agents.turn.images` and
-:meth:`AgentLoop._round`).
+retired to make room comes back only for a read of its passage, fresh or from memory, or when a
+forced answer puts it back: a search or listing that names it again does not bring it back. A
+round refused with pictures is sent once more without those still attached (see
+:mod:`~docint.agents.turn.images` and :meth:`AgentLoop._round`).
 
 Carried passages. A follow-up starts out holding the passages its earlier answers cite, which the
 window lists: they are seeded as ``[1..k]`` before the first round, each with its opening counted
@@ -817,16 +817,25 @@ class AgentLoop:
         return stubs
 
     def _restore(self, turn: _Turn) -> None:
-        """Put cleared replies back for a forced answer, newest first, while each fits the room left.
+        """Put back for a forced answer what making room took out: retired pictures first, then cleared replies.
 
-        The first that does not fit stops it. Retired pictures stay out. Nothing is put back once
-        the replies were cut after an overflow.
+        Each kind comes back newest first while each fits the room left, and the first that does
+        not fit stops it; a picture message must fit the prompt's cap too, and one holding a
+        picture a read showed again stays retired (see
+        :meth:`~docint.agents.turn.images.TurnImages.restore`). Pictures go first: making room
+        took them out last, since a visual answer rests on them. Nothing is put back once the
+        replies were cut after an overflow.
 
         Args:
             turn (_Turn): The turn, about to answer.
         """
         if turn.shortened:
             return
+        retired = turn.images.retired
+        turn.transcript, grown, back = turn.images.restore(turn.transcript, room=self._room - turn.spent)
+        turn.spent += grown
+        if back:
+            logger.info("An agent turn restored {} of its {} retired picture messages for its answer", back, retired)
         cleared = [record for record in turn.replies if record.cleared]
         restored = 0
         for record in reversed(cleared):
@@ -1160,7 +1169,8 @@ class AgentLoop:
     def _final_round(self, turn: _Turn) -> Iterator[AgentProgress | str | AgentResult]:
         """Make the model answer with no tool to choose, and end the turn.
 
-        Replies cleared to make room are put back first, as far as they fit (see :meth:`_restore`).
+        Pictures retired and replies cleared to make room are put back first, pictures first, as
+        far as they fit (see :meth:`_restore`).
         A reply that holds tool calls and no text is sent once more, declaring no tools (see
         :meth:`_resend_without_tools`).
 

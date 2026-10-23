@@ -2742,7 +2742,7 @@ def _room_lines(captured: LogCaptureFixture) -> list[str]:
     return [
         line
         for line in captured.messages
-        if "picture messages to go on" in line or "tool replies for its answer" in line
+        if any(part in line for part in ("picture messages to go on", "for its answer"))
     ]
 
 
@@ -4631,7 +4631,8 @@ def test_a_search_that_finds_a_retired_picture_again_does_not_show_it() -> None:
     """Only a read brings a retired picture back: a search that finds its frame again names it and fetches nothing.
 
     The turn retires its first picture as in the tests above; its third search finds the first
-    frame again, which its reply names as shown before.
+    frame again, which its reply names as shown before. Only the forced answer puts the picture
+    back, where it stood, with no fetch.
     """
     store = ThumbnailStore(0, 1)
     search = ScriptedSearch([frame_passage(0)], [frame_passage(1)], [frame_passage(0)])
@@ -4650,8 +4651,115 @@ def test_a_search_that_finds_a_retired_picture_again_does_not_show_it() -> None:
 
     assert "Also matched, shown before: [1]." in _tool_replies(llm, 3)["call_c"]
     assert store.fetches == [["frame-0"], ["frame-1"]]
-    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], LOOP_FINAL_NOTE]
+    assert _picture_turns(llm, 3) == [[thumbnail_url(0)], [thumbnail_url(1)], LOOP_FINAL_NOTE]
     assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+
+
+#: An invented caption long enough that a search shows only part of it, and a read most of a reply.
+LONG_CAPTION = ("Zwei Personen in Regenjacken stehen am Hafen unter bedecktem Himmel, Möwen kreisen. " * 30).strip()
+#: The calls of a visual turn that finds two long-captioned frames and reads the second.
+LONG_FRAME_CALLS = (*FRAME_CALLS[:2], ("call_c", "read", {"n": 2}))
+#: A turn whose forced answer, after those calls, has 639 tokens left with its first picture retired.
+LONG_FRAMES = _budget_with_room(2760)
+
+
+def _long_frame(index: int) -> NodeWithScore:
+    """Build a frame of the invented clip, as ``frame_passage`` does, with a caption that runs long.
+
+    Args:
+        index (int): The frame's place in the clip; its thumbnail is fetched by ``frame-{index}``.
+
+    Returns:
+        NodeWithScore: The frame.
+    """
+    return scored_node(
+        f"frame-{index}",
+        LONG_CAPTION,
+        filename=CLIP,
+        image_id=f"harbour-walk-image-{index}",
+        source_file=CLIP,
+        keyframe_index=index,
+    )
+
+
+def _long_frames(llm: Any, store: ThumbnailStore) -> AgentLoop:
+    """Build a visual loop whose image search finds a long-captioned frame a run, frame 0 first.
+
+    Args:
+        llm (Any): The model double.
+        store (ThumbnailStore): The thumbnail fetcher.
+
+    Returns:
+        AgentLoop: The loop: three rounds, six pictures a prompt, the room of ``LONG_FRAMES``.
+    """
+    search = ScriptedSearch([_long_frame(0)], [_long_frame(1)])
+    return scripted_loop(
+        llm,
+        target="visual",
+        search_images=search,
+        fetch_thumbnails=store,
+        max_images=6,
+        max_rounds=3,
+        budget=LONG_FRAMES,
+    )
+
+
+def test_a_forced_answer_puts_a_retired_picture_back_before_a_cleared_reply(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """Before a forced answer the retired pictures come back first, where they stood, and then the cleared replies.
+
+    Between the second and third rounds the turn clears its first reply (261 tokens) and retires
+    its first picture (586). Its forced answer then has 639 tokens left: the picture comes back
+    first, and the reply, which would take 261 more, stays a stub. Put back first, the reply would
+    have left no room for the picture.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    store = ThumbnailStore(0, 1)
+    llm = streaming_tool_llm([*(call_round(call) for call in LONG_FRAME_CALLS), answer_round(ANSWER)])
+
+    _, _, result = _drain(_turn(_long_frames(llm, store)))
+
+    assert _picture_turns(llm, 2) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)]]
+    assert _picture_turns(llm, 3) == [[thumbnail_url(0)], [thumbnail_url(1)], LOOP_FINAL_NOTE]
+    assert _tool_replies(llm, 3)["call_a"] == CLEARED.format(refs="[1]")
+    assert store.fetches == [["frame-0"], ["frame-1"]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+    assert _room_lines(loguru_caplog_info) == [
+        "An agent turn cleared 1 earlier tool replies and 1 picture messages to go on, freeing 847 tokens",
+        "An agent turn restored 1 of its 1 retired picture messages for its answer",
+    ]
+
+
+def test_a_refusal_after_a_restore_keeps_the_restored_picture_shown(loguru_caplog: LogCaptureFixture) -> None:
+    """A forced answer refused with pictures takes them back: a restored one returns to its line and stays shown.
+
+    The turn runs as in the test above; its forced answer, carrying the restored picture and the
+    second one, is refused before its first event and sent again without them.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    store = ThumbnailStore(0, 1)
+    calls = [call_round(call) for call in LONG_FRAME_CALLS]
+    llm = streaming_tool_llm([*calls, bad_request(REFUSED_PICTURES), answer_round(ANSWER)])
+
+    _, texts, result = _drain(_turn(_long_frames(llm, store)))
+
+    assert _pictures_by_call(llm) == [0, 1, 1, 2, 0]
+    assert _picture_turns(llm, 4) == [RETIRED.format(refs="[1]"), LOOP_FINAL_NOTE]
+    assert (result.reason, result.images_attached, _stamped(result), "".join(texts)) == (
+        "round_budget",
+        1,
+        [1],
+        ANSWER,
+    )
+    assert loguru_caplog.messages == [
+        "An agent round carrying 2 pictures failed before its first event (BadRequestError); "
+        "it is sent again without them"
+    ]
 
 
 def test_a_read_answered_from_memory_shows_the_picture_the_cap_kept_back() -> None:

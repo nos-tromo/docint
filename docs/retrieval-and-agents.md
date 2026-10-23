@@ -929,17 +929,23 @@ goes on.
   retiring every picture that may be retired, would still leave the room
   short, nothing changes and the limit stands.
 - **Restored before a forced answer.** When a limit makes the model answer,
-  the cleared replies are put back first, newest first, while each fits the
-  room left; the first that does not fit stops it. Retired pictures stay out.
-  An answer the model writes by choice while some replies are stubs stands as
-  written, and validation still checks the passages it cites.
+  what making room took out is put back before it answers. The retired
+  pictures come first, each where it stood, newest first, while each fits the
+  room left and the prompt's cap. Then the cleared replies, newest first,
+  while each fits the room still left. For either, the first that does not fit
+  stops it. Pictures go first because making room took them out last: a visual
+  answer rests on them. A picture message holding a picture that a `read(n)`
+  already showed again stays retired, so no picture is shown twice. An answer
+  the model writes by choice while some replies are stubs stands as written,
+  and validation still checks the passages it cites.
 - **Nothing after an overflow cut.** Once the overflow retry has cut every
   tool reply, nothing is cleared, retired or put back.
 
 Each clearing logs one INFO line with counts only (`An agent turn cleared 2
 earlier tool replies and 1 picture messages to go on, freeing 605 tokens`), and
-so does a restore (`An agent turn restored 1 of its 2 cleared tool replies for
-its answer`). The SPA shows neither.
+so does each kind of restore (`An agent turn restored 1 of its 1 retired
+picture messages for its answer`, `An agent turn restored 1 of its 2 cleared
+tool replies for its answer`). The SPA shows neither.
 
 ### Fallback to the plain path
 
@@ -1040,11 +1046,13 @@ then the images.
   and the prompt's cap and the room left allow: it is shown in a message of
   its own after that round's replies. A search or keyframe listing that finds
   it again only names it, so the room just freed is not spent again on every
-  mention.
+  mention. Before a forced answer, retired pictures are put back where they
+  stood, as far as the room and the cap allow (see [Making room](#making-room)).
 - A round that carries pictures and fails before its first event is taken as
   refusing them. The pictures still attached are taken back, and the round is
   sent once more without them. A retired picture was seen by calls that began,
-  so its line stays and it still counts as shown.
+  so its line stays and it still counts as shown. So does a picture a forced
+  answer put back: its line returns where it stood.
 
 The response reports `visual: {"images_attached": n}`: the pictures retired to
 make room plus those still attached when the turn ended, each counted once, so

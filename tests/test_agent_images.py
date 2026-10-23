@@ -482,3 +482,100 @@ def test_a_drop_takes_back_only_the_pictures_still_attached() -> None:
     assert (kept[1] is retired[0][1], kept[1].content, freed) == (True, RETIRED.format(refs="[1]"), _price(2))
     assert (images.count, images.shown, _stamped(images.stamp(_ledger(*passages)))) == (0, 1, [True, None])
     assert images.attach(_numbered(passages[1], first=2), room=WIDE, after_round=3) is None
+
+
+def _two_retired(images: TurnImages) -> tuple[list[ChatMessage], ChatMessage, ChatMessage]:
+    """Attach frame 0, then frames 1 and 2, in two messages, and retire both.
+
+    Args:
+        images (TurnImages): The turn's pictures, over a store holding frames 0 to 2.
+
+    Returns:
+        tuple[list[ChatMessage], ChatMessage, ChatMessage]: The transcript, each message a line,
+        and the two picture messages as they were attached.
+    """
+    first = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=1)
+    second = images.attach(_numbered(frame_passage(1), frame_passage(2), first=2), room=WIDE, after_round=2)
+    assert first is not None and second is not None
+    once = images.retire_oldest([_reply("call_a"), first[0], _reply("call_b"), second[0]], seen_through=2)
+    assert once is not None
+    twice = images.retire_oldest(once[0], seen_through=2)
+    assert twice is not None
+    return twice[0], first[0], second[0]
+
+
+def test_restore_puts_retired_messages_back_where_they_stood_newest_first_while_they_fit() -> None:
+    """Retired picture messages come back newest first, each where it stood; the first that does not fit stops it."""
+    images = _images(ThumbnailStore(0, 1, 2))
+    retired, first, second = _two_retired(images)
+    newest = _price(2, 3) - _retired_cost("[2], [3]")
+    oldest = _price(1) - _retired_cost("[1]")
+
+    kept, grown, back = images.restore(retired, room=newest + oldest - 1)
+    rest, more, again = images.restore(kept, room=WIDE)
+
+    assert [message is before for message, before in zip(kept, retired, strict=True)] == [True, True, True, False]
+    assert (kept[3] is second, grown, back) == (True, newest, 1)
+    assert (rest[1] is first, rest[3] is second, more, again) == (True, True, oldest, 1)
+    assert (images.count, images.shown, images.retired) == (3, 3, 0)
+
+
+def test_restore_stops_at_a_message_the_cap_cannot_hold() -> None:
+    """A message comes back only while the prompt's cap holds its pictures beside those attached since."""
+    images = _images(ThumbnailStore(0, 1, 2, 3), max_images=3)
+    retired, _, second = _two_retired(images)
+    later = images.attach(_numbered(frame_passage(3), first=4), room=WIDE, after_round=3)
+    assert later is not None
+
+    kept, grown, back = images.restore([*retired, later[0]], room=WIDE)
+
+    assert (kept[1].content, kept[3] is second) == (RETIRED.format(refs="[1]"), True)
+    assert (grown, back, images.count, images.retired) == (_price(2, 3) - _retired_cost("[2], [3]"), 1, 3, 1)
+
+
+def test_restore_passes_over_a_message_whose_picture_a_read_showed_again() -> None:
+    """A retired message holding a picture a read showed again stays retired: putting it back would show it twice."""
+    images = _images(ThumbnailStore(0, 1, 2))
+    retired, _, second = _two_retired(images)
+    again = images.attach(_numbered(frame_passage(0)), room=WIDE, after_round=3, read={1})
+    assert again is not None
+
+    kept, grown, back = images.restore([*retired, again[0]], room=WIDE)
+
+    assert (kept[1].content, kept[3] is second, kept[4] is again[0]) == (RETIRED.format(refs="[1]"), True, True)
+    assert (grown, back, images.count, images.shown) == (_price(2, 3) - _retired_cost("[2], [3]"), 1, 3, 3)
+
+
+def test_restore_puts_nothing_back_after_a_drop() -> None:
+    """After a refusal the turn shows no more pictures, so a forced answer puts no retired one back."""
+    images = _images(ThumbnailStore(0, 1, 2))
+    retired, _, _ = _two_retired(images)
+    kept, _ = images.drop(retired)
+
+    restored, grown, back = images.restore(kept, room=WIDE)
+
+    assert ([message is before for message, before in zip(restored, kept, strict=True)], grown, back) == (
+        [True, True, True, True],
+        0,
+        0,
+    )
+    assert (images.count, images.retired) == (0, 2)
+
+
+def test_a_drop_after_a_restore_puts_its_line_back_and_its_picture_stays_shown() -> None:
+    """A restored message was seen before it was retired: a refusal puts its line back, and it stays shown."""
+    passages = (frame_passage(0), frame_passage(1))
+    images = _images(ThumbnailStore(0, 1))
+    first = images.attach(_numbered(passages[0]), room=WIDE, after_round=1)
+    second = images.attach(_numbered(passages[1], first=2), room=WIDE, after_round=2)
+    assert first is not None and second is not None
+    retired = images.retire_oldest([_reply("call_a"), first[0], _reply("call_b"), second[0]], seen_through=1)
+    assert retired is not None
+    restored, _, back = images.restore(retired[0], room=WIDE)
+    assert (back, restored[1] is first[0]) == (1, True)
+
+    kept, freed = images.drop(restored)
+
+    assert [message.role for message in kept] == [MessageRole.TOOL, MessageRole.USER, MessageRole.TOOL]
+    assert (kept[1] is retired[0][1], freed) == (True, _price(1) - _retired_cost("[1]") + _price(2))
+    assert (images.count, images.shown, _stamped(images.stamp(_ledger(*passages)))) == (0, 1, [True, None])

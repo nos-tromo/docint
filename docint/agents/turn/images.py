@@ -22,7 +22,9 @@ A message is seen once a model call that began carried it: one attached after a 
 (:data:`RETIRED_PICTURES`) and its pictures leave the prompt's count, so later ones may follow.
 A retired picture is attached again only when a round reads its passage, fresh or from memory,
 in that round's message and within its cap and room; a search or listing that names it does not
-bring it back, so the room just freed is not spent again on every mention.
+bring it back, so the room just freed is not spent again on every mention. Before a forced
+answer, the loop puts retired messages back where they stood, newest first, as far as the room
+left and the cap allow (:meth:`TurnImages.restore`).
 
 Stamps. The passages whose pictures the turn showed, retired ones included, are stamped
 ``VISUAL_IMAGES_ATTACHED_KEY`` on the numbered copies the turn's result returns, as
@@ -33,7 +35,7 @@ Refusal. An endpoint may refuse a request that carries pictures: it caps how man
 has no vision tower. :meth:`TurnImages.drop` then takes back every picture still attached, its
 message, stamp and room, and the turn shows no more, as ``VisualImagesMixin._drop_attached_images``
 gives them up. A retired picture was seen by calls that began, so it stays shown and stamped, and
-its line stays.
+its line stays; so does one a restore put back, whose line returns where it stood.
 
 Nothing here logs a caption, a thumbnail or a passage: only exception types.
 """
@@ -65,23 +67,28 @@ RETIRED_PICTURES = (
 
 @dataclass
 class _Attached:
-    """One picture message a turn attached, which the loop may retire to make room.
+    """One picture message a turn attached, which the loop may retire to make room and put back.
 
     Attributes:
         message (ChatMessage): The message the transcript holds: the pictures, or the line that
-            replaced them once retired.
+            replaced them while retired.
+        built (ChatMessage): The picture message as it was attached, which a restore puts back.
         numbers (tuple[int, ...]): The passages whose pictures it shows, by number, ascending.
         pictures (tuple[str, ...]): Their pictures' ``image_id`` values.
-        cost (int): What the message cost as it was sent.
+        cost (int): What the picture message cost as it was sent.
         after_round (int): The tool round after which it was attached.
+        line (ChatMessage | None): The line that stands in for its pictures while retired;
+            ``None`` until it is first retired. A message with one was seen by calls that began.
         retired (bool): Whether the transcript holds its line in place of its pictures.
     """
 
     message: ChatMessage
+    built: ChatMessage
     numbers: tuple[int, ...]
     pictures: tuple[str, ...]
     cost: int
     after_round: int
+    line: ChatMessage | None = None
     retired: bool = False
 
 
@@ -108,6 +115,20 @@ def _retired_text(record: _Attached) -> str:
         str: :data:`RETIRED_PICTURES`, naming the passages whose pictures it showed.
     """
     return RETIRED_PICTURES.format(refs=refs(record.numbers))
+
+
+def _require(record: _Attached, transcript: Sequence[ChatMessage]) -> None:
+    """Check that the transcript holds what a picture message stands as now, found by identity.
+
+    Args:
+        record (_Attached): The picture message.
+        transcript (Sequence[ChatMessage]): The turn's rounds so far.
+
+    Raises:
+        RuntimeError: When the transcript does not hold it, which the turn's records never allow.
+    """
+    if not any(message is record.message for message in transcript):
+        raise RuntimeError("A picture message the turn attached is missing from its transcript.")
 
 
 class TurnImages:
@@ -161,6 +182,26 @@ class TurnImages:
             are not counted, even when an earlier call carried them.
         """
         return len({picture for record in self._attached for picture in record.pictures})
+
+    @property
+    def retired(self) -> int:
+        """How many picture messages are retired now, which a forced answer may put back.
+
+        Returns:
+            int: The picture messages whose lines the transcript holds.
+        """
+        return sum(record.retired for record in self._attached)
+
+    def _saving(self, record: _Attached) -> int:
+        """Return what a picture message frees when its line stands in for it.
+
+        Args:
+            record (_Attached): The picture message.
+
+        Returns:
+            int: Its cost as it was sent, less its line's.
+        """
+        return record.cost - message_cost(_retired_text(record), self._ratio)
 
     def _seen(self, seen_through: int) -> list[_Attached]:
         """Return the picture messages still attached that the model has seen, oldest first.
@@ -253,7 +294,14 @@ class TurnImages:
         cost = self._price(shown)
         numbers = tuple(number for number, _, _ in shown)
         self._attached.append(
-            _Attached(message=message, numbers=numbers, pictures=tuple(pictures), cost=cost, after_round=after_round)
+            _Attached(
+                message=message,
+                built=message,
+                numbers=numbers,
+                pictures=tuple(pictures),
+                cost=cost,
+                after_round=after_round,
+            )
         )
         return message, cost
 
@@ -266,9 +314,7 @@ class TurnImages:
         Returns:
             int: Tokens: each such message still attached, less the line that would replace it.
         """
-        return sum(
-            record.cost - message_cost(_retired_text(record), self._ratio) for record in self._seen(seen_through)
-        )
+        return sum(self._saving(record) for record in self._seen(seen_through))
 
     def retire_oldest(
         self, transcript: Sequence[ChatMessage], *, seen_through: int
@@ -294,32 +340,84 @@ class TurnImages:
         if not seen:
             return None
         record = seen[0]
-        if not any(message is record.message for message in transcript):
-            raise RuntimeError("A picture message the turn attached is missing from its transcript.")
-        text = _retired_text(record)
-        line = ChatMessage(role=MessageRole.USER, content=text)
+        _require(record, transcript)
+        if record.line is None:
+            record.line = ChatMessage(role=MessageRole.USER, content=_retired_text(record))
+        line = record.line
         kept = [line if message is record.message else message for message in transcript]
         record.message, record.retired = line, True
-        return kept, record.cost - message_cost(text, self._ratio)
+        return kept, self._saving(record)
+
+    def restore(self, transcript: Sequence[ChatMessage], *, room: int) -> tuple[list[ChatMessage], int, int]:
+        """Put retired picture messages back where they stood, newest first, while each fits the room and the cap.
+
+        The first that does not fit, in the room left or under the prompt's cap beside the
+        pictures attached now, stops it. A message holding a picture the prompt carries again,
+        which a read showed after it was retired, is passed over: putting it back would show that
+        picture twice. Nothing comes back after a drop: the turn shows no more pictures.
+
+        Args:
+            transcript (Sequence[ChatMessage]): The turn's rounds so far; never changed.
+            room (int): Tokens the transcript may still take.
+
+        Returns:
+            tuple[list[ChatMessage], int, int]: The transcript with the messages put back, every
+            other message the same object; the tokens that takes; and how many came back.
+
+        Raises:
+            RuntimeError: When a retired message's line is not in the transcript, which the
+                turn's records never allow.
+        """
+        kept = list(transcript)
+        grown = back = 0
+        if self._dropped:
+            return kept, grown, back
+        for record in reversed(self._attached):
+            if not record.retired:
+                continue
+            carried = {picture for other in self._attached if not other.retired for picture in other.pictures}
+            if carried.intersection(record.pictures):
+                continue
+            if self.count + len(record.numbers) > self._cap or self._saving(record) > room - grown:
+                break
+            _require(record, kept)
+            kept = [record.built if message is record.message else message for message in kept]
+            record.message, record.retired = record.built, False
+            grown, back = grown + self._saving(record), back + 1
+        return kept, grown, back
 
     def drop(self, transcript: Sequence[ChatMessage]) -> tuple[list[ChatMessage], int]:
         """Take back every picture still attached, its message, stamp and room, and show no more this turn.
 
         A retired picture was seen by calls that began, so it stays shown and stamped, and its
-        line stays in the transcript.
+        line stays in the transcript. So was one a restore put back: its line returns where it
+        stood, and it stays shown and stamped too.
 
         Args:
             transcript (Sequence[ChatMessage]): The turn's rounds so far; never changed.
 
         Returns:
             tuple[list[ChatMessage], int]: The transcript without the picture messages still
-            attached, found by identity, and the tokens they took.
+            attached, found by identity, a restored one's line in its place; and the tokens they
+            took.
         """
-        attached = [record for record in self._attached if not record.retired]
-        built = {id(record.message) for record in attached}
+        kept = list(transcript)
+        freed = 0
+        for record in self._attached:
+            if record.retired:
+                continue
+            if record.line is None:
+                built = record.message
+                kept = [message for message in kept if message is not built]
+                freed += record.cost
+            else:
+                line = record.line
+                kept = [line if message is record.message else message for message in kept]
+                record.message, record.retired = line, True
+                freed += self._saving(record)
         self._attached = [record for record in self._attached if record.retired]
         self._dropped = True
-        return [message for message in transcript if id(message) not in built], sum(record.cost for record in attached)
+        return kept, freed
 
     def stamp(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
         """Stamp the passages whose pictures the model was shown this turn, retired ones included.
