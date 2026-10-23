@@ -721,12 +721,16 @@ targets, never on a `visual` turn or a scoped one, which offers no tools.
 the keyword index's coverage, whether the `_images` companion exists, and the
 payload schemas. It creates no index and does not profile the collection. A
 `documents` turn reads only the main collection, never the companion.
-Readiness is read at most once every 30 s per collection and target (`all` or
-`documents`) in each backend process; a read that failed or found a lane
-uncounted is not kept, so the next turn reads again. An ingest or a deletion in
-that process refreshes it at once; a `make search-index` backfill, which runs
-in its own container, shows within 30 s. The tool is withheld, and the turn
-keeps its other tools, when:
+Readiness is kept for 30 s per collection and target (`all` or `documents`),
+and each check asks for it again before it counts. While this backend process
+writes the collection, during an ingest or while uploaded files are still
+preprocessing, no kept read is used: each turn and each check reads it afresh.
+The end of such a write, a deletion and an index this process creates drop the
+kept read at once. A read that failed or found a lane uncounted is not kept, so
+the next turn reads again. A change made by another process shows within 30 s:
+a `make search-index` backfill, which only adds coverage and indexes, or an
+`ingest` CLI run on a host. The tool is withheld, and the turn keeps its other
+tools, when:
 
 - the request's filters cannot be compiled for Qdrant, since a count would then
   cover other material than the turn searches;
@@ -781,6 +785,9 @@ when more than the text is offered.
   yet backfilled (`make search-index`) and, on `all`, a companion without the
   field's index. The number counts the whole collection, whatever the filters,
   so it can overstate what the filtered count missed.
+- While the collection is being written, a batch stored during a check can be
+  missed by that check. It is neither counted nor reported unchecked, and the
+  next check reads the coverage again.
 
 **Passages.** The passages are retrieved as a search retrieves them, narrowed to
 the matches by the filter that counts them: the same rerank, image floor and

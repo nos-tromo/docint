@@ -3031,7 +3031,7 @@ _AGENT_IDENTITY_KEYS = (
 #: lane in scope was not counted, or the text, which a call matches by default, has no index to match.
 KeywordUnavailable = Literal["filters", "coverage", "text_not_ready"]
 
-#: How long a read of a collection's keyword readiness is reused before the store is read again.
+#: How long a read of a collection's keyword readiness is reused, unless this process writes the collection meanwhile.
 KEYWORD_READINESS_TTL_S = 30.0
 
 
@@ -8315,9 +8315,10 @@ class RAG:
             endpoint that fails partway through would write dense-only
             points into a hybrid collection. Wiring this method to a real
             caller MUST add a ``self.probe_sparse_endpoint()`` call first.
-            It also never calls :meth:`forget_keyword_readiness`, so a turn
-            may reuse the collection's kept keyword readiness for up to
-            ``KEYWORD_READINESS_TTL_S`` after it.
+            It also opens no write window, so a turn may decide on a keyword
+            readiness read before, during, or up to ``KEYWORD_READINESS_TTL_S``
+            after the run. A real caller must wrap it as :meth:`ingest_docs`
+            is wrapped.
         """
         # See ingest_docs: pre-create the Qdrant collection so it stays
         # selectable in the UI even when every embedding batch fails.
@@ -9164,8 +9165,8 @@ class RAG:
 
         A read covers the keyword index's coverage per lane, whether the image companion
         exists, and one payload schema per collection. It is kept per physical collection and
-        lane scope for ``KEYWORD_READINESS_TTL_S``, and only while nothing in this process
-        writes the collection (:mod:`docint.core.collection_writes`): a kept read is reused only
+        lane scope for ``KEYWORD_READINESS_TTL_S``, and reused only while nothing in this process
+        writes the collection (:mod:`docint.core.collection_writes`): a kept read is served only
         at the epoch it was read at, and never while a write window on the collection is
         open. Nothing that failed is kept: a lane in scope that was not counted (``coverage``),
         a read that raised, and a schema that came back empty, which reads the same as one that
@@ -9225,10 +9226,10 @@ class RAG:
 
         It moves the collection's epoch (:func:`docint.core.collection_writes.touch`), which voids
         the read any engine of this process kept of it, in either lane scope, and drops this
-        engine's own. Called when this engine deletes the collection or creates its indexes,
-        and by the API after an ingest. A change made by another process shows once the kept
-        read is ``KEYWORD_READINESS_TTL_S`` old. A read of this collection already in flight is
-        returned to its turn but not kept.
+        engine's own. Called when this engine deletes the collection or creates its indexes; an
+        ingest needs no call, because it is a write window. A change made by another process
+        shows once the kept read is ``KEYWORD_READINESS_TTL_S`` old. A read of this collection
+        already in flight is returned to its turn but not kept.
 
         Args:
             collection (str): The physical main collection.
@@ -9263,8 +9264,8 @@ class RAG:
         nor reported unchecked. The fields offered are decided once, on the read the match is
         built with (:func:`_keyword_plan`). Each check asks for the readiness again before it
         counts, in the same lane scope, and counts by that read: a write since the turn began,
-        or a read past its window, is read afresh, and a field no longer planned there has its
-        count reported unavailable.
+        or a read past its window, is read afresh. A check whose read finds a lane in scope
+        uncounted (``coverage``), or its field no longer planned, reports its count unavailable.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
@@ -9388,7 +9389,7 @@ class RAG:
             current = self._keyword_readiness(collection, with_images=with_images)
             plan = None if isinstance(current, str) else _keyword_plan(current)
             if plan is None or field not in plan[0]:
-                # A lane went uncounted, or the field lost its index: no count of it would be exact.
+                # A lane went uncounted, or the field is no longer planned: no count of it would be exact.
                 return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords)
             joins, unchecked = plan
             conditions = _filter(words, field, request_filter)
