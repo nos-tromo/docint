@@ -721,10 +721,12 @@ targets, never on a `visual` turn or a scoped one, which offers no tools.
 the keyword index's coverage, whether the `_images` companion exists, and the
 payload schemas. It creates no index and does not profile the collection. A
 `documents` turn reads only the main collection, never the companion.
-Readiness is read at most once every 30 s per collection in each backend
-process; an ingest or a deletion in that process refreshes it at once, and a
-`make search-index` backfill, which runs in its own container, shows within
-30 s. The tool is withheld, and the turn keeps its other tools, when:
+Readiness is read at most once every 30 s per collection and target (`all` or
+`documents`) in each backend process; a read that failed or found a lane
+uncounted is not kept, so the next turn reads again. An ingest or a deletion in
+that process refreshes it at once; a `make search-index` backfill, which runs
+in its own container, shows within 30 s. The tool is withheld, and the turn
+keeps its other tools, when:
 
 - the request's filters cannot be compiled for Qdrant, since a count would then
   cover other material than the turn searches;

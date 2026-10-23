@@ -8280,6 +8280,9 @@ class RAG:
             endpoint that fails partway through would write dense-only
             points into a hybrid collection. Wiring this method to a real
             caller MUST add a ``self.probe_sparse_endpoint()`` call first.
+            It also never calls :meth:`forget_keyword_readiness`, so a turn
+            may reuse the collection's kept keyword readiness for up to
+            ``KEYWORD_READINESS_TTL_S`` after it.
         """
         # See ingest_docs: pre-create the Qdrant collection so it stays
         # selectable in the UI even when every embedding batch fails.
