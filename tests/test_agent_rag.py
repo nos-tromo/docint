@@ -1881,6 +1881,52 @@ def test_forgetting_a_collection_drops_both_its_lane_scopes_and_no_other(monkeyp
     assert rag.forget_keyword_readiness("never-read") is None
 
 
+def test_a_forget_during_a_read_keeps_that_read_out_of_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forget that lands while a turn is reading is not undone: that read answers its turn and is not kept.
+
+    An ingest ending mid-read would otherwise see the read it overtook served for the whole window.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    companion = f"{PHYSICAL}_images"
+    client = KeywordClient(
+        {PHYSICAL: ready_schema("text"), companion: ready_schema("text")}, counts={PHYSICAL: 10, companion: 4}
+    )
+    rag._qdrant_client = cast(Any, client)
+    real = client.get_collection
+    overtaken: list[str] = []
+
+    def _forgotten_mid_read(collection_name: str) -> Any:
+        """Read a schema as the double does, having the collection forgotten the first time, as an ingest ending would.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: The double's answer.
+        """
+        if not overtaken:
+            overtaken.append(collection_name)
+            rag.forget_keyword_readiness(PHYSICAL)
+        return real(collection_name)
+
+    monkeypatch.setattr(client, "get_collection", _forgotten_mid_read)
+
+    first = _offered(rag, PHYSICAL, "all")
+    after_first = _store_reads(client)
+    second = _offered(rag, PHYSICAL, "all")
+    after_second = _store_reads(client)
+    _offered(rag, PHYSICAL, "all")
+
+    assert overtaken == [PHYSICAL]
+    assert first == second == ("text",)
+    assert all(later > earlier for later, earlier in zip(after_second, after_first, strict=True))
+    assert _store_reads(client) == after_second
+
+
 def test_ensuring_the_field_indexes_forgets_the_readiness_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """The indexes ensured decide which fields are offered, so the first ensure of a collection drops its kept read.
 

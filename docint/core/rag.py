@@ -3372,6 +3372,7 @@ class RAG:
         default_factory=dict, init=False, repr=False
     )
     _keyword_readiness_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _keyword_readiness_generation: int = field(default=0, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
     collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
@@ -9125,7 +9126,7 @@ class RAG:
         that was not counted (``coverage``), a read that raised, and a schema that came back
         empty, which reads the same as one that could not be read, so an outage neither
         withholds nor offers keyword for the whole window. :meth:`forget_keyword_readiness`
-        drops a kept read early.
+        drops a kept read early, and a read it overtook is returned to its turn but not kept.
 
         Args:
             collection (str): The physical main collection.
@@ -9143,6 +9144,7 @@ class RAG:
         key = (collection, with_images)
         with self._keyword_readiness_lock:
             kept = self._keyword_readiness_cache.get(key)
+            generation = self._keyword_readiness_generation
         if kept is not None and now - kept[0] < KEYWORD_READINESS_TTL_S:
             return kept[1]
         client = self.qdrant_client
@@ -9166,7 +9168,8 @@ class RAG:
         )
         if read.main_schema and (read.image_schema or not in_scope):
             with self._keyword_readiness_lock:
-                self._keyword_readiness_cache[key] = (now, read)
+                if self._keyword_readiness_generation == generation:
+                    self._keyword_readiness_cache[key] = (now, read)
         return read
 
     def forget_keyword_readiness(self, collection: str) -> None:
@@ -9175,12 +9178,14 @@ class RAG:
         Called when this engine deletes or ingests the collection or creates its field
         indexes, and by the API after an ingest, which runs on an engine of its own. A
         change made by another process shows once the kept read is
-        ``KEYWORD_READINESS_TTL_S`` old.
+        ``KEYWORD_READINESS_TTL_S`` old. It also keeps out any read already in flight, of this
+        collection or another: that read is returned to its turn but not kept.
 
         Args:
             collection (str): The physical main collection.
         """
         with self._keyword_readiness_lock:
+            self._keyword_readiness_generation += 1
             for with_images in (True, False):
                 self._keyword_readiness_cache.pop((collection, with_images), None)
 
