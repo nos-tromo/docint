@@ -45,6 +45,7 @@ from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TOOL, probe_tool
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
 from docint.core import collection_writes
+from docint.core.ingest.preprocess import PreprocessPool, preprocess_key
 from docint.core.rag import (
     AGENT_LEDGER_CAP,
     AGENT_METADATA_VALUE_CHARS,
@@ -2307,6 +2308,66 @@ def test_a_turn_during_another_engines_ingest_counts_what_the_ingest_has_written
 
     assert [(result.matches, result.unchecked) for result in during] == [(3, 5)]
     assert read_afresh != after_run
+    assert _store_reads(client) == read_afresh
+
+
+def test_a_turn_while_an_upload_is_preprocessing_counts_the_images_already_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn while an uploaded file is being preprocessed counts the images that task has stored so far.
+
+    The serving engine read the collection before the upload: no image companion, every chunk indexed. The task is
+    a real pool task, as the upload handler queues one, and stores matching images in a new companion before it
+    goes on running. Reusing the read made before the upload, a turn would count no image and report nothing
+    unchecked, an exact zero for matches the task had stored. Instead each turn meanwhile reads the collection
+    afresh and keeps nothing; once the task has settled, the next turn reads afresh once more and that read is kept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    serving = _rag(monkeypatch)
+    client, _ = _keyword_ready(monkeypatch, serving, collection=PHYSICAL, matches=2)
+    lanes = keyword_coverage(monkeypatch, {PHYSICAL: (10, 10)})
+    companion = f"{PHYSICAL}_images"
+    stored = threading.Event()
+    release = threading.Event()
+
+    def _preprocess() -> None:
+        """Store matching images in a new companion, then go on running until released."""
+        client.schemas[companion] = ready_schema("text")
+        client.counts[companion] = 3
+        lanes[companion] = (3, 3)
+        stored.set()
+        release.wait(timeout=5)
+
+    _offered(serving, PHYSICAL, "all")
+    before_upload = _store_reads(client)
+    _offered(serving, PHYSICAL, "all")
+    assert _store_reads(client) == before_upload
+    pool = PreprocessPool(max_workers=1)
+    try:
+        pool.submit(preprocess_key("image", PHYSICAL, "h"), _preprocess)
+        assert stored.wait(timeout=5)
+        with serving.collection_scope(PHYSICAL):
+            matcher = serving._agent_keyword_matcher(
+                metadata_filter_rules=None, metadata_filters_active=False, retrieval_target="all"
+            )
+            assert matcher is not None
+            counted = matcher.run("Hafenfest", "text")
+        meanwhile = [_store_reads(client)]
+        _offered(serving, PHYSICAL, "all")
+        meanwhile.append(_store_reads(client))
+    finally:
+        release.set()
+        pool.wait_idle(timeout=5)
+        pool.shutdown()
+    _offered(serving, PHYSICAL, "all")
+    read_afresh = _store_reads(client)
+    _offered(serving, PHYSICAL, "all")
+
+    assert (counted.matches, counted.unchecked) == (5, 0)
+    assert all(later != earlier for earlier, later in pairwise([before_upload, *meanwhile, read_afresh]))
     assert _store_reads(client) == read_afresh
 
 

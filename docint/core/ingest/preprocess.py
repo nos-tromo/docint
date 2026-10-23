@@ -17,9 +17,10 @@ are the memory, and a failed task is simply tried again.
 
 Concurrency is threads, not asyncio, for the reasons ``streaming_executor``
 gives: the sync ingest path is canonical and every stage here is HTTP-bound.
-The class itself has no docint domain imports; the task builders below import
-theirs lazily so the readers and pre-passes that call back into this pool do
-not close an import cycle.
+The class itself has no docint domain imports beyond ``collection_writes``,
+which is standard-library only; the task builders below import theirs lazily so
+the readers and pre-passes that call back into this pool do not close an import
+cycle.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from loguru import logger
 
+from docint.core import collection_writes
 from docint.core.ingest.images_service import ImageAsset, ImageIngestionService, IngestContext
 from docint.utils.env_cfg import load_ingestion_env, load_logging_env, load_nextext_env
 from docint.utils.hashing import compute_file_hash
@@ -308,18 +310,36 @@ class PreprocessPool:
     def submit(self, key: str, fn: Callable[[], T]) -> Future[T]:
         """Start *fn* under *key*, or return the future already running it.
 
+        A new task is a write window on its key's collection
+        (:mod:`docint.core.collection_writes`), from before it is queued until it settles, however
+        it settles. A key naming no collection opens none, and a key already in flight opens no
+        second.
+
         Args:
             key (str): Dedupe key, from :func:`preprocess_key`.
             fn (Callable[[], T]): Zero-argument task.
 
         Returns:
             Future[T]: The in-flight future for *key*.
+
+        Raises:
+            RuntimeError: When the executor refuses the task, as after :meth:`shutdown`; the window
+                it opened is closed first.
         """
         with self._lock:
             existing = self._futures.get(key)
             if existing is not None:
                 return existing
-            future: Future[T] = self._executor_for(key).submit(fn)
+            collection = collection_of_key(key)
+            close = collection_writes.begin(collection) if collection else None
+            try:
+                future: Future[T] = self._executor_for(key).submit(fn)
+            except BaseException:
+                if close is not None:
+                    close()
+                raise
+            if close is not None:
+                future.add_done_callback(lambda _done, close=close: close())
             self._futures[key] = future
             # Asked for, not yet done: the bar has to appear when the work
             # starts, which is the whole point of preprocessing on upload.
