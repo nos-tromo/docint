@@ -15,7 +15,6 @@ covered separately by :mod:`tests.test_retry`.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from pathlib import Path
@@ -285,40 +284,6 @@ def test_fail_fast_aborts_on_first_failure(
     pass
     # The in-flight hash from the failing batch is marked failed.
     assert any(c == "bench" and h == "h2" for c, h, _ in fake.failed)
-
-
-def test_skip_and_continue_async_path(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The async ingest path should mirror sync skip-and-continue semantics."""
-    yields: list[tuple[list[Any], list[TextNode], set[str]]] = [
-        ([], [_node("ok-1", "h1", "ok-1")], {"h1"}),
-        ([], [_node("bad", "h2", "fail-me")], set()),
-    ]
-
-    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(monkeypatch, yields, fail_fast=False)
-
-    apersist_calls: list[Any] = []
-
-    async def _arecord(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
-        apersist_calls.append(list(nodes))
-        if any(getattr(n, "node_id", "") == "fail-me" for n in nodes):
-            raise ConnectionError("connection reset")
-
-    monkeypatch.setattr(RAG, "_apersist_node_batches", _arecord)
-
-    cleanup = _capture_loguru(caplog)
-    try:
-        asyncio.run(rag.asingest_docs(Path("/tmp/_unused"), build_query_engine=False))
-    finally:
-        cleanup()
-
-    assert len(apersist_calls) == 2
-    pass
-    assert ("bench", "h1") in fake.completed
-    assert any(c == "bench" and h == "h2" for c, h, _ in fake.failed)
-    combined = "\n".join(str(record.msg) for record in caplog.records)
-    assert "failed_ingest_batch" in combined
-    assert "Async ingest finished with 1 failed batch" in combined
-    _ = persist_calls  # unused for the async path
 
 
 def test_a_cancellation_is_never_skipped_as_a_bad_batch(monkeypatch: pytest.MonkeyPatch) -> None:

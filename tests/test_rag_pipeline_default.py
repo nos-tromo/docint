@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from collections.abc import Iterator
@@ -461,9 +460,8 @@ def _enriching_pipeline(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> Docu
     return pipeline
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_ingest_docs_runs_hate_speech_detection_on_pdf_chunks(
-    mode: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recording_pool: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recording_pool: Any
 ) -> None:
     """A PDF is enriched by the same NER + hate-speech pass as every other file.
 
@@ -472,7 +470,6 @@ def test_ingest_docs_runs_hate_speech_detection_on_pdf_chunks(
     view read a hateful document as clean.
 
     Args:
-        mode: ``sync`` drives ``ingest_docs``, ``async`` drives ``asingest_docs``.
         monkeypatch: The monkeypatch fixture.
         tmp_path: Temporary directory path for the test.
         recording_pool: Inline preprocessing pool.
@@ -510,11 +507,7 @@ def test_ingest_docs_runs_hate_speech_detection_on_pdf_chunks(
     def _persist(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
         persisted.extend(nodes)
 
-    async def _apersist(self: RAG, nodes: list[Any], progress_callback: Any = None) -> None:
-        persisted.extend(nodes)
-
     monkeypatch.setattr(RAG, "_persist_node_batches", _persist)
-    monkeypatch.setattr(RAG, "_apersist_node_batches", _apersist)
     monkeypatch.setattr(RAG, "create_collection_if_missing", lambda self: None)
     monkeypatch.setattr(RAG, "probe_sparse_endpoint", lambda self: None)
     monkeypatch.setattr(RAG, "probe_embed_endpoint", lambda self: None)
@@ -533,10 +526,7 @@ def test_ingest_docs_runs_hate_speech_detection_on_pdf_chunks(
     monkeypatch.setattr(rag_module, "prefetch_batch", lambda *a, **k: 0)
 
     rag = RAG(qdrant_collection="test")
-    if mode == "sync":
-        rag.ingest_docs(batch_dir, build_query_engine=False)
-    else:
-        asyncio.run(rag.asingest_docs(batch_dir, build_query_engine=False))
+    rag.ingest_docs(batch_dir, build_query_engine=False)
 
     by_text = {node.text: node for node in persisted}
     assert set(by_text) == {_HATEFUL_CHUNK, _NEUTRAL_CHUNK}

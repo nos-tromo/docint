@@ -11,16 +11,14 @@ Two invariants:
 * The engine is generic over the exception predicate. SQLite, Qdrant, and
   per-file ingestion failures supply their own classifier via
   ``is_retryable``.
-* The async variant uses :func:`asyncio.sleep` so it never blocks the
-  event loop; the sync variant uses :func:`time.sleep` and may be guarded
-  by a :class:`threading.Lock` for connection-level serialisation.
+* The engine uses :func:`time.sleep` and may be guarded by a
+  :class:`threading.Lock` for connection-level serialisation.
 """
 
 from __future__ import annotations
 
-import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import TypeVar
 
@@ -30,7 +28,6 @@ T = TypeVar("T")
 
 RetryPredicate = Callable[[BaseException], bool]
 SyncSleep = Callable[[float], None]
-AsyncSleep = Callable[[float], Awaitable[None]]
 
 
 _QDRANT_TRANSIENT_TOKENS: tuple[str, ...] = (
@@ -68,13 +65,11 @@ def _matches_transient_substring(exc: BaseException) -> bool:
 def is_transient_qdrant_error(exc: BaseException) -> bool:
     """Return True if *exc* is a transient Qdrant transport failure.
 
-    Used by :meth:`docint.core.rag.RAG._persist_node_batches` and
-    :meth:`docint.core.rag.RAG._apersist_node_batches` to wrap
-    ``index.insert_nodes`` / ``index.ainsert_nodes`` calls. The Qdrant
-    client has its own inner retry layer; this is the outer envelope
-    for cases the inner layer did not (or was configured not to)
-    handle, so operators see end-to-end resilience even with the inner
-    retry disabled.
+    Used by :meth:`docint.core.rag.RAG._persist_node_batches` to wrap
+    ``index.insert_nodes`` calls. The Qdrant client has its own inner
+    retry layer; this is the outer envelope for cases the inner layer
+    did not (or was configured not to) handle, so operators see
+    end-to-end resilience even with the inner retry disabled.
 
     Args:
         exc: The exception raised by a Qdrant or HTTP transport call.
@@ -249,57 +244,3 @@ def is_hard_ingest_error(exc: BaseException) -> bool:
     except ImportError:  # pragma: no cover - pandas is a hard dependency
         pass
     return False
-
-
-async def aretry_with_backoff(
-    operation: str,
-    fn: Callable[[], Awaitable[T]],
-    *,
-    max_retries: int,
-    initial_backoff: float,
-    max_backoff: float,
-    is_retryable: RetryPredicate,
-    sleep: AsyncSleep | None = None,
-) -> T:
-    """Async twin of :func:`retry_with_backoff`.
-
-    Args:
-        operation: Human-readable operation name.
-        fn: Callable returning an awaitable to retry.
-        max_retries: Maximum retry attempts after the first failure.
-        initial_backoff: Initial delay between retries, in seconds.
-        max_backoff: Maximum delay between retries, in seconds.
-        is_retryable: Predicate classifying transient vs. fatal errors.
-        sleep: Async sleep callable, parameterised for testability.
-
-    Returns:
-        The awaited value from *fn* on the first successful attempt.
-
-    Raises:
-        Exception: Re-raises the last exception after retries are
-            exhausted, or immediately for non-retryable errors.
-    """
-    attempts = max(1, int(max_retries) + 1)
-    initial = max(0.0, float(initial_backoff))
-    cap = max(0.0, float(max_backoff))
-
-    attempt = 1
-    while True:
-        try:
-            return await fn()
-        except Exception as exc:
-            if not is_retryable(exc) or attempt >= attempts:
-                raise
-            delay = min(initial * (2 ** (attempt - 1)), cap)
-            logger.warning(
-                "Async operation '{}' hit retryable error on attempt {}/{}: {!r}. Retrying in {:.2f}s",
-                operation,
-                attempt,
-                attempts,
-                exc,
-                delay,
-            )
-            if delay > 0:
-                sleep_fn = sleep if sleep is not None else asyncio.sleep
-                await sleep_fn(delay)
-            attempt += 1

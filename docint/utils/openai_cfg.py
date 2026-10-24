@@ -315,25 +315,6 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         except Exception as exc:
             self._reraise(exc, texts=texts)
 
-    async def aget_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
-        """Async variant of :meth:`get_text_embeddings_strict`.
-
-        Args:
-            texts (list[str]): Text batch to embed.
-
-        Returns:
-            list[list[float]]: Embedding vectors aligned to input order.
-
-        Raises:
-            EmbeddingInputTooLongError: When any text triggers the
-                provider's context-limit error.
-            EmbeddingEndpointError: When the endpoint is unusable.
-        """
-        try:
-            return await super()._aget_text_embeddings(texts)
-        except Exception as exc:
-            self._reraise(exc, texts=texts)
-
     @override
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, raising loudly on context overflow.

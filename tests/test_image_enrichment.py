@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from dataclasses import replace
@@ -341,14 +340,10 @@ def _rag_over(client: QdrantClient, monkeypatch: pytest.MonkeyPatch) -> RAG:
     return rag
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-def test_ingest_docs_enriches_the_images_waiting_for_it(
-    mode: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_ingest_docs_enriches_the_images_waiting_for_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The job runs the pass with its own pipeline, after every lane has stored its images.
 
     Args:
-        mode: ``sync`` drives ``ingest_docs``, ``async`` drives ``asingest_docs``.
         monkeypatch: The monkeypatch fixture.
         tmp_path: Temporary directory path for the test.
     """
@@ -375,10 +370,7 @@ def test_ingest_docs_enriches_the_images_waiting_for_it(
     monkeypatch.setattr(rag_module, "prefetch_batch", lambda *a, **k: 0)
     rag = _rag_over(client, monkeypatch)
 
-    if mode == "sync":
-        rag.ingest_docs(tmp_path, build_query_engine=False)
-    else:
-        asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
+    rag.ingest_docs(tmp_path, build_query_engine=False)
 
     figure = _payload(client, _COMPANION, FIGURE)
     assert figure["enrichment"] == "done"
