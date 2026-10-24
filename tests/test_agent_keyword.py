@@ -24,6 +24,7 @@ from docint.agents.turn.keyword import (
     ONE_VALUE_ONLY,
     TERM_CONTEXT_CHARS,
     UNINDEXABLE_WORD,
+    WRITING_LINE,
     KeywordMatcher,
     KeywordResult,
     KeywordTool,
@@ -491,6 +492,36 @@ def test_the_note_has_no_coverage_line_when_the_index_covers_every_chunk() -> No
     ]
 
 
+@pytest.mark.parametrize(
+    ("matches", "line"),
+    [
+        (None, "The number of matching chunks is unavailable."),
+        (0, "No indexed chunk in the searched material contains all of these words."),
+        (1, "1 indexed chunk in the searched material contains all of these words."),
+        (37, "37 indexed chunks in the searched material contain all of these words."),
+    ],
+    ids=["unknown", "zero", "one", "many"],
+)
+def test_the_note_says_a_check_ran_while_its_collection_was_written(matches: int | None, line: str) -> None:
+    """A count made while the collection was written covers only what was stored, so even a zero is hedged.
+
+    Args:
+        matches (int | None): The count a keyword call made.
+        line (str): The count line the model reads first.
+    """
+    assert keyword_note(matches=matches, unchecked=0, writing=True).splitlines() == [line, WRITING_LINE]
+
+
+def test_the_writing_line_comes_between_the_count_and_the_coverage_line() -> None:
+    """The writing line is the second of the note, ahead of the coverage line, so the overflow retry's head keeps it."""
+    assert keyword_note(matches=0, unchecked=2, writing=True) == (
+        "No indexed chunk in the searched material contains all of these words.\n"
+        "The collection was being written during this check, so it covers only the chunks stored so far; "
+        "chunks still arriving were not checked and may still contain these words.\n"
+        "2 chunks are not in the keyword index yet, so they were not checked and may still contain these words."
+    )
+
+
 def test_the_checks_list_every_keyword_step_with_a_known_count() -> None:
     """Other steps and a failed count say nothing about the collection; a zero does, and is listed."""
     actions = [
@@ -613,6 +644,7 @@ def _result(
     matches: int | None,
     unchecked: int = 0,
     keywords: Sequence[str] = ("hafenfest",),
+    writing: bool = False,
 ) -> KeywordResult:
     """Build what a keyword match found.
 
@@ -621,11 +653,14 @@ def _result(
         matches (int | None): The exact count; ``None`` for a count that failed.
         unchecked (int): Chunks the keyword index does not cover.
         keywords (Sequence[str]): The words the match used.
+        writing (bool): Whether the collection was being written while the check ran.
 
     Returns:
         KeywordResult: The result.
     """
-    return KeywordResult(nodes=list(nodes), matches=matches, unchecked=unchecked, keywords=tuple(keywords))
+    return KeywordResult(
+        nodes=list(nodes), matches=matches, unchecked=unchecked, keywords=tuple(keywords), writing=writing
+    )
 
 
 class _Matcher:
@@ -1098,6 +1133,19 @@ def test_the_overflow_retry_keeps_the_count_of_a_long_keyword_reply() -> None:
     assert note not in _cut(trailing.text)
 
 
+def test_the_overflow_cut_of_a_zero_reply_keeps_that_its_collection_was_written() -> None:
+    """Cut to its head, a zero with unchecked chunks still says its collection was written; the coverage line goes."""
+    double = _Matcher(_result(matches=0, unchecked=12, writing=True))
+    reply = _ask(double.tool, tool_context(), words="Hafenfest")
+
+    shortened = _shortened([ChatMessage(role=MessageRole.TOOL, content=reply.text)])
+
+    assert shortened is not None
+    cut = shortened[0].content or ""
+    assert "The collection was being written" in cut
+    assert "12 chunks are not in the keyword index" not in cut
+
+
 def test_found_counts_the_passages_admitted_not_the_chunks_matched() -> None:
     """Forty chunks match, two are new to the turn, and the same two found again are admitted no more."""
     both = [programme_passage(), _weather()]
@@ -1134,6 +1182,40 @@ def test_the_trail_names_the_field_and_the_count_and_the_unchecked_only_when_the
         trail (dict[str, Any]): The extra keys of the call's step, exactly.
     """
     double = _Matcher(_result([programme_passage()], matches=matches, unchecked=unchecked), fields=ALL_FIELDS)
+
+    reply = _ask(double.tool, tool_context(), words="Hafenfest", field=field)
+
+    assert reply.trail == trail
+    assert json.loads(json.dumps(reply.trail)) == trail
+
+
+@pytest.mark.parametrize(
+    ("field", "matches", "unchecked", "writing", "trail"),
+    [
+        ("text", 3, 0, True, {"field": "text", "matches": 3, "writing": True}),
+        ("text", 0, 0, True, {"field": "text", "matches": 0, "writing": True}),
+        ("author", 3, 2, True, {"field": "author", "matches": 3, "unchecked": 2, "writing": True}),
+        ("text", None, 0, True, {"field": "text", "matches": None, "writing": True}),
+        ("text", None, 4, True, {"field": "text", "matches": None, "unchecked": 4, "writing": True}),
+        ("author", 3, 2, False, {"field": "author", "matches": 3, "unchecked": 2}),
+    ],
+    ids=["count", "zero", "unchecked", "failed-count", "failed-count-unchecked", "not-written"],
+)
+def test_the_trail_says_the_collection_was_written_only_when_it_was(
+    field: str, matches: int | None, unchecked: int, writing: bool, trail: dict[str, Any]
+) -> None:
+    """The step carries ``writing`` as a true flag, even beside a failed count, and has no such key otherwise.
+
+    Args:
+        field (str): The field the call matched.
+        matches (int | None): The count the match made.
+        unchecked (int): Chunks the keyword index does not cover.
+        writing (bool): Whether the collection was being written while the check ran.
+        trail (dict[str, Any]): The extra keys of the call's step, exactly.
+    """
+    double = _Matcher(
+        _result([programme_passage()], matches=matches, unchecked=unchecked, writing=writing), fields=ALL_FIELDS
+    )
 
     reply = _ask(double.tool, tool_context(), words="Hafenfest", field=field)
 
@@ -1198,6 +1280,23 @@ def test_reordered_or_recased_words_on_the_text_are_answered_from_memory() -> No
     assert (first.found, first.informative) == (1, True)
     assert first.trail == {"field": "text", "matches": 2, "unchecked": 1}
     assert (again.found, again.informative, again.trail) == (0, False, first.trail)
+
+
+def test_a_count_made_while_written_is_news_and_remembered_with_its_flag() -> None:
+    """A zero made while the collection was written is news, and asked again it replays its step with the flag."""
+    double = _Matcher(_result(matches=0, unchecked=1, writing=True))
+    registry = ToolRegistry([double.tool])
+    ctx = tool_context()
+
+    first = registry.call(tool_call("keyword", words="Hafenfest Sturmwarnung"), ctx)
+    again = registry.call(tool_call("keyword", words="  STURMWARNUNG   hafenfest"), ctx)
+
+    assert double.runs == [("Hafenfest Sturmwarnung", "text")]
+    assert (first.found, first.informative) == (0, True)
+    assert first.trail == {"field": "text", "matches": 0, "unchecked": 1, "writing": True}
+    assert again.text == "Already called keyword with these arguments; it showed no passages."
+    assert (again.found, again.informative) == (0, False)
+    assert again.trail == first.trail
 
 
 def test_two_fields_are_two_calls_even_for_the_same_words() -> None:
