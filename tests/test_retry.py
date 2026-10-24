@@ -3,13 +3,12 @@
 The retry engine in :mod:`docint.utils.retry` underpins both the SQLite KV
 store (``database is locked`` retries from PR #116) and the Qdrant vector
 inserts (added when generalising the streaming pattern across the
-ingestion pipeline). These tests pin the schedule, the predicate-based
-classification, and the async variant.
+ingestion pipeline). These tests pin the schedule and the predicate-based
+classification.
 """
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import threading
 from typing import Any
@@ -17,7 +16,6 @@ from typing import Any
 import pytest
 
 from docint.utils.retry import (
-    aretry_with_backoff,
     is_transient_qdrant_error,
     retry_with_backoff,
 )
@@ -216,89 +214,6 @@ def test_retry_clamps_negative_backoff_values() -> None:
     # the sleep callable is never invoked (the helper short-circuits on
     # ``delay <= 0``), but the retries still happen.
     assert len(attempts) == 3
-    assert sleeps == []
-
-
-def test_aretry_succeeds_after_transient_failure() -> None:
-    """Async variant should mirror sync retry semantics."""
-    sleeps: list[float] = []
-    attempts: list[int] = []
-
-    async def fn() -> str:
-        attempts.append(len(attempts) + 1)
-        if len(attempts) <= 1:
-            raise ConnectionError("flaky")
-        return "ok"
-
-    async def sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    result = asyncio.run(
-        aretry_with_backoff(
-            "async-flaky",
-            fn,
-            max_retries=2,
-            initial_backoff=0.1,
-            max_backoff=1.0,
-            is_retryable=_always,
-            sleep=sleep,
-        )
-    )
-
-    assert result == "ok"
-    assert attempts == [1, 2]
-    assert sleeps == [0.1]
-
-
-def test_aretry_exhausts_and_reraises() -> None:
-    """Async variant should propagate the final exception after exhaustion."""
-    sleeps: list[float] = []
-
-    async def fn() -> str:
-        raise TimeoutError("perma-fail")
-
-    async def sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    with pytest.raises(TimeoutError, match="perma-fail"):
-        asyncio.run(
-            aretry_with_backoff(
-                "async-doomed",
-                fn,
-                max_retries=1,
-                initial_backoff=0.05,
-                max_backoff=1.0,
-                is_retryable=_always,
-                sleep=sleep,
-            )
-        )
-
-    assert sleeps == [0.05]
-
-
-def test_aretry_non_retryable_raises_immediately() -> None:
-    """Async variant should not sleep for non-retryable errors."""
-    sleeps: list[float] = []
-
-    async def fn() -> str:
-        raise ValueError("hard")
-
-    async def sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    with pytest.raises(ValueError):
-        asyncio.run(
-            aretry_with_backoff(
-                "async-hard",
-                fn,
-                max_retries=3,
-                initial_backoff=0.1,
-                max_backoff=1.0,
-                is_retryable=_never,
-                sleep=sleep,
-            )
-        )
-
     assert sleeps == []
 
 

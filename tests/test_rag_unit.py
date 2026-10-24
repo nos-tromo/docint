@@ -4294,14 +4294,6 @@ class _FakeIndex:
         """
         _ = nodes
 
-    async def ainsert_nodes(self, nodes: list[Any]) -> None:
-        """No-op asynchronous node insertion.
-
-        Args:
-            nodes: Nodes to insert (ignored).
-        """
-        _ = nodes
-
 
 class _FakePipeline:
     """Minimal pipeline stub for ingest invalidation tests."""
@@ -4471,54 +4463,6 @@ def test_persist_node_batches_streams_micro_batches() -> None:
 
     assert index.docstore.batch_sizes == [2, 2, 1]
     assert index.vector_batch_sizes == [2, 2, 1]
-
-
-def test_apersist_node_batches_streams_micro_batches() -> None:
-    """Async node persistence should split ingest writes into micro-batches."""
-
-    class FakeDocStore:
-        """Capture docstore write batch sizes."""
-
-        def __init__(self) -> None:
-            """Initialise an empty list to capture batch sizes."""
-            self.batch_sizes: list[int] = []
-
-        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
-            """Capture the size of each batch of documents added to the docstore.
-
-            Args:
-                nodes (list[Any]): The list of nodes being added to the docstore.
-                allow_update (bool, optional): Whether to allow updating existing nodes. Defaults to True.
-            """
-            _ = allow_update
-            self.batch_sizes.append(len(nodes))
-
-    class FakeIndex:
-        """Capture async vector insert batch sizes."""
-
-        def __init__(self) -> None:
-            """Initialise an empty list to capture batch sizes."""
-            self.docstore = FakeDocStore()
-            self.vector_batch_sizes: list[int] = []
-
-        async def ainsert_nodes(self, nodes: list[Any]) -> None:
-            """Capture the size of each batch of nodes inserted into the vector store.
-
-            Args:
-                nodes (list[Any]): The list of nodes being inserted into the vector store.
-            """
-            self.vector_batch_sizes.append(len(nodes))
-
-    rag = RAG(qdrant_collection="test")
-    rag.docstore_batch_size = 3
-    rag.index = cast(Any, FakeIndex())
-
-    nodes = [types.SimpleNamespace(metadata={}) for _ in range(7)]
-    asyncio.run(rag._apersist_node_batches(cast(list[Any], nodes)))
-    index: Any = rag.index
-
-    assert index.docstore.batch_sizes == [3, 3, 1]
-    assert index.vector_batch_sizes == [3, 3, 1]
 
 
 def test_prepare_vector_nodes_resplits_oversize_before_embed() -> None:
@@ -5281,69 +5225,6 @@ def test_persist_node_batches_orphaned_log_includes_attempt_count(
     assert "node-1" in combined
 
 
-def test_apersist_node_batches_retries_transient_qdrant_error_then_succeeds(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Async vector-insert retries should recover from transient failures.
-
-    Args:
-        caplog: Pytest log capture fixture.
-        monkeypatch: Pytest monkeypatch fixture.
-    """
-
-    async def _afake_prepare(_self: RAG, vector_nodes: list[Any]) -> tuple[list[Any], list[Any]]:
-        return (list(vector_nodes), list(vector_nodes))
-
-    insert_calls: list[int] = []
-
-    class FakeDocStore:
-        def __init__(self) -> None:
-            self.persisted: list[str] = []
-
-        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
-            _ = allow_update
-            self.persisted.extend(n.node_id for n in nodes)
-
-    class FakeAsyncIndex:
-        def __init__(self) -> None:
-            self.docstore = FakeDocStore()
-            self.successful_inserts: list[list[Any]] = []
-
-        async def ainsert_nodes(self, nodes: list[Any]) -> None:
-            insert_calls.append(len(nodes))
-            if len(insert_calls) <= 2:
-                raise TimeoutError("read timed out")
-            self.successful_inserts.append(list(nodes))
-
-    monkeypatch.setattr(
-        RAG,
-        "_aprepare_vector_nodes_for_insert",
-        _afake_prepare,
-    )
-
-    rag = RAG(qdrant_collection="active")
-    rag.docstore_batch_size = 10
-    rag.docstore_max_retries = 3
-    rag.docstore_retry_backoff_seconds = 0.0
-    rag.docstore_retry_backoff_max_seconds = 0.0
-    rag.index = cast(Any, FakeAsyncIndex())
-
-    node = TextNode(text="resilient async", metadata={}, id_="node-ra")
-
-    cleanup = _capture_loguru(caplog)
-    try:
-        asyncio.run(rag._apersist_node_batches([node]))
-    finally:
-        cleanup()
-
-    assert len(insert_calls) == 3
-    index: Any = rag.index
-    assert index.successful_inserts == [[node]]
-    assert index.docstore.persisted == ["node-ra"]
-    combined = "\n".join(str(record.msg) for record in caplog.records)
-    assert "orphaned_kv_nodes" not in combined
-
-
 def test_log_ingest_benchmark_summary_emits_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5415,46 +5296,6 @@ def test_ingest_docs_bumps_summary_revision(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(RAG, "_bump_summary_revision", _bump_summary_revision)
 
     rag.ingest_docs(tmp_path, build_query_engine=False)
-
-    assert bumps == [("test", True)]
-
-
-def test_asingest_docs_bumps_summary_revision(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """asingest_docs should bump summary revision after successful ingestion.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-        tmp_path: The temporary path fixture.
-    """
-    rag = RAG(qdrant_collection="test")
-    rag._embed_model = cast(Any, object())
-    _patch_ingest_dependencies(monkeypatch)
-
-    bumps: list[tuple[str | None, bool]] = []
-
-    def _bump_summary_revision(
-        self: RAG,
-        collection: str | None = None,
-        *,
-        allow_create: bool = True,
-    ) -> int:
-        """Bump the summary revision.
-
-        Args:
-            self (RAG): The RAG instance.
-            collection (str | None, optional): The collection name. Defaults to None.
-            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
-
-        Returns:
-            int: The new summary revision.
-        """
-        _ = self
-        bumps.append((collection, allow_create))
-        return len(bumps)
-
-    monkeypatch.setattr(RAG, "_bump_summary_revision", _bump_summary_revision)
-
-    asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
 
     assert bumps == [("test", True)]
 
@@ -5638,78 +5479,6 @@ def test_ingest_docs_empty_emits_warning_progress_message(monkeypatch: pytest.Mo
     warning_messages = [m for m in captured if m.lower().startswith("warning:")]
     assert warning_messages, f"expected warning: prefix in {captured!r}"
     assert "silence-test" in warning_messages[0]
-
-
-def test_asingest_docs_empty_raises_and_cleans_kv_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Async empty fresh ingestion must raise and clean the orphan KV file.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-        tmp_path: The Qdrant source root.
-    """
-    rag, qdrant_mock, bumps = _setup_empty_ingest_rag(monkeypatch, tmp_path, main_collection_exists=False)
-
-    kv_dir = tmp_path / "silence-test"
-    kv_dir.mkdir(parents=True, exist_ok=True)
-    kv_file = kv_dir / "silence-test_kv.db"
-    kv_file.write_bytes(b"SQLITE_SENTINEL")
-
-    qdrant_mock.collection_exists.return_value = False
-
-    with pytest.raises(rag_module.EmptyIngestionError) as excinfo:
-        asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
-
-    assert excinfo.value.collection_name == "silence-test"
-    assert not kv_file.exists()
-    assert bumps == []
-
-
-@pytest.mark.parametrize("outcome", ["completed", "failed"])
-def test_asingest_docs_keeps_its_collection_written_while_it_runs(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
-) -> None:
-    """The async run is a write window on its collection from start to end, a failed run included.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        tmp_path (Path): The directory ingested.
-        outcome (str): How the run ends: ``completed`` with its stats, or ``failed`` with an error.
-    """
-    physical = "u0123456789ab__hafen"
-    rag = RAG(qdrant_collection=physical)
-    stats = rag_module.IngestStats(files_processed=1, files_skipped=0, files_failed=0, docs=1, nodes=3)
-    during: list[collection_writes.WriteState] = []
-
-    async def _pipeline(self: RAG, data_dir: str | Path, **kwargs: Any) -> rag_module.IngestStats:
-        """Note where the collection's writes stand as the run goes, then end it as the case says.
-
-        Args:
-            self (RAG): The engine.
-            data_dir (str | Path): The directory ingested, unused.
-            **kwargs (Any): The run's options, unused.
-
-        Returns:
-            rag_module.IngestStats: The run's stats, for the ``completed`` outcome.
-
-        Raises:
-            RuntimeError: For the ``failed`` outcome.
-        """
-        during.append(collection_writes.state(physical))
-        if outcome == "failed":
-            raise RuntimeError("the run failed")
-        return stats
-
-    monkeypatch.setattr(RAG, "_asingest_docs", _pipeline)
-    epoch = collection_writes.state(physical).epoch
-
-    if outcome == "failed":
-        with pytest.raises(RuntimeError, match="the run failed"):
-            asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
-    else:
-        assert asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False)) is stats
-
-    assert during == [collection_writes.WriteState(epoch + 1, True)]
-    assert collection_writes.state(physical) == collection_writes.WriteState(epoch + 2, False)
 
 
 def test_create_collection_if_missing_returns_when_collection_exists(
